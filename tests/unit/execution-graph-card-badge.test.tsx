@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 
 import { ExecutionGraphCard } from '@/pages/Chat/ExecutionGraphCard';
-import type { SessionExecutionGraphStep } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionExecutionGraphStep } from '../../src/types/session/render-item';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

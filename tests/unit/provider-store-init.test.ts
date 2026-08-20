@@ -2,21 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from '@testing-library/react';
 
 const fetchProviderSnapshotMock = vi.fn();
+const normalizeProviderSnapshotMock = vi.fn(() => ({
+  credentials: [],
+  statuses: [],
+  vendors: [],
+  revisions: {},
+}));
 const trackUiEventMock = vi.hoisted(() => vi.fn());
 const startUiTimingMock = vi.hoisted(() => vi.fn(() => () => 1));
 
 vi.mock('@/lib/provider-accounts', () => ({
   fetchProviderSnapshot: (...args: unknown[]) => fetchProviderSnapshotMock(...args),
-  normalizeProviderSnapshot: (value: unknown) => {
-    const snapshot = value && typeof value === 'object'
-      ? value as Record<string, unknown>
-      : {};
-    return {
-      credentials: Array.isArray(snapshot.credentials) ? snapshot.credentials : [],
-      statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
-      vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
-    };
-  },
+  normalizeProviderSnapshot: (...args: unknown[]) => normalizeProviderSnapshotMock(...args),
 }));
 
 vi.mock('@/lib/provider-projection', () => ({
@@ -42,6 +39,7 @@ describe('useProviderStore.init', () => {
   beforeEach(() => {
     vi.useRealTimers();
     fetchProviderSnapshotMock.mockReset();
+    normalizeProviderSnapshotMock.mockClear();
     trackUiEventMock.mockReset();
     startUiTimingMock.mockClear();
     useProviderStore.setState({
@@ -83,6 +81,23 @@ describe('useProviderStore.init', () => {
         reason: 'app_init',
       }),
     );
+  });
+
+  it('直接应用 decoder 返回的 typed snapshot，而不重复解析 delivery', async () => {
+    const snapshot = {
+      statuses: [{ id: 'ollama-local', name: 'Ollama', hasKey: true, keyMasked: null }],
+      credentials: [{ id: 'ollama-local', vendorId: 'ollama', label: 'Ollama', authMode: 'local' }],
+      vendors: [],
+      revisions: { 'ollama-local': 1 },
+    };
+    fetchProviderSnapshotMock.mockResolvedValueOnce(snapshot);
+
+    await act(async () => {
+      await useProviderStore.getState().refreshProviderSnapshot({ trigger: 'background' });
+    });
+
+    expect(useProviderStore.getState().providerSnapshot).toEqual(snapshot);
+    expect(normalizeProviderSnapshotMock).not.toHaveBeenCalled();
   });
 
   it('快照失败时会收敛到 error 状态', async () => {

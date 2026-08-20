@@ -19,18 +19,21 @@ if [ -x /opt/MatchaClaw/MatchaClaw ]; then
     ln -sf /opt/MatchaClaw/MatchaClaw /usr/local/bin/MatchaClaw 2>/dev/null || true
 fi
 
-# Create symbolic links for bundled CLIs
+# Create a symbolic link for the supported bundled CLI.
 OPENCLAW_WRAPPER="/opt/MatchaClaw/resources/cli/openclaw"
 if [ -f "$OPENCLAW_WRAPPER" ]; then
     chmod +x "$OPENCLAW_WRAPPER" 2>/dev/null || true
     ln -sf "$OPENCLAW_WRAPPER" /usr/local/bin/openclaw 2>/dev/null || true
 fi
 
-MATCHA_WRAPPER="/opt/MatchaClaw/resources/cli/matcha"
-if [ -f "$MATCHA_WRAPPER" ]; then
-    chmod +x "$MATCHA_WRAPPER" 2>/dev/null || true
-    ln -sf "$MATCHA_WRAPPER" /usr/local/bin/matcha 2>/dev/null || true
-fi
+# Upgrade cleanup: only remove the legacy link when it still targets the
+# wrapper shipped by an older MatchaClaw package.
+remove_legacy_matcha_link() {
+    [ "$(readlink /usr/local/bin/matcha 2>/dev/null)" = "/opt/MatchaClaw/resources/cli/matcha" ] || return 0
+    rm -f /usr/local/bin/matcha 2>/dev/null || true
+}
+
+remove_legacy_matcha_link
 
 # Set chrome-sandbox permissions.
 # On systems without working user namespaces, the SUID bit is required.

@@ -3,6 +3,7 @@ import {
   internalError,
   invalidParams,
   isJsonRpcRequest,
+  isRecord,
   methodNotFound,
   parseJsonRpcMessage,
 } from '../protocol/jsonRpc.js'
@@ -15,6 +16,7 @@ import type {
   JsonRpcMessage,
   JsonRpcResponse,
   ModelsListParams,
+  ProviderRuntimeConfig,
   SessionCancelParams,
   SessionCloseParams,
   SessionCreateParams,
@@ -469,10 +471,31 @@ function parseSessionSetModelParams(
   if (sessionId.resultType === 'invalidParams') return sessionId
   const model = requiredString(parsed.params, 'model')
   if (model.resultType === 'invalidParams') return model
+  const providerFingerprint = optionalString(
+    parsed.params,
+    'providerFingerprint',
+  )
+  if (providerFingerprint.resultType === 'invalidParams')
+    return providerFingerprint
+
+  const providerRuntime = optionalProviderRuntime(
+    parsed.params,
+    'providerRuntime',
+  )
+  if (providerRuntime.resultType === 'invalidParams') return providerRuntime
 
   return {
     resultType: 'success',
-    params: { sessionId: sessionId.value, model: model.value },
+    params: {
+      sessionId: sessionId.value,
+      model: model.value,
+      ...(providerFingerprint.value !== undefined
+        ? { providerFingerprint: providerFingerprint.value }
+        : {}),
+      ...(providerRuntime.value !== undefined
+        ? { providerRuntime: providerRuntime.value }
+        : {}),
+    },
   }
 }
 
@@ -553,6 +576,65 @@ function optionalString(
     return { resultType: 'invalidParams', message: `${key} must be a string` }
   }
   return { resultType: 'success', value }
+}
+
+function optionalNonEmptyString(
+  params: Record<string, unknown>,
+  key: string,
+): ScalarParseResult<string | undefined> {
+  const value = optionalString(params, key)
+  if (value.resultType === 'invalidParams' || value.value === undefined) {
+    return value
+  }
+  if (value.value.trim() === '') {
+    return {
+      resultType: 'invalidParams',
+      message: `${key} must be a non-empty string`,
+    }
+  }
+  return value
+}
+
+function isProviderRuntimeKind(
+  value: string,
+): value is ProviderRuntimeConfig['kind'] {
+  return (
+    value === 'anthropicMessages' ||
+    value === 'googleGenerativeAi' ||
+    value === 'openAiChatCompletions' ||
+    value === 'openAiResponses'
+  )
+}
+
+function optionalProviderRuntime(
+  params: Record<string, unknown>,
+  key: string,
+): ScalarParseResult<ProviderRuntimeConfig | undefined> {
+  const value = params[key]
+  if (value === undefined) return { resultType: 'success', value: undefined }
+  if (!isRecord(value)) {
+    return { resultType: 'invalidParams', message: `${key} must be an object` }
+  }
+  const kind = requiredString(value, 'kind')
+  if (kind.resultType === 'invalidParams') return kind
+  if (!isProviderRuntimeKind(kind.value)) {
+    return {
+      resultType: 'invalidParams',
+      message: `${key}.kind is unsupported`,
+    }
+  }
+  const baseUrl = optionalNonEmptyString(value, 'baseUrl')
+  if (baseUrl.resultType === 'invalidParams') return baseUrl
+  const apiKey = optionalNonEmptyString(value, 'apiKey')
+  if (apiKey.resultType === 'invalidParams') return apiKey
+  return {
+    resultType: 'success',
+    value: {
+      kind: kind.value,
+      ...(baseUrl.value !== undefined ? { baseUrl: baseUrl.value } : {}),
+      ...(apiKey.value !== undefined ? { apiKey: apiKey.value } : {}),
+    },
+  }
 }
 
 function optionalFiniteNumber(

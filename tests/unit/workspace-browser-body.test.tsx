@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
-import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 
 const sessionIdentity: SessionIdentity = {
   endpoint: {
@@ -70,12 +70,10 @@ describe('workspace browser body', () => {
       ok: true,
       entries: [
         {
-          name: 'demo.ts',
-          path: '/workspace/demo.ts',
-          isDir: false,
+          relativePath: 'demo.ts',
+          display: 'demo.ts',
+          isDirectory: false,
           size: 0,
-          mtimeMs: 0,
-          hasChildren: false,
         },
       ],
     });
@@ -95,18 +93,18 @@ describe('workspace browser body', () => {
     await waitFor(() => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
-          path: '/workspace',
-          sessionIdentity,
+          endpoint: sessionIdentity.endpoint,
+          sessionKey: sessionIdentity.sessionKey,
+          relativePath: '',
         },
-        {
-          timeoutMs: 60000,
-        },
+        { timeoutMs: 60000 },
       );
     });
 
     fireEvent.click(await screen.findByRole('button', { name: /demo\.ts/i }));
     expect(onSelectFile).toHaveBeenCalledWith(expect.objectContaining({
       filePath: '/workspace/demo.ts',
+      relativePath: 'demo.ts',
       fileName: 'demo.ts',
       contentType: 'code',
     }));
@@ -117,12 +115,10 @@ describe('workspace browser body', () => {
       ok: true,
       entries: [
         {
-          name: 'demo.ts',
-          path: '/workspace/demo.ts',
-          isDir: false,
+          relativePath: 'demo.ts',
+          display: 'demo.ts',
+          isDirectory: false,
           size: 0,
-          mtimeMs: 0,
-          hasChildren: false,
         },
       ],
     });
@@ -233,12 +229,11 @@ describe('workspace browser body', () => {
     await waitFor(() => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
-          path: '/workspace',
-          sessionIdentity,
+          endpoint: sessionIdentity.endpoint,
+          sessionKey: sessionIdentity.sessionKey,
+          relativePath: '',
         },
-        {
-          timeoutMs: 60000,
-        },
+        { timeoutMs: 60000 },
       );
     });
     expect(screen.queryByTestId('workspace-root-path')).toBeNull();
@@ -258,12 +253,10 @@ describe('workspace browser body', () => {
         ok: true,
         entries: [
           {
-            name: 'src',
-            path: '/workspace/src',
-            isDir: true,
+            relativePath: 'src',
+            display: 'src',
+            isDirectory: true,
             size: 0,
-            mtimeMs: 0,
-            hasChildren: true,
           },
         ],
       })
@@ -271,12 +264,10 @@ describe('workspace browser body', () => {
         ok: true,
         entries: [
           {
-            name: 'demo.ts',
-            path: '/workspace/src/demo.ts',
-            isDir: false,
+            relativePath: 'src/demo.ts',
+            display: 'demo.ts',
+            isDirectory: false,
             size: 0,
-            mtimeMs: 0,
-            hasChildren: false,
           },
         ],
       });
@@ -302,12 +293,11 @@ describe('workspace browser body', () => {
     expect(hostFileListDirMock).toHaveBeenNthCalledWith(
       2,
       {
-        path: '/workspace/src',
-        sessionIdentity,
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'src',
       },
-      {
-        timeoutMs: 60000,
-      },
+      { timeoutMs: 60000 },
     );
   });
 
@@ -317,12 +307,10 @@ describe('workspace browser body', () => {
         ok: true,
         entries: [
           {
-            name: 'memory',
-            path: '/workspace/memory',
-            isDir: true,
+            relativePath: 'memory',
+            display: 'memory',
+            isDirectory: true,
             size: 0,
-            mtimeMs: 0,
-            hasChildren: true,
           },
         ],
       })
@@ -349,12 +337,11 @@ describe('workspace browser body', () => {
       expect(hostFileListDirMock).toHaveBeenNthCalledWith(
         2,
         {
-          path: '/workspace/memory',
-          sessionIdentity,
+          endpoint: sessionIdentity.endpoint,
+          sessionKey: sessionIdentity.sessionKey,
+          relativePath: 'memory',
         },
-        {
-          timeoutMs: 60000,
-        },
+        { timeoutMs: 60000 },
       );
     });
     expect(onSelectFile).not.toHaveBeenCalled();
@@ -365,12 +352,10 @@ describe('workspace browser body', () => {
       ok: true,
       entries: [
         {
-          name: 'demo.ts',
-          path: '/workspace/demo.ts',
-          isDir: false,
+          relativePath: 'demo.ts',
+          display: 'demo.ts',
+          isDirectory: false,
           size: 0,
-          mtimeMs: 0,
-          hasChildren: false,
         },
       ],
     });

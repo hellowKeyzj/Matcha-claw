@@ -1,21 +1,24 @@
 import type { BrowserWindow } from 'electron';
-import type { GatewayManager } from './process-runtime/openclaw-gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
-import type {
-  RuntimeHostManager,
-  RuntimeHostManagerHealth,
-  RuntimeHostManagerState,
-} from './runtime-host-manager';
-import { buildPublicGatewayStatus } from './process-runtime/openclaw-gateway/public-status';
-import { browserOAuthManager } from '../services/providers/oauth/browser-oauth-manager';
-import { deviceOAuthManager } from '../services/providers/oauth/device-oauth-manager';
-import { getE2EGatewayStatus } from '@electron/e2e-fixture-loader';
+import type { DirectRuntimeHostExit } from './runtime-host-delivery/direct-host';
+import type { RuntimeHostLifecycle } from './runtime-host-delivery/lifecycle-owner';
+import {
+  decodeLegacySessionUpdateDelta,
+  decodeSessionDelta,
+} from './runtime-host-delivery/transport/sessions/session-contract';
+import {
+  readGatewayStatusProjection,
+  readRuntimeHostStatusProjection,
+  unavailableGatewayStatus,
+} from '../api/routes/app';
+import type { RendererEventRouteRegistry } from './renderer-event-routes';
 
 type HostEventName =
   | 'gateway:status'
   | 'gateway:error'
   | 'gateway:notification'
   | 'session:update'
+  | 'session.delta'
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:exit'
@@ -30,73 +33,16 @@ type HostEventName =
   | 'oauth:code'
   | 'oauth:start'
   | 'oauth:success'
-  | 'oauth:error';
+  | 'oauth:error'
+  | 'openclaw:lifecycle'
+  | 'openclaw:cron';
 
 type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
 
-type RuntimeHostLifecycleStatus =
-  | 'starting'
-  | 'running'
-  | 'restarting'
-  | 'stopping'
-  | 'degraded'
-  | 'error'
-  | 'stopped';
-
-type RuntimeHostStatusPayload = {
-  status: RuntimeHostLifecycleStatus;
-  hostLifecycle: RuntimeHostManagerState['lifecycle'];
-  runtimeLifecycle: RuntimeHostManagerState['runtimeLifecycle'];
-  activePluginCount: number;
-  pid?: number;
-  error?: string;
-  updatedAt: number;
-};
-
-function asRuntimeHostStatus(
-  state: RuntimeHostManagerState,
-  health: RuntimeHostManagerHealth,
-): RuntimeHostStatusPayload {
-  const stopping = state.lifecycle === 'stopping' || state.runtimeLifecycle === 'stopping';
-  const stopped = state.lifecycle === 'stopped' || state.runtimeLifecycle === 'stopped';
-  const restarting = state.lifecycle === 'restarting' || state.runtimeLifecycle === 'restarting';
-  const starting = state.lifecycle === 'starting' || state.runtimeLifecycle === 'starting';
-  const hardError = state.lifecycle === 'error' || state.runtimeLifecycle === 'error';
-  const running = state.lifecycle === 'running' && state.runtimeLifecycle === 'running' && health.ok;
-  const degraded = !restarting && !stopping && state.runtimeLifecycle === 'running' && !health.ok;
-
-  let status: RuntimeHostLifecycleStatus;
-  if (hardError) {
-    status = 'error';
-  } else if (stopping) {
-    status = 'stopping';
-  } else if (restarting) {
-    status = 'restarting';
-  } else if (stopped) {
-    status = 'stopped';
-  } else if (running) {
-    status = 'running';
-  } else if (degraded) {
-    status = 'degraded';
-  } else if (starting) {
-    status = 'starting';
-  } else {
-    status = 'error';
-  }
-
-  const mergedError = status === 'restarting' || status === 'starting' || status === 'stopping'
-    ? undefined
-    : (state.lastError || health.error);
-  return {
-    status,
-    hostLifecycle: state.lifecycle,
-    runtimeLifecycle: state.runtimeLifecycle,
-    activePluginCount: state.activePluginCount,
-    ...(typeof state.pid === 'number' ? { pid: state.pid } : {}),
-    ...(typeof mergedError === 'string' && mergedError.trim() ? { error: mergedError } : {}),
-    updatedAt: Date.now(),
-  };
-}
+type RuntimeHostBridge = Pick<
+  RuntimeHostLifecycle,
+  'command' | 'onExit' | 'onRestart' | 'onSafeEvent'
+>;
 
 export function emitHostEvent(
   eventBus: HostEventBus,
@@ -105,192 +51,147 @@ export function emitHostEvent(
   payload: unknown,
 ): void {
   eventBus.emit(eventName, payload);
+  sendRendererHostEvent(mainWindow, eventName, payload);
+}
+
+function sendRendererHostEvent(
+  mainWindow: BrowserWindow | null,
+  eventName: HostEventName,
+  payload: unknown,
+): void {
   mainWindow?.webContents.send('host:event', { eventName, payload });
 }
 
 export function registerHostEventBridge(deps: {
-  gatewayManager: GatewayManager;
-  runtimeHostManager: RuntimeHostManager;
+  runtimeHost: RuntimeHostBridge;
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
+  rendererEventRoutes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>;
 }): void {
   const emit: EmitHostEvent = (eventName, payload) => {
     emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
   };
 
-  let previousRuntimeHostStatus: RuntimeHostLifecycleStatus | null = null;
-  let previousRuntimeHostPid: number | undefined;
-  let previousRuntimeHostError: string | undefined;
-  let runtimeHostPublishInflight: Promise<void> | null = null;
-  let runtimeHostPublishPending = false;
-
-  const publishGatewaySnapshot = async () => {
-    const e2eStatus = await getE2EGatewayStatus<ReturnType<typeof buildPublicGatewayStatus>>();
-    if (e2eStatus) {
-      emit('gateway:status', e2eStatus);
+  const publishRuntimeHostStatus = async (): Promise<void> => {
+    const status = await readRuntimeHostStatusProjection(deps.runtimeHost);
+    if (status) {
+      emit('runtime-host:status', status);
       return;
     }
-    const baseStatus = deps.gatewayManager.getStatus();
-    const runtimeGatewayStatus = await deps.runtimeHostManager.readGatewayStatus();
-    emit('gateway:status', buildPublicGatewayStatus(baseStatus, runtimeGatewayStatus));
+    emit('runtime-host:error', { status: 'error', message: 'Runtime Host is unavailable.' });
   };
 
-  const publishRuntimeHostSnapshotOnce = async () => {
-    const state = deps.runtimeHostManager.getState();
-    const health = await deps.runtimeHostManager.checkHealth();
-    const payload = asRuntimeHostStatus(state, health);
-    const statusChanged = previousRuntimeHostStatus !== payload.status;
-    const pidChanged = previousRuntimeHostPid !== payload.pid;
-    const errorChanged = previousRuntimeHostError !== payload.error;
-    const shouldEmitStatus = statusChanged || pidChanged || errorChanged;
-
-    if (shouldEmitStatus) {
-      emit('runtime-host:status', payload);
-    }
-
-    if (
-      previousRuntimeHostPid
-      && payload.pid
-      && previousRuntimeHostPid !== payload.pid
-      && payload.status === 'running'
-    ) {
-      emit('runtime-host:restart', {
-        previousPid: previousRuntimeHostPid,
-        pid: payload.pid,
-        status: payload.status,
-        recoveredAt: payload.updatedAt,
-      });
-    }
-
-    if (
-      (payload.status === 'degraded' || payload.status === 'error')
-      && payload.error
-      && (errorChanged || statusChanged)
-    ) {
-      emit('runtime-host:error', {
-        status: payload.status,
-        message: payload.error,
-        pid: payload.pid,
-        updatedAt: payload.updatedAt,
-      });
-    }
-
-    previousRuntimeHostStatus = payload.status;
-    previousRuntimeHostPid = payload.pid;
-    previousRuntimeHostError = payload.error;
+  const publishGatewayStatus = async (
+    options: { readonly freshness?: 'reuse-pending' | 'fresh' } = {},
+  ): Promise<void> => {
+    const status = await readGatewayStatusProjection(deps.runtimeHost, options)
+      .then((projection) => projection ?? unavailableGatewayStatus());
+    emit('gateway:status', status);
   };
 
-  const publishRuntimeHostSnapshot = async () => {
-    if (runtimeHostPublishInflight) {
-      runtimeHostPublishPending = true;
-      await runtimeHostPublishInflight;
-      return;
-    }
-
-    do {
-      runtimeHostPublishPending = false;
-      const work = publishRuntimeHostSnapshotOnce();
-      runtimeHostPublishInflight = work;
-      try {
-        await work;
-      } finally {
-        if (runtimeHostPublishInflight === work) {
-          runtimeHostPublishInflight = null;
-        }
-      }
-    } while (runtimeHostPublishPending);
-  };
-
-  deps.gatewayManager.on('status', () => {
-    void publishGatewaySnapshot();
+  deps.hostEventBus.on('session:update', (payload) => {
+    publishSessionDelta(decodeLegacySessionUpdateDelta(payload), emit, deps.rendererEventRoutes);
   });
 
-  deps.gatewayManager.on('error', (error) => {
-    emit('gateway:error', { message: error.message });
+  for (const eventName of [
+    'gateway:error',
+    'gateway:notification',
+    'task:snapshot',
+    'gateway:channel-status',
+    'gateway:exit',
+    'team:event',
+    'runtime-job:done',
+    'runtime-job:progress',
+  ] as const) {
+    deps.hostEventBus.on(eventName, (payload) => {
+      sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
+    });
+  }
+
+  deps.hostEventBus.on('gateway:lifecycle', () => {
+    void publishGatewayStatus();
   });
 
-  deps.gatewayManager.on('exit', (code) => {
-    emit('gateway:exit', { code });
-  });
-
-  deps.runtimeHostManager.onGatewayEvent((eventName, payload) => {
-    if (eventName === 'gateway:lifecycle') {
-      // child 视角的 transport state 变化（connected/reconnecting/disconnected）触发完整 PublicGatewayStatus 重发。
-      // 这样 renderer 只需要订阅 gateway:status 事件，不再需要 30s 轮询补盲区。
-      void publishGatewaySnapshot();
-      return;
-    }
-    if (eventName === 'gateway:error') {
-      emit('gateway:error', payload);
-      return;
-    }
-    if (eventName === 'gateway:notification') {
-      emit('gateway:notification', payload);
-      return;
-    }
-    if (eventName === 'session:update') {
-      emit('session:update', payload);
-      return;
-    }
-    if (eventName === 'task:snapshot') {
-      emit('task:snapshot', payload);
-      return;
-    }
-    if (eventName === 'gateway:channel-status') {
-      emit('gateway:channel-status', payload);
-      return;
-    }
-    if (eventName === 'license:gate-changed') {
-      emit('license:gate-changed', payload);
-      return;
-    }
-    if (eventName === 'team:event') {
-      emit('team:event', payload);
+  deps.runtimeHost.onSafeEvent((event) => {
+    switch (event.type) {
+      case 'openclaw.lifecycle':
+        emit('openclaw:lifecycle', {
+          active: event.hasRun || event.hasMessage || event.hasSessionActivity,
+        });
+        void publishRuntimeHostStatus();
+        void publishGatewayStatus();
+        return;
+      case 'openclaw.runtime':
+        void publishRuntimeHostStatus();
+        void publishGatewayStatus({ freshness: 'fresh' });
+        return;
+      case 'openclaw.cron.execution':
+        emit('openclaw:cron', {
+          jobId: event.jobId,
+          runId: event.runId,
+          status: event.status,
+        });
+        return;
+      case 'matcha.session.activity':
+      case 'openclaw.session.activity':
+      case 'openclaw.session.update':
+        return;
+      case 'session.delta':
+        publishSessionDelta(decodeSessionDelta(event.delta), emit, deps.rendererEventRoutes);
+        return;
     }
   });
-
-  deps.runtimeHostManager.onRuntimeJobEvent((eventName, payload) => {
-    if (eventName === 'runtime-job:done' || eventName === 'runtime-job:progress') {
-      emit(eventName, payload);
-    }
+  deps.runtimeHost.onExit((exit) => {
+    emitHostExit(emit, exit);
   });
-
-  deviceOAuthManager.on('oauth:start', (payload) => {
-    emit('oauth:start', payload);
+  deps.runtimeHost.onRestart((restart) => {
+    emit('runtime-host:restart', restart);
+    void publishRuntimeHostStatus();
+    void publishGatewayStatus();
   });
+  void publishRuntimeHostStatus();
+  void publishGatewayStatus();
+}
 
-  deviceOAuthManager.on('oauth:code', (payload) => {
-    emit('oauth:code', payload);
-  });
 
-  deviceOAuthManager.on('oauth:success', (payload) => {
-    emit('oauth:success', { ...payload, success: true });
-  });
+function publishSessionDelta(
+  delta: ReturnType<typeof decodeSessionDelta>,
+  emit: EmitHostEvent,
+  routes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>,
+): void {
+  if (!delta || delta.routeKey === undefined || !isBoundSessionDelta(delta, routes)) return;
+  emit('session.delta', delta);
+  if (delta.changes.some((change) => change.kind === 'runPhaseChanged'
+    && isTerminalRunPhase(change.phase))) {
+    routes.release(delta.routeKey);
+  }
+}
 
-  deviceOAuthManager.on('oauth:error', (error) => {
-    emit('oauth:error', error);
-  });
+function isBoundSessionDelta(
+  delta: { readonly sessionKey: string; readonly routeKey?: string },
+  routes: Pick<RendererEventRouteRegistry, 'matchesSession'>,
+): boolean {
+  // The live wire carries only sessionKey/routeKey; matchesSession is the strongest
+  // binding proof available without fabricating endpoint or agent identity.
+  return delta.routeKey !== undefined && routes.matchesSession(delta.routeKey, delta.sessionKey);
+}
 
-  browserOAuthManager.on('oauth:start', (payload) => {
-    emit('oauth:start', payload);
-  });
+function isTerminalRunPhase(phase: unknown): boolean {
+  return phase === 'cancelled'
+    || phase === 'completed'
+    || phase === 'failed'
+    || phase === 'interrupted';
+}
 
-  browserOAuthManager.on('oauth:code', (payload) => {
-    emit('oauth:code', payload);
-  });
-
-  browserOAuthManager.on('oauth:success', (payload) => {
-    emit('oauth:success', { ...payload, success: true });
-  });
-
-  browserOAuthManager.on('oauth:error', (error) => {
-    emit('oauth:error', error);
-  });
-
-  void publishGatewaySnapshot();
-  void publishRuntimeHostSnapshot();
-  deps.runtimeHostManager.onStateChange(() => {
-    void publishRuntimeHostSnapshot();
-    void publishGatewaySnapshot();
-  });
+function emitHostExit(emit: EmitHostEvent, exit: DirectRuntimeHostExit): void {
+  if (exit.kind === 'exited' && exit.code === 0 && exit.signal === null) {
+    emit('runtime-host:status', {
+      status: 'stopped',
+      hostLifecycle: 'shutDown',
+      runtimeLifecycle: 'shutDown',
+      updatedAt: Date.now(),
+    });
+    return;
+  }
+  emit('runtime-host:error', { message: 'Runtime Host is unavailable.' });
 }

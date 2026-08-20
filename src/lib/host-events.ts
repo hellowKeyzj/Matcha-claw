@@ -1,3 +1,5 @@
+import { createSessionTraceId, logSessionTrace } from './session-trace';
+
 const HOST_EVENT_HUB_KEY = '__MATCHACLAW_HOST_EVENT_HUB__';
 
 type HostEventEnvelope<T = unknown> = {
@@ -52,11 +54,22 @@ function ensureIpcBridge(hub: HostEventHub, ipc: IpcRendererLike): void {
   }
 
   const bridgeListener = (raw: unknown) => {
+    const traceId = createSessionTraceId('host-events-boundary');
     const envelope = raw as HostEventEnvelope<unknown> | null;
     if (!envelope || typeof envelope.eventName !== 'string') {
+      logSessionTrace('host.event.received', traceId, {
+        envelopeValid: false,
+        eventName: null,
+        listenerCount: 0,
+      });
       return;
     }
     const handlers = hub.listenersByEvent.get(envelope.eventName);
+    logSessionTrace('host.event.received', traceId, {
+      envelopeValid: true,
+      eventName: envelope.eventName,
+      listenerCount: handlers?.size ?? 0,
+    });
     if (!handlers || handlers.size === 0) {
       return;
     }
@@ -111,6 +124,6 @@ export function subscribeHostEvent<T = unknown>(
     };
   }
 
-  console.warn(`[host-events] host:event unavailable, event subscription disabled for "${eventName}"`);
+  console.warn('[host-events] host:event unavailable; subscription disabled');
   return () => {};
 }

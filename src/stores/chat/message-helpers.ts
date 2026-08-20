@@ -2,12 +2,12 @@ import {
   normalizeAssistantFinalText,
   sanitizeCanonicalUserContent as sanitizeCanonicalUserContentShared,
   sanitizeCanonicalUserText as sanitizeCanonicalUserTextShared,
-} from '../../../runtime-host/shared/chat-message-normalization';
+} from './message-display';
 import type {
   SessionAssistantTurnItem,
   SessionRenderItem,
   SessionRenderUserMessageItem,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [

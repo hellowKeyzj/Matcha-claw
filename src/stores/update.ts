@@ -5,7 +5,7 @@
 import { create } from 'zustand';
 import { useSettingsStore } from './settings';
 import { invokeIpc } from '@/lib/api-client';
-import { isUpdateVersionNewer } from '../../runtime-host/shared/update-version';
+import { isUpdateVersionNewer } from '../../electron/desktop-contract/update-version';
 
 export interface UpdateInfo {
   version: string;

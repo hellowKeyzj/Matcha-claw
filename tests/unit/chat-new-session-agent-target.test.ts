@@ -2,44 +2,50 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../runtime-host/shared/runtime-address';
-import type { RuntimeEndpointSummary } from '../../runtime-host/shared/runtime-topology';
+import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import { completeFact, sessionView, windowView } from './helpers/session-fixtures';
 
 const hostSessionNewMock = vi.fn();
-const hostRuntimeEndpointsListMock = vi.fn();
 const hostSessionListMock = vi.fn();
+const hostSessionLoadMock = vi.fn();
+const hostRuntimeEndpointsListMock = vi.fn();
 
-interface Deferred<T> {
+const openClawTestRuntimeEndpoint = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+} as const;
+
+function createOpenClawTestSessionIdentity(sessionKey: string, agentId: string): SessionIdentity {
+  return { endpoint: openClawTestRuntimeEndpoint, agentId, sessionKey };
+}
+
+type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
-  reject: (error: unknown) => void;
-}
+  reject: (reason?: unknown) => void;
+};
 
 function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((innerResolve, innerReject) => {
-    resolve = innerResolve;
-    reject = innerReject;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
   });
   return { promise, resolve, reject };
 }
 
 vi.mock('@/lib/host-api', () => ({
   hostSessionNew: (...args: unknown[]) => hostSessionNewMock(...args),
-  hostRuntimeEndpointsList: (...args: unknown[]) => hostRuntimeEndpointsListMock(...args),
   hostSessionList: (...args: unknown[]) => hostSessionListMock(...args),
   hostSessionApprovals: vi.fn(),
-  hostSessionRename: vi.fn(),
-  hostSessionResolveApproval: vi.fn(),
+  hostSessionRespondApproval: vi.fn(),
   hostSessionDelete: vi.fn(),
-  hostSessionResume: vi.fn(),
-  hostSessionSwitch: vi.fn(),
+  hostSessionLoad: (...args: unknown[]) => hostSessionLoadMock(...args),
+  hostRuntimeEndpointsList: (...args: unknown[]) => hostRuntimeEndpointsListMock(...args),
   hostSessionWindowFetch: vi.fn(),
-  resolveHydratedSessionSnapshot: vi.fn(),
   hostApiFetch: vi.fn(),
 }));
 
@@ -68,67 +74,43 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
   };
 }
 
-function buildTestSessionIdentity(
-  sessionKey: string,
-  agentId: string,
-  endpoint: RuntimeEndpointRef = openClawTestRuntimeEndpoint,
-): SessionIdentity {
-  return {
-    endpoint,
-    agentId,
-    sessionKey,
-  };
+function buildCreateView(sessionKey: string, agentId = sessionKey.split(':')[1] ?? 'main') {
+  return sessionView(sessionKey, {
+    identity: createOpenClawTestSessionIdentity(sessionKey, agentId),
+    items: completeFact([]),
+    window: completeFact(windowView(0)),
+  });
 }
 
-function buildRuntimeEndpointSummary(input: {
-  id: string;
-  endpoint: RuntimeEndpointRef;
-  protocolId?: string;
-  runtimeAdapterId?: string;
-  runtimeInstanceId?: string;
-  connectorId?: string;
-  displayName?: string;
-  agentIds: string[];
-  defaultAgentId: string;
-  readiness?: RuntimeEndpointSummary['controlState']['readiness'];
-}): RuntimeEndpointSummary {
-  const defaultScope: AgentScope = {
-    kind: 'agent',
-    endpoint: input.endpoint,
-    agentId: input.defaultAgentId,
-  };
+function buildEmptyTimeline(sessionKey = 'agent:main:main') {
+  return buildCreateView(sessionKey);
+}
+
+function buildOpenClawEndpointSummary(overrides: Record<string, unknown> = {}) {
   return {
-    id: input.id,
-    protocolId: input.protocolId ?? 'openclaw-v4',
-    ...(input.connectorId ? { connectorId: input.connectorId } : {}),
-    ...(input.runtimeAdapterId ? { runtimeAdapterId: input.runtimeAdapterId } : {}),
-    ...(input.runtimeInstanceId ? { runtimeInstanceId: input.runtimeInstanceId } : {}),
-    endpointRef: input.endpoint,
-    source: input.endpoint.kind === 'native-runtime'
-      ? {
-          kind: 'runtime-adapter',
-          runtimeAdapterId: input.runtimeAdapterId ?? input.endpoint.runtimeAdapterId,
-          runtimeInstanceId: input.runtimeInstanceId ?? input.endpoint.runtimeInstanceId,
-        }
-      : {
-          kind: 'protocol-connector',
-          protocolId: input.endpoint.protocolId,
-          connectorId: input.endpoint.connectorId,
-          endpointId: input.endpoint.endpointId,
-        },
-    location: { kind: 'local' },
+    id: 'openclaw-local',
+    protocolId: 'openclaw-v4',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    endpointRef: openClawTestRuntimeEndpoint,
+    source: {
+      kind: 'runtime-adapter' as const,
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+    },
+    location: { kind: 'local' as const },
     lifecycle: {
-      phase: 'ready',
+      phase: 'ready' as const,
       connected: true,
       ready: true,
-      updatedAt: 1,
+      updatedAt: null,
     },
-    displayName: input.displayName ?? input.id,
-    agentIds: input.agentIds,
-    defaultAgentId: input.defaultAgentId,
-    agents: input.agentIds.map((agentId) => ({
+    displayName: 'OpenClaw Local',
+    agentIds: ['main', 'test'],
+    defaultAgentId: 'main',
+    agents: ['main', 'test'].map((agentId) => ({
       agentId,
-      source: 'declared' as const,
+      source: 'discovered' as const,
       capabilities: {
         chat: true,
         streaming: true,
@@ -147,75 +129,23 @@ function buildRuntimeEndpointSummary(input: {
       replay: true,
       modelSelection: true,
     },
-    capabilitySummaries: input.agentIds.map((agentId) => ({
-      id: 'session.prompt',
-      scopeKind: 'agent' as const,
-      scope: {
-        ...defaultScope,
-        agentId,
-      },
-      targetKinds: [],
-      operations: [],
-      availability: 'available' as const,
-    })),
+    capabilityFamilies: [
+      { family: 'session' as const, availability: 'supported' as const },
+      { family: 'task' as const, availability: 'supported' as const },
+      { family: 'team' as const, availability: 'supported' as const },
+      { family: 'cron' as const, availability: 'supported' as const },
+      { family: 'workspace' as const, availability: 'supported' as const },
+      { family: 'skill' as const, availability: 'supported' as const },
+      { family: 'channel' as const, availability: 'supported' as const },
+      { family: 'lifecycle' as const, availability: 'supported' as const },
+    ],
     controlState: {
       connection: null,
-      readiness: input.readiness ?? {
-        ready: true,
-        phase: 'ready',
-        requiredMethods: [],
-        missingMethods: [],
-        retryable: false,
-      },
+      readiness: { ready: true, phase: 'ready' as const },
       capabilities: null,
-      updatedAt: 1,
+      updatedAt: null,
     },
-  };
-}
-
-function buildNewSessionSnapshot(
-  sessionKey: string,
-  endpoint: RuntimeEndpointRef = openClawTestRuntimeEndpoint,
-) {
-  const agentId = sessionKey.split(':')[1] ?? 'main';
-  return {
-    sessionKey,
-    catalog: {
-      key: sessionKey,
-      agentId,
-      protocolId: 'openclaw-v4',
-      runtimeEndpointId: 'openclaw-local',
-      sessionIdentity: buildTestSessionIdentity(sessionKey, agentId, endpoint),
-      kind: 'session' as const,
-      preferred: false,
-      displayName: sessionKey,
-      updatedAt: 1,
-    },
-    items: [],
-    approvals: [],
-    usage: [],
-    artifacts: [],
-    replayComplete: true,
-    runtime: {
-      activeRunId: null,
-      runPhase: 'idle' as const,
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      runtimeActivity: null,
-      lastUserMessageAt: null,
-      lastError: null,
-      lastIssue: null,
-      updatedAt: 1,
-    },
-    window: {
-      totalItemCount: 0,
-      windowStartOffset: 0,
-      windowEndOffset: 0,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    },
+    ...overrides,
   };
 }
 
@@ -231,18 +161,17 @@ describe('chat store newSession agent targeting', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     hostSessionNewMock.mockReset();
-    hostRuntimeEndpointsListMock.mockReset();
     hostSessionListMock.mockReset();
-    hostRuntimeEndpointsListMock.mockResolvedValue({ endpoints: [] });
+    hostSessionLoadMock.mockReset();
+    hostRuntimeEndpointsListMock.mockReset();
     hostSessionListMock.mockResolvedValue({ ready: true, sessions: [] });
-    hostSessionNewMock.mockImplementation(async (payload?: { agentId?: string; endpoint?: RuntimeEndpointRef }) => {
+    hostSessionLoadMock.mockImplementation(async (payload?: { sessionKey?: string }) => {
+      return buildEmptyTimeline(payload?.sessionKey);
+    });
+    hostRuntimeEndpointsListMock.mockResolvedValue({ endpoints: [buildOpenClawEndpointSummary()] });
+    hostSessionNewMock.mockImplementation(async (payload?: { agentId?: string }) => {
       const agentId = payload?.agentId ?? 'main';
-      const sessionKey = `agent:${agentId}:session-${Date.now()}`;
-      return {
-        success: true,
-        sessionKey,
-        snapshot: buildNewSessionSnapshot(sessionKey, payload?.endpoint),
-      };
+      return buildCreateView(`agent:${agentId}:session-${Date.now()}`, agentId);
     });
     loadHistory.mockClear();
     useChatStore.setState({
@@ -287,12 +216,19 @@ describe('chat store newSession agent targeting', () => {
 
     await useChatStore.getState().newSession();
 
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1711111111111', 'test')));
-    expect(hostSessionNewMock).toHaveBeenCalledWith({
+    const createdKey = buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1711111111111', 'test'));
+    expect(useChatStore.getState().currentSessionKey).toBe(createdKey);
+    expect(hostSessionNewMock).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'test',
-    });
-    expect(useChatStore.getState().loadedSessions[buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1711111111111', 'test'))]?.meta.historyStatus).toBe('ready');
+    }), expect.objectContaining({ traceId: null }));
+    const createdRecord = useChatStore.getState().loadedSessions[createdKey];
+    expect(createdRecord?.meta.sessionIdentity).toEqual(expect.objectContaining({
+      sessionKey: 'agent:test:session-1711111111111',
+      agentId: 'test',
+    }));
+    expect(createdRecord?.meta.historyStatus).toBe('ready');
+    expect(createdRecord?.meta.lastActivityAt).toBeNull();
     nowSpy.mockRestore();
   });
 
@@ -315,10 +251,10 @@ describe('chat store newSession agent targeting', () => {
     await useChatStore.getState().newSession();
 
     expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:runtime-owner:session-1733222222222', 'runtime-owner')));
-    expect(hostSessionNewMock).toHaveBeenCalledWith({
+    expect(hostSessionNewMock).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'runtime-owner',
-    });
+    }), expect.objectContaining({ traceId: null }));
     nowSpy.mockRestore();
   });
 
@@ -328,43 +264,10 @@ describe('chat store newSession agent targeting', () => {
     await useChatStore.getState().newSession('main');
 
     expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:main:session-1733333333333', 'main')));
-    expect(hostSessionNewMock).toHaveBeenCalledWith({
+    expect(hostSessionNewMock).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'main',
-    });
-    nowSpy.mockRestore();
-  });
-
-  it('显式传入 AgentScope 时，应使用该 scope 的 endpoint 与 agentId 创建会话', async () => {
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_733_444_444_444);
-    const scopedEndpoint: RuntimeEndpointRef = {
-      kind: 'protocol-connector',
-      protocolId: 'matcha-test-protocol',
-      connectorId: 'connector-a',
-      endpointId: 'endpoint-a',
-    };
-    const scopedAgent: AgentScope = {
-      kind: 'agent',
-      endpoint: scopedEndpoint,
-      agentId: 'scoped-agent',
-    };
-
-    await useChatStore.getState().newSessionForScope(scopedAgent);
-
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(buildTestSessionIdentity(
-      'agent:scoped-agent:session-1733444444444',
-      'scoped-agent',
-      scopedEndpoint,
-    )));
-    expect(hostSessionNewMock).toHaveBeenCalledTimes(1);
-    expect(hostSessionNewMock).toHaveBeenCalledWith({
-      endpoint: scopedEndpoint,
-      agentId: 'scoped-agent',
-    });
-    expect(hostSessionNewMock).not.toHaveBeenCalledWith({
-      endpoint: openClawTestRuntimeEndpoint,
-      agentId: 'main',
-    });
+    }), expect.objectContaining({ traceId: null }));
     nowSpy.mockRestore();
   });
 
@@ -417,22 +320,21 @@ describe('chat store newSession agent targeting', () => {
       },
     } as never);
 
+    hostSessionNewMock.mockResolvedValueOnce({ outcome: 'target_rejected' });
+
     await useChatStore.getState().newSession();
 
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(buildTestSessionIdentity(
-      'agent:matcha:session-1733555555555',
-      'matcha',
-      matchaEndpoint,
-    )));
+    expect(useChatStore.getState().currentSessionKey).toBe('');
+    expect(useChatStore.getState().error).toBe('Session create target_rejected');
     expect(hostSessionNewMock).toHaveBeenCalledTimes(1);
-    expect(hostSessionNewMock).toHaveBeenCalledWith({
+    expect(hostSessionNewMock).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: matchaEndpoint,
       agentId: 'matcha',
-    });
-    expect(hostSessionNewMock).not.toHaveBeenCalledWith({
+    }), expect.objectContaining({ traceId: null }));
+    expect(hostSessionNewMock).not.toHaveBeenCalledWith(expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'main',
-    });
+    }));
     nowSpy.mockRestore();
   });
 
@@ -445,6 +347,7 @@ describe('chat store newSession agent targeting', () => {
             activeRunId: 'run-from-agent-test',
           },
         }),
+        'agent:another:main': buildSessionRecord({ sessionKey: 'agent:another:main' }),
       },
     } as never);
 
@@ -469,7 +372,17 @@ describe('chat store newSession agent targeting', () => {
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
-          items: buildRenderItemsFromMessages('agent:test:main', [userMsg]),
+          items: [{
+            key: 'msg-local-1',
+            kind: 'user-message',
+            role: 'user',
+            sessionKey: 'agent:test:main',
+            text: userMsg.content,
+            images: [],
+            attachedFiles: [],
+            messageId: userMsg.id,
+            createdAt: userMsg.timestamp,
+          }],
           window: createViewportWindowState({
             totalItemCount: 1,
             windowStartOffset: 0,
@@ -480,6 +393,7 @@ describe('chat store newSession agent targeting', () => {
             activeRunId: 'run-agent-test',
           },
         }),
+        'agent:another:main': buildSessionRecord({ sessionKey: 'agent:another:main' }),
       },
     } as never);
 
@@ -581,29 +495,29 @@ describe('chat store newSession agent targeting', () => {
     const runtime = state.loadedSessions[state.currentSessionKey]?.runtime;
     expect(state.currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1722222222222', 'test')));
     expect(runtime?.activeRunId).toBeNull();
-    expect(runtime?.runPhase).toBe('idle');
+    expect(runtime?.runPhase).toBe('done');
     nowSpy.mockRestore();
   });
 
   it('newSession 并发乱序 resolve 时，旧请求不得覆盖后一次选择', async () => {
-    const firstCreate = createDeferred<ReturnType<typeof buildNewSessionSnapshot>>();
-    const secondCreate = createDeferred<ReturnType<typeof buildNewSessionSnapshot>>();
+    const firstCreate = createDeferred<ReturnType<typeof buildCreateView>>();
+    const secondCreate = createDeferred<ReturnType<typeof buildCreateView>>();
     hostSessionNewMock
-      .mockReturnValueOnce(firstCreate.promise.then((snapshot) => ({ success: true, sessionKey: snapshot.sessionKey, snapshot })))
-      .mockReturnValueOnce(secondCreate.promise.then((snapshot) => ({ success: true, sessionKey: snapshot.sessionKey, snapshot })));
+      .mockReturnValueOnce(firstCreate.promise)
+      .mockReturnValueOnce(secondCreate.promise);
 
     const firstRequest = useChatStore.getState().newSession('test');
     const secondRequest = useChatStore.getState().newSession('main');
-    const secondSnapshot = buildNewSessionSnapshot('agent:main:session-second');
-    const firstSnapshot = buildNewSessionSnapshot('agent:test:session-first');
-    const secondRecordKey = buildSessionRecordKey(secondSnapshot.catalog.sessionIdentity);
-    const firstRecordKey = buildSessionRecordKey(firstSnapshot.catalog.sessionIdentity);
+    const secondOutcome = buildCreateView('agent:main:session-second');
+    const firstOutcome = buildCreateView('agent:test:session-first');
+    const secondRecordKey = buildSessionRecordKey(createOpenClawTestSessionIdentity(secondOutcome.sessionKey, 'main'));
+    const firstRecordKey = buildSessionRecordKey(createOpenClawTestSessionIdentity(firstOutcome.sessionKey, 'test'));
 
-    secondCreate.resolve(secondSnapshot);
+    secondCreate.resolve(secondOutcome);
     await secondRequest;
     expect(useChatStore.getState().currentSessionKey).toBe(secondRecordKey);
 
-    firstCreate.resolve(firstSnapshot);
+    firstCreate.resolve(firstOutcome);
     await firstRequest;
 
     const state = useChatStore.getState();
@@ -612,140 +526,50 @@ describe('chat store newSession agent targeting', () => {
     expect(state.loadedSessions[firstRecordKey]).toBeDefined();
     expect(state.error).toBeNull();
     expect(state.mutating).toBe(false);
-    expect(hostSessionNewMock).toHaveBeenNthCalledWith(1, {
+    expect(hostSessionNewMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'test',
-    });
-    expect(hostSessionNewMock).toHaveBeenNthCalledWith(2, {
+    }), expect.objectContaining({ traceId: null }));
+    expect(hostSessionNewMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
       endpoint: openClawTestRuntimeEndpoint,
       agentId: 'main',
-    });
+    }), expect.objectContaining({ traceId: null }));
   });
 
-  it('starting 的 OpenClaw endpoint 仍可作为新会话 target，terminal unavailable 则保持 endpoint unavailable 错误', async () => {
-    const endpoint = buildRuntimeEndpointSummary({
-      id: 'openclaw-local',
-      endpoint: openClawTestRuntimeEndpoint,
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      displayName: 'OpenClaw Local',
-      agentIds: ['main'],
-      defaultAgentId: 'main',
-      readiness: {
-        ready: false,
-        phase: 'starting',
-        requiredMethods: [],
-        missingMethods: [],
-        retryable: true,
-      },
-    });
-    hostRuntimeEndpointsListMock.mockResolvedValueOnce({ endpoints: [endpoint] });
-
-    await useChatStore.getState().bootstrapSessionRuntime();
-
-    let catalog = useChatStore.getState().sessionRuntimeCatalog;
-    expect(catalog.status).toBe('ready');
-    expect(catalog.endpoints.map((target) => target.endpointId)).toEqual(['openclaw-local']);
-    expect(catalog.defaultSessionPromptScope).toEqual({
-      kind: 'agent',
-      endpoint: openClawTestRuntimeEndpoint,
-      agentId: 'main',
-    });
-
-    hostRuntimeEndpointsListMock.mockResolvedValueOnce({
-      endpoints: [{
-        ...endpoint,
-        controlState: {
-          ...endpoint.controlState,
-          readiness: {
-            ...endpoint.controlState.readiness!,
-            phase: 'unavailable',
-            retryable: false,
-          },
-        },
-      }],
+  it('requires endpoint lifecycle and session capability readiness before exposing session targets', async () => {
+    hostRuntimeEndpointsListMock.mockResolvedValue({
+      endpoints: [buildOpenClawEndpointSummary({
+        lifecycle: { phase: 'connecting', connected: true, ready: false, updatedAt: null },
+      })],
     });
 
     await useChatStore.getState().bootstrapSessionRuntime();
 
-    catalog = useChatStore.getState().sessionRuntimeCatalog;
-    expect(catalog.status).toBe('error');
-    expect(catalog.endpoints).toEqual([]);
-    expect(catalog.defaultSessionPromptScope).toBeNull();
-    expect(catalog.error).toBe('No session runtime endpoint is available');
-    expect(useChatStore.getState().error).toBe('No session runtime endpoint is available');
+    expect(useChatStore.getState().sessionRuntimeCatalog).toEqual(expect.objectContaining({
+      status: 'error',
+      endpoints: [],
+      defaultSessionPromptScope: null,
+    }));
   });
 
-  it('runtime catalog 并发乱序 resolve 时，旧响应不得覆盖新响应', async () => {
-    const oldEndpoint: RuntimeEndpointRef = {
-      kind: 'protocol-connector',
-      protocolId: 'old-protocol',
-      connectorId: 'old-connector',
-      endpointId: 'old-endpoint',
-    };
-    const newEndpoint: RuntimeEndpointRef = {
-      kind: 'protocol-connector',
-      protocolId: 'new-protocol',
-      connectorId: 'new-connector',
-      endpointId: 'new-endpoint',
-    };
-    const oldLoad = createDeferred<{ endpoints: RuntimeEndpointSummary[] }>();
-    const newLoad = createDeferred<{ endpoints: RuntimeEndpointSummary[] }>();
-    hostRuntimeEndpointsListMock
-      .mockReturnValueOnce(oldLoad.promise)
-      .mockReturnValueOnce(newLoad.promise);
-    useChatStore.setState({
-      currentSessionKey: '',
-      sessionRuntimeCatalog: {
-        status: 'idle',
-        error: null,
-        endpoints: [],
-        defaultSessionPromptScope: null,
-      },
-    } as never);
+  it('初始化固定公开的 OpenClaw local session target，不请求泛化 endpoint catalog', async () => {
+    await useChatStore.getState().bootstrapSessionRuntime();
 
-    const oldRequest = useChatStore.getState().bootstrapSessionRuntime();
-    const newRequest = useChatStore.getState().bootstrapSessionRuntime();
-
-    newLoad.resolve({
-      endpoints: [buildRuntimeEndpointSummary({
-        id: 'new-endpoint',
-        endpoint: newEndpoint,
-        protocolId: 'new-protocol',
-        connectorId: 'new-connector',
-        displayName: 'New Runtime',
-        agentIds: ['new-agent'],
-        defaultAgentId: 'new-agent',
+    expect(useChatStore.getState().sessionRuntimeCatalog).toEqual(expect.objectContaining({
+      status: 'ready',
+      error: null,
+      endpoints: [expect.objectContaining({
+        endpoint: openClawTestRuntimeEndpoint,
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        acceptsDynamicAgents: true,
       })],
-    });
-    await newRequest;
-    expect(useChatStore.getState().sessionRuntimeCatalog.defaultSessionPromptScope).toEqual({
-      kind: 'agent',
-      endpoint: newEndpoint,
-      agentId: 'new-agent',
-    });
-
-    oldLoad.resolve({
-      endpoints: [buildRuntimeEndpointSummary({
-        id: 'old-endpoint',
-        endpoint: oldEndpoint,
-        protocolId: 'old-protocol',
-        connectorId: 'old-connector',
-        displayName: 'Old Runtime',
-        agentIds: ['old-agent'],
-        defaultAgentId: 'old-agent',
-      })],
-    });
-    await oldRequest;
-
-    const catalog = useChatStore.getState().sessionRuntimeCatalog;
-    expect(catalog.status).toBe('ready');
-    expect(catalog.endpoints.map((endpoint) => endpoint.endpointId)).toEqual(['new-endpoint']);
-    expect(catalog.defaultSessionPromptScope).toEqual({
-      kind: 'agent',
-      endpoint: newEndpoint,
-      agentId: 'new-agent',
-    });
+      defaultSessionPromptScope: expect.objectContaining({
+        endpoint: openClawTestRuntimeEndpoint,
+        agentId: 'main',
+      }),
+    }));
+    expect(useChatStore.getState().error).toBeNull();
   });
 
   it('旧 loadSessions 响应不得覆盖更新后的 currentSessionKey', async () => {
@@ -762,11 +586,9 @@ describe('chat store newSession agent targeting', () => {
       }>;
     }>();
     hostSessionListMock.mockReturnValueOnce(catalogLoad.promise);
-    hostSessionNewMock.mockResolvedValueOnce({
-      success: true,
-      sessionKey: 'agent:main:session-newer',
-      snapshot: buildNewSessionSnapshot('agent:main:session-newer'),
-    });
+    hostSessionNewMock.mockResolvedValueOnce(
+      buildCreateView('agent:main:session-newer'),
+    );
 
     const loadRequest = useChatStore.getState().loadSessions();
     await useChatStore.getState().newSession('main');
@@ -788,61 +610,6 @@ describe('chat store newSession agent targeting', () => {
     await loadRequest;
 
     expect(useChatStore.getState().currentSessionKey).toBe(newerRecordKey);
-  });
-
-  it('runtime catalog loading 和错误不应清除用户已有 runtime 选择', async () => {
-    const selectedEndpoint: RuntimeEndpointRef = {
-      kind: 'protocol-connector',
-      protocolId: 'selected-protocol',
-      connectorId: 'selected-connector',
-      endpointId: 'selected-endpoint',
-    };
-    const selectedScope: AgentScope = {
-      kind: 'agent',
-      endpoint: selectedEndpoint,
-      agentId: 'selected-agent',
-    };
-    const loadingRequest = createDeferred<{ endpoints: RuntimeEndpointSummary[] }>();
-    hostRuntimeEndpointsListMock.mockReturnValueOnce(loadingRequest.promise);
-    useChatStore.setState({
-      sessionRuntimeCatalog: {
-        status: 'ready',
-        error: null,
-        endpoints: [buildRuntimeEndpointSummary({
-          id: 'selected-endpoint',
-          endpoint: selectedEndpoint,
-          protocolId: 'selected-protocol',
-          connectorId: 'selected-connector',
-          displayName: 'Selected Runtime',
-          agentIds: ['selected-agent'],
-          defaultAgentId: 'selected-agent',
-        })].map((endpoint) => ({
-          endpointId: endpoint.id,
-          protocolId: endpoint.protocolId,
-          connectorId: endpoint.connectorId,
-          displayName: endpoint.displayName,
-          endpoint: endpoint.endpointRef,
-          agentIds: endpoint.agentIds,
-          acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
-          sessionPromptScopes: [selectedScope],
-          defaultSessionPromptScope: selectedScope,
-        })),
-        defaultSessionPromptScope: selectedScope,
-      },
-    } as never);
-
-    const request = useChatStore.getState().bootstrapSessionRuntime();
-    expect(useChatStore.getState().sessionRuntimeCatalog.status).toBe('loading');
-    expect(useChatStore.getState().sessionRuntimeCatalog.defaultSessionPromptScope).toBe(selectedScope);
-
-    loadingRequest.reject(new Error('catalog failed'));
-    await request;
-
-    const catalog = useChatStore.getState().sessionRuntimeCatalog;
-    expect(catalog.status).toBe('error');
-    expect(catalog.error).toBe('catalog failed');
-    expect(catalog.endpoints).toHaveLength(1);
-    expect(catalog.defaultSessionPromptScope).toBe(selectedScope);
   });
 
   it('newSession 只写 loadedSessions 主链，不改写 session catalog status shell', async () => {

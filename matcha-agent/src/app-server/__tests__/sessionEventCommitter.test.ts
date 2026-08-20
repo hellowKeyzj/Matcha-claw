@@ -82,7 +82,10 @@ describe('SessionEventCommitter', () => {
       reportPostAppendFailure: () => {},
     })
 
-    const firstCommit = committer.commit('session-1', createMessageDeltaEvent(10))
+    const firstCommit = committer.commit(
+      'session-1',
+      createMessageDeltaEvent(10),
+    )
     await metadataEntered.promise
     const secondCommit = committer.commit(
       'session-1',
@@ -93,7 +96,9 @@ describe('SessionEventCommitter', () => {
     expect(calls).not.toContain('append:11')
 
     releaseMetadata.resolve()
-    await expect(Promise.all([firstCommit, secondCommit])).resolves.toHaveLength(2)
+    await expect(
+      Promise.all([firstCommit, secondCommit]),
+    ).resolves.toHaveLength(2)
     expect(calls).toEqual([
       'append:10',
       'metadata:10',
@@ -159,7 +164,8 @@ describe('SessionEventCommitter', () => {
 
   test('continues post-append work and later commits after metadata fails', async () => {
     const calls: string[] = []
-    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> = []
+    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> =
+      []
     const metadataFailure = new Error('metadata failed')
     const committer = new SessionEventCommitter({
       append: async (sessionId, event) => {
@@ -204,7 +210,8 @@ describe('SessionEventCommitter', () => {
 
   test('publishes and continues after snapshot projection fails', async () => {
     const calls: string[] = []
-    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> = []
+    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> =
+      []
     const committer = new SessionEventCommitter({
       append: async (sessionId, event) => {
         const seq = sequenceForEvent(event)
@@ -248,7 +255,8 @@ describe('SessionEventCommitter', () => {
 
   test('does not publish an append failure and keeps the queue tail usable', async () => {
     const calls: string[] = []
-    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> = []
+    const reports: Array<{ stage: SessionEventPostAppendStage; seq: number }> =
+      []
     const appendEntered = createDeferred<void>()
     const failAppend = createDeferred<void>()
     const appendFailure = new Error('append failed')

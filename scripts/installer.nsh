@@ -82,6 +82,10 @@
       ${nsProcess::Unload}
   ${endIf}
 
+  ; Orphan cleanup is needed only for an existing install. On a fresh install
+  ; it would scan every process and wait without a possible file lock to release.
+  IfFileExists "$INSTDIR\" 0 _existing_install_cleanup_done
+
   ; Even if MatchaClaw.exe was not detected, orphan child processes from a
   ; previous crash or unclean shutdown may still hold file locks inside $INSTDIR.
   nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith('$INSTDIR', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
@@ -98,6 +102,7 @@
 
   ; Brief wait for handle release. The main wait already ran if the app was open.
   Sleep 2000
+  _existing_install_cleanup_done:
 
   ; Prevent NSIS itself from holding $INSTDIR as current working directory before
   ; the rename check. Windows refuses to rename a directory held as CWD.

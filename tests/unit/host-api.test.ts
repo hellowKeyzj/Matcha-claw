@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SessionPromptResult, SessionRenderUserMessageItem } from '../../runtime-host/shared/session-adapter-types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const invokeIpcMock = vi.fn();
@@ -15,11 +14,6 @@ const testSessionIdentity = {
   endpoint: testRuntimeEndpoint,
   agentId: 'default',
   sessionKey: 'agent:default:main',
-};
-
-const workspaceScope = {
-  kind: 'workspace' as const,
-  endpoint: testRuntimeEndpoint,
 };
 
 function proxyEnvelope(json: unknown, status = 200) {
@@ -86,6 +80,16 @@ describe('host-api', () => {
     await expect(hostApiFetch('/api/test')).rejects.toThrow('Invalid Authentication');
   });
 
+  it('preserves safe proxy error code from unified non-ok envelope', async () => {
+    invokeIpcMock.mockResolvedValueOnce({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'TIMEOUT' },
+    });
+
+    const { hostApiFetch } = await import('@/lib/host-api');
+    await expect(hostApiFetch('/api/test')).rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
+
   it('throws when host api returns http error status in proxy envelope', async () => {
     invokeIpcMock.mockResolvedValueOnce({
       ok: true,
@@ -128,7 +132,7 @@ describe('host-api', () => {
 
   it('requires SessionIdentity on session-specific host API payloads', async () => {
     const source = await readFile(join(process.cwd(), 'src/lib/host-api.ts'), 'utf8');
-    const sessionFunctions = [...source.matchAll(/export async function (hostSession\w+)\([\s\S]*?\n}\n/g)];
+    const sessionFunctions = [...source.matchAll(/export async function (hostSession\w+)\([\s\S]*?\r?\n}\s*\r?\n/g)];
     expect(sessionFunctions.length).toBeGreaterThan(0);
     for (const match of sessionFunctions) {
       const functionSource = match[0];
@@ -146,185 +150,127 @@ describe('host-api', () => {
     await expect(hostApiFetch('/api/test')).rejects.toThrow('Invalid IPC channel: hostapi:fetch');
   });
 
-  it('hostFileStagePaths uses workspace capability execute', async () => {
-    const workspaceStagingTarget = { kind: 'workspace-staging' as const, identity: testSessionIdentity };
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: [{ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null }],
-      },
-    });
-
-    const { hostFileStagePaths } = await import('@/lib/host-api');
-    const result = await hostFileStagePaths({
-      filePaths: ['/tmp/demo.txt'],
-      sessionIdentity: testSessionIdentity,
-    });
-
-    expect(result).toEqual([{ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null }]);
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'workspace.file',
-          operationId: 'files.stagePaths',
-          scope: workspaceScope,
-          target: workspaceStagingTarget,
-          input: {
-            filePaths: ['/tmp/demo.txt'],
-            sessionIdentity: testSessionIdentity,
-          },
-        }),
-      }),
-    );
-  });
-
-  it('hostFileReadText ignores UI workspace metadata for authoritative workspace scope and target', async () => {
-    mockWorkspaceCapabilityExecute({ ok: true, path: '/workspace/demo.txt', content: 'demo', mimeType: 'text/plain' });
+  it('hostFileReadText sends only the session-relative read contract', async () => {
+    mockWorkspaceCapabilityExecute({ name: 'docs/demo.txt', content: 'demo', size: 4 });
 
     const { hostFileReadText } = await import('@/lib/host-api');
     const result = await hostFileReadText({
-      path: '/workspace/demo.txt',
-      sessionIdentity: testSessionIdentity,
-      workspaceId: 'workspace-1',
-      sourceId: 'source-1',
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/demo.txt',
     });
 
-    expect(result).toEqual({ ok: true, path: '/workspace/demo.txt', content: 'demo', mimeType: 'text/plain' });
+    expect(result).toEqual({ ok: true, content: 'demo', size: 4 });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
-        path: '/api/capabilities/execute',
+        path: '/api/files/read-text',
         method: 'POST',
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.readText',
-          scope: workspaceScope,
-          target: {
-            kind: 'workspace-file',
-            path: '/workspace/demo.txt',
-            identity: testSessionIdentity,
+          scope: {
+            kind: 'session',
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
           },
+          target: { kind: 'workspace-file' },
           input: {
-            path: '/workspace/demo.txt',
-            sessionIdentity: testSessionIdentity,
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+            relativePath: 'docs/demo.txt',
           },
         }),
       }),
     );
+    expect(JSON.stringify(invokeIpcMock.mock.calls)).not.toContain('/workspace');
   });
 
-  it('hostFileStagePaths ignores UI workspace metadata in capability payload', async () => {
-    mockWorkspaceCapabilityExecute([{ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null }]);
-
-    const { hostFileStagePaths } = await import('@/lib/host-api');
-    await hostFileStagePaths({
-      filePaths: ['/workspace/demo.txt'],
-      sessionIdentity: testSessionIdentity,
-      workspaceId: 'workspace-1',
-      sourceId: 'source-1',
+  it('hostWorkspaceMediaThumbnail uses the sealed thumbnail DTO without exposing native details', async () => {
+    mockWorkspaceCapabilityExecute({
+      preview: 'data:image/png;base64,YWJj',
+      fileSize: 3,
     });
 
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'workspace.file',
-          operationId: 'files.stagePaths',
-          scope: workspaceScope,
-          target: { kind: 'workspace-staging', identity: testSessionIdentity },
-          input: {
-            filePaths: ['/workspace/demo.txt'],
-            sessionIdentity: testSessionIdentity,
-          },
-        }),
-      }),
-    );
-  });
-
-  it('hostFileStageBuffer uses workspace capability execute', async () => {
-    mockWorkspaceCapabilityExecute({ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null });
-
-    const { hostFileStageBuffer } = await import('@/lib/host-api');
-    const result = await hostFileStageBuffer({
-      base64: 'ZGVtbw==',
-      fileName: 'demo.txt',
-      mimeType: 'text/plain',
-      sessionIdentity: testSessionIdentity,
-    });
-
-    expect(result).toEqual({ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null });
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'workspace.file',
-          operationId: 'files.stageBuffer',
-          scope: workspaceScope,
-          target: { kind: 'workspace-staging', identity: testSessionIdentity },
-          input: {
-            base64: 'ZGVtbw==',
-            fileName: 'demo.txt',
-            mimeType: 'text/plain',
-            sessionIdentity: testSessionIdentity,
-          },
-        }),
-      }),
-    );
-  });
-
-  it('hostFileThumbnail uses workspace file capability execute with matching target path', async () => {
-    mockWorkspaceCapabilityExecute({ preview: 'data:image/png;base64,abc', fileSize: 3 });
-
-    const { hostFileThumbnail } = await import('@/lib/host-api');
-    const result = await hostFileThumbnail({
-      path: '/workspace/artifact.png',
+    const { hostWorkspaceMediaThumbnail } = await import('@/lib/host-api');
+    const result = await hostWorkspaceMediaThumbnail({
+      relativePath: 'artifacts/demo.png',
       mimeType: 'image/png',
       sessionIdentity: testSessionIdentity,
-      workspaceId: 'workspace-1',
-      sourceId: 'source-1',
     });
 
-    expect(result).toEqual({ preview: 'data:image/png;base64,abc', fileSize: 3 });
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'workspace.file',
-          operationId: 'files.thumbnail',
-          scope: workspaceScope,
-          target: {
-            kind: 'workspace-file',
-            path: '/workspace/artifact.png',
-            identity: testSessionIdentity,
-          },
-          input: {
-            path: '/workspace/artifact.png',
-            mimeType: 'image/png',
-            sessionIdentity: testSessionIdentity,
-          },
-        }),
-      }),
-    );
+    expect(result).toEqual({ preview: 'data:image/png;base64,YWJj', fileSize: 3 });
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', expect.anything());
+    const capabilityCall = invokeIpcMock.mock.calls.find(([channel]) => channel === 'hostapi:fetch');
+    expect(JSON.stringify(capabilityCall)).not.toContain('reference');
+    expect(JSON.stringify(capabilityCall)).not.toContain('stagedAttachmentId');
   });
 
-  it('hostUvInstallAll uses runtime-job target', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, job: { id: 'job-uv', type: 'toolchain.installUv' } }, 202));
+  it('hostWorkspaceMediaThumbnail projects sealed media failures', async () => {
+    mockWorkspaceCapabilityExecute({ success: false, error: 'Workspace media path is invalid' }, 422);
+    const { hostWorkspaceMediaThumbnail } = await import('@/lib/host-api');
+
+    await expect(hostWorkspaceMediaThumbnail({
+      relativePath: 'artifacts/demo.png',
+      mimeType: 'image/png',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: null, fileSize: 0, error: 'invalidPath' });
+  });
+
+  it('hostWorkspaceMediaThumbnail keeps raw size when preview is unavailable', async () => {
+    mockWorkspaceCapabilityExecute({
+      preview: null,
+      fileSize: 42,
+    });
+
+    const { hostWorkspaceMediaThumbnail } = await import('@/lib/host-api');
+    await expect(hostWorkspaceMediaThumbnail({
+      relativePath: 'artifacts/demo.png',
+      mimeType: 'image/png',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: null, fileSize: 42 });
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', expect.anything());
+  });
+
+  it('hostWorkspaceMediaThumbnail rejects absolute paths without delivery', async () => {
+    const { hostWorkspaceMediaThumbnail } = await import('@/lib/host-api');
+    await expect(hostWorkspaceMediaThumbnail({
+      relativePath: '/workspace/demo.png',
+      mimeType: 'image/png',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: null, fileSize: 0, error: 'invalidPath' });
+    expect(invokeIpcMock).not.toHaveBeenCalled();
+  });
+
+  it('hostFileThumbnail converts an in-workspace absolute path without transporting it', async () => {
+    mockWorkspaceCapabilityExecute({
+      preview: 'data:image/png;base64,YWJj',
+      fileSize: 3,
+    });
+
+    const { hostFileThumbnail } = await import('@/lib/host-api');
+    await expect(hostFileThumbnail({
+      path: 'C:/workspace/demo.png',
+      workspaceRoot: 'C:/workspace',
+      mimeType: 'image/png',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: 'data:image/png;base64,YWJj', fileSize: 3 });
+
+    const capabilityCall = invokeIpcMock.mock.calls.find(([channel]) => channel === 'hostapi:fetch');
+    expect(JSON.stringify(capabilityCall)).toContain('demo.png');
+    expect(JSON.stringify(capabilityCall)).not.toContain('C:/workspace');
+    expect(JSON.stringify(capabilityCall)).toContain('media.thumbnail');
+  });
+
+  it('hostUvInstallAll uses the platform runtime install capability', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
+      success: true,
+      job: { id: 'job-uv', status: 'queued' },
+    }));
 
     const { hostUvInstallAll } = await import('@/lib/host-api');
-    const result = await hostUvInstallAll(testRuntimeEndpoint);
+    await hostUvInstallAll(testRuntimeEndpoint);
 
-    expect(result).toEqual({ success: true, job: { id: 'job-uv', type: 'toolchain.installUv' } });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
@@ -341,11 +287,14 @@ describe('host-api', () => {
     );
   });
 
-  it('hostRuntimePrepareGatewayLaunch uses gateway-control target', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, job: { id: 'job-gateway', type: 'runtimeHost.prepareGatewayLaunch' } }, 202));
+  it('hostRuntimeJobGet binds the job id in target and input', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
+      success: true,
+      job: null,
+    }));
 
-    const { hostRuntimePrepareGatewayLaunch } = await import('@/lib/host-api');
-    await hostRuntimePrepareGatewayLaunch({ gatewayToken: 'token-1' }, testRuntimeEndpoint);
+    const { hostRuntimeJobGet } = await import('@/lib/host-api');
+    await hostRuntimeJobGet('job-uv', testRuntimeEndpoint);
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
@@ -354,51 +303,22 @@ describe('host-api', () => {
         method: 'POST',
         body: JSON.stringify({
           id: 'runtime.host',
-          operationId: 'runtimeHost.prepareGatewayLaunch',
+          operationId: 'runtimeHost.jobGet',
           scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          target: { kind: 'gateway-control' },
-          input: { gatewayToken: 'token-1' },
-        }),
-      }),
-    );
-  });
-
-  it('hostDiagnosticsCollect executes against the caller supplied runtime endpoint', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, job: { id: 'job-1', type: 'diagnostics.collect' } }, 202));
-
-    const { hostDiagnosticsCollect } = await import('@/lib/host-api');
-    const result = await hostDiagnosticsCollect(testRuntimeEndpoint);
-
-    expect(result).toEqual({ success: true, job: { id: 'job-1', type: 'diagnostics.collect' } });
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'runtime.host',
-          operationId: 'diagnostics.collect',
-          scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          target: { kind: 'runtime-endpoint' },
-          input: {},
+          target: { kind: 'runtime-job', jobId: 'job-uv' },
+          input: { jobId: 'job-uv' },
         }),
       }),
     );
   });
 
   it('hostSessionList uses endpoint scoped capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
-      sessions: [],
-      ready: true,
-      refreshing: false,
-      updatedAt: null,
-      error: null,
-    }));
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ sessions: [] }));
 
     const { hostSessionList } = await import('@/lib/host-api');
     const result = await hostSessionList({ endpoint: testRuntimeEndpoint });
 
-    expect(result).toEqual({ sessions: [], ready: true, refreshing: false, updatedAt: null, error: null });
+    expect(result).toEqual({ sessions: [] });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
@@ -415,221 +335,200 @@ describe('host-api', () => {
     );
   });
 
-  it('hostFileReadText uses workspace file capability execute', async () => {
-    const workspaceFileTarget = { kind: 'workspace-file' as const, path: '/tmp/demo.md', identity: testSessionIdentity };
-    mockWorkspaceCapabilityExecute({ ok: true, content: '# Hello' });
+  it('hostFileReadText exposes only sealed workspace text failures', async () => {
+    mockWorkspaceCapabilityExecute({
+      success: false,
+      error: 'Workspace text target exceeds the limit',
+    }, 422);
 
     const { hostFileReadText } = await import('@/lib/host-api');
-    const result = await hostFileReadText({ path: '/tmp/demo.md', sessionIdentity: testSessionIdentity });
+    const result = await hostFileReadText({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/demo.md',
+    });
 
-    expect(result).toEqual({ ok: true, content: '# Hello' });
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'workspace.file',
-          operationId: 'files.readText',
-          scope: workspaceScope,
-          target: workspaceFileTarget,
-          input: {
-            path: '/tmp/demo.md',
-            sessionIdentity: testSessionIdentity,
-          },
-        }),
-      }),
-    );
+    expect(result).toEqual({ ok: false, error: 'tooLarge' });
   });
 
-  it('hostFileReadBinary uses workspace file capability execute', async () => {
-    const workspaceFileTarget = { kind: 'workspace-file' as const, path: '/tmp/demo.pdf', identity: testSessionIdentity };
-    mockWorkspaceCapabilityExecute({ ok: true, data: 'UEsDBA==' });
+  it('hostFileReadText redacts malformed and unavailable proxy responses', async () => {
+    mockWorkspaceCapabilityExecute({
+      success: false,
+      error: 'private native failure at C:/workspace/root',
+    }, 422);
+
+    const { hostFileReadText } = await import('@/lib/host-api');
+    const result = await hostFileReadText({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/demo.md',
+    });
+
+    expect(result).toEqual({ ok: false, error: 'unavailable' });
+  });
+
+  it('hostFileReadBinary uses the fixed session-relative binary delivery route', async () => {
+    mockWorkspaceCapabilityExecute({ name: 'docs/demo.pdf', data: 'UEsDBA==', size: 4 });
 
     const { hostFileReadBinary } = await import('@/lib/host-api');
-    const result = await hostFileReadBinary({ path: '/tmp/demo.pdf', sessionIdentity: testSessionIdentity });
+    const result = await hostFileReadBinary({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/demo.pdf',
+      maxBytes: 1024,
+    });
 
-    expect(result).toEqual({ ok: true, data: 'UEsDBA==' });
+    expect(result).toEqual({ ok: true, name: 'docs/demo.pdf', data: 'UEsDBA==', size: 4 });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
-        path: '/api/capabilities/execute',
+        path: '/api/files/binary',
         method: 'POST',
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.readBinary',
-          scope: workspaceScope,
-          target: workspaceFileTarget,
+          scope: {
+            kind: 'session',
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+          },
+          target: { kind: 'workspace-file' },
           input: {
-            path: '/tmp/demo.pdf',
-            sessionIdentity: testSessionIdentity,
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+            relativePath: 'docs/demo.pdf',
+            maxBytes: 1024,
           },
         }),
       }),
     );
+    expect(JSON.stringify(invokeIpcMock.mock.calls)).not.toContain('/tmp/demo.pdf');
   });
 
-  it('hostFileListDir uses workspace file capability execute', async () => {
-    const workspaceFileTarget = { kind: 'workspace-file' as const, path: '/tmp/workspace', identity: testSessionIdentity };
-    mockWorkspaceCapabilityExecute({ ok: true, entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }] });
+  it('hostFileStat projects the Rust mtime without metadata leakage', async () => {
+    mockWorkspaceCapabilityExecute({
+      name: 'docs/demo.md',
+      isDirectory: false,
+      size: 5,
+      mtimeMs: 1_700_000_000_000,
+    });
+
+    const { hostFileStat } = await import('@/lib/host-api');
+    await expect(hostFileStat({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/demo.md',
+    })).resolves.toEqual({
+      ok: true,
+      name: 'docs/demo.md',
+      isDirectory: false,
+      size: 5,
+      mtimeMs: 1_700_000_000_000,
+    });
+  });
+
+  it('hostFileListDir uses the fixed session-relative delivery route', async () => {
+    mockWorkspaceCapabilityExecute({
+      entries: [{ relativePath: 'src', display: 'src', isDirectory: true, size: 0 }],
+    });
 
     const { hostFileListDir } = await import('@/lib/host-api');
-    const result = await hostFileListDir({ path: '/tmp/workspace', sessionIdentity: testSessionIdentity });
+    const result = await hostFileListDir({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: '',
+      includeHidden: true,
+    });
 
     expect(result).toEqual({
       ok: true,
-      entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }],
+      entries: [{
+        relativePath: 'src',
+        display: 'src',
+        isDirectory: true,
+        size: 0,
+      }],
     });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
-        path: '/api/capabilities/execute',
+        path: '/api/files/list-dir',
         method: 'POST',
         timeoutMs: 60000,
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.listDir',
-          scope: workspaceScope,
-          target: workspaceFileTarget,
+          scope: {
+            kind: 'session',
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+          },
+          target: { kind: 'workspace-file' },
           input: {
-            path: '/tmp/workspace',
-            sessionIdentity: testSessionIdentity,
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+            relativePath: '',
+            includeHidden: true,
           },
         }),
       }),
     );
   });
 
-  it('waitForRuntimeJobResult 在 done 事件缺失时轮询到终态', async () => {
-    vi.useFakeTimers();
-    try {
-      invokeIpcMock
-        .mockResolvedValueOnce({
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              success: true,
-              job: {
-                id: 'job-1',
-                type: 'sessions.hydrateTimeline',
-                status: 'queued',
-                queuedAt: 1,
-                attempts: 0,
-                maxAttempts: 1,
-              },
-            },
-          },
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              success: true,
-              job: {
-                id: 'job-1',
-                type: 'sessions.hydrateTimeline',
-                status: 'running',
-                queuedAt: 1,
-                startedAt: 2,
-                attempts: 1,
-                maxAttempts: 1,
-              },
-            },
-          },
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              success: true,
-              job: {
-                id: 'job-1',
-                type: 'sessions.hydrateTimeline',
-                status: 'succeeded',
-                queuedAt: 1,
-                startedAt: 2,
-                finishedAt: 3,
-                attempts: 1,
-                maxAttempts: 1,
-              },
-            },
-          },
-        });
+  it('hostFileWriteText uses the fixed session-relative delivery route', async () => {
+    mockWorkspaceCapabilityExecute({ name: 'notes.txt', size: 5 });
 
-      const { waitForRuntimeJobResult } = await import('@/lib/host-api');
-      const result = waitForRuntimeJobResult('job-1', { intervalMs: 50, timeoutMs: 1000, endpoint: testRuntimeEndpoint });
-
-      await vi.advanceTimersByTimeAsync(50);
-      await vi.advanceTimersByTimeAsync(100);
-
-      await expect(result).resolves.toBeUndefined();
-      expect(invokeIpcMock).toHaveBeenCalledTimes(3);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('waitForRuntimeJobResult 对缺失 job 使用宽限期后失败，避免无限轮询', async () => {
-    vi.useFakeTimers();
-    try {
-      invokeIpcMock.mockImplementation(async (_channel: string, request?: { body?: string }) => {
-        if (request?.body) {
-          const body = JSON.parse(request.body) as { operationId?: string };
-          if (body.operationId === 'runtimeHost.jobGet') {
-            return proxyEnvelope({ success: true, job: null });
-          }
-        }
-        return proxyEnvelope({
-          capabilities: [{
-            id: 'runtime.host',
-            availability: 'available',
-            scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          }],
-        });
-      });
-
-      const { waitForRuntimeJobResult } = await import('@/lib/host-api');
-      const assertion = expect(
-        waitForRuntimeJobResult('missing-job', { intervalMs: 500, timeoutMs: 5000, endpoint: testRuntimeEndpoint }),
-      ).rejects.toThrow('runtime job not found: missing-job');
-
-      await vi.advanceTimersByTimeAsync(500);
-      await vi.advanceTimersByTimeAsync(1000);
-      await vi.advanceTimersByTimeAsync(2000);
-
-      await assertion;
-      expect(invokeIpcMock).toHaveBeenCalledTimes(4);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('hostCapabilitiesList 读取 runtime capability 列表', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { capabilities: [] },
-      },
+    const { hostFileWriteText } = await import('@/lib/host-api');
+    const result = await hostFileWriteText({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'docs/notes.txt',
+      content: 'notes',
     });
 
-    const { hostCapabilitiesList } = await import('@/lib/host-api');
-    await expect(hostCapabilitiesList()).resolves.toEqual({ capabilities: [] });
-
+    expect(result).toEqual({ ok: true, name: 'notes.txt', size: 5 });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
-        path: '/api/capabilities/list',
-        method: 'GET',
+        path: '/api/files/write-text',
+        method: 'POST',
+        body: JSON.stringify({
+          id: 'workspace.file',
+          operationId: 'files.writeText',
+          scope: {
+            kind: 'session',
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+          },
+          target: { kind: 'workspace-file' },
+          input: {
+            endpoint: testRuntimeEndpoint,
+            sessionKey: testSessionIdentity.sessionKey,
+            relativePath: 'docs/notes.txt',
+            content: 'notes',
+          },
+        }),
       }),
     );
+  });
+
+  it('redacts malformed workspace directory and write responses', async () => {
+    mockWorkspaceCapabilityExecute({ entries: [{ relativePath: 'private', display: 'private', isDirectory: true, size: -1 }] });
+    const { hostFileListDir, hostFileWriteText } = await import('@/lib/host-api');
+
+    await expect(hostFileListDir({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: '',
+    })).resolves.toEqual({ ok: false, error: 'unavailable' });
+
+    mockWorkspaceCapabilityExecute({ success: false, error: 'native root /private secret' }, 422);
+    await expect(hostFileWriteText({
+      endpoint: testRuntimeEndpoint,
+      sessionKey: testSessionIdentity.sessionKey,
+      relativePath: 'notes.txt',
+      content: 'notes',
+    })).resolves.toEqual({ ok: false, error: 'unavailable' });
   });
 
   it('resolveSingleCapabilityScope rejects missing or ambiguous capability scopes', async () => {
@@ -697,172 +596,6 @@ describe('host-api', () => {
     expect(invokeIpcMock).toHaveBeenCalledTimes(1);
   });
 
-  it('hostRuntimeAdaptersList 读取 runtime adapter 列表', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { adapters: [] },
-      },
-    });
-
-    const { hostRuntimeAdaptersList } = await import('@/lib/host-api');
-    await expect(hostRuntimeAdaptersList()).resolves.toEqual({ adapters: [] });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-adapters/list',
-        method: 'GET',
-      }),
-    );
-  });
-
-  it('hostRuntimeAdapterInstancesList 读取 runtime adapter instance 列表', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { instances: [] },
-      },
-    });
-
-    const { hostRuntimeAdapterInstancesList } = await import('@/lib/host-api');
-    await expect(hostRuntimeAdapterInstancesList()).resolves.toEqual({ instances: [] });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-adapters/instances/list',
-        method: 'GET',
-      }),
-    );
-  });
-
-  it('hostRuntimeConnectorsList 读取 runtime connector 列表', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { connectors: [] },
-      },
-    });
-
-    const { hostRuntimeConnectorsList } = await import('@/lib/host-api');
-    await expect(hostRuntimeConnectorsList()).resolves.toEqual({ connectors: [] });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-connectors/list',
-        method: 'GET',
-      }),
-    );
-  });
-
-  it('hostRuntimeConnectorConnect 连接 runtime connector endpoint', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { success: true, readiness: { ready: true, phase: 'connected' } },
-      },
-    });
-
-    const { hostRuntimeConnectorConnect } = await import('@/lib/host-api');
-    const payload = { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' };
-    await expect(hostRuntimeConnectorConnect(payload)).resolves.toEqual({ success: true, readiness: { ready: true, phase: 'connected' } });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-connectors/connect',
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    );
-  });
-
-  it('hostRuntimeConnectorDisconnect 断开 runtime connector endpoint', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { success: true, readiness: { ready: false, phase: 'disconnected' } },
-      },
-    });
-
-    const { hostRuntimeConnectorDisconnect } = await import('@/lib/host-api');
-    const payload = { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' };
-    await expect(hostRuntimeConnectorDisconnect(payload)).resolves.toEqual({ success: true, readiness: { ready: false, phase: 'disconnected' } });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-connectors/disconnect',
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    );
-  });
-
-  it('hostRuntimeEndpointsList 读取 runtime endpoint 列表', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { endpoints: [] },
-      },
-    });
-
-    const { hostRuntimeEndpointsList } = await import('@/lib/host-api');
-    await expect(hostRuntimeEndpointsList()).resolves.toEqual({ endpoints: [] });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/runtime-endpoints/list',
-        method: 'GET',
-      }),
-    );
-  });
-
-  it('hostCapabilityDescribe 按 scope 查询 capability', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { capability: { id: 'session.prompt' } },
-      },
-    });
-
-    const { hostCapabilityDescribe } = await import('@/lib/host-api');
-    const scope = { kind: 'session' as const, identity: testSessionIdentity };
-    await hostCapabilityDescribe({
-      id: 'session.prompt',
-      scope,
-    });
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/describe',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'session.prompt',
-          scope,
-        }),
-      }),
-    );
-  });
-
   it('hostCapabilityExecute 保持内部化且不暴露命名过渡出口', async () => {
     const source = await readFile(join(process.cwd(), 'src/lib/host-api.ts'), 'utf8');
 
@@ -900,8 +633,52 @@ describe('host-api', () => {
     );
   });
 
+  it('hostSessionNew executes the OpenClaw create capability with an endpoint session id', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ outcome: 'succeeded', sessionKey: 'agent:main:session-1' }));
+
+    const { hostSessionNew } = await import('@/lib/host-api');
+    await hostSessionNew({
+      endpoint: testRuntimeEndpoint,
+      agentId: 'main',
+      sessionKey: 'agent:main:session-1',
+      endpointSessionId: 'session-1',
+    });
+
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/capabilities/execute',
+        method: 'POST',
+        body: JSON.stringify({
+          id: 'session.prompt',
+          operationId: 'sessions.create',
+          scope: { kind: 'agent', endpoint: testRuntimeEndpoint, agentId: 'main' },
+          target: { kind: 'agent', agentId: 'main' },
+          input: {
+            endpoint: testRuntimeEndpoint,
+            agentId: 'main',
+            sessionKey: 'agent:main:session-1',
+            endpointSessionId: 'session-1',
+          },
+        }),
+      }),
+    );
+  });
+
   it('hostSessionWindowFetch executes the session window capability with the caller SessionIdentity', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ snapshot: { sessionKey: 'agent:main:main' } }));
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
+      outcome: 'complete',
+      sessionIdentity: testSessionIdentity,
+      messages: [],
+      window: {
+        totalItemCount: 0,
+        windowStartOffset: 0,
+        windowEndOffset: 0,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    }));
 
     const { hostSessionWindowFetch } = await import('@/lib/host-api');
     await hostSessionWindowFetch({
@@ -932,12 +709,11 @@ describe('host-api', () => {
     );
   });
 
-  it('hostSessionDelete executes the session delete capability with the caller SessionIdentity', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true }));
+  it('hostSessionDelete executes the session delete capability with only the caller SessionIdentity', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ outcome: 'succeeded' }));
 
     const { hostSessionDelete } = await import('@/lib/host-api');
     await hostSessionDelete({
-      sessionKey: 'agent:main:main',
       sessionIdentity: testSessionIdentity,
     });
 
@@ -952,7 +728,6 @@ describe('host-api', () => {
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
-            sessionKey: 'agent:main:main',
             sessionIdentity: testSessionIdentity,
           },
         }),
@@ -960,129 +735,86 @@ describe('host-api', () => {
     );
   });
 
-  it('hostSessionPrompt preserves the complete media SessionPromptResult', async () => {
-    const media = [{
-      filePath: '/workspace/report.pdf',
-      fileName: 'report.pdf',
-      mimeType: 'application/pdf',
-      fileSize: 2048,
-      preview: 'data:application/pdf;base64,cmVwb3J0',
-    }];
-    const item: SessionRenderUserMessageItem = {
-      key: 'item-user-1',
-      kind: 'user-message',
-      role: 'user',
-      sessionKey: 'agent:main:main',
-      runId: 'run-media-1',
-      text: 'Review the attached report',
-      images: [],
-      attachedFiles: [{
-        fileName: 'report.pdf',
-        mimeType: 'application/pdf',
-        fileSize: 2048,
-        preview: 'data:application/pdf;base64,cmVwb3J0',
-        filePath: '/workspace/report.pdf',
-        source: 'user-upload',
-      }],
-    };
-    const mediaPromptResult: SessionPromptResult = {
-      success: true,
-      sessionKey: 'agent:main:main',
-      runId: 'run-media-1',
-      item,
-      snapshot: {
-        sessionKey: 'agent:main:main',
-        catalog: {
-          key: 'agent:main:main',
-          agentId: 'default',
-          protocolId: 'openclaw',
-          runtimeEndpointId: 'openclaw:local',
-          sessionIdentity: testSessionIdentity,
-          kind: 'main',
-          preferred: true,
-        },
-        items: [item],
-        approvals: [],
-        usage: [],
-        artifacts: [],
-        replayComplete: true,
-        runtime: {
-          activeRunId: 'run-media-1',
-          runPhase: 'submitted',
-          activeTurnItemKey: null,
-          pendingTurnKey: 'item-user-1',
-          pendingTurnLaneKey: null,
-          runtimeActivity: null,
-          lastUserMessageAt: 1,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: 1,
-        },
-        window: {
-          totalItemCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
-    };
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope(mediaPromptResult));
+  it('hostSessionRename executes the identity-bound rename capability', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ outcome: 'succeeded' }));
 
-    const { hostSessionPrompt } = await import('@/lib/host-api');
-    const result = await hostSessionPrompt({
-      sessionKey: 'agent:main:main',
+    const { hostSessionRename } = await import('@/lib/host-api');
+    await hostSessionRename({
       sessionIdentity: testSessionIdentity,
-      message: 'Review the attached report',
-      media,
+      label: 'Renamed',
     });
 
-    expect(result).toBe(mediaPromptResult);
-    expect(result).toMatchObject({
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/capabilities/execute',
+        method: 'POST',
+        body: JSON.stringify({
+          id: 'session.management',
+          operationId: 'sessions.rename',
+          scope: { kind: 'session', identity: testSessionIdentity },
+          target: { kind: 'session', identity: testSessionIdentity },
+          input: {
+            sessionIdentity: testSessionIdentity,
+            label: 'Renamed',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('hostSessionPrompt uses the media prompt capability for staged attachments', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
       success: true,
-      sessionKey: 'agent:main:main',
+      sessionKey: testSessionIdentity.sessionKey,
       runId: 'run-media-1',
-      item: {
-        kind: 'user-message',
-        attachedFiles: [{
-          fileName: 'report.pdf',
-          filePath: '/workspace/report.pdf',
-          mimeType: 'application/pdf',
-          fileSize: 2048,
-          preview: 'data:application/pdf;base64,cmVwb3J0',
-        }],
-      },
-      snapshot: {
-        runtime: { runPhase: 'submitted', activeRunId: 'run-media-1' },
-        items: [{
-          kind: 'user-message',
-          attachedFiles: [{
-            fileName: 'report.pdf',
-            filePath: '/workspace/report.pdf',
-            mimeType: 'application/pdf',
-            fileSize: 2048,
-            preview: 'data:application/pdf;base64,cmVwb3J0',
-          }],
-        }],
-      },
+      item: null,
+      snapshot: {},
+    }));
+
+    const { hostSessionPrompt } = await import('@/lib/host-api');
+    await expect(hostSessionPrompt({
+      sessionKey: testSessionIdentity.sessionKey,
+      sessionIdentity: testSessionIdentity,
+      message: 'Review the image',
+      idempotencyKey: 'user-local-media-1',
+      deliver: false,
+      attachments: [{
+        stagedAttachmentId: 'attachment-image',
+        mimeType: 'image/png',
+        fileName: 'image.png',
+        fileSize: 5,
+      }],
+    })).resolves.toEqual({
+      success: true,
+      sessionKey: testSessionIdentity.sessionKey,
+      runId: 'run-media-1',
+      item: null,
+      snapshot: {},
     });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
         path: '/api/capabilities/execute',
         method: 'POST',
-        timeoutMs: 10000,
+        timeoutMs: expect.any(Number),
         body: JSON.stringify({
           id: 'session.prompt',
           operationId: 'sessions.sendWithMedia',
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
-            sessionKey: 'agent:main:main',
+            sessionKey: testSessionIdentity.sessionKey,
             sessionIdentity: testSessionIdentity,
-            message: 'Review the attached report',
-            media,
+            message: 'Review the image',
+            idempotencyKey: 'user-local-media-1',
+            deliver: false,
+            attachments: [{
+              stagedAttachmentId: 'attachment-image',
+              mimeType: 'image/png',
+              fileName: 'image.png',
+              fileSize: 5,
+            }],
           },
         }),
       }),
@@ -1096,7 +828,7 @@ describe('host-api', () => {
     await hostSessionPatch({
       sessionKey: 'agent:main:main',
       sessionIdentity: testSessionIdentity,
-      runtimeModelRef: 'anthropic:claude-sonnet-4-6',
+      modelSelectionId: 'anthropic:claude-sonnet-4-6',
     });
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
@@ -1109,26 +841,26 @@ describe('host-api', () => {
           id: 'session.modelSelection',
           operationId: 'sessions.patchModel',
           scope: { kind: 'session', identity: testSessionIdentity },
-          target: { kind: 'model-selection', identity: testSessionIdentity, runtimeModelRef: 'anthropic:claude-sonnet-4-6' },
+          target: { kind: 'model-selection', identity: testSessionIdentity, modelSelectionId: 'anthropic:claude-sonnet-4-6' },
           input: {
             sessionKey: 'agent:main:main',
             sessionIdentity: testSessionIdentity,
-            runtimeModelRef: 'anthropic:claude-sonnet-4-6',
+            modelSelectionId: 'anthropic:claude-sonnet-4-6',
           },
         }),
       }),
     );
   });
 
-  it('hostSessionResolveApproval executes the session approval resolve capability', async () => {
+  it('sends the session approval resolution contract', async () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true }));
 
     const { hostSessionResolveApproval } = await import('@/lib/host-api');
     await hostSessionResolveApproval({
       id: 'approval-1',
-      sessionKey: 'agent:main:main',
+      sessionKey: testSessionIdentity.sessionKey,
       sessionIdentity: testSessionIdentity,
-      decision: 'approved',
+      decision: 'allow',
     });
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
@@ -1143,21 +875,20 @@ describe('host-api', () => {
           target: { kind: 'approval', identity: testSessionIdentity, approvalId: 'approval-1' },
           input: {
             id: 'approval-1',
-            sessionKey: 'agent:main:main',
+            sessionKey: testSessionIdentity.sessionKey,
             sessionIdentity: testSessionIdentity,
-            decision: 'approved',
+            decision: 'allow',
           },
         }),
       }),
     );
   });
 
-  it('hostSessionApprovals executes the session approvals list capability', async () => {
+  it('sends the session approval list contract', async () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ approvals: [] }));
 
     const { hostSessionApprovals } = await import('@/lib/host-api');
-    const sessionIdentity = { ...testSessionIdentity, agentId: 'test', sessionKey: 'agent:test:main' };
-    await hostSessionApprovals({ sessionIdentity });
+    await hostSessionApprovals({ sessionIdentity: testSessionIdentity });
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
@@ -1167,9 +898,9 @@ describe('host-api', () => {
         body: JSON.stringify({
           id: 'session.approval',
           operationId: 'approvals.list',
-          scope: { kind: 'session', identity: sessionIdentity },
-          target: { kind: 'session', identity: sessionIdentity },
-          input: { sessionIdentity },
+          scope: { kind: 'session', identity: testSessionIdentity },
+          target: { kind: 'session', identity: testSessionIdentity },
+          input: { sessionIdentity: testSessionIdentity },
         }),
       }),
     );

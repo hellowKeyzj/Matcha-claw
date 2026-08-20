@@ -3,7 +3,7 @@ import type { MouseEvent, PointerEvent } from 'react';
 import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Eye, FileCode2, GitBranch, GitCompare, Sparkles, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import type { SessionExecutionGraphStep } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionExecutionGraphStep } from '../../types/session/render-item';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
 
 interface ExecutionGraphCardProps {

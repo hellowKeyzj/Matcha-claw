@@ -6,8 +6,10 @@ import {
   type ApprovalRecord,
   type ApprovalRespondParams,
   type ClassifiedError,
+  type ProviderRuntimeConfig,
   type RunRecord,
   type SessionRecord,
+  type SessionSetModelParams,
   type SessionSnapshot,
   type StopReason,
   type UsageSummary,
@@ -140,6 +142,7 @@ export function createDefaultAppServerServices(options: {
   const approvalBroker = new ApprovalBroker()
   const drainingSessions = new Map<string, Promise<void>>()
   const pendingDrains = new Set<string>()
+  const providerRuntimeBySessionId = new Map<string, ProviderRuntimeConfig>()
   const sessionHistoryStore =
     options.sessionHistoryStore ?? createEmptySessionHistoryStore()
 
@@ -147,7 +150,10 @@ export function createDefaultAppServerServices(options: {
     append: (sessionId, event, fields) =>
       eventStore.append(sessionId, event, fields),
     updateSessionMetadata: async envelope => {
-      const updatedSession = updateSessionAfterEnvelope(sessionRegistry, envelope)
+      const updatedSession = updateSessionAfterEnvelope(
+        sessionRegistry,
+        envelope,
+      )
       if (updatedSession) {
         await sessionIndex.upsert(updatedSession)
       }
@@ -442,6 +448,7 @@ export function createDefaultAppServerServices(options: {
         cwd: loaded.workspaceRoot,
         model: loaded.model,
         permissionMode: loaded.permissionMode,
+        providerRuntime: providerRuntimeBySessionId.get(loaded.sessionId),
       })
     } catch (error) {
       await failNextQueuedRunStart(sessionId, error)
@@ -745,6 +752,7 @@ export function createDefaultAppServerServices(options: {
           sessionId: params.sessionId,
         })
         await sessionIndex.remove(params.sessionId)
+        providerRuntimeBySessionId.delete(params.sessionId)
         sessionRegistry.close(params.sessionId)
         return runtimeSession
       },
@@ -897,11 +905,7 @@ export function createDefaultAppServerServices(options: {
         return buildSnapshot(params.sessionId)
       },
       setModel: async params => {
-        return updateSessionSettings(params.sessionId, session => ({
-          ...session,
-          model: params.model,
-          updatedAt: new Date().toISOString(),
-        }))
+        return updateSessionModel(params)
       },
       setMode: async params => {
         return updateSessionSettings(params.sessionId, session => ({
@@ -934,6 +938,83 @@ export function createDefaultAppServerServices(options: {
     models: {
       list: async () => ({ models: await listAvailableModelIds() }),
     },
+  }
+
+  async function updateSessionModel(
+    params: SessionSetModelParams,
+  ): Promise<SessionRecord> {
+    const loaded = await ensureSessionRuntimeState(params.sessionId)
+    if (!loaded) throw new Error(`Session not found: ${params.sessionId}`)
+
+    const activeRun = activeSessionRun(params.sessionId)
+    if (activeRun) {
+      throw new Error(
+        `Cannot update session settings while run ${activeRun.runId} is ${activeRun.status.type}`,
+      )
+    }
+
+    const providerFingerprint = params.providerFingerprint?.trim() || undefined
+    const providerRuntime = params.providerRuntime
+    const sameProvider = loaded.providerFingerprint === providerFingerprint
+    const sameProviderRuntime = providerRuntimeEquals(
+      providerRuntimeBySessionId.get(params.sessionId),
+      providerRuntime,
+    )
+    const updated = sessionRegistry.update(params.sessionId, session => ({
+      ...session,
+      model: params.model,
+      providerFingerprint,
+      updatedAt: new Date().toISOString(),
+    }))
+    if (updated.resultType !== 'updated')
+      throw new Error(`Session not found: ${params.sessionId}`)
+
+    if (providerRuntime) {
+      providerRuntimeBySessionId.set(params.sessionId, providerRuntime)
+    } else {
+      providerRuntimeBySessionId.delete(params.sessionId)
+    }
+
+    if (sameProvider && sameProviderRuntime) {
+      await setWarmWorkerModel(params.sessionId, params.model)
+    } else {
+      await workerSupervisor.shutdownSession(params.sessionId, 'restart')
+    }
+    await appendEvent(params.sessionId, {
+      type: 'session.loaded',
+      session: updated.session,
+    })
+    return updated.session
+  }
+
+  function providerRuntimeEquals(
+    left: ProviderRuntimeConfig | undefined,
+    right: ProviderRuntimeConfig | undefined,
+  ): boolean {
+    if (left === undefined || right === undefined) return left === right
+    return (
+      left.kind === right.kind &&
+      left.baseUrl === right.baseUrl &&
+      left.apiKey === right.apiKey
+    )
+  }
+
+  async function setWarmWorkerModel(
+    sessionId: string,
+    model: string,
+  ): Promise<void> {
+    if (!workerSupervisor.getWorker(sessionId)) return
+    try {
+      const response = await workerSupervisor.send(sessionId, {
+        id: crypto.randomUUID(),
+        type: 'worker.setModel',
+        model,
+      })
+      if (response.ok) return
+    } catch {
+      // Fall through to restart the warm worker for the next prompt.
+    }
+    await workerSupervisor.shutdownSession(sessionId, 'restart')
   }
 
   async function updateSessionSettings(

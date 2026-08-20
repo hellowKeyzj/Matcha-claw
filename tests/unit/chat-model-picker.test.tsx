@@ -4,19 +4,23 @@ import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
+import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import {
-  hostRuntimeEndpointsListMock,
-  hostSessionPatchMock,
-  resetGatewayClientMocks,
-} from './helpers/mock-gateway-client';
-import { createOpenClawTestSessionIdentity, openClawTestRuntimeIdentity } from './helpers/runtime-address-fixtures';
+import type { SessionRenderItem } from '../../src/types/session/render-item';
+
+const { hostSessionPatchMock } = vi.hoisted(() => ({
+  hostSessionPatchMock: vi.fn(),
+}));
+
+vi.mock('@/lib/host-api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/lib/host-api')>(),
+  hostSessionPatch: hostSessionPatchMock,
+}));
 
 vi.mock('sonner', () => ({
   toast: {
@@ -31,13 +35,72 @@ class ResizeObserverStub {
 }
 
 const TEST_SESSION_KEY = 'agent:test:main';
-const TEST_SESSION_IDENTITY = createOpenClawTestSessionIdentity(TEST_SESSION_KEY, 'test');
+const TEST_SESSION_IDENTITY = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+  agentId: 'test',
+  sessionKey: TEST_SESSION_KEY,
+};
+const OPENCLAW_TEST_RUNTIME_IDENTITY = {
+  protocolId: 'openclaw-v4',
+  runtimeEndpointId: 'local',
+};
 const TEST_AGENT_SCOPE = {
   kind: 'agent' as const,
   endpoint: TEST_SESSION_IDENTITY.endpoint,
   agentId: 'test',
 };
 const TEST_RECORD_KEY = buildSessionRecordKey(TEST_SESSION_IDENTITY);
+
+function buildRenderItemsFromMessages(
+  sessionKey: string,
+  messages: Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>,
+): SessionRenderItem[] {
+  return messages.map((message) => {
+    if (message.role === 'user') {
+      return {
+        key: message.id,
+        kind: 'user-message',
+        sessionKey,
+        role: 'user',
+        text: message.content,
+        images: [],
+        attachedFiles: [],
+        messageId: message.id,
+        createdAt: message.timestamp,
+        updatedAt: message.timestamp,
+      };
+    }
+
+    return {
+      key: message.id,
+      kind: 'assistant-turn',
+      sessionKey,
+      role: 'assistant',
+      identitySource: 'message',
+      identityMode: 'message',
+      identityConfidence: 'strong',
+      status: 'final',
+      segments: [],
+      thinking: null,
+      tools: [],
+      text: message.content,
+      images: [],
+      attachedFiles: [],
+      turnKey: message.id,
+      createdAt: message.timestamp,
+      updatedAt: message.timestamp,
+    };
+  });
+}
 
 function renderChat() {
   return render(
@@ -51,7 +114,7 @@ function renderChat() {
 
 describe('chat model picker', () => {
   beforeEach(() => {
-    resetGatewayClientMocks();
+    hostSessionPatchMock.mockReset();
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 
     const sessionKey = TEST_SESSION_KEY;
@@ -70,11 +133,9 @@ describe('chat model picker', () => {
       },
     ]);
 
-    hostSessionPatchMock.mockImplementation(async () => ({
-      success: true,
-    }));
+    hostSessionPatchMock.mockResolvedValue({ outcome: 'succeeded' });
 
-    useGatewayStore.setState({
+    useRuntimeHostStore.setState({
       status: {
         processState: 'running',
         port: 18789,
@@ -88,7 +149,23 @@ describe('chat model picker', () => {
         },
         updatedAt: 1,
       },
+      runtimeHost: { lifecycle: 'running' },
+      isInitialized: true,
       rpc: vi.fn().mockResolvedValue({}),
+    } as never);
+
+    useCapabilityRoutingStore.setState({
+      routing: {
+        chat: {
+          primary: { accountId: 'openai', modelId: 'gpt-5.4' },
+          fallbacks: [],
+        },
+      },
+      revision: 1,
+      ready: true,
+      loading: false,
+      saving: false,
+      error: null,
     } as never);
 
     useSubagentsStore.setState({
@@ -160,40 +237,6 @@ describe('chat model picker', () => {
       clearError: vi.fn(),
     } as never);
 
-    hostRuntimeEndpointsListMock.mockResolvedValue({
-      endpoints: [{
-        id: openClawTestRuntimeIdentity.runtimeEndpointId,
-        protocolId: openClawTestRuntimeIdentity.protocolId,
-        runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
-        runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
-        displayName: 'OpenClaw Local',
-        agentIds: ['test'],
-        acceptsDynamicAgents: true,
-        capabilities: {
-          chat: true,
-          streaming: true,
-          tools: true,
-          approvals: true,
-          replay: true,
-          modelSelection: true,
-        },
-        capabilitySummaries: [{
-          id: 'session.prompt',
-          scopeKind: 'agent',
-          scope: TEST_AGENT_SCOPE,
-          targetKinds: ['session'],
-          operations: [],
-          availability: 'available',
-        }],
-        controlState: {
-          connection: null,
-          readiness: null,
-          capabilities: null,
-          updatedAt: null,
-        },
-      }],
-    });
-
     useChatStore.setState({
       currentSessionKey: TEST_RECORD_KEY,
       pendingApprovalsBySession: {},
@@ -225,8 +268,8 @@ describe('chat model picker', () => {
         status: 'ready',
         error: null,
         endpoints: [{
-          endpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
-          protocolId: openClawTestRuntimeIdentity.protocolId,
+          endpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
+          protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
           endpoint: TEST_SESSION_IDENTITY.endpoint,
           runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
           runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
@@ -256,8 +299,8 @@ describe('chat model picker', () => {
             backendSessionKey: TEST_SESSION_KEY,
             runtimeScopeKey: buildRuntimeScopeKey(TEST_SESSION_IDENTITY.endpoint),
             agentId: 'test',
-            protocolId: openClawTestRuntimeIdentity.protocolId,
-            runtimeEndpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
+            protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
+            runtimeEndpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
             sessionIdentity: TEST_SESSION_IDENTITY,
             kind: 'main',
             preferred: true,
@@ -279,45 +322,66 @@ describe('chat model picker', () => {
     fireEvent.click(picker);
     fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
 
-    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: TEST_SESSION_KEY,
         sessionIdentity: TEST_SESSION_IDENTITY,
-        runtimeModelRef: 'anthropic/claude-opus-4-6',
+        modelSelectionId: 'anthropic/claude-opus-4-6',
       });
     });
 
     await waitFor(() => {
       expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
     });
-
     expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
   });
 
-  it('rolls back the optimistic session model when session patch fails', async () => {
+  it.each(['target_rejected', 'outcome_unknown'] as const)(
+    'keeps the peer snapshot projection unchanged when patch returns %s',
+    async (outcome) => {
+      hostSessionPatchMock.mockResolvedValueOnce({ outcome });
+
+      renderChat();
+
+      const picker = await screen.findByTestId('chat-model-picker');
+      expect(picker).toHaveTextContent('openai / gpt-5.4');
+
+      fireEvent.click(picker);
+      fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+
+      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+      expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+
+      await waitFor(() => {
+        expect(hostSessionPatchMock).toHaveBeenCalledWith({
+          sessionKey: TEST_SESSION_KEY,
+          sessionIdentity: TEST_SESSION_IDENTITY,
+          modelSelectionId: 'anthropic/claude-opus-4-6',
+        });
+      });
+    },
+  );
+
+  it('keeps the peer snapshot projection unchanged when session patch fails', async () => {
     hostSessionPatchMock.mockRejectedValueOnce(new Error('patch failed'));
 
     renderChat();
 
     const picker = await screen.findByTestId('chat-model-picker');
-    expect(picker).toHaveTextContent('openai / gpt-5.4');
-
     fireEvent.click(picker);
     fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
 
-    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
-
     await waitFor(() => {
-      expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+      expect(hostSessionPatchMock).toHaveBeenCalledWith({
+        sessionKey: TEST_SESSION_KEY,
+        sessionIdentity: TEST_SESSION_IDENTITY,
+        modelSelectionId: 'anthropic/claude-opus-4-6',
+      });
     });
-
-    await waitFor(() => {
-      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
-    });
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
   });
 
   it('uses the first available model for sessions without a session or agent default model', async () => {
@@ -372,7 +436,7 @@ describe('chat model picker', () => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: TEST_SESSION_KEY,
         sessionIdentity: TEST_SESSION_IDENTITY,
-        runtimeModelRef: 'openai/gpt-5.4',
+        modelSelectionId: 'openai/gpt-5.4',
       });
     });
   });
@@ -429,7 +493,7 @@ describe('chat model picker', () => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: TEST_SESSION_KEY,
         sessionIdentity: TEST_SESSION_IDENTITY,
-        runtimeModelRef: 'openai/gpt-5.4',
+        modelSelectionId: 'openai/gpt-5.4',
       });
     });
   });

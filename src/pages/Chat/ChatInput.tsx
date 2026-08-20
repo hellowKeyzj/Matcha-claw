@@ -3,7 +3,7 @@
  * Textarea with send button and universal file upload support.
  * Enter to send, Shift+Enter for new line.
  * Supports: native file picker, clipboard paste, drag & drop.
- * Files are staged to disk via IPC — only lightweight path references
+ * Files are staged to disk via IPC — only opaque staged IDs
  * are sent with the message (no base64 over WebSocket).
  */
 import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
@@ -11,8 +11,9 @@ import { createPortal } from 'react-dom';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { hostFileStageBuffer, hostFileStagePaths, type WorkspaceFileContext } from '@/lib/host-api';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
@@ -21,28 +22,26 @@ import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
-import type { ChatSendResult } from '@/stores/chat';
+import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import type { ChatContextUsageViewModel } from './context-usage';
 
 // ── Types ────────────────────────────────────────────────────────
 
 export interface FileAttachment {
-  id: string;
+  stagedAttachmentId: string;
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;        // disk path for gateway
   preview: string | null;    // data URL for images, null for others
   status: 'staging' | 'ready' | 'error';
   error?: string;
 }
 
 interface DialogStagedAttachmentPayload {
-  id: string;
+  stagedAttachmentId: string;
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;
   preview: string | null;
 }
 
@@ -101,7 +100,7 @@ const PERMISSION_PICKER_OPTIONS: Array<{ mode: PermissionMode; labelKey: string 
 ];
 
 const STAGE_BUFFER_CONCURRENCY = 3;
-const STAGE_BUFFER_MAX_BYTES = 50 * 1024 * 1024;
+const STAGE_BUFFER_MAX_BYTES = 20 * 1024 * 1024;
 const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
 
 interface QuickPhrase {
@@ -112,7 +111,7 @@ interface QuickPhrase {
 const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
 
 interface ChatInputProps {
-  onSend: (text: string, attachments?: FileAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
+  onSend: (text: string, attachments?: ChatSendAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
   onStop?: () => void;
   stopping?: boolean;
   onPreviewSkill?: (skill: SelectedSkill) => void;
@@ -126,7 +125,6 @@ interface ChatInputProps {
   mentionCandidates?: MentionCandidate[];
   allowedSkillIds?: string[] | null;
   sessionIdentity: SessionIdentity | null;
-  workspaceContext?: WorkspaceFileContext;
 }
 
 function resolveInputPlaceholder(
@@ -337,17 +335,16 @@ function createQuickPhraseId(): string {
 }
 
 function buildStagingAttachment(
-  id: string,
+  stagedAttachmentId: string,
   fileName: string,
   mimeType: string,
   fileSize: number,
 ): FileAttachment {
   return {
-    id,
+    stagedAttachmentId,
     fileName,
     mimeType,
     fileSize,
-    stagedPath: '',
     preview: null,
     status: 'staging',
   };
@@ -381,11 +378,13 @@ export const ChatInput = memo(function ChatInput({
   mentionCandidates = [],
   allowedSkillIds = null,
   sessionIdentity,
-  workspaceContext,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const ownedStagedAttachmentIdsRef = useRef(new Set<string>());
+  const canceledStagingKeysRef = useRef(new Set<string>());
+  const mountedRef = useRef(true);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionStart, setMentionStart] = useState(-1);
   const [mentionEnd, setMentionEnd] = useState(-1);
@@ -406,7 +405,6 @@ export const ChatInput = memo(function ChatInput({
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     src: string;
     fileName: string;
-    filePath?: string;
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
@@ -690,39 +688,67 @@ export const ChatInput = memo(function ChatInput({
     setQuickPhraseAddOpen(false);
   }, [commitQuickPhraseList, quickPhraseDraft, quickPhrases]);
 
+  const releaseStagedAttachmentIds = useCallback((stagedAttachmentIds: readonly string[], ownedOnly = false) => {
+    const uniqueIds = [...new Set(stagedAttachmentIds)].filter((id): id is string => typeof id === 'string' && id.length > 0);
+    const idsToRelease = ownedOnly
+      ? uniqueIds.filter((id) => ownedStagedAttachmentIdsRef.current.has(id))
+      : uniqueIds;
+    if (idsToRelease.length === 0) {
+      return;
+    }
+    idsToRelease.forEach((id) => ownedStagedAttachmentIdsRef.current.delete(id));
+    void invokeIpc('dialog:releaseStagedAttachments', idsToRelease).catch(() => undefined);
+  }, []);
+
+  const registerStagedAttachment = useCallback((stagedAttachmentId: string, stagingKey: string): boolean => {
+    if (!mountedRef.current || canceledStagingKeysRef.current.has(stagingKey)) {
+      releaseStagedAttachmentIds([stagedAttachmentId]);
+      return false;
+    }
+    canceledStagingKeysRef.current.delete(stagingKey);
+    ownedStagedAttachmentIdsRef.current.add(stagedAttachmentId);
+    return true;
+  }, [releaseStagedAttachmentIds]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const ownedStagedAttachmentIds = ownedStagedAttachmentIdsRef.current;
+    const canceledStagingKeys = canceledStagingKeysRef.current;
+    return () => {
+      mountedRef.current = false;
+      const stagedAttachmentIds = [...ownedStagedAttachmentIds];
+      ownedStagedAttachmentIds.clear();
+      canceledStagingKeys.clear();
+      if (stagedAttachmentIds.length > 0) {
+        void invokeIpc('dialog:releaseStagedAttachments', stagedAttachmentIds).catch(() => undefined);
+      }
+    };
+  }, []);
+
   // ── File staging via native dialog ─────────────────────────────
 
   const stageSelectedDialogAttachments = useCallback(async () => {
     const tempIds: string[] = [];
     let stagingAttachments: FileAttachment[] = [];
+    let stagedAttachmentIdsFromResult: string[] = [];
 
     try {
-      const result = await invokeIpc('dialog:stageOpenAttachments', {
+      const result = await invokeIpc<StageOpenAttachmentsResult>('dialog:stageOpenAttachments', {
         properties: ['openFile', 'multiSelections'],
-      }) as StageOpenAttachmentsResult;
-      if (result.canceled) {
+      });
+      if (result.canceled || !result.attachments || result.attachments.length === 0) {
         return;
       }
+      stagedAttachmentIdsFromResult = result.attachments.map((attachment) => attachment.stagedAttachmentId);
 
-      const selectedFiles = result.selectedFiles?.length
-        ? result.selectedFiles
-        : result.attachments?.map((attachment) => ({
-          fileName: attachment.fileName,
-          mimeType: attachment.mimeType,
-          fileSize: attachment.fileSize,
-        })) ?? [];
-      if (selectedFiles.length === 0) {
-        return;
-      }
-
-      stagingAttachments = selectedFiles.map((file) => {
+      stagingAttachments = result.attachments.map((attachment) => {
         const tempId = crypto.randomUUID();
         tempIds.push(tempId);
         return buildStagingAttachment(
           tempId,
-          file.fileName,
-          file.mimeType || 'application/octet-stream',
-          file.fileSize ?? 0,
+          attachment.fileName,
+          attachment.mimeType,
+          attachment.fileSize,
         );
       });
       setAttachments((prev) => [...prev, ...stagingAttachments]);
@@ -731,62 +757,87 @@ export const ChatInput = memo(function ChatInput({
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
-        const attachment = result.attachments?.[i];
-        updatesByTempId.set(tempId, attachment
+        const attachment = result.attachments[i];
+        const registered = registerStagedAttachment(attachment.stagedAttachmentId, tempId);
+        updatesByTempId.set(tempId, registered
           ? { ...attachment, status: 'ready' }
-          : { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
+          : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
-      setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
+      if (mountedRef.current) {
+        setAttachments((prev) => prev.map((attachment) => (
+          updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
+        )));
+      }
     } catch (err) {
+      if (stagedAttachmentIdsFromResult.length > 0) {
+        releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
+      }
       if (tempIds.length === 0) {
         console.error('[stageSelectedDialogAttachments] Failed to stage selected attachments:', err);
         return;
       }
       const failedIds = new Set(tempIds);
-      setAttachments((prev) => prev.map((attachment) => (
-        failedIds.has(attachment.id)
-          ? { ...attachment, status: 'error', error: String(err) }
-          : attachment
-      )));
+      if (mountedRef.current) {
+        setAttachments((prev) => prev.map((attachment) => (
+          failedIds.has(attachment.stagedAttachmentId)
+            ? { ...attachment, status: 'error', error: String(err) }
+            : attachment
+        )));
+      }
     }
-  }, []);
+  }, [registerStagedAttachment, releaseStagedAttachmentIds]);
 
   const stageDroppedPathFiles = useCallback(async (filePaths: string[]) => {
     if (filePaths.length === 0) {
       return;
     }
-    const tempIds: string[] = [];
-    const stagingAttachments = filePaths.map((filePath) => {
-      const tempId = crypto.randomUUID();
-      tempIds.push(tempId);
+    const tempIds: string[] = filePaths.map(() => crypto.randomUUID());
+    let stagedAttachmentIdsFromResult: string[] = [];
+    const stagingAttachments = filePaths.map((filePath, index) => {
       const fileName = filePath.split(/[\\/]/).pop() || 'file';
-      return buildStagingAttachment(tempId, fileName, '', 0);
+      return buildStagingAttachment(tempIds[index], fileName, 'application/octet-stream', 0);
     });
     setAttachments((prev) => [...prev, ...stagingAttachments]);
 
     try {
-      if (!sessionIdentity) {
-        throw new Error('SessionIdentity is required');
-      }
-      const staged = await hostFileStagePaths({ filePaths, sessionIdentity, ...workspaceContext });
+      const result = await invokeIpc<{ attachments?: DialogStagedAttachmentPayload[] }>(
+        'dialog:stageDroppedAttachments',
+        filePaths,
+      );
+      const stagedAttachments = result.attachments ?? [];
+      stagedAttachmentIdsFromResult = stagedAttachments.map((attachment) => attachment.stagedAttachmentId);
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
-        const data = staged[i];
-        updatesByTempId.set(tempId, data
+        const data = stagedAttachments[i];
+        if (!data) {
+          updatesByTempId.set(tempId, { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
+          continue;
+        }
+        const registered = registerStagedAttachment(data.stagedAttachmentId, tempId);
+        updatesByTempId.set(tempId, registered
           ? { ...data, status: 'ready' }
-          : { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
+          : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
-      setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
+      if (mountedRef.current) {
+        setAttachments((prev) => prev.map((attachment) => (
+          updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
+        )));
+      }
     } catch (err) {
+      if (stagedAttachmentIdsFromResult.length > 0) {
+        releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
+      }
       const failedIds = new Set(tempIds);
-      setAttachments((prev) => prev.map((attachment) => (
-        failedIds.has(attachment.id)
-          ? { ...attachment, status: 'error', error: String(err) }
-          : attachment
-      )));
+      if (mountedRef.current) {
+        setAttachments((prev) => prev.map((attachment) => (
+          failedIds.has(attachment.stagedAttachmentId)
+            ? { ...attachment, status: 'error', error: String(err) }
+            : attachment
+        )));
+      }
     }
-  }, [sessionIdentity, workspaceContext]);
+  }, [registerStagedAttachment, releaseStagedAttachmentIds]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
@@ -824,23 +875,29 @@ export const ChatInput = memo(function ChatInput({
             throw new Error('tooLarge');
           }
           const base64 = await readFileAsBase64(file);
-          if (!sessionIdentity) {
-            throw new Error('SessionIdentity is required');
-          }
-          const staged = await hostFileStageBuffer({
+          const staged = await invokeIpc<DialogStagedAttachmentPayload>('dialog:stageRendererBufferAttachment', {
             base64,
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
-            sessionIdentity,
-            ...workspaceContext,
           });
+          if (!registerStagedAttachment(staged.stagedAttachmentId, tempId)) {
+            return {
+              tempId,
+              attachment: {
+                ...fallback,
+                stagedAttachmentId: tempId,
+                status: 'error' as const,
+                error: 'Attachment removed',
+              },
+            };
+          }
           return { tempId, attachment: { ...staged, status: 'ready' as const } };
         } catch (err) {
           return {
             tempId,
             attachment: {
               ...fallback,
-              id: tempId,
+              stagedAttachmentId: tempId,
               status: 'error' as const,
               error: String(err),
             },
@@ -849,35 +906,34 @@ export const ChatInput = memo(function ChatInput({
       },
     );
 
+    if (!mountedRef.current) {
+      return;
+    }
     const updatesByTempId = new Map<string, FileAttachment>(
       results.map((result) => [result.tempId, result.attachment] as const),
     );
-    setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
-  }, [sessionIdentity, workspaceContext]);
+    setAttachments((prev) => prev.map((attachment) => (
+      updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
+    )));
+  }, [registerStagedAttachment]);
 
   // ── Attachment management ──────────────────────────────────────
 
-  const removeAttachment = useCallback((id: string) => {
-    setAttachments(prev => prev.filter(a => a.id !== id));
-  }, []);
+  const removeAttachment = useCallback((stagedAttachmentId: string) => {
+    canceledStagingKeysRef.current.add(stagedAttachmentId);
+    setAttachments((prev) => prev.filter((attachment) => attachment.stagedAttachmentId !== stagedAttachmentId));
+    releaseStagedAttachmentIds([stagedAttachmentId], true);
+  }, [releaseStagedAttachmentIds]);
 
   const openAttachment = useCallback((attachment: FileAttachment) => {
-    if (attachment.status !== 'ready') {
+    if (attachment.status !== 'ready' || !isPreviewableImageAttachment(attachment)) {
       return;
     }
 
-    if (isPreviewableImageAttachment(attachment)) {
-      setLightboxAttachment({
-        src: attachment.preview!,
-        fileName: attachment.fileName,
-        filePath: attachment.stagedPath || undefined,
-      });
-      return;
-    }
-
-    if (attachment.stagedPath) {
-      void invokeIpc('shell:openPath', attachment.stagedPath);
-    }
+    setLightboxAttachment({
+      src: attachment.preview!,
+      fileName: attachment.fileName,
+    });
   }, []);
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
@@ -903,14 +959,34 @@ export const ChatInput = memo(function ChatInput({
 
   const handleSend = useCallback(async () => {
     if (!canSend) return;
-    const readyAttachments = attachments.filter(a => a.status === 'ready');
+    const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready');
     const rawText = input.trim();
     const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
-    const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
-    const result = await onSend(textToSend, attachmentsToSend);
-    if (!result.accepted) {
+    const attachmentsToSend = readyAttachments.length > 0
+      ? readyAttachments.map(({ stagedAttachmentId, fileName, mimeType, fileSize }) => ({
+          stagedAttachmentId,
+          fileName,
+          mimeType,
+          fileSize,
+        })) as ChatSendAttachment[]
+      : undefined;
+    const stagedIdsToSend = readyAttachments.map((attachment) => attachment.stagedAttachmentId);
+    let result: ChatSendResult;
+    try {
+      result = await onSend(textToSend, attachmentsToSend);
+    } catch {
+      releaseStagedAttachmentIds(stagedIdsToSend, true);
+      setAttachments([]);
       return;
     }
+    if (!result.accepted) {
+      releaseStagedAttachmentIds(stagedIdsToSend, true);
+      setAttachments([]);
+      return;
+    }
+    stagedIdsToSend.forEach((stagedAttachmentId) => {
+      ownedStagedAttachmentIdsRef.current.delete(stagedAttachmentId);
+    });
     setInput('');
     closeMention();
     closeSlash();
@@ -920,7 +996,7 @@ export const ChatInput = memo(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, selectedSkills]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, releaseStagedAttachmentIds, selectedSkills]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -1120,10 +1196,10 @@ export const ChatInput = memo(function ChatInput({
                 <div className="mb-3 flex flex-wrap gap-2">
                   {attachments.map((attachment) => (
                     <AttachmentChip
-                      key={attachment.id}
+                      key={attachment.stagedAttachmentId}
                       attachment={attachment}
                       onActivate={() => openAttachment(attachment)}
-                      onRemove={() => removeAttachment(attachment.id)}
+                      onRemove={() => removeAttachment(attachment.stagedAttachmentId)}
                     />
                   ))}
                 </div>
@@ -1695,7 +1771,6 @@ export const ChatInput = memo(function ChatInput({
           <ChatImageLightbox
             src={lightboxAttachment.src}
             fileName={lightboxAttachment.fileName}
-            filePath={lightboxAttachment.filePath}
             onClose={() => setLightboxAttachment(null)}
           />
         )}
@@ -1716,8 +1791,8 @@ function AttachmentChip({
   onRemove: () => void;
 }) {
   const previewableImage = isPreviewableImageAttachment(attachment);
-  const canOpen = attachment.status === 'ready' && (previewableImage || attachment.stagedPath.length > 0);
-  const actionLabel = previewableImage ? `Preview ${attachment.fileName}` : `Open ${attachment.fileName}`;
+  const canOpen = attachment.status === 'ready' && previewableImage;
+  const actionLabel = `Preview ${attachment.fileName}`;
 
   let leading: ReactNode;
   if (attachment.status === 'staging') {

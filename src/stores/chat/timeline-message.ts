@@ -1,8 +1,10 @@
 import type {
   SessionAssistantTurnSegment,
+} from '../../types/session/tool-card';
+import type {
   SessionAssistantTurnItem,
   SessionRenderItem,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
 
 function isAssistantTurnItem(item: SessionRenderItem): item is SessionAssistantTurnItem {
   return item.kind === 'assistant-turn';

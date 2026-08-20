@@ -95,7 +95,7 @@ export interface AgentsListResult {
 export interface ModelCatalogEntry {
   id: string;
   provider: string;
-  credentialId?: string;
+  accountId?: string;
   providerLabel: string;
   modelLabel: string;
   displayLabel: string;

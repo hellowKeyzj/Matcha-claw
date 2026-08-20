@@ -1,13 +1,43 @@
 import { describe, expect, it } from 'vitest';
+import { extractMessageText, normalizeMessageRole } from '../../src/stores/chat/message-content';
+import {
+  sanitizeAssistantDisplayText,
+  sanitizeCanonicalUserText,
+} from '../../src/stores/chat/message-display';
+import { normalizeRawChatMessage } from '../../src/stores/chat/message-identity';
 import {
   isAssistantControlPrefixMessage,
   isInternalRuntimeDisplayMessage,
-  sanitizeAssistantDisplayText,
-  sanitizeCanonicalUserText,
   shouldPreserveCanonicalTranscriptMessage,
-} from '../../runtime-host/shared/chat-message-normalization';
+} from '../../src/stores/chat/message-filter';
 
 describe('chat message normalization', () => {
+  it('normalizes message content roles and text blocks', () => {
+    expect(normalizeMessageRole('TOOL_RESULT')).toBe('tool_result');
+    expect(extractMessageText([{ type: 'text', text: 'first' }, { type: 'image', text: 'ignored' }, { type: 'text', text: 'second' }])).toBe('first\nsecond');
+  });
+
+  it('normalizes canonical message identity and user content', () => {
+    expect(normalizeRawChatMessage({
+      role: 'USER',
+      id: ' id-1 ',
+      parent_message_id: ' parent-1 ',
+      idempotency_key: ' client-1 ',
+      content: '[Bootstrap pending]\nPlease read BOOTSTRAP.md from the workspace and follow it before replying normally.\n\n在吗',
+    }, {
+      sanitizeCanonicalUser: true,
+      fallbackMessageIdToId: true,
+      fallbackOriginMessageIdToParentMessageId: true,
+    })).toMatchObject({
+      role: 'user',
+      id: 'id-1',
+      messageId: 'id-1',
+      originMessageId: 'parent-1',
+      clientId: 'client-1',
+      content: '在吗',
+    });
+  });
+
   it('filters runtime system injection bundles from canonical transcript preservation', () => {
     const message = {
       role: 'user',

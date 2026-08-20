@@ -29,6 +29,7 @@ import { isRecord } from '../protocol/jsonRpc.js'
 import type {
   AppServerEvent,
   JsonObject,
+  ProviderRuntimeConfig,
   StopReason,
   UsageSummary,
   WorkerApprovalDecision,
@@ -86,6 +87,7 @@ export type WorkerSession = {
     decision: WorkerApprovalDecision,
   ): boolean
   flush(): Promise<void>
+  setModel(model: string): void
   shutdown(reason: 'serverShutdown' | 'idleTimeout' | 'restart'): Promise<void>
 }
 
@@ -162,6 +164,77 @@ function mergeByName<T extends { name: string }>(
   return Array.from(itemByName.values())
 }
 
+const HOST_MANAGED_PROVIDER_ENV_KEYS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GROK',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_OPENAI_RESPONSES',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'GEMINI_API_KEY',
+  'GEMINI_BASE_URL',
+  'GEMINI_MODEL',
+  'OPENAI_API_KEY',
+  'OPENAI_AUTH_MODE',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+] as const
+
+function prepareHostProviderRuntime(
+  providerRuntime: ProviderRuntimeConfig | undefined,
+): void {
+  if (!providerRuntime) return
+  process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
+}
+
+function applyHostProviderRuntime(
+  providerRuntime: ProviderRuntimeConfig | undefined,
+): void {
+  if (!providerRuntime) return
+  clearHostManagedProviderEnvironment()
+  switch (providerRuntime.kind) {
+    case 'anthropicMessages':
+      applyOptionalEnv('ANTHROPIC_BASE_URL', providerRuntime.baseUrl)
+      applyOptionalEnv('ANTHROPIC_API_KEY', providerRuntime.apiKey)
+      return
+    case 'googleGenerativeAi':
+      process.env.CLAUDE_CODE_USE_GEMINI = '1'
+      applyOptionalEnv('GEMINI_BASE_URL', providerRuntime.baseUrl)
+      applyOptionalEnv('GEMINI_API_KEY', providerRuntime.apiKey)
+      return
+    case 'openAiChatCompletions':
+      process.env.CLAUDE_CODE_USE_OPENAI = '1'
+      applyOptionalEnv('OPENAI_BASE_URL', providerRuntime.baseUrl)
+      applyOptionalEnv('OPENAI_API_KEY', providerRuntime.apiKey)
+      return
+    case 'openAiResponses':
+      process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES = '1'
+      applyOptionalEnv('OPENAI_BASE_URL', providerRuntime.baseUrl)
+      applyOptionalEnv('OPENAI_API_KEY', providerRuntime.apiKey)
+      return
+  }
+}
+
+function clearHostManagedProviderEnvironment(): void {
+  for (const key of HOST_MANAGED_PROVIDER_ENV_KEYS) {
+    delete process.env[key]
+  }
+}
+
+function applyOptionalEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key]
+  } else {
+    process.env[key] = value
+  }
+}
+
 export async function createWorkerSession(
   payload: WorkerInitializePayload,
   sink: WorkerSessionSink,
@@ -226,7 +299,9 @@ export async function createWorkerSession(
   )
   bootstrapState.setOriginalCwd(payload.cwd)
   settingsCache.resetSettingsCache()
+  prepareHostProviderRuntime(payload.providerRuntime)
   managedEnv.applySafeConfigEnvironmentVariables()
+  applyHostProviderRuntime(payload.providerRuntime)
   const restoredLog = resolvedSessionFile
     ? await getLastSessionLog(payload.sessionId as UUID)
     : null
@@ -420,6 +495,13 @@ class QueryEngineWorkerSession implements WorkerSession {
       '../../utils/sessionStorage.js'
     )
     await flushSessionStorage()
+  }
+
+  setModel(model: string): void {
+    if (!this.queryEngine) {
+      throw new Error('Worker session is not initialized')
+    }
+    this.queryEngine.setModel(model)
   }
 
   async shutdown(

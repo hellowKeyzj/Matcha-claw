@@ -73,7 +73,7 @@ function hasImageGenerationFields(row: Pick<ModelDraftRow, 'capabilities'>): boo
   return row.capabilities.includes('imageGenerate');
 }
 
-function draftRowToModel(credential: ProviderCredential, row: ModelDraftRow): Omit<ProviderModel, 'credentialId'> | null {
+function draftRowToModel(credential: ProviderCredential, row: ModelDraftRow): Omit<ProviderModel, 'accountId'> | null {
   const modelId = row.modelId.trim();
   if (!modelId || row.capabilities.length === 0) return null;
   const includeTextTuning = hasTextTuningFields(credential, row);
@@ -104,10 +104,11 @@ export function ProviderCredentialModelsEditor(props: {
   loading: boolean;
   saving: boolean;
   error: string | null;
-  onReplace: (next: Omit<ProviderModel, 'credentialId'>[]) => Promise<void>;
+  warning: string | null;
+  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
 }) {
   const { t } = useTranslation('settings');
-  const { credential, vendor, models, ready, loading, saving, error, onReplace } = props;
+  const { credential, vendor, models, ready, loading, saving, error, warning, onReplace } = props;
   const allowedCapabilities = useMemo(() => resolveProviderModelCapabilities(credential, vendor), [credential, vendor]);
   const baseline = useMemo(() => models.map((model) => ({
     ...modelToDraftRow(model),
@@ -124,6 +125,7 @@ export function ProviderCredentialModelsEditor(props: {
       loading={loading}
       saving={saving}
       error={error}
+      warning={warning}
       onReplace={onReplace}
       t={t}
     />
@@ -138,10 +140,11 @@ function ProviderCredentialModelsEditorInner(props: {
   loading: boolean;
   saving: boolean;
   error: string | null;
-  onReplace: (next: Omit<ProviderModel, 'credentialId'>[]) => Promise<void>;
+  warning: string | null;
+  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
   t: ReturnType<typeof useTranslation>[0];
 }) {
-  const { credential, allowedCapabilities, baseline, ready, loading, saving, error, onReplace, t } = props;
+  const { credential, allowedCapabilities, baseline, ready, loading, saving, error, warning, onReplace, t } = props;
   const [rows, setRows] = useState<ModelDraftRow[]>(baseline);
   const [localError, setLocalError] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
@@ -158,7 +161,7 @@ function ProviderCredentialModelsEditorInner(props: {
     if (codePlanRegistered) return;
     const existing = rows
       .map((row) => draftRowToModel(credential, row))
-      .filter((model): model is Omit<ProviderModel, 'credentialId'> => model !== null);
+      .filter((model): model is Omit<ProviderModel, 'accountId'> => model !== null);
     await onReplace([
       ...existing,
       { modelId: ARK_CODE_PLAN_MODEL_ID, capabilities: ['chat'] },
@@ -185,7 +188,7 @@ function ProviderCredentialModelsEditorInner(props: {
 
   const handleSave = async () => {
     setLocalError(null);
-    const collected: Omit<ProviderModel, 'credentialId'>[] = [];
+    const collected: Omit<ProviderModel, 'accountId'>[] = [];
     const seen = new Set<string>();
     for (const row of rows) {
       if (!row.modelId.trim()) continue;
@@ -268,6 +271,8 @@ function ProviderCredentialModelsEditorInner(props: {
 
           {(localError || error) ? (
             <p className="border-t border-border/70 px-3 py-2 text-xs text-destructive">{localError || error}</p>
+          ) : warning ? (
+            <p className="border-t border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">{warning}</p>
           ) : null}
         </>
       ) : null}

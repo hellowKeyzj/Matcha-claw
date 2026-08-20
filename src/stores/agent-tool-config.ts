@@ -1,8 +1,11 @@
 import { create } from 'zustand';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
-import type { AgentScope, CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+} from '../../electron/desktop-contract/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 
-const AGENT_TOOL_CONFIG_CAPABILITY_ID = 'agent.tool-config';
+const SUBAGENT_TOOLS_CAPABILITY_ID = 'subagent.tools';
 
 export type AgentToolConfigUnsupportedReason = 'runtimeDoesNotExposeAgentToolConfig' | 'agentNotConfigured';
 
@@ -259,7 +262,7 @@ function normalizeToolConfigGroup(value: unknown): AgentToolConfigGroup | null {
 
 function normalizeAgentToolConfigView(payload: unknown, requestedAgentId: string): AgentToolConfigView {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error(`agent.tool-config returned an invalid view for agent "${requestedAgentId}". Refresh the agent and try again.`);
+    throw new Error(`subagent.tools returned an invalid view for agent "${requestedAgentId}". Refresh the agent and try again.`);
   }
   const record = payload as Record<string, unknown>;
   const agentId = typeof record.agentId === 'string' && record.agentId.trim()
@@ -315,9 +318,9 @@ function normalizeSetAgentToolConfigCommand(command: SetAgentToolConfigCommand):
 }
 
 async function resolveAgentToolConfigScope(): Promise<AgentScope> {
-  const scope = await resolveSingleCapabilityScope(AGENT_TOOL_CONFIG_CAPABILITY_ID);
+  const scope = await resolveSingleCapabilityScope(SUBAGENT_TOOLS_CAPABILITY_ID);
   if (scope.kind !== 'agent') {
-    throw new Error(`agent.tool-config requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
+    throw new Error(`subagent.tools requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
   }
   return scope;
 }
@@ -339,7 +342,7 @@ async function agentToolConfigCapabilityExecute<TResult>(
   return await hostApiFetch<TResult>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
-      id: AGENT_TOOL_CONFIG_CAPABILITY_ID,
+      id: SUBAGENT_TOOLS_CAPABILITY_ID,
       operationId,
       scope,
       target: buildAgentToolConfigTarget(scope, targetAgentId),
@@ -350,7 +353,7 @@ async function agentToolConfigCapabilityExecute<TResult>(
 
 async function fetchAgentToolConfigView(agentId: string): Promise<AgentToolConfigView> {
   const result = await agentToolConfigCapabilityExecute<unknown>(
-    'agentToolConfig.get',
+    'subagentTools.get',
     { agentId },
     agentId,
   );
@@ -359,7 +362,7 @@ async function fetchAgentToolConfigView(agentId: string): Promise<AgentToolConfi
 
 async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promise<AgentToolConfigView> {
   const result = await agentToolConfigCapabilityExecute<SetAgentToolConfigResult>(
-    'agentToolConfig.set',
+    'subagentTools.set',
     {
       agentId: command.agentId,
       revision: command.revision,
@@ -387,7 +390,7 @@ async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promi
       if (result.reason === 'agentNotConfigured') {
         throw new Error('This runtime has not registered capability settings for this agent yet, so its tools cannot be changed here. Refresh the agent and try again.');
       }
-      throw new Error('This runtime does not expose agent tool configuration. Reconnect to a runtime that supports agent.tool-config, then refresh the agent and try again.');
+      throw new Error('This runtime does not expose agent tool configuration. Reconnect to a runtime that supports subagent.tools, then refresh the agent and try again.');
   }
 }
 

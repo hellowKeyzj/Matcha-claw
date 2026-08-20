@@ -302,6 +302,8 @@
     "gatewayPreparing": "Gateway 正在启动，审计数据稍后可用。",
     "gatewayStopped": "Gateway 未运行，无法读取审计。",
     "loading": "正在加载审计...",
+    "loadFailed": "加载审计记录失败。",
+    "stale": "最新读取失败，已清空审计记录。",
     "empty": "暂无命中记录。",
     "risk": {
       "critical": "严重",

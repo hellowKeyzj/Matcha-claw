@@ -11,7 +11,7 @@ import { BrowserWindow, app, ipcMain } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
-import { isUpdateVersionNewer } from '../../runtime-host/shared/update-version';
+import { isUpdateVersionNewer } from '../desktop-contract/update-version';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -251,6 +251,15 @@ export class AppUpdater extends EventEmitter {
 /**
  * Register IPC handlers for update operations
  */
+export function registerE2EUpdateHandlers(): void {
+  ipcMain.handle('update:status', () => ({ status: 'idle' }));
+  ipcMain.handle('update:version', () => app.getVersion());
+  ipcMain.handle('update:check', () => ({ success: true, status: { status: 'idle' } }));
+  ipcMain.handle('update:download', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
+  ipcMain.handle('update:install', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
+  ipcMain.handle('update:setChannel', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
+}
+
 export function registerUpdateHandlers(
   updater: AppUpdater,
   mainWindow: BrowserWindow

@@ -1,6 +1,12 @@
 import { hostSessionPrompt } from '@/lib/host-api';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
-import type { SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
+import {
+  logSessionTrace,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
+import { decodeSessionProjectionEvent, type SessionProjectionEvent } from '../../types/session/update-event';
 import type { ChatSendAttachment } from './types';
 
 export const CHAT_SEND_RPC_TIMEOUT_MS = 120_000;
@@ -15,17 +21,35 @@ export interface SendChatTransportParams {
   idempotencyKey: string;
   attachments?: ChatSendAttachment[];
   timeoutMs?: number;
+  traceId?: string | null;
 }
 
 export type SendChatTransportResult =
-  | { ok: true; runId: string | null; snapshot: SessionStateSnapshot }
+  | { ok: true; runId: string | null; projection: SessionProjectionEvent | null }
   | { ok: false; error: string };
 
 export async function sendChatTransport(
   params: SendChatTransportParams,
 ): Promise<SendChatTransportResult> {
   const attachments = params.attachments ?? [];
-  const response = await hostSessionPrompt({
+  logSessionTrace('send.transport.request', params.traceId, {
+    backendSessionKey: summarizeIdentifier(params.sessionKey),
+    endpointSessionId: summarizeIdentifier(params.endpointSessionId),
+    sessionIdentity: {
+      endpoint: {
+        runtimeAdapterId: params.sessionIdentity.endpoint.runtimeAdapterId,
+        runtimeInstanceId: params.sessionIdentity.endpoint.runtimeInstanceId,
+      },
+      agentId: summarizeIdentifier(params.sessionIdentity.agentId),
+      sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
+    },
+    idempotencyKey: summarizeIdentifier(params.idempotencyKey),
+    messageLength: params.message.length,
+    attachmentCount: attachments.length,
+    attachmentBytes: attachments.reduce((sum, attachment) => sum + attachment.fileSize, 0),
+    timeoutMs: params.timeoutMs ?? null,
+  });
+  const payload = {
     sessionKey: params.sessionKey,
     ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
@@ -34,19 +58,32 @@ export async function sendChatTransport(
     deliver: false,
     ...(attachments.length > 0
       ? {
-          media: attachments.map((attachment) => ({
-            filePath: attachment.stagedPath,
-            mimeType: attachment.mimeType,
+          attachments: attachments.map((attachment) => ({
+            stagedAttachmentId: attachment.stagedAttachmentId,
             fileName: attachment.fileName,
+            mimeType: attachment.mimeType,
             fileSize: attachment.fileSize,
-            preview: attachment.preview,
           })),
         }
       : {}),
+  };
+  const response = params.traceId === undefined
+    ? await hostSessionPrompt(payload)
+    : await hostSessionPrompt(payload, { traceId: params.traceId });
+  logSessionTrace('send.transport.response', params.traceId, {
+    success: response.success ?? null,
+    outcome: response.outcome ?? null,
+    status: response.status ?? null,
+    runId: summarizeIdentifier(response.runId),
+    routeKey: summarizeIdentifier(response.routeKey),
+    errorPresent: typeof response.error === 'string' && response.error.trim().length > 0,
   });
-  if (!response.success) {
-    const failureMessage = typeof (response as { error?: unknown }).error === 'string'
-      ? (response as { error?: string }).error?.trim()
+  const accepted = response.success === true
+    || response.outcome === 'queued'
+    || response.outcome === 'succeeded';
+  if (!accepted) {
+    const failureMessage = typeof response.error === 'string'
+      ? response.error.trim()
       : '';
     return {
       ok: false,
@@ -61,6 +98,6 @@ export async function sendChatTransport(
   return {
     ok: true,
     runId: normalizedRunId || null,
-    snapshot: response.snapshot,
+    projection: decodeSessionProjectionEvent(response.projection ?? response.snapshot),
   };
 }

@@ -86,6 +86,6 @@ describe('launch-at-startup integration', () => {
     setPlatform('freebsd');
     const { applyLaunchAtStartupSetting } = await import('@electron/main/launch-at-startup');
 
-    await expect(applyLaunchAtStartupSetting(true)).resolves.toBeUndefined();
+    await expect(applyLaunchAtStartupSetting(true)).resolves.toBe(false);
   });
 });

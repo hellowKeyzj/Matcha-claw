@@ -3,13 +3,13 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { SubAgents } from '@/pages/SubAgents';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useAgentSkillConfigStore, __resetAgentSkillConfigStoreInternalCachesForTest } from '@/stores/agent-skill-config';
 import { useAgentToolConfigStore, __resetAgentToolConfigStoreInternalCachesForTest } from '@/stores/agent-tool-config';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
-import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../runtime-host/shared/runtime-address';
+import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../electron/desktop-contract/runtime-address';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -29,6 +29,28 @@ const runtimeEndpoint: RuntimeEndpointRef = {
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
 };
+const runningGatewayStatus = {
+  processState: 'running',
+  port: 18789,
+  gatewayReady: true,
+  healthSummary: 'healthy',
+  transportState: 'connected',
+  portReachable: true,
+  diagnostics: {
+    consecutiveHeartbeatMisses: 0,
+    consecutiveRpcFailures: 0,
+  },
+  updatedAt: 1,
+} as const;
+const stoppedGatewayStatus = {
+  ...runningGatewayStatus,
+  processState: 'stopped',
+  gatewayReady: false,
+  healthSummary: 'unresponsive',
+  transportState: 'disconnected',
+  portReachable: false,
+  updatedAt: 0,
+} as const;
 const defaultAgentScope: AgentScope = {
   kind: 'agent',
   endpoint: runtimeEndpoint,
@@ -64,22 +86,6 @@ function buildCapabilitiesListEnvelope() {
             routeOwnerId: 'openclaw',
           },
           {
-            id: 'model.provider',
-            kind: 'model.provider',
-            scopeKind: 'agent',
-            scope: defaultAgentScope,
-            targetKinds: ['model-selection'],
-            runtimeAdapterId: 'openclaw',
-            runtimeInstanceId: 'local',
-            targetAgentIds: ['default'],
-            supportLevel: 'native',
-            availability: 'available',
-            operations: [],
-            policyScope: 'model.provider',
-            ownerModuleId: 'openclaw',
-            routeOwnerId: 'openclaw',
-          },
-          {
             id: 'workspace.file',
             kind: 'workspace.file',
             scopeKind: 'workspace',
@@ -96,8 +102,8 @@ function buildCapabilitiesListEnvelope() {
             routeOwnerId: 'openclaw',
           },
           {
-            id: 'agent.skill-config',
-            kind: 'agent.skill-config',
+            id: 'subagent.skills',
+            kind: 'subagent-skills',
             scopeKind: 'agent',
             scope: defaultAgentScope,
             targetKinds: ['subagent'],
@@ -107,13 +113,13 @@ function buildCapabilitiesListEnvelope() {
             supportLevel: 'native',
             availability: 'available',
             operations: [],
-            policyScope: 'agent.skill-config',
+            policyScope: 'subagent.skills',
             ownerModuleId: 'openclaw',
             routeOwnerId: 'openclaw',
           },
           {
-            id: 'agent.tool-config',
-            kind: 'agent.tool-config',
+            id: 'subagent.tools',
+            kind: 'subagent-tools',
             scopeKind: 'agent',
             scope: defaultAgentScope,
             targetKinds: ['subagent'],
@@ -123,7 +129,7 @@ function buildCapabilitiesListEnvelope() {
             supportLevel: 'native',
             availability: 'available',
             operations: [],
-            policyScope: 'agent.tool-config',
+            policyScope: 'subagent.tools',
             ownerModuleId: 'openclaw',
             routeOwnerId: 'openclaw',
           },
@@ -244,20 +250,9 @@ describe('subagents page', () => {
     vi.mocked(toast.error).mockReset();
 
     i18n.changeLanguage('en');
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      status: runningGatewayStatus,
+      runtimeHost: { lifecycle: 'running' },
       health: null,
       isInitialized: true,
       lastError: null,
@@ -463,20 +458,9 @@ describe('subagents page', () => {
   });
 
   it('挂载时等待网关 ready 后再加载模型和 agents', () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'stopped',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      status: stoppedGatewayStatus,
+      runtimeHost: { lifecycle: 'stopped' },
     });
     useSubagentsStore.setState({
       agents: [],
@@ -488,40 +472,18 @@ describe('subagents page', () => {
   });
 
   it('网关恢复到 running 后会自动重载数据', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'stopped',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      status: stoppedGatewayStatus,
+      runtimeHost: { lifecycle: 'stopped' },
     });
     renderSubagentsPage();
     expect(loadAgents).not.toHaveBeenCalled();
     expect(loadAvailableModels).not.toHaveBeenCalled();
 
     act(() => {
-      useGatewayStore.setState({
-        status: {
-          processState: 'running',
-          port: 18789,
-          gatewayReady: true,
-          healthSummary: 'healthy',
-          transportState: 'connected',
-          portReachable: true,
-          diagnostics: {
-            consecutiveHeartbeatMisses: 0,
-            consecutiveRpcFailures: 0,
-          },
-          updatedAt: 2,
-        },
+      useRuntimeHostStore.setState({
+        status: runningGatewayStatus,
+        runtimeHost: { lifecycle: 'running' },
       });
     });
 
@@ -696,20 +658,8 @@ describe('subagents page', () => {
   });
 
   it('submits prompt to generate subagent draft', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     renderSubagentsPage();
 
@@ -731,20 +681,8 @@ describe('subagents page', () => {
   });
 
   it('passes current-file baseline option when draft switch is enabled', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     renderSubagentsPage();
 
@@ -858,20 +796,8 @@ describe('subagents page', () => {
       }
       return undefined;
     });
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     renderSubagentsPage();
     await waitFor(() => {
@@ -935,20 +861,8 @@ describe('subagents page', () => {
       }
       return undefined;
     });
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     renderSubagentsPage();
     await waitFor(() => {
@@ -1048,7 +962,7 @@ describe('subagents page', () => {
         {
           id: 'custom-dd749b2e/gpt-4o-mini',
           provider: 'custom-dd749b2e',
-          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+          accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '自定义',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '自定义 / gpt-4o-mini',
@@ -1091,7 +1005,7 @@ describe('subagents page', () => {
         {
           id: 'custom-dd749b2e/gpt-4o-mini',
           provider: 'custom-dd749b2e',
-          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+          accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',
@@ -1111,7 +1025,7 @@ describe('subagents page', () => {
         {
           id: 'custom-dd749b2e/gpt-4o-mini',
           provider: 'custom-dd749b2e',
-          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+          accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',
@@ -1301,20 +1215,8 @@ describe('subagents page', () => {
   });
 
   it('closes edit dialog via top-right close button and triggers cancel action', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',

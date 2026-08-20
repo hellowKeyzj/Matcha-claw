@@ -1,34 +1,5 @@
-import { hostApiFetch, resolveSingleCapabilityScope, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
 import type { ChannelType } from '@/types/channel';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
-
-const CHANNEL_INTEGRATION_CAPABILITY_ID = 'integration.channel';
-
-async function channelIntegrationCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget | null = null,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: CHANNEL_INTEGRATION_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(CHANNEL_INTEGRATION_CAPABILITY_ID),
-      target,
-      input,
-    }),
-  });
-}
-
-async function submitChannelCapabilityJob<TResult = unknown>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget | null = null,
-): Promise<TResult> {
-  const submission = await channelIntegrationCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, input, target);
-  return await waitForRuntimeJobResult<TResult>(submission.job.id);
-}
 
 export interface ChannelSnapshotFetchResult {
   success: boolean;
@@ -39,29 +10,47 @@ export interface ChannelSnapshotFetchResult {
   error?: string | null;
 }
 
+export interface ChannelLoginProgress {
+  outcome: 'progress' | 'connected' | 'target_rejected' | 'unknown';
+  channel: string;
+  accountId?: string;
+  qrDataUrl?: string;
+  sessionKey?: string;
+}
+
+export interface ChannelLoginWaitOptions {
+  timeoutMs?: number;
+  sessionKey?: string;
+  currentQrDataUrl?: string;
+  signal?: AbortSignal;
+}
+
 export interface ChannelPairingRequest {
   id: string;
-  code: string;
-  createdAt: string;
-  lastSeenAt: string;
-  meta?: Record<string, string>;
+  status: 'pending' | 'unknown';
 }
 
 export async function hostChannelsFetchSnapshot(): Promise<ChannelSnapshotFetchResult> {
   return await hostApiFetch<ChannelSnapshotFetchResult>('/api/channels/snapshot');
 }
 
-export async function hostChannelsProbe(): Promise<unknown> {
-  return await submitChannelCapabilityJob('channels.probe', {}, { kind: 'none' });
+export async function hostChannelsProbe(): Promise<never> {
+  throw new Error('Channel probe is unavailable');
 }
 
 export async function hostChannelsReadConfig(
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean; values?: Record<string, string> }> {
-  const suffix = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
   return await hostApiFetch<{ success: boolean; values?: Record<string, string> }>(
-    `/api/channels/config/${encodeURIComponent(channelType)}${suffix}`,
+    '/api/channels/config/read',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        channel: channelType,
+        ...(accountId ? { accountId } : {}),
+      }),
+    },
   );
 }
 
@@ -69,20 +58,66 @@ export async function hostChannelsActivate(input: {
   channelType: ChannelType;
   config: Record<string, unknown>;
   accountId?: string;
-}): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
-  const target = { kind: 'channel' as const, channelType: input.channelType, ...(input.accountId ? { accountId: input.accountId } : {}) };
+}): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean; progress?: ChannelLoginProgress }> {
   if (input.channelType === 'whatsapp' || input.channelType === 'openclaw-weixin') {
-    return await channelIntegrationCapabilityExecute<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
-      'channels.activate',
-      input,
-      target,
-    );
+    const result = await hostApiFetch<ChannelLoginProgress>('/api/channels/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'start',
+        channel: input.channelType,
+        accountId: input.accountId ?? 'default',
+        force: true,
+        config: input.config,
+      }),
+    });
+    if (result.outcome === 'progress' || result.outcome === 'connected') {
+      return { success: true, progress: result };
+    }
+    return {
+      success: false,
+      error: result.outcome === 'target_rejected'
+        ? 'Channel activation was rejected'
+        : 'Channel activation outcome is unknown',
+    };
   }
-  return await submitChannelCapabilityJob<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
-    'channels.activate',
-    input,
-    target,
-  );
+  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/configure', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'apply',
+      channel: input.channelType,
+      accountId: input.accountId ?? 'default',
+      values: input.config,
+    }),
+  });
+  if (result.outcome === 'confirmed') {
+    return { success: true };
+  }
+  return {
+    success: false,
+    error: result.outcome === 'target_rejected'
+      ? 'Channel configuration was rejected'
+      : 'Channel configuration outcome is unknown',
+  };
+}
+
+export async function hostChannelsLoginWait(
+  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
+  accountId: string,
+  options: ChannelLoginWaitOptions = {},
+): Promise<ChannelLoginProgress> {
+  return await hostApiFetch<ChannelLoginProgress>('/api/channels/login', {
+    method: 'POST',
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+    body: JSON.stringify({
+      action: 'wait',
+      channel: channelType,
+      accountId,
+      ...(options.sessionKey ? { sessionKey: options.sessionKey } : {}),
+      ...(options.currentQrDataUrl ? { currentQrDataUrl: options.currentQrDataUrl } : {}),
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    }),
+  });
 }
 
 export async function hostChannelsValidateCredentials(
@@ -107,69 +142,89 @@ export async function hostChannelsValidateCredentials(
   });
 }
 
-export async function hostChannelsDeleteConfig(channelType: ChannelType): Promise<unknown> {
-  return await submitChannelCapabilityJob('channels.deleteConfig', { channelType }, { kind: 'channel', channelType });
+export async function hostChannelsDeleteConfig(
+  channelType: ChannelType,
+  accountId = 'default',
+): Promise<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }> {
+  return await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/delete-config', {
+    method: 'POST',
+    body: JSON.stringify({ channel: channelType, accountId }),
+  });
 }
 
 export async function hostChannelsConnect(
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean }>(
-    'channels.connect',
-    { channelType, accountId },
-    { kind: 'channel', channelType, ...(accountId ? { accountId } : {}) },
-  );
+  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/control', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'connect',
+      channel: channelType,
+      accountId: accountId ?? 'default',
+    }),
+  });
+  return { success: result.outcome === 'confirmed' };
 }
 
 export async function hostChannelsDisconnect(
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean }>(
-    'channels.disconnect',
-    { channelType, accountId },
-    { kind: 'channel', channelType, ...(accountId ? { accountId } : {}) },
-  );
-}
-
-export async function hostChannelsRequestQrCode(
-  channelType: ChannelType,
-): Promise<{ success: boolean; qrCode?: string; sessionId?: string }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean; qrCode?: string; sessionId?: string }>(
-    'channels.requestQr',
-    { channelType },
-    { kind: 'channel-pairing', channelType },
-  );
+  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/control', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'disconnect',
+      channel: channelType,
+      accountId: accountId ?? 'default',
+    }),
+  });
+  return { success: result.outcome === 'confirmed' };
 }
 
 export async function hostChannelsCancelSession(
   channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
-): Promise<unknown> {
-  return await channelIntegrationCapabilityExecute(
-    'channels.cancelSession',
-    { channelType },
-    { kind: 'channel-pairing', channelType },
-  );
+  accountId: string,
+): Promise<{ outcome: 'cancelled' }> {
+  return await hostApiFetch<{ outcome: 'cancelled' }>('/api/channels/login', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'cancel',
+      channel: channelType,
+      ...(accountId ? { accountId } : {}),
+    }),
+  });
 }
 
 export async function hostChannelsListPairingRequests(
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean; requests?: ChannelPairingRequest[] }> {
-  const suffix = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
-  return await hostApiFetch<{ success: boolean; requests?: ChannelPairingRequest[] }>(
-    `/api/channels/pairing/${encodeURIComponent(channelType)}${suffix}`,
-  );
+  void accountId;
+  const result = await hostApiFetch<{ requests: readonly ChannelPairingRequest[] }>('/api/channels/pairing', {
+    method: 'POST',
+    body: JSON.stringify({ channel: channelType }),
+  });
+  return { success: true, requests: [...result.requests] };
 }
 
 export async function hostChannelsApprovePairingRequest(
   channelType: ChannelType,
   input: { code: string; accountId?: string },
-): Promise<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }>(
-    'channels.approvePairing',
-    { ...input, channelType },
-    { kind: 'channel-pairing', channelType, ...(input.accountId ? { accountId: input.accountId } : {}), pairingId: input.code },
-  );
+): Promise<{ success: boolean }> {
+  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/pairing', {
+    method: 'POST',
+    body: JSON.stringify({
+      action: 'approve',
+      channel: channelType,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
+      code: input.code,
+    }),
+  });
+  if (result.outcome === 'confirmed') {
+    return { success: true };
+  }
+  throw new Error(result.outcome === 'target_rejected'
+    ? 'Channel pairing approval was rejected'
+    : 'Channel pairing approval outcome is unknown');
 }

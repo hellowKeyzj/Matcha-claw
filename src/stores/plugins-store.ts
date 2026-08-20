@@ -1,11 +1,5 @@
 import { create } from 'zustand';
-import {
-  hostApiFetch,
-  resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
-} from '@/lib/host-api';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import { hostApiFetch } from '@/lib/host-api';
 
 export type PluginCatalogItem = {
   id: string;
@@ -46,11 +40,17 @@ export type RuntimePayload = {
 };
 
 type CatalogPayload = {
-  success: boolean;
-  execution: {
+  success?: boolean;
+  execution?: {
     enabledPluginIds: string[];
   };
   plugins: PluginCatalogItem[];
+};
+
+export type PluginConfigurationOutcome = 'configured' | 'rejected' | 'unknown';
+export type PluginOperation = 'install' | 'update' | 'uninstall';
+type PluginMutationResponse = {
+  outcome: PluginConfigurationOutcome;
 };
 
 export type PluginRefreshReason = 'initial' | 'manual' | 'mutation' | 'background';
@@ -66,7 +66,6 @@ type PluginRefreshOptions = PluginFetchOptions & {
 
 const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
 const PLUGIN_CACHE_FRESH_MS = 30_000;
-const PLUGIN_RUNTIME_CAPABILITY_ID = 'plugin.runtime';
 const RUNTIME_HOST_READY_TIMEOUT_MS = 15_000;
 const RUNTIME_HOST_READY_RETRY_MS = 300;
 const EMPTY_CATALOG: PluginCatalogItem[] = [];
@@ -116,23 +115,6 @@ function hasFreshCatalogCache(): boolean {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
-  });
-}
-
-async function pluginRuntimeCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown>,
-  target: CapabilityTarget,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: PLUGIN_RUNTIME_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(PLUGIN_RUNTIME_CAPABILITY_ID),
-      target,
-      input,
-    }),
   });
 }
 
@@ -206,7 +188,7 @@ async function fetchCatalogShared(): Promise<PluginCatalogItem[]> {
   }
 }
 
-function hasMutatingState(action: 'restart' | null, pluginId: string | null): boolean {
+function hasMutatingState(action: 'restart' | PluginOperation | null, pluginId: string | null): boolean {
   return action !== null || pluginId !== null;
 }
 
@@ -220,7 +202,7 @@ interface PluginsStoreState {
   refreshing: boolean;
   refreshReason: PluginRefreshReason | null;
   mutating: boolean;
-  mutatingAction: 'restart' | null;
+  mutatingAction: 'restart' | PluginOperation | null;
   mutatingPluginId: string | null;
   error: string | null;
   prewarm: () => Promise<void>;
@@ -228,7 +210,8 @@ interface PluginsStoreState {
   refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
   refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
-  togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
+  togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<PluginConfigurationOutcome>;
+  operatePlugin: (pluginId: string, operation: PluginOperation) => Promise<PluginConfigurationOutcome>;
   clearError: () => void;
 }
 
@@ -332,10 +315,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
 
     try {
-      await Promise.all([
-        get().refreshRuntime({ reason, force: options?.force }),
-        get().refreshCatalog({ reason, force: options?.force }),
-      ]);
+      const refreshTasks = [get().refreshCatalog({ reason, force: options?.force })];
+      if (get().runtimeReady) {
+        refreshTasks.push(get().refreshRuntime({ reason, force: options?.force }));
+      }
+      await Promise.all(refreshTasks);
       if (requestId !== latestSnapshotRefreshRequestId || silent) {
         return;
       }
@@ -386,31 +370,55 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   },
 
   togglePluginEnabled: async (pluginId, nextEnabled) => {
-    const runtime = get().runtime;
-    if (!runtime) {
-      return;
-    }
-    void nextEnabled;
-    const nextIds = [pluginId];
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
-      const submission = await pluginRuntimeCapabilityExecute<RuntimeJobSubmission<RuntimePayload>>(
-        'plugins.setEnabled',
-        { pluginIds: nextIds, enabled: nextEnabled },
-        { kind: 'plugin', pluginId },
-      );
-      const payload = await waitForRuntimeJobResult<RuntimePayload>(submission.job.id);
-      set({
-        runtime: writeRuntimeCache(payload),
-        runtimeReady: true,
+      const response = await hostApiFetch<PluginMutationResponse>('/api/plugins/configuration', {
+        method: 'POST',
+        body: JSON.stringify({ runtime: 'openclaw', pluginId, enabled: nextEnabled }),
       });
-      await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });
+      if (response.outcome !== 'configured') {
+        set({ error: 'plugins:errors.togglePluginFailed' });
+      } else {
+        await get().refreshCatalog({ reason: 'mutation', force: true });
+      }
+      return response.outcome;
+    } catch (error) {
+      set({ error: 'plugins:errors.togglePluginFailed' });
+      throw error;
     } finally {
       set((state) => {
         const nextPluginId = state.mutatingPluginId === pluginId ? null : state.mutatingPluginId;
         return {
           mutatingPluginId: nextPluginId,
           mutating: hasMutatingState(state.mutatingAction, nextPluginId),
+        };
+      });
+    }
+  },
+
+  operatePlugin: async (pluginId, operation) => {
+    set({ mutatingPluginId: pluginId, mutatingAction: operation, mutating: true, error: null });
+    try {
+      const response = await hostApiFetch<PluginMutationResponse>('/api/plugins/operation', {
+        method: 'POST',
+        body: JSON.stringify({ runtime: 'openclaw', operation, pluginId }),
+      });
+      if (response.outcome !== 'configured') {
+        set({ error: 'plugins:errors.operationFailed' });
+      } else {
+        await get().refreshCatalog({ reason: 'mutation', force: true });
+      }
+      return response.outcome;
+    } catch (error) {
+      set({ error: 'plugins:errors.operationFailed' });
+      throw error;
+    } finally {
+      set((state) => {
+        const nextPluginId = state.mutatingPluginId === pluginId ? null : state.mutatingPluginId;
+        return {
+          mutatingPluginId: nextPluginId,
+          mutatingAction: null,
+          mutating: hasMutatingState(null, nextPluginId),
         };
       });
     }

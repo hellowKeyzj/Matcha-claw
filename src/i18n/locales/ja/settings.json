@@ -117,6 +117,23 @@
       "step2": "ブラウザでログインページを開いてください。",
       "step3": "コードを貼り付けてアクセスを承認してください。",
       "requestingCode": "セキュアログインコードを取得中..."
+    },
+    "projectionErrors": {
+      "diagnostic": "OpenClaw 設定の同期に失敗しました: {{reason}}",
+      "readbackMismatch": "OpenClaw 設定の読み戻し結果が保存内容と一致しません。",
+      "readbackUnavailable": "OpenClaw 設定を書き込みましたが、確認のために読み戻せませんでした。",
+      "outcomeUnknown": "OpenClaw 設定同期の結果が不明です。",
+      "privateResolver": {
+        "credentialMissing": "このアカウントに保存された API キーがありません。再入力して保存してください。",
+        "credentialDecryptFailed": "保存済み API キーをこの端末で復号できません。再入力して保存してください。",
+        "credentialProviderMismatch": "保存済み API キーは別のプロバイダーのものです。このプロバイダーの API キーを再入力してください。",
+        "credentialInvalid": "このアカウントの認証情報が無効です。再入力して保存してください。",
+        "authProfileReadInvalid": "OpenClaw の認証設定ファイルが無効です。修復または削除してから再保存してください。",
+        "authProfileWriteFailed": "OpenClaw の認証設定ファイルを書き込めません。ファイル権限を確認してください。",
+        "credentialStoreUnavailable": "ローカルのプロバイダー認証情報を読み取れません。API キーを再入力して保存してください。",
+        "invalidRequest": "内部認証同期リクエストが無効です。再試行してください。",
+        "unknown": "OpenClaw の認証同期に失敗しました。API キーを再入力して保存してください。"
+      }
     }
   },
   "license": {
@@ -160,15 +177,15 @@
   "diagnostics": {
     "title": "診断",
     "description": "トラブルシュート用のローカル診断バンドルを収集します",
-    "collect": "診断バンドルを収集",
-    "collecting": "収集中",
-    "openFolder": "フォルダーを開く",
-    "lastBundle": "前回のバンドル",
-    "lastMeta": "生成時刻 {{generatedAt}}、ファイル数 {{count}}",
+    "collect": "診断バンドルを書き出す",
+    "collecting": "書き出し中",
+    "lastBundle": "前回のアーカイブ",
+    "lastMeta": "エントリ数: {{count}}、バイト数: {{bytes}}",
     "toast": {
-      "success": "診断バンドルを生成しました。ファイル数: {{count}}",
-      "failed": "診断バンドルの生成に失敗しました: {{error}}",
-      "openFailed": "診断フォルダーを開けませんでした: {{error}}"
+      "success": "診断アーカイブを書き出しました。エントリ数: {{count}}",
+      "failed": "診断アーカイブの書き出しに失敗しました: {{error}}",
+      "cancelled": "診断アーカイブの書き出しをキャンセルしました",
+      "exportFailed": "診断アーカイブの書き出しに失敗しました"
     }
   },
   "gateway": {

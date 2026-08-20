@@ -1,4 +1,4 @@
-import type { SessionContextTokenSnapshot } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionContextTokenSnapshot } from '../../types/session/snapshot';
 import type { ModelCatalogEntry } from '@/types/subagent';
 
 export type ChatContextUsageLevel = 'neutral' | 'warning' | 'danger';

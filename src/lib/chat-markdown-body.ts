@@ -1,5 +1,5 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type { SessionAssistantTurnItem, SessionTimelineAssistantTurnEntry } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionAssistantTurnItem, SessionTimelineAssistantTurnEntry } from '../types/session/render-item';
 import {
   buildMarkdownCacheKey,
   getOrBuildMarkdownBody,

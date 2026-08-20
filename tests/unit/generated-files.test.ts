@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionRenderToolCard } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderToolCard } from '../../src/types/session/tool-card';
 
 function buildToolCard(partial: Partial<SessionRenderToolCard>): SessionRenderToolCard {
   return {

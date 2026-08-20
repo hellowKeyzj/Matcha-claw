@@ -1,9 +1,14 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT_DIR = path.resolve(__dirname, '..');
-const UV_VERSION = '0.10.0';
+const scriptPath = fileURLToPath(import.meta.url);
+const ROOT_DIR = path.resolve(dirname(scriptPath), '..');
+export const UV_VERSION = '0.10.0';
 const BASE_URL = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}`;
 const OUTPUT_BASE = path.join(ROOT_DIR, 'resources', 'bin');
 
@@ -42,7 +47,48 @@ const PLATFORM_GROUPS = {
   'linux': ['linux-x64', 'linux-arm64']
 };
 
-async function setupTarget(id) {
+function cachedUvMatchesTarget({ executablePath, targetId }, dependencies = {}) {
+  const pathExists = dependencies.existsSync ?? existsSync;
+  const execute = dependencies.spawnSync ?? spawnSync;
+  const readFile = dependencies.readFileSync ?? readFileSync;
+  if (!pathExists(executablePath)) return false;
+  try {
+    const version = execute(executablePath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    if (version.error || version.status !== 0 || !new RegExp(`^uv ${UV_VERSION}(?: \\(.+\\))?$`).test(String(version.stdout ?? '').trim())) {
+      return false;
+    }
+    if (targetId !== 'win32-x64' && targetId !== 'win32-arm64') return true;
+    const binary = readFile(executablePath);
+    const peOffset = binary.readUInt32LE(0x3c);
+    const machine = binary.readUInt16LE(peOffset + 4);
+    return machine === (targetId === 'win32-x64' ? 0x8664 : 0xaa64);
+  } catch {
+    return false;
+  }
+}
+
+export function canReuseCachedUv({ executablePath, targetId }, dependencies) {
+  return cachedUvMatchesTarget({ executablePath, targetId }, dependencies);
+}
+
+export function localFunctionalUvCacheEvidence({ executablePath, targetId }, dependencies) {
+  if (targetId !== 'win32-x64' || !cachedUvMatchesTarget({ executablePath, targetId }, dependencies)) {
+    return undefined;
+  }
+  return {
+    source: 'local-cache',
+    target: 'win32-x64',
+    functionalMatch: 'exact-uv-0.10.0-win32-x64-pe',
+    independentProvenance: 'unverified',
+    supplyChainAttestation: 'not-present',
+  };
+}
+
+async function setupTarget(id, { reuseFunctionalLocalCache = false } = {}) {
   const target = TARGETS[id];
   if (!target) {
     echo(chalk.yellow`⚠️ Target ${id} is not supported by this script.`);
@@ -59,6 +105,10 @@ async function setupTarget(id) {
   // Do not wipe the whole target folder, otherwise other bundled tools may be deleted.
   // Also keep the old uv binary until the new one is ready, so interrupted downloads are harmless.
   const destBin = path.join(targetDir, target.binName);
+  if (reuseFunctionalLocalCache && cachedUvMatchesTarget({ executablePath: destBin, targetId: id })) {
+    echo(chalk.yellow`Using locally cached uv with functional target match and independently unverified provenance: ${destBin}`);
+    return;
+  }
   await fs.remove(tempDir);
   await fs.ensureDir(targetDir);
   await fs.ensureDir(tempDir);
@@ -116,8 +166,15 @@ async function setupTarget(id) {
 }
 
 // Main logic
+if (process.argv.includes(scriptPath)) {
 const downloadAll = argv.all;
 const platform = argv.platform;
+const target = argv.target;
+const reuseFunctionalLocalCache = argv['reuse-functional-local-cache'] === true;
+if (reuseFunctionalLocalCache && target !== 'win32-x64') {
+  echo(chalk.red`❌ --reuse-functional-local-cache is restricted to --target=win32-x64.`);
+  process.exit(1);
+}
 
 if (downloadAll) {
   // Download for all platforms
@@ -125,6 +182,13 @@ if (downloadAll) {
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);
   }
+} else if (target) {
+  if (!TARGETS[target]) {
+    echo(chalk.red`❌ Unknown target: ${target}`);
+    echo(`Available targets: ${Object.keys(TARGETS).join(', ')}`);
+    process.exit(1);
+  }
+  await setupTarget(target, { reuseFunctionalLocalCache });
 } else if (platform) {
   // Download for a specific platform (e.g., --platform=mac)
   const targets = PLATFORM_GROUPS[platform];
@@ -156,3 +220,4 @@ if (downloadAll) {
 }
 
 echo(chalk.green`\n🎉 Done!`);
+}

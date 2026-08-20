@@ -3,11 +3,21 @@ import type {
   AgentScope,
   RuntimeEndpointRef,
   SessionIdentity,
-} from '../../../runtime-host/shared/runtime-address';
-import type { SessionContextTokenSnapshot, SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
-import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
-import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
-import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
+} from '../../../electron/desktop-contract/runtime-address';
+import type {
+  SessionContextTokenSnapshot,
+} from '../../types/session/snapshot';
+import type {
+  SessionRenderAttachedFile,
+} from '../../types/session/tool-card';
+import type {
+  SessionRenderItem,
+} from '../../types/session/render-item';
+import type {
+  SessionCatalogKind,
+  SessionCatalogTitleSource,
+} from '../../types/session/snapshot';
+import type { GatewayTransportIssue } from '../../types/session/runtime-state';
 
 /** Metadata for chat attachments backed by a local file or Gateway media record. */
 export interface AttachedFileMeta {
@@ -224,10 +234,10 @@ export interface ChatStoreBaseState extends ChatViewState {
 }
 
 export interface ChatSendAttachment {
+  stagedAttachmentId: string;
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;
   preview: string | null;
 }
 
@@ -235,7 +245,7 @@ export type ChatSendRejectReason = 'empty' | 'mutating' | 'active' | 'stopping' 
 
 export type ChatSendResult =
   | { accepted: true }
-  | { accepted: false; reason: ChatSendRejectReason; error?: string };
+  | { accepted: false; reason: ChatSendRejectReason; error?: string; attachmentReselectionRequired?: boolean };
 
 export type ChatHistoryLoadMode = 'active' | 'quiet';
 export type ChatHistoryLoadScope = 'foreground' | 'background';
@@ -253,6 +263,7 @@ export interface ChatHistoryLoadRequest {
   mode: ChatHistoryLoadMode;
   scope: ChatHistoryLoadScope;
   reason?: string;
+  traceId?: string | null;
 }
 
 export interface ChatStoreActions {
@@ -260,8 +271,8 @@ export interface ChatStoreActions {
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
   openSessionIdentity: (target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null }) => void;
-  switchSession: (key: string) => void;
-  newSession: (agentId?: string) => Promise<void>;
+  switchSession: (key: string, traceId?: string | null) => void;
+  newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
   newSessionForScope: (scope: AgentScope) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
   renameSession: (key: string, label: string) => Promise<void>;
@@ -278,7 +289,6 @@ export interface ChatStoreActions {
   getTaskBridgeState: () => TaskChatBridgeState;
   openTaskSession: (sessionKey: string) => string;
   sendTaskRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
-  handleSessionUpdateEvent: (event: SessionUpdateEvent) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
   clearError: () => void;

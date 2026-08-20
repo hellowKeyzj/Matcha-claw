@@ -331,7 +331,9 @@ describe('createDefaultAppServerServices', () => {
       const replayed = await services.ports.events.replay?.({
         sessionId: 'session-1',
       })
-      return replayed?.events.some(event => event.event.type === 'run.completed')
+      return replayed?.events.some(
+        event => event.event.type === 'run.completed',
+      )
         ? true
         : undefined
     })
@@ -368,18 +370,22 @@ describe('createDefaultAppServerServices', () => {
     await waitFor(() =>
       sentEvents
         .map(parseClientHubEventNotification)
-        .some(notification => notification.params.event.type === 'run.completed')
+        .some(
+          notification => notification.params.event.type === 'run.completed',
+        )
         ? true
         : undefined,
     )
     const eventNotifications = sentEvents.map(parseClientHubEventNotification)
-    expect(eventNotifications.map(notification => notification.params.sessionId)).toEqual(
-      Array(eventNotifications.length).fill('session-1'),
-    )
-    expect(eventNotifications.map(notification => notification.params.seq)).toEqual(
-      eventNotifications.map((_, index) => index + 1),
-    )
-    expect(eventNotifications.map(notification => notification.params.event.type)).toEqual([
+    expect(
+      eventNotifications.map(notification => notification.params.sessionId),
+    ).toEqual(Array(eventNotifications.length).fill('session-1'))
+    expect(
+      eventNotifications.map(notification => notification.params.seq),
+    ).toEqual(eventNotifications.map((_, index) => index + 1))
+    expect(
+      eventNotifications.map(notification => notification.params.event.type),
+    ).toEqual([
       'session.created',
       'run.queued',
       'worker.ready',
@@ -806,9 +812,9 @@ describe('createDefaultAppServerServices', () => {
     })
 
     const indexPath = join(storageRoot, 'sessions', 'index.json')
-    const persistedIndex = JSON.parse(await readFile(indexPath, 'utf8')) as Array<
-      Record<string, unknown>
-    >
+    const persistedIndex = JSON.parse(
+      await readFile(indexPath, 'utf8'),
+    ) as Array<Record<string, unknown>>
     await writeFile(
       indexPath,
       `${JSON.stringify(
@@ -1459,10 +1465,11 @@ describe('createDefaultAppServerServices', () => {
       const snapshot = await services.ports.session.snapshot({
         sessionId: 'session-1',
       })
-      return snapshot.runs.some(
+      const runFailed = snapshot.runs.some(
         run =>
           run.runId === timedOutPrompt.runId && run.status.type === 'failed',
       )
+      return runFailed && snapshot.session.workerState.state === 'crashed'
         ? snapshot
         : undefined
     })
@@ -1988,7 +1995,7 @@ describe('createDefaultAppServerServices', () => {
     })
   })
 
-  test('restarts warm workers after session settings changes', async () => {
+  test('updates warm worker model without restart for the same provider', async () => {
     const storageRoot = await createTempRoot()
     const workerChildren: FakeWorkerChild[] = []
     const services = createDefaultAppServerServices({
@@ -2052,38 +2059,33 @@ describe('createDefaultAppServerServices', () => {
       sessionId: 'session-1',
       model: 'opus',
     })
-    const shutdownCommand = (await waitForWorkerCommand(
+    const setModelCommand = (await waitForWorkerCommand(
       firstWorker,
-      'worker.shutdown',
-    )) as Extract<WorkerCommand, { type: 'worker.shutdown' }>
-    expect(shutdownCommand.reason).toBe('restart')
-    firstWorker.emitFrame({ id: shutdownCommand.id, ok: true })
-    firstWorker.emitExit(0, null)
+      'worker.setModel',
+    )) as Extract<WorkerCommand, { type: 'worker.setModel' }>
+    expect(setModelCommand.model).toBe('opus')
+    firstWorker.emitFrame({ id: setModelCommand.id, ok: true })
     const updated = await setModelPromise
     expect(updated.model).toBe('opus')
+    expect(
+      firstWorker
+        .writtenCommands()
+        .filter(command => command.type === 'worker.shutdown'),
+    ).toHaveLength(0)
 
     await services.ports.session.prompt({
       sessionId: 'session-1',
       prompt: 'after model change',
     })
-    const secondWorker = await waitFor(() => workerChildren[1])
-    const secondInitialize = (await waitForWorkerCommand(
-      secondWorker,
-      'worker.initialize',
-    )) as Extract<WorkerCommand, { type: 'worker.initialize' }>
-    expect(secondInitialize.payload.model).toBe('opus')
-    secondWorker.emitFrame({ id: secondInitialize.id, ok: true })
-    secondWorker.emitFrame({
-      type: 'worker.ready',
-      workerId: secondWorker.assignedWorkerId,
-      pid: 12345,
-    })
-    const secondPrompt = (await waitForWorkerCommand(
-      secondWorker,
-      'session.prompt',
-    )) as Extract<WorkerCommand, { type: 'session.prompt' }>
-    secondWorker.emitFrame({ id: secondPrompt.id, ok: true })
-    secondWorker.emitFrame({
+    expect(workerChildren).toHaveLength(1)
+    const secondPrompt = (await waitFor(() => {
+      const prompts = firstWorker
+        .writtenCommands()
+        .filter(command => command.type === 'session.prompt')
+      return prompts[1]
+    })) as Extract<WorkerCommand, { type: 'session.prompt' }>
+    firstWorker.emitFrame({ id: secondPrompt.id, ok: true })
+    firstWorker.emitFrame({
       type: 'run.completed',
       runId: secondPrompt.runId,
       stopReason: 'end_turn',
@@ -2096,6 +2098,139 @@ describe('createDefaultAppServerServices', () => {
       return snapshot.runs.some(run => run.status.type === 'completed')
         ? snapshot
         : undefined
+    })
+  })
+
+  test('restarts warm worker when provider fingerprint changes', async () => {
+    const storageRoot = await createTempRoot()
+    const workerChildren: FakeWorkerChild[] = []
+    const services = createDefaultAppServerServices({
+      config: createTestConfig(storageRoot),
+      clientHub: new ClientHub({ maxClientQueueSize: 16 }),
+      serverVersion: 'test-server',
+      spawnWorker: ((_command, _args, _options: SpawnOptionsWithoutStdio) => {
+        const child = createFakeWorkerChild(
+          String(_options.env?.MATCHA_AGENT_WORKER_ID ?? ''),
+        )
+        workerChildren.push(child)
+        return child
+      }) as WorkerProcessSpawn,
+      createWorkerRequestId: sequentialIds('worker-request'),
+    })
+
+    await services.ports.session.create({
+      cwd: storageRoot,
+      sessionId: 'session-1',
+      model: 'sonnet',
+    })
+    await services.ports.session.prompt({
+      sessionId: 'session-1',
+      prompt: 'before provider change',
+    })
+    const worker = await waitFor(() => workerChildren[0])
+    const initialize = await waitForWorkerCommand(worker, 'worker.initialize')
+    worker.emitFrame({ id: initialize.id, ok: true })
+    worker.emitFrame({
+      type: 'worker.ready',
+      workerId: worker.assignedWorkerId,
+      pid: 12345,
+    })
+    const prompt = (await waitForWorkerCommand(
+      worker,
+      'session.prompt',
+    )) as Extract<WorkerCommand, { type: 'session.prompt' }>
+    worker.emitFrame({ id: prompt.id, ok: true })
+    worker.emitFrame({
+      type: 'run.completed',
+      runId: prompt.runId,
+      stopReason: 'end_turn',
+    })
+    await waitFor(async () => {
+      const snapshot = await services.ports.session.snapshot({
+        sessionId: 'session-1',
+      })
+      return snapshot.runs.some(run => run.status.type === 'completed')
+        ? snapshot
+        : undefined
+    })
+
+    const setModel = services.ports.session.setModel({
+      sessionId: 'session-1',
+      model: 'opus',
+      providerFingerprint: 'matcha-provider:v1:next',
+    })
+    const shutdown = (await waitForWorkerCommand(
+      worker,
+      'worker.shutdown',
+    )) as Extract<WorkerCommand, { type: 'worker.shutdown' }>
+    expect(shutdown.reason).toBe('restart')
+    worker.emitFrame({ id: shutdown.id, ok: true })
+    worker.emitExit(0, null)
+    await expect(setModel).resolves.toMatchObject({
+      model: 'opus',
+      providerFingerprint: 'matcha-provider:v1:next',
+    })
+  })
+
+  test('keeps provider runtime private and passes it only to worker initialization', async () => {
+    const storageRoot = await createTempRoot()
+    const workerChildren: FakeWorkerChild[] = []
+    const services = createDefaultAppServerServices({
+      config: createTestConfig(storageRoot),
+      clientHub: new ClientHub({ maxClientQueueSize: 16 }),
+      serverVersion: 'test-server',
+      spawnWorker: ((_command, _args, _options: SpawnOptionsWithoutStdio) => {
+        const child = createFakeWorkerChild(
+          String(_options.env?.MATCHA_AGENT_WORKER_ID ?? ''),
+        )
+        workerChildren.push(child)
+        return child
+      }) as WorkerProcessSpawn,
+      createWorkerRequestId: sequentialIds('worker-request'),
+    })
+
+    await services.ports.session.create({
+      cwd: storageRoot,
+      sessionId: 'session-1',
+      model: 'sonnet',
+    })
+    const updated = await services.ports.session.setModel({
+      sessionId: 'session-1',
+      model: 'ark-code-latest',
+      providerFingerprint: 'matcha-provider:v1:ark',
+      providerRuntime: {
+        kind: 'openAiChatCompletions',
+        baseUrl: 'https://ark.example/v1',
+        apiKey: 'ark-secret',
+      },
+    })
+
+    expect(JSON.stringify(updated)).not.toContain('ark-secret')
+    expect(JSON.stringify(updated)).not.toContain('https://ark.example/v1')
+    const snapshot = await services.ports.session.snapshot({
+      sessionId: 'session-1',
+    })
+    expect(JSON.stringify(snapshot)).not.toContain('ark-secret')
+    expect(JSON.stringify(snapshot)).not.toContain('https://ark.example/v1')
+    const replayed = await services.ports.events.replay?.({
+      sessionId: 'session-1',
+    })
+    expect(JSON.stringify(replayed)).not.toContain('ark-secret')
+    expect(JSON.stringify(replayed)).not.toContain('https://ark.example/v1')
+
+    await services.ports.session.prompt({
+      sessionId: 'session-1',
+      prompt: 'uses host provider runtime',
+    })
+    const worker = await waitFor(() => workerChildren[0])
+    const initialize = (await waitForWorkerCommand(
+      worker,
+      'worker.initialize',
+    )) as Extract<WorkerCommand, { type: 'worker.initialize' }>
+    expect(initialize.payload.providerRuntime).toEqual({
+      kind: 'openAiChatCompletions',
+      baseUrl: 'https://ark.example/v1',
+      apiKey: 'ark-secret',
     })
   })
 

@@ -30,48 +30,46 @@ function createTempOpenClawPackage(): string {
     '}',
   ].join('\n'));
 
-  fs.writeFileSync(path.join(dist, 'core-descriptors-test.js'), [
-    'const CORE_GATEWAY_METHOD_SPECS = [',
-    '\t{',
-    '\t\tname: "chat.send",',
-    '\t\tscope: "operator.write"',
-    '\t},',
-    '];',
-    'function createCoreGatewayMethodDescriptors(handlers) {',
-    '\tthrow new Error(`gateway method handler is missing a descriptor: ${name}`);',
-    '}',
-  ].join('\n'));
-
-  fs.writeFileSync(path.join(dist, 'pi-bundle-mcp-runtime-test.js'), [
-    'function createSessionMcpRuntime(params) {',
-    '\tlet catalog = null;',
-    '\treturn {',
-    '\t\tgetCatalog,',
-    '\t};',
-    '}',
-    'function createSessionMcpRuntimeManager() {',
-    '\tconst runtimesBySessionId = new Map();',
-    '\tconst sessionIdBySessionKey = new Map();',
-    '\treturn {',
-    '\t\tresolveSessionId(sessionKey) {',
-    '\t\t\treturn sessionIdBySessionKey.get(sessionKey);',
-    '\t\t},',
-    '\t};',
-    '}',
-    'function getSessionMcpRuntimeManager() {',
-    '\treturn createSessionMcpRuntimeManager();',
-    '}',
-    'export { getSessionMcpRuntimeManager as g };',
+  fs.writeFileSync(path.join(dist, 'protocol-test.js'), [
+    'const WebLoginStartParamsSchema = Type.Object({',
+    '\tforce: Type.Optional(Type.Boolean()),',
+    '\ttimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),',
+    '\tverbose: Type.Optional(Type.Boolean()),',
+    '\taccountId: Type.Optional(Type.String())',
+    '}, { additionalProperties: false });',
+    'const QrDataUrlSchema = Type.String({',
+    '\tmaxLength: 16384,',
+    '\tpattern: "^data:image/png;base64,"',
+    '});',
+    'const WebLoginWaitParamsSchema = Type.Object({',
+    '\ttimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),',
+    '\taccountId: Type.Optional(Type.String()),',
+    '\tcurrentQrDataUrl: Type.Optional(QrDataUrlSchema)',
+    '}, { additionalProperties: false });',
   ].join('\n'));
 
   fs.writeFileSync(path.join(dist, 'server-methods-test.js'), [
-    'import { t as createSubsystemLogger } from "./subsystem-BIvbRvCg.js";',
-    'const coreGatewayHandlers = {',
-    '\t...chatHandlers,',
+    'const WEB_LOGIN_METHODS = new Set(["web.login.start", "web.login.wait"]);',
+    'const resolveWebLoginProvider = () => listChannelPlugins().find((plugin) => [...plugin.gatewayMethods ?? [], ...(plugin.gatewayMethodDescriptors ?? []).map((descriptor) => descriptor.name)].some((method) => WEB_LOGIN_METHODS.has(method))) ?? null;',
+    'const webHandlers = {',
+    '\t"web.login.start": async ({ params }) => {',
+    '\t\tconst provider = resolveWebLoginProvider();',
+    '\t\tconst result = await provider.gateway.loginWithQrStart({',
+    '\t\t\tforce: Boolean(params.force),',
+    '\t\t\ttimeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : void 0,',
+    '\t\t\tverbose: Boolean(params.verbose),',
+    '\t\t\taccountId: typeof params.accountId === "string" ? params.accountId : void 0',
+    '\t\t});',
+    '\t},',
+    '\t"web.login.wait": async ({ params }) => {',
+    '\t\tconst provider = resolveWebLoginProvider();',
+    '\t\tconst result = await provider.gateway.loginWithQrWait({',
+    '\t\t\t\ttimeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : void 0,',
+    '\t\t\t\taccountId,',
+    '\t\t\t\tcurrentQrDataUrl: typeof params.currentQrDataUrl === "string" ? params.currentQrDataUrl : void 0',
+    '\t\t\t});',
+    '\t}',
     '};',
-    'function createRequestGatewayMethodRegistry(extraHandlers) {',
-    '\treturn extraHandlers;',
-    '}',
   ].join('\n'));
 
   return root;
@@ -84,50 +82,45 @@ afterEach(() => {
 });
 
 describe('openclaw bundle patches', () => {
-  it('patches OpenClaw gateway to expose cached session MCP client status', () => {
+  it('patches the shared web login contract and retains custom provider patches', () => {
     const openclawDir = createTempOpenClawPackage();
-    const logs: string[] = [];
 
-    const results = applyOpenClawBundlePatches(openclawDir, { log: (line) => logs.push(line) });
+    const results = applyOpenClawBundlePatches(openclawDir, { log: () => undefined });
 
     expect(results).toContainEqual(expect.objectContaining({
-      id: 'openclaw-mcp-status-gateway-method',
+      id: 'custom-provider-skip-api-owner-hint',
       status: 'applied',
     }));
-    expect(logs.some((line) => line.includes('openclaw-mcp-status-gateway-method'))).toBe(true);
-
-    const descriptorSource = fs.readFileSync(path.join(openclawDir, 'dist', 'core-descriptors-test.js'), 'utf8');
-    expect(descriptorSource).toContain('name: "mcpServerStatus/list"');
-    expect(descriptorSource).toContain('scope: "operator.read"');
-
-    const serverMethodsSource = fs.readFileSync(path.join(openclawDir, 'dist', 'server-methods-test.js'), 'utf8');
-    expect(serverMethodsSource).toContain('import { g as getSessionMcpRuntimeManager } from "./pi-bundle-mcp-runtime-test.js";');
-    expect(serverMethodsSource).toContain('const matchaMcpStatusGatewayHandlers = {');
-    expect(serverMethodsSource).toContain('"mcpServerStatus/list": async ({ params, respond, context }) => {');
-    expect(serverMethodsSource).toContain('context?.logGateway ?? createSubsystemLogger("gateway/mcp-status")');
-    expect(serverMethodsSource).toContain('mcpServerStatus/list request sessionKey=');
-    expect(serverMethodsSource).toContain('mcpServerStatus/list resolved sessionKey=');
-    expect(serverMethodsSource).toContain('getBySessionKey(sessionKey)');
-    expect(serverMethodsSource).toContain('await runtime.getCatalog()');
-    expect(serverMethodsSource).toContain('loadSessionEntry(sessionKey)');
-    expect(serverMethodsSource).toContain('manager.getOrCreate({');
-    expect(serverMethodsSource).toContain('...matchaMcpStatusGatewayHandlers,');
-    expect(serverMethodsSource).not.toContain('resolveCodexAppServerRuntimeOptions');
-    expect(serverMethodsSource).not.toContain('requestCodexAppServerJson');
-
-    const runtimeSource = fs.readFileSync(path.join(openclawDir, 'dist', 'pi-bundle-mcp-runtime-test.js'), 'utf8');
-    expect(runtimeSource).toContain('getCachedCatalog() {');
-    expect(runtimeSource).toContain('getBySessionKey(sessionKey) {');
+    expect(results).toContainEqual(expect.objectContaining({
+      id: 'custom-provider-skip-synthetic-profile-defer',
+      status: 'applied',
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      id: 'openclaw-web-login-contract',
+      status: 'applied',
+    }));
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'providers.runtime-test.js'), 'utf8'))
+      .toContain('if (!normalizedProvider || normalizedProvider.startsWith("custom-")) return;');
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'model-auth-test.js'), 'utf8'))
+      .toContain('if (normalizeProviderId(params.provider).startsWith("custom-")) return false;');
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'protocol-test.js'), 'utf8'))
+      .toContain('channel: Type.Optional(NonEmptyString),');
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'protocol-test.js'), 'utf8'))
+      .toContain('sessionKey: Type.Optional(NonEmptyString),');
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'server-methods-test.js'), 'utf8'))
+      .toContain('resolveWebLoginProvider(params.channel)');
+    expect(fs.readFileSync(path.join(openclawDir, 'dist', 'server-methods-test.js'), 'utf8'))
+      .toContain('sessionKey: typeof params.sessionKey === "string" ? params.sessionKey : void 0,');
   });
 
-  it('keeps the OpenClaw MCP status gateway patch idempotent', () => {
+  it('keeps the web login bundle patch idempotent', () => {
     const openclawDir = createTempOpenClawPackage();
     applyOpenClawBundlePatches(openclawDir, { log: () => undefined });
 
     const results = applyOpenClawBundlePatches(openclawDir, { log: () => undefined });
 
     expect(results).toContainEqual(expect.objectContaining({
-      id: 'openclaw-mcp-status-gateway-method',
+      id: 'openclaw-web-login-contract',
       status: 'clean',
     }));
   });

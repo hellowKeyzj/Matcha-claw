@@ -1,214 +1,266 @@
-import { expect, test } from '../fixtures/electron';
+import { expect, readE2EOpenClawState, test } from '../fixtures/electron';
 import type { Page } from '@playwright/test';
 
-async function ensureSetupComplete(page: Page): Promise<void> {
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5KQAAAABJRU5ErkJggg==';
+
+async function bootChat(page: Page): Promise<void> {
   await page.evaluate(() => {
     const storageKey = 'matchaclaw-settings';
     const raw = window.localStorage.getItem(storageKey);
-    let parsed: { state?: Record<string, unknown>; version?: number } = {};
-    if (raw) {
-      try {
-        parsed = JSON.parse(raw) as { state?: Record<string, unknown>; version?: number };
-      } catch {
-        parsed = {};
-      }
+    let parsed: { state?: Record<string, unknown>; version?: number };
+    try {
+      parsed = raw ? JSON.parse(raw) as { state?: Record<string, unknown>; version?: number } : {};
+    } catch {
+      parsed = {};
     }
     parsed.state = { ...(parsed.state ?? {}), setupComplete: true };
     parsed.version = typeof parsed.version === 'number' ? parsed.version : 0;
     window.localStorage.setItem(storageKey, JSON.stringify(parsed));
-  });
-}
-
-async function bootChat(page: Page): Promise<void> {
-  await ensureSetupComplete(page);
-  await page.evaluate(() => {
     window.location.hash = '#/';
   });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.locator('textarea')).toBeVisible({ timeout: 15_000 });
 }
 
-function visibleByTestId(page: Page, testId: string) {
-  return page.locator(`[data-testid="${testId}"]:visible`).first();
+async function createOpenClawSession(page: Page): Promise<void> {
+  const sessionList = page.getByTestId('session-list-scroll-area');
+  const newSession = page.getByRole('button', { name: /新会话|New session/i });
+  await expect(page.getByTestId('session-list-error')).toHaveCount(0, { timeout: 30_000 });
+  await expect(newSession).toBeEnabled({ timeout: 30_000 });
+  const initialCount = await sessionList.getByRole('button').count();
+  await newSession.click();
+  await expect.poll(async () => sessionList.getByRole('button').count()).toBeGreaterThan(initialCount);
 }
 
-function visibleMonacoEditorBackground(page: Page) {
-  return page.locator('.monaco-editor-background:visible').first();
+async function openWorkspaceBrowser(page: Page) {
+  const sidePanel = page.getByTestId('chat-side-panel');
+  if (!(await sidePanel.isVisible())) {
+    await page.getByRole('button', { name: /打开右侧栏|Open side panel/i }).click();
+    await expect(sidePanel).toBeVisible();
+  }
+  await sidePanel.getByTestId('chat-side-panel-tab-artifacts').click();
+  await sidePanel.getByTestId('chat-artifact-section-workspace').click();
+  await expect(sidePanel.getByTestId('workspace-browser-body')).toBeVisible();
+  return sidePanel;
+}
+
+async function dropPngAttachment(page: Page): Promise<void> {
+  await page.locator('textarea').evaluate((target, base64) => {
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const file = new File([bytes], 'e2e-attachment.png', { type: 'image/png' });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    target.closest('.w-full')?.dispatchEvent(new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    }));
+  }, TINY_PNG_BASE64);
+}
+
+async function invokeHostCapability(page: Page, body: unknown): Promise<unknown> {
+  return await page.evaluate(async (body) => {
+    const electron = (window as Window & {
+      electron?: { ipcRenderer?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> } };
+    }).electron;
+    return await electron?.ipcRenderer?.invoke?.('hostapi:fetch', {
+      requestId: crypto.randomUUID(),
+      path: '/api/capabilities/execute',
+      method: 'POST',
+      body,
+      timeoutMs: 120_000,
+    }) ?? null;
+  }, body);
+}
+
+async function stageRendererAttachment(page: Page, input: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+}): Promise<{
+  stagedAttachmentId: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+}> {
+  const staged = await page.evaluate(async (input) => {
+    const electron = (window as Window & {
+      electron?: { ipcRenderer?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> } };
+    }).electron;
+    return await electron?.ipcRenderer?.invoke?.(
+      'dialog:stageRendererBufferAttachment', input,
+    ) ?? null;
+  }, input);
+  expect(staged).toMatchObject({
+    stagedAttachmentId: expect.any(String),
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    fileSize: expect.any(Number),
+  });
+  const stagedAttachment = staged as {
+    stagedAttachmentId: string;
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+  };
+  return {
+    stagedAttachmentId: stagedAttachment.stagedAttachmentId,
+    fileName: stagedAttachment.fileName,
+    mimeType: stagedAttachment.mimeType,
+    fileSize: stagedAttachment.fileSize,
+  };
+}
+
+async function createOpenClawSessionThroughCapability(page: Page): Promise<{
+  sessionKey: string;
+  endpoint: { kind: 'native-runtime'; runtimeAdapterId: 'openclaw'; runtimeInstanceId: 'local' };
+}> {
+  const endpoint = {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw' as const,
+    runtimeInstanceId: 'local' as const,
+  };
+  await expect.poll(async () => await invokeHostCapability(page, {
+    id: 'session.management',
+    operationId: 'sessions.list',
+    scope: { kind: 'runtime-instance', endpoint },
+    target: { kind: 'runtime-endpoint' },
+    input: { endpoint },
+  }), { timeout: 45_000 }).toMatchObject({
+    ok: true,
+    data: { status: 200, ok: true, json: { sessions: expect.any(Array) } },
+  });
+  const endpointSessionId = `e2e-attachment-${crypto.randomUUID()}`;
+  const response = await invokeHostCapability(page, {
+    id: 'session.prompt',
+    operationId: 'sessions.create',
+    scope: { kind: 'agent', endpoint, agentId: 'main' },
+    target: { kind: 'agent', agentId: 'main' },
+    input: { endpoint, agentId: 'main', endpointSessionId },
+  });
+  const sessionKey = `agent:main:${endpointSessionId}`;
+  expect(response).toMatchObject({
+    ok: true,
+    data: { status: 200, ok: true, json: { outcome: 'succeeded', sessionKey } },
+  });
+  return { sessionKey, endpoint };
 }
 
 test.describe('Chat e2e', () => {
-  test('发送后进入流式并完成最终回复', async ({ page }) => {
+  test('creates an OpenClaw session and previews its isolated workspace through Electron Main and Rust Host', async ({ page }) => {
     await bootChat(page);
+    await createOpenClawSession(page);
 
-    const input = page.locator('textarea');
-    await input.fill('e2e default message');
-    await page.getByTitle('Send').click();
+    const sidePanel = await openWorkspaceBrowser(page);
+    const workspace = sidePanel.getByTestId('workspace-browser-body');
+    await expect(workspace.getByRole('button', { name: 'AGENTS.md' })).toBeVisible();
+    await expect(workspace).not.toContainText('e2e-profile-closure-2');
 
-    await expect(page.getByText('Mock streaming...')).toBeVisible();
-    await expect(page.getByText('Mock reply: e2e default message')).toBeVisible();
-    await expect(page.getByTitle('Send')).toBeVisible();
+    await workspace.getByRole('button', { name: 'AGENTS.md' }).click();
+    await expect(sidePanel.getByText('AGENTS.md', { exact: true }).last()).toBeVisible();
+    await expect(workspace.getByText(/You are|workspace/i).first()).toBeVisible();
   });
 
-  test('审批等待可展示并允许后继续完成', async ({ page }) => {
+  test('stages and sends an image attachment without exposing its owned path', async ({ page, electronApp }) => {
     await bootChat(page);
+    await createOpenClawSession(page);
 
-    const input = page.locator('textarea');
-    await input.fill('[approval] need approval');
-    await page.getByTitle('Send').click();
+    await dropPngAttachment(page);
+    await expect(page.getByText('e2e-attachment.png', { exact: true })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('stagedPath');
+    await expect(page.locator('body')).not.toContainText('attachment-staging');
 
-    const approvalDock = page.getByTestId('chat-approval-dock');
-    await expect(approvalDock).toBeVisible();
-    await approvalDock.getByRole('button', { name: /Allow once|允许一次|同意一次/i }).click();
-
-    await expect(page.getByText('Approved result')).toBeVisible();
-    await expect(approvalDock).toBeHidden();
+    await page.locator('textarea').fill('Describe this image.');
+    await page.getByRole('button', { name: 'Send' }).click();
+    const messageStack = page.getByTestId('chat-message-stack');
+    await expect(messageStack.getByText('Describe this image.', { exact: true }),
+      `OpenClaw state: ${JSON.stringify(await readE2EOpenClawState(electronApp))}`,
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(messageStack.locator('img[src^="blob:"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('body')).not.toContainText('attachment-staging');
   });
 
-  test('长任务可中断并回到可发送状态', async ({ page }) => {
-    await bootChat(page);
+  test('delivers a fixed PNG through the public session capability without leaking custody details', async ({ page, electronApp }) => {
+    const { sessionKey, endpoint } = await createOpenClawSessionThroughCapability(page);
+    const attachment = await stageRendererAttachment(page, {
+      base64: TINY_PNG_BASE64,
+      fileName: 'fixed-profile.png',
+      mimeType: 'image/png',
+    });
+    const identity = { endpoint, agentId: 'main', sessionKey };
 
-    const input = page.locator('textarea');
-    await input.fill('[long] keep running');
-    await page.getByTitle('Send').click();
-
-    await expect(page.getByTitle('Stop')).toBeVisible();
-    await page.getByTitle('Stop').click();
-    await expect(page.getByTitle('Send')).toBeVisible();
-  });
-
-  test('会话切换可在历史会话与主会话之间往返', async ({ page }) => {
-    await bootChat(page);
-
-    const input = page.locator('textarea');
-    await input.fill('main session text');
-    await page.getByTitle('Send').click();
-    await expect(page.getByText('Mock reply: main session text')).toBeVisible();
-
-    const sessionList = page.getByTestId('session-list-scroll-area');
-    await sessionList.getByText('History Session').click();
-    await expect(page.getByRole('main').getByText('History session seed message', { exact: true })).toBeVisible();
-
-    await page.getByTestId('agent-item-main').click();
-    await expect(page.getByText('main session text', { exact: true })).toBeVisible();
-  });
-
-  test('附件上传后可走发送链路并渲染附件消息', async ({ page }) => {
-    await bootChat(page);
-
-    await page.getByTitle('Attach files').click();
-    await expect(page.getByText('notes.txt')).toBeVisible();
-
-    const input = page.locator('textarea');
-    await input.fill('send with attachment');
-    await page.getByTitle('Send').click();
-
-    const sentUserTurn = page.getByTestId('chat-message-stack')
-      .locator('[data-chat-item-kind="user-message"]')
-      .filter({ has: page.getByText('send with attachment', { exact: true }) });
-    await expect(sentUserTurn.getByTestId('chat-attached-file-card').filter({ hasText: 'notes.txt' })).toBeVisible();
-    await expect(page.getByText('Mock reply: send with attachment')).toBeVisible();
-  });
-
-  test('artifact workbench navigates generated files, rich previews, and workspace skill files', async ({ page }) => {
-    await bootChat(page);
-
-    const sessionList = page.getByTestId('session-list-scroll-area');
-    await sessionList.getByText('Artifact Session').click();
-
-    await expect(page.getByTestId('chat-execution-graph')).toBeVisible();
-
-    const sidePanel = page.getByTestId('chat-side-panel');
-    await expect(sidePanel).toBeVisible();
-    await expect(sidePanel.getByTestId('chat-side-panel-tab-artifacts')).toHaveAttribute('data-state', 'active');
-    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
-    await page.getByTestId('execution-graph-artifact-edit-1').click();
-    await expect(sidePanel.getByText('export const value = 1;').first()).toBeVisible();
-    await expect(sidePanel.getByText('export const value = 2;').first()).toBeVisible();
-    await expect(sidePanel.getByTestId('artifact-preview-next-file')).toBeVisible();
-
-    await sidePanel.getByTestId('chat-side-panel-artifact-fullscreen-toggle').click();
-    await expect(page.getByTestId('chat-artifact-workbench-fullscreen')).toBeVisible();
-    await expect(page.getByTestId('chat-workspace-host')).toHaveAttribute('data-takeover-mode', 'artifact-workbench');
-    await expect(page.getByTestId('agent-sessions-pane')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /新对话|New Chat/i })).toHaveCount(0);
-    await sidePanel.getByTestId('chat-side-panel-artifact-fullscreen-toggle').click();
-    await expect(page.getByTestId('chat-artifact-workbench-fullscreen')).toHaveCount(0);
-    await expect(page.getByTestId('chat-workspace-host')).toHaveAttribute('data-takeover-mode', 'none');
-    await expect(page.getByTestId('agent-sessions-pane')).toBeVisible();
-    await expect(page.getByRole('button', { name: /新对话|New Chat/i })).toBeVisible();
-
-    await sidePanel.getByTestId('artifact-preview-next-file').click();
-    await expect(sidePanel).toContainText('report.pdf');
-    await expect(page.getByTestId('pdf-viewer')).toBeVisible();
-    await expect(sidePanel.getByTestId('chat-artifact-section-changes')).toBeDisabled();
-
-    await sidePanel.getByTestId('artifact-preview-next-file').click();
-    await expect(sidePanel).toContainText('sales.xlsx');
-    await expect(page.getByTestId('sheet-viewer')).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: 'Summary' })).toBeVisible();
-    await expect(sidePanel.getByTestId('chat-artifact-section-changes')).toBeDisabled();
-
-    await sidePanel.getByTestId('artifact-preview-prev-file').click();
-    await expect(page.getByTestId('pdf-viewer')).toBeVisible();
-
-    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
-    await expect(sidePanel.getByTestId('workspace-browser-body')).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
-    await expect(sidePanel.getByTestId('workspace-browser-body')).not.toContainText('/workspace');
-    await expect(page.locator('[data-testid="workspace-tree-select-toggle"]')).toHaveCount(0);
-
-    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
-    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: /report\.pdf/i }).first()).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: /sales\.xlsx/i }).first()).toBeVisible();
-  });
-
-  test('artifact diff viewer keeps light-theme background aligned with the app shell', async ({ page }) => {
-    await bootChat(page);
-
-    await page.evaluate(() => {
-      const root = document.documentElement;
-      root.classList.remove('dark');
-      root.classList.add('light');
+    const textOnlyResponse = await invokeHostCapability(page, {
+      id: 'session.prompt',
+      operationId: 'sessions.send',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: {
+        sessionKey,
+        sessionIdentity: identity,
+        message: 'Verify the session send baseline.',
+        runId: `e2e-attachment-baseline-${crypto.randomUUID()}`,
+        attachments: [],
+      },
+    });
+    expect(
+      textOnlyResponse,
+      `OpenClaw state: ${JSON.stringify(await readE2EOpenClawState(electronApp))}`,
+    ).toMatchObject({
+      ok: true,
+      data: {
+        status: 202,
+        ok: true,
+        json: { outcome: 'queued', runId: expect.any(String) },
+      },
     });
 
-    const sessionList = page.getByTestId('session-list-scroll-area');
-    await sessionList.getByText('Artifact Session').click();
-
-    await page.getByTestId('execution-graph-artifact-edit-1').click();
-    const diffBackground = visibleMonacoEditorBackground(page);
-    await expect(diffBackground).toBeVisible({ timeout: 30_000 });
-
-    const colors = await diffBackground.evaluate((element) => {
-      return {
-        diffBackground: window.getComputedStyle(element).backgroundColor,
-        appBackground: window.getComputedStyle(document.body).backgroundColor,
-      };
+    const response = await invokeHostCapability(page, {
+      id: 'session.prompt',
+      operationId: 'sessions.send',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: {
+        sessionKey,
+        sessionIdentity: identity,
+        message: 'Read the fixed PNG attachment.',
+        runId: `e2e-attachment-run-${crypto.randomUUID()}`,
+        attachments: [attachment],
+      },
     });
 
-    expect(colors.diffBackground).toBe(colors.appBackground);
-    expect(colors.diffBackground).not.toBe('rgb(255, 255, 255)');
-  });
+    expect(
+      response,
+      `Response: ${JSON.stringify(response)}; OpenClaw state: ${JSON.stringify(await readE2EOpenClawState(electronApp))}`,
+    ).toMatchObject({
+      ok: true,
+      data: {
+        status: 202,
+        ok: true,
+        json: { outcome: 'queued', runId: expect.any(String) },
+      },
+    });
+    const projected = JSON.stringify(response);
+    expect(projected).not.toContain('attachment-staging');
+    expect(projected).not.toContain('media://');
+    expect(projected).not.toContain(TINY_PNG_BASE64);
+    expect(projected).not.toContain('iVBORw0KGgo');
 
-  test('artifact workbench supports group-level open and workspace browsing without multi-select', async ({ page }) => {
-    await bootChat(page);
-
-    const sessionList = page.getByTestId('session-list-scroll-area');
-    await sessionList.getByText('Artifact Session').click();
-
-    const sidePanel = page.getByTestId('chat-side-panel');
-    await expect(sidePanel).toBeVisible();
-
-    await sidePanel.getByRole('button', { name: '打开最新' }).first().click();
-    await expect(page.getByTestId('sheet-viewer')).toBeVisible();
-
-    await sidePanel.getByRole('button', { name: /demo\.ts/i }).first().click();
-    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
-    await expect(sidePanel.getByTestId('workspace-browser-body')).toBeVisible();
-    await expect(page.locator('[data-testid="workspace-tree-select-toggle"]')).toHaveCount(0);
-    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: /report\.pdf/i }).first()).toBeVisible();
-    await expect(sidePanel.getByRole('button', { name: /sales\.xlsx/i }).first()).toBeVisible();
-    await expect(sidePanel.getByTestId('workspace-browser-body')).not.toContainText('/workspace');
+    const secondUse = await invokeHostCapability(page, {
+      id: 'session.prompt',
+      operationId: 'sessions.send',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: {
+        sessionKey,
+        sessionIdentity: identity,
+        message: 'This must not replay the attachment.',
+        runId: `e2e-attachment-replay-${crypto.randomUUID()}`,
+        attachments: [attachment],
+      },
+    });
+    expect(secondUse).toMatchObject({
+      ok: true,
+      data: { status: 500, ok: false, json: { success: false, error: 'Capability request failed' } },
+    });
   });
 });

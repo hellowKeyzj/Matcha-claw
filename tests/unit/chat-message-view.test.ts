@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { getOrBuildChatMessageView } from '@/pages/Chat/chat-message-view';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
-import type { SessionAssistantTurnItem } from '../../runtime-host/shared/session-adapter-types';
+import type {
+  SessionAssistantTurnItem,
+  SessionRenderItem,
+} from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function buildItem(content: unknown): SessionRenderItem {

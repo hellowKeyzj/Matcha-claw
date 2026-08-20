@@ -1,71 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.fn();
-const hostCapabilityExecuteMock = vi.fn();
-const waitForRuntimeJobResultMock = vi.fn();
-const resolveSingleCapabilityScopeMock = vi.fn();
-
-const pluginRuntimeScope = {
-  kind: 'runtime-instance' as const,
-  endpoint: {
-    kind: 'native-runtime' as const,
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-};
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
-    if (path === '/api/capabilities/execute') {
-      const payload = init?.body ? JSON.parse(init.body) : {};
-      return await hostCapabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
-    }
-    return await hostApiFetchMock(path, init);
-  },
-  resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
-  waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
+  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
 }));
 
-function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
-  const enabledPluginIds = params?.enabledPluginIds ?? ['plugin-a'];
-  return {
-    success: true,
-    state: {
-      lifecycle: 'running',
-      runtimeLifecycle: 'running',
-      activePluginCount: enabledPluginIds.length,
-      enabledPluginIds,
-    },
-    health: {
-      ok: true,
-      lifecycle: 'running',
-      activePluginCount: enabledPluginIds.length,
-      degradedPlugins: [],
-    },
-    execution: {
-      enabledPluginIds,
-    },
-  };
-}
-
 function buildCatalogPayload() {
-    return {
-      success: true,
-      execution: {
-        enabledPluginIds: ['plugin-a'],
-      },
-    plugins: [
-      {
-        id: 'plugin-a',
-        name: 'Plugin A',
-        version: '1.0.0',
-        kind: 'builtin' as const,
-        platform: 'matchaclaw' as const,
-        category: 'runtime',
-        group: 'model' as const,
-        enabled: true,
-      },
-    ],
+  return {
+    plugins: [{
+      runtime: 'openclaw',
+      id: 'plugin-a',
+      name: 'Plugin A',
+      version: '1.0.0',
+      kind: 'builtin',
+      platform: 'openclaw',
+      category: 'runtime',
+      group: 'general',
+      enabled: true,
+      description: 'Plugin description',
+    }],
   };
 }
 
@@ -73,160 +27,145 @@ describe('plugins store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
-    hostCapabilityExecuteMock.mockReset();
-    waitForRuntimeJobResultMock.mockReset();
-    resolveSingleCapabilityScopeMock.mockReset();
-    resolveSingleCapabilityScopeMock.mockResolvedValue(pluginRuntimeScope);
   });
 
-  it('首次加载时 runtime 和 catalog 分层写入，不再等整份 snapshot', async () => {
+  it('loads the catalog without requesting runtime status', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload();
-      }
-      if (path === '/api/plugins/catalog') {
-        return buildCatalogPayload();
-      }
-      throw new Error(`unexpected path: ${path}`);
+      if (path === '/api/plugins/catalog') return buildCatalogPayload();
+      throw new Error(`Unexpected path: ${path}`);
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
-    expect(usePluginsStore.getState().runtimeReady).toBe(false);
-    expect(usePluginsStore.getState().catalogReady).toBe(false);
-
-    await usePluginsStore.getState().refreshRuntime({ reason: 'initial' });
-
-    let state = usePluginsStore.getState();
-    expect(state.runtimeReady).toBe(true);
-    expect(state.catalogReady).toBe(false);
-    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
-
     await usePluginsStore.getState().refreshCatalog({ reason: 'initial' });
 
-    state = usePluginsStore.getState();
-    expect(state.catalogReady).toBe(true);
-    expect(state.catalog).toHaveLength(1);
-    expect(state.error).toBeNull();
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/catalog');
+    expect(usePluginsStore.getState()).toMatchObject({
+      catalogReady: true,
+      catalog: buildCatalogPayload().plugins,
+      error: null,
+    });
   });
 
-  it('有缓存时 refreshSnapshot 失败保留旧 runtime 和 catalog', async () => {
+  it('preserves loaded projections when a later refresh fails', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload();
-      }
-      if (path === '/api/plugins/catalog') {
-        return buildCatalogPayload();
-      }
-      throw new Error(`unexpected path: ${path}`);
+      if (path === '/api/plugins/catalog') return buildCatalogPayload();
+      throw new Error(`Unexpected path: ${path}`);
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
+    hostApiFetchMock.mockRejectedValue(new Error('offline'));
 
-    hostApiFetchMock.mockRejectedValue(new Error('network error'));
-    await expect(usePluginsStore.getState().refreshSnapshot({ reason: 'manual', force: true })).rejects.toThrow();
+    await expect(usePluginsStore.getState().refreshSnapshot({ reason: 'manual', force: true })).rejects.toThrow('offline');
 
-    const state = usePluginsStore.getState();
-    expect(state.runtimeReady).toBe(true);
-    expect(state.catalogReady).toBe(true);
-    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
-    expect(state.catalog).toHaveLength(1);
-    expect(state.error).toBe('plugins:errors.loadFailed');
+    expect(usePluginsStore.getState()).toMatchObject({
+      catalog: buildCatalogPayload().plugins,
+      error: 'plugins:errors.loadFailed',
+    });
   });
 
-  it('缓存新鲜时 prewarm 不重复请求插件数据', async () => {
+  it('posts the closed configuration DTO and refreshes both projections after confirmation', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload();
-      }
-      if (path === '/api/plugins/catalog') {
-        return buildCatalogPayload();
-      }
-      throw new Error(`unexpected path: ${path}`);
+      if (path === '/api/plugins/catalog') return buildCatalogPayload();
+      if (path === '/api/plugins/configuration') return { outcome: 'configured' };
+      if (path === '/api/plugins/operation') return { outcome: 'configured' };
+      throw new Error(`Unexpected path: ${path}`);
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
     hostApiFetchMock.mockClear();
 
-    await usePluginsStore.getState().prewarm();
+    await expect(usePluginsStore.getState().togglePluginEnabled('plugin-a', false)).resolves.toBe('configured');
 
-    expect(hostApiFetchMock).not.toHaveBeenCalled();
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/configuration', {
+      method: 'POST',
+      body: JSON.stringify({ runtime: 'openclaw', pluginId: 'plugin-a', enabled: false }),
+    });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/catalog');
+    expect(usePluginsStore.getState().mutatingPluginId).toBeNull();
   });
 
-  it('togglePluginEnabled 后刷新 runtime 与 catalog，并在结束后清理 mutating 状态', async () => {
+  it.each(['rejected', 'unknown'] as const)('keeps projections when configuration is %s', async (outcome) => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload({ enabledPluginIds: ['plugin-a'] });
-      }
-      if (path === '/api/plugins/catalog') {
-        return buildCatalogPayload();
-      }
-      throw new Error(`unexpected path: ${path}`);
+      if (path === '/api/plugins/catalog') return buildCatalogPayload();
+      if (path === '/api/plugins/configuration') return { outcome };
+      throw new Error(`Unexpected path: ${path}`);
     });
-    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
-      if (payload.operationId === 'plugins.setEnabled') {
-        return {
-          success: true,
-          job: {
-            id: 'job-1',
-            type: 'plugins.setEnabled',
-            status: 'queued',
-            queuedAt: 1,
-            attempts: 0,
-            maxAttempts: 1,
-          },
-        };
-      }
-      throw new Error(`unexpected operation: ${payload.operationId}`);
-    });
-    waitForRuntimeJobResultMock.mockResolvedValue(buildRuntimePayload({ enabledPluginIds: [] }));
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
-    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false);
+    hostApiFetchMock.mockClear();
 
-    const state = usePluginsStore.getState();
-    expect(state.mutating).toBe(false);
-    expect(state.mutatingPluginId).toBeNull();
-    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
-    expect(resolveSingleCapabilityScopeMock).toHaveBeenCalledWith('plugin.runtime');
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'plugin.runtime',
-      operationId: 'plugins.setEnabled',
-      scope: pluginRuntimeScope,
-      target: { kind: 'plugin', pluginId: 'plugin-a' },
-      input: { pluginIds: ['plugin-a'], enabled: false },
-    }), { timeoutMs: undefined });
-    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
+    await expect(usePluginsStore.getState().togglePluginEnabled('plugin-a', false)).resolves.toBe(outcome);
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(usePluginsStore.getState()).toMatchObject({
+      catalog: buildCatalogPayload().plugins,
+      error: 'plugins:errors.togglePluginFailed',
+    });
   });
 
-  it('restartHost 先请求宿主重启 runtime-host，等待恢复后刷新插件业务快照', async () => {
-    let runtimeAttempts = 0;
-    hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/runtime-host/restart') {
-        return { success: true };
+  it('posts a plugin operation, exposes its action, and refreshes the catalog after confirmation', async () => {
+    let resolveOperation: ((value: { outcome: 'configured' }) => void) | undefined;
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/plugins/catalog') return Promise.resolve(buildCatalogPayload());
+      if (path === '/api/plugins/operation') {
+        return new Promise<{ outcome: 'configured' }>((resolve) => {
+          resolveOperation = resolve;
+        });
       }
-      if (path === '/api/plugins/runtime') {
-        runtimeAttempts += 1;
-        if (runtimeAttempts === 1) {
-          throw new Error('fetch failed during restart');
-        }
-        return buildRuntimePayload({ enabledPluginIds: ['plugin-a'] });
-      }
-      if (path === '/api/plugins/catalog') {
-        return buildCatalogPayload();
-      }
-      throw new Error(`unexpected path: ${path}`);
+      throw new Error(`Unexpected path: ${path}`);
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
-    await usePluginsStore.getState().restartHost();
+    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
+    hostApiFetchMock.mockClear();
 
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/runtime-host/restart', { method: 'POST' });
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime', undefined);
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(3, '/api/plugins/runtime', undefined);
-    expect(usePluginsStore.getState().runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
-    expect(usePluginsStore.getState().mutating).toBe(false);
+    const operation = usePluginsStore.getState().operatePlugin('plugin-a', 'update');
+    await vi.waitFor(() => expect(usePluginsStore.getState()).toMatchObject({
+      mutatingPluginId: 'plugin-a',
+      mutatingAction: 'update',
+    }));
+    resolveOperation?.({ outcome: 'configured' });
+
+    await expect(operation).resolves.toBe('configured');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/operation', {
+      method: 'POST',
+      body: JSON.stringify({ runtime: 'openclaw', operation: 'update', pluginId: 'plugin-a' }),
+    });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/catalog');
+    expect(usePluginsStore.getState()).toMatchObject({
+      mutatingPluginId: null,
+      mutatingAction: null,
+      error: null,
+    });
+  });
+
+  it.each(['rejected', 'unknown'] as const)('keeps projections when plugin operation is %s', async (outcome) => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/plugins/catalog') return buildCatalogPayload();
+      if (path === '/api/plugins/operation') return { outcome };
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const { usePluginsStore } = await import('@/stores/plugins-store');
+    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
+    hostApiFetchMock.mockClear();
+
+    await expect(usePluginsStore.getState().operatePlugin('plugin-a', 'uninstall')).resolves.toBe(outcome);
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/operation', {
+      method: 'POST',
+      body: JSON.stringify({ runtime: 'openclaw', operation: 'uninstall', pluginId: 'plugin-a' }),
+    });
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(usePluginsStore.getState()).toMatchObject({
+      catalog: buildCatalogPayload().plugins,
+      mutatingPluginId: null,
+      mutatingAction: null,
+      error: 'plugins:errors.operationFailed',
+    });
   });
 });

@@ -1,7 +1,7 @@
 import { hostSessionAbort } from '@/lib/host-api';
 import type { StoreSessionRunCache } from './session-run-cache';
-import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
-import { getSessionRuntime, patchSessionSnapshot } from './store-state-helpers';
+import { resolveSessionOperationTarget } from './session-identity';
+import { getSessionRuntime } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
   ApprovalItem,
@@ -65,14 +65,7 @@ function scheduleAbortRetry(params: {
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
       approvalIds,
-    }).then((abortRuntime) => {
-      set((state) => {
-        const loadedSessions = patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot);
-        return {
-          loadedSessions,
-          sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-        };
-      });
+    }).then(() => {
       scheduleAbortRetry(params);
     }).catch(() => {
       scheduleAbortRetry(params);
@@ -99,18 +92,11 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     }));
     const target = resolveSessionOperationTarget(get(), sessionKey);
     const approvalIds = pendingApprovals.map((approval) => approval.id);
-    const abortRuntime = await hostSessionAbort({
+    await hostSessionAbort({
       sessionKey: target.sessionKey,
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       approvalIds,
-    });
-    set((state) => {
-      const loadedSessions = patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot);
-      return {
-        loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-      };
     });
     scheduleAbortRetry({
       set,

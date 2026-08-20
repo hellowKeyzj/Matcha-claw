@@ -5,16 +5,21 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
-import type { SessionUpdateEvent, TaskSnapshotEvent } from '../../runtime-host/shared/session-adapter-types';
-import { buildSessionIdentityKey } from '../../runtime-host/shared/runtime-address';
+import type { TaskSnapshotEvent } from '../types/session/task-snapshot';
+import { decodeSessionDelta } from '../types/session/snapshot';
 import type { GatewayStatus } from '../types/gateway';
+import { applySessionDelta } from './chat/store-state-helpers';
 import { useChatStore } from './chat';
 import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
-import { isGatewayOperational } from '@/lib/gateway-status';
-import { logRendererMatchaTerminalDelivery } from '@/lib/debug-logging';
-import { readMatchaTerminalDeliveryTraceContext } from '../../runtime-host/shared/matcha-terminal-delivery-trace';
-import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { decodeGatewayChannelStatusUpdates } from '@/lib/channel-status';
+import type { GatewayTransportIssue } from '../types/session/runtime-state';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
@@ -59,6 +64,73 @@ interface RuntimeHostObservedState {
   updatedAt?: number;
 }
 
+interface RuntimeHostStatusSnapshot {
+  status: RuntimeHostObservedStatus;
+  hostLifecycle?: string;
+  runtimeLifecycle?: string;
+  pid?: number;
+  activePluginCount?: number;
+  enabledPluginIds?: string[];
+  error?: string;
+  updatedAt?: number;
+}
+
+function applyRuntimeHostSnapshot(
+  snapshot: RuntimeHostStatusSnapshot,
+  previous: RuntimeHostObservedState,
+): RuntimeHostObservedState {
+  return {
+    lifecycle: snapshot.status,
+    hostLifecycle: snapshot.hostLifecycle,
+    runtimeLifecycle: snapshot.runtimeLifecycle,
+    pid: snapshot.pid,
+    activePluginCount: snapshot.activePluginCount,
+    enabledPluginIds: snapshot.enabledPluginIds ?? previous.enabledPluginIds,
+    error: snapshot.status === 'running' || snapshot.status === 'restarting' || snapshot.status === 'starting' || snapshot.status === 'stopping'
+      ? undefined
+      : snapshot.error,
+    restartCount: previous.restartCount,
+    lastRestartAt: previous.lastRestartAt,
+    updatedAt: snapshot.updatedAt ?? Date.now(),
+  };
+}
+
+function unavailableRuntimeHostSnapshot(): RuntimeHostStatusSnapshot {
+  return {
+    status: 'error',
+    error: 'Runtime Host status is unavailable.',
+    updatedAt: Date.now(),
+  };
+}
+
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+const STARTUP_TRACE_MESSAGE_LIMIT = 200;
+
+function sanitizeStartupTraceMessage(message: string): string {
+  return message
+    .replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp|private)\/)[^\s"'<>)]*/g, '[path]')
+    .replace(/(token|authorization|password|secret|api[-_ ]?key)(["'\s:=]+)[^\s"',}]+/gi, '$1$2[redacted]')
+    .slice(0, STARTUP_TRACE_MESSAGE_LIMIT);
+}
+
+function summarizeStartupTraceError(error: unknown): { errorName: string; message: string } {
+  return {
+    errorName: error instanceof Error ? error.name : typeof error,
+    message: sanitizeStartupTraceMessage(error instanceof Error ? error.message : String(error)),
+  };
+}
+
+function gatewayStartupTraceSummary(source: string, phase: string, status: GatewayStatus | null) {
+  return {
+    source,
+    phase,
+    processState: status?.processState,
+    gatewayReady: status?.gatewayReady,
+    healthSummary: status?.healthSummary,
+    transportState: status?.transportState,
+  };
+}
+
 interface GatewayState {
   status: GatewayStatus;
   health: GatewayHealth | null;
@@ -69,13 +141,41 @@ interface GatewayState {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
+  refreshRuntimeHostStatus: () => Promise<void>;
   checkHealth: () => Promise<GatewayHealth>;
   setStatus: (status: GatewayStatus) => void;
   clearError: () => void;
 }
 
 async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
-  return await hostApiFetch<GatewayStatus>('/api/gateway/status');
+  try {
+    const status = await hostApiFetch<GatewayStatus>('/api/gateway/status');
+    console.info(JSON.stringify({
+      prefix: STARTUP_TRACE_PREFIX,
+      ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-snapshot-success', status),
+    }));
+    return status;
+  } catch (error) {
+    console.warn(STARTUP_TRACE_PREFIX, {
+      ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-snapshot-failed', null),
+      ...summarizeStartupTraceError(error),
+    });
+    throw error;
+  }
+}
+
+async function fetchRuntimeHostStatusSnapshot(): Promise<RuntimeHostStatusSnapshot> {
+  return await hostApiFetch<RuntimeHostStatusSnapshot>('/api/runtime-host/status');
+}
+
+function isCurrentGatewayStatus(current: GatewayStatus, incoming: GatewayStatus): boolean {
+  if (incoming.updatedAt > current.updatedAt) {
+    return true;
+  }
+  if (incoming.updatedAt !== current.updatedAt) {
+    return false;
+  }
+  return isGatewayPreparing(current, true) && isGatewayOperational(incoming);
 }
 
 function syncPendingApprovalsFromChatStore(): void {
@@ -85,101 +185,6 @@ function syncPendingApprovalsFromChatStore(): void {
     void state.syncPendingApprovals();
   } catch {
     // ignore
-  }
-}
-
-function isSessionUpdateEvent(value: unknown): value is SessionUpdateEvent {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  const update = (value as { sessionUpdate?: unknown }).sessionUpdate;
-  return update === 'session_item'
-    || update === 'session_item_chunk'
-    || update === 'session_info_update'
-    || update === 'plan';
-}
-
-function resolveSessionUpdateTargetRecordKey(event: SessionUpdateEvent): string | null {
-  const eventSessionKey = typeof event.sessionKey === 'string' ? event.sessionKey.trim() : '';
-  const snapshotSessionKey = typeof event.snapshot.sessionKey === 'string' ? event.snapshot.sessionKey.trim() : '';
-  if (eventSessionKey && snapshotSessionKey && eventSessionKey !== snapshotSessionKey) {
-    return null;
-  }
-  const backendSessionKey = eventSessionKey || snapshotSessionKey;
-  if (!backendSessionKey) {
-    return null;
-  }
-  const state = useChatStore.getState();
-  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, backendSessionKey)) {
-    return backendSessionKey;
-  }
-  const identity = event.snapshot.catalog.sessionIdentity;
-  if (!identity) {
-    return null;
-  }
-  return state.sessionRecordKeyByIdentityKey[buildSessionIdentityKey({
-    ...identity,
-    sessionKey: identity.sessionKey || backendSessionKey,
-  })] ?? null;
-}
-
-function handleSessionUpdateEvent(event: unknown): void {
-  const terminalTrace = readMatchaTerminalDeliveryTraceContext(event);
-  if (!isSessionUpdateEvent(event)) {
-    if (terminalTrace) {
-      logRendererMatchaTerminalDelivery('renderer_event_rejected_shape', terminalTrace);
-    }
-    return;
-  }
-  if (!terminalTrace) {
-    try {
-      useChatStore.getState().handleSessionUpdateEvent(event);
-    } catch {
-      // ignore
-    }
-    return;
-  }
-  const targetSessionKey = resolveSessionUpdateTargetRecordKey(event);
-  const stateBefore = useChatStore.getState();
-  const activeRunIdBefore = targetSessionKey
-    ? stateBefore.loadedSessions[targetSessionKey]?.runtime.activeRunId ?? null
-    : null;
-  logRendererMatchaTerminalDelivery('renderer_event_received', {
-    ...terminalTrace,
-    snapshotActiveRunIdIsNull: event.snapshot.runtime.activeRunId === null,
-  });
-  try {
-    stateBefore.handleSessionUpdateEvent(event);
-    const stateAfter = useChatStore.getState();
-    const activeRunIdAfter = targetSessionKey
-      ? stateAfter.loadedSessions[targetSessionKey]?.runtime.activeRunId ?? null
-      : null;
-    logRendererMatchaTerminalDelivery('renderer_event_applied', {
-      ...terminalTrace,
-      runtimeActiveToInactive: activeRunIdBefore !== null && activeRunIdAfter === null,
-      runtimeInactive: activeRunIdAfter === null,
-    });
-  } catch (error) {
-    logRendererMatchaTerminalDelivery('renderer_event_rejected', {
-      ...terminalTrace,
-      errorCategory: error instanceof Error ? 'error' : 'non_error',
-    });
-  }
-}
-
-function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconnected' | 'error' {
-  switch (status) {
-    case 'connected':
-    case 'running':
-      return 'connected';
-    case 'connecting':
-    case 'starting':
-      return 'connecting';
-    case 'error':
-    case 'failed':
-      return 'error';
-    default:
-      return 'disconnected';
   }
 }
 
@@ -195,11 +200,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       consecutiveHeartbeatMisses: 0,
       consecutiveRpcFailures: 0,
     },
-    updatedAt: Date.now(),
+    updatedAt: 0,
   },
   health: null,
   runtimeHost: {
-    lifecycle: 'unknown',
+    lifecycle: 'starting',
     restartCount: 0,
   },
   isInitialized: false,
@@ -214,13 +219,16 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
 
     gatewayInitPromise = (async () => {
       try {
-        const status = await fetchGatewayStatusSnapshot();
-        set({ status, isInitialized: true });
-
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
-            const prevOperational = isGatewayOperational(get().status);
+            console.info(JSON.stringify({
+              prefix: STARTUP_TRACE_PREFIX,
+              ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-event', payload),
+            }));
+            const current = get().status;
+            if (!isCurrentGatewayStatus(current, payload)) return;
+            const prevOperational = isGatewayOperational(current);
             set({ status: payload });
             if (isGatewayOperational(payload) && !prevOperational) {
               syncPendingApprovalsFromChatStore();
@@ -238,8 +246,50 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               },
             }));
           }));
-          unsubscribers.push(subscribeHostEvent<unknown>('session:update', (payload) => {
-            handleSessionUpdateEvent(payload);
+          unsubscribers.push(subscribeHostEvent<unknown>('session.delta', (payload) => {
+            const traceId = createSessionTraceId('session.delta-boundary');
+            logSessionTrace('session.delta.received', traceId, {
+              payloadType: payload && typeof payload === 'object' ? 'object' : typeof payload,
+            });
+            let delta;
+            try {
+              delta = decodeSessionDelta(payload);
+            } catch (error) {
+              logSessionTrace('session.delta.decode', traceId, {
+                decoded: false,
+                errorName: error instanceof Error ? error.name : typeof error,
+              });
+              return;
+            }
+            const before = useChatStore.getState().loadedSessions[delta.sessionKey];
+            logSessionTrace('session.delta.decode', traceId, {
+              decoded: true,
+              sessionKey: summarizeIdentifier(delta.sessionKey),
+              epoch: delta.epoch,
+              seq: delta.seq,
+              cursor: delta.cursor,
+              previousEpoch: before ? null : undefined,
+              previousSeq: before ? null : undefined,
+              previousCursor: before ? null : undefined,
+              changeKinds: delta.changes.map((change) => change.kind),
+              runtimePhase: before?.runtime.runPhase ?? null,
+              activeRunId: summarizeIdentifier(before?.runtime.activeRunId),
+            });
+            const applyResult = applySessionDelta({
+              set: useChatStore.setState,
+              get: useChatStore.getState,
+            }, delta);
+            logSessionTrace('session.delta.apply', traceId, {
+              status: applyResult.status,
+              reason: 'reason' in applyResult ? applyResult.reason : null,
+              sessionKey: summarizeIdentifier(delta.sessionKey),
+              epoch: delta.epoch,
+              seq: delta.seq,
+              cursor: delta.cursor,
+              changeKinds: delta.changes.map((change) => change.kind),
+              runtimePhase: useChatStore.getState().loadedSessions[delta.sessionKey]?.runtime.runPhase ?? null,
+              activeRunId: summarizeIdentifier(useChatStore.getState().loadedSessions[delta.sessionKey]?.runtime.activeRunId),
+            });
           }));
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
             'task:snapshot',
@@ -247,14 +297,17 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               useTaskSnapshotStore.getState().reportTaskCenterSnapshot(payload);
             },
           ));
-          unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
+          unsubscribers.push(subscribeHostEvent<unknown>(
             'gateway:channel-status',
-            (update) => {
-              if (!update.channelId || !update.status) return;
+            (payload) => {
+              const updates = decodeGatewayChannelStatusUpdates(payload);
+              if (updates.length === 0) return;
               const state = useChannelsStore.getState();
-              const channel = state.channels.find((item) => item.type === update.channelId);
-              if (channel) {
-                state.updateChannel(channel.id, { status: mapChannelStatus(update.status) });
+              for (const update of updates) {
+                const channel = state.channels.find((item) => item.type === update.channelId);
+                if (channel) {
+                  state.updateChannel(channel.id, { status: update.status });
+                }
               }
             },
           ));
@@ -318,12 +371,30 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           }));
           gatewayEventUnsubscribers = unsubscribers;
         }
-        if (isGatewayOperational(status)) {
+        const [statusResult, runtimeHostResult] = await Promise.allSettled([
+          fetchGatewayStatusSnapshot(),
+          fetchRuntimeHostStatusSnapshot(),
+        ]);
+        const status = statusResult.status === 'fulfilled' ? statusResult.value : null;
+        const runtimeHost = runtimeHostResult.status === 'fulfilled'
+          ? runtimeHostResult.value
+          : unavailableRuntimeHostSnapshot();
+        set((state) => ({
+          ...(status && isCurrentGatewayStatus(state.status, status) ? { status } : {}),
+          runtimeHost: applyRuntimeHostSnapshot(runtimeHost, state.runtimeHost),
+          isInitialized: true,
+          lastError: statusResult.status === 'rejected' ? String(statusResult.reason) : null,
+        }));
+
+        if (status && isGatewayOperational(status)) {
           syncPendingApprovalsFromChatStore();
         }
       } catch (error) {
-        console.error('Failed to initialize Gateway:', error);
-        set({ lastError: String(error) });
+        set((state) => ({
+          lastError: String(error),
+          runtimeHost: applyRuntimeHostSnapshot(unavailableRuntimeHostSnapshot(), state.runtimeHost),
+          isInitialized: true,
+        }));
       } finally {
         gatewayInitPromise = null;
       }
@@ -356,7 +427,6 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       const status = await fetchGatewayStatusSnapshot();
       set({ status });
     } catch (error) {
-      console.error('Failed to stop Gateway:', error);
       set({ lastError: String(error) });
     }
   },
@@ -378,6 +448,13 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
     }
   },
 
+  refreshRuntimeHostStatus: async () => {
+    const runtimeHost = await fetchRuntimeHostStatusSnapshot();
+    set((state) => ({
+      runtimeHost: applyRuntimeHostSnapshot(runtimeHost, state.runtimeHost),
+    }));
+  },
+
   checkHealth: async () => {
     try {
       const result = await hostApiFetch<GatewayHealth>('/api/gateway/health');
@@ -393,3 +470,5 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   setStatus: (status) => set({ status }),
   clearError: () => set({ lastError: null }),
 }));
+
+export const useRuntimeHostStore = useGatewayStore;

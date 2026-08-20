@@ -20,6 +20,8 @@
 
 ## 2. 帧结构与握手
 
+`Matcha-claw` Rust Integration 的常规 Gateway RPC 使用一条已认证 backend WebSocket control connection：同一 frame loop 复用 request/response/event，按 request `id` 维护 pending map，允许并发请求和乱序响应。常规读写不再按调用新建短连接；`sessions.subscribe`/会话流和 cron forced-run terminal event stream 是独立长连接例外，shutdown 仅在 control connection 不可用时允许一次性 fallback。
+
 请求帧：
 
 ```json
@@ -229,7 +231,7 @@ web.login.start
 web.login.wait
 ```
 
-## 6. Gateway 事件清单（23）
+## 6. Gateway 事件清单（24）
 
 ```text
 connect.challenge
@@ -255,6 +257,7 @@ exec.approval.requested
 exec.approval.resolved
 plugin.approval.requested
 plugin.approval.resolved
+update.available
 ```
 
 ## 7. 2026.3.13 → 2026.4.1 差异
@@ -286,15 +289,15 @@ plugin.approval.resolved
 
 事件：
 
-- 数量：`19 -> 23`
-- 新增（5）：
+- 数量：`19 -> 24`
+- 新增（6）：
   - `session.message`
   - `session.tool`
   - `sessions.changed`
   - `plugin.approval.requested`
   - `plugin.approval.resolved`
-- 移除（1）：
   - `update.available`
+- 移除（0）：无
 
 ## 8. 权限模型（operator 角色）
 

@@ -6,7 +6,10 @@ import { findAgentScope, sameRuntimeEndpointScope } from '@/stores/chat/session-
 import { parseSessionCreatedAtMs } from '@/stores/chat/session-helpers';
 import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
 import type { ChatSessionRuntimeEndpointTarget } from '@/stores/chat/types';
-import type { AgentScope, RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+  RuntimeEndpointRef,
+} from '../../../electron/desktop-contract/runtime-address';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 

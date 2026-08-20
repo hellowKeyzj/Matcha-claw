@@ -1201,6 +1201,7 @@ export function TeamRunGraphCanvas({
       nodeId,
       kind,
       title: paletteItem.title,
+      maxAttempts: 1,
       status: 'pending',
       ...(kind === 'work' || kind === 'review' ? { roleId: 'leader' } : {}),
       ...(kind === 'work' ? { taskId: nodeId } : {}),

@@ -5,7 +5,7 @@ import {
   type ChatStoreState,
 } from '@/stores/chat';
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../types/session/render-item';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRenderItemsCacheStats } from '@/pages/Chat/chat-render-items-cache';
 import { hostApiFetch } from './host-api';

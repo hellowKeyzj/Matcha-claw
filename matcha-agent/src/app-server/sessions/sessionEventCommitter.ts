@@ -66,10 +66,8 @@ export class SessionEventCommitter {
   ): Promise<AppServerEventEnvelope> {
     const envelope = await this.ports.append(sessionId, event, fields)
 
-    await this.completePostAppendStage(
-      'sessionMetadata',
-      envelope,
-      () => this.ports.updateSessionMetadata(envelope),
+    await this.completePostAppendStage('sessionMetadata', envelope, () =>
+      this.ports.updateSessionMetadata(envelope),
     )
     await this.completePostAppendStage('snapshot', envelope, () =>
       this.ports.updateSnapshot(envelope),

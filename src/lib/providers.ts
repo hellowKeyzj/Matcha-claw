@@ -47,7 +47,7 @@ export interface ProviderConfig {
   type: ProviderType;
   providerKind?: ProviderCredentialKind;
   baseUrl?: string;
-  apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai';
   mediaApiProtocol?: CustomMediaApiProtocol;
   headers?: Record<string, string>;
   enabled: boolean;
@@ -119,7 +119,7 @@ export interface ProviderCredential {
   label: string;
   authMode: ProviderAuthMode;
   baseUrl?: string;
-  apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai';
   mediaApiProtocol?: CustomMediaApiProtocol;
   headers?: Record<string, string>;
   enabled: boolean;

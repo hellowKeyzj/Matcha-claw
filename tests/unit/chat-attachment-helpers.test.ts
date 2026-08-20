@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hostFileThumbnailMock = vi.fn();
+const hostWorkspaceMediaThumbnailMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostFileThumbnail: (...args: unknown[]) => hostFileThumbnailMock(...args),
+  hostWorkspaceMediaThumbnail: (...args: unknown[]) => hostWorkspaceMediaThumbnailMock(...args),
 }));
 
 import {
@@ -16,12 +16,12 @@ import {
   buildItemRenderFingerprint,
   reconcileSessionItems,
 } from '@/stores/chat/store-state-helpers';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 describe('chat attachment helpers', () => {
   beforeEach(() => {
-    hostFileThumbnailMock.mockReset();
+    hostWorkspaceMediaThumbnailMock.mockReset();
     localStorage.clear();
   });
 
@@ -31,7 +31,7 @@ describe('chat attachment helpers', () => {
       agentId: 'main',
       sessionKey: 'agent:test:main',
     };
-    hostFileThumbnailMock.mockResolvedValue({ preview: `data:image/png;base64,${'a'.repeat(512 * 1024 + 1)}`, fileSize: 123 });
+    hostWorkspaceMediaThumbnailMock.mockResolvedValue({ preview: `data:image/png;base64,${'a'.repeat(512 * 1024 + 1)}`, fileSize: 123 });
     const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',
       id: 'assistant-1',
@@ -41,18 +41,56 @@ describe('chat attachment helpers', () => {
         mimeType: 'image/png',
         fileSize: 0,
         preview: null,
-        filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+        filePath: 'artifacts/artifact.png',
         source: 'tool-result',
       }],
     }]) as SessionRenderItem[];
 
     const updated = await loadMissingItemPreviews(items, { sessionIdentity });
 
+    expect(hostWorkspaceMediaThumbnailMock).toHaveBeenCalledWith({
+      relativePath: 'artifacts/artifact.png',
+      mimeType: 'image/png',
+      sessionIdentity,
+    });
     expect(updated?.[0]).toMatchObject({
       kind: 'assistant-turn',
       attachedFiles: [{ preview: expect.stringContaining('data:image/png;base64,') }],
     });
     expect(localStorage.getItem('matchaclaw:image-cache')).not.toContain('data:image/png;base64,');
+  });
+
+  it('resolves absolute workspace file paths before requesting a thumbnail', async () => {
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'main',
+      sessionKey: 'agent:test:main',
+    };
+    hostWorkspaceMediaThumbnailMock.mockResolvedValue({
+      preview: 'data:image/png;base64,abc',
+      fileSize: 123,
+    });
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      id: 'assistant-absolute-path',
+      content: 'generated image',
+      _attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: null,
+        filePath: 'C:\\workspace\\artifacts\\artifact.png',
+        source: 'tool-result',
+      }],
+    }]) as SessionRenderItem[];
+
+    await loadMissingItemPreviews(items, { sessionIdentity, workspaceRoot: 'C:\\workspace' });
+
+    expect(hostWorkspaceMediaThumbnailMock).toHaveBeenCalledWith({
+      relativePath: 'artifacts/artifact.png',
+      mimeType: 'image/png',
+      sessionIdentity,
+    });
   });
 
   it('marks image previews unavailable when thumbnail loading returns no image data', async () => {
@@ -61,7 +99,7 @@ describe('chat attachment helpers', () => {
       agentId: 'main',
       sessionKey: 'agent:test:main',
     };
-    hostFileThumbnailMock.mockResolvedValue({ preview: null, fileSize: 0 });
+    hostWorkspaceMediaThumbnailMock.mockResolvedValue({ preview: null, fileSize: 0 });
     const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',
       id: 'assistant-1',
@@ -71,7 +109,7 @@ describe('chat attachment helpers', () => {
         mimeType: 'image/png',
         fileSize: 0,
         preview: null,
-        filePath: 'E:\\code\\Matcha-claw\\artifact-unavailable.png',
+        filePath: 'artifacts/artifact-unavailable.png',
         source: 'tool-result',
       }],
     }]) as SessionRenderItem[];
@@ -154,7 +192,7 @@ describe('chat attachment helpers', () => {
         mimeType: 'image/png',
         fileSize: 0,
         preview: 'data:image/png;base64,abc',
-        filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+        filePath: 'artifacts/artifact.png',
         source: 'tool-result',
       }],
     }]);
@@ -204,8 +242,8 @@ describe('chat attachment helpers', () => {
     const reconciled = reconcileSessionItems(currentItems, nextItems);
 
     expect(reconciled).toHaveLength(2);
-    expect(reconciled[0]).toBe(currentItems[0]);
-    expect(reconciled[1]).toBe(nextItems[1]);
+    expect(reconciled[0]).toBe(nextItems[0]);
+    expect(reconciled[1]).toBe(currentItems[0]);
     expect(reconciled.map((item) => item.key)).toEqual(nextItems.map((item) => item.key));
   });
 
@@ -222,7 +260,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 0,
           preview: null,
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },
@@ -240,7 +278,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 0,
           preview: 'data:image/png;base64,abc',
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },
@@ -262,7 +300,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 0,
           preview: null,
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },
@@ -278,7 +316,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 123,
           preview: 'data:image/png;base64,abc',
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },
@@ -320,7 +358,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 0,
           preview: null,
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },
@@ -342,7 +380,7 @@ describe('chat attachment helpers', () => {
           mimeType: 'image/png',
           fileSize: 123,
           preview: 'data:image/png;base64,abc',
-          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          filePath: 'artifacts/artifact.png',
           source: 'tool-result',
         }],
       },

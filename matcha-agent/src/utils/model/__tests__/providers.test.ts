@@ -17,15 +17,27 @@ type APIProvider =
   | 'vertex'
   | 'foundry'
   | 'openai'
+  | 'openaiResponses'
   | 'gemini'
   | 'grok'
 
 function getAPIProviderTest(settings: { modelType?: string }): APIProvider {
+  if (
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST === '1' ||
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST === 'true'
+  ) {
+    return getEnvAPIProviderTest() ?? 'firstParty'
+  }
+
   const modelType = settings.modelType
   if (modelType === 'openai') return 'openai'
   if (modelType === 'gemini') return 'gemini'
   if (modelType === 'grok') return 'grok'
 
+  return getEnvAPIProviderTest() ?? 'firstParty'
+}
+
+function getEnvAPIProviderTest(): APIProvider | undefined {
   if (
     process.env.CLAUDE_CODE_USE_BEDROCK === '1' ||
     process.env.CLAUDE_CODE_USE_BEDROCK === 'true'
@@ -43,6 +55,11 @@ function getAPIProviderTest(settings: { modelType?: string }): APIProvider {
     return 'foundry'
 
   if (
+    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES === '1' ||
+    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES === 'true'
+  )
+    return 'openaiResponses'
+  if (
     process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
     process.env.CLAUDE_CODE_USE_OPENAI === 'true'
   )
@@ -58,7 +75,7 @@ function getAPIProviderTest(settings: { modelType?: string }): APIProvider {
   )
     return 'grok'
 
-  return 'firstParty'
+  return undefined
 }
 
 function isFirstPartyAnthropicBaseUrlTest(): boolean {
@@ -78,11 +95,13 @@ function isFirstPartyAnthropicBaseUrlTest(): boolean {
 
 describe('getAPIProvider', () => {
   const envKeys = [
+    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
     'CLAUDE_CODE_USE_GEMINI',
     'CLAUDE_CODE_USE_BEDROCK',
     'CLAUDE_CODE_USE_VERTEX',
     'CLAUDE_CODE_USE_FOUNDRY',
     'CLAUDE_CODE_USE_OPENAI',
+    'CLAUDE_CODE_USE_OPENAI_RESPONSES',
     'CLAUDE_CODE_USE_GROK',
     'OPENAI_BASE_URL',
     'GEMINI_BASE_URL',
@@ -119,6 +138,12 @@ describe('getAPIProvider', () => {
     expect(getAPIProviderTest({ modelType: 'gemini' })).toBe('gemini')
   })
 
+  test('host-managed provider routing ignores settings modelType', () => {
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    expect(getAPIProviderTest({ modelType: 'gemini' })).toBe('openai')
+  })
+
   test('returns "gemini" when CLAUDE_CODE_USE_GEMINI is set', () => {
     process.env.CLAUDE_CODE_USE_GEMINI = '1'
     expect(getAPIProviderTest({})).toBe('gemini')
@@ -142,6 +167,11 @@ describe('getAPIProvider', () => {
   test('returns "openai" when CLAUDE_CODE_USE_OPENAI is set', () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     expect(getAPIProviderTest({})).toBe('openai')
+  })
+
+  test('returns "openaiResponses" when CLAUDE_CODE_USE_OPENAI_RESPONSES is set', () => {
+    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES = '1'
+    expect(getAPIProviderTest({})).toBe('openaiResponses')
   })
 
   test('returns "grok" when CLAUDE_CODE_USE_GROK is set', () => {

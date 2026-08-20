@@ -1,4 +1,4 @@
-import type { SessionRenderToolCard } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderToolCard } from '../types/session/tool-card';
 
 export type FileContentType =
   | 'code'

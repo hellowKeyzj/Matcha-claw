@@ -3,20 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useProviderModelCatalogStore } from '@/stores/provider-model-catalog';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
-const resolveSingleCapabilityScopeMock = vi.hoisted(() => vi.fn());
 const capabilityRefreshMock = vi.hoisted(() => vi.fn());
-const TEST_RUNTIME_SCOPE = {
-  kind: 'runtime-instance',
-  endpoint: {
-    kind: 'native-runtime',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-} as const;
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: hostApiFetchMock,
-  resolveSingleCapabilityScope: resolveSingleCapabilityScopeMock,
 }));
 
 vi.mock('@/stores/capability-routing', () => ({
@@ -30,8 +20,7 @@ vi.mock('@/stores/capability-routing', () => ({
 describe('provider model catalog store', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    resolveSingleCapabilityScopeMock.mockResolvedValue(TEST_RUNTIME_SCOPE);
-    hostApiFetchMock.mockResolvedValue({ success: false, error: 'sync failed' });
+    hostApiFetchMock.mockResolvedValue({ success: false, error: 'Provider model request was rejected' });
     useProviderModelCatalogStore.setState({
       models: [],
       ready: false,
@@ -42,23 +31,23 @@ describe('provider model catalog store', () => {
   });
 
   it('rejects when provider model persistence fails', async () => {
-    await expect(useProviderModelCatalogStore.getState().replaceCredentialModels('custom-1', [
+    await expect(useProviderModelCatalogStore.getState().replaceAccountModels('custom-1', [
       { modelId: 'gpt-5.4', capabilities: ['chat'] },
-    ], 'custom')).rejects.toThrow('sync failed');
+    ], 'custom')).rejects.toThrow('Provider model request was rejected');
 
     expect(useProviderModelCatalogStore.getState()).toMatchObject({
       saving: false,
-      error: 'sync failed',
+      error: 'Provider model request was rejected',
     });
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/capabilities/execute', expect.objectContaining({ method: 'POST' }));
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models', expect.objectContaining({ method: 'POST' }));
     expect(JSON.parse(hostApiFetchMock.mock.calls[0][1].body)).toEqual({
-      id: 'model.provider',
+      id: 'provider.models',
       operationId: 'providerModels.replace',
-      scope: TEST_RUNTIME_SCOPE,
-      target: { kind: 'provider-credential', accountId: 'custom-1', vendorId: 'custom' },
+      scope: { kind: 'provider-model-catalog' },
+      target: { kind: 'provider-models' },
       input: {
-        credentialId: 'custom-1',
-        vendorId: 'custom',
+        kind: 'replace',
+        accountId: 'custom-1',
         models: [{ modelId: 'gpt-5.4', capabilities: ['chat'] }],
       },
     });
@@ -81,7 +70,7 @@ describe('provider model catalog store', () => {
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
     expect(resolveModels).not.toBeNull();
     await act(async () => {
-      resolveModels?.({ models: [{ credentialId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }] });
+      resolveModels?.({ models: [{ accountId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }] });
       await Promise.all([first, second]);
     });
 
@@ -90,7 +79,7 @@ describe('provider model catalog store', () => {
       ready: true,
       loading: false,
       error: null,
-      models: [{ credentialId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }],
+      models: [{ accountId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }],
     });
   });
 });

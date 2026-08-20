@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto'
 import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import { openaiAdapter } from 'src/services/providerUsage/adapters/openai.js'
+import { updateProviderBuckets } from 'src/services/providerUsage/store.js'
+import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import { getValidChatGPTAuth } from './chatgptAuth.js'
 
 type ResponsesInputItem = Record<string, unknown>
@@ -23,6 +26,12 @@ type AnthropicUsage = {
   output_tokens: number
   cache_creation_input_tokens: number
   cache_read_input_tokens: number
+}
+
+const DEFAULT_OPENAI_RESPONSES_BASE_URL = 'https://api.openai.com/v1'
+
+function openAIResponsesUrl(baseUrl: string | undefined): string {
+  return `${(baseUrl || DEFAULT_OPENAI_RESPONSES_BASE_URL).replace(/\/+$/, '')}/responses`
 }
 
 function textFromContent(content: unknown): string {
@@ -193,7 +202,8 @@ export function buildResponsesRequest(params: {
 async function* parseSSE(
   response: Response,
 ): AsyncGenerator<Record<string, unknown>, void> {
-  if (!response.body) throw new Error('ChatGPT response did not include a body')
+  if (!response.body)
+    throw new Error('OpenAI Responses API response did not include a body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -407,13 +417,13 @@ export async function* adaptResponsesStreamToAnthropic(
 
     if (type === 'response.error') {
       const error = event.error as Record<string, unknown> | undefined
-      throw new Error(String(error?.message ?? 'ChatGPT Responses API error'))
+      throw new Error(String(error?.message ?? 'OpenAI Responses API error'))
     }
 
     if (type === 'response.failed') {
       const response = event.response as Record<string, unknown> | undefined
       const error = response?.error as Record<string, unknown> | undefined
-      throw new Error(String(error?.message ?? 'ChatGPT Responses API failed'))
+      throw new Error(String(error?.message ?? 'OpenAI Responses API failed'))
     }
 
     if (type === 'response.completed' || type === 'response.incomplete') {
@@ -440,6 +450,43 @@ export async function* adaptResponsesStreamToAnthropic(
       yield { type: 'message_stop' } as BetaRawMessageStreamEvent
     }
   }
+}
+
+export async function createOpenAIResponsesStream(params: {
+  request: ResponsesRequest
+  signal: AbortSignal
+  fetchOverride?: typeof fetch
+}): Promise<AsyncIterable<Record<string, unknown>>> {
+  const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
+  const response = await fetchFn(
+    openAIResponsesUrl(process.env.OPENAI_BASE_URL),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY || ''}`,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(params.request),
+      signal: params.signal,
+      ...getProxyFetchOptions({ forAnthropicAPI: false }),
+    },
+  )
+  try {
+    updateProviderBuckets(
+      'openai',
+      openaiAdapter.parseHeaders(response.headers),
+    )
+  } catch {
+    // Usage tracking must not affect the request path.
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(
+      `OpenAI Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
+    )
+  }
+  return parseSSE(response)
 }
 
 export async function createChatGPTResponsesStream(params: {

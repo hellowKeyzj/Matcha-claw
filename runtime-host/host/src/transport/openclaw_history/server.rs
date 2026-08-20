@@ -1,0 +1,297 @@
+use std::{
+    io,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::Value;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+    time::timeout,
+};
+
+use crate::transport::authorization::CapabilityDecisionVerifier;
+
+use super::{DecodeError, OpenClawHistoryDelivery, OpenClawHistoryRequest};
+
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_HEADER_BYTES: usize = 8 * 1024;
+const MAX_HEADERS: usize = 32;
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const AUTHORIZATION_HEADER: &str = "authorization";
+const BEARER_PREFIX: &str = "Bearer ";
+
+pub(crate) struct Server {
+    listener: TcpListener,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+}
+
+impl Server {
+    pub(crate) async fn bind(
+        port: u16,
+        verifier: CapabilityDecisionVerifier,
+        owner: crate::owner::Handle,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            listener: TcpListener::bind(("127.0.0.1", port)).await?,
+            verifier: Arc::new(Mutex::new(verifier)),
+            owner,
+        })
+    }
+
+    pub(crate) async fn run(self) -> io::Result<()> {
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            let verifier = Arc::clone(&self.verifier);
+            let owner = self.owner.clone();
+            tokio::spawn(async move {
+                let _ = serve(stream, verifier, owner).await;
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> u16 {
+        self.listener
+            .local_addr()
+            .expect("OpenClaw history transport listener has a local address")
+            .port()
+    }
+}
+
+async fn serve(
+    mut stream: TcpStream,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+) -> io::Result<()> {
+    let response = match timeout(REQUEST_DEADLINE, async {
+        let request = read_request(&mut stream).await?;
+        Ok::<_, io::Error>(match request {
+            Ok(request) => handle(request, verifier, owner).await,
+            Err(response) => response,
+        })
+    })
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => Response::bad_request(),
+    };
+    write_response(&mut stream, response).await
+}
+
+async fn handle(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+) -> Response {
+    if request.method != "POST" || request.path != "/api/openclaw/chat/history" {
+        return Response::not_found();
+    }
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        return Response::unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => return Response::bad_request(),
+    };
+    let mut verifier = verifier.lock().await;
+    let request =
+        match OpenClawHistoryRequest::decode(value, authorization, &mut verifier, now_millis()) {
+            Ok(request) => request,
+            Err(DecodeError::Unauthorized) => return Response::unauthorized(),
+            Err(DecodeError::Invalid) => return Response::bad_request(),
+        };
+    let params = match request.into_params() {
+        Ok(params) => params,
+        Err(_) => return Response::bad_request(),
+    };
+    drop(verifier);
+    let result = match owner.history_open_claw_chat(params).await {
+        Ok(result) => result,
+        Err(_) => return Response::unavailable(),
+    };
+    Response::from_delivery(OpenClawHistoryDelivery::from_native(result))
+}
+
+struct Request {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+struct ParsedHeaders {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+}
+
+struct Response {
+    status: u16,
+    body: Value,
+}
+
+impl Response {
+    fn bad_request() -> Self {
+        Self::fixed(400, "OpenClaw chat history request is invalid")
+    }
+
+    fn unauthorized() -> Self {
+        Self::fixed(401, "OpenClaw chat history authorization is invalid")
+    }
+
+    fn not_found() -> Self {
+        Self::fixed(404, "OpenClaw chat history route is not available")
+    }
+
+    fn unavailable() -> Self {
+        Self::from_delivery(OpenClawHistoryDelivery::Unavailable)
+    }
+
+    fn fixed(status: u16, error: &'static str) -> Self {
+        Self {
+            status,
+            body: serde_json::json!({ "success": false, "error": error }),
+        }
+    }
+
+    fn from_delivery(delivery: OpenClawHistoryDelivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+}
+
+async fn read_request(stream: &mut TcpStream) -> io::Result<Result<Request, Response>> {
+    let mut bytes = Vec::with_capacity(1024);
+    let mut buffer = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 || bytes.len() + read > MAX_HEADER_BYTES {
+            return Ok(Err(Response::bad_request()));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let ParsedHeaders {
+        method,
+        path,
+        headers: parsed_headers,
+    } = match parse_headers(&bytes[..header_end]) {
+        Ok(request) => request,
+        Err(response) => return Ok(Err(response)),
+    };
+    let content_length = parsed_headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok());
+    let Some(content_length) = content_length else {
+        return Ok(Err(Response::bad_request()));
+    };
+    if content_length > MAX_REQUEST_BYTES || header_end + content_length > MAX_REQUEST_BYTES {
+        return Ok(Err(Response::bad_request()));
+    }
+    while bytes.len() < header_end + content_length {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 || bytes.len() + read > MAX_REQUEST_BYTES {
+            return Ok(Err(Response::bad_request()));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if bytes.len() != header_end + content_length {
+        return Ok(Err(Response::bad_request()));
+    }
+    Ok(Ok(Request {
+        method,
+        path,
+        headers: parsed_headers,
+        body: bytes[header_end..].to_vec(),
+    }))
+}
+
+fn parse_headers(bytes: &[u8]) -> Result<ParsedHeaders, Response> {
+    let headers = std::str::from_utf8(bytes).map_err(|_| Response::bad_request())?;
+    let mut lines = headers.split("\r\n");
+    let start = lines.next().ok_or_else(Response::bad_request)?;
+    let mut start = start.split_whitespace();
+    let (Some(method), Some(path), Some(version), None) =
+        (start.next(), start.next(), start.next(), start.next())
+    else {
+        return Err(Response::bad_request());
+    };
+    if version != "HTTP/1.1" {
+        return Err(Response::bad_request());
+    }
+    let mut parsed_headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(Response::bad_request());
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_owned();
+        if name.is_empty()
+            || parsed_headers.len() == MAX_HEADERS
+            || parsed_headers.iter().any(|(existing, _)| existing == &name)
+        {
+            return Err(Response::bad_request());
+        }
+        parsed_headers.push((name, value));
+    }
+    Ok(ParsedHeaders {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        headers: parsed_headers,
+    })
+}
+
+async fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
+    let body = serde_json::to_vec(&response.body)
+        .expect("OpenClaw history public response is serializable");
+    let reason = match response.status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        503 => "Service Unavailable",
+        _ => "Internal Server Error",
+    };
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.status,
+                reason,
+                body.len(),
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(&body).await
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod server_tests;

@@ -3,7 +3,7 @@ import type {
   SessionRenderAttachedFile,
   SessionRenderImage,
   SessionRenderToolCard,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/tool-card';
 
 export interface ChatSessionMarkdownExportInput {
   title?: string | null;

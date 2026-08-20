@@ -1,17 +1,11 @@
 import { vi } from 'vitest';
 import * as hostApiModule from '@/lib/host-api';
-import type { RuntimeEndpointRef, RuntimeScope, SessionIdentity } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { RuntimeScope } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
 
 type GatewayRpcEnvelope<TResult = unknown> = {
   success: boolean;
   result?: TResult;
   error?: string;
-};
-
-type RpcCall = {
-  method: string;
-  params: unknown;
-  timeoutMs?: number;
 };
 
 const runtimeEndpoint: RuntimeEndpointRef = {
@@ -54,16 +48,13 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
 
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
-export const capabilityExecuteMock = vi.fn();
-export const hostSessionPromptMock = vi.fn();
+export const hostSessionSendMock = vi.fn();
 export const hostSessionWindowFetchMock = vi.fn();
-export const hostSessionDeleteMock = vi.fn();
-export const hostSessionListMock = vi.fn();
-export const hostSessionPatchMock = vi.fn();
-export const hostRuntimeEndpointsListMock = vi.fn();
+export const capabilityExecuteMock = vi.fn();
 
 const subagentCapabilityOperations: Record<string, string> = {
   'subagents.list': 'agents.list',
+  'subagents.draft.wait': 'agent.wait',
   'subagents.displayConfig.get': 'displayConfig.get',
   'subagents.description.set': 'description.set',
   'subagents.model.set': 'model.set',
@@ -147,54 +138,49 @@ vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unkn
     return {
       capabilities: [
         capabilityDescriptor('plugin.runtime'),
-        capabilityDescriptor('skill.management'),
         capabilityDescriptor('subagent.management'),
       ],
     } as TResult;
   }
+  if (path === '/api/subagents/agents') {
+    const payload = readCapabilityInput(parseJsonBody(init));
+    const operationId = typeof payload.operationId === 'string' ? payload.operationId : '';
+    const method = subagentCapabilityOperations[operationId];
+    if (method) {
+      const result = await invokeMockedGatewayRpc<unknown>(
+        method,
+        readCapabilityInput(payload.input),
+        init?.timeoutMs,
+      );
+      if (method === 'agents.create') {
+        const agentId = result && typeof result === 'object' && !Array.isArray(result)
+          ? (result as { agentId?: unknown }).agentId
+          : undefined;
+        return { agent: typeof agentId === 'string' ? { id: agentId } : result } as TResult;
+      }
+      return result as TResult;
+    }
+  }
   if (path === '/api/capabilities/execute') {
-    const payload = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : {};
-    return await mockedCapabilityExecute<TResult>(payload, { timeoutMs: init?.timeoutMs });
+    const payload = readCapabilityInput(parseJsonBody(init));
+    return await mockedCapabilityExecute<TResult>(payload as {
+      id: string;
+      operationId: string;
+      scope: RuntimeScope;
+      target?: unknown;
+      input?: unknown;
+    }, { timeoutMs: init?.timeoutMs });
   }
   return await hostApiFetchMock(path, init) as TResult;
+});
+
+vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (payload, options) => {
+  return await hostSessionWindowFetchMock(payload, options);
 });
 
 vi.spyOn(hostApiModule, 'resolveSingleCapabilityScope').mockImplementation(async (
   capabilityId: string,
 ) => capabilityScope(capabilityId));
-
-vi.spyOn(hostApiModule, 'hostRuntimeEndpointsList').mockImplementation(async () => {
-  const response = await hostRuntimeEndpointsListMock();
-  if (response) {
-    return response;
-  }
-  return {
-    endpoints: [{
-      id: 'openclaw-local',
-      protocolId: 'openclaw-v4',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      displayName: 'OpenClaw Local',
-      agentIds: ['default'],
-      acceptsDynamicAgents: true,
-      capabilities: {
-        chat: true,
-        streaming: true,
-        tools: true,
-        approvals: true,
-        replay: true,
-        modelSelection: true,
-      },
-      capabilitySummaries: [capabilityDescriptor('session.prompt')],
-      controlState: {
-        connection: null,
-        readiness: null,
-        capabilities: null,
-        updatedAt: null,
-      },
-    }],
-  };
-});
 
 async function mockedCapabilityExecute<TResult = unknown>(
   payload: {
@@ -227,54 +213,10 @@ async function mockedCapabilityExecute<TResult = unknown>(
   return await capabilityExecuteMock(payload, options) as TResult;
 }
 
-vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (
-  payload: {
-    sessionKey: string;
-    message: string;
-    idempotencyKey?: string;
-    deliver?: boolean;
-    media?: Array<{
-      filePath: string;
-      mimeType?: string;
-      fileName?: string;
-    }>;
-  },
-) => await hostSessionPromptMock(payload));
-
-vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (
-  payload: {
-    sessionKey: string;
-    mode?: 'latest' | 'older' | 'newer';
-    limit?: number;
-    offset?: number;
-    includeCanonical?: boolean;
-  },
-) => await hostSessionWindowFetchMock(payload));
-
-vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (
-  payload: { sessionKey: string; sessionIdentity: SessionIdentity },
-) => await hostSessionDeleteMock(payload));
-
-vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async (
-  payload: { endpoint: RuntimeEndpointRef },
-) => await hostSessionListMock(payload));
-
-vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
-  payload: {
-    sessionKey: string;
-    sessionIdentity: SessionIdentity;
-    runtimeModelRef: string;
-  },
-) => await hostSessionPatchMock(payload));
-
 export function resetGatewayClientMocks(): void {
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
-  capabilityExecuteMock.mockReset();
-  hostSessionPromptMock.mockReset();
+  hostSessionSendMock.mockReset();
   hostSessionWindowFetchMock.mockReset();
-  hostSessionDeleteMock.mockReset();
-  hostSessionListMock.mockReset();
-  hostSessionPatchMock.mockReset();
-  hostRuntimeEndpointsListMock.mockReset();
+  capabilityExecuteMock.mockReset();
 }

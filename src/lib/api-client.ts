@@ -44,12 +44,16 @@ export function toUserMessage(error: unknown): string {
       return 'Authentication failed. Check API key or login session and retry.';
     case 'TIMEOUT':
       return 'Request timed out. Please retry.';
+    case 'ABORTED':
+      return 'Request was canceled.';
     case 'RATE_LIMIT':
       return 'Too many requests. Please wait and try again.';
     case 'PERMISSION':
       return 'Permission denied. Check your configuration and retry.';
     case 'CHANNEL_UNAVAILABLE':
       return 'Service channel unavailable. Retry after restarting the app or gateway.';
+    case 'UNAVAILABLE':
+      return 'Service unavailable. Retry after restarting the app or gateway.';
     case 'NETWORK':
       return 'Network error. Please verify connectivity and retry.';
     case 'CONFIG':

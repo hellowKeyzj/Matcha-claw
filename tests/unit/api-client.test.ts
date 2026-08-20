@@ -58,6 +58,11 @@ describe('api-client', () => {
     expect(msg).toContain('Service channel unavailable');
   });
 
+  it('returns user-facing message for upstream unavailable error', () => {
+    const msg = toUserMessage(new AppError('UNAVAILABLE', 'Host API request is unavailable.'));
+    expect(msg).toContain('Service unavailable');
+  });
+
   it('sends tuple payload for multi-arg requests', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockResolvedValueOnce({ success: true });

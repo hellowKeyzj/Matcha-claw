@@ -1,0 +1,43 @@
+[package]
+name = "foundation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+test-support = []
+
+[[bin]]
+name = "runtime-host-guardian"
+path = "src/bin/process-guardian.rs"
+test = false
+
+[dependencies]
+futures-util.workspace = true
+tokio = { version = "1.48", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.48", features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+tokio = { version = "1.48", features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1.48", features = ["net"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }

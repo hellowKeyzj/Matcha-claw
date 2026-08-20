@@ -3,19 +3,14 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
-import { usePluginsStore } from '@/stores/plugins-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { RawMessage } from './helpers/timeline-fixtures';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 vi.mock('@/features/teams/feature-flag', () => ({
   TEAMS_FEATURE_ENABLED: true,
@@ -46,7 +41,7 @@ function mountSidebar(initialPath: string) {
 
 function createSessionRecord(input?: {
   sessionKey?: string;
-  messages?: RawMessage[];
+  messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   label?: string | null;
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
 }) {
@@ -58,20 +53,36 @@ function createSessionRecord(input?: {
       ...base.meta,
       backendSessionKey: recordKey,
       agentId: recordKey.split(':')[1] ?? null,
-      sessionIdentity: createOpenClawTestSessionIdentity(recordKey),
+      sessionIdentity: {
+        endpoint: {
+          kind: 'native-runtime' as const,
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
+        },
+        agentId: recordKey.split(':')[1] ?? 'main',
+        sessionKey: recordKey,
+      },
       label: input?.label ?? null,
       historyStatus: input?.historyStatus ?? 'idle',
     },
     runtime: {
       ...base.runtime,
     },
-    items: buildRenderItemsFromMessages(recordKey, messages),
-    window: createViewportWindowState({
+    items: messages.map((message, index) => ({
+      id: `${recordKey}:${index}`,
+      kind: 'message' as const,
+      message: {
+        id: `${recordKey}:${index}`,
+        role: message.role,
+        content: message.content,
+      },
+    })),
+    window: {
       totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
-    }),
+    },
   };
 }
 
@@ -100,20 +111,8 @@ function setupSidebarState() {
     loadAvailableModels: vi.fn().mockResolvedValue(undefined),
     selectAgent: vi.fn(),
   } as never);
-  useGatewayStore.setState({
-    status: {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore.setState({
+    runtimeHost: { lifecycle: 'running' },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
   useTeamsStore.setState({
@@ -140,7 +139,7 @@ function setupSidebarState() {
     deleteTeam: vi.fn(),
     createRun: vi.fn().mockResolvedValue(undefined),
     deleteRun: vi.fn().mockResolvedValue(undefined),
-    refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+    refreshActiveRunViews: vi.fn().mockResolvedValue(undefined),
     cancelRun: vi.fn().mockResolvedValue(undefined),
     resolveApproval: vi.fn().mockResolvedValue(undefined),
     submitDecision: vi.fn().mockResolvedValue(undefined),
@@ -156,9 +155,6 @@ function setupSidebarState() {
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
   } as never);
-  usePluginsStore.setState({
-    prewarm: vi.fn().mockResolvedValue(undefined),
-  } as never);
   i18n.changeLanguage('en');
 }
 
@@ -173,7 +169,7 @@ describe('sidebar chat nav', () => {
     mountSidebar('/dashboard');
 
     expect(screen.getByText('New Chat')).toBeInTheDocument();
-    expect(screen.getByText('Plugin Center')).toBeInTheDocument();
+    expect(screen.getByText('Skills')).toBeInTheDocument();
   });
 
   it('does not animate sidebar width changes on the outer shell', () => {
@@ -183,24 +179,6 @@ describe('sidebar chat nav', () => {
 
     const sidebar = screen.getByRole('complementary');
     expect(sidebar.className).not.toContain('transition-[width]');
-  });
-
-  it('hover 插件入口时会预热插件数据', async () => {
-    vi.useFakeTimers();
-    try {
-      setupSidebarState();
-      const prewarm = vi.fn().mockResolvedValue(undefined);
-      usePluginsStore.setState({ prewarm } as never);
-
-      mountSidebar('/dashboard');
-
-      fireEvent.mouseEnter(screen.getByRole('link', { name: 'Plugin Center' }));
-      vi.advanceTimersByTime(140);
-
-      expect(prewarm).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it('from non-chat routes, clicking chat only navigates and does not create new session', async () => {
@@ -303,7 +281,7 @@ describe('sidebar chat nav', () => {
     });
   });
 
-  it('hides resolved team approval blockers', () => {
+  it('hides Team approval blockers when the sealed pending query is empty', () => {
     setupSidebarState();
     useTeamsStore.setState({
       teams: [
@@ -315,21 +293,7 @@ describe('sidebar chat nav', () => {
           updatedAt: 1,
         },
       ],
-      approvalsByTeamId: {
-        'team-1': [
-          {
-            approvalId: 'approval-2',
-            runId: 'team-1',
-            stageId: 'stage-456',
-            roleId: 'main',
-            reason: 'Need decision',
-            requestedAction: 'Run profiling',
-            status: 'approved',
-            idempotencyKey: 'approval-2',
-            createdAt: Date.now(),
-          },
-        ],
-      },
+      approvalsByTeamId: { 'team-1': [] },
     } as never);
 
     mountSidebar('/dashboard');
@@ -354,15 +318,9 @@ describe('sidebar chat nav', () => {
       pendingApprovalsBySession: {
         'agent:analytics:main': [
           {
-            id: 'approval-chat-1',
+            approvalId: 'approval-chat-1',
             sessionKey: 'agent:analytics:main',
-            backendSessionKey: 'agent:analytics:main',
-            sessionIdentity: createOpenClawTestSessionIdentity('agent:analytics:main'),
-            runId: 'run-chat-1',
-            title: 'gateway',
-            command: 'Remove-Item demo.txt',
-            allowedDecisions: ['allow-once', 'deny'],
-            createdAtMs: Date.now(),
+            optionIds: ['option-1'],
           },
         ],
       },
@@ -370,14 +328,15 @@ describe('sidebar chat nav', () => {
 
     mountSidebar('/dashboard');
 
-    expect(screen.getByText(/Approval Blocker · gateway/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Approval Blocker · gateway/i }));
+    const approvalCard = await screen.findByRole('button', { name: /approval-chat-1/i });
+    expect(approvalCard).toBeInTheDocument();
+    fireEvent.click(approvalCard);
     await waitFor(() => {
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
     });
   });
 
-  it('chat approval blocker cache should not depend on session displayName fallback', () => {
+  it('chat approval blocker cache should not depend on session displayName fallback', async () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -393,15 +352,9 @@ describe('sidebar chat nav', () => {
       pendingApprovalsBySession: {
         'agent:main:main': [
           {
-            id: 'approval-chat-1',
+            approvalId: 'approval-chat-1',
             sessionKey: 'agent:main:main',
-            backendSessionKey: 'agent:main:main',
-            sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
-            runId: 'run-chat-1',
-            title: 'gateway',
-            command: 'Remove-Item demo.txt',
-            allowedDecisions: ['allow-once', 'deny'],
-            createdAtMs: Date.now(),
+            optionIds: ['option-1'],
           },
         ],
       },
@@ -410,6 +363,6 @@ describe('sidebar chat nav', () => {
     mountSidebar('/dashboard');
 
     expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
-    expect(screen.getByText(/Approval Blocker · gateway/i)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /approval-chat-1/i })).toBeInTheDocument();
   });
 });

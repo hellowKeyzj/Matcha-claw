@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Settings } from '@/pages/Settings';
 import { useSettingsStore } from '@/stores/settings';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import i18n from '@/i18n';
 
@@ -15,69 +15,61 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
+const licenseRuntimeMock = vi.hoisted(() => ({
+  clear: vi.fn().mockResolvedValue({ success: true }),
+  gate: vi.fn(),
+  revalidate: vi.fn(),
+  storedKey: vi.fn(),
+  validate: vi.fn(),
+}));
+
 vi.mock('@/lib/host-api', () => ({
   hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
   hostApiFetch: vi.fn(async (path: string) => {
-    if (path === '/api/license/gate') {
-      return {
-        state: 'blocked',
-        reason: 'empty',
-        checkedAtMs: Date.now(),
-        hasStoredKey: false,
-        hasUsableCache: false,
-        nextRevalidateAtMs: null,
-        lastValidation: null,
-        renewalAlert: null,
-      };
-    }
-    if (path === '/api/license/stored-key') {
-      return { key: null };
-    }
     if (path === '/api/capabilities/execute') {
       return { success: true };
-    }
-    if (path === '/api/gateway/status') {
-      return {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      };
-    }
-    if (path === '/api/plugins/runtime') {
-      return {
-        success: true,
-        state: {
-          lifecycle: 'running',
-          runtimeLifecycle: 'running',
-          activePluginCount: 0,
-          enabledPluginIds: [],
-        },
-        health: {
-          ok: true,
-          lifecycle: 'running',
-          activePluginCount: 0,
-          degradedPlugins: [],
-        },
-        execution: {
-          enabledPluginIds: [],
-        },
-      };
     }
     throw new Error(`unhandled hostApiFetch path: ${path}`);
   }),
 }));
 
+vi.mock('@/lib/license-runtime', () => ({
+  hostLicenseClear: licenseRuntimeMock.clear,
+  hostLicenseGate: licenseRuntimeMock.gate,
+  hostLicenseRevalidate: licenseRuntimeMock.revalidate,
+  hostLicenseStoredKey: licenseRuntimeMock.storedKey,
+  hostLicenseValidate: licenseRuntimeMock.validate,
+}));
+
 describe('settings user avatar', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    licenseRuntimeMock.gate.mockResolvedValue({
+      state: 'blocked',
+      reason: 'empty',
+      checkedAtMs: Date.now(),
+      hasStoredKey: false,
+      hasUsableCache: false,
+      nextRevalidateAtMs: null,
+      lastValidation: null,
+      renewalAlert: null,
+    });
+    licenseRuntimeMock.storedKey.mockResolvedValue({ masked: null });
+    licenseRuntimeMock.validate.mockResolvedValue({
+      valid: false,
+      code: 'empty',
+      masked: null,
+      last4: null,
+    });
+    licenseRuntimeMock.revalidate.mockResolvedValue({
+      valid: false,
+      code: 'empty',
+      masked: null,
+      last4: null,
+    });
+    licenseRuntimeMock.clear.mockResolvedValue({ success: true });
+
     i18n.changeLanguage('en');
 
     useSettingsStore.setState((state) => ({
@@ -95,21 +87,9 @@ describe('settings user avatar', () => {
       initialized: true,
     }));
 
-    useGatewayStore.setState((state) => ({
+    useRuntimeHostStore.setState((state) => ({
       ...state,
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+      runtimeHost: { lifecycle: 'running' },
     }));
 
     useUpdateStore.setState((state) => ({

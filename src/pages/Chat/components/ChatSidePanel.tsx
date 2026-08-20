@@ -19,7 +19,9 @@ import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import type { WorkspaceFileContext } from '@/lib/host-api';
-import type { SessionIdentity } from '../../../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../../../electron/desktop-contract/runtime-address';
 import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 import type { TaskInboxTask } from '../useChatSidePanelController';
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyAssistantPresentationToItems, type ChatRenderItem } from '@/pages/Chat/chat-render-item-model';
 import { collectChatArtifactGroups } from '@/pages/Chat/artifacts';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { SessionRenderExecutionGraphItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderExecutionGraphItem } from '../../src/types/session/render-item';
 
 describe('chat artifacts', () => {
   it('collects generated files from the assistant reply anchored by an execution graph', () => {

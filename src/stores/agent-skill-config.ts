@@ -1,8 +1,11 @@
 import { create } from 'zustand';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
-import type { AgentScope, CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+} from '../../electron/desktop-contract/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 
-const AGENT_SKILL_CONFIG_CAPABILITY_ID = 'agent.skill-config';
+const SUBAGENT_SKILLS_CAPABILITY_ID = 'subagent.skills';
 
 export type AgentSkillConfigUnsupportedReason = 'runtimeDoesNotExposeAgentSkillConfig' | 'agentNotConfigured';
 
@@ -169,7 +172,7 @@ function normalizeSupport(value: unknown): AgentSkillConfigSupport {
 
 function normalizeAgentSkillConfigView(payload: unknown, requestedAgentId: string): AgentSkillConfigView {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error(`agent.skill-config returned an invalid view for agent "${requestedAgentId}". Refresh the agent and try again.`);
+    throw new Error(`subagent.skills returned an invalid view for agent "${requestedAgentId}". Refresh the agent and try again.`);
   }
   const record = payload as Record<string, unknown>;
   const agentId = typeof record.agentId === 'string' && record.agentId.trim()
@@ -217,9 +220,9 @@ function normalizeSetAgentSkillConfigCommand(command: SetAgentSkillConfigCommand
 }
 
 async function resolveAgentSkillConfigScope(): Promise<AgentScope> {
-  const scope = await resolveSingleCapabilityScope(AGENT_SKILL_CONFIG_CAPABILITY_ID);
+  const scope = await resolveSingleCapabilityScope(SUBAGENT_SKILLS_CAPABILITY_ID);
   if (scope.kind !== 'agent') {
-    throw new Error(`agent.skill-config requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
+    throw new Error(`subagent.skills requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
   }
   return scope;
 }
@@ -241,7 +244,7 @@ async function agentSkillConfigCapabilityExecute<TResult>(
   return await hostApiFetch<TResult>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
-      id: AGENT_SKILL_CONFIG_CAPABILITY_ID,
+      id: SUBAGENT_SKILLS_CAPABILITY_ID,
       operationId,
       scope,
       target: buildAgentSkillConfigTarget(scope, targetAgentId),
@@ -252,7 +255,7 @@ async function agentSkillConfigCapabilityExecute<TResult>(
 
 async function fetchAgentSkillConfigView(agentId: string): Promise<AgentSkillConfigView> {
   const result = await agentSkillConfigCapabilityExecute<unknown>(
-    'agentSkillConfig.get',
+    'subagentSkills.get',
     { agentId },
     agentId,
   );
@@ -261,7 +264,7 @@ async function fetchAgentSkillConfigView(agentId: string): Promise<AgentSkillCon
 
 async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Promise<AgentSkillConfigView> {
   const result = await agentSkillConfigCapabilityExecute<SetAgentSkillConfigResult>(
-    'agentSkillConfig.set',
+    'subagentSkills.set',
     {
       agentId: command.agentId,
       revision: command.revision,
@@ -294,7 +297,7 @@ async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Pro
       if (result.reason === 'agentNotConfigured') {
         throw new Error('This runtime has not registered capability settings for this agent yet, so its skills cannot be changed here. Refresh the agent and try again.');
       }
-      throw new Error('This runtime does not expose agent skill configuration. Reconnect to a runtime that supports agent.skill-config, then refresh the agent and try again.');
+      throw new Error('This runtime does not expose agent skill configuration. Reconnect to a runtime that supports subagent.skills, then refresh the agent and try again.');
   }
 }
 

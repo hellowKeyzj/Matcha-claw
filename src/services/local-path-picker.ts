@@ -11,6 +11,19 @@ interface LocalPathPickerResult {
   filePaths?: string[];
 }
 
+export type LocalSkillImportPayload = Readonly<
+  | {
+    kind: 'markdown';
+    skillKey: string;
+    content: string;
+  }
+  | {
+    kind: 'bundle';
+    skillKey: string;
+    files: Array<Readonly<{ path: string; content: string }>>;
+  }
+>;
+
 function readSelectedPath(result: LocalPathPickerResult): string | null {
   if (result.canceled || !result.filePaths?.length) {
     return null;
@@ -51,4 +64,16 @@ export async function pickLocalSkillSource(options: LocalPathPickerOptions = {})
       { name: 'All Files', extensions: ['*'] },
     ],
   }));
+}
+
+type LocalSkillImportResponse =
+  | { canceled: true }
+  | ({ canceled: false } & LocalSkillImportPayload);
+
+export async function readLocalSkillImport(sourcePath?: string): Promise<LocalSkillImportPayload | null> {
+  const result = await invokeIpc<LocalSkillImportResponse>('dialog:readSkillImport', sourcePath);
+  if (result.canceled) {
+    return null;
+  }
+  return result;
 }

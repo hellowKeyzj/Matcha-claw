@@ -1,9 +1,6 @@
 import { logRendererDebug } from '@/lib/debug-logging';
-import type {
-  SessionAssistantTurnItem,
-  SessionRenderItem,
-  SessionStateSnapshot,
-} from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionAssistantTurnItem, SessionRenderItem } from '../../types/session/render-item';
+import type { SessionStateSnapshot } from '../../types/session/snapshot';
 
 const TODO_TOOL_DEBUG_PATTERN = /TodoWrite|TodoGet|todowrite|todoget|newTodos|oldTodos/;
 

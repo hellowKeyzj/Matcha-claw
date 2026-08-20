@@ -1,16 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+
+function createOpenClawTestSessionIdentity(sessionKey: string, agentId = 'main'): SessionIdentity {
+  return {
+    endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+    agentId,
+    sessionKey,
+  };
+}
 
 const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
 const firstSessionIdentity = createOpenClawTestSessionIdentity('agent:main:first');
 const secondSessionIdentity = createOpenClawTestSessionIdentity('agent:main:second');
 
 const listTaskSnapshotMock = vi.fn<(payload: { sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }) => Promise<TaskListSnapshot>>();
+const createTaskMock = vi.fn();
 const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   listTaskSnapshot: (...args: [{ sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }]) => listTaskSnapshotMock(...args),
+  createTask: (...args: unknown[]) => createTaskMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
@@ -45,6 +55,7 @@ describe('task center store', () => {
   beforeEach(() => {
     vi.resetModules();
     listTaskSnapshotMock.mockReset();
+    createTaskMock.mockReset();
     updateTaskMock.mockReset();
   });
 
@@ -136,13 +147,55 @@ describe('task center store', () => {
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
   });
 
+  it('createTask uses TaskCreate then refreshes the authoritative task snapshot', async () => {
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([]));
+    createTaskMock.mockResolvedValueOnce({
+      outcome: 'applied',
+      snapshot: snapshot([task({ id: '2', subject: 'created task', status: 'pending' })]),
+    });
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
+      task({ id: '2', subject: 'created task', status: 'pending' }),
+    ]));
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+
+    await useTaskCenterStore.getState().createTask({ subject: 'created task', description: 'created description' });
+
+    expect(createTaskMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      sessionIdentity,
+      subject: 'created task',
+      description: 'created description',
+    });
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['2']);
+  });
+
+  it.each(['rejected', 'unknown'] as const)('createTask retains the current snapshot when TaskCreate is %s', async (outcome) => {
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([task({ id: '1', status: 'pending' })]));
+    createTaskMock.mockResolvedValueOnce({ outcome });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+
+    await useTaskCenterStore.getState().createTask({ subject: 'created task', description: 'created description' });
+
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1']);
+    expect(useTaskCenterStore.getState().error).toBe(outcome === 'unknown' ? 'Task creation outcome is unknown' : 'Task creation was rejected');
+  });
+
   it('deleteTaskById 调用 TaskUpdate(status=deleted) 后用 TaskList 全量刷新', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
       task({ id: '1', status: 'pending' }),
       task({ id: '2', status: 'in_progress' }),
       task({ id: '3', status: 'completed' }),
     ]));
-    updateTaskMock.mockResolvedValueOnce({ taskId: '2', deleted: true, todos: [] });
+    updateTaskMock.mockResolvedValueOnce({ outcome: 'applied', snapshot: snapshot([
+      task({ id: '1', status: 'pending' }),
+      task({ id: '3', status: 'completed' }),
+    ]) });
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
       task({ id: '1', status: 'pending' }),
       task({ id: '3', status: 'completed' }),
@@ -161,5 +214,22 @@ describe('task center store', () => {
     });
     expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '3']);
+  });
+
+  it.each(['rejected', 'unknown'] as const)('deleteTaskById retains the current snapshot when TaskUpdate is %s', async (outcome) => {
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
+      task({ id: '1', status: 'pending' }),
+      task({ id: '2', status: 'in_progress' }),
+    ]));
+    updateTaskMock.mockResolvedValueOnce({ outcome });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+
+    await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
+
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
+    expect(useTaskCenterStore.getState().error).toBe(outcome === 'unknown' ? 'Task deletion outcome is unknown' : 'Task deletion was rejected');
   });
 });

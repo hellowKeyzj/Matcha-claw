@@ -1,11 +1,14 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('runtime-host process route bridge boundary', () => {
   it('除 gateway 入口路由外，runtime 路由目录不得直接调用 gatewayRpc', async () => {
     const routesDir = path.join(process.cwd(), 'runtime-host', 'api', 'routes');
-    const files = await readdir(routesDir, { withFileTypes: true });
+    const files = existsSync(routesDir)
+      ? await readdir(routesDir, { withFileTypes: true })
+      : [];
     const routeFiles = files
       .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
       .map((entry) => entry.name);

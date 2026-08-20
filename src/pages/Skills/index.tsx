@@ -41,13 +41,12 @@ import {
   hostApiFetch,
   hostOpenClawGetSkillsDir,
   resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
 } from '@/lib/host-api';
-import type { CapabilityTarget } from '../../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../../electron/desktop-contract/capability-target';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
+import { readLocalSkillImport } from '@/services/local-path-picker';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
@@ -57,12 +56,6 @@ import type { GatewayStatus } from '@/types/gateway';
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
-type LocalSkillImportResult = {
-  success: true;
-  skillKey: string;
-  installedPath: string;
-  sourceKind: 'directory' | 'zip' | 'markdown';
-};
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
@@ -1044,6 +1037,7 @@ export function Skills() {
   const searchResults = useSkillsStore((state) => state.searchResults);
   const searchSkills = useSkillsStore((state) => state.searchSkills);
   const installSkill = useSkillsStore((state) => state.installSkill);
+  const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
   const uninstallSkill = useSkillsStore((state) => state.uninstallSkill);
   const searching = useSkillsStore((state) => state.searching);
   const searchError = useSkillsStore((state) => state.searchError);
@@ -1370,16 +1364,15 @@ export function Skills() {
 
     setLocalSkillImporting(true);
     try {
-      const submission = await skillManagementCapabilityExecute<RuntimeJobSubmission<LocalSkillImportResult>>(
-        'skills.importLocal',
-        { sourcePath: localSkillSourcePath },
-        { kind: 'skill' },
-      );
-      const result = await waitForRuntimeJobResult<LocalSkillImportResult>(submission.job.id);
-      const skillKey = result.skillKey.trim();
+      const importedSkill = await readLocalSkillImport(localSkillSourcePath);
+      if (!importedSkill) {
+        return;
+      }
+      const skillKey = importedSkill.skillKey.trim();
       if (!skillKey) {
         throw new Error('Imported skill did not return a skill key');
       }
+      await importLocalSkill(importedSkill);
 
       let enableError: unknown = null;
       try {
@@ -1407,7 +1400,7 @@ export function Skills() {
     } finally {
       setLocalSkillImporting(false);
     }
-  }, [enableSkill, fetchSkills, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
+  }, [enableSkill, fetchSkills, importLocalSkill, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {

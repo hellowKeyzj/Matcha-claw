@@ -56,8 +56,8 @@ function buildModelOptions(
   return models
     .filter((model) => model.capabilities.includes(capability))
     .map((model) => {
-      const value = `${model.credentialId}/${model.modelId}`;
-      const label = `${model.label ?? credentialLabels.get(model.credentialId) ?? model.credentialId} / ${model.modelId}`;
+      const value = `${model.accountId}/${model.modelId}`;
+      const label = `${model.label ?? credentialLabels.get(model.accountId) ?? model.accountId} / ${model.modelId}`;
       return { value, label };
     })
     .sort((left, right) => left.label.localeCompare(right.label));
@@ -394,6 +394,7 @@ export function MediaCapabilitiesPanel() {
   const loading = useCapabilityRoutingStore((state) => state.loading);
   const saving = useCapabilityRoutingStore((state) => state.saving);
   const error = useCapabilityRoutingStore((state) => state.error);
+  const warning = useCapabilityRoutingStore((state) => state.warning);
   const refresh = useCapabilityRoutingStore((state) => state.refresh);
   const setRoute = useCapabilityRoutingStore((state) => state.setRoute);
   const models = useProviderModelCatalogStore((state) => state.models);
@@ -449,6 +450,11 @@ export function MediaCapabilitiesPanel() {
             {error && (
               <div className="m-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                 {error}
+              </div>
+            )}
+            {!error && warning && (
+              <div className="m-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                {warning}
               </div>
             )}
             {CAPABILITY_KEYS.map((capability) => (

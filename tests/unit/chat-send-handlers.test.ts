@@ -2,12 +2,47 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend, NO_RESPONSE_RECEIVED_ERROR, startStoreSendWatchers } from '@/stores/chat/send-handlers';
 import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
-import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import type { SessionRenderItem } from '../../src/types/session/render-item';
+import { completeFact, sessionView, userItem } from './helpers/session-fixtures';
+
+interface RawMessage {
+  role: 'user';
+  content: string;
+  timestamp?: number;
+  id?: string;
+  messageId?: string;
+  [key: string]: unknown;
+}
+
+const openClawTestRuntimeEndpoint = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+} as const;
+
+function createOpenClawTestSessionIdentity(sessionKey: string) {
+  return {
+    endpoint: openClawTestRuntimeEndpoint,
+    agentId: sessionKey.split(':')[1] ?? 'main',
+    sessionKey,
+  };
+}
+
+function buildRenderItemsFromMessages(sessionKey: string, messages: readonly RawMessage[]): SessionRenderItem[] {
+  return messages.map((message, index) => ({
+    key: message.messageId ?? message.id ?? `message-${index}`,
+    kind: 'user-message',
+    sessionKey,
+    role: 'user',
+    text: message.content,
+    images: [],
+    attachedFiles: [],
+    ...(message.messageId ? { messageId: message.messageId } : {}),
+    ...(message.timestamp != null ? { createdAt: message.timestamp, updatedAt: message.timestamp } : {}),
+  }));
+}
 
 const sendChatTransportMock = vi.fn();
 
@@ -101,63 +136,64 @@ describe('chat send handlers', () => {
     expect(record.items).toEqual([]);
   });
 
-  it('send success applies the runtime-host submitted snapshot without binding runId locally', async () => {
+  it('applies a canonical view returned by send transport', async () => {
     const sessionKey = 'agent:main:session-1';
+    const view = sessionView(sessionKey, {
+      identity: createOpenClawTestSessionIdentity(sessionKey),
+      items: completeFact([userItem('user-1', 'hello')]),
+    });
     sendChatTransportMock.mockResolvedValueOnce({
       ok: true,
       runId: 'run-1',
-      snapshot: {
-        sessionKey,
-        catalog: {
-          key: sessionKey,
-          agentId: 'main',
-          protocolId: 'openclaw-v4',
-          runtimeEndpointId: 'local',
-          sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
-          kind: 'session' as const,
-          preferred: false,
-          label: 'latest reply',
-          titleSource: 'user' as const,
-          displayName: sessionKey,
-          updatedAt: 1,
-        },
-        items: [{
-          key: `session:${sessionKey}|entry:user-local-1`,
-          kind: 'user-message',
-          sessionKey,
-          role: 'user',
-          text: 'latest reply',
-          images: [],
-          attachedFiles: [{
-            fileName: 'attachment.txt',
-            mimeType: 'text/plain',
-            fileSize: 16,
-            preview: null,
-            source: 'user-upload',
-          }],
-          createdAt: 1,
-          updatedAt: 1,
-          messageId: 'user-local-1',
-        }],
-        replayComplete: true,
-        runtime: {
-          activeRunId: null,
-          runPhase: 'submitted',
-          activeTurnItemKey: null,
-          pendingTurnKey: 'main:run-1',
-          pendingTurnLaneKey: 'main',
-          lastUserMessageAt: 1,
-          updatedAt: 1,
-        },
-        window: {
-          totalItemCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
+      projection: { kind: 'view', view },
+    });
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: { [sessionKey]: createSessionRecord({ sessionKey }) },
+      rendererRouteRecordKeys: {},
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState>)) => {
+      state = { ...state, ...(typeof partial === 'function' ? partial(state) : partial) };
+    };
+
+    await executeStoreSend({
+      set,
+      get: () => state,
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      sessionRunCache: createStoreSessionRunCache(),
+      text: 'hello',
+    });
+
+    const items = getSessionItems(state, sessionKey);
+    expect(items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        role: 'assistant',
+        identitySource: 'client',
+        identityMode: 'client',
+        pendingState: 'typing',
+      }),
+    ]));
+    expect(items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: 'hello',
+        messageId: 'user-1',
+      }),
+    ]));
+  });
+
+  it('accepted attachment send writes a metadata-only renderer receipt keyed by its run', async () => {
+    const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: true,
+      runId: 'run-attachment-1',
+      projection: null,
     });
 
     let state = {
@@ -190,22 +226,65 @@ describe('chat send handlers', () => {
         fileName: 'attachment.txt',
         mimeType: 'text/plain',
         fileSize: 16,
-        stagedPath: 'C:\\tmp\\attachment.txt',
-        preview: null,
+        stagedAttachmentId: 'attachment-text',
+        preview: 'data:text/plain;base64,c2VjcmV0',
+      }, {
+        fileName: 'attachment.png',
+        mimeType: 'image/png',
+        fileSize: 32,
+        stagedAttachmentId: 'attachment-image',
+        preview: 'blob:renderer-attachment-preview',
+      }, {
+        fileName: 'staged-image.png',
+        mimeType: 'image/png',
+        fileSize: 24,
+        stagedAttachmentId: 'attachment-staged-image',
+        preview: 'data:image/png;base64,aW1hZ2U=',
       }],
     });
 
     expect(sendChatTransportMock).toHaveBeenCalledWith(expect.objectContaining({
-      attachments: [expect.objectContaining({ fileName: 'attachment.txt' })],
+      attachments: expect.arrayContaining([expect.objectContaining({ fileName: 'attachment.txt' })]),
     }));
     const record = state.loadedSessions[sessionKey]!;
     expect(record.runtime.activeRunId).toBeNull();
-    expect(record.runtime.pendingTurnKey).toBe('main:run-1');
-    expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
-    expect(getSessionItems(state, sessionKey)[0]).toMatchObject({
-      messageId: 'user-local-1',
-      attachedFiles: [expect.objectContaining({ fileName: 'attachment.txt' })],
-    });
+    expect(record.runtime.pendingTurnKey).toBeNull();
+    const items = getSessionItems(state, sessionKey);
+    expect(items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        role: 'assistant',
+        identitySource: 'client',
+        identityMode: 'client',
+        pendingState: 'typing',
+      }),
+    ]));
+    expect(items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: 'latest reply',
+        runId: expect.any(String),
+        rendererReceiptRunId: expect.any(String),
+        images: [{
+          url: 'blob:renderer-attachment-preview',
+          mimeType: 'image/png',
+        }],
+        attachedFiles: [{
+          fileName: 'attachment.txt',
+          mimeType: 'text/plain',
+          fileSize: 16,
+          preview: null,
+        }],
+      }),
+    ]));
+    const receipt = getSessionItems(state, sessionKey)[0]!;
+    expect(receipt.key).toBe(`renderer-receipt:${receipt.runId}`);
+    expect(receipt.rendererReceiptRunId).toBe(receipt.runId);
+    expect(JSON.stringify(receipt)).not.toContain('attachment-text');
+    expect(JSON.stringify(receipt)).not.toContain('attachment-image');
+    expect(JSON.stringify(receipt)).not.toContain('attachment-staged-image');
+    expect(JSON.stringify(receipt)).not.toContain('c2VjcmV0');
+    expect(JSON.stringify(receipt)).not.toContain('aW1hZ2U=');
   });
 
   it('does not send while a previous send mutation is still in flight', async () => {
@@ -508,7 +587,7 @@ describe('chat send handlers', () => {
         fileName: 'report.txt',
         mimeType: 'text/plain',
         fileSize: 42,
-        stagedPath: 'C:\\tmp\\report.txt',
+        stagedAttachmentId: 'attachment-report',
         preview: null,
       }],
     });
@@ -517,8 +596,52 @@ describe('chat send handlers', () => {
       accepted: false,
       reason: 'error',
       error: 'Attachment staging expired',
+      attachmentReselectionRequired: true,
     });
     expect(state.error).toBe('Attachment staging expired');
+  });
+
+  it('unknown attachment send requires reselection instead of preserving a reusable token', async () => {
+    const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'Gateway RPC timeout: chat.send',
+    });
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: { [sessionKey]: createSessionRecord({ sessionKey }) },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState>)) => {
+      state = { ...state, ...(typeof partial === 'function' ? partial(state) : partial) };
+    };
+
+    await expect(executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'keep the text',
+      attachments: [{
+        fileName: 'report.txt',
+        mimeType: 'text/plain',
+        fileSize: 42,
+        stagedAttachmentId: 'attachment-report',
+        preview: null,
+      }],
+    })).resolves.toEqual({
+      accepted: false,
+      reason: 'error',
+      error: 'Gateway RPC timeout: chat.send',
+      attachmentReselectionRequired: true,
+    });
+    expect(state.error).toBe('Gateway RPC timeout: chat.send');
+    expect(state.syncPendingApprovals).not.toHaveBeenCalled();
   });
 
   it('recoverable chat.send timeout leaves runtime unchanged while runtime-host remains authoritative', async () => {
@@ -618,52 +741,7 @@ describe('chat send handlers', () => {
     resolveSend?.({
       ok: true,
       runId: 'run-late-1',
-      snapshot: {
-        sessionKey,
-        catalog: {
-          key: sessionKey,
-          agentId: 'main',
-          protocolId: 'openclaw-v4',
-          runtimeEndpointId: 'local',
-          sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
-          kind: 'session' as const,
-          preferred: false,
-          label: 'late reply',
-          titleSource: 'user' as const,
-          displayName: sessionKey,
-          updatedAt: 1,
-        },
-        items: [{
-          key: `session:${sessionKey}|entry:user-late-1`,
-          kind: 'user-message',
-          sessionKey,
-          role: 'user',
-          text: 'late reply',
-          images: [],
-          attachedFiles: [],
-          createdAt: 1,
-          updatedAt: 1,
-          messageId: 'user-late-1',
-        }],
-        replayComplete: true,
-        runtime: {
-          activeRunId: 'run-late-1',
-          runPhase: 'submitted' as const,
-          activeTurnItemKey: null,
-          pendingTurnKey: 'main:run-late-1',
-          pendingTurnLaneKey: 'main',
-          lastUserMessageAt: 1,
-          updatedAt: 1,
-        },
-        window: {
-          totalItemCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
+      projection: null,
     });
 
     await sendPromise;

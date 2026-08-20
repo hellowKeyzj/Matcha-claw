@@ -14,17 +14,28 @@ import {
   setSendSafetyTimer,
 } from './timers';
 import {
-  patchSessionSnapshot,
+  applySessionDelta,
+  applySessionView,
   getSessionMeta,
   getSessionRuntime,
   patchSessionMeta,
   hasTimeoutSignal,
   isRecoverableChatSendTimeout,
   getSessionItems,
+  patchSessionRecord,
 } from './store-state-helpers';
-import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
+import { resolveSessionOperationTarget } from './session-identity';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeIdentifier,
+  summarizeSessionIdentity,
+} from '@/lib/session-trace';
 import type { ChatSendAttachment, ChatSendResult, ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
+import type {
+  SessionRenderUserMessageItem,
+} from '../../types/session/render-item';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -188,6 +199,112 @@ interface FinalizeStoreSendFailureParams {
   error: string;
 }
 
+function attachmentReselectionRequired(attachments: ChatSendAttachment[] | undefined): true | undefined {
+  return attachments && attachments.length > 0 ? true : undefined;
+}
+
+function cachedAttachmentReceiptFiles(attachments: ChatSendAttachment[]) {
+  return attachments
+    .filter((attachment) => !attachment.mimeType.startsWith('image/'))
+    .map((attachment) => ({
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      fileSize: attachment.fileSize,
+      preview: null,
+    }));
+}
+
+function cachedAttachmentReceiptImages(attachments: ChatSendAttachment[]) {
+  return attachments
+    .filter((attachment) => attachment.mimeType.startsWith('image/') && attachment.preview?.startsWith('blob:'))
+    .map((attachment) => ({
+      url: attachment.preview!,
+      mimeType: attachment.mimeType,
+    }));
+}
+
+function appendOptimisticSendItems(params: {
+  set: ChatStoreSetFn;
+  sessionKey: string;
+  clientId: string;
+  text: string;
+  attachments: ChatSendAttachment[] | undefined;
+  createdAt: number;
+}): void {
+  const { set, sessionKey, clientId, text, attachments, createdAt } = params;
+  set((state) => {
+    const current = state.loadedSessions[sessionKey];
+    if (!current) return state;
+    const userItem: SessionRenderUserMessageItem = {
+      key: `renderer-user:${clientId}`,
+      kind: 'user-message',
+      role: 'user',
+      sessionKey,
+      text,
+      clientId,
+      status: 'pending',
+      createdAt,
+      updatedAt: createdAt,
+      images: cachedAttachmentReceiptImages(attachments ?? []),
+      attachedFiles: cachedAttachmentReceiptFiles(attachments ?? []),
+    };
+    return {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
+        items: [...current.items, userItem],
+      }),
+    };
+  });
+}
+
+function confirmOptimisticSendItems(params: {
+  set: ChatStoreSetFn;
+  sessionKey: string;
+  clientId: string;
+  runId: string;
+  retainReceipt: boolean;
+}): void {
+  const { set, sessionKey, clientId, runId, retainReceipt } = params;
+  set((state) => {
+    const current = state.loadedSessions[sessionKey];
+    if (!current) return state;
+    let changed = false;
+    const items = current.items.map((item) => {
+      if (item.kind === 'user-message' && item.clientId === clientId) {
+        changed = true;
+        return {
+          ...item,
+          key: retainReceipt ? `renderer-receipt:${runId}` : item.key,
+          runId,
+          ...(retainReceipt ? { rendererReceiptRunId: runId } : {}),
+        };
+      }
+      return item;
+    });
+    return changed ? {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+    } : state;
+  });
+}
+
+function removeOptimisticSendItems(params: {
+  set: ChatStoreSetFn;
+  sessionKey: string;
+  clientId: string;
+}): void {
+  const { set, sessionKey, clientId } = params;
+  set((state) => {
+    const current = state.loadedSessions[sessionKey];
+    if (!current) return state;
+    const items = current.items.filter((item) => !(
+      (item.kind === 'user-message' && item.clientId === clientId)
+      || (item.kind === 'assistant-turn' && item.runId === clientId)
+    ));
+    return items.length === current.items.length ? state : {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+    };
+  });
+}
+
 function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void {
   const { set, error } = params;
   clearHistoryPoll();
@@ -215,12 +332,21 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     attachments,
   } = params;
   const trimmed = text.trim();
+  const traceId = createSessionTraceId('send-boundary');
   if (!trimmed && (!attachments || attachments.length === 0)) {
+    logSessionTrace('send.rejected', traceId, { reason: 'empty' });
     return { accepted: false, reason: 'empty' };
   }
 
   const stateBeforeSend = get();
+  logSessionTrace('send.start', traceId, {
+    currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
+    mutating: stateBeforeSend.mutating,
+    messageLength: trimmed.length,
+    attachmentCount: attachments?.length ?? 0,
+  });
   if (stateBeforeSend.mutating === true) {
+    logSessionTrace('send.rejected', traceId, { reason: 'mutating' });
     return { accepted: false, reason: 'mutating' };
   }
   const { currentSessionKey } = stateBeforeSend;
@@ -230,11 +356,26 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     target = resolveSessionOperationTarget(stateBeforeSend, currentSessionKey);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const targetErrorReason = errorMessage.startsWith('Backend session key is required:')
+      ? 'missing-backend-session-key'
+      : errorMessage.startsWith('SessionIdentity is required:')
+        ? 'missing-session-identity'
+        : 'unexpected';
+    logSessionTrace('send.target.error', traceId, { reason: targetErrorReason });
     set({ error: errorMessage });
     return { accepted: false, reason: 'missing-session', error: errorMessage };
   }
+  logSessionTrace('send.target.resolved', traceId, {
+    backendSessionKey: summarizeIdentifier(target.sessionKey),
+    endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+    runPhase: runtimeBeforeSend.runPhase,
+    activeRunId: summarizeIdentifier(runtimeBeforeSend.activeRunId),
+  });
   if (isRunActive(runtimeBeforeSend)) {
-    return { accepted: false, reason: runtimeBeforeSend.runPhase === 'stopping' ? 'stopping' : 'active' };
+    const reason = runtimeBeforeSend.runPhase === 'stopping' ? 'stopping' : 'active';
+    logSessionTrace('send.rejected', traceId, { reason, runPhase: runtimeBeforeSend.runPhase });
+    return { accepted: false, reason };
   }
   const nowMs = Date.now();
   const clientMessageId = crypto.randomUUID();
@@ -244,6 +385,14 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     sessionKey: currentSessionKey,
     text: trimmed,
     nowMs,
+  });
+  appendOptimisticSendItems({
+    set,
+    sessionKey: currentSessionKey,
+    clientId: clientMessageId,
+    text: trimmed,
+    attachments,
+    createdAt: nowMs,
   });
 
   startStoreSendWatchers({
@@ -267,15 +416,42 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       idempotencyKey: clientMessageId,
       attachments,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
+      traceId,
     });
 
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
+      removeOptimisticSendItems({
+        set,
+        sessionKey: currentSessionKey,
+        clientId: clientMessageId,
+      });
       return { accepted: true };
     }
 
     if (!sendResult.ok) {
       const errorMsg = sendResult.error;
+      logSessionTrace('send.result.error', traceId, {
+        category: isRecoverableChatSendTimeout(errorMsg) ? 'recoverable-timeout' : 'transport-error',
+        attachmentReselectionRequired: Boolean(attachmentReselectionRequired(attachments)),
+      });
       if (isRecoverableChatSendTimeout(errorMsg)) {
+        if (attachmentReselectionRequired(attachments)) {
+          removeOptimisticSendItems({
+            set,
+            sessionKey: currentSessionKey,
+            clientId: clientMessageId,
+          });
+          finalizeStoreSendFailure({
+            set,
+            error: errorMsg,
+          });
+          return {
+            accepted: false,
+            reason: 'error',
+            error: errorMsg,
+            attachmentReselectionRequired: true,
+          };
+        }
         if (await maybeEnterStoreWaitingApproval({
           get,
           sessionKey: currentSessionKey,
@@ -290,27 +466,74 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       })) {
         return { accepted: true };
       }
+      removeOptimisticSendItems({
+        set,
+        sessionKey: currentSessionKey,
+        clientId: clientMessageId,
+      });
       finalizeStoreSendFailure({
         set,
         error: errorMsg,
       });
-      return { accepted: false, reason: 'error', error: errorMsg };
+      return {
+        accepted: false,
+        reason: 'error',
+        error: errorMsg,
+        attachmentReselectionRequired: attachmentReselectionRequired(attachments),
+      };
     }
 
-    set((state) => {
-      const loadedSessions = patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot);
-      return {
-        loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-      };
+    logSessionTrace('send.result.accepted', traceId, {
+      runId: summarizeIdentifier(sendResult.runId ?? clientMessageId),
+      hasProjection: Boolean(sendResult.projection),
     });
+    confirmOptimisticSendItems({
+      set,
+      sessionKey: currentSessionKey,
+      clientId: clientMessageId,
+      runId: sendResult.runId ?? clientMessageId,
+      retainReceipt: (attachments?.length ?? 0) > 0,
+    });
+    if (sendResult.projection) {
+      if (sendResult.projection.kind === 'view') {
+        applySessionView({ set, get }, sendResult.projection.view);
+      } else {
+        applySessionDelta({ set, get }, sendResult.projection.delta);
+      }
+    }
     return { accepted: true };
   } catch (error) {
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
+      removeOptimisticSendItems({
+        set,
+        sessionKey: currentSessionKey,
+        clientId: clientMessageId,
+      });
       return { accepted: true };
     }
     const errorMsg = String(error);
+    logSessionTrace('send.exception', traceId, {
+      errorName: error instanceof Error ? error.name : typeof error,
+      timeoutSignal: hasTimeoutSignal(error),
+    });
     if (isRecoverableChatSendTimeout(errorMsg)) {
+      if (attachmentReselectionRequired(attachments)) {
+        removeOptimisticSendItems({
+          set,
+          sessionKey: currentSessionKey,
+          clientId: clientMessageId,
+        });
+        finalizeStoreSendFailure({
+          set,
+          error: errorMsg,
+        });
+        return {
+          accepted: false,
+          reason: 'error',
+          error: errorMsg,
+          attachmentReselectionRequired: true,
+        };
+      }
       if (await maybeEnterStoreWaitingApproval({
         get,
         sessionKey: currentSessionKey,
@@ -327,11 +550,21 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     if (timeoutSignal && hasStoreApprovalEvidence(state, currentSessionKey)) {
       return { accepted: true };
     }
+    removeOptimisticSendItems({
+      set,
+      sessionKey: currentSessionKey,
+      clientId: clientMessageId,
+    });
     finalizeStoreSendFailure({
       set,
       error: errorMsg,
     });
-    return { accepted: false, reason: 'error', error: errorMsg };
+    return {
+      accepted: false,
+      reason: 'error',
+      error: errorMsg,
+      attachmentReselectionRequired: attachmentReselectionRequired(attachments),
+    };
   } finally {
     finishMutating();
   }

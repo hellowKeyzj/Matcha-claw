@@ -1,5 +1,10 @@
 export type ChannelConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
 
+export interface GatewayChannelStatusUpdate {
+  channelId: string;
+  status: ChannelConnectionStatus;
+}
+
 export interface ChannelRuntimeAccountSnapshot {
   connected?: boolean;
   linked?: boolean;
@@ -102,4 +107,44 @@ export function pickChannelRuntimeStatus(
   }
 
   return 'disconnected';
+}
+
+export function decodeGatewayChannelStatusUpdates(payload: unknown): GatewayChannelStatusUpdate[] {
+  if (!isRecord(payload) || typeof payload.eventName === 'string') return [];
+
+  if (typeof payload.channelId === 'string' && typeof payload.status === 'string') {
+    return [{ channelId: payload.channelId, status: normalizeChannelStatus(payload.status) }];
+  }
+
+  if (!isRecord(payload.channelAccounts)) return [];
+
+  const channels = isRecord(payload.channels) ? payload.channels : {};
+  return Object.entries(payload.channelAccounts).flatMap(([channelId, value]) => {
+    if (!Array.isArray(value)) return [];
+    const accounts = value.filter(isRecord) as unknown as ChannelRuntimeAccountSnapshot[];
+    const summary = isRecord(channels[channelId])
+      ? channels[channelId] as ChannelRuntimeSummarySnapshot
+      : undefined;
+    return [{ channelId, status: pickChannelRuntimeStatus(accounts, summary) }];
+  });
+}
+
+function normalizeChannelStatus(status: string): ChannelConnectionStatus {
+  switch (status) {
+    case 'connected':
+    case 'running':
+      return 'connected';
+    case 'connecting':
+    case 'starting':
+      return 'connecting';
+    case 'error':
+    case 'failed':
+      return 'error';
+    default:
+      return 'disconnected';
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

@@ -1,9 +1,11 @@
 import type { AttachedFileMeta } from '@/stores/chat';
 import type {
   SessionAssistantTurnItem,
-  SessionRenderImage,
   SessionRenderUserMessageItem,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
+import type {
+  SessionRenderImage,
+} from '../../types/session/tool-card';
 
 export interface ChatMessageImage {
   url?: string;

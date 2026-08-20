@@ -30,6 +30,8 @@ type GatewayHandler = (options: {
 }) => Promise<void> | void
 
 function createPluginHarness() {
+  const debugLogs: string[] = []
+  const warnLogs: string[] = []
   const toolRegistrations: ToolRegistration[] = []
   const gatewayMethods = new Map<string, GatewayHandler>()
   const hooks = new Map<string, HookHandler>()
@@ -80,8 +82,9 @@ function createPluginHarness() {
       },
     },
     logger: {
+      debug: (message: string) => debugLogs.push(message),
       info: () => {},
-      warn: () => {},
+      warn: (message: string) => warnLogs.push(message),
       error: () => {},
     },
     registerTool: (factory: ToolFactory, options?: { name?: string }) => {
@@ -120,8 +123,9 @@ function createPluginHarness() {
   }
 
   const getRegisteredToolNames = () => toolRegistrations.map((registration) => registration.options?.name ?? null)
+  const getRegisteredGatewayMethodNames = () => [...gatewayMethods.keys()]
 
-  return { getTool, getRegisteredToolNames, callGateway, hooks }
+  return { getTool, getRegisteredToolNames, getRegisteredGatewayMethodNames, callGateway, hooks, debugLogs, warnLogs }
 }
 
 describe('task-manager semantics', () => {
@@ -148,18 +152,53 @@ describe('task-manager semantics', () => {
     ])
   })
 
-  it('registers only final task tools and gateway methods', () => {
+  it('registers only final exact-case task tools and gateway methods', async () => {
     const harness = createPluginHarness()
+    const methods = [
+      'TaskCreate',
+      'TaskList',
+      'TaskGet',
+      'TaskUpdate',
+      'TodoWrite',
+      'TodoGet',
+      'TaskOutput',
+      'TaskStop',
+    ]
 
-    expect(harness.getTool('TaskCreate', {}).name).toBe('TaskCreate')
-    expect(harness.getTool('TaskUpdate', {}).name).toBe('TaskUpdate')
-    expect(harness.getTool('TaskList', {}).name).toBe('TaskList')
-    expect(harness.getTool('TaskGet', {}).name).toBe('TaskGet')
-    expect(harness.getTool('TodoWrite', {}).name).toBe('TodoWrite')
-    expect(harness.getTool('TodoGet', {}).name).toBe('TodoGet')
-    expect(harness.getTool('TaskOutput', {}).name).toBe('TaskOutput')
-    expect(harness.getTool('TaskStop', {}).name).toBe('TaskStop')
+    expect(harness.getRegisteredGatewayMethodNames()).toEqual(methods)
+    for (const method of methods) {
+      expect(harness.getTool(method, {}).name).toBe(method)
+    }
     expect(() => harness.getTool('task_create', {})).toThrow('tool not found: task_create')
+    await expect(harness.callGateway('todowrite', {})).rejects.toThrow('gateway method not found: todowrite')
+    await expect(harness.callGateway(' TodoGet ', {})).rejects.toThrow('gateway method not found:  TodoGet ')
+  })
+
+  it('debug logs retain only operation counts, never private task context', async () => {
+    const harness = createPluginHarness()
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-private-workspace-'))
+    tempDirs.push(workspaceDir)
+    const sessionKey = 'session-private-canary'
+    const metadata = 'metadata-private-canary'
+
+    await harness.callGateway('TodoWrite', {
+      workspaceDir,
+      sessionKey,
+      oldTodos: [],
+      newTodos: [{ content: metadata, status: 'pending' }],
+    })
+    await harness.callGateway('TaskList', { workspaceDir, sessionKey })
+
+    expect(harness.debugLogs).toEqual([
+      '[task-pipeline] plugin.gateway.TodoWrite count=1',
+      '[task-pipeline] plugin.gateway.TaskList count=0',
+    ])
+    for (const log of harness.debugLogs) {
+      expect(log).not.toContain(sessionKey)
+      expect(log).not.toContain(workspaceDir)
+      expect(log).not.toContain(metadata)
+      expect(log).not.toContain('storageRoot')
+    }
   })
 
   it('registers task prompt hook alongside final task tools', async () => {
@@ -600,6 +639,31 @@ describe('task-manager semantics', () => {
       { id: 'a', content: '读代码', activeForm: 'Reading code', status: 'in_progress', owner: 'main' },
       { id: 'b', content: '写实现', status: 'pending' },
     ])
+  })
+
+  it('TodoWrite returns a state-only snapshot and TodoGet reads that same session state', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todo-gateway-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+    const sessionKey = 'session-todo-gateway'
+
+    const write = await harness.callGateway('TodoWrite', {
+      workspaceDir,
+      sessionKey,
+      oldTodos: [],
+      newTodos: [{ content: 'native todo state', status: 'pending' }],
+    })
+    expect(write).toMatchObject({
+      success: true,
+      data: { todos: [{ content: 'native todo state', status: 'pending' }] },
+    })
+    expect(write.data).not.toHaveProperty('scope')
+    expect(write.data).not.toHaveProperty('tasks')
+
+    await expect(harness.callGateway('TodoGet', { workspaceDir, sessionKey })).resolves.toMatchObject({
+      success: true,
+      data: { todos: [{ content: 'native todo state', status: 'pending' }] },
+    })
   })
 
   it('TodoWrite rejects missing oldTodos before writing', async () => {

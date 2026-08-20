@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, readFile, stat } from 'node:fs/promises';
-import { basename, extname, join } from 'node:path';
-import { getOpenClawConfigDir } from '../../utils/paths';
+import { constants } from 'node:fs';
+import { copyFile, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, extname, join, relative } from 'node:path';
+import { getAttachmentStagingDir } from '../../utils/paths';
 
 const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const IMAGE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
@@ -43,20 +44,101 @@ const EXT_MIME_MAP: Record<string, string> = {
 };
 
 export interface StagedDialogAttachmentPayload {
-  id: string;
+  stagedAttachmentId: string;
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;
   preview: string | null;
+}
+
+const stagedAttachmentPaths = new Map<string, string>();
+
+/**
+ * Releases Main-owned staged attachments that have not entered materialization.
+ * This intentionally exposes no custody detail to the caller.
+ */
+export async function releaseStagedAttachments(stagedAttachmentIds: readonly string[]): Promise<void> {
+  const stagedPaths = [...new Set(stagedAttachmentIds)]
+    .map((stagedAttachmentId) => {
+      const stagedPath = stagedAttachmentPaths.get(stagedAttachmentId);
+      stagedAttachmentPaths.delete(stagedAttachmentId);
+      return stagedPath;
+    })
+    .filter((stagedPath): stagedPath is string => Boolean(stagedPath));
+
+  await Promise.all(stagedPaths.map(async (stagedPath) => {
+    await unlink(stagedPath).catch(() => undefined);
+  }));
+}
+
+export async function consumeStagedAttachment(stagedAttachmentId: string): Promise<Buffer> {
+  const stagedPath = stagedAttachmentPaths.get(stagedAttachmentId);
+  if (!stagedPath) {
+    throw new Error('unavailable');
+  }
+  stagedAttachmentPaths.delete(stagedAttachmentId);
+
+  try {
+    const root = await realpath(getAttachmentStagingDir());
+    const ownedPath = await realpath(stagedPath);
+    if (!isStagingPath(root, ownedPath)) {
+      throw new Error('unavailable');
+    }
+    const metadata = await stat(ownedPath);
+    if (!metadata.isFile() || metadata.size > ATTACHMENT_MAX_BYTES) {
+      throw new Error('unavailable');
+    }
+    const content = await readFile(ownedPath);
+    if (content.length !== metadata.size) {
+      throw new Error('unavailable');
+    }
+    return content;
+  } catch {
+    throw new Error('unavailable');
+  } finally {
+    await unlink(stagedPath).catch(() => undefined);
+  }
+}
+
+/**
+ * Copies a one-shot Main-owned staged attachment to a native dialog destination.
+ * The caller supplies only the opaque staged ID; the source path never crosses the boundary.
+ */
+export async function copyStagedAttachment(
+  stagedAttachmentId: string,
+  destinationPath: string,
+): Promise<void> {
+  const stagedPath = stagedAttachmentPaths.get(stagedAttachmentId);
+  if (!stagedPath) {
+    throw new Error('unavailable');
+  }
+  stagedAttachmentPaths.delete(stagedAttachmentId);
+
+  try {
+    const root = await realpath(getAttachmentStagingDir());
+    const ownedPath = await realpath(stagedPath);
+    if (!isStagingPath(root, ownedPath)) {
+      throw new Error('unavailable');
+    }
+    const metadata = await stat(ownedPath);
+    if (!metadata.isFile() || metadata.size > ATTACHMENT_MAX_BYTES) {
+      throw new Error('unavailable');
+    }
+    await copyFile(ownedPath, destinationPath);
+  } catch {
+    throw new Error('unavailable');
+  } finally {
+    await unlink(stagedPath).catch(() => undefined);
+  }
 }
 
 function getMimeType(ext: string): string {
   return EXT_MIME_MAP[ext.toLowerCase()] || 'application/octet-stream';
 }
 
-function getOutboundMediaDir(): string {
-  return join(getOpenClawConfigDir(), 'media', 'outbound');
+function safeFileName(value: string): string {
+  const name = basename(value);
+  return name && name !== '.' && name !== '..' ? name : 'file';
 }
 
 async function generateImagePreview(stagedPath: string, mimeType: string, fileSize: number): Promise<string | null> {
@@ -78,20 +160,92 @@ function isFileNotFoundError(error: unknown): boolean {
     && error.code === 'ENOENT';
 }
 
+function isStagingPath(root: string, candidate: string): boolean {
+  const pathWithinStaging = relative(root, candidate);
+  return Boolean(pathWithinStaging)
+    && !pathWithinStaging.startsWith('..')
+    && !pathWithinStaging.includes(':');
+}
+
 async function statSelectedFile(filePath: string): Promise<{ isFile(): boolean; size: number }> {
   try {
     return await stat(filePath);
   } catch (error) {
     if (isFileNotFoundError(error)) {
-      throw new Error('notFound');
+      throw new Error('notFound', { cause: error });
     }
     throw error;
   }
 }
 
+export async function stageWorkspaceMediaAttachment(input: {
+  name: string;
+  mimeType: string;
+  content: Buffer;
+  preview?: string | null;
+}): Promise<StagedDialogAttachmentPayload> {
+  if (!input.name || input.name.includes('\0') || !input.mimeType || input.mimeType.includes('\0')
+    || input.content.length > ATTACHMENT_MAX_BYTES) {
+    throw new Error('invalid');
+  }
+  const attachmentStagingDirectory = getAttachmentStagingDir();
+  await mkdir(attachmentStagingDirectory, { recursive: true });
+  const root = await realpath(attachmentStagingDirectory);
+  const id = randomUUID();
+  const stagedPath = join(root, `${id}${extname(safeFileName(input.name))}`);
+  let written = false;
+  try {
+    await writeFile(stagedPath, input.content, { flag: 'wx' });
+    written = true;
+    const ownedPath = await realpath(stagedPath);
+    if (!isStagingPath(root, ownedPath)) {
+      throw new Error('invalid');
+    }
+    const metadata = await stat(ownedPath);
+    if (!metadata.isFile() || metadata.size !== input.content.length || metadata.size > ATTACHMENT_MAX_BYTES) {
+      throw new Error('invalid');
+    }
+    const preview = input.preview ?? await generateImagePreview(ownedPath, input.mimeType, metadata.size);
+    stagedAttachmentPaths.set(id, ownedPath);
+    return {
+      stagedAttachmentId: id,
+      fileName: safeFileName(input.name),
+      mimeType: input.mimeType,
+      fileSize: metadata.size,
+      preview,
+    };
+  } catch {
+    if (written) {
+      await unlink(stagedPath).catch(() => undefined);
+    }
+    throw new Error('invalid');
+  }
+}
+
+export async function stageRendererBufferAttachment(input: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+}): Promise<StagedDialogAttachmentPayload> {
+  if (typeof input.base64 !== 'string' || input.base64.length > Math.ceil(ATTACHMENT_MAX_BYTES / 3) * 4
+    || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.base64) || input.base64.length % 4 !== 0) {
+    throw new Error('invalid');
+  }
+  const content = Buffer.from(input.base64, 'base64');
+  if (content.length > ATTACHMENT_MAX_BYTES || content.toString('base64') !== input.base64) {
+    throw new Error('invalid');
+  }
+  return await stageWorkspaceMediaAttachment({
+    name: input.fileName,
+    mimeType: input.mimeType,
+    content,
+  });
+}
+
 export async function stageDialogSelectedAttachments(filePaths: string[]): Promise<StagedDialogAttachmentPayload[]> {
-  const outboundMediaDir = getOutboundMediaDir();
-  await mkdir(outboundMediaDir, { recursive: true });
+  const attachmentStagingDirectory = getAttachmentStagingDir();
+  await mkdir(attachmentStagingDirectory, { recursive: true });
+  const root = await realpath(attachmentStagingDirectory);
 
   const attachments: StagedDialogAttachmentPayload[] = [];
   for (const filePath of filePaths) {
@@ -103,20 +257,40 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
       throw new Error('tooLarge');
     }
 
-    const id = randomUUID();
     const ext = extname(filePath);
-    const stagedPath = join(outboundMediaDir, `${id}${ext}`);
     const mimeType = getMimeType(ext);
-
-    await copyFile(filePath, stagedPath);
-    attachments.push({
-      id,
-      fileName: basename(filePath) || 'file',
-      mimeType,
-      fileSize: fileStat.size,
-      stagedPath,
-      preview: await generateImagePreview(stagedPath, mimeType, fileStat.size),
-    });
+    const id = randomUUID();
+    const stagedPath = join(root, `${id}${ext}`);
+    let copied = false;
+    try {
+      await copyFile(filePath, stagedPath, constants.COPYFILE_EXCL);
+      copied = true;
+      const ownedPath = await realpath(stagedPath);
+      if (!isStagingPath(root, ownedPath)) {
+        throw new Error('invalid');
+      }
+      const metadata = await stat(ownedPath);
+      if (!metadata.isFile() || metadata.size !== fileStat.size || metadata.size > ATTACHMENT_MAX_BYTES) {
+        throw new Error('invalid');
+      }
+      const preview = await generateImagePreview(ownedPath, mimeType, metadata.size);
+      stagedAttachmentPaths.set(id, ownedPath);
+      attachments.push({
+        stagedAttachmentId: id,
+        fileName: basename(filePath) || 'file',
+        mimeType,
+        fileSize: metadata.size,
+        preview,
+      });
+    } catch (error) {
+      if (copied) {
+        await unlink(stagedPath).catch(() => undefined);
+      }
+      if (error instanceof Error && (error.message === 'invalid' || error.message === 'tooLarge')) {
+        throw error;
+      }
+      throw new Error('invalid', { cause: error });
+    }
   }
 
   return attachments;

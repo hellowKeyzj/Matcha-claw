@@ -2,7 +2,7 @@ import { ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
-import { expandPath, getResourcesDir } from '../../utils/paths';
+import { expandPath, getLogsDir, getResourcesDir } from '../../utils/paths';
 import { logger } from '../../utils/logger';
 
 const CHROME_EXTENSIONS_URL = 'chrome://extensions/';
@@ -205,6 +205,15 @@ export function registerShellHandlers(): void {
 
   ipcMain.handle('shell:openChromeExtensions', async () => {
     await openChromeExtensionsPage();
+  });
+
+  ipcMain.handle('shell:showAppLogsDirectory', async () => {
+    const logsDirectory = getLogsDir();
+    if (!existsSync(logsDirectory)) {
+      return { success: false, outcome: 'unavailable' as const };
+    }
+    shell.showItemInFolder(logsDirectory);
+    return { success: true, outcome: 'opened' as const };
   });
 
   ipcMain.handle('shell:openResourcePath', async (_, path: string) => {

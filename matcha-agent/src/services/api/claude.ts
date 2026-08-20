@@ -1343,6 +1343,18 @@ async function* queryModel(
   // OpenAI-compatible provider: delegate to the OpenAI adapter layer
   // after shared preprocessing (message normalization, tool filtering,
   // media stripping) but before Anthropic-specific logic (betas, thinking, caching).
+  if (getAPIProvider() === 'openaiResponses') {
+    const { queryModelOpenAIResponses } = await import('./openai/index.js')
+    yield* queryModelOpenAIResponses(
+      messagesForAPI,
+      systemPrompt,
+      tools,
+      signal,
+      options,
+    )
+    return
+  }
+
   if (getAPIProvider() === 'openai') {
     const { queryModelOpenAI } = await import('./openai/index.js')
     // OpenAI emulates Anthropic's dynamic tool loading client-side. It needs

@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Chat from '@/pages/Chat';
 import { useChatStore as realUseChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -140,7 +140,7 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
             fileName: 'brief.txt',
             mimeType: 'text/plain',
             fileSize: 12,
-            stagedPath: '/tmp/brief.txt',
+            stagedAttachmentId: 'attachment-brief',
             preview: null,
             status: 'ready',
           }]).then(chatInputSendResultSpy);
@@ -234,7 +234,7 @@ describe('chat 顶层订阅收口', () => {
     chatViewportPaneRenderSpy.mockClear();
     chatInputSendResultSpy.mockClear();
 
-    useGatewayStore.setState({
+    useRuntimeHostStore.setState({
       status: {
         processState: 'running',
         port: 18789,
@@ -248,6 +248,7 @@ describe('chat 顶层订阅收口', () => {
         },
         updatedAt: 1,
       },
+      runtimeHost: { lifecycle: 'running' },
       isInitialized: true,
       rpc: vi.fn(),
     } as never);
@@ -776,7 +777,7 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.activeRunDisconnected');
   });
 
-  it('运行期 gateway 恢复中应保留 Chat 内容并禁用输入框', () => {
+  it('Runtime Host 恢复到 running 后保留 Chat 内容并启用输入框', () => {
     render(
       <MemoryRouter>
         <Chat isActive={false} />
@@ -787,61 +788,23 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'false');
 
     act(() => {
-      useGatewayStore.setState({
+      useRuntimeHostStore.setState({
         isInitialized: true,
-        status: {
-          processState: 'running',
-          port: 18789,
-          gatewayReady: false,
-          healthSummary: 'unresponsive',
-          transportState: 'disconnected',
-          portReachable: true,
-          lastError: 'Gateway RPC timeout: agents.list',
-          lastIssue: {
-            message: 'Gateway RPC timeout: agents.list',
-            source: 'rpc',
-            at: 2,
-          },
-          diagnostics: {
-            consecutiveHeartbeatMisses: 0,
-            consecutiveRpcFailures: 3,
-          },
-          updatedAt: 2,
-        },
+        runtimeHost: { lifecycle: 'running' },
       } as never);
     });
 
     expect(screen.queryByTestId('chat-offline')).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
     expect(screen.getByTestId('chat-viewport-pane')).toHaveTextContent('1');
-    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'true');
-    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-reconnecting', 'true');
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'false');
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-reconnecting', 'false');
   });
 
-  it('gateway 进程仍在恢复时，socket 1006 不应显示为断连错误', () => {
-    useGatewayStore.setState({
+  it('运行中的 Runtime Host 不会伪装为 Gateway transport 恢复状态', () => {
+    useRuntimeHostStore.setState({
       isInitialized: true,
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
-        lastError: 'Gateway socket closed: code=1006 reason=network down',
-        lastIssue: {
-          message: 'Gateway socket closed: code=1006 reason=network down',
-          source: 'socket-close',
-          at: 1,
-          code: '1006',
-          details: { reason: 'network down' },
-        },
-        diagnostics: {
-          consecutiveHeartbeatMisses: 1,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
+      runtimeHost: { lifecycle: 'running' },
     } as never);
 
     render(
@@ -850,15 +813,12 @@ describe('chat 顶层订阅收口', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'loading');
-    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('gatewayPreparing.title');
-    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
+    expect(screen.queryByTestId('chat-offline')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
   });
 
-  it('gateway 进程停止后，离线页应显示具体 transport 错误原因', () => {
-    useGatewayStore.setState({
-      isInitialized: true,
+  it('Runtime Host 停止时离线页只显示通用 host 状态', () => {
+    useRuntimeHostStore.setState({
       status: {
         processState: 'stopped',
         port: 18789,
@@ -866,20 +826,14 @@ describe('chat 顶层订阅收口', () => {
         healthSummary: 'unresponsive',
         transportState: 'disconnected',
         portReachable: false,
-        lastError: 'Gateway socket closed: code=1006 reason=network down',
-        lastIssue: {
-          message: 'Gateway socket closed: code=1006 reason=network down',
-          source: 'socket-close',
-          at: 1,
-          code: '1006',
-          details: { reason: 'network down' },
-        },
         diagnostics: {
-          consecutiveHeartbeatMisses: 1,
+          consecutiveHeartbeatMisses: 0,
           consecutiveRpcFailures: 0,
         },
         updatedAt: 2,
       },
+      isInitialized: true,
+      runtimeHost: { lifecycle: 'stopped' },
     } as never);
 
     render(
@@ -890,12 +844,11 @@ describe('chat 顶层订阅收口', () => {
 
     expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'error');
-    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('errors.gatewaySocketClosed');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayRequired');
   });
 
   it('应用刚启动、gateway 状态尚未初始化时，应显示准备中而不是断连错误', () => {
-    useGatewayStore.setState({
-      isInitialized: false,
+    useRuntimeHostStore.setState({
       status: {
         processState: 'stopped',
         port: 18789,
@@ -903,13 +856,14 @@ describe('chat 顶层订阅收口', () => {
         healthSummary: 'unresponsive',
         transportState: 'disconnected',
         portReachable: false,
-        lastError: 'Gateway socket closed: code=1006 reason=unknown',
         diagnostics: {
           consecutiveHeartbeatMisses: 0,
           consecutiveRpcFailures: 0,
         },
         updatedAt: 2,
       },
+      isInitialized: false,
+      runtimeHost: { lifecycle: 'stopped' },
     } as never);
 
     render(
@@ -923,27 +877,9 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
   });
 
-  it('当前会话仍在发送时，应延迟显示 gateway transport issue banner', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'degraded',
-        transportState: 'connected',
-        portReachable: true,
-        lastError: 'Gateway RPC timeout: chat.send',
-        lastIssue: {
-          message: 'Gateway RPC timeout: chat.send',
-          source: 'rpc',
-          at: 1,
-        },
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 1,
-        },
-        updatedAt: 2,
-      },
+  it('当前会话仍在发送但没有会话错误时，不从 Host lifecycle 推导 transport 错误 banner', () => {
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     } as never);
     useChatStore.setState((state) => ({
       loadedSessions: {
@@ -966,27 +902,11 @@ describe('chat 顶层订阅收口', () => {
     );
 
     expect(screen.queryByTestId('chat-error-banner')).not.toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.gatewayRpcTimeout');
-    });
   });
 
   it('当前会话仍在发送且只有 gateway 错误文本时，不应立即闪现错误 banner', () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'degraded',
-        transportState: 'connected',
-        portReachable: true,
-        lastError: 'Gateway RPC timeout: chat.send',
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 1,
-        },
-        updatedAt: 2,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     } as never);
     useChatStore.setState((state) => ({
       loadedSessions: {

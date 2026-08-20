@@ -1,4 +1,4 @@
-import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+import type { GatewayTransportIssue } from './session/runtime-state';
 
 /**
  * Gateway Type Definitions

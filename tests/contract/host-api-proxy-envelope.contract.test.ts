@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   decodeHostApiProxyEnvelope,
+  resolveHostApiProxyErrorCode,
   resolveHostApiProxyErrorMessage,
   unwrapHostApiProxyEnvelope,
 } from '../../src/lib/host-api-transport-contract';
@@ -51,14 +52,19 @@ describe('host-api proxy envelope contract', () => {
     })).toThrow('Runtime Host HTTP request failed: GET /api/cron/jobs (fetch failed)');
   });
 
-  it('失败包络必须有 error.message，且可被统一取错', () => {
+  it('失败包络保留安全结构化错误码，且可被统一取错', () => {
     const envelope = decodeHostApiProxyEnvelope({
       ok: false,
-      error: { message: 'Invalid Authentication' },
+      error: { message: 'Host API request is unavailable.', code: 'TIMEOUT' },
     });
     expect(envelope.ok).toBe(false);
     if (!envelope.ok) {
-      expect(resolveHostApiProxyErrorMessage(envelope.error)).toBe('Invalid Authentication');
+      expect(resolveHostApiProxyErrorMessage(envelope.error)).toBe('Host API request is unavailable.');
+      expect(resolveHostApiProxyErrorCode(envelope.error)).toBe('TIMEOUT');
+      expect(() => unwrapHostApiProxyEnvelope(envelope, {
+        method: 'GET',
+        path: '/api/demo',
+      })).toThrow(expect.objectContaining({ code: 'TIMEOUT' }));
     }
   });
 });

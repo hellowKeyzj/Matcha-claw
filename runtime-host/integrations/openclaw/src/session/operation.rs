@@ -1,0 +1,686 @@
+use std::{fmt, sync::Arc};
+
+use platform::exchange::InvocationOutcome;
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::gateway::{
+    client::{GatewayClient, GatewayClientError},
+    delivery::MutationDelivery,
+    wire::{self, GatewayResponse},
+};
+
+use super::protocol::{
+    self, ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
+    ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
+    SessionDeleteResult, SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
+    SessionModelPatchResult, SessionsListParams, SessionsListResult,
+};
+
+static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) struct SessionOperation {
+    gateway: Arc<GatewayClient>,
+}
+
+impl SessionOperation {
+    pub(crate) fn new(gateway: Arc<GatewayClient>) -> Self {
+        Self { gateway }
+    }
+
+    pub(crate) async fn list_sessions(
+        &self,
+        params: SessionsListParams,
+    ) -> Result<SessionsListResult, OperationError> {
+        let request_id = next_request_id("sessions-list");
+        let request = request(&request_id, protocol::SESSIONS_LIST_METHOD, params)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(OperationError::from)?;
+        protocol::decode_sessions_list_result(&request_id, response).map_err(OperationError::from)
+    }
+
+    pub(crate) async fn history(
+        &self,
+        params: ChatHistoryParams,
+    ) -> Result<ChatHistoryResult, OperationError> {
+        let limit = params.limit();
+        let request_id = next_request_id("chat-history");
+        let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(OperationError::from)?;
+        protocol::decode_chat_history_result(&request_id, response, limit)
+            .map_err(OperationError::from)
+    }
+
+    pub(crate) async fn history_payload(
+        &self,
+        params: ChatHistoryParams,
+    ) -> Result<Value, OperationError> {
+        let request_id = next_request_id("chat-history");
+        let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(OperationError::from)?;
+        payload(&request_id, response)
+    }
+
+    pub(crate) async fn send_chat(
+        &self,
+        params: ChatSendParams,
+    ) -> Result<InvocationOutcome<ChatSendResult, OperationError>, OperationError> {
+        let request_id = next_request_id("chat-send");
+        let request = request(&request_id, protocol::CHAT_SEND_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_chat_send_result(&request_id, response)
+            })
+            .await)
+    }
+
+    pub(crate) async fn abort_chat(
+        &self,
+        params: ChatAbortParams,
+    ) -> Result<InvocationOutcome<ChatAbortResult, OperationError>, OperationError> {
+        let request_id = next_request_id("chat-abort");
+        let request = request(&request_id, protocol::CHAT_ABORT_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_chat_abort_result(&request_id, response)
+            })
+            .await)
+    }
+
+    pub(crate) async fn patch_session_model(
+        &self,
+        params: SessionModelPatchParams,
+    ) -> Result<InvocationOutcome<SessionModelPatchResult, OperationError>, OperationError> {
+        let request_id = next_request_id("sessions-patch-model");
+        let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_session_model_patch_result(&request_id, response)
+            })
+            .await)
+    }
+
+    pub(crate) async fn patch_session_label(
+        &self,
+        params: SessionLabelPatchParams,
+    ) -> Result<InvocationOutcome<SessionLabelPatchResult, OperationError>, OperationError> {
+        let expected_key = params.key().clone();
+        let request_id = next_request_id("sessions-patch-label");
+        let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_session_label_patch_result(&request_id, response, &expected_key)
+            })
+            .await)
+    }
+
+    pub(crate) async fn create_session(
+        &self,
+        params: SessionCreateParams,
+    ) -> Result<InvocationOutcome<SessionCreateResult, OperationError>, OperationError> {
+        let expected_key = params.key().clone();
+        let request_id = next_request_id("sessions-create");
+        let request = request(&request_id, protocol::SESSIONS_CREATE_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_session_create_result(&request_id, response, &expected_key)
+            })
+            .await)
+    }
+
+    pub(crate) async fn delete_session(
+        &self,
+        params: SessionDeleteParams,
+    ) -> Result<InvocationOutcome<SessionDeleteResult, OperationError>, OperationError> {
+        let expected_key = params.key().clone();
+        let request_id = next_request_id("sessions-delete");
+        let request = request(&request_id, protocol::SESSIONS_DELETE_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_session_delete_result(&request_id, response, &expected_key)
+            })
+            .await)
+    }
+
+    async fn mutate<T>(
+        &self,
+        request: wire::RpcRequest,
+        decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>,
+    ) -> InvocationOutcome<T, OperationError> {
+        let request_id = request.request_id().to_owned();
+        match self.gateway.rpc_mutation(request).await {
+            MutationDelivery::Response(response) if response.request_id() != request_id => {
+                InvocationOutcome::TargetRejected(OperationError::UnknownResponse)
+            }
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                InvocationOutcome::TargetRejected(OperationError::gateway_rejected(error))
+            }
+            MutationDelivery::Response(response) => match decode(response) {
+                Ok(result) => InvocationOutcome::Succeeded(result),
+                Err(protocol::ProtocolError::Rejected) => {
+                    InvocationOutcome::TargetRejected(OperationError::Rejected)
+                }
+                Err(error) => InvocationOutcome::TargetRejected(OperationError::from(error)),
+            },
+            MutationDelivery::NotWritten(error) | MutationDelivery::MayHaveReached(error) => {
+                let _ = error;
+                InvocationOutcome::Unknown
+            }
+        }
+    }
+}
+
+impl fmt::Debug for SessionOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionOperation")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum OperationError {
+    RequestIdExhausted,
+    RequestDeadline,
+    ConnectionClosed,
+    UnknownResponse,
+    Transport,
+    Protocol,
+    Rejected,
+    GatewayRejected { code: String, message: String },
+}
+
+impl OperationError {
+    fn gateway_rejected(error: wire::GatewayError) -> Self {
+        Self::GatewayRejected {
+            code: error.code().to_owned(),
+            message: error.message().to_owned(),
+        }
+    }
+
+    pub(crate) fn gateway_rejection(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::GatewayRejected { code, message } => Some((code, message)),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for OperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestIdExhausted => formatter.write_str("RequestIdExhausted"),
+            Self::RequestDeadline => formatter.write_str("RequestDeadline"),
+            Self::ConnectionClosed => formatter.write_str("ConnectionClosed"),
+            Self::UnknownResponse => formatter.write_str("UnknownResponse"),
+            Self::Transport => formatter.write_str("Transport"),
+            Self::Protocol => formatter.write_str("Protocol"),
+            Self::Rejected => formatter.write_str("Rejected"),
+            Self::GatewayRejected { code, .. } => formatter
+                .debug_struct("GatewayRejected")
+                .field("code", code)
+                .field("message", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+impl From<GatewayClientError> for OperationError {
+    fn from(value: GatewayClientError) -> Self {
+        match value {
+            GatewayClientError::RpcDeadline => Self::RequestDeadline,
+            GatewayClientError::ConnectionClosed => Self::ConnectionClosed,
+            GatewayClientError::Protocol | GatewayClientError::RpcFailed => Self::Protocol,
+            _ => Self::Transport,
+        }
+    }
+}
+
+impl From<protocol::ProtocolError> for OperationError {
+    fn from(value: protocol::ProtocolError) -> Self {
+        match value {
+            protocol::ProtocolError::Rejected => Self::Rejected,
+            protocol::ProtocolError::MismatchedResponse => Self::UnknownResponse,
+            _ => Self::Protocol,
+        }
+    }
+}
+
+impl From<wire::WireError> for OperationError {
+    fn from(_: wire::WireError) -> Self {
+        Self::Protocol
+    }
+}
+
+fn request<P: Serialize>(
+    request_id: &str,
+    method: &'static str,
+    params: P,
+) -> Result<wire::RpcRequest, OperationError> {
+    let params = serde_json::to_value(params).map_err(|_| OperationError::Protocol)?;
+    wire::session_request(request_id.to_owned(), method, params).map_err(Into::into)
+}
+
+fn payload(request_id: &str, response: GatewayResponse) -> Result<Value, OperationError> {
+    if response.request_id() != request_id {
+        return Err(OperationError::UnknownResponse);
+    }
+    match response {
+        GatewayResponse::Success {
+            payload: Some(payload),
+            ..
+        } => Ok(payload),
+        GatewayResponse::Success { payload: None, .. } => Err(OperationError::Protocol),
+        GatewayResponse::Failure { .. } => Err(OperationError::Rejected),
+    }
+}
+
+fn next_request_id(operation: &str) -> String {
+    let sequence = NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("matcha-session-{operation}-{sequence}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    use crate::gateway::{
+        auth::GatewaySecret,
+        client::{
+            GatewayClientMetadata, GatewayEndpoint,
+            test_support::{TestSocket, TestTlsIdentity, accept_websocket},
+        },
+    };
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_operation_reuses_control_gateway_for_every_method_without_subscribe() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = TestTlsIdentity::generate();
+        let client = Arc::new(test_client(&listener, identity.fingerprint()));
+        let acceptor = identity.acceptor();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_control(&listener, &acceptor).await;
+            serve_session_success(
+                &mut socket,
+                protocol::SESSIONS_LIST_METHOD,
+                json!({
+                    "ts": 42,
+                    "count": 0,
+                    "sessions": []
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::CHAT_HISTORY_METHOD,
+                json!({
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::CHAT_SEND_METHOD,
+                json!({
+                    "runId": "run-7",
+                    "status": "started"
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::CHAT_ABORT_METHOD,
+                json!({
+                    "ok": true,
+                    "aborted": true,
+                    "runIds": ["run-7"]
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::SESSIONS_PATCH_METHOD,
+                json!({
+                    "ok": true,
+                    "key": "agent:main:session-1",
+                    "resolved": {
+                        "modelProvider": "anthropic",
+                        "model": "anthropic/claude-opus-4-7",
+                        "agentRuntime": {"id": "acpx", "source": "session-key"}
+                    }
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::SESSIONS_PATCH_METHOD,
+                json!({
+                    "ok": true,
+                    "key": "agent:main:session-1"
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::SESSIONS_CREATE_METHOD,
+                json!({
+                    "ok": true,
+                    "key": "agent:mct-team:team-endpoint-session-run-1-reviewer",
+                    "sessionId": "team-endpoint-session-run-1-reviewer"
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                protocol::SESSIONS_DELETE_METHOD,
+                json!({
+                    "ok": true,
+                    "key": "agent:mct-team:team-endpoint-session-run-1-reviewer",
+                    "deleted": true
+                }),
+            )
+            .await;
+        });
+
+        let operation = SessionOperation::new(Arc::clone(&client));
+        let session_key = protocol::SessionKey::try_new("agent:main:session-1").unwrap();
+        let run_id = protocol::RunId::try_new("run-7").unwrap();
+        let create = protocol::SessionCreateParams::try_new(
+            protocol::AgentId::try_new("mct-team").unwrap(),
+            protocol::EndpointSessionId::try_new("team-endpoint-session-run-1-reviewer").unwrap(),
+        )
+        .unwrap();
+        let delete = protocol::SessionDeleteParams::new(create.key().clone());
+
+        operation
+            .list_sessions(protocol::SessionsListParams::default())
+            .await
+            .unwrap();
+        let history = operation
+            .history(protocol::ChatHistoryParams::new(session_key.clone()))
+            .await
+            .unwrap();
+        assert_eq!(history.messages.len(), 1);
+        assert!(matches!(
+            operation
+                .send_chat(
+                    protocol::ChatSendParams::try_new(session_key.clone(), "hello", run_id.clone())
+                        .unwrap()
+                )
+                .await,
+            Ok(InvocationOutcome::Succeeded(_))
+        ));
+        assert!(matches!(
+            operation
+                .abort_chat(protocol::ChatAbortParams::new(session_key.clone()).for_run(run_id))
+                .await,
+            Ok(InvocationOutcome::Succeeded(_))
+        ));
+        assert!(matches!(
+            operation
+                .patch_session_model(protocol::SessionModelPatchParams::new(
+                    session_key.clone(),
+                    Some(protocol::ModelRef::try_new("anthropic/claude-opus-4-7").unwrap()),
+                ))
+                .await,
+            Ok(InvocationOutcome::Succeeded(_))
+        ));
+        assert!(matches!(
+            operation
+                .patch_session_label(
+                    protocol::SessionLabelPatchParams::try_new(session_key, "Review").unwrap()
+                )
+                .await,
+            Ok(InvocationOutcome::Succeeded(_))
+        ));
+        assert!(matches!(
+            operation.create_session(create).await,
+            Ok(InvocationOutcome::Succeeded(_))
+        ));
+        assert!(matches!(
+            operation.delete_session(delete).await,
+            Ok(InvocationOutcome::Succeeded(
+                protocol::SessionDeleteResult { deleted: true }
+            ))
+        ));
+
+        client.close_control_connection().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_operation_maps_gateway_failure_responses_without_subscribe() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = TestTlsIdentity::generate();
+        let client = Arc::new(test_client(&listener, identity.fingerprint()));
+        let acceptor = identity.acceptor();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_control(&listener, &acceptor).await;
+            serve_session_failure(&mut socket, protocol::SESSIONS_LIST_METHOD).await;
+            serve_session_failure(&mut socket, protocol::CHAT_SEND_METHOD).await;
+        });
+
+        let operation = SessionOperation::new(Arc::clone(&client));
+        assert_eq!(
+            operation
+                .list_sessions(protocol::SessionsListParams::default())
+                .await,
+            Err(OperationError::Rejected)
+        );
+        let rejection = operation
+            .send_chat(
+                protocol::ChatSendParams::try_new(
+                    protocol::SessionKey::try_new("agent:main:session-1").unwrap(),
+                    "hello",
+                    protocol::RunId::try_new("run-7").unwrap(),
+                )
+                .unwrap(),
+            )
+            .await;
+        assert!(matches!(
+            rejection,
+            Ok(InvocationOutcome::TargetRejected(
+                OperationError::GatewayRejected { .. }
+            ))
+        ));
+
+        client.close_control_connection().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_operation_maps_unknown_mutation_delivery_without_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = TestTlsIdentity::generate();
+        let client = Arc::new(test_client(&listener, identity.fingerprint()));
+        let acceptor = identity.acceptor();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_control(&listener, &acceptor).await;
+            let request = read_session_request(&mut socket, protocol::CHAT_ABORT_METHOD).await;
+            socket.close(None).await.unwrap();
+            request
+        });
+
+        let operation = SessionOperation::new(Arc::clone(&client));
+        assert_eq!(
+            operation
+                .abort_chat(protocol::ChatAbortParams::new(
+                    protocol::SessionKey::try_new("agent:main:session-1").unwrap(),
+                ))
+                .await,
+            Ok(InvocationOutcome::Unknown)
+        );
+        client.close_control_connection().await;
+        server.await.unwrap();
+
+        assert_eq!(
+            SessionOperation::new(client)
+                .send_chat(
+                    protocol::ChatSendParams::try_new(
+                        protocol::SessionKey::try_new("agent:main:session-1").unwrap(),
+                        "hello",
+                        protocol::RunId::try_new("run-7").unwrap(),
+                    )
+                    .unwrap()
+                )
+                .await,
+            Ok(InvocationOutcome::Unknown)
+        );
+    }
+
+    async fn accept_control(
+        listener: &TcpListener,
+        acceptor: &tokio_rustls::TlsAcceptor,
+    ) -> TestSocket {
+        let mut socket = accept_websocket(listener, acceptor).await;
+        send_json(
+            &mut socket,
+            json!({
+                "type": "event",
+                "event": "connect.challenge",
+                "payload": {"nonce": "fake-nonce", "ts": 42}
+            }),
+        )
+        .await;
+        let connect = read_json(&mut socket).await;
+        assert_eq!(connect["method"], "connect");
+        assert_eq!(
+            connect["params"]["scopes"],
+            json!([
+                "operator.read",
+                "operator.write",
+                "operator.admin",
+                "operator.approvals"
+            ])
+        );
+        assert_ne!(connect["method"], wire::SESSIONS_SUBSCRIBE_METHOD);
+        send_json(
+            &mut socket,
+            json!({
+                "type": "res",
+                "id": connect["id"],
+                "ok": true,
+                "payload": {
+                    "type": "hello-ok",
+                    "protocol": 4,
+                    "server": {"version": wire::OPENCLAW_GATEWAY_VERSION, "connId": "fake-connection"},
+                    "features": {
+                        "methods": [
+                            "status",
+                            "config.get",
+                            "config.patch",
+                            "config.apply",
+                            "agents.list",
+                            "skills.status",
+                            wire::SYSTEM_PRESENCE_METHOD,
+                            protocol::SESSIONS_LIST_METHOD,
+                            protocol::CHAT_HISTORY_METHOD,
+                            protocol::CHAT_SEND_METHOD,
+                            protocol::CHAT_ABORT_METHOD,
+                            protocol::SESSIONS_PATCH_METHOD,
+                            protocol::SESSIONS_CREATE_METHOD,
+                            protocol::SESSIONS_DELETE_METHOD
+                        ],
+                        "events": ["tick"]
+                    },
+                    "snapshot": {
+                        "presence": [{"ts": 41}],
+                        "health": {"ok": true},
+                        "stateVersion": {"presence": 1, "health": 1},
+                        "uptimeMs": 100
+                    },
+                    "auth": {
+                        "role": "operator",
+                        "scopes": ["operator.read", "operator.write", "operator.admin", "operator.approvals"]
+                    },
+                    "policy": {
+                        "maxPayload": 26214400,
+                        "maxBufferedBytes": 52428800,
+                        "tickIntervalMs": 15000
+                    }
+                }
+            }),
+        )
+        .await;
+        socket
+    }
+
+    async fn serve_session_success(socket: &mut TestSocket, method: &str, payload: Value) {
+        let request = read_session_request(socket, method).await;
+        send_json(
+            socket,
+            json!({
+                "type": "res",
+                "id": request["id"],
+                "ok": true,
+                "payload": payload
+            }),
+        )
+        .await;
+    }
+
+    async fn serve_session_failure(socket: &mut TestSocket, method: &str) {
+        let request = read_session_request(socket, method).await;
+        send_json(
+            socket,
+            json!({
+                "type": "res",
+                "id": request["id"],
+                "ok": false,
+                "error": {"code": "REJECTED", "message": "rejected", "retryable": false}
+            }),
+        )
+        .await;
+    }
+
+    async fn read_session_request(socket: &mut TestSocket, method: &str) -> Value {
+        let request = read_json(socket).await;
+        assert_eq!(request["method"], method);
+        assert_ne!(request["method"], wire::SESSIONS_SUBSCRIBE_METHOD);
+        request
+    }
+
+    async fn read_json(socket: &mut TestSocket) -> Value {
+        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+            panic!("expected text frame");
+        };
+        serde_json::from_str(text.as_str()).unwrap()
+    }
+
+    async fn send_json(socket: &mut TestSocket, value: Value) {
+        socket
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .unwrap();
+    }
+
+    fn test_client(
+        listener: &TcpListener,
+        certificate_fingerprint: platform::listener_identity::CertificateFingerprint,
+    ) -> GatewayClient {
+        GatewayClient::new(
+            GatewayEndpoint::try_new(listener.local_addr().unwrap()).unwrap(),
+            certificate_fingerprint,
+            Arc::new(GatewaySecret::new("fake-gateway-token".into()).unwrap()),
+            GatewayClientMetadata::try_new("1.2.3".into(), "windows".into()).unwrap(),
+        )
+    }
+}

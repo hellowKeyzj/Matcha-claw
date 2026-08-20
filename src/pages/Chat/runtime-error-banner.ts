@@ -1,4 +1,4 @@
-import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
+import type { GatewayTransportIssue } from '../../types/session/runtime-state';
 import type { ChatRunPhase, ChatSessionRuntimeState } from '@/stores/chat/types';
 import { isRunActive } from '@/stores/chat/types';
 

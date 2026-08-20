@@ -109,12 +109,49 @@ type ExternalConnectorConnectionStatusPayload = {
   status: ExternalConnectorConnectionStatus;
 };
 
-type ExternalConnectorMutationPayload = {
-  success: true;
-  connector: ExternalConnectorSpec;
-  resultType?: 'created' | 'updated';
-  downstreamSyncResults?: unknown[];
-};
+export type ExternalConnectorMutationDesiredStatus = 'stored' | 'removed';
+
+export interface ExternalConnectorMutationDesired {
+  readonly status: ExternalConnectorMutationDesiredStatus;
+  readonly revision?: number;
+}
+
+export type ExternalConnectorMutationApplied =
+  | {
+      readonly status: 'written';
+      readonly changed: boolean;
+    }
+  | {
+      readonly status: 'unknown' | 'unavailable';
+      readonly changed?: never;
+    };
+
+export interface ExternalConnectorMutationObserved {
+  readonly status: 'not-observed';
+}
+
+export interface ExternalConnectorUpsertMutationReceipt {
+  readonly success: true;
+  readonly connector: ExternalConnectorSpec;
+  readonly resultType: 'created' | 'updated';
+  readonly desired: ExternalConnectorMutationDesired & { readonly status: 'stored' };
+  readonly applied: ExternalConnectorMutationApplied;
+  readonly observed: ExternalConnectorMutationObserved;
+}
+
+export interface ExternalConnectorRemoveMutationReceipt {
+  readonly success: true;
+  readonly connector?: never;
+  readonly desired: ExternalConnectorMutationDesired & { readonly status: 'removed' };
+  readonly applied: ExternalConnectorMutationApplied;
+  readonly observed: ExternalConnectorMutationObserved;
+}
+
+export type ExternalConnectorMutationReceipt =
+  | ExternalConnectorUpsertMutationReceipt
+  | ExternalConnectorRemoveMutationReceipt;
+
+export type ExternalConnectorMutationPayload = ExternalConnectorUpsertMutationReceipt;
 
 type ExternalConnectorsState = {
   connectors: ExternalConnectorSpec[];
@@ -206,7 +243,6 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
           [result.connector.id]: {
             connectorId: result.connector.id,
             resultType: 'unknown',
-            reason: 'connector changed and has not been probed',
             safeProbe: false,
           },
         },
@@ -224,7 +260,7 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
   remove: async (connectorId) => {
     set({ mutatingId: connectorId, error: null });
     try {
-      await externalConnectorPost<ExternalConnectorMutationPayload>('/api/external-connectors/remove', { connectorId });
+      await externalConnectorPost<ExternalConnectorRemoveMutationReceipt>('/api/external-connectors/remove', { connectorId });
       set((state) => {
         const { [connectorId]: _removedStatus, ...connectorStatuses } = state.connectorStatuses;
         return {

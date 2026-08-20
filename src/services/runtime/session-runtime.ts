@@ -6,10 +6,15 @@ import {
   hostSessionList,
   hostSessionPrompt,
   hostSessionWindowFetch,
-  resolveHydratedSessionSnapshot,
 } from '@/lib/host-api';
-import type { RuntimeEndpointRef, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
-import type { SessionRenderItem, SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
+import {
+  buildSessionIdentityKey,
+  type RuntimeEndpointRef,
+  type SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
+import type { SessionRenderItem } from '../../types/session/render-item';
+import { decodeHistorySessionView, resolveSessionViewError } from '@/stores/chat/history-fetch-helpers';
+import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
 import type { ChatSession } from '@/stores/chat/types';
 import {
   findLatestAssistantSnapshotFromItems,
@@ -25,12 +30,14 @@ export interface AssistantSnapshot {
 export interface FetchChatHistoryInput {
   sessionKey: string;
   sessionIdentity: SessionIdentity;
+  endpointSessionId?: string;
   limit?: number;
 }
 
 export interface FetchChatTimelineInput {
   sessionKey: string;
   sessionIdentity: SessionIdentity;
+  endpointSessionId?: string;
   limit?: number;
 }
 
@@ -55,33 +62,22 @@ export interface ListSessionsInput {
 
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 
-function resolveAuthoritativeItems(
-  snapshot: SessionStateSnapshot,
-): SessionRenderItem[] {
-  return Array.isArray(snapshot.items) ? snapshot.items : [];
-}
-
 export async function fetchChatTimeline(
   input: FetchChatTimelineInput,
 ): Promise<SessionRenderItem[]> {
-  const initial = await hostSessionWindowFetch({
-    sessionKey: input.sessionKey,
-    sessionIdentity: input.sessionIdentity,
-    mode: 'latest',
-    limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
-    includeCanonical: true,
-  });
-  const snapshot = await resolveHydratedSessionSnapshot({
-    initial,
-    refetch: async () => await hostSessionWindowFetch({
+  try {
+    const view = decodeHistorySessionView(await hostSessionWindowFetch({
       sessionKey: input.sessionKey,
+      ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
       sessionIdentity: input.sessionIdentity,
       mode: 'latest',
       limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
       includeCanonical: true,
-    }),
-  });
-  return snapshot ? resolveAuthoritativeItems(snapshot) : [];
+    }));
+    return projectSessionViewItems(view);
+  } catch (error) {
+    throw resolveSessionViewError(error);
+  }
 }
 
 export async function fetchLatestAssistantText(
@@ -90,6 +86,7 @@ export async function fetchLatestAssistantText(
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     sessionIdentity: input.sessionIdentity,
+    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
     limit: input.limit,
   });
   return findLatestAssistantTextFromItems(items);
@@ -101,6 +98,7 @@ export async function fetchLatestAssistantTurnText(
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     sessionIdentity: input.sessionIdentity,
+    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
     limit: input.limit,
   });
   return findLatestAssistantTurnTextFromItems(items);
@@ -112,6 +110,7 @@ export async function fetchLatestAssistantSnapshot(
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     sessionIdentity: input.sessionIdentity,
+    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
     limit: input.limit,
   });
   return findLatestAssistantSnapshotFromItems(items);
@@ -168,5 +167,22 @@ export async function listSessions(
   input: ListSessionsInput,
 ): Promise<ChatSession[]> {
   const result = await hostSessionList({ endpoint: input.endpoint });
-  return Array.isArray(result.sessions) ? result.sessions as ChatSession[] : [];
+  return result.sessions.map((session) => ({
+    key: buildSessionIdentityKey(session.sessionIdentity),
+    backendSessionKey: session.key,
+    agentId: session.agentId,
+    sessionIdentity: session.sessionIdentity,
+    kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
+      ? session.kind
+      : 'named',
+    preferred: session.preferred === true,
+    ...(session.protocolId ? { protocolId: session.protocolId } : {}),
+    ...(session.runtimeEndpointId ? { runtimeEndpointId: session.runtimeEndpointId } : {}),
+    ...(session.endpointSessionId ? { endpointSessionId: session.endpointSessionId } : {}),
+    ...(session.label ? { label: session.label } : {}),
+    ...(session.titleSource ? { titleSource: session.titleSource } : {}),
+    ...(session.displayName ? { displayName: session.displayName } : {}),
+    ...(session.contextTokens ? { contextTokens: session.contextTokens } : {}),
+    ...(typeof session.updatedAt === 'number' ? { updatedAt: session.updatedAt } : {}),
+  }));
 }

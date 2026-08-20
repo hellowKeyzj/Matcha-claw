@@ -14,7 +14,10 @@ import { useChatStore, type ChatSession } from '@/stores/chat';
 import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import type { ChatSessionRuntimeEndpointTarget } from '@/stores/chat/types';
-import type { AgentScope, RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+  RuntimeEndpointRef,
+} from '../../../electron/desktop-contract/runtime-address';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -820,7 +823,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     teamName: team.name,
     activeRunId: team.activeRunId,
     runs: (runListByTeamId[team.id] ?? []).map((run) => {
-      const toRoleNode = (role: (typeof run.sessions)[number]): TeamRoleSessionNode => ({
+      const sessions = run.sessions ?? [];
+      const toRoleNode = (role: (typeof sessions)[number]): TeamRoleSessionNode => ({
         roleId: role.roleId,
         agentId: role.agentId,
         sessionIdentity: role.sessionIdentity,
@@ -830,11 +834,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
           endpointSessionId: role.endpointSessionId,
         })?.endpointSessionId ?? role.endpointSessionId,
       });
-      const leader = run.sessions.find((role) => role.roleId === 'leader');
+      const leader = sessions.find((role) => role.roleId === 'leader');
       return {
         runId: run.runId,
         ...(leader ? { leader: toRoleNode(leader) } : {}),
-        roles: run.sessions
+        roles: sessions
           .filter((role) => role.roleId !== 'leader')
           .map(toRoleNode),
       };
@@ -1056,6 +1060,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 }
                 handleCreateSessionForDefaultScope();
               }}
+              disabled={!selectedRuntimeEndpoint}
               aria-label={t('sidebar.newSession')}
               title={t('sidebar.newSession')}
             >
@@ -1097,6 +1102,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 size="icon"
                 className="h-8 w-8 shrink-0 rounded-[calc(var(--radius-interactive)+2px)]"
                 onClick={handleCreateSessionForDefaultScope}
+                disabled={!selectedRuntimeEndpoint}
                 aria-label={t('sidebar.newSession')}
                 title={t('sidebar.newSession')}
               >

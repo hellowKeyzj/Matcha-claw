@@ -1,341 +1,218 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const registeredHandlers = new Map<string, (...args: unknown[]) => unknown>();
-const proxyAwareFetchMock = vi.fn();
+const hoisted = vi.hoisted(() => {
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  return {
+    handlers,
+    ipcMainHandleMock: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+      handlers.set(channel, handler);
+    }),
+    proxyAwareFetchMock: vi.fn(),
+    getHostApiBaseUrlMock: vi.fn(() => 'http://127.0.0.1:13210'),
+    getHostApiTokenMock: vi.fn(() => 'host-api-token'),
+    handleE2EHostApiFetchMock: vi.fn(),
+  };
+});
 
 vi.mock('electron', () => ({
   ipcMain: {
-    handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
-      registeredHandlers.set(channel, handler);
-    },
+    handle: (...args: unknown[]) => hoisted.ipcMainHandleMock(...args),
   },
 }));
-
 vi.mock('../../electron/utils/proxy-fetch', () => ({
-  proxyAwareFetch: (...args: unknown[]) => proxyAwareFetchMock(...args),
+  proxyAwareFetch: (...args: unknown[]) => hoisted.proxyAwareFetchMock(...args),
 }));
-
-vi.mock('../../electron/utils/config', () => ({
-  getPort: vi.fn(() => 13210),
-}));
-
 vi.mock('../../electron/api/server', () => ({
-  getHostApiBaseUrl: vi.fn(() => 'http://127.0.0.1:45678'),
-  getHostApiToken: vi.fn(() => 'host-token'),
+  getHostApiBaseUrl: () => hoisted.getHostApiBaseUrlMock(),
+  getHostApiToken: () => hoisted.getHostApiTokenMock(),
+}));
+vi.mock('../../electron/main/e2e-fixture-loader', () => ({
+  handleE2EHostApiFetch: (...args: unknown[]) => hoisted.handleE2EHostApiFetchMock(...args),
 }));
 
-vi.mock('@electron/e2e-fixture-loader', () => ({
-  handleE2EHostApiFetch: vi.fn(async () => null),
-}));
-
-describe('hostapi proxy ipc', () => {
+describe('host API IPC boundary', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.resetModules();
-    registeredHandlers.clear();
-    proxyAwareFetchMock.mockReset();
-    proxyAwareFetchMock.mockResolvedValue({
+    vi.clearAllMocks();
+    hoisted.handlers.clear();
+    hoisted.handleE2EHostApiFetchMock.mockResolvedValue(null);
+  });
+
+  it.each([
+    ['GET', '/api/logs'],
+    ['GET', '/api/logs/dir'],
+    ['GET', '/api/logs/files'],
+    ['GET', '/api/openclaw/logs'],
+    ['GET', '/api/openclaw/logs/dir'],
+    ['GET', '/api/gateway/status'],
+    ['GET', '/api/gateway/health'],
+    ['POST', '/api/gateway/start'],
+    ['POST', '/api/gateway/stop'],
+    ['POST', '/api/gateway/restart'],
+    ['GET', '/api/gateway/control-ui'],
+    ['POST', '/api/runtime-host/restart'],
+  ])('forwards retained public route %s %s', async (method, path) => {
+    hoisted.proxyAwareFetchMock.mockResolvedValue({
       status: 200,
       ok: true,
-      headers: { get: () => 'application/json' },
-      json: async () => ({ success: true }),
-      text: async () => 'ok',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => ({ success: true })),
     });
-  });
-
-  async function fetchViaProxy(request: Record<string, unknown>) {
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers();
-    const handler = registeredHandlers.get('hostapi:fetch');
-    expect(handler).toBeTypeOf('function');
-    return await handler?.({}, request);
-  }
 
-  async function resolveHostApiBaseUrlViaIpc() {
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
-    const handler = registeredHandlers.get('hostapi:base-url');
-    expect(handler).toBeTypeOf('function');
-    return await handler?.({});
-  }
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    await handler?.({}, { path, method });
 
-  it('exposes the actual Host API base URL for direct WebSocket connections', async () => {
-    await expect(resolveHostApiBaseUrlViaIpc()).resolves.toBe('http://127.0.0.1:45678');
-  });
-
-  it('forwards allowed capability calls with host token', async () => {
-    const result = await fetchViaProxy({ path: '/api/capabilities/execute', method: 'POST', body: { id: 'workspace.file' } });
-
-    expect(result).toMatchObject({ ok: true, data: { status: 200, ok: true } });
-    expect(proxyAwareFetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:13210/api/capabilities/execute',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-        body: JSON.stringify({ id: 'workspace.file' }),
-      }),
+    expect(hoisted.proxyAwareFetchMock).toHaveBeenCalledWith(
+      `http://127.0.0.1:13210${path}`,
+      expect.objectContaining({ method }),
     );
   });
 
-  it('preserves a complete media session prompt result JSON response', async () => {
-    const userAttachment = {
-      fileName: 'receipt.png',
-      mimeType: 'image/png',
-      fileSize: 2048,
-      preview: 'data:image/png;base64,AA==',
-      filePath: '/tmp/receipt.png',
-      gatewayUrl: 'http://127.0.0.1:13210/media/receipt.png',
-      source: 'user-upload',
-    };
-    const userMessage = {
-      key: 'item-user-1',
-      kind: 'user-message',
-      sessionKey: 'session-media-1',
-      runId: 'run-media-1',
-      role: 'user',
-      text: 'Please inspect the attached receipt.',
-      images: [{ mimeType: 'image/png', data: 'AA==' }],
-      attachedFiles: [userAttachment],
-      messageId: 'message-user-1',
-    };
-    const sessionPromptResult = {
-      success: true,
-      sessionKey: 'session-media-1',
-      runId: 'run-media-1',
-      item: userMessage,
-      snapshot: {
-        sessionKey: 'session-media-1',
-        catalog: {
-          key: 'session-media-1',
-          agentId: 'agent-1',
-          protocolId: 'matcha-agent',
-          runtimeEndpointId: 'runtime-matcha-agent',
-          sessionIdentity: {
-            endpoint: {
-              kind: 'native-runtime',
-              runtimeAdapterId: 'matcha-agent',
-              runtimeInstanceId: 'runtime-matcha-agent',
-            },
-            agentId: 'agent-1',
-            sessionKey: 'session-media-1',
-          },
-          kind: 'session',
-          preferred: true,
-          status: 'active',
-          displayName: 'Receipt review',
-        },
-        items: [userMessage],
-        approvals: [],
-        usage: [],
-        artifacts: [],
-        replayComplete: true,
-        runtime: {
-          activeRunId: 'run-media-1',
-          runPhase: 'submitted',
-          activeTurnItemKey: 'item-user-1',
-          pendingTurnKey: 'turn-media-1',
-          pendingTurnLaneKey: 'lane-media-1',
-          runtimeActivity: null,
-          lastUserMessageAt: 1_700_000_000_000,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: 1_700_000_000_001,
-        },
-        window: {
-          totalItemCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
-    };
-    proxyAwareFetchMock.mockResolvedValue({
+  it.each([
+    ['POST', '/api/openclaw/logs'],
+    ['POST', '/api/gateway/status'],
+    ['GET', '/api/gateway/restart'],
+    ['GET', '/api/runtime-host/restart'],
+    ['POST', '/internal/runtime-host/shell-actions'],
+  ])('rejects unsupported public method or internal path %s %s before any loopback request', async (method, path) => {
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const result = await handler?.({}, { path, method });
+
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'UNAVAILABLE' },
+    });
+    expect(hoisted.proxyAwareFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('forwards retained diagnostics requests with host-only credentials', async () => {
+    hoisted.proxyAwareFetchMock.mockResolvedValue({
       status: 200,
       ok: true,
-      headers: { get: () => 'application/json' },
-      json: async () => sessionPromptResult,
-      text: async () => 'ok',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => ({ sampledAt: 'now' })),
     });
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
 
-    const result = await fetchViaProxy({
-      path: '/api/capabilities/execute',
-      method: 'POST',
-      body: { id: 'session.prompt' },
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const result = await handler?.({}, {
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+      headers: {
+        authorization: 'Bearer renderer-token',
+        'Proxy-Authorization': 'Basic renderer-credential',
+        'X-Request-Source': 'renderer',
+      },
     });
 
     expect(result).toEqual({
       ok: true,
-      data: { status: 200, ok: true, json: sessionPromptResult },
+      data: { status: 200, ok: true, json: { sampledAt: 'now' } },
     });
-  });
-
-  it('forwards explicit public read-only routes including query strings', async () => {
-    await fetchViaProxy({ path: '/api/openclaw/logs?tailLines=10', method: 'GET' });
-    await fetchViaProxy({ path: '/api/matcha-agent/app-server/status', method: 'GET' });
-
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      1,
-      'http://127.0.0.1:13210/api/openclaw/logs?tailLines=10',
-      expect.objectContaining({ method: 'GET' }),
-    );
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      2,
-      'http://127.0.0.1:13210/api/matcha-agent/app-server/status',
-      expect.objectContaining({ method: 'GET' }),
-    );
-  });
-
-  it('forwards allowed process restart routes with host token', async () => {
-    await fetchViaProxy({ path: '/api/gateway/restart', method: 'POST' });
-    await fetchViaProxy({ path: '/api/matcha-agent/app-server/restart', method: 'POST' });
-    await fetchViaProxy({ path: '/api/runtime-host/restart', method: 'POST' });
-
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      1,
-      'http://127.0.0.1:13210/api/gateway/restart',
+    expect(hoisted.proxyAwareFetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:13210/api/diagnostics/memory',
       expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-      }),
-    );
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      2,
-      'http://127.0.0.1:13210/api/matcha-agent/app-server/restart',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-      }),
-    );
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      3,
-      'http://127.0.0.1:13210/api/runtime-host/restart',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer host-api-token',
+          'X-Request-Source': 'renderer',
+        },
       }),
     );
   });
 
-  it('forwards explicit public validation POST routes', async () => {
-    await fetchViaProxy({
-      path: '/api/channels/credentials/validate',
+  it('rejects unimplemented methods before the proxy request', async () => {
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const result = await handler?.({}, {
+      path: '/api/diagnostics/memory',
       method: 'POST',
-      body: { channelType: 'feishu', config: { appId: 'cli_xxx', appSecret: 'secret' } },
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:13210/api/channels/credentials/validate',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ channelType: 'feishu', config: { appId: 'cli_xxx', appSecret: 'secret' } }),
-      }),
-    );
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'UNAVAILABLE' },
+    });
+    expect(hoisted.proxyAwareFetchMock).not.toHaveBeenCalled();
   });
 
-  it('forwards remote fleet probe-connection POST calls with host token', async () => {
-    const result = await fetchViaProxy({
-      path: '/api/remote-fleet/probe-connection',
-      method: 'POST',
-      body: { connectionId: 'connection-1' },
-    });
-
-    expect(result).toMatchObject({ ok: true, data: { status: 200, ok: true } });
-    expect(proxyAwareFetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:13210/api/remote-fleet/probe-connection',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-        body: JSON.stringify({ connectionId: 'connection-1' }),
-      }),
+  it('does not expose upstream errors through the renderer IPC envelope', async () => {
+    hoisted.proxyAwareFetchMock.mockRejectedValue(
+      new Error('upstream rejected Authorization: Bearer private-token at /private/native/path'),
     );
-  });
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
 
-  it('forwards explicit public Remote Fleet credential and terminal control routes', async () => {
-    await fetchViaProxy({
-      path: '/api/remote-fleet/write-credential',
-      method: 'POST',
-      body: { nodeId: 'node-1', credentialName: 'ssh', plaintext: 'secret-value' },
-    });
-    await fetchViaProxy({
-      path: '/api/remote-fleet/terminal/open',
-      method: 'POST',
-      body: { endpointId: 'endpoint-1' },
-    });
-    await fetchViaProxy({
-      path: '/api/remote-fleet/terminal/sessions',
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const result = await handler?.({}, {
+      path: '/api/diagnostics/memory',
       method: 'GET',
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      1,
-      'http://127.0.0.1:13210/api/remote-fleet/write-credential',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-        body: JSON.stringify({ nodeId: 'node-1', credentialName: 'ssh', plaintext: 'secret-value' }),
-      }),
-    );
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      2,
-      'http://127.0.0.1:13210/api/remote-fleet/terminal/open',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-        body: JSON.stringify({ endpointId: 'endpoint-1' }),
-      }),
-    );
-    expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-      3,
-      'http://127.0.0.1:13210/api/remote-fleet/terminal/sessions',
-      expect.objectContaining({ method: 'GET' }),
-    );
-  });
-
-  it('forwards the public Remote Fleet registration lifecycle routes', async () => {
-    const registrationRequests = [
-      { path: '/api/remote-fleet/register-connection', body: { connection: { id: 'connection-1' } } },
-      { path: '/api/remote-fleet/register-environment', body: { environment: { id: 'environment-1', connectionId: 'connection-1' } } },
-      { path: '/api/remote-fleet/deploy-environment', body: { environmentId: 'environment-1' } },
-      { path: '/api/remote-fleet/delete-environment', body: { environmentId: 'environment-1' } },
-    ] as const;
-
-    for (const request of registrationRequests) {
-      await expect(fetchViaProxy({ ...request, method: 'POST' })).resolves.toMatchObject({ ok: true, data: { status: 200, ok: true } });
-    }
-
-    registrationRequests.forEach((request, index) => {
-      expect(proxyAwareFetchMock).toHaveBeenNthCalledWith(
-        index + 1,
-        `http://127.0.0.1:13210${request.path}`,
-        expect.objectContaining({
-          method: 'POST',
-          headers: expect.objectContaining({ Authorization: 'Bearer host-token' }),
-          body: JSON.stringify(request.body),
-        }),
-      );
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'UNAVAILABLE' },
     });
+    expect(JSON.stringify(result)).not.toContain('private-token');
+    expect(JSON.stringify(result)).not.toContain('/private/native/path');
   });
 
-  it('rejects legacy file routes, secret routes, mutations, internal routes, and absolute URLs before forwarding', async () => {
-    for (const request of [
-      { path: '/api/files/read-text', method: 'POST' },
-      { path: '/api/files/write-text', method: 'POST' },
-      { path: '/api/provider-accounts/account-1/api-key', method: 'GET' },
-      { path: '/api/provider-accounts/validate', method: 'POST' },
-      { path: '/api/gateway/start', method: 'POST' },
-      { path: '/api/remote-fleet/probe-connection', method: 'GET' },
-      { path: '/api/remote-fleet/terminal/stream', method: 'GET' },
-      { path: '/api/matcha-agent/app-server/status', method: 'POST' },
-      { path: '/api/matcha-agent/app-server/restart', method: 'GET' },
-      { path: '/api/matcha-agent/app-server/restart', method: 'PUT' },
-      { path: '/internal/runtime-host/shell-actions', method: 'POST' },
-      { path: 'http://127.0.0.1:13210/api/capabilities/list', method: 'GET' },
-    ]) {
-      const result = await fetchViaProxy(request);
-      expect(result).toMatchObject({ ok: false });
-    }
+  it('classifies upstream timeout without exposing raw error details', async () => {
+    vi.useFakeTimers();
+    hoisted.proxyAwareFetchMock.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw timeout /private/native/path')));
+    }));
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
 
-    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const resultPromise = handler?.({}, {
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+      timeoutMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await resultPromise;
+
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'TIMEOUT' },
+    });
+    expect(JSON.stringify(result)).not.toContain('/private/native/path');
+  });
+
+  it('classifies renderer abort without exposing raw error details', async () => {
+    hoisted.proxyAwareFetchMock.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw abort /private/native/path')));
+    }));
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const fetchHandler = hoisted.handlers.get('hostapi:fetch');
+    const abortHandler = hoisted.handlers.get('hostapi:abort');
+    const resultPromise = fetchHandler?.({}, {
+      requestId: 'request-1',
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+    });
+    await Promise.resolve();
+    const abortResult = await abortHandler?.({}, { requestId: 'request-1' });
+    const result = await resultPromise;
+
+    expect(abortResult).toEqual({ ok: true });
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'ABORTED' },
+    });
+    expect(JSON.stringify(result)).not.toContain('/private/native/path');
   });
 });

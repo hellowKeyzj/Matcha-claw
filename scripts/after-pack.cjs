@@ -630,6 +630,7 @@ exports.default = async function afterPack(context) {
   const nodeModulesRoot = join(__dirname, '..', 'node_modules');
   const pluginsDestRoot = join(resourcesDir, 'openclaw-plugins');
 
+
   if (process.env.SKIP_MATCHA_AGENT_BUILD !== '1') {
     const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
     const matchaAgentDest = join(resourcesDir, 'matcha-agent', 'dist');

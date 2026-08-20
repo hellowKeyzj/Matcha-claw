@@ -51,12 +51,13 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import {
   hostApiFetch,
-  hostDiagnosticsCollect,
   hostOpenClawGetCliCommand,
-  resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import {
+  collectDiagnosticsArchive,
+  exportDiagnosticsArchive,
+} from '@/lib/diagnostics-archive';
 import {
   hostSettingsPutPatch,
 } from '@/lib/settings-runtime';
@@ -70,10 +71,6 @@ import {
   parseSettingsSectionFromSearch,
   type SettingsSectionKey,
 } from '@/lib/sections';
-import { isGatewayOperational } from '@/lib/gateway-status';
-import type { RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
-
-const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
 type ControlUiInfo = {
   url: string;
   token?: string;
@@ -129,12 +126,6 @@ interface LicenseGateSnapshot {
   nextRevalidateAtMs: number | null;
   lastValidation?: LicenseValidationResponse | null;
   renewalAlert?: 'near_expiry_renew_failed' | null;
-}
-
-interface DiagnosticsBundleResponse {
-  zipPath: string;
-  generatedAt: string;
-  fileCount: number;
 }
 
 const TELEMETRY_WINDOW_MINUTES_OPTIONS = [0, 5, 15, 60] as const;
@@ -295,19 +286,15 @@ export function Settings() {
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
 
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
   const initGatewayEvents = useGatewayStore((state) => state.init);
+  const refreshRuntimeHostStatusSnapshot = useGatewayStore((state) => state.refreshRuntimeHostStatus);
   const restartGateway = useGatewayStore((state) => state.restart);
-  const runtime = usePluginsStore((state) => state.runtime);
-  const runtimeReady = usePluginsStore((state) => state.runtimeReady);
-  const runtimePending = usePluginsStore((state) => state.runtimePending);
   const refreshing = usePluginsStore((state) => state.refreshing);
   const refreshReason = usePluginsStore((state) => state.refreshReason);
   const mutating = usePluginsStore((state) => state.mutating);
   const mutatingAction = usePluginsStore((state) => state.mutatingAction);
   const refreshRuntime = usePluginsStore((state) => state.refreshRuntime);
-  const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
   const restartHostAction = usePluginsStore((state) => state.restartHost);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
@@ -333,9 +320,9 @@ export function Settings() {
   const [showOpenClawLogs, setShowOpenClawLogs] = useState(false);
   const [openClawLogContent, setOpenClawLogContent] = useState('');
   const [collectingDiagnostics, setCollectingDiagnostics] = useState(false);
-  const [lastDiagnosticsZipPath, setLastDiagnosticsZipPath] = useState('');
-  const [lastDiagnosticsGeneratedAt, setLastDiagnosticsGeneratedAt] = useState('');
-  const [lastDiagnosticsFileCount, setLastDiagnosticsFileCount] = useState(0);
+  const [lastDiagnosticsArchiveId, setLastDiagnosticsArchiveId] = useState('');
+  const [lastDiagnosticsEntries, setLastDiagnosticsEntries] = useState(0);
+  const [lastDiagnosticsBytes, setLastDiagnosticsBytes] = useState(0);
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>(
     () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
   );
@@ -356,7 +343,6 @@ export function Settings() {
     lastValidation: null,
     renewalAlert: null,
   });
-  const [runtimeHostEndpoint, setRuntimeHostEndpoint] = useState<RuntimeEndpointRef | null>(null);
   const [matchaAgentAppServerStatus, setMatchaAgentAppServerStatus] = useState<MatchaAgentAppServerStatus | null>(null);
   const [matchaAgentAppServerLoading, setMatchaAgentAppServerLoading] = useState(false);
   const [matchaAgentAppServerRestarting, setMatchaAgentAppServerRestarting] = useState(false);
@@ -372,41 +358,6 @@ export function Settings() {
       }
     });
   }, [initGatewayEvents, refreshRuntime, t]);
-
-  useEffect(() => {
-    if (!gatewayOperational) {
-      setRuntimeHostEndpoint(null);
-      return;
-    }
-    let active = true;
-    void resolveSingleCapabilityScope(RUNTIME_HOST_CAPABILITY_ID)
-      .then((scope) => {
-        if (!active) {
-          return;
-        }
-        switch (scope.kind) {
-          case 'runtime-instance':
-          case 'agent':
-          case 'workspace':
-          case 'team-run':
-            setRuntimeHostEndpoint(scope.endpoint);
-            break;
-          case 'session':
-            setRuntimeHostEndpoint(scope.identity.endpoint);
-            break;
-          default:
-            setRuntimeHostEndpoint(null);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setRuntimeHostEndpoint(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [gatewayOperational]);
 
   const handleShowOpenClawLogs = async () => {
     try {
@@ -550,40 +501,28 @@ export function Settings() {
   }, [refreshLicenseGateSnapshot, t]);
 
   const handleCollectDiagnosticsBundle = useCallback(async () => {
-    if (!runtimeHostEndpoint) {
-      toast.error(t('diagnostics.toast.failed', { error: t('common:status.error') }));
-      return;
-    }
     setCollectingDiagnostics(true);
     try {
-      const submission = await hostDiagnosticsCollect(runtimeHostEndpoint);
-      const result = await waitForRuntimeJobResult<DiagnosticsBundleResponse>(submission.job.id, {
-        timeoutMs: 180000,
-      });
-      if (!result || typeof result.zipPath !== 'string' || !result.zipPath.trim()) {
-        throw new Error('invalid diagnostics bundle result');
+      const receipt = await collectDiagnosticsArchive();
+      const exportResult = await exportDiagnosticsArchive(receipt.archiveId);
+      if (exportResult.status === 'cancelled') {
+        toast.info(t('diagnostics.toast.cancelled'));
+        return;
       }
-      setLastDiagnosticsZipPath(result.zipPath);
-      setLastDiagnosticsGeneratedAt(result.generatedAt);
-      setLastDiagnosticsFileCount(result.fileCount);
-      toast.success(t('diagnostics.toast.success', { count: result.fileCount }));
+      if (exportResult.status === 'failed') {
+        toast.error(t('diagnostics.toast.exportFailed'));
+        return;
+      }
+      setLastDiagnosticsArchiveId(receipt.archiveId);
+      setLastDiagnosticsEntries(receipt.entries);
+      setLastDiagnosticsBytes(receipt.bytes);
+      toast.success(t('diagnostics.toast.success', { count: receipt.entries }));
     } catch (error) {
       toast.error(t('diagnostics.toast.failed', { error: String(error) }));
     } finally {
       setCollectingDiagnostics(false);
     }
-  }, [runtimeHostEndpoint, t]);
-
-  const handleOpenDiagnosticsBundleFolder = useCallback(async () => {
-    if (!lastDiagnosticsZipPath) {
-      return;
-    }
-    try {
-      await invokeIpc('shell:showItemInFolder', lastDiagnosticsZipPath);
-    } catch (error) {
-      toast.error(t('diagnostics.toast.openFailed', { error: String(error) }));
-    }
-  }, [lastDiagnosticsZipPath, t]);
+  }, [t]);
 
   const handleCopyBrowserRelayPath = useCallback(async () => {
     const target = browserRelayInfo?.extensionDir ?? browserRelayInfo?.relativeDir;
@@ -805,8 +744,7 @@ export function Settings() {
     if (activeSection !== 'license') {
       return;
     }
-    // 后端 license-node-runtime 的 armRevalidateTimer 会按服务端 refreshAfterSec 自动重新验证；
-    // 验证完成后会推 license:gate-changed 事件，渲染端只需要订阅，不再轮询。
+    // Electron Main 的 License owner 会按服务端 refreshAfterSec 自动重新验证并推送 gate 事件。
     const unsubscribe = subscribeHostEvent<LicenseGateSnapshot>('license:gate-changed', (payload) => {
       if (payload && typeof payload === 'object' && typeof payload.state === 'string') {
         setLicenseGateSnapshot(payload);
@@ -1076,26 +1014,22 @@ export function Settings() {
   }, [historyStrategySampleMin]);
 
   const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
-  const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
-    ? observedRuntimeHostStatus
-    : (runtime?.health.ok ? 'running' : 'stopped');
+  const effectiveRuntimeHostStatus = observedRuntimeHostStatus;
   const showRuntimeHostError = effectiveRuntimeHostStatus === 'degraded'
     || effectiveRuntimeHostStatus === 'error'
     || effectiveRuntimeHostStatus === 'stopped';
-  const showRuntimeHealthError = showRuntimeHostError || runtime?.health.lifecycle === 'error';
   const runtimeHostRecoveredAt = runtimeHostEventState.lastRestartAt
     ? formatIsoTime(runtimeHostEventState.lastRestartAt)
     : '';
   const manualRuntimeRefreshing = refreshing && refreshReason === 'manual';
-  const showRuntimeLoading = !runtimeReady && runtimePending;
 
   const refreshRuntimeHostStatus = useCallback(async () => {
     try {
-      await refreshSnapshot({ reason: 'manual', force: true });
+      await refreshRuntimeHostStatusSnapshot();
     } catch {
       toast.error(t('plugins:errors.loadFailed'));
     }
-  }, [refreshSnapshot, t]);
+  }, [refreshRuntimeHostStatusSnapshot, t]);
 
   const loadMatchaAgentAppServerStatus = useCallback(async () => {
     const ownedRequestSequence = matchaAgentAppServerStatusRequestSequenceRef.current + 1;
@@ -1138,13 +1072,11 @@ export function Settings() {
   const matchaAgentAppServerState = matchaAgentAppServerStatus?.processState ?? 'unknown';
   const matchaAgentAppServerBadgeVariant = matchaAgentAppServerState === 'running'
     ? 'success'
-    : matchaAgentAppServerState === 'error'
+    : matchaAgentAppServerState === 'failed' || matchaAgentAppServerState === 'stopping'
       ? 'destructive'
-      : matchaAgentAppServerState === 'starting' || matchaAgentAppServerState === 'restarting'
+      : matchaAgentAppServerState === 'starting' || matchaAgentAppServerState === 'waitingToRestart'
         ? 'outline'
-        : matchaAgentAppServerState === 'stopping'
-          ? 'destructive'
-          : 'secondary';
+        : 'secondary';
   const matchaAgentAppServerPort = matchaAgentAppServerStatus?.port ?? t('gateway.unknown');
   const matchaAgentAppServerPid = matchaAgentAppServerStatus?.pid ?? t('gateway.unknown');
   const matchaAgentAppServerStatusError = matchaAgentAppServerStatus?.lastError || matchaAgentAppServerError;
@@ -1683,12 +1615,7 @@ export function Settings() {
             <RuntimeStatusPanel
               title={t('gateway.runtimeHostStatus')}
               description={t('gateway.runtimeHostDescription')}
-              badges={showRuntimeLoading ? (
-                <>
-                  <div className="h-5 w-48 animate-pulse rounded bg-muted" />
-                  <div className="h-5 w-24 animate-pulse rounded bg-muted" />
-                </>
-              ) : (
+              badges={(
                 <>
                   {effectiveRuntimeHostStatus === 'running' && (
                     <Badge variant="success">{t('plugins:state.hostRunning')}</Badge>
@@ -1741,21 +1668,11 @@ export function Settings() {
                   </Button>
                 </>
               )}
-              details={showRuntimeLoading ? null : (
+              details={(
                 <>
-                  {runtime?.state.lastError && (
-                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                      {runtime.state.lastError}
-                    </p>
-                  )}
                   {showRuntimeHostError && runtimeHostEventState.error && (
                     <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
                       {runtimeHostEventState.error}
-                    </p>
-                  )}
-                  {showRuntimeHealthError && runtime?.health.error && (
-                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                      {runtime.health.error}
                     </p>
                   )}
                   {runtimeHostEventState.restartCount > 0 && (
@@ -1980,26 +1897,16 @@ export function Settings() {
               )}
               {collectingDiagnostics ? t('diagnostics.collecting') : t('diagnostics.collect')}
             </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                void handleOpenDiagnosticsBundleFolder();
-              }}
-              disabled={!lastDiagnosticsZipPath}
-            >
-              <ExternalLink className="mr-2 h-4 w-4" />
-              {t('diagnostics.openFolder')}
-            </Button>
           </div>
 
-          {lastDiagnosticsZipPath ? (
+          {lastDiagnosticsArchiveId ? (
             <div className="space-y-2 rounded-lg border border-border/60 bg-background/40 p-3">
               <Label>{t('diagnostics.lastBundle')}</Label>
-              <Input readOnly value={lastDiagnosticsZipPath} className="font-mono" />
+              <Input readOnly value={lastDiagnosticsArchiveId} className="font-mono" />
               <p className="text-xs text-muted-foreground">
                 {t('diagnostics.lastMeta', {
-                  generatedAt: lastDiagnosticsGeneratedAt || '-',
-                  count: lastDiagnosticsFileCount,
+                  count: lastDiagnosticsEntries,
+                  bytes: lastDiagnosticsBytes,
                 })}
               </p>
             </div>

@@ -239,6 +239,96 @@ describe('ProtocolGateway', () => {
     ])
   })
 
+  test('parses session.setModel provider runtime params', async () => {
+    const setModelParams: unknown[] = []
+    const gateway = new ProtocolGateway(
+      createTestPorts({
+        session: {
+          setModel: params => {
+            setModelParams.push(params)
+            return {
+              sessionId: params.sessionId,
+              workspaceRoot: '/workspace',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              runtime: 'matcha-agent',
+              lastSeq: 0,
+              lastSnapshotVersion: 0,
+              model: params.model,
+              providerFingerprint: params.providerFingerprint,
+              workerState: { state: 'unloaded', reason: 'notStarted' },
+            }
+          },
+        },
+      }),
+    )
+
+    const response = parseResponse(
+      await gateway.handleTextMessage(
+        'client-1',
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'model-1',
+          method: 'session.setModel',
+          params: {
+            sessionId: 'session-1',
+            model: 'gpt-5',
+            providerFingerprint: 'matcha-provider:v1:test',
+            providerRuntime: {
+              kind: 'openAiResponses',
+              baseUrl: 'https://api.openai.com/v1',
+              apiKey: 'openai-secret',
+            },
+          },
+        }),
+      ),
+    )
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 'model-1',
+      result: { sessionId: 'session-1', model: 'gpt-5' },
+    })
+    expect(setModelParams).toEqual([
+      {
+        sessionId: 'session-1',
+        model: 'gpt-5',
+        providerFingerprint: 'matcha-provider:v1:test',
+        providerRuntime: {
+          kind: 'openAiResponses',
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'openai-secret',
+        },
+      },
+    ])
+  })
+
+  test('rejects invalid session.setModel provider runtime params', async () => {
+    const gateway = new ProtocolGateway(createTestPorts())
+
+    const response = parseResponse(
+      await gateway.handleTextMessage(
+        'client-1',
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'model-1',
+          method: 'session.setModel',
+          params: {
+            sessionId: 'session-1',
+            model: 'ark-code-latest',
+            providerRuntime: { kind: 'openAiChatCompletions', apiKey: '' },
+          },
+        }),
+      ),
+    )
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 'model-1',
+      error: { code: -32602, message: 'apiKey must be a non-empty string' },
+    })
+  })
+
   test('replays events before reporting an event subscription', async () => {
     const gateway = new ProtocolGateway(createTestPorts())
 

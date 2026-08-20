@@ -1,5 +1,7 @@
 import { hostApiFetch } from '@/lib/host-api';
-import { appScope } from '../../runtime-host/shared/runtime-address';
+import {
+  appScope,
+} from '../../electron/desktop-contract/runtime-address';
 
 const LICENSE_RUNTIME_CAPABILITY_ID = 'license.runtime';
 
@@ -18,6 +20,14 @@ async function licenseRuntimeCapabilityExecute<TResult>(
       input,
     }),
   });
+}
+
+export async function hostLicenseGate<TResult = unknown>(): Promise<TResult> {
+  return await hostApiFetch<TResult>('/api/license/gate');
+}
+
+export async function hostLicenseStoredKey<TResult = unknown>(): Promise<TResult> {
+  return await hostApiFetch<TResult>('/api/license/stored-key');
 }
 
 export async function hostLicenseValidate<TResult>(key: string): Promise<TResult> {

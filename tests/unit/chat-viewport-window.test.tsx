@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -67,20 +67,8 @@ describe('chat viewport window', () => {
     const currentSessionKey = 'agent:test:main';
     const allMessages = buildSessionMessages(35);
     const viewportMessages = allMessages.slice(15);
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
     useSubagentsStore.setState({
@@ -154,20 +142,8 @@ describe('chat viewport window', () => {
     const sendMessage = vi.fn().mockResolvedValue({ accepted: true });
     const allMessages = buildSessionMessages(20);
 
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
     useSubagentsStore.setState({

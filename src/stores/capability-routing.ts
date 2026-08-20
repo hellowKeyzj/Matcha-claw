@@ -6,49 +6,57 @@ import {
   type CapabilityRouting,
   type ModelRoute,
 } from '@/lib/capability-routing';
+
 interface CapabilityRoutingState {
   routing: CapabilityRouting;
+  revision: number | null;
   ready: boolean;
   loading: boolean;
   saving: boolean;
   error: string | null;
+  warning: string | null;
   refresh: () => Promise<void>;
   setRoute: (capability: CapabilityKey, route: ModelRoute | undefined) => Promise<void>;
 }
 
 async function applyRoutingMutation(
   current: CapabilityRouting,
+  revision: number,
   mutate: (draft: CapabilityRouting) => CapabilityRouting,
-): Promise<{ next: CapabilityRouting; error?: string }> {
+): Promise<{ next: CapabilityRouting; revision: number; error?: string; warning?: string }> {
   const next = mutate({ ...current });
-  const result = await persistCapabilityRouting(next);
+  const result = await persistCapabilityRouting(next, revision);
   if (!result.success) {
-    return { next: current, error: result.error || 'Failed to persist capability routing' };
+    return { next: current, revision, error: result.error || 'Failed to persist capability routing' };
   }
-  return { next: result.routing };
+  return { next: result.routing, revision: result.revision, ...(result.warning ? { warning: result.warning } : {}) };
 }
 
 export const useCapabilityRoutingStore = create<CapabilityRoutingState>((set, get) => ({
   routing: {},
+  revision: null,
   ready: false,
   loading: false,
   saving: false,
   error: null,
+  warning: null,
 
   refresh: async () => {
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, warning: null });
     try {
-      const routing = await fetchCapabilityRouting();
-      set({ routing, ready: true, loading: false });
+      const snapshot = await fetchCapabilityRouting();
+      set({ routing: snapshot.routing, revision: snapshot.revision, ready: true, loading: false, warning: null });
     } catch (error) {
       set({ loading: false, error: String(error) });
     }
   },
 
   setRoute: async (capability, route) => {
-    set({ saving: true, error: null });
+    set({ saving: true, error: null, warning: null });
     try {
-      const { next, error } = await applyRoutingMutation(get().routing, (draft) => {
+      const currentRevision = get().revision;
+      const nextRevision = currentRevision === null ? 1 : currentRevision + 1;
+      const { next, revision: persistedRevision, error, warning } = await applyRoutingMutation(get().routing, nextRevision, (draft) => {
         if (route) {
           draft[capability] = route;
         } else {
@@ -56,11 +64,11 @@ export const useCapabilityRoutingStore = create<CapabilityRoutingState>((set, ge
         }
         return draft;
       });
-      if (error) {
+      if (error && next === get().routing) {
         set({ saving: false, error });
         return;
       }
-      set({ routing: next, saving: false, ready: true });
+      set({ routing: next, revision: persistedRevision, saving: false, ready: true, error: null, warning: warning ?? null });
     } catch (error) {
       set({ saving: false, error: String(error) });
     }

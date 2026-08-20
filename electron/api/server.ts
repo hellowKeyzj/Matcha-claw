@@ -1,51 +1,164 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { PORTS, getPort } from '../utils/config';
+import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { HostApiContext } from './context';
+import { handleCapabilityRoutes } from './routes/capabilities';
+import { handleAgentsRoutes } from './routes/agents';
 import { handleAppRoutes } from './routes/app';
-import { handleGatewayRoutes } from './routes/gateway';
-import { handleRuntimeHostInternalRoutes } from './routes/runtime-host-internal';
-import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
-import { handleLogRoutes } from './routes/logs';
-import { handleFileRoutes } from './routes/files';
+import { handleChannelCatalogRoutes } from './routes/channel-catalog';
+import { handleChannelConfigureRoutes } from './routes/channel-configure';
+import { handleChannelCredentialsRoutes } from './routes/channel-credentials';
+import { handleChannelControlRoutes } from './routes/channel-control';
+import { handleChannelDeleteConfigRoutes } from './routes/channel-delete-config';
+import { handleChannelLoginRoutes } from './routes/channel-login';
+import { handleChannelConfigReadRoutes } from './routes/channel-config-read';
+import { handleChannelPairingRoutes } from './routes/channel-pairing';
+import { handleChannelStatusRoutes } from './routes/channel-status';
+import { handleChatHistoryRoutes } from './routes/chat-history';
+import { handleClawHubSkillRoutes } from './routes/clawhub-skill';
+import { handleCronRoutes } from './routes/cron';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
+import { handleExternalConnectorsRoutes } from './routes/external-connectors';
+import { handleFileRoutes } from './routes/files';
+import { handleFleetRoutes } from './routes/fleet';
+import { handleGatewayRoutes } from './routes/gateway';
+import { handleLicenseRoutes } from './routes/license';
+import { handleLogRoutes } from './routes/logs';
+import { handleManualTeamRoutes } from './routes/manual-team';
 import { handleMatchaAgentAppServerRoutes } from './routes/matcha-agent-app-server';
-import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';
-import { isHostApiProxyWebSocketRoute, isHostApiQueryTokenAllowedRoute, isMainOwnedRoute } from './route-boundary';
+import { handleOpenClawRoutes } from './routes/openclaw';
+import { handlePluginsRoutes } from './routes/plugins';
+import { handleProviderAccountsRoutes } from './routes/provider-accounts';
+import { handleProviderModelsRoutes } from './routes/provider-models';
+import { handleProviderRoutingRoutes } from './routes/provider-routing';
+import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
+import { handleRuntimeHostUsageRoutes } from './routes/runtime-host-usage';
+import { handleRuntimeDirectoryRoutes } from './routes/runtime-directory';
+import { handleSecurityEmergencyRoutes } from './routes/security-emergency';
+import { handleSecurityPolicyRoutes } from './routes/security-policy';
+import { handleSecurityRoutes } from './routes/security';
+import { handleSettingsDesiredRoutes } from './routes/settings-desired';
+import { handleSettingsRoutes } from './routes/settings';
+import { handleSkillBundleRoutes } from './routes/skill-bundle';
+import { handleSkillsRoutes } from './routes/skills';
+import { handleTeamApprovalsRoutes } from './routes/team-approvals';
+import { handleTeamDecisionRoutes } from './routes/team-decision';
+import { handleTeamGraphRoutes } from './routes/team-graph';
+import { handleTeamLifecycleRoutes } from './routes/team-lifecycle';
+import { handleTeamPublicRoutes } from './routes/team-public';
+import { handleTeamTaskBoardRoutes } from './routes/team-task-board';
+import { handleTeamRoleChatRoutes } from './routes/team-role-chat';
+import { handleTeamRoleSessionsRoutes } from './routes/team-role-sessions';
+import { handleTeamSkillRoutes } from './routes/team-skill';
+import { handleTeamTriggerRoutes } from './routes/team-trigger';
+import { handleTeamWebhookAuthRoutes } from './routes/team-webhook-auth';
+import { handleToolchainRoutes } from './routes/toolchain';
+import { handleUsageRoutes } from './routes/usage';
+import { createFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
+import { proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
+import {
+  isHostApiProxyWebSocketRoute,
+  isHostApiQueryTokenAllowedRoute,
+  isHostApiRequestAllowed,
+  isMainOwnedRoute,
+} from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 
 type RouteHandler = (
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: HostApiContext,
+  deps: HostApiContext,
 ) => Promise<boolean>;
 
-const mainOwnedHandlers: RouteHandler[] = [
-  handleRuntimeHostInternalRoutes,
-  handleRuntimeHostProcessRoutes,
+const routeHandlers: readonly RouteHandler[] = [
   handleAppRoutes,
-  handleGatewayRoutes,
-  handleFileRoutes,
-  handleDiagnosticsRoutes,
-  handleLogRoutes,
-  handleMatchaAgentAppServerRoutes,
+  (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.agentsTransport),
+  (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.channelCatalogTransport),
+  (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.channelCatalogTransport),
+  (req, res, url, deps) => handleChannelCredentialsRoutes(req, res, url, deps.channelCredentialsTransport),
+  (req, res, url, deps) => handleChannelDeleteConfigRoutes(req, res, url, deps.channelDeleteConfigTransport),
+  (req, res, url, deps) => handleChannelLoginRoutes(req, res, url, deps.channelLoginTransport),
+  (req, res, url, deps) => handleChannelConfigReadRoutes(req, res, url, deps.channelConfigReadTransport),
+  (req, res, url, deps) => handleChannelControlRoutes(req, res, url, deps.channelControlTransport),
+  (req, res, url, deps) => handleChannelPairingRoutes(req, res, url, deps.channelPairingTransport),
+  (req, res, url, deps) => handleChannelStatusRoutes(req, res, url, deps.channelStatusTransport),
+  (req, res, url, deps) => handleChatHistoryRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleClawHubSkillRoutes(
+    req,
+    res,
+    url,
+    deps.clawHubSkillInstallTransport,
+    deps.clawHubSkillSearchTransport,
+  ),
+  (req, res, url, deps) => handleCronRoutes(req, res, url, deps.cronTransport),
+  (req, res, url, deps) => handleFileRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleDiagnosticsRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleExternalConnectorsRoutes(req, res, url, deps.externalConnectorsTransport),
+  (req, res, url, deps) => handleFleetRoutes(
+    req,
+    res,
+    url,
+    deps.fleetTransport,
+    deps.credentialWriteAdapter ?? createFleetCredentialWriteAdapter(deps.runtimeHost),
+  ),
+  (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleLicenseRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.manualTeamTransport),
+  (req, res, url, deps) => handleMatchaAgentAppServerRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleOpenClawRoutes(req, res, url, deps),
+  (req, res, url, deps) => handlePluginsRoutes(req, res, url, deps.pluginsTransport),
+  (req, res, url, deps) => handleProviderAccountsRoutes(
+    req,
+    res,
+    url,
+    deps.providerAccountsTransport,
+    deps.providerCredentialStatusTransport,
+  ),
+  (req, res, url, deps) => handleProviderModelsRoutes(req, res, url, deps.providerModelsTransport),
+  (req, res, url, deps) => handleProviderRoutingRoutes(req, res, url, deps.providerRoutingTransport),
+  (req, res, url, deps) => handleRuntimeHostProcessRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleRuntimeHostUsageRoutes(req, res, url, deps.usageTransport),
+  (req, res, url, deps) => handleRuntimeDirectoryRoutes(req, res, url, deps.runtimeDirectoryTransport),
+  (req, res, url, deps) => handleSecurityEmergencyRoutes(req, res, url, deps.securityEmergencyTransport),
+  (req, res, url, deps) => handleSecurityPolicyRoutes(req, res, url, deps.securityPolicyTransport),
+  (req, res, url, deps) => handleSecurityRoutes(
+    req,
+    res,
+    url,
+    deps.securityPolicyTransport,
+    deps.securityRuleCatalogTransport,
+  ),
+  (req, res, url, deps) => handleSettingsDesiredRoutes(req, res, url, deps.settingsDesiredTransport),
+  (req, res, url, deps) => handleSettingsRoutes(req, res, url, deps.settingsDesiredTransport),
+  (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.skillBundleTransport),
+  (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.skillsManagementTransport),
+  (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.teamApprovalsTransport),
+  (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.teamHumanDecisionTransport),
+  (req, res, url, deps) => handleTeamGraphRoutes(req, res, url, deps.teamGraphTransport),
+  (req, res, url, deps) => handleTeamLifecycleRoutes(req, res, url, deps.teamLifecycleTransport),
+  (req, res, url, deps) => handleTeamPublicRoutes(req, res, url, deps.teamPublicTransport),
+  (req, res, url, deps) => handleTeamTaskBoardRoutes(req, res, url, deps.teamTaskBoardTransport),
+  (req, res, url, deps) => handleTeamRoleChatRoutes(req, res, url, deps.teamRoleChatTransport),
+  (req, res, url, deps) => handleTeamRoleSessionsRoutes(req, res, url, deps.teamRoleSessionsTransport),
+  (req, res, url, deps) => handleTeamSkillRoutes(req, res, url, deps.teamSkillTransport),
+  (req, res, url, deps) => handleTeamTriggerRoutes(req, res, url, deps.teamTriggerTransport),
+  (req, res, url, deps) => handleTeamWebhookAuthRoutes(
+    req,
+    res,
+    url,
+    deps.teamWebhookAuthTransport,
+  ),
+  (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.usageTransport),
 ];
-
-const routeHandlers: RouteHandler[] = [
-  ...mainOwnedHandlers,
-  handleRuntimeHostProxyRoutes,
-];
-
-if (routeHandlers[routeHandlers.length - 1] !== handleRuntimeHostProxyRoutes) {
-  throw new Error('Host API route handler chain invalid: runtime-host proxy must be the final fallback handler.');
-}
 
 let hostApiToken = '';
 let hostApiBaseUrl = '';
-const RUNTIME_HOST_INTERNAL_PREFIX = '/internal/runtime-host/';
 
 export function getHostApiToken(): string {
   return hostApiToken;
@@ -55,11 +168,7 @@ export function getHostApiBaseUrl(): string {
   return hostApiBaseUrl;
 }
 
-export function shouldBypassHostApiBearerAuth(pathname: string, _method: string | undefined): boolean {
-  return pathname.startsWith(RUNTIME_HOST_INTERNAL_PREFIX);
-}
-
-export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
+export function createHostApiRequestHandler(deps: HostApiContext, port: number) {
   return async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
@@ -72,7 +181,7 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
         return;
       }
 
-      if (!shouldBypassHostApiBearerAuth(requestUrl.pathname, req.method) && hostApiToken) {
+      if (hostApiToken) {
         const authHeader = typeof req.headers?.authorization === 'string'
           ? req.headers.authorization
           : '';
@@ -94,8 +203,20 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
         return;
       }
 
+      if (!isHostApiRequestAllowed(req.method ?? '', requestUrl.pathname)) {
+        if (isMainOwnedRoute(requestUrl.pathname)) {
+          sendJson(res, 500, {
+            success: false,
+            error: `Main-owned route is not registered: ${req.method} ${requestUrl.pathname}`,
+          });
+          return;
+        }
+        sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
+        return;
+      }
+
       for (const handler of routeHandlers) {
-        if (await handler(req, res, requestUrl, ctx)) {
+        if (await handler(req, res, requestUrl, deps)) {
           return;
         }
       }
@@ -107,9 +228,9 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
         return;
       }
       sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
-    } catch (error) {
-      logger.error('Host API request failed:', error);
-      sendJson(res, 500, { success: false, error: String(error) });
+    } catch {
+      logger.error('Host API request failed.');
+      sendJson(res, 500, { success: false, error: 'Host API request failed.' });
     }
   };
 }
@@ -117,6 +238,7 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
 export function startHostApiServer(
   ctx: HostApiContext,
   port?: number,
+  fleetTerminalStreamPort?: number,
 ): Server {
   const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
     ? Number(port)
@@ -128,11 +250,11 @@ export function startHostApiServer(
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
-    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname)) {
+    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(fleetTerminalStreamPort)) {
       socket.destroy();
       return;
     }
-    ctx.runtimeHost.proxyUpgrade(req, socket, head);
+    proxyFleetTerminalStreamUpgrade(Number(fleetTerminalStreamPort), req, socket, head);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {

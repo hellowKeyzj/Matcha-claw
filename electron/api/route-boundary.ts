@@ -1,133 +1,196 @@
 export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
+  'agents.ts',
   'app.ts',
+  'capabilities.ts',
+  'channel-catalog.ts',
+  'channel-configure.ts',
+  'channel-credentials.ts',
+  'channel-delete-config.ts',
+  'channel-login.ts',
+  'channel-config-read.ts',
+  'channel-control.ts',
+  'channel-pairing.ts',
+  'channel-status.ts',
+  'chat-history.ts',
+  'clawhub-skill.ts',
+  'cron.ts',
   'diagnostics.ts',
+  'fleet.ts',
+  'external-connectors.ts',
+  'settings-desired.ts',
+  'security-policy.ts',
+  'security.ts',
+  'settings.ts',
+  'skill-bundle.ts',
+  'skills.ts',
   'files.ts',
   'gateway.ts',
+  'license.ts',
   'logs.ts',
-  'matcha-agent-app-server.ts',
-  'runtime-host-internal.ts',
   'runtime-host-process.ts',
-  'runtime-host-proxy.ts',
-]);
-
-export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
-  '/api/events',
-  '/api/app/browser-relay-info',
-  '/api/gateway/status',
-  '/api/gateway/health',
-  '/api/gateway/start',
-  '/api/gateway/stop',
-  '/api/gateway/restart',
-  '/api/gateway/control-ui',
-  '/api/matcha-agent/app-server/status',
-  '/api/matcha-agent/app-server/restart',
-  '/api/files/save-image',
-  '/api/diagnostics/memory',
-  '/api/diagnostics/gateway-snapshot',
-  '/api/logs',
-  '/api/logs/dir',
-  '/api/logs/files',
-  '/api/openclaw/logs',
-  '/api/openclaw/logs/dir',
-  '/api/runtime-host/restart',
-  '/internal/runtime-host/shell-actions',
-]);
-
-export const MAIN_OWNED_PREFIX_ROUTES = Object.freeze([
-  '/internal/runtime-host/',
+  'runtime-host-usage.ts',
+  'runtime-directory.ts',
+  'manual-team.ts',
+  'matcha-agent-app-server.ts',
+  'openclaw.ts',
+  'plugins.ts',
+  'provider-accounts.ts',
+  'provider-models.ts',
+  'provider-routing.ts',
+  'security-emergency.ts',
+  'team-approvals.ts',
+  'team-decision.ts',
+  'team-graph.ts',
+  'team-lifecycle.ts',
+  'team-public.ts',
+  'team-task-board.ts',
+  'toolchain.ts',
+  'team-role-chat.ts',
+  'team-role-sessions.ts',
+  'team-skill.ts',
+  'team-trigger.ts',
+  'team-webhook-auth.ts',
+  'usage.ts',
 ]);
 
 export const HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES = Object.freeze([
   '/api/remote-fleet/terminal/stream',
 ]);
 
-export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
+export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
+  '/api/events',
   '/api/app/browser-relay-info',
-  '/api/capability-routing',
+  '/api/subagents/agents',
+  '/api/capabilities/list',
+  '/api/capabilities/describe',
+  '/api/capabilities/execute',
+  '/api/channels/catalog',
+  '/api/channels/configure',
+  '/api/channels/credentials/validate',
+  '/api/channels/config/validate',
+  '/api/channels/delete-config',
+  '/api/channels/login',
+  '/api/channels/config/read',
+  '/api/channels/control',
+  '/api/channels/pairing',
+  '/api/channels/status',
   '/api/channels/snapshot',
+  '/api/clawhub/skills/install',
+  '/api/clawhub/search',
   '/api/cron/jobs',
+  '/api/cron/jobs/create',
+  '/api/cron/jobs/update',
+  '/api/cron/jobs/delete',
+  '/api/cron/jobs/toggle',
   '/api/cron/session-history',
-  '/api/diagnostics/gateway-snapshot',
+  '/api/openclaw/chat/history',
+  '/api/matcha-agent/chat/history',
+  '/api/usage/recent',
   '/api/diagnostics/memory',
-  '/api/external-connectors',
-  '/api/external-connectors/mcp-server-programs',
-  '/api/external-connectors/status',
-  '/api/gateway/control-ui',
-  '/api/gateway/health',
-  '/api/gateway/status',
-  '/api/license/gate',
-  '/api/license/stored-key',
-  '/api/logs',
-  '/api/logs/dir',
-  '/api/logs/files',
-  '/api/matcha-agent/app-server/status',
-  '/api/openclaw/cli-command',
-  '/api/openclaw/config-dir',
-  '/api/openclaw/dir',
-  '/api/openclaw/logs',
-  '/api/openclaw/logs/dir',
-  '/api/openclaw/ready',
-  '/api/openclaw/skills-dir',
-  '/api/openclaw/status',
-  '/api/openclaw/tool-permission-mode',
-  '/api/openclaw/subagent-templates',
-  '/api/openclaw/task-workspace-dirs',
-  '/api/openclaw/workspace-dir',
-  '/api/platform/runtime/health',
-  '/api/platform/tools',
-  '/api/plugins/catalog',
-  '/api/plugins/runtime',
-  '/api/provider-accounts',
-  '/api/provider-models',
-  '/api/provider-models/selectable',
-  '/api/remote-fleet/list-audit-events',
-  '/api/remote-fleet/list-commands',
-  '/api/remote-fleet/metrics',
-  '/api/remote-fleet/snapshot',
-  '/api/remote-fleet/terminal/sessions',
-  '/api/runtime-adapters/instances/list',
-  '/api/runtime-adapters/list',
-  '/api/runtime-connectors/list',
-  '/api/runtime-endpoints/list',
-  '/api/runtime-host/gateway-launch-plan',
-  '/api/runtime-host/health',
-  '/api/runtime-host/host-bootstrap-settings',
-  '/api/runtime-host/jobs',
-  '/api/runtime-host/provider-env-map',
-  '/api/runtime-host/team-webhook-auth',
-  '/api/runtime-host/transport-stats',
-  '/api/runtime-host/usage/recent',
+  '/api/diagnostics/gateway-snapshot',
+  '/api/diagnostics/archive',
+  '/api/diagnostics/archive/download',
+  '/api/settings',
+  '/api/settings/desired',
   '/api/security',
   '/api/security/audit',
   '/api/security/destructive-rule-catalog',
-  '/api/settings',
-  '/api/skills/effective',
-  '/api/skills/status',
-  '/api/toolchain/uv/check',
-  '/api/workbench/bootstrap',
-]);
-
-export const HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES = Object.freeze([
-  '/api/channels/config/',
-  '/api/channels/pairing/',
-  '/api/openclaw/subagent-templates/',
-  '/api/settings/',
-]);
-
-export const HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES = Object.freeze([
-  '/api/channels/credentials/validate',
-  '/api/clawhub/search',
-]);
-
-export const HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES = Object.freeze([
+  '/api/security/emergency',
+  '/api/security/policy',
+  '/api/security/policy/current',
+  '/api/security/operation',
+  '/api/files/save-image',
+  '/api/files/binary',
+  '/api/files/read-text',
+  '/api/files/list-dir',
+  '/api/files/write-text',
+  '/api/logs',
+  '/api/logs/dir',
+  '/api/logs/files',
+  '/api/openclaw/logs/dir',
+  '/api/gateway/status',
+  '/api/gateway/health',
+  '/api/gateway/start',
+  '/api/gateway/stop',
   '/api/gateway/restart',
-  '/api/matcha-agent/app-server/restart',
+  '/api/gateway/control-ui',
+  '/api/license/gate',
+  '/api/license/stored-key',
+  '/api/openclaw/status',
+  '/api/openclaw/ready',
+  '/api/openclaw/dir',
+  '/api/openclaw/config-dir',
+  '/api/openclaw/subagent-templates',
+  '/api/openclaw/workspace-dir',
+  '/api/openclaw/task-workspace-dirs',
+  '/api/openclaw/skills-dir',
+  '/api/openclaw/cli-command',
+  '/api/openclaw/tool-permission-mode',
+  '/api/openclaw/runtime/snapshot',
+  '/api/openclaw/lifecycle/status',
+  '/api/openclaw/lifecycle/restart',
+  '/api/openclaw/logs',
+  '/api/runtime-host/status',
   '/api/runtime-host/restart',
+  '/api/provider-accounts',
+  '/api/provider-models',
+  '/api/provider-models/selectable',
+  '/api/provider-routing',
+  '/api/external-connectors',
+  '/api/external-connectors/mcp-server-programs',
+  '/api/external-connectors/status',
   '/api/external-connectors/get',
   '/api/external-connectors/probe',
   '/api/external-connectors/session-status',
   '/api/external-connectors/upsert',
   '/api/external-connectors/remove',
+  '/api/plugins/catalog',
+  '/api/plugins/runtime',
+  '/api/plugins/configuration',
+  '/api/plugins/operation',
+  '/api/skills/status',
+  '/api/skills/search',
+  '/api/skills/detail',
+  '/api/skills/config',
+  '/api/skills/clawhub/install',
+  '/api/skills/clawhub/update',
+  '/api/skills/upload/begin',
+  '/api/skills/upload/chunk',
+  '/api/skills/upload/commit',
+  '/api/skills/uninstall',
+  '/api/skills/import/markdown',
+  '/api/skills/import/bundle',
+  '/api/skills/readme',
+  '/api/subagents/skill-bundles/export',
+  '/api/subagents/skill-bundles/import',
+  '/api/matcha-agent/app-server/status',
+  '/api/matcha-agent/app-server/restart',
+  '/api/runtime-host/usage/recent',
+  '/api/runtime-adapters/list',
+  '/api/runtime-adapters/instances/list',
+  '/api/runtime-connectors/list',
+  '/api/runtime-connectors/connect',
+  '/api/runtime-connectors/disconnect',
+  '/api/platform/tools',
+  '/api/runtime-endpoints/list',
+  '/api/team/approvals',
+  '/api/team/decision',
+  '/api/team/role-chat',
+  '/api/team/role-sessions',
+  '/api/team/graph',
+  '/api/team/lifecycle',
+  '/api/team/manual-materialize-and-create',
+  '/api/team/public',
+  '/api/team/skill',
+  '/api/team/task-board',
+  '/api/team/trigger',
+  '/api/runtime-host/team-webhook-auth',
+  '/api/toolchain/uv/check',
+  '/api/remote-fleet/list-audit-events',
+  '/api/remote-fleet/list-commands',
+  '/api/remote-fleet/metrics',
+  '/api/remote-fleet/snapshot',
+  '/api/remote-fleet/terminal/sessions',
   '/api/remote-fleet/drain-endpoint',
   '/api/remote-fleet/install-agent',
   '/api/remote-fleet/probe',
@@ -147,36 +210,186 @@ export const HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES = Object.freeze([
   '/api/remote-fleet/revoke-agent',
 ]);
 
-export const HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES = Object.freeze([
-  '/api/openclaw/tool-permission-mode',
-]);
+type HostApiAllowedRequest = readonly [method: string, pathname: string];
+
+const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freeze([
+  ['GET', '/api/events'],
+  ['GET', '/api/app/browser-relay-info'],
+  ['POST', '/api/subagents/agents'],
+  ['GET', '/api/capabilities/list'],
+  ['POST', '/api/capabilities/describe'],
+  ['POST', '/api/capabilities/execute'],
+  ['POST', '/api/channels/catalog'],
+  ['POST', '/api/channels/configure'],
+  ['POST', '/api/channels/credentials/validate'],
+  ['POST', '/api/channels/config/validate'],
+  ['POST', '/api/channels/delete-config'],
+  ['POST', '/api/channels/login'],
+  ['POST', '/api/channels/config/read'],
+  ['POST', '/api/channels/control'],
+  ['POST', '/api/channels/pairing'],
+  ['POST', '/api/channels/status'],
+  ['GET', '/api/channels/snapshot'],
+  ['POST', '/api/clawhub/skills/install'],
+  ['POST', '/api/clawhub/search'],
+  ['GET', '/api/cron/jobs'],
+  ['POST', '/api/cron/jobs/create'],
+  ['POST', '/api/cron/jobs/update'],
+  ['POST', '/api/cron/jobs/delete'],
+  ['POST', '/api/cron/jobs/toggle'],
+  ['GET', '/api/cron/session-history'],
+  ['POST', '/api/openclaw/chat/history'],
+  ['POST', '/api/matcha-agent/chat/history'],
+  ['GET', '/api/usage/recent'],
+  ['GET', '/api/diagnostics/memory'],
+  ['GET', '/api/diagnostics/gateway-snapshot'],
+  ['POST', '/api/diagnostics/archive'],
+  ['POST', '/api/diagnostics/archive/download'],
+  ['GET', '/api/settings'],
+  ['POST', '/api/settings/desired'],
+  ['GET', '/api/security'],
+  ['GET', '/api/security/audit'],
+  ['GET', '/api/security/destructive-rule-catalog'],
+  ['POST', '/api/security/emergency'],
+  ['POST', '/api/security/policy'],
+  ['GET', '/api/security/policy/current'],
+  ['POST', '/api/security/operation'],
+  ['POST', '/api/files/save-image'],
+  ['POST', '/api/files/binary'],
+  ['POST', '/api/files/read-text'],
+  ['POST', '/api/files/list-dir'],
+  ['POST', '/api/files/write-text'],
+  ['GET', '/api/logs'],
+  ['GET', '/api/logs/dir'],
+  ['GET', '/api/logs/files'],
+  ['GET', '/api/openclaw/logs/dir'],
+  ['GET', '/api/gateway/status'],
+  ['GET', '/api/gateway/health'],
+  ['POST', '/api/gateway/start'],
+  ['POST', '/api/gateway/stop'],
+  ['POST', '/api/gateway/restart'],
+  ['GET', '/api/gateway/control-ui'],
+  ['GET', '/api/license/gate'],
+  ['GET', '/api/license/stored-key'],
+  ['GET', '/api/openclaw/status'],
+  ['GET', '/api/openclaw/ready'],
+  ['GET', '/api/openclaw/dir'],
+  ['GET', '/api/openclaw/config-dir'],
+  ['GET', '/api/openclaw/subagent-templates'],
+  ['GET', '/api/openclaw/workspace-dir'],
+  ['GET', '/api/openclaw/task-workspace-dirs'],
+  ['GET', '/api/openclaw/skills-dir'],
+  ['GET', '/api/openclaw/cli-command'],
+  ['GET', '/api/openclaw/tool-permission-mode'],
+  ['PUT', '/api/openclaw/tool-permission-mode'],
+  ['GET', '/api/openclaw/runtime/snapshot'],
+  ['GET', '/api/openclaw/lifecycle/status'],
+  ['POST', '/api/openclaw/lifecycle/restart'],
+  ['GET', '/api/openclaw/logs'],
+  ['GET', '/api/provider-accounts'],
+  ['POST', '/api/provider-accounts'],
+  ['GET', '/api/provider-models'],
+  ['POST', '/api/provider-models'],
+  ['GET', '/api/provider-models/selectable'],
+  ['GET', '/api/provider-routing'],
+  ['POST', '/api/provider-routing'],
+  ['GET', '/api/external-connectors'],
+  ['GET', '/api/external-connectors/mcp-server-programs'],
+  ['GET', '/api/external-connectors/status'],
+  ['POST', '/api/external-connectors'],
+  ['POST', '/api/external-connectors/get'],
+  ['POST', '/api/external-connectors/probe'],
+  ['POST', '/api/external-connectors/session-status'],
+  ['POST', '/api/external-connectors/upsert'],
+  ['POST', '/api/external-connectors/remove'],
+  ['GET', '/api/plugins/catalog'],
+  ['GET', '/api/plugins/runtime'],
+  ['POST', '/api/plugins/configuration'],
+  ['POST', '/api/plugins/operation'],
+  ['GET', '/api/skills/status'],
+  ['POST', '/api/skills/search'],
+  ['POST', '/api/skills/detail'],
+  ['POST', '/api/skills/config'],
+  ['POST', '/api/skills/clawhub/install'],
+  ['POST', '/api/skills/clawhub/update'],
+  ['POST', '/api/skills/upload/begin'],
+  ['POST', '/api/skills/upload/chunk'],
+  ['POST', '/api/skills/upload/commit'],
+  ['POST', '/api/skills/uninstall'],
+  ['POST', '/api/skills/import/markdown'],
+  ['POST', '/api/skills/import/bundle'],
+  ['POST', '/api/skills/readme'],
+  ['POST', '/api/subagents/skill-bundles/export'],
+  ['POST', '/api/subagents/skill-bundles/import'],
+  ['GET', '/api/matcha-agent/app-server/status'],
+  ['POST', '/api/matcha-agent/app-server/restart'],
+  ['GET', '/api/runtime-host/usage/recent'],
+  ['GET', '/api/runtime-host/status'],
+  ['GET', '/api/runtime-adapters/list'],
+  ['GET', '/api/runtime-adapters/instances/list'],
+  ['GET', '/api/runtime-connectors/list'],
+  ['POST', '/api/runtime-connectors/connect'],
+  ['POST', '/api/runtime-connectors/disconnect'],
+  ['GET', '/api/platform/tools'],
+  ['GET', '/api/runtime-endpoints/list'],
+  ['POST', '/api/runtime-host/restart'],
+  ['POST', '/api/team/approvals'],
+  ['POST', '/api/team/decision'],
+  ['POST', '/api/team/role-chat'],
+  ['POST', '/api/team/role-sessions'],
+  ['POST', '/api/team/graph'],
+  ['POST', '/api/team/lifecycle'],
+  ['POST', '/api/team/manual-materialize-and-create'],
+  ['POST', '/api/team/public'],
+  ['POST', '/api/team/skill'],
+  ['POST', '/api/team/task-board'],
+  ['POST', '/api/team/trigger'],
+  ['GET', '/api/runtime-host/team-webhook-auth'],
+  ['GET', '/api/toolchain/uv/check'],
+  ['GET', '/api/remote-fleet/list-audit-events'],
+  ['GET', '/api/remote-fleet/list-commands'],
+  ['GET', '/api/remote-fleet/metrics'],
+  ['GET', '/api/remote-fleet/snapshot'],
+  ['GET', '/api/remote-fleet/terminal/sessions'],
+  ['POST', '/api/remote-fleet/drain-endpoint'],
+  ['POST', '/api/remote-fleet/install-agent'],
+  ['POST', '/api/remote-fleet/probe'],
+  ['POST', '/api/remote-fleet/probe-connection'],
+  ['POST', '/api/remote-fleet/register-connection'],
+  ['POST', '/api/remote-fleet/delete-connection'],
+  ['POST', '/api/remote-fleet/register-environment'],
+  ['POST', '/api/remote-fleet/deploy-environment'],
+  ['POST', '/api/remote-fleet/delete-environment'],
+  ['POST', '/api/remote-fleet/register'],
+  ['POST', '/api/remote-fleet/write-credential'],
+  ['POST', '/api/remote-fleet/terminal/open'],
+  ['POST', '/api/remote-fleet/terminal/reconnect'],
+  ['POST', '/api/remote-fleet/terminal/close'],
+  ['POST', '/api/remote-fleet/remove-node'],
+  ['POST', '/api/remote-fleet/retire-endpoint'],
+  ['POST', '/api/remote-fleet/revoke-agent'],
+] as const);
+
+const HOST_API_ALLOWED_DYNAMIC_REQUESTS = Object.freeze([
+  ['GET', '/api/channels/pairing/:channelType'],
+  ['GET', '/api/openclaw/subagent-templates/:templateId'],
+  ['GET', '/api/settings/:key'],
+  ['GET', '/api/provider-accounts/:accountId/has-api-key'],
+] as const satisfies readonly HostApiAllowedRequest[]);
 
 export function getMainApiBoundarySnapshot() {
   return {
     allowedRouteFiles: [...MAIN_API_ALLOWED_ROUTE_FILES],
-    mainOwnedExactRoutes: [...MAIN_OWNED_EXACT_ROUTES],
-    mainOwnedPrefixRoutes: [...MAIN_OWNED_PREFIX_ROUTES],
     hostapiProxyWebsocketExactRoutes: [...HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES],
-    hostapiProxyPublicReadonlyExactRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES],
-    hostapiProxyPublicReadonlyPrefixRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES],
-    hostapiProxyPublicValidationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES],
-    hostapiProxyPublicMutationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES],
-    hostapiProxyPublicMutationPutExactRoutes: [...HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES],
+    mainOwnedExactRoutes: [...MAIN_OWNED_EXACT_ROUTES],
+    hostApiAllowedRequests: HOST_API_ALLOWED_REQUESTS.map(([method, pathname]) => [method, pathname]),
+    hostApiAllowedDynamicRequests: HOST_API_ALLOWED_DYNAMIC_REQUESTS.map(([method, pathname]) => [method, pathname]),
   };
 }
 
 export function isMainOwnedRoute(pathname: string): boolean {
-  if (MAIN_OWNED_EXACT_ROUTES.includes(pathname)) {
-    return true;
-  }
-  return MAIN_OWNED_PREFIX_ROUTES.some((prefix) => pathname.startsWith(prefix));
-}
-
-export function isRuntimeHostBusinessRoute(pathname: string): boolean {
-  if (!pathname.startsWith('/api/')) {
-    return false;
-  }
-  return !isMainOwnedRoute(pathname);
+  return MAIN_OWNED_EXACT_ROUTES.includes(pathname)
+    || HOST_API_ALLOWED_DYNAMIC_REQUESTS.some(([, template]) => isSafeDynamicRoute(pathname, template));
 }
 
 export function isHostApiQueryTokenAllowedRoute(method: string | undefined, pathname: string): boolean {
@@ -187,31 +400,49 @@ export function isHostApiProxyWebSocketRoute(pathname: string): boolean {
   return HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES.includes(pathname);
 }
 
-export function isHostApiProxyAllowedRoute(method: string, pathname: string): boolean {
+export function isHostApiRequestAllowed(method: string, pathname: string): boolean {
   const normalizedMethod = method.toUpperCase();
-  if (pathname === '/api/capabilities/list' && normalizedMethod === 'GET') {
+  if (HOST_API_ALLOWED_REQUESTS.some(
+    ([allowedMethod, allowedPathname]) =>
+      allowedMethod === normalizedMethod && allowedPathname === pathname,
+  )) {
     return true;
   }
-  if (
-    (pathname === '/api/capabilities/describe' || pathname === '/api/capabilities/execute')
-    && normalizedMethod === 'POST'
-  ) {
-    return true;
+  return HOST_API_ALLOWED_DYNAMIC_REQUESTS.some(
+    ([allowedMethod, template]) =>
+      allowedMethod === normalizedMethod && isSafeDynamicRoute(pathname, template),
+  );
+}
+
+function isSafeDynamicRoute(pathname: string, template: string): boolean {
+  const templateSegments = template.split('/');
+  const pathnameSegments = pathname.split('/');
+  if (pathnameSegments.length !== templateSegments.length) return false;
+
+  for (let index = 0; index < templateSegments.length; index += 1) {
+    const templateSegment = templateSegments[index];
+    const pathnameSegment = pathnameSegments[index];
+    if (templateSegment.startsWith(':')) {
+      if (!isSafeDynamicSegment(pathnameSegment)) return false;
+    } else if (templateSegment !== pathnameSegment) {
+      return false;
+    }
   }
-  if (normalizedMethod === 'POST' && HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES.includes(pathname)) {
-    return true;
-  }
-  if (normalizedMethod === 'POST' && HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES.includes(pathname)) {
-    return true;
-  }
-  if (normalizedMethod === 'PUT' && HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES.includes(pathname)) {
-    return true;
-  }
-  if (normalizedMethod !== 'GET') {
+  return true;
+}
+
+function isSafeDynamicSegment(segment: string | undefined): boolean {
+  if (!segment) return false;
+  let decodedSegment: string;
+  try {
+    decodedSegment = decodeURIComponent(segment);
+  } catch {
     return false;
   }
-  if (HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES.includes(pathname)) {
-    return true;
-  }
-  return HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES.some((prefix) => pathname.startsWith(prefix));
+  return decodedSegment.length > 0
+    && decodedSegment !== '.'
+    && decodedSegment !== '..'
+    && !decodedSegment.includes('/')
+    && !decodedSegment.includes('\\')
+    && !decodedSegment.includes('\0');
 }

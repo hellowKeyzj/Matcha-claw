@@ -84,7 +84,6 @@ function makeState(overrides: Record<string, unknown> = {}) {
     error: null,
     showThinking: true,
     thinkingLevel: null,
-    resolveApproval: vi.fn(),
     loadHistory: vi.fn(),
     loadSessions: vi.fn(),
     switchSession: vi.fn(),
@@ -128,13 +127,9 @@ describe('chat selectors layering', () => {
       currentSessionKey: 'agent:foo:main',
       pendingApprovalsBySession: {
         'agent:main:main': [{
-          id: 'ap-1',
+          approvalId: 'ap-1',
           sessionKey: 'agent:main:main',
-          backendSessionKey: 'agent:main:main',
-          sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
-          title: 'gateway',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1,
+          optionIds: ['option-1'],
         }],
       },
       loadedSessions: {

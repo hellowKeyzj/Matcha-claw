@@ -1,5 +1,7 @@
 import { hostApiFetch } from '@/lib/host-api';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 

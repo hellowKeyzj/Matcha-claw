@@ -9,7 +9,6 @@ import {
   hostChannelsDisconnect,
   hostChannelsFetchSnapshot,
   hostChannelsProbe,
-  hostChannelsRequestQrCode,
 } from '@/lib/channel-runtime';
 import {
   isChannelRuntimeConnected,
@@ -38,7 +37,6 @@ interface ChannelsState {
   deleteChannel: (channelId: string) => Promise<void>;
   connectChannel: (channelId: string) => Promise<void>;
   disconnectChannel: (channelId: string) => Promise<void>;
-  requestQrCode: (channelType: ChannelType) => Promise<{ qrCode: string; sessionId: string }>;
   setChannels: (channels: Channel[]) => void;
   updateChannel: (channelId: string, updates: Partial<Channel>) => void;
   clearError: () => void;
@@ -310,13 +308,11 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
         mutating: true,
       };
     });
-    const channelTypeFromState = get().channels.find((channel) => channel.id === channelId)?.type;
+    const channel = get().channels.find((item) => item.id === channelId);
+    const channelTypeFromState = channel?.type;
     const placeholderMatch = channelId.match(/^(.*)-default$/);
     const channelType = channelTypeFromState ?? (placeholderMatch?.[1] as ChannelType | undefined);
     if (!channelType) {
-      set((state) => ({
-        channels: state.channels.filter((c) => c.id !== channelId),
-      }));
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
@@ -328,22 +324,31 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      await hostChannelsDeleteConfig(channelType);
+      const result = await hostChannelsDeleteConfig(channelType, channel?.accountId);
+      if (result.outcome !== 'confirmed') {
+        const error = `Channel deletion outcome was ${result.outcome}`;
+        set((state) => ({
+          channels: state.channels.map((item) => item.id === channelId ? { ...item, error } : item),
+        }));
+        return;
+      }
+      set((state) => ({
+        channels: state.channels.filter((item) => item.id !== channelId),
+      }));
     } catch (error) {
-      console.error('Failed to delete channel config:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      set((state) => ({
+        channels: state.channels.map((item) => item.id === channelId ? { ...item, error: message } : item),
+      }));
+    } finally {
+      set((state) => {
+        const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+        return {
+          mutatingByChannelId: next,
+          mutating: hasMutatingChannels(next),
+        };
+      });
     }
-
-    // Remove from local state
-    set((state) => ({
-      channels: state.channels.filter((c) => c.id !== channelId),
-    }));
-    set((state) => {
-      const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
-      return {
-        mutatingByChannelId: next,
-        mutating: hasMutatingChannels(next),
-      };
-    });
   },
 
   connectChannel: async (channelId) => {
@@ -366,13 +371,15 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       });
       return;
     }
-    updateChannel(channelId, { status: 'connecting', error: undefined });
-
     try {
-      await hostChannelsConnect(channel.type, channel.accountId);
-      updateChannel(channelId, { status: 'connected' });
+      const result = await hostChannelsConnect(channel.type, channel.accountId);
+      if (result.success) {
+        updateChannel(channelId, { status: 'connected', error: undefined });
+      } else {
+        updateChannel(channelId, { error: 'Channel connection was not confirmed' });
+      }
     } catch (error) {
-      updateChannel(channelId, { status: 'error', error: String(error) });
+      updateChannel(channelId, { error: error instanceof Error ? error.message : String(error) });
     } finally {
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
@@ -406,27 +413,23 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      await hostChannelsDisconnect(channel.type, channel.accountId);
+      const result = await hostChannelsDisconnect(channel.type, channel.accountId);
+      if (result.success) {
+        updateChannel(channelId, { status: 'disconnected', error: undefined });
+      } else {
+        updateChannel(channelId, { error: 'Channel disconnection was not confirmed' });
+      }
     } catch (error) {
-      console.error('Failed to disconnect channel:', error);
+      updateChannel(channelId, { error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set((state) => {
+        const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+        return {
+          mutatingByChannelId: next,
+          mutating: hasMutatingChannels(next),
+        };
+      });
     }
-
-    updateChannel(channelId, { status: 'disconnected', error: undefined });
-    set((state) => {
-      const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
-      return {
-        mutatingByChannelId: next,
-        mutating: hasMutatingChannels(next),
-      };
-    });
-  },
-
-  requestQrCode: async (channelType) => {
-    const result = await hostChannelsRequestQrCode(channelType);
-    return {
-      qrCode: result.qrCode || '',
-      sessionId: result.sessionId || '',
-    };
   },
 
   setChannels: (channels) => set({ channels, snapshotReady: true }),

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
-import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../electron/desktop-contract/runtime-address';
 import {
   listTaskSnapshot,
   updateTask,

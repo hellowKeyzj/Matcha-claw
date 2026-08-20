@@ -1,4 +1,4 @@
-import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../types/session/render-item';
 import { applyAssistantPresentationToItems, type ChatRenderItem } from './chat-render-item-model';
 
 export interface SessionStaticRenderItemsCacheEntry {

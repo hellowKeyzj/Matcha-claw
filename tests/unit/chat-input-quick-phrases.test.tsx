@@ -13,27 +13,6 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-type SkillMock = {
-  id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  installed: boolean;
-  eligible?: boolean;
-  icon?: string;
-};
-
-const skillsStoreState: {
-  skills: SkillMock[];
-  snapshotReady: boolean;
-  initialLoading: boolean;
-  fetchSkills: () => Promise<void>;
-} = {
-  skills: [],
-  snapshotReady: true,
-  initialLoading: false,
-  fetchSkills: vi.fn(async () => {}),
-};
 
 const testSessionIdentity = {
   endpoint: {
@@ -45,9 +24,6 @@ const testSessionIdentity = {
   sessionKey: 'test-session',
 };
 
-vi.mock('@/stores/skills', () => ({
-  useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
-}));
 
 describe('chat input quick phrases', () => {
   beforeEach(() => {

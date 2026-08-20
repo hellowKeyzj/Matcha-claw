@@ -118,6 +118,23 @@
       "step2": "Open the login page in your browser.",
       "step3": "Paste the code to approve access.",
       "requestingCode": "Requesting secure login code..."
+    },
+    "projectionErrors": {
+      "diagnostic": "OpenClaw config sync failed: {{reason}}",
+      "readbackMismatch": "OpenClaw config readback does not match the saved provider settings.",
+      "readbackUnavailable": "OpenClaw config was written but could not be read back for verification.",
+      "outcomeUnknown": "OpenClaw config sync outcome is unknown.",
+      "privateResolver": {
+        "credentialMissing": "This account has no saved API key. Enter the API key again and save.",
+        "credentialDecryptFailed": "The saved API key cannot be decrypted on this machine. Enter it again and save.",
+        "credentialProviderMismatch": "The saved API key belongs to a different provider. Enter this provider's API key again and save.",
+        "credentialInvalid": "The saved credential for this account is invalid. Enter it again and save.",
+        "authProfileReadInvalid": "The OpenClaw auth profile file is invalid. Repair or remove it, then save again.",
+        "authProfileWriteFailed": "Cannot write the OpenClaw auth profile file. Check file permissions and try again.",
+        "credentialStoreUnavailable": "Cannot read the local provider credential store. Enter the API key again and save.",
+        "invalidRequest": "The internal auth sync request is invalid. Try again.",
+        "unknown": "OpenClaw auth sync failed. Enter the API key again and save."
+      }
     }
   },
   "license": {
@@ -161,15 +178,15 @@
   "diagnostics": {
     "title": "Diagnostics",
     "description": "Collect a local diagnostics bundle for troubleshooting",
-    "collect": "Collect Bundle",
-    "collecting": "Collecting",
-    "openFolder": "Open Folder",
-    "lastBundle": "Last Bundle",
-    "lastMeta": "Generated at {{generatedAt}}, files: {{count}}",
+    "collect": "Export Bundle",
+    "collecting": "Exporting",
+    "lastBundle": "Last Archive",
+    "lastMeta": "Entries: {{count}}, bytes: {{bytes}}",
     "toast": {
-      "success": "Diagnostics bundle generated, files: {{count}}",
-      "failed": "Failed to generate diagnostics bundle: {{error}}",
-      "openFailed": "Failed to open diagnostics folder: {{error}}"
+      "success": "Diagnostics archive exported, entries: {{count}}",
+      "failed": "Failed to export diagnostics archive: {{error}}",
+      "cancelled": "Diagnostics archive export cancelled",
+      "exportFailed": "Diagnostics archive export failed"
     }
   },
   "gateway": {

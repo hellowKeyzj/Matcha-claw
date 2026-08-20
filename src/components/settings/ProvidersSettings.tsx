@@ -106,8 +106,8 @@ function resolveAccountLabel(
   return rawLabel;
 }
 
-function modelsForCredential(models: readonly ProviderModel[], credentialId: string): ProviderModel[] {
-  return models.filter((model) => model.credentialId === credentialId);
+function modelsForAccount(models: readonly ProviderModel[], accountId: string): ProviderModel[] {
+  return models.filter((model) => model.accountId === accountId);
 }
 
 export function ProvidersSettings() {
@@ -120,6 +120,7 @@ export function ProvidersSettings() {
     refreshing,
     mutatingActionsByAccountId,
     error,
+    warning,
     refreshProviderSnapshot,
     createAccount,
     removeAccount,
@@ -131,8 +132,9 @@ export function ProvidersSettings() {
   const modelCatalogLoading = useProviderModelCatalogStore((state) => state.loading);
   const modelCatalogSaving = useProviderModelCatalogStore((state) => state.saving);
   const modelCatalogError = useProviderModelCatalogStore((state) => state.error);
+  const modelCatalogWarning = useProviderModelCatalogStore((state) => state.warning);
   const refreshModelCatalog = useProviderModelCatalogStore((state) => state.refresh);
-  const replaceCredentialModels = useProviderModelCatalogStore((state) => state.replaceCredentialModels);
+  const replaceAccountModels = useProviderModelCatalogStore((state) => state.replaceAccountModels);
   const { credentials, statuses, vendors } = providerSnapshot;
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -295,6 +297,10 @@ export function ProvidersSettings() {
         <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
+      ) : !error && warning ? (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {warning}
+        </div>
       ) : null}
 
       {initialLoading && !snapshotReady ? (
@@ -337,11 +343,12 @@ export function ProvidersSettings() {
             <ProviderCard
               key={item.account.id}
               item={item}
-              models={modelsForCredential(modelCatalogModels, item.account.id)}
+              models={modelsForAccount(modelCatalogModels, item.account.id)}
               modelCatalogReady={modelCatalogReady}
               modelCatalogLoading={modelCatalogLoading}
               modelCatalogSaving={modelCatalogSaving}
               modelCatalogError={modelCatalogError}
+              modelCatalogWarning={modelCatalogWarning}
               isMutating={Boolean(mutatingActionsByAccountId[item.account.id])}
               isDeleting={Boolean(mutatingActionsByAccountId[item.account.id]?.delete)}
               isEditing={editingProvider === item.account.id}
@@ -360,7 +367,7 @@ export function ProvidersSettings() {
                 setEditingProvider(null);
               }}
               onValidateKey={(key, options) => validateAccountApiKey(item.account.id, key, options)}
-              onReplaceModels={(next) => replaceCredentialModels(item.account.id, next, item.account.vendorId)}
+              onReplaceModels={(next) => replaceAccountModels(item.account.id, next)}
             />
           ))}
         </div>
@@ -387,6 +394,7 @@ interface ProviderCardProps {
   modelCatalogLoading: boolean;
   modelCatalogSaving: boolean;
   modelCatalogError: string | null;
+  modelCatalogWarning: string | null;
   isMutating: boolean;
   isDeleting: boolean;
   isEditing: boolean;
@@ -402,7 +410,7 @@ interface ProviderCardProps {
       headers?: Record<string, string>;
     },
   ) => Promise<{ valid: boolean; error?: string }>;
-  onReplaceModels: (next: Omit<ProviderModel, 'credentialId'>[]) => Promise<void>;
+  onReplaceModels: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
 }
 
 function ProviderCard({
@@ -412,6 +420,7 @@ function ProviderCard({
   modelCatalogLoading,
   modelCatalogSaving,
   modelCatalogError,
+  modelCatalogWarning,
   isMutating,
   isDeleting,
   isEditing,
@@ -769,6 +778,7 @@ function ProviderCard({
               loading={modelCatalogLoading}
               saving={modelCatalogSaving}
               error={modelCatalogError}
+              warning={modelCatalogWarning}
               onReplace={onReplaceModels}
             />
           </div>

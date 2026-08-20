@@ -1,0 +1,954 @@
+use serde_json::{Value, json};
+
+use crate::session_state::{RecoveryReason, SessionChange, SessionDelta};
+
+use super::*;
+
+fn command(name: &str, input: Option<Value>) -> Value {
+    let mut command = json!({ "name": name });
+    if let Some(input) = input {
+        command["input"] = input;
+    }
+    json!({
+        "version": 1,
+        "type": "command",
+        "id": "command-1",
+        "timeoutMs": 1_000,
+        "command": command,
+    })
+}
+
+fn session_delta() -> SessionDelta {
+    SessionDelta {
+        session_key: "session-1".to_owned(),
+        route_key: Some("renderer-route:test".to_owned()),
+        epoch: 1,
+        seq: 1,
+        cursor: 1,
+        run_id: None,
+        changes: vec![SessionChange::RecoveryRequired {
+            reason: RecoveryReason::EventOverflow,
+        }],
+    }
+}
+
+#[test]
+fn command_round_trip_is_strict_and_has_no_http_shape() {
+    let health =
+        decode_command_request(command("host.health", None).to_string().as_bytes()).unwrap();
+    let send = decode_command_request(
+        command(
+            "openclaw.chat.send",
+            Some(json!({
+                "sessionKey": "session-1",
+                "message": "private input",
+                "runId": "run-1",
+            })),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+
+    let lifecycle = [
+        ("matcha.lifecycle.status", Command::MatchaStatus {}),
+        ("matcha.lifecycle.start", Command::MatchaStart {}),
+        ("matcha.lifecycle.stop", Command::MatchaStop {}),
+        ("matcha.lifecycle.restart", Command::MatchaRestart {}),
+        ("openclaw.lifecycle.status", Command::OpenClawStatus {}),
+        (
+            "openclaw.environment.status",
+            Command::OpenClawEnvironmentStatus {},
+        ),
+        ("openclaw.runtime.paths", Command::OpenClawRuntimePaths {}),
+        ("openclaw.cli.command", Command::OpenClawCliCommand {}),
+        (
+            "openclaw.tool-permission.get",
+            Command::OpenClawToolPermissionGet {},
+        ),
+        (
+            "openclaw.toolchain.status",
+            Command::OpenClawToolchainStatus {},
+        ),
+        (
+            "openclaw.toolchain.install-uv",
+            Command::OpenClawToolchainInstallUv {},
+        ),
+        ("openclaw.lifecycle.start", Command::OpenClawStart {}),
+        ("openclaw.lifecycle.stop", Command::OpenClawStop {}),
+        ("openclaw.lifecycle.restart", Command::OpenClawRestart {}),
+        ("openclaw.control.ready", Command::OpenClawControlReady {}),
+    ];
+
+    assert_eq!(health.id.as_str(), "command-1");
+    assert_eq!(health.timeout, Timeout(1_000));
+    assert_eq!(health.command, Command::HostHealth {});
+    let capabilities = decode_command_request(
+        command("host.capabilities.list", None)
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(capabilities.command, Command::HostCapabilitiesList {});
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encode_command_request(&capabilities).unwrap()).unwrap(),
+        command("host.capabilities.list", None),
+    );
+    let describe = decode_command_request(
+        command(
+            "host.capabilities.describe",
+            Some(json!({
+                "id": "scheduler.cron",
+                "scope": {
+                    "kind": "runtime-instance",
+                    "endpoint": {
+                        "kind": "native-runtime",
+                        "runtimeAdapterId": "openclaw",
+                        "runtimeInstanceId": "local",
+                    },
+                },
+            })),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        describe.command,
+        Command::HostCapabilitiesDescribe {
+            input: CommandInput(json!({
+                "id": "scheduler.cron",
+                "scope": {
+                    "kind": "runtime-instance",
+                    "endpoint": {
+                        "kind": "native-runtime",
+                        "runtimeAdapterId": "openclaw",
+                        "runtimeInstanceId": "local",
+                    },
+                },
+            })),
+        }
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encode_command_request(&describe).unwrap()).unwrap(),
+        command(
+            "host.capabilities.describe",
+            Some(json!({
+                "id": "scheduler.cron",
+                "scope": {
+                    "kind": "runtime-instance",
+                    "endpoint": {
+                        "kind": "native-runtime",
+                        "runtimeAdapterId": "openclaw",
+                        "runtimeInstanceId": "local",
+                    },
+                },
+            })),
+        )
+    );
+    assert!(matches!(send.command, Command::OpenClawChatSend { .. }));
+    for (name, expected) in lifecycle {
+        let decoded = decode_command_request(command(name, None).to_string().as_bytes()).unwrap();
+        assert_eq!(decoded.command, expected);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode_command_request(&decoded).unwrap()).unwrap(),
+            command(name, None),
+        );
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encode_command_request(&health).unwrap()).unwrap(),
+        command("host.health", None)
+    );
+
+    let trigger = decode_command_request(
+        command(
+            "openclaw.cron.manual-trigger",
+            Some(json!({ "jobId": "cron-job-1" })),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        trigger.command,
+        Command::OpenClawManualCronTrigger {
+            input: CommandInput(json!({ "jobId": "cron-job-1" })),
+        }
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encode_command_request(&trigger).unwrap()).unwrap(),
+        command(
+            "openclaw.cron.manual-trigger",
+            Some(json!({ "jobId": "cron-job-1" })),
+        )
+    );
+    let permission = decode_command_request(
+        command(
+            "openclaw.tool-permission.set",
+            Some(json!({ "mode": "fullAccess" })),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        permission.command,
+        Command::OpenClawToolPermissionSet {
+            input: CommandInput(json!({ "mode": "fullAccess" })),
+        }
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encode_command_request(&permission).unwrap()).unwrap(),
+        command(
+            "openclaw.tool-permission.set",
+            Some(json!({ "mode": "fullAccess" })),
+        )
+    );
+}
+
+#[test]
+fn command_rejects_legacy_http_shape_and_schema_drift() {
+    let cases = [
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.health", "unexpected": true },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": {
+                "name": "host.capabilities.describe",
+                "method": "POST",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.capabilities.describe" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": {
+                "name": "host.capabilities.describe",
+                "input": null,
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": {
+                "name": "host.capabilities.describe",
+                "input": [],
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.diagnostics.collect" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.diagnostics.cancel" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "team.human-decision", "input": {
+                "runId": "run:1",
+                "approvalId": "approval:1",
+                "decision": "approve",
+                "idempotencyKey": "decision:1"
+            } },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "team.role-chat", "input": {
+                "teamId": "team:1",
+                "runId": "run:1",
+                "roleId": "leader",
+                "message": "private prompt canary",
+                "idempotencyKey": "role-chat:1"
+            } },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "matcha.lifecycle.status", "input": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "matcha.lifecycle.start", "input": null },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "matcha.lifecycle.stop", "unexpected": true },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "matcha.lifecycle.restart", "input": [] },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.lifecycle.status", "input": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.environment.status", "path": "/private/openclaw" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.environment.status", "method": "GET" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "input": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "sessions.authority.revoke" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.sessions.list", "input": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "method": "GET" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "route": "/control/ready" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "payload": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "endpoint": "http://127.0.0.1" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "port": 18789 },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.control.ready", "token": "private-token" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.lifecycle.stop", "unexpected": true },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.lifecycle.restart", "input": null },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.chat.send", "input": null },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.chat.send", "input": [], "method": "POST" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.chat.send", "input": {}, "route": "/api/openclaw/chat/send" },
+        }),
+        json!({
+            "version": 1,
+            "type": "request",
+            "id": "command-1",
+            "deadlineMs": 1_000,
+            "dispatch": { "version": 1, "method": "POST", "route": "/api/openclaw/chat/send" },
+        }),
+        json!({
+            "version": 2,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.health" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.health" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 0,
+            "command": { "name": "host.health" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": MAX_TIMEOUT_MS + 1,
+            "command": { "name": "host.health" },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "x".repeat(MAX_REQUEST_ID_BYTES + 1),
+            "timeoutMs": 1_000,
+            "command": { "name": "host.health" },
+        }),
+    ];
+
+    for value in cases {
+        assert_eq!(
+            decode_command_request(value.to_string().as_bytes()),
+            Err(WireError::InvalidCommand)
+        );
+    }
+    assert_eq!(
+        decode_command_request(br#"{"#),
+        Err(WireError::MalformedJson)
+    );
+}
+
+#[test]
+fn private_control_rejects_public_capability_names() {
+    for (name, input) in [
+        ("environment.create", Some(json!({}))),
+        ("environment.replace", Some(json!({}))),
+        ("environment.delete", Some(json!({}))),
+        ("openclaw.sessions.list", None),
+    ] {
+        assert_eq!(
+            decode_command_request(command(name, input).to_string().as_bytes()),
+            Err(WireError::InvalidCommand)
+        );
+    }
+}
+
+#[test]
+fn output_round_trips_with_semantic_outcomes_and_typed_events() {
+    let request =
+        decode_command_request(command("host.health", None).to_string().as_bytes()).unwrap();
+    let outputs = [
+        Output::Ready(Ready::new()),
+        Output::Outcome(Outcome::new(
+            request.id.clone(),
+            CommandOutcome::succeeded(json!({ "health": { "ok": true } })),
+        )),
+        Output::Outcome(Outcome::new(
+            request.id.clone(),
+            CommandOutcome::rejected(RejectionCode::Unavailable, "Runtime Host is unavailable."),
+        )),
+        Output::Outcome(Outcome::new(
+            request.id.clone(),
+            CommandOutcome::unknown(json!({ "outcome": "unknown" })),
+        )),
+        Output::Outcome(Outcome::new(
+            request.id.clone(),
+            CommandOutcome::timed_out(),
+        )),
+        Output::Event(Event::new(SafeEvent::OpenClawLifecycle {
+            sequence: Some(7),
+            has_run: true,
+            has_message: true,
+            has_session_activity: true,
+        })),
+        Output::Event(Event::new(SafeEvent::OpenClawRuntime)),
+        Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
+            job_id: CronExecutionId::try_new("cron-job-1".to_owned()).unwrap(),
+            run_id: CronExecutionId::try_new("cron-run-1".to_owned()).unwrap(),
+            status: SafeCronExecutionStatus::Succeeded,
+        })),
+        Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
+            job_id: CronExecutionId::try_new("cron-job-2".to_owned()).unwrap(),
+            run_id: CronExecutionId::try_new("cron-run-2".to_owned()).unwrap(),
+            status: SafeCronExecutionStatus::Failed,
+        })),
+        Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
+            job_id: CronExecutionId::try_new("cron-job-3".to_owned()).unwrap(),
+            run_id: CronExecutionId::try_new("cron-run-3".to_owned()).unwrap(),
+            status: SafeCronExecutionStatus::Skipped,
+        })),
+        Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
+            job_id: CronExecutionId::try_new("cron-job-4".to_owned()).unwrap(),
+            run_id: CronExecutionId::try_new("cron-run-4".to_owned()).unwrap(),
+            status: SafeCronExecutionStatus::Cancelled,
+        })),
+        Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
+            job_id: CronExecutionId::try_new("cron-job-5".to_owned()).unwrap(),
+            run_id: CronExecutionId::try_new("cron-run-5".to_owned()).unwrap(),
+            status: SafeCronExecutionStatus::OutcomeUnknown,
+        })),
+        Output::Event(Event::new(SafeEvent::SessionDelta {
+            delta: session_delta(),
+        })),
+    ];
+
+    let encoded: Vec<Value> = outputs
+        .iter()
+        .map(|output| serde_json::from_slice(&encode(output).unwrap()).unwrap())
+        .collect();
+
+    assert_eq!(
+        encoded,
+        vec![
+            json!({
+                "version": 1,
+                "type": "ready",
+            }),
+            json!({
+                "version": 1,
+                "type": "outcome",
+                "id": "command-1",
+                "outcome": { "kind": "succeeded", "result": { "health": { "ok": true } } },
+            }),
+            json!({
+                "version": 1,
+                "type": "outcome",
+                "id": "command-1",
+                "outcome": {
+                    "kind": "rejected",
+                    "error": {
+                        "code": "UNAVAILABLE",
+                        "message": "Runtime Host is unavailable.",
+                    },
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "outcome",
+                "id": "command-1",
+                "outcome": { "kind": "unknown", "result": { "outcome": "unknown" } },
+            }),
+            json!({
+                "version": 1,
+                "type": "outcome",
+                "id": "command-1",
+                "outcome": { "kind": "timed-out" },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.lifecycle",
+                    "sequence": 7,
+                    "hasRun": true,
+                    "hasMessage": true,
+                    "hasSessionActivity": true,
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": { "type": "openclaw.runtime" },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.cron.execution",
+                    "jobId": "cron-job-1",
+                    "runId": "cron-run-1",
+                    "status": "succeeded",
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.cron.execution",
+                    "jobId": "cron-job-2",
+                    "runId": "cron-run-2",
+                    "status": "failed",
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.cron.execution",
+                    "jobId": "cron-job-3",
+                    "runId": "cron-run-3",
+                    "status": "skipped",
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.cron.execution",
+                    "jobId": "cron-job-4",
+                    "runId": "cron-run-4",
+                    "status": "cancelled",
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "openclaw.cron.execution",
+                    "jobId": "cron-job-5",
+                    "runId": "cron-run-5",
+                    "status": "outcome-unknown",
+                },
+            }),
+            json!({
+                "version": 1,
+                "type": "event",
+                "event": {
+                    "type": "session.delta",
+                    "delta": {
+                        "sessionKey": "session-1",
+                        "routeKey": "renderer-route:test",
+                        "epoch": 1,
+                        "seq": 1,
+                        "cursor": 1,
+                        "changes": [{
+                            "kind": "recoveryRequired",
+                            "reason": "event_overflow",
+                        }],
+                    },
+                },
+            }),
+        ]
+    );
+
+    for output in outputs {
+        assert_eq!(decode_output(&encode(&output).unwrap()).unwrap(), output);
+    }
+}
+
+#[test]
+fn projects_event_sequences_to_the_electron_safe_integer_range() {
+    let event = Output::Event(Event::new(SafeEvent::OpenClawLifecycle {
+        sequence: Some(MAX_SAFE_SEQUENCE),
+        has_run: true,
+        has_message: false,
+        has_session_activity: false,
+    }));
+
+    let encoded: Value = serde_json::from_slice(&encode(&event).unwrap()).unwrap();
+    assert_eq!(encoded["event"]["sequence"], MAX_SAFE_SEQUENCE);
+}
+
+#[test]
+fn session_delta_is_canonical_and_strict() {
+    let event = Output::Event(Event::new(SafeEvent::SessionDelta {
+        delta: session_delta(),
+    }));
+    let encoded: Value = serde_json::from_slice(&encode(&event).unwrap()).unwrap();
+    assert_eq!(
+        encoded["event"],
+        json!({
+            "type": "session.delta",
+            "delta": {
+                "sessionKey": "session-1",
+                "routeKey": "renderer-route:test",
+                "epoch": 1,
+                "seq": 1,
+                "cursor": 1,
+                "changes": [{
+                    "kind": "recoveryRequired",
+                    "reason": "event_overflow",
+                }],
+            },
+        })
+    );
+    assert_eq!(decode_output(&encode(&event).unwrap()).unwrap(), event);
+
+    for value in [
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "session.delta",
+                "delta": {
+                    "sessionKey": "session-1",
+                    "routeKey": "renderer-route:test",
+                    "epoch": 1,
+                    "seq": 1,
+                    "cursor": 1,
+                    "changes": [],
+                },
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "session.delta",
+                "delta": {
+                    "sessionKey": "session-1",
+                    "routeKey": "renderer-route:test",
+                    "epoch": 1,
+                    "seq": 1,
+                    "cursor": 1,
+                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
+                    "unexpected": true,
+                },
+            },
+        }),
+    ] {
+        assert_eq!(
+            decode_output(value.to_string().as_bytes()),
+            Err(WireError::InvalidOutput)
+        );
+    }
+}
+
+#[test]
+fn rejects_unknown_fields_and_safe_event_secret_channels() {
+    let cases = [
+        json!({ "version": 1, "type": "ready", "unexpected": true }),
+        json!({
+            "version": 1,
+            "type": "ready",
+            "sessionList": {
+                "endpoint": "http://127.0.0.1:12345/v1/sessions/list",
+                "credential": "transport-credential-must-not-return",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.lifecycle",
+                "sequence": MAX_SAFE_SEQUENCE + 1,
+                "hasRun": true,
+                "hasMessage": false,
+                "hasSessionActivity": false,
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "session.delta",
+                "delta": {
+                    "sessionKey": "session-1",
+                    "routeKey": "renderer-route:test/invalid",
+                    "epoch": 1,
+                    "seq": 1,
+                    "cursor": 1,
+                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
+                },
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "session.delta",
+                "delta": {
+                    "sessionKey": "session-1",
+                    "routeKey": "renderer-route:test",
+                    "epoch": 1,
+                    "seq": 1,
+                    "cursor": 1,
+                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
+                    "sessionKeyNative": "must-be-absent",
+                },
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.session.update",
+                "routeKey": "renderer-route:test",
+                "kind": "delta",
+                "sequence": 7,
+                "text": "legacy update must be rejected",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.session.activity",
+                "routeKey": "renderer-route:test",
+                "sequence": 7,
+                "activity": {"kind": "message"},
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "matcha.session.activity",
+                "routeKey": "renderer-route:test",
+                "sequence": 7,
+                "activity": {"kind": "approval"},
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.cron.execution",
+                "jobId": "cron-job-1",
+                "runId": "cron-run-1",
+                "status": "success",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.cron.execution",
+                "jobId": "",
+                "runId": "cron-run-1",
+                "status": "succeeded",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": {
+                "type": "openclaw.cron.execution",
+                "jobId": "cron/job-1",
+                "runId": "cron-run-1",
+                "status": "succeeded",
+            },
+        }),
+        json!({
+            "version": 1,
+            "type": "outcome",
+            "id": "command-1",
+            "outcome": { "kind": "succeeded", "result": {}, "extra": true },
+        }),
+    ];
+
+    for value in cases {
+        assert_eq!(
+            decode_output(value.to_string().as_bytes()),
+            Err(WireError::InvalidOutput)
+        );
+    }
+
+    for legacy_event in [
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": { "type": "openclaw.session.update" },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": { "type": "openclaw.session.activity" },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": { "type": "matcha.session.activity" },
+        }),
+    ] {
+        assert_eq!(
+            decode_output(legacy_event.to_string().as_bytes()),
+            Err(WireError::InvalidOutput)
+        );
+    }
+
+    let output = String::from_utf8(
+        encode(&Output::Event(Event::new(SafeEvent::SessionDelta {
+            delta: session_delta(),
+        })))
+        .unwrap(),
+    )
+    .unwrap();
+    for legacy in [
+        "openclaw.session.update",
+        "openclaw.session.activity",
+        "matcha.session.activity",
+        "rawPayload",
+        "native-session-identity",
+        "token",
+    ] {
+        assert!(!output.contains(legacy));
+    }
+}

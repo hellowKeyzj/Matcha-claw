@@ -1,0 +1,47 @@
+[package]
+name = "runtime-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "runtime-host-mcp"
+path = "src/bin/runtime-host-mcp.rs"
+
+[dependencies]
+russh = { version = "0.62.5", default-features = false, features = ["ring", "rsa"] }
+environment = { version = "0.1.0", path = "../domains/environment" }
+fleet = { version = "0.1.0", path = "../domains/fleet" }
+aes-gcm.workspace = true
+base64.workspace = true
+chrono.workspace = true
+foundation = { version = "0.1.0", path = "../foundation" }
+futures-util.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+matcha-agent = { version = "0.1.0", path = "../integrations/matcha-agent" }
+openclaw = { version = "0.1.0", path = "../integrations/openclaw" }
+organization = { version = "0.1.0", path = "../domains/organization" }
+platform = { version = "0.1.0", path = "../platform" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+foundation = { version = "0.1.0", path = "../foundation", features = ["test-support"] }
+openclaw = { version = "0.1.0", path = "../integrations/openclaw", features = ["test-support"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

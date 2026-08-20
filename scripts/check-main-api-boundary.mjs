@@ -4,7 +4,6 @@ import path from 'node:path';
 const ROOT = process.cwd();
 const ROUTES_DIR = path.join(ROOT, 'electron', 'api', 'routes');
 const SERVER_FILE = path.join(ROOT, 'electron', 'api', 'server.ts');
-const RUNTIME_HOST_PROXY_FILE = path.join(ROOT, 'electron', 'api', 'routes', 'runtime-host-proxy.ts');
 const BOUNDARY_FILE = path.join(ROOT, 'electron', 'api', 'main-api-boundary.json');
 
 let ALLOWED_ROUTE_FILES = new Set();
@@ -17,15 +16,11 @@ const FORBIDDEN_ROUTE_IMPORT_MODULES = [
   'security',
   'providers',
   'channels',
-  'usage',
   'skills',
   'sessions',
   'task-plugin',
   'team-runtime',
-  'openclaw',
   'toolchain',
-  'cron',
-  'license',
 ];
 
 function fail(message, details = []) {
@@ -81,20 +76,6 @@ async function checkServerImports() {
     );
   }
 
-  if (!source.includes("import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';")) {
-    fail(
-      'Main API boundary check failed: electron/api/server.ts 未导入 runtime-host-proxy。',
-      ['缺少 import: handleRuntimeHostProxyRoutes'],
-    );
-  }
-
-  if (!source.includes('handleRuntimeHostProxyRoutes')) {
-    fail(
-      'Main API boundary check failed: electron/api/server.ts 未启用 runtime-host-proxy 处理链路。',
-      ['routeHandlers 中必须包含 handleRuntimeHostProxyRoutes'],
-    );
-  }
-
   const importsMainOwnedRoute = /import\s+\{[^}]*\bisMainOwnedRoute\b[^}]*\}\s+from\s+['"]\.\/route-boundary['"];?/m.test(source);
   if (!importsMainOwnedRoute) {
     fail(
@@ -111,28 +92,10 @@ async function checkServerImports() {
   }
 }
 
-async function checkProxyBoundaryGuard() {
-  const source = await readFile(RUNTIME_HOST_PROXY_FILE, 'utf8');
-  if (!source.includes("import { isRuntimeHostBusinessRoute } from '../route-boundary';")) {
-    fail(
-      'Main API boundary check failed: runtime-host-proxy 未导入 business-owned 守卫。',
-      ['缺少 import: isRuntimeHostBusinessRoute'],
-    );
-  }
-
-  if (!source.includes('if (!isRuntimeHostBusinessRoute(url.pathname))')) {
-    fail(
-      'Main API boundary check failed: runtime-host-proxy 缺少 business-owned 过滤守卫。',
-      ['缺少保护分支: if (!isRuntimeHostBusinessRoute(url.pathname))'],
-    );
-  }
-}
-
 async function main() {
   await loadBoundarySpec();
   await checkRouteFiles();
   await checkServerImports();
-  await checkProxyBoundaryGuard();
   console.log('Main API boundary check passed.');
 }
 

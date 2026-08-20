@@ -118,6 +118,23 @@
       "step2": "在浏览器中打开登录页面。",
       "step3": "粘贴授权码以批准访问。",
       "requestingCode": "正在获取安全登录码..."
+    },
+    "projectionErrors": {
+      "diagnostic": "OpenClaw 配置同步失败：{{reason}}",
+      "readbackMismatch": "OpenClaw 配置写入后读回内容不一致。",
+      "readbackUnavailable": "OpenClaw 配置写入后无法读回验证。",
+      "outcomeUnknown": "OpenClaw 配置同步结果未知。",
+      "privateResolver": {
+        "credentialMissing": "当前账号没有可用的 API Key，请重新填写并保存。",
+        "credentialDecryptFailed": "本机保存的 API Key 无法解密，请重新填写并保存。",
+        "credentialProviderMismatch": "当前账号保存的 API Key 属于另一个提供商，请重新填写并保存。",
+        "credentialInvalid": "当前账号保存的认证信息格式无效，请重新填写并保存。",
+        "authProfileReadInvalid": "OpenClaw 认证配置文件已损坏，请修复或删除后重新保存。",
+        "authProfileWriteFailed": "无法写入 OpenClaw 认证配置文件，请检查文件权限后重试。",
+        "credentialStoreUnavailable": "无法读取本机保存的 provider 凭据，请重新填写并保存。",
+        "invalidRequest": "内部认证同步请求无效，请重试。",
+        "unknown": "OpenClaw 认证同步失败，请重新填写 API Key 后保存。"
+      }
     }
   },
   "license": {
@@ -163,13 +180,13 @@
     "description": "收集本地诊断包用于问题排查",
     "collect": "导出诊断包",
     "collecting": "导出中",
-    "openFolder": "打开目录",
-    "lastBundle": "最近一次导出",
-    "lastMeta": "生成时间 {{generatedAt}}，文件数 {{count}}",
+    "lastBundle": "最近一次归档",
+    "lastMeta": "条目数：{{count}}，字节数：{{bytes}}",
     "toast": {
-      "success": "诊断包已生成，文件数: {{count}}",
-      "failed": "生成诊断包失败: {{error}}",
-      "openFailed": "打开诊断目录失败: {{error}}"
+      "success": "诊断归档已导出，条目数：{{count}}",
+      "failed": "导出诊断归档失败：{{error}}",
+      "cancelled": "已取消诊断归档导出",
+      "exportFailed": "诊断归档导出失败"
     }
   },
   "gateway": {

@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
 import { isGatewayOperational } from '@/lib/gateway-status';
-import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource } from '@/services/local-path-picker';
+import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource, readLocalSkillImport } from '@/services/local-path-picker';
 import {
   planTeamDependencies,
   validateTeamSkillPackage,
@@ -111,6 +111,7 @@ export function TeamsPage() {
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
+  const enableSkill = useSkillsStore((state) => state.enableSkill);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
@@ -324,7 +325,12 @@ export function TeamsPage() {
     setCreateDialogPhase({ type: 'importing_dependency', review, dependencyName: item.name });
     setCreateError(null);
     try {
-      await importLocalSkill(normalizeDependencySource(item.source));
+      const importedSkill = await readLocalSkillImport(normalizeDependencySource(item.source));
+      if (!importedSkill) {
+        throw new Error('Local skill import was canceled');
+      }
+      await importLocalSkill(importedSkill);
+      await enableSkill(importedSkill.skillKey);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       setCreateDialogPhase({ type: 'review_ready', review });
@@ -347,7 +353,13 @@ export function TeamsPage() {
         setCreateDialogPhase({ type: 'review_ready', review });
         return;
       }
-      await importLocalSkill(selectedPath);
+      const importedSkill = await readLocalSkillImport(selectedPath);
+      if (!importedSkill) {
+        setCreateDialogPhase({ type: 'review_ready', review });
+        return;
+      }
+      await importLocalSkill(importedSkill);
+      await enableSkill(importedSkill.skillKey);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       setCreateDialogPhase({ type: 'review_ready', review });

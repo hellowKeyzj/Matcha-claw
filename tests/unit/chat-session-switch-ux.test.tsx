@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
@@ -60,20 +60,8 @@ function setupChatSessions() {
   const currentItems = buildRenderItemsFromMessages(currentSessionKey, currentMessages);
   const anotherItems = buildRenderItemsFromMessages(anotherSessionKey, anotherMessages);
 
-  useGatewayStore.setState({
-    status: {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore.setState({
+    runtimeHost: { lifecycle: 'running' },
     rpc: vi.fn().mockResolvedValue({}),
   } as never);
   useSubagentsStore.setState({

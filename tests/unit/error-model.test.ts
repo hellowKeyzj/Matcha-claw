@@ -16,6 +16,15 @@ describe('error-model', () => {
     expect(error.code).toBe('CHANNEL_UNAVAILABLE');
   });
 
+  it('prefers structured safe error codes over message classification', () => {
+    const error = Object.assign(new Error('Host API request is unavailable.'), { code: 'TIMEOUT' });
+    expect(normalizeAppError(error).code).toBe('TIMEOUT');
+  });
+
+  it('normalizes abort errors into ABORTED', () => {
+    expect(normalizeAppError(new DOMException('Aborted', 'AbortError')).code).toBe('ABORTED');
+  });
+
   it('preserves AppError and merges details', () => {
     const base = new AppError('TIMEOUT', 'request timeout', undefined, { a: 1 });
     const normalized = normalizeAppError(base, { b: 2 });

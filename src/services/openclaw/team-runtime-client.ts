@@ -1,5 +1,6 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
-import type { CapabilityTarget, RuntimeEndpointRef, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { CapabilityTarget } from '../../../electron/desktop-contract/capability-target';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
@@ -427,6 +428,7 @@ export interface TeamGraphNodeRecord {
   stageId?: string;
   status?: string;
   statusReason?: string;
+  maxAttempts?: number;
   createdAt?: number;
   completedAt?: number;
   artifactId?: string;

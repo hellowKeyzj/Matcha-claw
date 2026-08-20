@@ -2544,7 +2544,9 @@ function convertToLogOption(
   return {
     date: lastMessage.timestamp,
     messages: removeExtraFields(transcript),
-    ...(transcript.some(hasRealUserMessage) ? { hasRealUserMessage: true } : {}),
+    ...(transcript.some(hasRealUserMessage)
+      ? { hasRealUserMessage: true }
+      : {}),
     fullPath,
     value,
     created,

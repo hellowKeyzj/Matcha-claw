@@ -2,17 +2,13 @@
  * Zustand Stores Tests
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { waitFor } from '@testing-library/react';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
-import { useGatewayStore } from '@/stores/gateway';
-import { hostApiFetchMock, capabilityExecuteMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { useRuntimeHostStore } from '@/stores/gateway';
 
 describe('Settings Store', () => {
   beforeEach(() => {
     // Reset store to default state
-    hostApiFetchMock.mockReset();
-    capabilityExecuteMock.mockReset();
     useSettingsStore.setState({
       theme: 'system',
       language: 'en',
@@ -23,111 +19,64 @@ describe('Settings Store', () => {
       startMinimized: false,
       launchAtStartup: false,
       updateChannel: 'stable',
+      initialized: false,
     });
   });
-  
+
   it('should have default values', () => {
     const state = useSettingsStore.getState();
     expect(state.theme).toBe('system');
     expect(state.gatewayAutoStart).toBe(true);
   });
-  
-  it('should update theme', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: true });
+
+  it('should update theme locally', async () => {
     const { setTheme } = useSettingsStore.getState();
     await setTheme('dark');
     expect(useSettingsStore.getState().theme).toBe('dark');
   });
 
-  it('should unlock dev mode', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: true });
+  it('should unlock dev mode locally', async () => {
     const { setDevModeUnlocked } = useSettingsStore.getState();
     await setDevModeUnlocked(true);
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
   });
 
-  it('should persist renderer-owned settings through host settings routes', async () => {
-    hostApiFetchMock
-      .mockResolvedValueOnce({ success: true })
-      .mockResolvedValueOnce({ success: true })
-      .mockResolvedValueOnce({ success: true });
+  it('should keep renderer-owned settings local', async () => {
+    const { setAutoCheckUpdate, setDevModeUnlocked, setLaunchAtStartup } = useSettingsStore.getState();
 
-    const { setAutoCheckUpdate, setDevModeUnlocked } = useSettingsStore.getState();
     await setAutoCheckUpdate(false);
     await setDevModeUnlocked(true);
+    await setLaunchAtStartup(true);
 
     expect(useSettingsStore.getState().autoCheckUpdate).toBe(false);
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
-
-    await waitFor(() => {
-      expect(capabilityExecuteMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'settings.runtime',
-          operationId: 'settings.setValue',
-          input: expect.objectContaining({ key: 'autoCheckUpdate', value: false }),
-        }),
-        { timeoutMs: undefined },
-      );
-      expect(capabilityExecuteMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'settings.runtime',
-          operationId: 'settings.setValue',
-          input: expect.objectContaining({ key: 'devModeUnlocked', value: true }),
-        }),
-        { timeoutMs: undefined },
-      );
-    });
-  });
-
-  it('should persist launch-at-startup setting through host api', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: true });
-
-    const { setLaunchAtStartup } = useSettingsStore.getState();
-    await setLaunchAtStartup(true);
-
     expect(useSettingsStore.getState().launchAtStartup).toBe(true);
-    await waitFor(() => {
-      expect(capabilityExecuteMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'settings.runtime',
-          operationId: 'settings.setValue',
-          input: expect.objectContaining({ key: 'launchAtStartup', value: true }),
-        }),
-        { timeoutMs: undefined },
-      );
+  });
+
+  it('should reset renderer-owned settings without replacing sealed desired projection', async () => {
+    useSettingsStore.setState({
+      theme: 'dark',
+      autoCheckUpdate: false,
+      devModeUnlocked: true,
+      browserMode: 'native',
+      proxyEnabled: true,
+      proxyServer: 'http://proxy.example.test:8080',
+      proxyBypassRules: '<local>',
+      initialized: true,
     });
-  });
 
-  it('should persist theme through host settings runtime', async () => {
-    const { setTheme } = useSettingsStore.getState();
+    await useSettingsStore.getState().resetSettings();
 
-    await setTheme('dark');
-
-    expect(useSettingsStore.getState().theme).toBe('dark');
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'settings.runtime',
-        operationId: 'settings.setValue',
-        scope: { kind: 'app' },
-        target: { kind: 'setting', key: 'theme' },
-        input: { key: 'theme', value: 'dark' },
-      }),
-      { timeoutMs: undefined },
-    );
-  });
-
-  it('should keep theme changes local when host settings write fails', async () => {
-    hostApiFetchMock.mockRejectedValueOnce(new Error('write failed'));
-    const { setTheme } = useSettingsStore.getState();
-
-    await expect(setTheme('dark', {
-      kind: 'native-runtime',
-      capabilityId: 'settings.runtime',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      agentId: 'default',
-    })).rejects.toThrow('write failed');
-    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(useSettingsStore.getState().theme).toBe('system');
+    expect(useSettingsStore.getState().autoCheckUpdate).toBe(true);
+    expect(useSettingsStore.getState().devModeUnlocked).toBe(false);
+    expect(useSettingsStore.getState()).toMatchObject({
+      browserMode: 'native',
+      proxyEnabled: true,
+      proxyServer: 'http://proxy.example.test:8080',
+      proxyBypassRules: '<local>',
+      initialized: true,
+    });
   });
 });
 
@@ -163,113 +112,19 @@ describe('Layout Store', () => {
   });
 });
 
-describe('Gateway Store', () => {
+describe('Runtime Host Store', () => {
   beforeEach(() => {
-    // Reset store
-    useGatewayStore.setState({
-      status: {
-        processState: 'stopped',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 0,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'unknown' },
       isInitialized: false,
-      lastError: null,
-      health: null,
-      runtimeHost: {
-        lifecycle: 'unknown',
-        restartCount: 0,
-      },
     });
-    resetGatewayClientMocks();
-  });
-  
-  it('should have default status', () => {
-    const state = useGatewayStore.getState();
-    expect(state.status.processState).toBe('stopped');
-    expect(state.status.port).toBe(18789);
-  });
-  
-  it('should update status', () => {
-    const { setStatus } = useGatewayStore.getState();
-    setStatus({
-      processState: 'running',
-      port: 18789,
-      pid: 12345,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    });
-    
-    const state = useGatewayStore.getState();
-    expect(state.status.processState).toBe('running');
-    expect(state.status.pid).toBe(12345);
   });
 
-  it('should refresh gateway status from host after start command succeeds', async () => {
-    hostApiFetchMock
-      .mockResolvedValueOnce({ success: true })
-      .mockResolvedValueOnce({
-        processState: 'starting',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'degraded',
-        transportState: 'reconnecting',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      });
-
-    await useGatewayStore.getState().start();
-
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(
-      1,
-      '/api/gateway/start',
-      expect.objectContaining({ method: 'POST' }),
-    );
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/gateway/status', undefined);
-    expect(useGatewayStore.getState().status.processState).toBe('starting');
-    expect(useGatewayStore.getState().lastError).toBeNull();
-  });
-
-  it('should keep observed lifecycle unchanged when restart command fails', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
-      lastError: null,
-    });
-    hostApiFetchMock.mockResolvedValueOnce({ success: false, error: 'restart denied' });
-
-    await useGatewayStore.getState().restart();
-
-    expect(useGatewayStore.getState().status.processState).toBe('running');
-    expect(useGatewayStore.getState().lastError).toBe('restart denied');
+  it('exposes only the safe lifecycle projection', () => {
+    const state = useRuntimeHostStore.getState();
+    expect(state.runtimeHost).toEqual({ lifecycle: 'unknown' });
+    expect(state).not.toHaveProperty('status');
+    expect(state).not.toHaveProperty('start');
+    expect(state).not.toHaveProperty('restart');
   });
 });

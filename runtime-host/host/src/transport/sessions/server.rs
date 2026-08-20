@@ -1,0 +1,542 @@
+use std::{
+    io,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::Value;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+    time::timeout,
+};
+
+use crate::transport::authorization::CapabilityDecisionVerifier;
+
+use super::{DecodeError, SessionListDelivery, SessionListRequest, map_native_outcome, timeline};
+use crate::transport::{
+    matcha_session_catalog, platform_tools, session_create, session_delete, session_trace,
+    sessions::rename,
+};
+
+#[cfg(test)]
+mod server_tests;
+
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_HEADER_BYTES: usize = 8 * 1024;
+const MAX_HEADERS: usize = 32;
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const AUTHORIZATION_HEADER: &str = "authorization";
+const BEARER_PREFIX: &str = "Bearer ";
+
+pub(crate) struct Server {
+    listener: TcpListener,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+}
+
+impl Server {
+    pub(crate) async fn bind(
+        port: u16,
+        verifier: CapabilityDecisionVerifier,
+        owner: crate::owner::Handle,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            listener: TcpListener::bind(("127.0.0.1", port)).await?,
+            verifier: Arc::new(Mutex::new(verifier)),
+            owner,
+        })
+    }
+
+    pub(crate) async fn run(self) -> io::Result<()> {
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            let verifier = Arc::clone(&self.verifier);
+            let owner = self.owner.clone();
+            tokio::spawn(async move {
+                let _ = serve(stream, verifier, owner).await;
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> u16 {
+        self.listener
+            .local_addr()
+            .expect("session transport listener has a local address")
+            .port()
+    }
+}
+
+async fn serve(
+    mut stream: TcpStream,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+) -> io::Result<()> {
+    let mut request_path = None;
+    let response = match timeout(REQUEST_DEADLINE, async {
+        let request = read_request(&mut stream).await?;
+        Ok::<_, io::Error>(match request {
+            Ok(request) => {
+                request_path = Some(request.path.clone());
+                handle(request, verifier, owner).await
+            }
+            Err(response) => response,
+        })
+    })
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => Response::deadline(request_path.as_deref()),
+    };
+    write_response(&mut stream, response).await
+}
+
+async fn handle(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+) -> Response {
+    if request.method == "GET" && request.path == "/api/runtime-endpoints/list" {
+        let response =
+            crate::transport::peer_directory::server::handle(&request.headers, verifier, owner)
+                .await;
+        return Response::from_peer_directory(response);
+    }
+    if request.method == "GET" && request.path == "/api/platform/tools" {
+        return Response::from_platform_tools(
+            platform_tools::server::handle(&request.headers, verifier, owner).await,
+        );
+    }
+    if request.method != "POST" {
+        return Response::not_found();
+    }
+    if request.path == "/api/sessions/create" {
+        let response =
+            session_create::server::handle(&request.headers, &request.body, verifier, owner).await;
+        return Response::from_create(response);
+    }
+    if request.path == "/api/sessions/delete" {
+        let response =
+            session_delete::server::handle(&request.headers, &request.body, verifier, owner).await;
+        return Response::from_delete(response);
+    }
+    if request.path == "/api/sessions/rename" {
+        return Response::from_rename(
+            rename::handle(&request.headers, &request.body, verifier, owner).await,
+        );
+    }
+    if request.path == "/api/matcha/sessions" {
+        let response = matcha_session_catalog::server::handle(
+            &request.headers,
+            &request.body,
+            verifier,
+            owner,
+        )
+        .await;
+        return Response::from_matcha_catalog(response);
+    }
+    if matches!(
+        request.path.as_str(),
+        "/api/sessions/load" | "/api/sessions/window"
+    ) {
+        return handle_timeline(request, verifier, owner).await;
+    }
+    if request.path != "/api/sessions" {
+        return Response::not_found();
+    }
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        return Response::unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => return Response::bad_request(),
+    };
+    let mut verifier = verifier.lock().await;
+    let _request =
+        match SessionListRequest::decode(value, authorization, &mut verifier, now_millis()) {
+            Ok(request) => request,
+            Err(DecodeError::Unauthorized) => return Response::unauthorized(),
+            Err(DecodeError::Invalid) => return Response::bad_request(),
+        };
+    drop(verifier);
+    let delivery = match owner.list_open_claw_sessions(Default::default()).await {
+        Ok(result) => map_native_outcome(result),
+        Err(_) => SessionListDelivery::Unavailable,
+    };
+    Response::from_delivery(delivery)
+}
+
+async fn handle_timeline(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    owner: crate::owner::Handle,
+) -> Response {
+    let trace_id = session_trace::trace_id(&request.headers);
+    session_trace::log(
+        "runtime.timeline.request",
+        trace_id,
+        serde_json::json!({ "method": &request.method, "path": &request.path }),
+    );
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        session_trace::log(
+            "runtime.timeline.unauthorized",
+            trace_id,
+            serde_json::json!({}),
+        );
+        return Response::timeline_unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => {
+            session_trace::log("runtime.timeline.bad-json", trace_id, serde_json::json!({}));
+            return Response::timeline_bad_request();
+        }
+    };
+    let expected_operation = match request.path.as_str() {
+        "/api/sessions/load" => "sessions.load",
+        "/api/sessions/window" => "sessions.window",
+        _ => return Response::timeline_bad_request(),
+    };
+    let mut verifier = verifier.lock().await;
+    let request = match timeline::Request::decode(value, authorization, &mut verifier, now_millis())
+    {
+        Ok(request) if request.operation_id() == expected_operation => request,
+        Err(timeline::DecodeError::Unauthorized) => {
+            session_trace::log(
+                "runtime.timeline.decode-unauthorized",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::timeline_unauthorized();
+        }
+        Ok(_) | Err(timeline::DecodeError::Invalid) => {
+            session_trace::log(
+                "runtime.timeline.decode-invalid",
+                trace_id,
+                serde_json::json!({ "operation": expected_operation }),
+            );
+            return Response::timeline_bad_request();
+        }
+    };
+    let identity = request.identity().clone();
+    let Some(command) = request.into_command() else {
+        return Response::timeline_bad_request();
+    };
+    drop(verifier);
+    let outcome = match owner.load_session_timeline(command).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            session_trace::log(
+                "runtime.timeline.owner-unavailable",
+                trace_id,
+                serde_json::json!({ "operation": expected_operation }),
+            );
+            return Response::timeline_unavailable();
+        }
+    };
+    let delivery = timeline::Delivery::from_outcome(&identity, outcome);
+    session_trace::log(
+        "runtime.timeline.outcome",
+        trace_id,
+        serde_json::json!({
+            "operation": expected_operation,
+            "status": delivery.status_code(),
+        }),
+    );
+    Response::from_timeline(delivery)
+}
+
+struct Request {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+struct Response {
+    status: u16,
+    body: Value,
+}
+
+impl Response {
+    fn bad_request() -> Self {
+        Self::fixed(400, "Session list request is invalid")
+    }
+
+    fn unauthorized() -> Self {
+        Self::fixed(401, "Session list authorization is invalid")
+    }
+
+    fn not_found() -> Self {
+        Self::fixed(404, "Session list route is not available")
+    }
+
+    fn unavailable() -> Self {
+        Self::from_delivery(SessionListDelivery::Unavailable)
+    }
+
+    fn deadline(path: Option<&str>) -> Self {
+        match path {
+            Some("/api/sessions/create") => Self::fixed(503, "Session create is unavailable"),
+            Some("/api/sessions") => Self::unavailable(),
+            Some("/api/sessions/load") | Some("/api/sessions/window") => {
+                Self::timeline_unavailable()
+            }
+            Some("/api/platform/tools") => {
+                Self::fixed(503, "Platform tools catalog is unavailable")
+            }
+            _ => Self::bad_request(),
+        }
+    }
+
+    fn fixed(status: u16, error: &'static str) -> Self {
+        Self {
+            status,
+            body: serde_json::json!({ "success": false, "error": error }),
+        }
+    }
+
+    fn from_delivery(delivery: SessionListDelivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+
+    fn from_create(response: session_create::server::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_delete(response: session_delete::server::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_rename(response: rename::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_matcha_catalog(response: matcha_session_catalog::server::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_peer_directory(response: crate::transport::peer_directory::server::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_platform_tools(response: platform_tools::server::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn timeline_bad_request() -> Self {
+        Self::fixed(400, "Session timeline request is invalid")
+    }
+
+    fn timeline_unauthorized() -> Self {
+        Self::fixed(401, "Session timeline authorization is invalid")
+    }
+
+    fn timeline_unavailable() -> Self {
+        Self::from_timeline(timeline::Delivery::Unavailable)
+    }
+
+    fn from_timeline(delivery: timeline::Delivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+}
+
+async fn read_request(stream: &mut TcpStream) -> io::Result<Result<Request, Response>> {
+    let mut bytes = Vec::with_capacity(1024);
+    let mut buffer = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(Err(Response::bad_request()));
+        }
+        if bytes.len() + read > MAX_HEADER_BYTES {
+            return Ok(Err(Response::bad_request()));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let headers = match std::str::from_utf8(&bytes[..header_end]) {
+        Ok(value) => value,
+        Err(_) => return Ok(Err(Response::bad_request())),
+    };
+    let mut lines = headers.split("\r\n");
+    let Some(start) = lines.next() else {
+        return Ok(Err(Response::bad_request()));
+    };
+    let mut start = start.split_whitespace();
+    let (Some(method), Some(path), Some(version), None) =
+        (start.next(), start.next(), start.next(), start.next())
+    else {
+        return Ok(Err(Response::bad_request()));
+    };
+    if version != "HTTP/1.1" {
+        return Ok(Err(Response::bad_request()));
+    }
+    let method = method.to_owned();
+    let path = path.to_owned();
+    let mut parsed_headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Ok(Err(Response::bad_request()));
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_owned();
+        if name.is_empty()
+            || parsed_headers.len() == MAX_HEADERS
+            || parsed_headers.iter().any(|(existing, _)| existing == &name)
+        {
+            return Ok(Err(Response::bad_request()));
+        }
+        parsed_headers.push((name, value));
+    }
+    let content_length = parsed_headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok());
+    let content_length = match content_length {
+        Some(value) => value,
+        None if method == "GET" => 0,
+        None => return Ok(Err(Response::bad_request())),
+    };
+    if content_length > MAX_REQUEST_BYTES || header_end + content_length > MAX_REQUEST_BYTES {
+        return Ok(Err(Response::bad_request()));
+    }
+    while bytes.len() < header_end + content_length {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 || bytes.len() + read > MAX_REQUEST_BYTES {
+            return Ok(Err(Response::bad_request()));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if bytes.len() != header_end + content_length {
+        return Ok(Err(Response::bad_request()));
+    }
+    Ok(Ok(Request {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        headers: parsed_headers,
+        body: bytes[header_end..].to_vec(),
+    }))
+}
+
+async fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
+    let body =
+        serde_json::to_vec(&response.body).expect("Session list public response is serializable");
+    let reason = match response.status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        503 => "Service Unavailable",
+        _ => "Internal Server Error",
+    };
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.status,
+                reason,
+                body.len(),
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(&body).await
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use serde_json::json;
+
+    use super::Response;
+
+    #[test]
+    fn deadline_projects_session_routes_without_invalid_request() {
+        for path in ["/api/sessions", "/api/sessions/create"] {
+            assert_eq!(Response::deadline(Some(path)).status, 503);
+        }
+        assert_eq!(
+            Response::deadline(Some("/api/sessions")).body,
+            json!({
+                "success": false,
+                "error": "Session catalog is unavailable",
+            })
+        );
+        assert_eq!(
+            Response::deadline(Some("/api/sessions/create")).body,
+            json!({
+                "success": false,
+                "error": "Session create is unavailable",
+            })
+        );
+        for path in ["/api/sessions/load", "/api/sessions/window"] {
+            assert_eq!(Response::deadline(Some(path)).status, 503);
+            assert_eq!(
+                Response::deadline(Some(path)).body,
+                json!({
+                    "success": false,
+                    "error": "Session timeline is unavailable",
+                })
+            );
+        }
+        assert_eq!(Response::deadline(None).status, 400);
+        assert_eq!(
+            Response::deadline(None).body,
+            json!({
+                "success": false,
+                "error": "Session list request is invalid",
+            })
+        );
+    }
+}

@@ -1,73 +1,43 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { Channels } from '@/pages/Channels';
 import { useChannelsStore } from '@/stores/channels';
-import type { RuntimeScope } from '../../runtime-host/shared/runtime-address';
-
-const integrationChannelScope: RuntimeScope = {
-  kind: 'runtime-instance',
-  endpoint: {
-    kind: 'native-runtime',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-};
 
 const hostChannelsActivateMock = vi.fn();
+const hostChannelsApprovePairingRequestMock = vi.fn();
 const hostChannelsCancelSessionMock = vi.fn();
+const hostChannelsConnectMock = vi.fn();
+const hostChannelsDeleteConfigMock = vi.fn();
+const hostChannelsDisconnectMock = vi.fn();
 const hostChannelsFetchSnapshotMock = vi.fn();
+const hostChannelsListPairingRequestsMock = vi.fn();
+const hostChannelsLoginWaitMock = vi.fn();
 const hostChannelsProbeMock = vi.fn();
 const hostChannelsReadConfigMock = vi.fn();
 const hostChannelsValidateCredentialsMock = vi.fn();
-const hostChannelsDeleteConfigMock = vi.fn();
-const hostChannelsConnectMock = vi.fn();
-const hostChannelsDisconnectMock = vi.fn();
-const hostChannelsRequestQrCodeMock = vi.fn();
-const hostChannelsListPairingRequestsMock = vi.fn();
-const hostChannelsApprovePairingRequestMock = vi.fn();
-const invokeIpcMock = vi.fn();
-const subscribedHostEvents = new Map<string, Set<(payload: unknown) => void>>();
 
 vi.mock('@/lib/channel-runtime', () => ({
   hostChannelsActivate: (...args: unknown[]) => hostChannelsActivateMock(...args),
+  hostChannelsApprovePairingRequest: (...args: unknown[]) => hostChannelsApprovePairingRequestMock(...args),
   hostChannelsCancelSession: (...args: unknown[]) => hostChannelsCancelSessionMock(...args),
+  hostChannelsConnect: (...args: unknown[]) => hostChannelsConnectMock(...args),
+  hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),
+  hostChannelsDisconnect: (...args: unknown[]) => hostChannelsDisconnectMock(...args),
   hostChannelsFetchSnapshot: (...args: unknown[]) => hostChannelsFetchSnapshotMock(...args),
+  hostChannelsListPairingRequests: (...args: unknown[]) => hostChannelsListPairingRequestsMock(...args),
+  hostChannelsLoginWait: (...args: unknown[]) => hostChannelsLoginWaitMock(...args),
   hostChannelsProbe: (...args: unknown[]) => hostChannelsProbeMock(...args),
   hostChannelsReadConfig: (...args: unknown[]) => hostChannelsReadConfigMock(...args),
   hostChannelsValidateCredentials: (...args: unknown[]) => hostChannelsValidateCredentialsMock(...args),
-  hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),
-  hostChannelsConnect: (...args: unknown[]) => hostChannelsConnectMock(...args),
-  hostChannelsDisconnect: (...args: unknown[]) => hostChannelsDisconnectMock(...args),
-  hostChannelsRequestQrCode: (...args: unknown[]) => hostChannelsRequestQrCodeMock(...args),
-  hostChannelsListPairingRequests: (...args: unknown[]) => hostChannelsListPairingRequestsMock(...args),
-  hostChannelsApprovePairingRequest: (...args: unknown[]) => hostChannelsApprovePairingRequestMock(...args),
 }));
 
 vi.mock('@/lib/host-events', () => ({
-  subscribeHostEvent: (eventName: string, handler: (payload: unknown) => void) => {
-    const handlers = subscribedHostEvents.get(eventName) ?? new Set<(payload: unknown) => void>();
-    handlers.add(handler);
-    subscribedHostEvents.set(eventName, handlers);
-    return () => {
-      const currentHandlers = subscribedHostEvents.get(eventName);
-      if (!currentHandlers) {
-        return;
-      }
-      currentHandlers.delete(handler);
-      if (currentHandlers.size === 0) {
-        subscribedHostEvents.delete(eventName);
-      }
-    };
-  },
+  subscribeHostEvent: vi.fn(() => () => { }),
 }));
 
 vi.mock('@/lib/api-client', () => ({
-  invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
-}));
-
-vi.mock('@/lib/host-api', () => ({
-  resolveSingleCapabilityScope: async () => integrationChannelScope,
+  invokeIpc: vi.fn(),
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -77,6 +47,8 @@ vi.mock('@/stores/gateway', () => ({
       transportState: string;
       gatewayReady: boolean;
       healthSummary: string;
+      portReachable: boolean;
+      diagnostics: { consecutiveHeartbeatMisses: number; consecutiveRpcFailures: number };
     };
     isInitialized: boolean;
   }) => unknown) => selector({
@@ -85,59 +57,47 @@ vi.mock('@/stores/gateway', () => ({
       transportState: 'connected',
       gatewayReady: true,
       healthSummary: 'healthy',
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
     },
     isInitialized: true,
   }),
 }));
 
-function emptyChannelsSnapshot() {
+function snapshot(channels: Record<string, unknown>, channelAccounts: Record<string, unknown[]>) {
   return {
     success: true,
     ready: true,
     snapshot: {
-      channelOrder: [],
-      channels: {},
-      channelAccounts: {},
-      channelDefaultAccountId: {},
+      channelOrder: Object.keys(channels),
+      channels,
+      channelAccounts,
+      channelDefaultAccountId: Object.fromEntries(Object.keys(channels).map((channel) => [channel, 'default'])),
     },
   };
 }
 
-function feishuConfiguredSnapshot() {
-  return {
-    success: true,
-    ready: true,
-    snapshot: {
-      channelOrder: ['feishu'],
-      channels: {
-        feishu: {
-          id: 'feishu',
-          type: 'feishu',
-          name: 'Feishu',
-          enabled: true,
-          configured: true,
-          connected: true,
-          status: 'connected',
-          accountId: 'default',
-        },
-      },
-      channelAccounts: {
-        feishu: [{
-          accountId: 'default',
-          configured: true,
-          connected: true,
-          name: 'Feishu',
-        }],
-      },
-      channelDefaultAccountId: { feishu: 'default' },
-    },
-  };
+function emptySnapshot() {
+  return snapshot({}, {});
+}
+
+function configuredFeishuSnapshot() {
+  return snapshot(
+    { feishu: { configured: true } },
+    { feishu: [{ accountId: 'default', configured: true, connected: true, name: 'Feishu' }] },
+  );
+}
+
+function clickAvailableChannel(name: string) {
+  const label = screen.getByText(name, { exact: true });
+  const button = label.closest('button');
+  expect(button).toBeInstanceOf(HTMLButtonElement);
+  fireEvent.click(button as HTMLButtonElement);
 }
 
 describe('Channels page QR session lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    subscribedHostEvents.clear();
     i18n.changeLanguage('en');
     useChannelsStore.setState({
       channels: [],
@@ -148,39 +108,56 @@ describe('Channels page QR session lifecycle', () => {
       mutatingByChannelId: {},
       error: null,
     });
-    hostChannelsFetchSnapshotMock.mockResolvedValue(emptyChannelsSnapshot());
+    hostChannelsFetchSnapshotMock.mockResolvedValue(emptySnapshot());
     hostChannelsReadConfigMock.mockResolvedValue({ success: true, values: {} });
-    hostChannelsActivateMock.mockResolvedValue({ success: true, queued: true, sessionKey: 'default' });
-    hostChannelsCancelSessionMock.mockResolvedValue({ success: true });
-    hostChannelsListPairingRequestsMock.mockResolvedValue({ success: true, requests: [] });
-    hostChannelsApprovePairingRequestMock.mockResolvedValue({
+    hostChannelsValidateCredentialsMock.mockResolvedValue({ success: true, valid: true });
+    hostChannelsActivateMock.mockResolvedValue({
       success: true,
-      approved: { id: 'ou_user_1' },
+      progress: {
+        outcome: 'progress',
+        channel: 'openclaw-weixin',
+        accountId: 'default',
+        qrDataUrl: 'data:image/png;base64,qr-start',
+        sessionKey: 'session-start',
+      },
     });
-    invokeIpcMock.mockResolvedValue({ success: true });
+    hostChannelsCancelSessionMock.mockResolvedValue({ outcome: 'cancelled' });
+    hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'confirmed' });
+    hostChannelsConnectMock.mockResolvedValue({ success: true });
+    hostChannelsDisconnectMock.mockResolvedValue({ success: true });
+    hostChannelsListPairingRequestsMock.mockResolvedValue({ success: true, requests: [] });
+    hostChannelsApprovePairingRequestMock.mockResolvedValue({ success: true });
   });
 
-  it('查看文档打开渠道对应的本地 HTML 预览', async () => {
-    render(<Channels />);
-
-    const weComLabel = await screen.findByText('WeCom');
-    const weComButton = weComLabel.closest('button');
-    expect(weComButton).toBeInstanceOf(HTMLButtonElement);
-    fireEvent.click(weComButton as HTMLButtonElement);
-    fireEvent.click(await screen.findByRole('button', { name: 'View Documentation' }));
-
-    await waitFor(() => {
-      expect(invokeIpcMock).toHaveBeenCalledWith('shell:openResourcePath', 'connector-guide/wecom.html');
+  it('starts QR login, applies refreshed QR and returned sessionKey, then completes when connected', async () => {
+    let resolveConnected: ((value: {
+      outcome: 'connected';
+      channel: string;
+      accountId: string;
+      sessionKey: string;
+    }) => void) | undefined;
+    const connectedPromise = new Promise<{
+      outcome: 'connected';
+      channel: string;
+      accountId: string;
+      sessionKey: string;
+    }>((resolve) => {
+      resolveConnected = resolve;
     });
-  });
+    hostChannelsLoginWaitMock
+      .mockResolvedValueOnce({
+        outcome: 'progress',
+        channel: 'openclaw-weixin',
+        accountId: 'default',
+        qrDataUrl: 'data:image/png;base64,qr-refresh',
+        sessionKey: 'session-refresh',
+      })
+      .mockReturnValueOnce(connectedPromise);
 
-  it('收到微信二维码事件后保持登录会话，不因渠道状态事件刷新而取消', async () => {
     render(<Channels />);
 
-    const weChatLabel = await screen.findByText('WeChat');
-    const weChatButton = weChatLabel.closest('button');
-    expect(weChatButton).toBeInstanceOf(HTMLButtonElement);
-    fireEvent.click(weChatButton as HTMLButtonElement);
+    expect(await screen.findByText('Available Channels')).toBeInTheDocument();
+    clickAvailableChannel('WeChat');
     fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
 
     await waitFor(() => {
@@ -189,60 +166,82 @@ describe('Channels page QR session lifecycle', () => {
         accountId: 'default',
         config: {},
       });
+      expect(hostChannelsLoginWaitMock).toHaveBeenCalledTimes(2);
     });
 
-    const channelStatusHandlers = subscribedHostEvents.get('gateway:channel-status');
-    expect(channelStatusHandlers?.size).toBeGreaterThanOrEqual(2);
-    const qrEvent = {
-      eventName: 'channel:weixin-qr',
-      payload: {
-        qrDataUrl: 'data:image/png;base64,abc',
-        raw: 'qr-token',
-      },
-    };
-    act(() => {
-      for (const handler of channelStatusHandlers ?? []) {
-        handler(qrEvent);
-      }
+    expect(hostChannelsLoginWaitMock.mock.calls[0]?.[2]).toMatchObject({
+      timeoutMs: 300_000,
+      sessionKey: 'session-start',
+      currentQrDataUrl: 'data:image/png;base64,qr-start',
+      signal: expect.any(AbortSignal),
     });
+    expect(hostChannelsLoginWaitMock.mock.calls[1]?.[2]).toMatchObject({
+      timeoutMs: 300_000,
+      sessionKey: 'session-refresh',
+      currentQrDataUrl: 'data:image/png;base64,qr-refresh',
+      signal: expect.any(AbortSignal),
+    });
+    expect(await screen.findByAltText('WeChat login QR code')).toHaveAttribute(
+      'src',
+      'data:image/png;base64,qr-refresh',
+    );
 
-    expect(await screen.findByAltText('WeChat login QR code')).toBeInTheDocument();
-    expect(hostChannelsCancelSessionMock).not.toHaveBeenCalled();
-    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
+    resolveConnected?.({
+      outcome: 'connected',
+      channel: 'openclaw-weixin',
+      accountId: 'default',
+      sessionKey: 'session-connected',
+    });
+    await waitFor(() => {
+      expect(screen.queryByAltText('WeChat login QR code')).not.toBeInTheDocument();
+    });
   });
 
-  it('飞书已连接时可以在页面审批用户配对码', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValue(feishuConfiguredSnapshot());
-    hostChannelsListPairingRequestsMock.mockResolvedValue({
-      success: true,
-      requests: [{
-        id: 'ou_user_1',
-        code: 'RTHZA8EP',
-        createdAt: '2026-05-18T00:00:00.000Z',
-        lastSeenAt: '2026-05-18T00:01:00.000Z',
-      }],
+  it('aborts the local wait and cancels the session when the QR dialog closes', async () => {
+    let waitSignal: AbortSignal | undefined;
+    hostChannelsLoginWaitMock.mockImplementation((_channel: unknown, _accountId: unknown, options: { signal?: AbortSignal }) => {
+      waitSignal = options.signal;
+      return new Promise(() => { });
     });
 
     render(<Channels />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Manage user binding' }));
+    expect(await screen.findByText('Available Channels')).toBeInTheDocument();
+    clickAvailableChannel('WeChat');
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
+    await screen.findByAltText('WeChat login QR code');
+    await waitFor(() => expect(hostChannelsLoginWaitMock).toHaveBeenCalledTimes(1));
+
+    const closeButton = screen.getAllByRole('button').find((button) => !button.textContent?.trim());
+    expect(closeButton).toBeDefined();
+    fireEvent.click(closeButton as HTMLButtonElement);
 
     await waitFor(() => {
-      expect(hostChannelsListPairingRequestsMock).toHaveBeenCalledWith('feishu', 'default');
+      expect(waitSignal?.aborted).toBe(true);
+      expect(hostChannelsCancelSessionMock).toHaveBeenCalledWith('openclaw-weixin', 'default');
     });
-    expect(await screen.findByText('RTHZA8EP')).toBeInTheDocument();
+  });
 
-    fireEvent.change(screen.getByLabelText('Pairing code'), {
-      target: { value: ' RTHZA8EP ' },
-    });
-    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0]);
+  it('keeps a configured channel when deletion is not confirmed', async () => {
+    hostChannelsFetchSnapshotMock.mockResolvedValue(configuredFeishuSnapshot());
+    hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'unknown' });
+
+    render(<Channels />);
+
+    expect(await screen.findByText('Configured Channels')).toBeInTheDocument();
+    const deleteButton = document.querySelector('button.text-destructive');
+    expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
+    fireEvent.click(deleteButton as HTMLButtonElement);
+    expect(screen.getByText('Are you sure you want to delete this channel?')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
-      expect(hostChannelsApprovePairingRequestMock).toHaveBeenCalledWith('feishu', {
-        code: 'RTHZA8EP',
-        accountId: 'default',
-      });
+      expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('feishu', 'default');
     });
-    expect(hostChannelsListPairingRequestsMock).toHaveBeenCalledTimes(2);
+    expect(useChannelsStore.getState().channels[0]).toMatchObject({
+      type: 'feishu',
+      accountId: 'default',
+      status: 'connected',
+    });
   });
 });

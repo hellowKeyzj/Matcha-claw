@@ -17,8 +17,10 @@ import {
 import { formatDuration } from './message-utils';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { hostFileStat, type WorkspaceFileContext } from '@/lib/host-api';
-import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import { DIRECTORY_MIME_TYPE, resolveWorkspaceRelativePath } from '@/components/file-preview/types';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,
@@ -207,7 +209,9 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     }
     return segment.images.length > 0 || segment.attachedFiles.length > 0;
   });
-  const pendingMode = hasContentSegments ? null : item.pendingState ?? null;
+  const pendingMode = !hasContentSegments
+    ? (item.status === 'waiting_tool' ? 'activity' : (isStreaming ? 'typing' : null))
+    : null;
   const plainText = getAssistantTurnPlainText(item);
   const attachedByPath = useMemo(() => {
     const next = new Set<string>();
@@ -244,11 +248,20 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     let cancelled = false;
     void Promise.all(pendingPaths.map(async (filePath) => {
       try {
-        const stat = await hostFileStat({ path: filePath, sessionIdentity, ...workspaceContext });
+        const relativePath = resolveWorkspaceRelativePath(filePath, workspaceContext?.workspaceRoot);
+        if (!relativePath) {
+          return { filePath, ok: false };
+        }
+        const stat = await hostFileStat({
+          endpoint: sessionIdentity.endpoint,
+          sessionKey: sessionIdentity.sessionKey,
+          relativePath,
+          ...workspaceContext,
+        });
         const expectDir = derivedAttachedFiles.find((file) => file.filePath === filePath)?.mimeType === DIRECTORY_MIME_TYPE;
         return {
           filePath,
-          ok: !!stat.ok && !!stat.entry && (expectDir ? stat.entry.isDir : !stat.entry.isDir),
+          ok: !!stat.ok && (expectDir ? !!stat.isDirectory : !stat.isDirectory),
         };
       } catch {
         return { filePath, ok: false };

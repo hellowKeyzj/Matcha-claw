@@ -77,6 +77,10 @@ const electronAPI = {
     return ipcRenderer.invoke('shell:openExternal', url);
   },
 
+  showAppLogsDirectory: () => {
+    return ipcRenderer.invoke('shell:showAppLogsDirectory');
+  },
+
   getPathForFile: (file: File) => {
     return webUtils.getPathForFile(file);
   },
@@ -84,6 +88,7 @@ const electronAPI = {
   /**
    * Get current platform
    */
+  writeFleetCredential: (input: unknown) => ipcRenderer.invoke('fleet:writeCredential', input),
   platform: process.platform,
 
   /**

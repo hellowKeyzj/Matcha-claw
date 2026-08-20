@@ -1,6 +1,9 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
 import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime';
-import type { AgentScope, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 
 interface AgentRunResult {
   runId?: unknown;

@@ -14,8 +14,6 @@ files:
   # explicit so stale dist-electron/electron/** bundles cannot ship.
   - dist-electron/main/**
   - dist-electron/preload/**
-  - runtime-host/build/**
-  - runtime-host/host-process.cjs
   - package.json
 
 extraResources:
@@ -70,6 +68,8 @@ mac:
   extraResources:
     - from: resources/bin/darwin-${arch}
       to: bin
+    - from: runtime-host/dist/darwin-${arch}
+      to: bin/darwin-${arch}
     - from: resources/cli/posix/
       to: cli/
   category: public.app-category.productivity
@@ -115,12 +115,19 @@ dmg:
 
 # Windows Configuration
 win:
+  # Skip executable signing and resource editing: local and release Windows
+  # packages are unsigned because no code-signing certificate is provisioned.
+  signAndEditExecutable: false
   # Skip update signature verification: we ship via OSS + GitHub without a
   # code-signing certificate, so verifying would always fail on the updater.
   verifyUpdateCodeSignature: false
   extraResources:
     - from: resources/bin/win32-${arch}
       to: bin
+    - from: runtime-host/dist/win32-${arch}
+      to: bin/win32-${arch}
+      filter:
+        - "**/*"
     - from: resources/cli/win32/
       to: cli/
   icon: resources/icons/icon.ico
@@ -151,6 +158,8 @@ linux:
   extraResources:
     - from: resources/bin/linux-${arch}
       to: bin
+    - from: runtime-host/dist/linux-${arch}
+      to: bin/linux-${arch}
     - from: resources/cli/posix/
       to: cli/
   icon: resources/icons

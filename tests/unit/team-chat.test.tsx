@@ -2,25 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-vi.mock('@/services/openclaw/team-runtime-client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/services/openclaw/team-runtime-client')>();
-  return {
-    ...actual,
-    readTeamWebhookAuth: vi.fn(async () => ({
-      success: true,
-      enabled: true,
-      source: 'settings',
-      headerName: 'x-matchaclaw-webhook-token',
-      authorizationScheme: 'Bearer',
-      maskedToken: 'mctwh_…oken',
-      copySupported: false,
-    })),
-  };
-});
-
 import { useTeamsStore } from '@/stores/teams';
-import { useGatewayStore } from '@/stores/gateway';
-import { readTeamWebhookAuth } from '@/services/openclaw/team-runtime-client';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { TeamChat } from '@/pages/Teams/TeamChat';
 import i18n from '@/i18n';
 
@@ -28,14 +11,8 @@ describe('team chat', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
     localStorage.removeItem('teams-runtime-store');
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        transportState: 'connected',
-        gatewayReady: true,
-        gatewayUrl: 'http://127.0.0.1:18789',
-        port: 18789,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     });
     useTeamsStore.setState({
       teams: [
@@ -57,43 +34,30 @@ describe('team chat', () => {
       runListByTeamId: {
         'team-1': [
           {
+            state: 'available',
+            teamId: 'team-1',
             runId: 'team-1',
-            packageName: 'ascendc-team',
-            packageVersion: '1.0.0',
-            sourcePath: '.tmp/team-skill',
-            status: 'waiting_for_user',
-            currentStageId: 'stage-1',
-            revision: 2,
-            createdAt: 1,
-            updatedAt: 2,
-            sessions: [],
+            teamRevision: 2,
+            graphStatus: 'waiting',
           },
         ],
       },
       runsById: {
         'team-1': {
+          state: 'available',
+          teamId: 'team-1',
           runId: 'team-1',
-          packageName: 'ascendc-team',
-          packageVersion: '1.0.0',
-          sourcePath: '.tmp/team-skill',
-          status: 'waiting_for_user',
-          currentStageId: 'stage-1',
-          revision: 2,
-          createdAt: 1,
-          updatedAt: 2,
+          teamRevision: 2,
+          graphStatus: 'waiting',
         },
       },
       runByTeamId: {
         'team-1': {
+          state: 'available',
+          teamId: 'team-1',
           runId: 'team-1',
-          packageName: 'ascendc-team',
-          packageVersion: '1.0.0',
-          sourcePath: '.tmp/team-skill',
-          status: 'waiting_for_user',
-          currentStageId: 'stage-1',
-          revision: 2,
-          createdAt: 1,
-          updatedAt: 2,
+          teamRevision: 2,
+          graphStatus: 'waiting',
         },
       },
       rolesByTeamId: {
@@ -136,7 +100,7 @@ describe('team chat', () => {
               roleId: 'operator-designer',
               taskId: 'task-design',
               status: 'running',
-              config: { prompt: 'Draft the design blueprint' },
+              maxAttempts: 1,
             },
             {
               nodeId: 'workflow-task:task-review',
@@ -153,14 +117,15 @@ describe('team chat', () => {
               sourceNodeId: 'workflow-task:task-design',
               targetNodeId: 'workflow-task:task-review',
               sourcePort: 'completed',
-              label: 'ready for review',
-              status: 'running',
+              targetPort: 'input',
+              action: 'activate',
             },
           ],
           updatedAt: 2,
         },
       },
       workflowPlanByTeamId: { 'team-1': null },
+      publicProjectionByTeamId: { 'team-1': {} },
       dispatchGroupsByTeamId: {},
       dispatchTasksByTeamId: {
         'team-1': [
@@ -183,14 +148,10 @@ describe('team chat', () => {
         'team-1': [
           {
             approvalId: 'approval-1',
-            runId: 'team-1',
             stageId: 'stage-1',
             roleId: 'operator-designer',
             reason: 'Need NPU authorization',
             requestedAction: 'Run profiling',
-            risk: 'Uses live NPU',
-            status: 'pending',
-            idempotencyKey: 'approval-1',
             createdAt: 2,
           },
         ],
@@ -240,7 +201,9 @@ describe('team chat', () => {
       setActiveRun: vi.fn(),
       createRun: vi.fn().mockResolvedValue(undefined),
       deleteRun: vi.fn().mockResolvedValue(undefined),
-      refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+      refreshActiveRunViews: vi.fn().mockResolvedValue(undefined),
+      refreshPublicProjection: vi.fn().mockResolvedValue(undefined),
+      refreshPendingApprovals: vi.fn().mockResolvedValue(undefined),
       syncRunList: vi.fn().mockResolvedValue(undefined),
       resumeRun: vi.fn().mockResolvedValue(undefined),
       cancelRun: vi.fn().mockResolvedValue(undefined),
@@ -346,7 +309,7 @@ describe('team chat', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('renders the workflow canvas as the primary Team view and keeps only run list plus roles outside it', async () => {
+  it('renders the workflow canvas as the primary Team view without private role bindings', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -355,7 +318,7 @@ describe('team chat', () => {
 
     expect(await screen.findByText('Run graph')).toBeInTheDocument();
     expect(screen.getByLabelText('Run List')).toBeInTheDocument();
-    expect(screen.getByLabelText('Team roles')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Team roles')).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Roles' })).not.toBeInTheDocument();
     expect(screen.getByText('2 nodes · 1 edges')).toBeInTheDocument();
     expect(screen.getByLabelText('Workflow canvas')).toBeInTheDocument();
@@ -369,7 +332,9 @@ describe('team chat', () => {
     expect(screen.getAllByText('Design blueprint').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Review design').length).toBeGreaterThan(0);
     expect(screen.getAllByText('operator-designer').length).toBeGreaterThan(0);
-    expect(screen.queryByText('Approvals')).not.toBeInTheDocument();
+    expect(screen.queryByText('Agent A1')).not.toBeInTheDocument();
+    expect(screen.queryByText('/workspace')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
     expect(screen.queryByText('Artifacts')).not.toBeInTheDocument();
     expect(screen.queryByText('Gates')).not.toBeInTheDocument();
     expect(screen.queryByText('Kickbacks')).not.toBeInTheDocument();
@@ -380,73 +345,19 @@ describe('team chat', () => {
     expect(screen.queryByText('Need decision')).not.toBeInTheDocument();
   });
 
-  it('renders a normalized graph with kindless nodes visible', async () => {
-    useTeamsStore.setState({
-      graphByTeamId: {
-        'team-1': {
-          runId: 'team-1',
-          workflowPlanId: 'workflow-plan-1',
-          status: 'running',
-          nodes: [
-            {
-              nodeId: 'analysis-work-node',
-              title: 'Work node without kind',
-              roleId: 'operator-designer',
-              status: 'running',
-              config: { prompt: 'Continue the work' },
-            },
-            {
-              nodeId: 'review-node',
-              kind: 'review',
-              title: 'Review work',
-              roleId: 'reviewer',
-              status: 'pending',
-            },
-          ],
-          edges: [
-            {
-              edgeId: 'review-edge',
-              sourceNodeId: 'analysis-work-node',
-              targetNodeId: 'review-node',
-              sourcePort: 'completed',
-              label: 'ready for review',
-              status: 'running',
-            },
-          ],
-          updatedAt: 3,
-        },
-      },
-    } as never);
-
+  it('opens edge configuration from the canvas edge and saves final port and action facts', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Work node without kind')).toBeInTheDocument();
-    expect(screen.getByText('2 nodes · 1 edges')).toBeInTheDocument();
-  });
-
-  it('opens edge configuration from the canvas edge and saves port settings without local scheduling', async () => {
-    render(
-      <MemoryRouter>
-        <TeamChat teamId="team-1" />
-      </MemoryRouter>,
-    );
-
-    const edgeGroup = screen.getByLabelText('Workflow edges').querySelector('g')!;
-    expect(screen.queryByRole('button', { name: 'completed' })).not.toBeInTheDocument();
-    fireEvent.mouseEnter(edgeGroup);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'completed' }))[0]!);
-    fireEvent.click(screen.getByLabelText('Workflow canvas'));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'completed' })).not.toBeInTheDocument());
-
-    fireEvent.mouseEnter(edgeGroup);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'completed' }))[0]!);
+    const edgeGroup = screen.getByLabelText('Workflow edges').querySelector('svg > g')!;
+    fireEvent.click(edgeGroup.querySelector('path')!);
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('Source port'), { target: { value: 'completed' } });
-    fireEvent.change(within(dialog).getByLabelText('Edge label'), { target: { value: 'completed path' } });
+    fireEvent.change(within(dialog).getByLabelText('When upstream result is'), { target: { value: 'failed' } });
+    fireEvent.change(within(dialog).getByLabelText('Action'), { target: { value: 'rework' } });
+    fireEvent.change(within(dialog).getByLabelText('Target port'), { target: { value: 'retry-input' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save connection' }));
 
     await waitFor(() => {
@@ -456,11 +367,9 @@ describe('team chat', () => {
           edges: expect.arrayContaining([
             expect.objectContaining({
               edgeId: 'edge-design-review',
-              sourcePort: 'completed',
-              edgeType: 'completed_success',
-              label: 'completed path',
-              action: 'activate',
-              payload: { includeUpstreamResult: true },
+              sourcePort: 'failed',
+              targetPort: 'retry-input',
+              action: 'rework',
             }),
           ]),
         }),
@@ -468,18 +377,21 @@ describe('team chat', () => {
     });
   });
 
-  it('opens node configuration from the canvas node and saves the selected agent', async () => {
+  it('opens a Work node configuration and saves its final role and task facts', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
       </MemoryRouter>,
     );
 
-    const nodeCard = (await screen.findAllByText('Design blueprint'))[0]!.closest('[role="button"]');
+    const canvas = await screen.findByLabelText('Workflow canvas');
+    const nodeCard = (await within(canvas).findAllByText('Design blueprint'))[0]!.closest('[role="button"]');
     expect(nodeCard).not.toBeNull();
     fireEvent.click(nodeCard!);
-    fireEvent.change(await screen.findByLabelText('Role ID'), { target: { value: 'reviewer' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save node' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Role ID'), { target: { value: 'reviewer' } });
+    fireEvent.change(within(dialog).getByLabelText('Task ID'), { target: { value: 'task-review-ready' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => {
       expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
@@ -489,7 +401,7 @@ describe('team chat', () => {
             expect.objectContaining({
               nodeId: 'workflow-task:task-design',
               roleId: 'reviewer',
-              executor: expect.objectContaining({ kind: 'team-role', roleId: 'reviewer' }),
+              taskId: 'task-review-ready',
             }),
           ]),
         }),
@@ -497,49 +409,18 @@ describe('team chat', () => {
     });
   });
 
-  it('shows node-kind specific configuration fields instead of the shared non-start form', async () => {
+  it('limits node editors to final graph facts', async () => {
     useTeamsStore.setState({
       graphByTeamId: {
         'team-1': {
           runId: 'team-1',
           status: 'running',
           nodes: [
-            {
-              nodeId: 'work-node',
-              kind: 'work',
-              title: 'Role work',
-              roleId: 'operator-designer',
-              taskId: 'work-node',
-              executor: { kind: 'team-role', roleId: 'operator-designer' },
-              config: { prompt: 'Do role work' },
-            },
-            {
-              nodeId: 'review-node',
-              kind: 'review',
-              title: 'Agent review',
-              roleId: 'reviewer',
-              executor: { kind: 'team-role', roleId: 'reviewer' },
-              config: { prompt: 'Review role work' },
-            },
-            {
-              nodeId: 'decision-node',
-              kind: 'human_decision',
-              title: 'Manual decision',
-              executor: { kind: 'human' },
-              config: { reason: 'Needs human call' },
-            },
-            {
-              nodeId: 'script-node',
-              kind: 'script_review',
-              title: 'Policy check',
-              executor: { kind: 'script', runtime: 'python' },
-              config: { ruleId: 'passThrough' },
-            },
-            {
-              nodeId: 'end-node',
-              kind: 'end',
-              title: 'Finish flow',
-            },
+            { nodeId: 'work-node', kind: 'work', title: 'Role work', roleId: 'operator-designer', taskId: 'task-role-work', maxAttempts: 1 },
+            { nodeId: 'review-node', kind: 'review', title: 'Agent review', maxAttempts: 1 },
+            { nodeId: 'decision-node', kind: 'human_decision', title: 'Manual decision', maxAttempts: 1 },
+            { nodeId: 'script-node', kind: 'script_review', title: 'Policy check', maxAttempts: 1 },
+            { nodeId: 'end-node', kind: 'end', title: 'Finish flow', maxAttempts: 1 },
           ],
           edges: [],
           updatedAt: 2,
@@ -553,81 +434,26 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click((await screen.findAllByText('Role work'))[0]!.closest('[role="button"]')!);
+    const canvas = await screen.findByLabelText('Workflow canvas');
+    fireEvent.click((await within(canvas).findAllByText('Role work'))[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByLabelText('Role ID')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Task ID')).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Work prompt')).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Output artifact kind')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Agent review').closest('[role="button"]')!);
-    expect(within(dialog).getByLabelText('Review mode')).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Review prompt')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('Manual decision').closest('[role="button"]')!);
-    expect(within(dialog).getByLabelText('Decision reason')).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Requested action')).toBeInTheDocument();
+    fireEvent.click(within(canvas).getByText('Agent review').closest('[role="button"]')!);
     expect(within(dialog).queryByLabelText('Role ID')).not.toBeInTheDocument();
-    expect(within(dialog).queryByLabelText('Work prompt')).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Review prompt')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Policy check').closest('[role="button"]')!);
-    expect(within(dialog).getByLabelText('Check rule')).toBeInTheDocument();
+    fireEvent.click(within(canvas).getByText('Manual decision').closest('[role="button"]')!);
+    expect(within(dialog).queryByLabelText('Decision reason')).not.toBeInTheDocument();
+
+    fireEvent.click(within(canvas).getByText('Policy check').closest('[role="button"]')!);
+    expect(within(dialog).queryByLabelText('Check rule')).not.toBeInTheDocument();
+
+    fireEvent.click(within(canvas).getByText('Finish flow').closest('[role="button"]')!);
     expect(within(dialog).queryByLabelText('Role ID')).not.toBeInTheDocument();
-    expect(within(dialog).queryByLabelText('Work prompt')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('Finish flow').closest('[role="button"]')!);
-    expect(within(dialog).getByText('End nodes only mark the workflow terminal point. If the leader must summarize, add a Leader Work node before End.')).toBeInTheDocument();
-    expect(within(dialog).queryByLabelText('Role ID')).not.toBeInTheDocument();
-    expect(within(dialog).queryByLabelText('Work prompt')).not.toBeInTheDocument();
-  });
-
-  it('saves ScriptReviewNode rule config without turning it into a role prompt node', async () => {
-    useTeamsStore.setState({
-      graphByTeamId: {
-        'team-1': {
-          runId: 'team-1',
-          status: 'running',
-          nodes: [
-            {
-              nodeId: 'script-node',
-              kind: 'script_review',
-              title: 'Policy check',
-              roleId: 'operator-designer',
-              executor: { kind: 'script', runtime: 'python' },
-              config: { ruleId: 'passThrough', prompt: 'legacy prompt' },
-            },
-          ],
-          edges: [],
-          updatedAt: 2,
-        },
-      },
-    } as never);
-
-    render(
-      <MemoryRouter>
-        <TeamChat teamId="team-1" />
-      </MemoryRouter>,
-    );
-
-    fireEvent.click((await screen.findAllByText('Policy check'))[0]!.closest('[role="button"]')!);
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('Check rule'), { target: { value: 'assertArtifactExists' } });
-    fireEvent.change(await within(dialog).findByLabelText('Artifact kind'), { target: { value: 'nodeSummary' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
-
-    await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
-        'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({
-              nodeId: 'script-node',
-              roleId: undefined,
-              executor: expect.objectContaining({ kind: 'script', runtime: 'python' }),
-              config: expect.objectContaining({ ruleId: 'assertArtifactExists', artifactKind: 'nodeSummary' }),
-            }),
-          ]),
-        }),
-      );
-    });
   });
 
   it('configures a StartNode cron trigger every 15 minutes through the custom schedule form', async () => {
@@ -642,7 +468,8 @@ describe('team chat', () => {
               kind: 'start',
               title: 'Schedule start',
               status: 'pending',
-              config: { trigger: { mode: 'webhook', path: '' } },
+              maxAttempts: 1,
+              trigger: { kind: 'webhook', path: '' },
             },
           ],
           edges: [],
@@ -680,9 +507,7 @@ describe('team chat', () => {
           nodes: expect.arrayContaining([
             expect.objectContaining({
               nodeId: 'start-1',
-              config: expect.objectContaining({
-                trigger: { mode: 'cron', cron: '*/15 * * * *' },
-              }),
+              trigger: { kind: 'cron', expression: '*/15 * * * *' },
             }),
           ]),
         }),
@@ -690,29 +515,13 @@ describe('team chat', () => {
     });
   });
 
-  it('configures a StartNode webhook path, previews the runtime-host route, and keeps the token masked', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
-      configurable: true,
-    });
-
+  it('configures a StartNode webhook fact without exposing an HTTP route or token', async () => {
     useTeamsStore.setState({
       graphByTeamId: {
         'team-1': {
           runId: 'team-1',
-          status: 'running',
-          nodes: [
-            {
-              nodeId: 'start-1',
-              kind: 'start',
-              title: 'Webhook start',
-              status: 'pending',
-              config: { trigger: { mode: 'webhook', path: '' } },
-            },
-          ],
+          nodes: [{ nodeId: 'start-1', kind: 'start', title: 'Webhook start', maxAttempts: 1, trigger: { kind: 'webhook', path: '' } }],
           edges: [],
-          updatedAt: 2,
         },
       },
     } as never);
@@ -728,17 +537,8 @@ describe('team chat', () => {
     fireEvent.click(nodeCard!);
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('Webhook path'), { target: { value: '/deploy/ready/' } });
-    fireEvent.change(within(dialog).getByLabelText('Public ingress base URL'), { target: { value: 'https://hooks.example.com/' } });
-
-    await waitFor(() => expect(readTeamWebhookAuth).toHaveBeenCalled());
-    expect(within(dialog).getByText('/api/team-runtime/webhooks/deploy/ready')).toBeInTheDocument();
-    expect(within(dialog).getByText('https://hooks.example.com/api/team-runtime/webhooks/deploy/ready')).toBeInTheDocument();
-    expect(within(dialog).getByText('mctwh_…oken')).toBeInTheDocument();
-    expect(within(dialog).queryByText('mctwh_test-token')).not.toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: 'Copy token' })).toBeDisabled();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Copy URL' }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://hooks.example.com/api/team-runtime/webhooks/deploy/ready'));
-    expect(within(dialog).getAllByRole('button', { name: 'Copied' }).length).toBeGreaterThan(0);
+    expect(within(dialog).queryByText('Public ingress base URL')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('Webhook token')).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => {
@@ -746,12 +546,7 @@ describe('team chat', () => {
         'team-1',
         expect.objectContaining({
           nodes: expect.arrayContaining([
-            expect.objectContaining({
-              nodeId: 'start-1',
-              config: expect.objectContaining({
-                trigger: { mode: 'webhook', path: 'deploy/ready', publicBaseUrl: 'https://hooks.example.com' },
-              }),
-            }),
+            expect.objectContaining({ nodeId: 'start-1', trigger: { kind: 'webhook', path: 'deploy/ready' } }),
           ]),
         }),
       );
@@ -765,7 +560,8 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    const nodeCard = (await screen.findAllByText('Design blueprint'))[0]!.closest('[role="button"]');
+    const canvas = await screen.findByLabelText('Workflow canvas');
+    const nodeCard = (await within(canvas).findAllByText('Design blueprint'))[0]!.closest('[role="button"]');
     expect(nodeCard).not.toBeNull();
     fireEvent.click(nodeCard!);
     fireEvent.click(await screen.findByRole('button', { name: 'Delete node' }));
@@ -802,7 +598,7 @@ describe('team chat', () => {
     });
   });
 
-  it('adds Team graph nodes from the palette without running local scheduling', async () => {
+  it('adds final graph nodes from the palette without legacy executor or config facts', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -819,17 +615,20 @@ describe('team chat', () => {
             expect.objectContaining({
               kind: 'script_review',
               title: 'Script check',
-              executor: expect.objectContaining({ kind: 'script', runtime: 'python' }),
-              config: expect.objectContaining({ runtime: 'python', timeoutMs: 60_000 }),
-              metadata: expect.objectContaining({ position: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }) }),
+              maxAttempts: 1,
             }),
           ]),
         }),
       );
     });
+    const savedGraph = vi.mocked(useTeamsStore.getState().saveGraph).mock.calls[0]?.[1];
+    const addedNode = savedGraph?.nodes.find((node) => node.kind === 'script_review');
+    expect(addedNode).not.toHaveProperty('executor');
+    expect(addedNode).not.toHaveProperty('config');
+    expect(addedNode).not.toHaveProperty('metadata');
   });
 
-  it('connects nodes through canvas ports and persists the edge', async () => {
+  it('connects nodes through canvas ports with final edge facts', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -849,8 +648,8 @@ describe('team chat', () => {
               sourceNodeId: 'workflow-task:task-design',
               targetNodeId: 'workflow-task:task-review',
               sourcePort: 'completed',
-              label: 'completed',
-              kind: 'projection',
+              targetPort: 'input',
+              action: 'activate',
             }),
           ]),
         }),
@@ -858,37 +657,27 @@ describe('team chat', () => {
     });
   });
 
-  it('drags nodes on the canvas and persists node position metadata', async () => {
+  it('keeps canvas node drag positions local instead of saving metadata', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
       </MemoryRouter>,
     );
 
-    const nodeCard = screen.getAllByText('Design blueprint')[0]!.closest('[role="button"]');
+    const canvas = await screen.findByLabelText('Workflow canvas');
+    const nodeCard = within(canvas).getAllByText('Design blueprint')[0]!.closest('[role="button"]');
     expect(nodeCard).not.toBeNull();
     fireEvent.pointerDown(nodeCard!, { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(nodeCard, { pointerId: 1, clientX: 132, clientY: 148 });
     fireEvent.pointerUp(nodeCard, { pointerId: 1, clientX: 132, clientY: 148 });
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
-        'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({
-              nodeId: 'workflow-task:task-design',
-              metadata: expect.objectContaining({
-                position: expect.objectContaining({ x: 104, y: 120 }),
-              }),
-            }),
-          ]),
-        }),
-      );
+      expect(nodeCard).toHaveStyle({ left: '104px', top: '120px' });
     });
+    expect(useTeamsStore.getState().saveGraph).not.toHaveBeenCalled();
   });
 
-  it('syncs run list before refreshing snapshot on mount without starting the TeamRun', async () => {
+  it('syncs the run list before refreshing the public projection on mount without starting the TeamRun', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -897,15 +686,16 @@ describe('team chat', () => {
 
     await waitFor(() => {
       expect(useTeamsStore.getState().syncRunList).toHaveBeenCalledWith('team-1');
-      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
+      expect(useTeamsStore.getState().refreshPublicProjection).toHaveBeenCalledWith('team-1');
     });
     const syncRunListOrder = vi.mocked(useTeamsStore.getState().syncRunList).mock.invocationCallOrder[0];
-    const refreshSnapshotOrder = vi.mocked(useTeamsStore.getState().refreshSnapshot).mock.invocationCallOrder[0];
-    expect(syncRunListOrder).toBeLessThan(refreshSnapshotOrder);
+    const refreshPublicProjectionOrder = vi.mocked(useTeamsStore.getState().refreshPublicProjection).mock.invocationCallOrder[0];
+    expect(syncRunListOrder).toBeLessThan(refreshPublicProjectionOrder);
+    expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Start Run' })).not.toBeInTheDocument();
   });
 
-  it('selects a run from the run list and refreshes the selected snapshot', async () => {
+  it('selects a run from the run list and refreshes its public projection', async () => {
     useTeamsStore.setState({
       teams: [
         {
@@ -917,46 +707,44 @@ describe('team chat', () => {
       runListByTeamId: {
         'team-1': [
           {
-            ...useTeamsStore.getState().runsById['team-1']!,
+            state: 'available',
+            teamId: 'team-1',
             runId: 'teamrun-old',
-            status: 'completed',
-            revision: 1,
-            updatedAt: 1,
-            sessions: [],
+            teamRevision: 1,
+            graphStatus: 'completed',
           },
           {
-            ...useTeamsStore.getState().runsById['team-1']!,
+            state: 'available',
+            teamId: 'team-1',
             runId: 'teamrun-new',
-            status: 'running',
-            revision: 2,
-            updatedAt: 2,
-            sessions: [],
+            teamRevision: 2,
+            graphStatus: 'running',
           },
         ],
       },
       runsById: {
         'teamrun-old': {
-          ...useTeamsStore.getState().runsById['team-1']!,
+          state: 'available',
+          teamId: 'team-1',
           runId: 'teamrun-old',
-          status: 'completed',
-          revision: 1,
-          updatedAt: 1,
+          teamRevision: 1,
+          graphStatus: 'completed',
         },
         'teamrun-new': {
-          ...useTeamsStore.getState().runsById['team-1']!,
+          state: 'available',
+          teamId: 'team-1',
           runId: 'teamrun-new',
-          status: 'running',
-          revision: 2,
-          updatedAt: 2,
+          teamRevision: 2,
+          graphStatus: 'running',
         },
       },
       runByTeamId: {
         'team-1': {
-          ...useTeamsStore.getState().runsById['team-1']!,
+          state: 'available',
+          teamId: 'team-1',
           runId: 'teamrun-new',
-          status: 'running',
-          revision: 2,
-          updatedAt: 2,
+          teamRevision: 2,
+          graphStatus: 'running',
         },
       },
     } as never);
@@ -971,8 +759,9 @@ describe('team chat', () => {
 
     await waitFor(() => {
       expect(useTeamsStore.getState().setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
-      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
+      expect(useTeamsStore.getState().refreshPublicProjection).toHaveBeenCalledWith('team-1');
     });
+    expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
   });
 
   it('shows an empty run hint when no run exists while still rendering the canvas shell', async () => {
@@ -996,7 +785,67 @@ describe('team chat', () => {
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
   });
 
-  it('enables cancel while the run is waiting for user but does not render separate decision UI', async () => {
+  it('renders the dedicated public approval projection and resolves each explicit decision', async () => {
+    const resolveApproval = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({ resolveApproval } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
+    const approvalCard = screen.getByRole('article');
+    expect(within(approvalCard).getByText('approval-1')).toBeInTheDocument();
+    expect(within(approvalCard).getByText('stage-1')).toBeInTheDocument();
+    expect(within(approvalCard).getByText('operator-designer')).toBeInTheDocument();
+    expect(within(approvalCard).getByText('Need NPU authorization')).toBeInTheDocument();
+    expect(within(approvalCard).getByText('Run profiling')).toBeInTheDocument();
+    expect(within(approvalCard).getByRole('time')).toHaveAttribute('datetime', '1970-01-01T00:00:00.002Z');
+    expect(within(approvalCard).queryByText('Uses live NPU')).not.toBeInTheDocument();
+    expect(within(approvalCard).queryByText('approval-1:approval')).not.toBeInTheDocument();
+
+    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'approve'));
+
+    resolveApproval.mockClear();
+    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Deny' }));
+    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'deny'));
+
+    resolveApproval.mockClear();
+    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Abort' }));
+    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'abort'));
+  });
+
+  it('keeps approval controls idempotent while resolving and surfaces resolution errors', async () => {
+    let releaseResolution!: () => void;
+    const resolveApproval = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+      releaseResolution = resolve;
+    }));
+    useTeamsStore.setState({ resolveApproval } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    const approveButton = await within(screen.getByRole('article')).findByRole('button', { name: 'Approve' });
+    fireEvent.click(approveButton);
+    fireEvent.click(approveButton);
+    expect(resolveApproval).toHaveBeenCalledTimes(1);
+    expect(approveButton).toBeDisabled();
+
+    releaseResolution();
+    await waitFor(() => expect(approveButton).toBeEnabled());
+
+    resolveApproval.mockRejectedValueOnce(new Error('approval unavailable'));
+    fireEvent.click(approveButton);
+    expect(await screen.findByText('approval unavailable')).toBeInTheDocument();
+  });
+
+  it('enables cancel while the run is waiting for user without replacing approval UI', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -1005,7 +854,7 @@ describe('team chat', () => {
 
     expect(await screen.findByRole('button', { name: 'Stop Run' })).toBeEnabled();
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Submit Decision' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
   });
 
   it('disables cancel for completed runs', async () => {
@@ -1013,7 +862,7 @@ describe('team chat', () => {
       runByTeamId: {
         'team-1': {
           ...useTeamsStore.getState().runByTeamId['team-1']!,
-          status: 'completed',
+          graphStatus: 'completed',
         },
       },
     } as never);

@@ -16,13 +16,18 @@ export const SHELL_INVOKE_CHANNELS = [
   'shell:openExternal',
   'shell:openResourcePath',
   'shell:openChromeExtensions',
+  'shell:showAppLogsDirectory',
   'shell:showItemInFolder',
   'shell:openPath',
   'dialog:open',
   'dialog:save',
   'dialog:message',
   'dialog:stageOpenAttachments',
+  'dialog:stageDroppedAttachments',
+  'dialog:stageRendererBufferAttachment',
+  'dialog:releaseStagedAttachments',
   'dialog:readSelectedTextFile',
+  'dialog:readSkillImport',
   'dialog:writeSelectedTextFile',
 ] as const;
 
@@ -38,7 +43,19 @@ export const TOOLCHAIN_AND_UPDATE_INVOKE_CHANNELS = [
 export const ENVIRONMENT_QUERY_INVOKE_CHANNELS = [
 ] as const;
 
+export const DIAGNOSTICS_INVOKE_CHANNELS = [
+  'diagnostics:exportArchive',
+] as const;
+
 export const RUNTIME_OWNED_INVOKE_CHANNELS = [
+  'fleet:writeCredential',
+  'settings:splitProxyIntent',
+  'providers:storeAccount',
+  'providers:validateApiKey',
+  'providers:deleteAccount',
+  'providers:startOAuth',
+  'providers:submitOAuthCode',
+  'providers:cancelOAuth',
 ] as const;
 
 export const LEGACY_COMPAT_INVOKE_CHANNELS = [
@@ -49,6 +66,7 @@ export const RETAINED_INVOKE_CHANNELS = [
   ...SHELL_INVOKE_CHANNELS,
   ...TOOLCHAIN_AND_UPDATE_INVOKE_CHANNELS,
   ...ENVIRONMENT_QUERY_INVOKE_CHANNELS,
+  ...DIAGNOSTICS_INVOKE_CHANNELS,
   ...RUNTIME_OWNED_INVOKE_CHANNELS,
   ...LEGACY_COMPAT_INVOKE_CHANNELS,
 ] as const;

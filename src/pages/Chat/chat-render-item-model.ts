@@ -1,13 +1,15 @@
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type {
   SessionAssistantToolSegment,
-  SessionAssistantTurnItem,
   SessionRenderImage,
+} from '../../types/session/tool-card';
+import type {
+  SessionAssistantTurnItem,
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
   SessionRenderSystemItem,
   SessionRenderUserMessageItem,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
 
 export interface ChatAssistantPresentation {
   agentId?: string;
@@ -261,6 +263,8 @@ function buildRenderSignature(item: SessionRenderItem): string {
     item.role,
     item.createdAt ?? '',
     'updatedAt' in item ? (item.updatedAt ?? '') : '',
+    'clientId' in item ? (item.clientId ?? '') : '',
+    'status' in item ? (item.status ?? '') : '',
     hashText(item.text),
     'images' in item ? buildImageSignature(item.images ?? []) : '',
     'attachedFiles' in item ? buildAttachedFilesSignature(item.attachedFiles ?? []) : '',

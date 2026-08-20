@@ -16,11 +16,12 @@ import {
 import {
   hostProviderCreateAccount,
   hostProviderDeleteAccount,
-  hostProviderReadApiKey,
   hostProviderUpdateAccount,
   hostProviderValidate,
 } from '@/lib/provider-projection';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
+import type { ProviderMutationReceipt } from '@/lib/host-api-transport-contract';
+import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 const PROVIDER_SNAPSHOT_TIMEOUT_MS = 20000;
 const PROVIDER_SNAPSHOT_CACHE_KEY = 'matchaclaw:providers:snapshot:v2';
@@ -52,6 +53,7 @@ function createEmptySnapshot(): ProviderSnapshot {
     statuses: [],
     credentials: [],
     vendors: [],
+    revisions: {},
   };
 }
 
@@ -60,6 +62,7 @@ function cloneSnapshot(snapshot: ProviderSnapshot): ProviderSnapshot {
     statuses: [...snapshot.statuses],
     credentials: [...snapshot.credentials],
     vendors: [...snapshot.vendors],
+    revisions: { ...snapshot.revisions },
   };
 }
 
@@ -281,6 +284,8 @@ interface ProviderState {
   mutating: boolean;
   mutatingActionsByAccountId: ProviderMutatingMap;
   error: string | null;
+  warning: string | null;
+  lastMutationReceipt: ProviderMutationReceipt | null;
 
   // Actions
   init: () => Promise<void>;
@@ -298,7 +303,10 @@ interface ProviderState {
       headers?: Record<string, string>;
     },
   ) => Promise<{ valid: boolean; error?: string }>;
-  getAccountApiKey: (accountId: string) => Promise<string | null>;
+}
+
+function providerNativeWarning(receipt: ProviderMutationReceipt | undefined): string | null {
+  return receipt ? nativeProjectionError(receipt) ?? null : null;
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
@@ -310,6 +318,8 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   mutating: false,
   mutatingActionsByAccountId: {},
   error: null,
+  warning: null,
+  lastMutationReceipt: null,
 
   init: async () => {
     await get().refreshProviderSnapshot({ trigger: 'background', reason: 'app_init' });
@@ -392,6 +402,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           initialLoading: false,
           refreshing: false,
           error: null,
+          warning: get().warning,
         });
         endRefreshTiming({
           result: 'success',
@@ -463,8 +474,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       initialLoading: false,
       refreshing: false,
       error: null,
+      warning: null,
       mutating: false,
       mutatingActionsByAccountId: {},
+      lastMutationReceipt: null,
     });
   },
 
@@ -480,8 +493,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     try {
       const result = await hostProviderCreateAccount(account, apiKey);
       if (!result.success) {
+        set({ lastMutationReceipt: result.receipt ?? null, warning: null });
         throw new Error(result.error || 'Failed to create provider account');
       }
+      set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
 
       set((state) => {
         const baseSnapshot = state.providerSnapshot;
@@ -502,6 +517,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           ...baseSnapshot,
           credentials: nextCredentials,
           statuses: nextStatuses,
+          revisions: { ...baseSnapshot.revisions, [account.id]: 1 },
         };
 
         writePersistedSnapshot(state.scopeKey, nextSnapshot);
@@ -540,24 +556,27 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderUpdateAccount(accountId, updates, apiKey);
+      const currentState = get();
+      const existingAccount = currentState.providerSnapshot.credentials.find((item) => item.id === accountId);
+      const currentRevision = currentState.providerSnapshot.revisions[accountId];
+      if (!existingAccount || !currentRevision) {
+        throw new Error('Provider account is unavailable');
+      }
+      const nextRevision = currentRevision + 1;
+      const patchedAccount: ProviderCredential = {
+        ...existingAccount,
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
+      const result = await hostProviderUpdateAccount(patchedAccount, nextRevision, apiKey);
       if (!result.success) {
+        set({ lastMutationReceipt: result.receipt ?? null, warning: null });
         throw new Error(result.error || 'Failed to update provider account');
       }
+      set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
 
       set((state) => {
         const baseSnapshot = state.providerSnapshot;
-        const existingAccount = baseSnapshot.credentials.find((item) => item.id === accountId);
-        if (!existingAccount) {
-          return {};
-        }
-
-        const patchedAccount: ProviderCredential = {
-          ...existingAccount,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-
         const nextCredentials = baseSnapshot.credentials.map((item) => (
           item.id === accountId ? patchedAccount : item
         ));
@@ -576,6 +595,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           ...baseSnapshot,
           credentials: nextCredentials,
           statuses: nextStatuses,
+          revisions: { ...baseSnapshot.revisions, [accountId]: nextRevision },
         };
 
         writePersistedSnapshot(state.scopeKey, nextSnapshot);
@@ -614,17 +634,25 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderDeleteAccount(accountId);
+      const revision = get().providerSnapshot.revisions[accountId];
+      if (!revision) {
+        throw new Error('Provider account is unavailable');
+      }
+      const result = await hostProviderDeleteAccount(accountId, revision);
       if (!result.success) {
+        set({ lastMutationReceipt: result.receipt ?? null, warning: null });
         throw new Error(result.error || 'Failed to delete provider account');
       }
+      set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
 
       set((state) => {
         const baseSnapshot = state.providerSnapshot;
+        const { [accountId]: _removedRevision, ...revisions } = baseSnapshot.revisions;
         const nextSnapshot: ProviderSnapshot = {
           ...baseSnapshot,
           credentials: baseSnapshot.credentials.filter((item) => item.id !== accountId),
           statuses: baseSnapshot.statuses.filter((status) => status.id !== accountId),
+          revisions,
         };
 
         writePersistedSnapshot(state.scopeKey, nextSnapshot);
@@ -667,14 +695,4 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     }
   },
 
-  getAccountApiKey: async (accountId) => {
-    try {
-      const account = get().providerSnapshot.credentials.find((candidate) => candidate.id === accountId);
-      if (!account) return null;
-      const result = await hostProviderReadApiKey(accountId, account.vendorId);
-      return result.keyMasked;
-    } catch {
-      return null;
-    }
-  },
 }));

@@ -5,8 +5,7 @@ import { AgentSkillConfigPanel } from '@/pages/Chat/components/AgentSkillConfigP
 import { ChatSidePanel } from '@/pages/Chat/components/ChatSidePanel';
 import { hostApiFetch } from '@/lib/host-api';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
-import { useSkillsStore } from '@/stores/skills';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -119,10 +118,10 @@ const skillRuntimeFixtures = vi.hoisted(() => {
       operationId?: string;
       input?: Partial<SetAgentSkillConfigCommand>;
     };
-    if (payload.operationId === 'agentSkillConfig.get') {
+    if (payload.operationId === 'subagentSkills.get') {
       return clone(agentSkillConfigView);
     }
-    if (payload.operationId === 'agentSkillConfig.set') {
+    if (payload.operationId === 'subagentSkills.set') {
       const selection = payload.input?.selection;
       const nextExplicitSkillKeys = selection?.selectionType === 'setExplicitSkillAllowlist'
         ? selection.skillKeys.filter((item): item is string => typeof item === 'string')
@@ -164,51 +163,10 @@ const hostApiFetchMock = vi.mocked(hostApiFetch);
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: skillRuntimeFixtures.hostApiFetch,
   hostSessionPatch: vi.fn().mockResolvedValue({ success: true }),
-  hostRuntimeEndpointsList: vi.fn().mockResolvedValue({
-    endpoints: [{
-      id: 'openclaw-local',
-      protocolId: 'openclaw-v4',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      displayName: 'OpenClaw Local',
-      agentIds: ['test'],
-      acceptsDynamicAgents: true,
-      capabilities: {
-        chat: true,
-        streaming: true,
-        tools: true,
-        approvals: true,
-        replay: true,
-        modelSelection: true,
-      },
-      capabilitySummaries: [{
-        id: 'session.prompt',
-        scopeKind: 'agent',
-        scope: skillRuntimeFixtures.testAgentScope,
-        targetKinds: ['session'],
-        operations: [],
-        availability: 'available',
-      }, {
-        id: 'agent.skill-config',
-        scopeKind: 'agent',
-        scope: skillRuntimeFixtures.testAgentScope,
-        targetKinds: ['subagent'],
-        operations: [],
-        availability: 'available',
-      }],
-      controlState: {
-        connection: null,
-        readiness: null,
-        capabilities: null,
-        updatedAt: null,
-      },
-    }],
-  }),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue(skillRuntimeFixtures.testAgentScope),
   hostSessionList: vi.fn().mockResolvedValue({ ready: true, sessions: [] }),
   hostSessionLoad: vi.fn().mockResolvedValue({ snapshot: null }),
   hostSessionWindowFetch: vi.fn().mockResolvedValue({ snapshot: null }),
-  resolveHydratedSessionSnapshot: vi.fn(async ({ initial }: { initial: { snapshot?: unknown } }) => initial.snapshot ?? null),
 }));
 
 interface CapabilityExecutePayload {
@@ -258,8 +216,8 @@ function renderSkillSidePanelHarness() {
       const result = await hostApiFetch('/api/capabilities/execute', {
         method: 'POST',
         body: JSON.stringify({
-          id: 'agent.skill-config',
-          operationId: 'agentSkillConfig.set',
+          id: 'subagent.skills',
+          operationId: 'subagentSkills.set',
           target: {
             kind: 'subagent',
             agentId: 'test',
@@ -303,8 +261,6 @@ function renderSkillSidePanelHarness() {
         skillsLoading={loading}
         selectedSkillIds={view.effectiveSkillKeys}
         onToggleSkill={handleToggleSkill}
-        skillPreview={null}
-        onClearSkillPreview={vi.fn()}
         artifactGroups={[]}
         artifactFocusedFile={null}
         artifactActiveSection="changes"
@@ -334,20 +290,8 @@ describe('chat agent skill configuration', () => {
     hostApiFetchMock.mockClear();
     skillRuntimeFixtures.resetAgentSkillConfigView();
 
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     } as never);
 
     useSubagentsStore.setState({
@@ -384,18 +328,6 @@ describe('chat agent skill configuration', () => {
       openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
       clearError: vi.fn(),
     } as never);
-
-    useSkillsStore.setState({
-      skills: [
-        { id: 'web-search', name: 'Web Search', description: 'web', enabled: true, installed: true, eligible: true, icon: '🌐' },
-        { id: 'feishu-doc', name: 'Feishu Doc', description: 'doc', enabled: true, installed: true, eligible: true, icon: '📄' },
-        { id: 'clawflow', name: 'Clawflow', description: 'flow', enabled: true, installed: true, eligible: true, icon: '🪝' },
-      ],
-      snapshotReady: true,
-      initialLoading: false,
-      refreshing: false,
-      fetchSkills: vi.fn().mockResolvedValue(undefined),
-    });
 
     useChatStore.setState({
       mutating: false,
@@ -473,9 +405,9 @@ describe('chat agent skill configuration', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'Web Search' }));
 
     await waitFor(() => {
-      expect(readCapabilityExecutePayloads('agentSkillConfig.set')).toContainEqual(expect.objectContaining({
-        id: 'agent.skill-config',
-        operationId: 'agentSkillConfig.set',
+      expect(readCapabilityExecutePayloads('subagentSkills.set')).toContainEqual(expect.objectContaining({
+        id: 'subagent.skills',
+        operationId: 'subagentSkills.set',
         target: expect.objectContaining({
           kind: 'subagent',
         }),
@@ -499,7 +431,7 @@ describe('chat agent skill configuration', () => {
     expect(disabledSkillSwitch).toBeDisabled();
     fireEvent.click(disabledSkillSwitch);
 
-    expect(readCapabilityExecutePayloads('agentSkillConfig.set')).toHaveLength(0);
+    expect(readCapabilityExecutePayloads('subagentSkills.set')).toHaveLength(0);
   });
 
   it('slash 只展示当前 agent effectiveSkillKeys 中的技能', () => {

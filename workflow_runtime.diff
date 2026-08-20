@@ -1,0 +1,740 @@
+diff --git a/runtime-host/application/workflows/session-gateway-ingress/session-gateway-ingress-workflow.ts b/runtime-host/application/workflows/session-gateway-ingress/session-gateway-ingress-workflow.ts
+deleted file mode 100644
+index d2c1fda2..00000000
+--- a/runtime-host/application/workflows/session-gateway-ingress/session-gateway-ingress-workflow.ts
++++ /dev/null
+@@ -1,357 +0,0 @@
+-import {
+-  buildSessionIdentityKey,
+-  validateSessionIdentity,
+-  type RuntimeEndpointRef,
+-  type SessionIdentity,
+-} from '../../agent-runtime/contracts/runtime-address';
+-import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
+-import { MATCHA_AGENT_RUNTIME_PROTOCOL_ID } from '../../adapters/matcha-agent/runtime/matcha-agent-runtime-identity';
+-import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
+-import type {
+-  SessionRenderItem,
+-  SessionUpdateEvent,
+-} from '../../../shared/session-adapter-types';
+-import type { CanonicalApprovalNotification } from '../../sessions/canonical/canonical-approval-events';
+-import type {
+-  CanonicalLifecycleEvent,
+-  CanonicalSessionEvent,
+-} from '../../sessions/canonical/canonical-events';
+-import { buildCanonicalMessageStateKey, buildCanonicalToolStateKey } from '../../sessions/canonical/canonical-reducer';
+-import type { RuntimeClockPort } from '../../common/runtime-ports';
+-import type { RuntimeHostLogger } from '../../../shared/logger';
+-import type { SessionRuntimeStateStore } from '../../sessions/session-runtime-state';
+-import type { SessionSnapshotService } from '../../sessions/session-snapshot-service';
+-import type { SessionTimelineRuntime } from '../../sessions/session-timeline-runtime';
+-import type { SessionRuntimeTimelineState } from '../../sessions/session-runtime-types';
+-import { createLatestWindowState } from '../../sessions/session-window-model';
+-import { isRecord } from '../../sessions/session-value-normalization';
+-import {
+-  containsTodoToolDebugSignal,
+-  logTodoToolDebug,
+-} from '../../sessions/todo-tool-debug';
+-import {
+-  attachMatchaTerminalDeliveryTrace,
+-  readMatchaTerminalDeliveryTraceContext,
+-  type MatchaTerminalDeliveryTrace,
+-} from '../../../shared/matcha-terminal-delivery-trace';
+-
+-export interface SessionGatewayIngressWorkflowDeps {
+-  stateStore: SessionRuntimeStateStore;
+-  timelineRuntime: SessionTimelineRuntime;
+-  snapshotService: SessionSnapshotService;
+-  clock: RuntimeClockPort;
+-  logger?: Pick<RuntimeHostLogger, 'traceDebug'>;
+-  terminalDeliveryTrace?: MatchaTerminalDeliveryTrace;
+-  agentRuntimeRegistry: AgentRuntimeRegistry;
+-}
+-
+-export class SessionGatewayIngressWorkflow {
+-  constructor(private readonly deps: SessionGatewayIngressWorkflowDeps) {}
+-
+-  consumeEndpointNotification(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+-    return this.consumeEndpointNotificationByEndpoint(endpoint, notification);
+-  }
+-
+-  async consumeEndpointConversationEvent(endpointRef: RuntimeEndpointRef, payload: unknown): Promise<SessionUpdateEvent[]> {
+-    if (!isRecord(payload)) {
+-      return [];
+-    }
+-    const registry = this.deps.agentRuntimeRegistry;
+-    const endpoint = registry.resolveEndpointForRef(endpointRef);
+-    const protocol = registry.getProtocol(endpoint.protocolId);
+-    const endpointSessionId = this.readEndpointEventSessionKey(payload);
+-    if (!endpointSessionId) {
+-      return [];
+-    }
+-    const { context, payload: canonicalPayload } = this.resolveEndpointEventContext(endpointRef, endpointSessionId, payload);
+-    if (!protocol.eventAdapter.canTranslate(canonicalPayload, context)) {
+-      return [];
+-    }
+-    const canonicalEvents = protocol.eventAdapter.translate(canonicalPayload, context);
+-    if (containsTodoToolDebugSignal(canonicalPayload) || containsTodoToolDebugSignal(canonicalEvents)) {
+-      logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.canonical-events', canonicalEvents);
+-    }
+-    return this.commitCanonicalEvents(
+-      canonicalEvents,
+-      context,
+-      protocol.protocolId === MATCHA_AGENT_RUNTIME_PROTOCOL_ID
+-        ? readMatchaTerminalDeliveryTraceContext(payload)
+-        : null,
+-    );
+-  }
+-
+-  private consumeEndpointNotificationByEndpoint(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+-    const adapter = this.deps.agentRuntimeRegistry.resolveApprovalNotificationsForEndpoint(endpoint);
+-    if (!adapter) {
+-      return [];
+-    }
+-    const endpointSessionId = this.readEndpointNotificationSessionKey(notification);
+-    const aliasedContext = endpointSessionId
+-      ? this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(endpoint, endpointSessionId)
+-      : null;
+-    const canonicalEvents = adapter.translateNotification(
+-      aliasedContext ? this.withEndpointNotificationSessionIdentity(notification, aliasedContext.identity) : notification,
+-      this.deps.clock.nowMs(),
+-    );
+-    const sessionKey = canonicalEvents[0]?.sessionId;
+-    if (aliasedContext) {
+-      return this.commitCanonicalEvents(canonicalEvents, aliasedContext);
+-    }
+-    const agentId = sessionKey ? this.readAgentIdFromSessionKey(sessionKey) : '';
+-    if (sessionKey && !agentId) {
+-      throw new Error('Session approval notification requires agentId metadata');
+-    }
+-    const context = sessionKey
+-      ? this.deps.agentRuntimeRegistry.rememberSessionIdentity(
+-        this.buildSessionIdentity(endpoint, sessionKey, agentId),
+-        endpointSessionId,
+-      )
+-      : undefined;
+-    return this.commitCanonicalEvents(canonicalEvents, context);
+-  }
+-
+-  private commitCanonicalEvents(
+-    canonicalEvents: CanonicalSessionEvent[],
+-    context?: RuntimeSessionContext,
+-    terminalTrace = null,
+-  ): SessionUpdateEvent[] {
+-    if (canonicalEvents.length === 0) {
+-      return [];
+-    }
+-    const sessionId = canonicalEvents[0]?.sessionId ?? '';
+-    if (!sessionId) {
+-      return [];
+-    }
+-    this.deps.stateStore.setActiveSessionKey(sessionId);
+-    const committed = this.deps.timelineRuntime.appendCanonicalEvents(sessionId, canonicalEvents, context);
+-    void committed;
+-    const state = this.deps.stateStore.getSessionState(sessionId, context);
+-    const snapshot = this.deps.snapshotService.buildSnapshot(sessionId, state, {
+-      window: state.window.totalItemCount > 0
+-        ? state.window
+-        : createLatestWindowState(state.renderItems.length),
+-      replayComplete: state.canonical.hydrated || canonicalEvents.every((event) => event.source === 'live'),
+-    });
+-    const primaryItem = this.resolvePrimaryCanonicalItem(state, canonicalEvents);
+-    const lastEvent = canonicalEvents[canonicalEvents.length - 1]!;
+-    if (
+-      lastEvent.type === 'lifecycle'
+-      || lastEvent.type === 'runtime_activity'
+-      || lastEvent.type === 'approval'
+-      || lastEvent.type === 'team'
+-      || lastEvent.type === 'usage'
+-      || lastEvent.type === 'artifact'
+-      || lastEvent.type === 'control'
+-    ) {
+-      const lifecycleEvent = this.resolveSessionInfoLifecycleEvent(canonicalEvents);
+-      const update = {
+-        sessionUpdate: 'session_info_update' as const,
+-        sessionKey: sessionId,
+-        runId: lastEvent.runId ?? null,
+-        phase: lifecycleEvent?.phase ?? 'unknown',
+-        snapshot,
+-        error: lifecycleEvent?.error ?? null,
+-        ...(lifecycleEvent?.transportIssue !== undefined ? { transportIssue: lifecycleEvent.transportIssue } : {}),
+-      };
+-      if (terminalTrace && lifecycleEvent?.phase === terminalTrace.terminalPhase) {
+-        this.deps.terminalDeliveryTrace?.({
+-          stage: 'canonical_terminal_applied',
+-          ...terminalTrace,
+-        });
+-        return [attachMatchaTerminalDeliveryTrace(update, terminalTrace)];
+-      }
+-      return [update];
+-    }
+-    if (lastEvent.type === 'plan') {
+-      return [{
+-        sessionUpdate: 'plan',
+-        sessionKey: sessionId,
+-        runId: lastEvent.runId ?? null,
+-        taskSnapshot: lastEvent.taskSnapshot,
+-        snapshot,
+-      }];
+-    }
+-    const isChunk = canonicalEvents.some((event) => (
+-      (event.type === 'message_part' || event.type === 'thought') && event.status === 'streaming'
+-    )) || canonicalEvents.some((event) => event.type === 'tool' && (event.phase === 'started' || event.phase === 'updated'));
+-    return [{
+-      sessionUpdate: isChunk ? 'session_item_chunk' : 'session_item',
+-      sessionKey: sessionId,
+-      runId: lastEvent.runId ?? null,
+-      item: primaryItem,
+-      snapshot,
+-    }];
+-  }
+-
+-  private resolveSessionInfoLifecycleEvent(events: ReadonlyArray<CanonicalSessionEvent>): CanonicalLifecycleEvent | null {
+-    for (let index = events.length - 1; index >= 0; index -= 1) {
+-      const event = events[index]!;
+-      if (event.type === 'lifecycle') {
+-        return event;
+-      }
+-    }
+-    return null;
+-  }
+-
+-  private resolvePrimaryCanonicalItem(state: SessionRuntimeTimelineState, events: ReadonlyArray<CanonicalSessionEvent>): SessionRenderItem | null {
+-    for (let index = events.length - 1; index >= 0; index -= 1) {
+-      const event = events[index]!;
+-      const itemKey = event.type === 'message_part'
+-        ? state.renderItemKeyIndex.messageItemKeyByCanonicalKey.get(buildCanonicalMessageStateKey(event))
+-        : event.type === 'tool'
+-          ? state.renderItemKeyIndex.toolItemKeyByCanonicalKey.get(buildCanonicalToolStateKey(event))
+-          : undefined;
+-      if (itemKey) {
+-        const itemIndex = state.renderItemIndexByKey.get(itemKey);
+-        if (itemIndex != null) {
+-          return state.renderItems[itemIndex] ?? null;
+-        }
+-      }
+-      if (event.type === 'thought') {
+-        const laneKey = event.laneKey || 'main';
+-        for (let itemIndex = state.renderItems.length - 1; itemIndex >= 0; itemIndex -= 1) {
+-          const item = state.renderItems[itemIndex];
+-          if (item?.kind === 'assistant-turn' && item.runId === event.runId && item.laneKey === laneKey) {
+-            return item;
+-          }
+-        }
+-      }
+-    }
+-    return state.renderItems[state.renderItems.length - 1] ?? null;
+-  }
+-
+-  private resolveEndpointEventContext(
+-    endpointRef: RuntimeEndpointRef,
+-    endpointSessionId: string,
+-    payload: Record<string, unknown>,
+-  ): { context: RuntimeSessionContext; payload: Record<string, unknown> } {
+-    const aliasedContext = this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(endpointRef, endpointSessionId);
+-    if (aliasedContext) {
+-      return {
+-        context: aliasedContext,
+-        payload: this.withEndpointEventSessionIdentity(payload, aliasedContext.identity),
+-      };
+-    }
+-    const identity = this.resolveEventSessionIdentity(endpointRef, endpointSessionId, payload);
+-    const payloadSessionIdentity = this.readEndpointEventSessionIdentity(payload);
+-    if (payloadSessionIdentity && buildSessionIdentityKey(payloadSessionIdentity) !== buildSessionIdentityKey(identity)) {
+-      throw new Error('SessionIdentity payload does not match endpoint ingress identity');
+-    }
+-    return {
+-      context: this.deps.agentRuntimeRegistry.rememberSessionIdentity(identity, endpointSessionId),
+-      payload: this.withEndpointEventSessionIdentity(payload, identity),
+-    };
+-  }
+-
+-  private withEndpointEventSessionIdentity(payload: Record<string, unknown>, identity: SessionIdentity): Record<string, unknown> {
+-    const event = isRecord(payload.event) ? payload.event : null;
+-    const params = isRecord(payload.params) ? payload.params : null;
+-    return {
+-      ...payload,
+-      sessionKey: identity.sessionKey,
+-      sessionIdentity: identity,
+-      ...(event ? { event: { ...event, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+-      ...(params ? { params: { ...params, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+-    };
+-  }
+-
+-  private withEndpointNotificationSessionIdentity(notification: CanonicalApprovalNotification, identity: SessionIdentity): CanonicalApprovalNotification {
+-    const params = isRecord(notification.params) ? notification.params : null;
+-    const data = isRecord(params?.data) ? params.data : null;
+-    const request = isRecord(params?.request) ? params.request : (isRecord(data?.request) ? data.request : null);
+-    return {
+-      ...notification,
+-      ...(params
+-        ? {
+-            params: {
+-              ...params,
+-              sessionKey: identity.sessionKey,
+-              sessionIdentity: identity,
+-              ...(data ? { data: { ...data, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+-              ...(request ? { request: { ...request, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+-            },
+-          }
+-        : {}),
+-    };
+-  }
+-
+-  private readEndpointNotificationSessionKey(notification: CanonicalApprovalNotification): string {
+-    const params = isRecord(notification.params) ? notification.params : null;
+-    const data = isRecord(params?.data) ? params.data : null;
+-    const request = isRecord(params?.request) ? params.request : (isRecord(data?.request) ? data.request : null);
+-    const candidates = [
+-      params?.sessionKey,
+-      data?.sessionKey,
+-      request?.sessionKey,
+-      this.readSessionIdentityKey(params?.sessionIdentity),
+-      this.readSessionIdentityKey(data?.sessionIdentity),
+-      this.readSessionIdentityKey(request?.sessionIdentity),
+-    ];
+-    for (const candidate of candidates) {
+-      if (typeof candidate === 'string' && candidate.trim()) {
+-        return candidate.trim();
+-      }
+-    }
+-    return '';
+-  }
+-
+-  private readSessionIdentityKey(value: unknown): string {
+-    return isRecord(value) && typeof value.sessionKey === 'string' && value.sessionKey.trim()
+-      ? value.sessionKey.trim()
+-      : '';
+-  }
+-
+-  private readEndpointEventSessionKey(payload: Record<string, unknown>): string {
+-    const event = isRecord(payload.event) ? payload.event : null;
+-    const params = isRecord(payload.params) ? payload.params : null;
+-    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey];
+-    for (const candidate of candidates) {
+-      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+-        return candidate.trim();
+-      }
+-    }
+-    return '';
+-  }
+-
+-  private resolveEventSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string, payload: Record<string, unknown>): SessionIdentity {
+-    const payloadIdentity = this.readEndpointEventSessionIdentity(payload);
+-    if (payloadIdentity) {
+-      return payloadIdentity;
+-    }
+-    const agentId = this.readAgentIdFromSessionKey(sessionKey);
+-    if (!agentId) {
+-      throw new Error('Session event requires agentId metadata');
+-    }
+-    return this.buildSessionIdentity(endpoint, sessionKey, agentId);
+-  }
+-
+-  private buildSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string, agentId: string): SessionIdentity {
+-    return {
+-      endpoint,
+-      agentId,
+-      sessionKey,
+-    };
+-  }
+-
+-  private readAgentIdFromSessionKey(sessionKey: string): string {
+-    const parts = sessionKey.trim().split(':');
+-    return parts[0] === 'agent' && parts[1]?.trim() ? parts[1].trim() : '';
+-  }
+-
+-  private readEndpointEventSessionIdentity(payload: Record<string, unknown>): SessionIdentity | null {
+-    const event = isRecord(payload.event) ? payload.event : null;
+-    const params = isRecord(payload.params) ? payload.params : null;
+-    const candidates = [payload.sessionIdentity, event?.sessionIdentity, params?.sessionIdentity];
+-    for (const candidate of candidates) {
+-      if (candidate === undefined) {
+-        continue;
+-      }
+-      const error = validateSessionIdentity(candidate);
+-      if (error) {
+-        throw new Error(error);
+-      }
+-      return candidate as SessionIdentity;
+-    }
+-    return null;
+-  }
+-}
+diff --git a/runtime-host/application/workflows/session-run/session-run-workflow.ts b/runtime-host/application/workflows/session-run/session-run-workflow.ts
+deleted file mode 100644
+index e9588ab7..00000000
+--- a/runtime-host/application/workflows/session-run/session-run-workflow.ts
++++ /dev/null
+@@ -1,371 +0,0 @@
+-import type {
+-  SessionPromptResult,
+-  SessionUpdateEvent,
+-} from '../../../shared/session-adapter-types';
+-import {
+-  buildSendWithMediaGatewayParams,
+-} from '../../chat/send-media';
+-import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
+-import { buildSessionIdentityKey, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
+-import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
+-import type {
+-  RuntimeClockPort,
+-  RuntimeFileSystemPort,
+-} from '../../common/runtime-ports';
+-import type { CanonicalSessionEvent } from '../../sessions/canonical/canonical-events';
+-import type { SessionOperationCoordinator } from '../../sessions/session-operation-coordinator';
+-import type { SessionSnapshotService } from '../../sessions/session-snapshot-service';
+-import type { SessionRuntimeStateStore } from '../../sessions/session-runtime-state';
+-import type {
+-  SessionPromptMediaPayload,
+-  SessionPromptPayload,
+-} from '../../sessions/session-runtime-types';
+-import type { SessionTimelineRuntime } from '../../sessions/session-timeline-runtime';
+-import type { RuntimeHostLogger } from '../../../shared/logger';
+-import {
+-  readMatchaTerminalDeliveryTraceContext,
+-  type MatchaTerminalDeliveryTrace,
+-  type MatchaTerminalDeliveryTraceContext,
+-} from '../../../shared/matcha-terminal-delivery-trace';
+-
+-export interface SessionRunWorkspaceResolverPort {
+-  getWorkspaceDirForSession(sessionKey: string): Promise<string>;
+-}
+-
+-export interface SessionRunWorkflowDeps {
+-  stateStore: SessionRuntimeStateStore;
+-  timelineRuntime: SessionTimelineRuntime;
+-  snapshotService: SessionSnapshotService;
+-  fileSystem: RuntimeFileSystemPort;
+-  clock: RuntimeClockPort;
+-  agentRuntimeRegistry: AgentRuntimeRegistry;
+-  operationCoordinator: SessionOperationCoordinator;
+-  workspaceResolver?: SessionRunWorkspaceResolverPort;
+-  ingestEndpointConversationEvent: (endpoint: RuntimeSessionContext['endpointRef'], payload: unknown) => Promise<SessionUpdateEvent[]>;
+-  emitSessionUpdate?: (event: SessionUpdateEvent) => void;
+-  logger?: Pick<RuntimeHostLogger, 'warn' | 'traceDebug'>;
+-  terminalDeliveryTrace?: MatchaTerminalDeliveryTrace;
+-}
+-
+-export interface SessionRunWorkflowInput {
+-  directBody: SessionPromptPayload;
+-  mediaBody: {
+-    sessionKey?: string;
+-    message?: string;
+-    idempotencyKey?: string;
+-    media?: unknown;
+-  } | null;
+-  sessionId: string;
+-  message: string;
+-  displayMessage: string;
+-  runId: string;
+-  sessionIdentity: SessionIdentity;
+-  endpointSessionId?: string;
+-}
+-
+-interface SubmittedPromptSnapshot {
+-  entryKey: string;
+-  snapshot: SessionPromptResult['snapshot'];
+-  shouldSendRuntimePrompt: boolean;
+-}
+-
+-class RuntimePromptSendError extends Error {
+-  constructor(message: string) {
+-    super(message);
+-    this.name = 'RuntimePromptSendError';
+-  }
+-}
+-
+-export class SessionRunWorkflow {
+-  private readonly startedSessionEventIdentityKeys = new Set<string>();
+-
+-  constructor(private readonly deps: SessionRunWorkflowDeps) {}
+-
+-  async execute(input: SessionRunWorkflowInput): Promise<SessionPromptResult> {
+-    const context = this.rememberSessionIdentity(input);
+-    const submitted = await this.commitSubmittedPrompt(input, context);
+-    if (submitted.shouldSendRuntimePrompt) {
+-      this.startRuntimeSendInBackground({ ...input, context });
+-    }
+-    return this.buildPromptResult(input, submitted);
+-  }
+-
+-  private rememberSessionIdentity(input: SessionRunWorkflowInput): RuntimeSessionContext {
+-    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity, input.endpointSessionId);
+-  }
+-
+-  private async commitSubmittedPrompt(
+-    input: SessionRunWorkflowInput,
+-    context: RuntimeSessionContext,
+-  ): Promise<SubmittedPromptSnapshot> {
+-    return await this.deps.operationCoordinator.run(input.sessionIdentity, 'prompt', async () => {
+-      await this.deps.timelineRuntime.activateSession(input.sessionId, {
+-        resetWindowToLatest: true,
+-        context,
+-      });
+-      const committed = this.deps.timelineRuntime.appendCanonicalEvents(
+-        input.sessionId,
+-        this.buildSubmittedPromptEvents(input, context),
+-        context,
+-      );
+-      const snapshot = {
+-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionId, committed.state),
+-        runtime: committed.runtime,
+-      };
+-      await this.deps.stateStore.flushPersistedStore();
+-      return {
+-        entryKey: snapshot.items.find((item) => item.kind === 'user-message' && item.runId === input.runId)?.key ?? '',
+-        snapshot,
+-        shouldSendRuntimePrompt: committed.committedEventCount > 0,
+-      };
+-    });
+-  }
+-
+-  private buildSubmittedPromptEvents(
+-    input: SessionRunWorkflowInput,
+-    context: RuntimeSessionContext,
+-  ): CanonicalSessionEvent[] {
+-    const now = this.deps.clock.nowMs();
+-    return [{
+-      eventId: `local:user:${input.sessionId}:${input.runId}`,
+-      type: 'message_part',
+-      partId: input.runId,
+-      protocolId: context.protocolId,
+-      runtimeEndpointId: context.runtimeEndpointId,
+-      source: 'live',
+-      sessionId: input.sessionId,
+-      runId: input.runId,
+-      timestamp: now,
+-      laneKey: 'main',
+-      origin: {
+-        runtimeEventType: 'local.prompt.user',
+-        runtimeIds: {
+-          sessionKey: input.sessionId,
+-          runId: input.runId,
+-        },
+-      },
+-      role: 'user',
+-      kind: 'text',
+-      mode: 'final',
+-      messageId: input.runId,
+-      content: input.displayMessage,
+-      text: input.displayMessage,
+-      status: 'final',
+-      attachedFiles: this.buildAttachedFiles(input),
+-    }, {
+-      eventId: `local:lifecycle:${input.sessionId}:${input.runId}:started`,
+-      type: 'lifecycle',
+-      protocolId: context.protocolId,
+-      runtimeEndpointId: context.runtimeEndpointId,
+-      source: 'live',
+-      sessionId: input.sessionId,
+-      runId: input.runId,
+-      timestamp: now,
+-      laneKey: 'main',
+-      origin: {
+-        runtimeEventType: 'local.prompt.started',
+-        runtimeIds: {
+-          sessionKey: input.sessionId,
+-          runId: input.runId,
+-        },
+-      },
+-      phase: 'started',
+-      runPhase: 'submitted',
+-      error: null,
+-    }];
+-  }
+-
+-  private buildAttachedFiles(input: SessionRunWorkflowInput) {
+-    const media = Array.isArray(input.mediaBody?.media)
+-      ? input.mediaBody.media as SessionPromptMediaPayload[]
+-      : [];
+-    return media.map((file) => ({
+-      fileName: file.fileName,
+-      mimeType: file.mimeType,
+-      fileSize: file.fileSize ?? 0,
+-      preview: file.preview ?? null,
+-      filePath: file.filePath,
+-      source: 'user-upload' as const,
+-    }));
+-  }
+-
+-  private buildPromptResult(
+-    input: SessionRunWorkflowInput,
+-    submitted: SubmittedPromptSnapshot,
+-  ): SessionPromptResult {
+-    return {
+-      success: true,
+-      sessionKey: input.sessionId,
+-      runId: input.runId,
+-      item: submitted.snapshot.items.find((candidate) => candidate.key === submitted.entryKey) ?? null,
+-      snapshot: submitted.snapshot,
+-    };
+-  }
+-
+-  private startRuntimeSendInBackground(input: SessionRunWorkflowInput & { context: RuntimeSessionContext }): void {
+-    void this.deps.operationCoordinator.run(input.context.identity, 'prompt', async () => {
+-      await this.sendRuntimePrompt(input);
+-    }).catch((error) => this.failSubmittedPrompt({
+-      sessionId: input.sessionId,
+-      runId: input.runId,
+-      error: error instanceof Error ? error.message : String(error),
+-      context: input.context,
+-    }).catch((compensationError) => {
+-      this.deps.logger?.warn('Prompt failure compensation failed', {
+-        sessionKey: input.sessionId,
+-        endpointSessionId: input.context.endpointSessionId,
+-        runId: input.runId,
+-        error: compensationError instanceof Error ? compensationError.message : String(compensationError),
+-      });
+-    }));
+-  }
+-
+-  private async sendRuntimePrompt(input: SessionRunWorkflowInput & { context: RuntimeSessionContext }): Promise<void> {
+-    const transport = this.deps.agentRuntimeRegistry.resolveTransport(input.context);
+-    if (transport.ensureSession) {
+-      const ensureResult = await transport.ensureSession({
+-        context: input.context,
+-        cwd: await this.resolveWorkspaceDir(input.sessionId),
+-      });
+-      if (!ensureResult.success) {
+-        throw new RuntimePromptSendError(ensureResult.error ?? 'Failed to prepare runtime session');
+-      }
+-    }
+-    if (transport.startSessionEvents) {
+-      const identityKey = buildSessionIdentityKey(input.context.identity);
+-      if (!this.startedSessionEventIdentityKeys.has(identityKey)) {
+-        await transport.startSessionEvents({
+-          context: input.context,
+-          consume: async (eventEnvelope) => {
+-            const terminalTrace = this.readMatchaTerminalTrace(eventEnvelope);
+-            try {
+-              await this.deps.ingestEndpointConversationEvent(input.context.endpointRef, eventEnvelope);
+-              if (terminalTrace) {
+-                this.emitTerminalDeliveryTrace('ingress_resolved', terminalTrace);
+-              }
+-            } catch (error) {
+-              const errorCategory = error instanceof Error ? 'error' : 'non_error';
+-              if (terminalTrace) {
+-                this.emitTerminalDeliveryTrace('ingress_rejected', terminalTrace, { errorCategory });
+-                return;
+-              }
+-              this.deps.logger?.warn('Session event ingestion failed', {
+-                source: 'runtime-session-event',
+-                errorCategory,
+-              });
+-            }
+-          },
+-        });
+-        this.startedSessionEventIdentityKeys.add(identityKey);
+-      }
+-    }
+-    const sendResult = await transport.sendPrompt({
+-      context: input.context,
+-      message: input.message,
+-      runId: input.runId,
+-      payload: await this.buildRuntimePromptPayload(input),
+-    });
+-
+-    if (!sendResult.success) {
+-      throw new RuntimePromptSendError(sendResult.error ?? 'Failed to prompt session');
+-    }
+-  }
+-
+-  private readMatchaTerminalTrace(eventEnvelope: unknown): MatchaTerminalDeliveryTraceContext | null {
+-    return readMatchaTerminalDeliveryTraceContext(eventEnvelope);
+-  }
+-
+-  private emitTerminalDeliveryTrace(
+-    stage: 'ingress_resolved' | 'ingress_rejected',
+-    trace: MatchaTerminalDeliveryTraceContext | null,
+-    details: { errorCategory?: 'error' | 'non_error' } = {},
+-  ): void {
+-    if (!trace) {
+-      return;
+-    }
+-    this.deps.terminalDeliveryTrace?.({
+-      stage,
+-      ...trace,
+-      ...details,
+-    });
+-  }
+-
+-  private async resolveWorkspaceDir(sessionId: string): Promise<string> {
+-    return this.deps.workspaceResolver
+-      ? await this.deps.workspaceResolver.getWorkspaceDirForSession(sessionId)
+-      : process.cwd();
+-  }
+-
+-  private async buildRuntimePromptPayload(input: SessionRunWorkflowInput): Promise<unknown> {
+-    return await buildSendWithMediaGatewayParams(this.deps.fileSystem, input.mediaBody
+-      ? {
+-          ...input.mediaBody,
+-          sessionKey: input.sessionId,
+-          message: input.message,
+-          idempotencyKey: input.runId,
+-        }
+-      : {
+-          sessionKey: input.sessionId,
+-          message: input.message,
+-          idempotencyKey: input.runId,
+-          ...(typeof input.directBody.deliver === 'boolean' ? { deliver: input.directBody.deliver } : {}),
+-        });
+-  }
+-
+-  private async failSubmittedPrompt(input: {
+-    sessionId: string;
+-    runId: string;
+-    error: string;
+-    context?: RuntimeSessionContext;
+-  }): Promise<void> {
+-    const context = input.context ?? this.deps.agentRuntimeRegistry.resolveSessionContext(input.sessionId);
+-    await this.deps.operationCoordinator.run(context.identity, 'prompt', async () => {
+-      const state = this.deps.stateStore.getSessionState(input.sessionId, context);
+-      if (state.runtime.activeRunId !== input.runId) {
+-        return;
+-      }
+-      const committed = this.deps.timelineRuntime.appendCanonicalEvents(input.sessionId, [this.buildPromptFailureEvent(input, context)], context);
+-      const snapshot = {
+-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionId, committed.state),
+-        runtime: committed.runtime,
+-      };
+-      await this.deps.stateStore.flushPersistedStore();
+-      this.deps.emitSessionUpdate?.({
+-        sessionUpdate: 'session_info_update',
+-        sessionKey: input.sessionId,
+-        runId: input.runId,
+-        phase: 'error',
+-        snapshot,
+-        error: input.error,
+-      });
+-      return snapshot;
+-    });
+-  }
+-
+-  private buildPromptFailureEvent(
+-    input: { sessionId: string; runId: string; error: string },
+-    context: RuntimeSessionContext,
+-  ): CanonicalSessionEvent {
+-    return {
+-      eventId: `local:lifecycle:${input.sessionId}:${input.runId}:error`,
+-      type: 'lifecycle',
+-      protocolId: context.protocolId,
+-      runtimeEndpointId: context.runtimeEndpointId,
+-      source: 'live',
+-      sessionId: input.sessionId,
+-      runId: input.runId,
+-      timestamp: this.deps.clock.nowMs(),
+-      laneKey: 'main',
+-      origin: {
+-        runtimeEventType: 'local.prompt.failed',
+-        runtimeIds: {
+-          sessionKey: input.sessionId,
+-          runId: input.runId,
+-        },
+-      },
+-      phase: 'error',
+-      runPhase: 'error',
+-      error: input.error,
+-    };
+-  }
+-}

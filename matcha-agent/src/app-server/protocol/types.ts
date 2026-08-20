@@ -130,9 +130,33 @@ export type ModelsListParams = {
   sessionId?: string
 }
 
+export type ProviderRuntimeConfig =
+  | {
+      kind: 'anthropicMessages'
+      baseUrl?: string
+      apiKey?: string
+    }
+  | {
+      kind: 'googleGenerativeAi'
+      baseUrl?: string
+      apiKey?: string
+    }
+  | {
+      kind: 'openAiChatCompletions'
+      baseUrl?: string
+      apiKey?: string
+    }
+  | {
+      kind: 'openAiResponses'
+      baseUrl?: string
+      apiKey?: string
+    }
+
 export type SessionSetModelParams = {
   sessionId: string
   model: string
+  providerFingerprint?: string
+  providerRuntime?: ProviderRuntimeConfig
 }
 
 export type SessionSetModeParams = {
@@ -176,6 +200,7 @@ export type SessionRecord = {
   lastSeq: number
   lastSnapshotVersion: number
   model?: string
+  providerFingerprint?: string
   permissionMode?: string
   workerState: WorkerRuntimeState
 }
@@ -365,6 +390,7 @@ export type WorkerInitializePayload = {
   cwd: string
   model?: string
   permissionMode?: string
+  providerRuntime?: ProviderRuntimeConfig
 }
 
 export type WorkerCommand =
@@ -384,6 +410,7 @@ export type WorkerCommand =
       decision: WorkerApprovalDecision
     }
   | { id: string; type: 'session.flush' }
+  | { id: string; type: 'worker.setModel'; model: string }
   | {
       id: string
       type: 'worker.shutdown'

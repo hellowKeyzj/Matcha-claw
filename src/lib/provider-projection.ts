@@ -1,38 +1,82 @@
 import {
-  hostApiFetch,
-  resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
-} from '@/lib/host-api';
+  decodeProviderMutationReceipt,
+  type ProviderMutationReceipt,
+} from '@/lib/host-api-transport-contract';
+import { nativeProjectionError } from '@/lib/provider-projection-errors';
 import type { ProviderCredential, ProviderType } from '@/lib/providers';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import { summarizeIdentifier } from '@/lib/session-trace';
 
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-
-async function modelProviderCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget | null = null,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: MODEL_PROVIDER_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
-      target,
-      input,
-    }),
-  });
+function invokePrivate<T>(channel: string, input: unknown): Promise<T> {
+  return window.electron.ipcRenderer.invoke(channel, input) as Promise<T>;
 }
 
-async function submitProviderJob<TResult = { success: boolean; error?: string }>(
-  operationId: string,
-  input: Record<string, unknown>,
-  target: CapabilityTarget | null,
-): Promise<TResult> {
-  const submission = await modelProviderCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, input, target);
-  return await waitForRuntimeJobResult<TResult>(submission.job.id);
+type AccountIntent = Readonly<{
+  id: string;
+  provider: string;
+  label: string;
+  enabled: boolean;
+  kind: 'chat' | 'media';
+  endpoint?: string;
+  protocol?: 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
+  mediaProtocol?: 'google' | 'openAi' | 'openRouter';
+  authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local';
+  revision: number;
+}>;
+
+type MutationOutcome = 'stored' | 'deleted' | 'rejected' | 'unknown' | 'unavailable';
+type MutationResult = Readonly<{
+  status: MutationOutcome;
+  receipt?: ProviderMutationReceipt;
+}>;
+type ProjectionResult = Readonly<{
+  success: boolean;
+  error?: string;
+  warning?: string;
+  receipt?: ProviderMutationReceipt;
+}>;
+
+function authMode(authMode: ProviderCredential['authMode']): AccountIntent['authMode'] {
+  switch (authMode) {
+    case 'api_key': return 'apiKey';
+    case 'oauth_browser': return 'oauthBrowser';
+    case 'oauth_device': return 'oauthDevice';
+    case 'local': return 'local';
+  }
+}
+
+function toAccount(account: ProviderCredential, revision: number): AccountIntent {
+  const kind = account.providerKind ?? 'chat';
+  return {
+    id: account.id,
+    provider: account.vendorId,
+    label: account.label,
+    enabled: account.enabled,
+    kind,
+    ...(account.baseUrl?.trim() ? { endpoint: account.baseUrl.trim() } : {}),
+    ...(kind === 'media'
+      ? { mediaProtocol: mediaProtocol(account.mediaApiProtocol) }
+      : account.apiProtocol ? { protocol: apiProtocol(account.apiProtocol) } : {}),
+    authMode: authMode(account.authMode),
+    revision,
+  };
+}
+
+function apiProtocol(protocol: NonNullable<ProviderCredential['apiProtocol']>): AccountIntent['protocol'] {
+  switch (protocol) {
+    case 'anthropic-messages': return 'anthropicMessages';
+    case 'google-generative-ai': return 'googleGenerativeAi';
+    case 'openai-completions': return 'openAiCompletions';
+    case 'openai-responses': return 'openAiResponses';
+  }
+}
+
+function mediaProtocol(protocol: ProviderCredential['mediaApiProtocol']): NonNullable<AccountIntent['mediaProtocol']> {
+  switch (protocol) {
+    case 'google': return 'google';
+    case 'openai': return 'openAi';
+    case 'openrouter': return 'openRouter';
+    default: return 'openAi';
+  }
 }
 
 export async function hostProviderStartOAuth(input: {
@@ -40,24 +84,29 @@ export async function hostProviderStartOAuth(input: {
   flowId: string;
   accountId: string;
   label: string;
-}): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>(
-    'providers.oauthStart',
-    input,
-    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.provider },
-  );
+}): Promise<{ flowId: string; status: 'started' }> {
+  const authMode = input.provider === 'openai' ? 'oauthBrowser' : 'oauthDevice';
+  return await invokePrivate('providers:startOAuth', {
+    provider: input.provider,
+    flowId: input.flowId,
+    account: {
+      id: input.accountId,
+      provider: input.provider,
+      label: input.label,
+      enabled: true,
+      kind: 'chat',
+      authMode,
+      revision: 1,
+    },
+  });
 }
 
 export async function hostProviderCancelOAuth(input: {
   flowId: string;
   accountId: string;
   vendorId: string;
-}): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>(
-    'providers.oauthCancel',
-    input,
-    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.vendorId },
-  );
+}): Promise<{ flowId: string; status: 'cancelled' }> {
+  return await invokePrivate('providers:cancelOAuth', { flowId: input.flowId });
 }
 
 export async function hostProviderSubmitOAuthCode(input: {
@@ -65,86 +114,123 @@ export async function hostProviderSubmitOAuthCode(input: {
   accountId: string;
   vendorId: string;
   code: string;
-}): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>(
-    'providers.oauthSubmit',
-    input,
-    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.vendorId },
-  );
+}): Promise<{ flowId: string; status: 'submitted' }> {
+  return await invokePrivate('providers:submitOAuthCode', { flowId: input.flowId, code: input.code });
 }
 
-export async function hostProviderReadAccount(
-  accountId: string,
-): Promise<{
-  baseUrl?: string;
-  apiProtocol?: ProviderCredential['apiProtocol'];
-  headers?: Record<string, string>;
-} | null> {
-  return await modelProviderCapabilityExecute<{
+export async function hostProviderValidate(input: {
+  accountId?: string;
+  vendorId: string;
+  apiKey: string;
+  options?: {
     baseUrl?: string;
     apiProtocol?: ProviderCredential['apiProtocol'];
     headers?: Record<string, string>;
-  } | null>('providers.getAccount', { accountId }, { kind: 'provider-account', accountId });
-}
-
-export async function hostProviderReadApiKey(accountId: string, vendorId: string): Promise<{ hasKey: boolean; keyMasked: string | null; last4: string | null }> {
-  return await modelProviderCapabilityExecute<{ hasKey: boolean; keyMasked: string | null; last4: string | null }>(
-    'providers.getApiKey',
-    { accountId, vendorId },
-    { kind: 'provider-credential', accountId, vendorId },
-  );
-}
-
-export async function hostProviderValidate(
-  input: {
-    accountId?: string;
-    vendorId: string;
-    apiKey: string;
-    options?: {
-      baseUrl?: string;
-      apiProtocol?: ProviderCredential['apiProtocol'];
-      headers?: Record<string, string>;
-    };
-  },
-): Promise<{ valid: boolean; error?: string }> {
-  return await modelProviderCapabilityExecute<{ valid: boolean; error?: string }>(
-    'providers.validate',
-    input,
-    input.accountId
-      ? { kind: 'provider-credential', accountId: input.accountId, vendorId: input.vendorId }
-      : { kind: 'provider-credential', accountId: input.vendorId, vendorId: input.vendorId },
-  );
+  };
+}): Promise<{ valid: boolean; error?: string }> {
+  return await invokePrivate('providers:validateApiKey', input);
 }
 
 export async function hostProviderCreateAccount(
   account: ProviderCredential,
   apiKey?: string,
-): Promise<{ success: boolean; error?: string }> {
-  return await submitProviderJob<{ success: boolean; error?: string }>(
-    'providers.createAccount',
-    { account, apiKey },
-    { kind: 'provider-account', accountId: account.id, vendorId: account.vendorId },
-  );
+): Promise<ProjectionResult> {
+  return await mutate('providers:storeAccount', {
+    account: toAccount(account, 1),
+    ...(apiKey?.trim() ? { apiKey } : {}),
+  }, 'stored');
 }
 
 export async function hostProviderUpdateAccount(
-  accountId: string,
-  updates: Partial<ProviderCredential>,
+  account: ProviderCredential,
+  revision: number,
   apiKey?: string,
-): Promise<{ success: boolean; error?: string }> {
-  return await submitProviderJob<{ success: boolean; error?: string }>(
-    'providers.updateAccount',
-    { accountId, updates, apiKey },
-    { kind: 'provider-account', accountId },
-  );
+): Promise<ProjectionResult> {
+  return await mutate('providers:storeAccount', {
+    account: toAccount(account, revision),
+    ...(apiKey?.trim() ? { apiKey } : {}),
+  }, 'stored');
 }
 
-export async function hostProviderDeleteAccount(accountId: string): Promise<{ success: boolean; error?: string }> {
-  return await submitProviderJob<{ success: boolean; error?: string }>(
-    'providers.deleteAccount',
-    { accountId },
-    { kind: 'provider-account', accountId },
-  );
+export async function hostProviderDeleteAccount(accountId: string, revision: number): Promise<ProjectionResult> {
+  return await mutate('providers:deleteAccount', { accountId, revision }, 'deleted');
+}
+
+function logProviderConfigTrace(phase: string, payload: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({
+    prefix: '[startup-trace]',
+    source: 'provider-projection',
+    phase,
+    ...payload,
+  }));
+}
+
+function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<string, unknown> {
+  return {
+    changed: receipt.native.changed,
+    applied: receipt.native.applied.status,
+    observed: receipt.native.observed.status,
+    diagnostic: receipt.native.diagnostic
+      ? {
+          phase: receipt.native.diagnostic.phase,
+          reason: receipt.native.diagnostic.reason,
+          configPath: receipt.native.diagnostic.configPath,
+          method: receipt.native.diagnostic.method,
+          expectedPath: receipt.native.diagnostic.expectedPath,
+          detail: receipt.native.diagnostic.detail
+            ? summarizeIdentifier(receipt.native.diagnostic.detail)
+            : undefined,
+        }
+      : undefined,
+  };
+}
+
+async function mutate(channel: string, input: unknown, success: 'stored' | 'deleted'): Promise<ProjectionResult> {
+  try {
+    logProviderConfigTrace('request-start', { channel });
+    const result = await invokePrivate<MutationResult>(channel, input);
+    const receipt = result.receipt
+      ? decodeProviderMutationReceipt(result.receipt, result.status === 'unknown' ? 'commit-outcome-unknown' : 'committed')
+      : undefined;
+    if (receipt) {
+      logProviderConfigTrace('request-finished', {
+        channel,
+        status: result.status,
+        ...providerProjectionTrace(receipt),
+      });
+    } else {
+      logProviderConfigTrace('request-finished', { channel, status: result.status, receipt: false });
+    }
+    if (result.status === success && receipt?.commit === 'committed' && receipt.persisted.status === 'confirmed') {
+      const warning = nativeProjectionError(receipt);
+      return {
+        success: true,
+        receipt,
+        ...(warning ? { warning } : {}),
+      };
+    }
+    return {
+      success: false,
+      error: outcomeError(result.status),
+      ...(receipt ? { receipt } : {}),
+    };
+  } catch (error) {
+    logProviderConfigTrace('request-failed', {
+      channel,
+      errorName: error instanceof Error ? error.name : typeof error,
+      message: summarizeIdentifier(error instanceof Error ? error.message : String(error)),
+    });
+    if (error instanceof Error && error.name === 'ProviderMutationReceiptUnavailableError') {
+      return { success: false, error: 'Provider accounts are unavailable' };
+    }
+    return { success: false, error: 'Provider account request was rejected' };
+  }
+}
+
+function outcomeError(outcome: MutationOutcome): string {
+  if (outcome === 'rejected') return 'Provider account request was rejected';
+  if (outcome === 'unknown') return 'Provider account request outcome is unknown';
+  return 'Provider accounts are unavailable';
 }
 
 export function buildProviderCredentialPayload(input: {

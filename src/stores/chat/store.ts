@@ -14,7 +14,6 @@ import {
   buildSyncPendingApprovalsPatch,
   groupApprovalsBySession,
 } from './approval-handlers';
-import { handleStoreSessionUpdateEvent } from './event-actions';
 import { executeHistoryLoad } from './history-load-execution';
 import { CHAT_HISTORY_LOADING_TIMEOUT_MS } from './history-constants';
 import { executeStoreSend } from './send-handlers';
@@ -41,8 +40,12 @@ import {
 } from './types';
 import { getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
-import { buildSessionIdentityKey, type AgentScope } from '../../../runtime-host/shared/runtime-address';
-import type { RuntimeEndpointSummary } from '../../../runtime-host/shared/runtime-topology';
+import {
+  buildSessionIdentityKey,
+  type AgentScope,
+  type RuntimeEndpointRef,
+} from '../../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointSummary } from '../../types/runtime-topology';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
 
@@ -50,34 +53,60 @@ function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
 }
 
-const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
-
-function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[] {
-  return endpoint.capabilitySummaries
-    .filter((capability) => capability.id === SESSION_PROMPT_CAPABILITY_ID && capability.scope.kind === 'agent')
-    .map((capability) => capability.scope as AgentScope);
-}
-
-function buildDefaultSessionPromptScope(endpoint: RuntimeEndpointSummary): AgentScope | null {
-  const agentId = endpoint.defaultAgentId.trim();
-  if (!agentId) {
+function buildAgentScope(endpoint: RuntimeEndpointSummary, agentId: string): AgentScope | null {
+  const normalizedAgentId = agentId.trim();
+  if (!normalizedAgentId) {
     return null;
   }
   return {
     kind: 'agent',
     endpoint: endpoint.endpointRef,
-    agentId,
+    agentId: normalizedAgentId,
   };
 }
 
-function isEndpointTerminallyUnavailable(endpoint: RuntimeEndpointSummary): boolean {
-  return endpoint.controlState.readiness?.phase === 'unavailable';
+function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[] {
+  const agentIds = new Set([
+    endpoint.defaultAgentId,
+    ...endpoint.agentIds,
+    ...endpoint.agents.map((agent) => agent.agentId),
+  ]);
+  return [...agentIds]
+    .map((agentId) => buildAgentScope(endpoint, agentId))
+    .filter((scope): scope is AgentScope => scope != null);
+}
+
+function buildDefaultSessionPromptScope(endpoint: RuntimeEndpointSummary): AgentScope | null {
+  return buildAgentScope(endpoint, endpoint.defaultAgentId);
+}
+
+function supportsSessionFamily(endpoint: RuntimeEndpointSummary): boolean {
+  return endpoint.capabilityFamilies.some((capabilityFamily) => (
+    capabilityFamily.family === 'session'
+    && capabilityFamily.availability === 'supported'
+  ));
 }
 
 function isReadySessionEndpoint(endpoint: RuntimeEndpointSummary): boolean {
   return endpoint.capabilities.chat
-    && buildDefaultSessionPromptScope(endpoint) != null
-    && !isEndpointTerminallyUnavailable(endpoint);
+    && endpoint.lifecycle.ready
+    && endpoint.controlState.readiness?.ready === true
+    && supportsSessionFamily(endpoint)
+    && buildDefaultSessionPromptScope(endpoint) != null;
+}
+
+function sessionEndpointMeta(endpoint: RuntimeEndpointRef): { protocolId: string | null; runtimeEndpointId: string } {
+  switch (endpoint.kind) {
+    case 'native-runtime':
+      return { protocolId: null, runtimeEndpointId: endpoint.runtimeInstanceId };
+    default: {
+      const connector = endpoint as RuntimeEndpointRef & {
+        protocolId: string;
+        endpointId: string;
+      };
+      return { protocolId: connector.protocolId, runtimeEndpointId: connector.endpointId };
+    }
+  }
 }
 
 function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, right: ChatSessionRuntimeEndpointTarget): number {
@@ -223,11 +252,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     openSessionIdentity: (target) => {
       executeOpenSessionIdentity(sessionInput, target);
     },
-    switchSession: (key) => {
-      executeSwitchSession(sessionInput, key);
+    switchSession: (key, traceId) => {
+      executeSwitchSession(sessionInput, key, traceId);
     },
-    newSession: async (agentId) => {
-      await executeNewSession(sessionInput, agentId);
+    newSession: async (agentId, traceId) => {
+      await executeNewSession(sessionInput, agentId, traceId);
     },
     newSessionForScope: async (scope) => {
       await executeNewSessionForScope(sessionInput, scope);
@@ -379,14 +408,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         sessionKey: identity.sessionKey || normalizedSessionKey,
       };
       set((state) => {
+        const endpoint = sessionIdentity.endpoint as RuntimeEndpointRef;
+        const endpointMeta = sessionEndpointMeta(endpoint);
         const loadedSessions = patchSessionMeta(state, normalizedSessionKey, {
           backendSessionKey: sessionIdentity.sessionKey,
-          runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+          runtimeScopeKey: buildRuntimeScopeKey(endpoint),
           agentId: sessionIdentity.agentId,
-          protocolId: sessionIdentity.endpoint.kind === 'protocol-connector' ? sessionIdentity.endpoint.protocolId : null,
-          runtimeEndpointId: sessionIdentity.endpoint.kind === 'native-runtime'
-            ? sessionIdentity.endpoint.runtimeInstanceId
-            : sessionIdentity.endpoint.endpointId,
+          ...endpointMeta,
           sessionIdentity,
         });
         return {
@@ -417,9 +445,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       }
       const result = await state.sendMessage(text);
       return result.accepted;
-    },
-    handleSessionUpdateEvent: (event) => {
-      handleStoreSessionUpdateEvent({ set, get }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

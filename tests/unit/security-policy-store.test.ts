@@ -96,13 +96,15 @@ describe('security policy store', () => {
     expect(state.error).toBe('network down');
   });
 
-  it('savePolicy 走 mutating，并在成功后同步 saved snapshot', async () => {
+  it('savePolicy 走 mutating，并仅在确认后同步 saved snapshot', async () => {
     hostSecurityReadPolicyMock.mockResolvedValue({
       preset: 'balanced',
       securityPolicyVersion: 1,
       runtime: buildRuntimePolicy(),
     });
-    hostSecurityWritePolicyMock.mockResolvedValue({ success: true });
+    hostSecurityWritePolicyMock.mockResolvedValue({
+      desired: { revision: 2, outcome: 'confirmed' },
+    });
     const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
     await useSecurityPolicyStore.getState().loadPolicy();
 
@@ -114,5 +116,26 @@ describe('security policy store', () => {
     expect(state.policy.preset).toBe('relaxed');
     expect(state.savedPolicySnapshot.preset).toBe('relaxed');
     expect(hostSecurityWritePolicyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not advance the saved snapshot when the effect outcome is unknown', async () => {
+    hostSecurityReadPolicyMock.mockResolvedValue({
+      preset: 'balanced',
+      securityPolicyVersion: 1,
+      runtime: buildRuntimePolicy(),
+    });
+    hostSecurityWritePolicyMock.mockResolvedValue({
+      desired: { revision: 2, outcome: 'outcome_unknown' },
+    });
+    const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
+    await useSecurityPolicyStore.getState().loadPolicy();
+
+    useSecurityPolicyStore.getState().applyPresetTemplate('relaxed');
+    await useSecurityPolicyStore.getState().savePolicy();
+
+    const state = useSecurityPolicyStore.getState();
+    expect(state.policy.preset).toBe('relaxed');
+    expect(state.savedPolicySnapshot.preset).toBe('balanced');
+    expect(state.error).toBe('Security policy outcome is pending confirmation');
   });
 });

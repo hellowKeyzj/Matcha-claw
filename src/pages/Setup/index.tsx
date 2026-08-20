@@ -32,7 +32,7 @@ import { hostLicenseValidate } from '@/lib/license-runtime';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
-import type { RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef } from '../../../electron/desktop-contract/runtime-address';
 
 const PLATFORM_RUNTIME_CAPABILITY_ID = 'platform.runtime';
 
@@ -155,19 +155,15 @@ export function Setup() {
         if (!active) {
           return;
         }
-        switch (scope.kind) {
-          case 'runtime-instance':
-          case 'agent':
-          case 'workspace':
-          case 'team-run':
-            setPlatformRuntimeEndpoint(scope.endpoint);
-            break;
-          case 'session':
-            setPlatformRuntimeEndpoint(scope.identity.endpoint);
-            break;
-          default:
-            setPlatformRuntimeEndpoint(null);
+        if ('identity' in scope) {
+          setPlatformRuntimeEndpoint(scope.identity.endpoint);
+          return;
         }
+        if ('endpoint' in scope) {
+          setPlatformRuntimeEndpoint(scope.endpoint);
+          return;
+        }
+        setPlatformRuntimeEndpoint(null);
       })
       .catch(() => {
         if (active) {

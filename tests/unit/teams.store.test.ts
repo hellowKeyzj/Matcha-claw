@@ -1,20 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/services/openclaw/team-runtime-client', () => ({
-  createTeamRun: vi.fn(),
-  deleteTeamInstance: vi.fn(),
-  deleteTeamRun: vi.fn(),
-  exportTeamRunGraphYaml: vi.fn(),
-  importTeamRunGraphYaml: vi.fn(),
-  submitTeamRunRoleMessage: vi.fn(),
-  listTeamRuns: vi.fn(),
-  provisionTeamAgents: vi.fn(),
-  readTeamRunSnapshot: vi.fn(),
-  resumeTeam: vi.fn(),
-  cancelTeamRun: vi.fn(),
-  resolveTeamApproval: vi.fn(),
-  saveTeamRunGraphProjection: vi.fn(),
-  submitTeamRunDecision: vi.fn(),
+vi.mock('@/services/team-graph', () => ({
+  exportTeamGraphYaml: vi.fn(),
+  importTeamGraphYaml: vi.fn(),
+  saveTeamGraph: vi.fn(),
+}));
+
+vi.mock('@/services/team-public-projection', () => ({
+  readTeamPublicProjection: vi.fn(),
+}));
+
+vi.mock('@/services/team-approvals', () => ({
+  readTeamPendingApprovals: vi.fn(),
+}));
+
+vi.mock('@/services/team-lifecycle', () => ({
+  beginTeamRunCancellation: vi.fn(),
+  createTeamRunLifecycle: vi.fn(),
+  deleteTeamLifecycle: vi.fn(),
+  listTeamRunLifecycle: vi.fn(),
+  resumeTeamRunLifecycle: vi.fn(),
+  tombstoneTeamRun: vi.fn(),
+}));
+
+vi.mock('@/services/team-role-chat', () => ({
+  submitTeamRoleChat: vi.fn(),
+}));
+
+vi.mock('@/services/team-role-sessions', () => ({
+  readTeamRoleSessions: vi.fn(),
+}));
+
+vi.mock('@/services/team-decisions', () => ({
+  resolveTeamHumanDecision: vi.fn(),
 }));
 
 import { useChatStore } from '@/stores/chat';
@@ -23,6 +41,7 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import {
   buildTeamRoleChatTargetByIdentityKey,
   buildTeamRoleChatTargetIndex,
+  buildTeamRoleSessionIndex,
   isKnownTeamRoleSession,
   resolveTeamRoleChatTarget,
   resolveTeamRoleChatTargetFromProbe,
@@ -31,25 +50,25 @@ import {
   type TeamMeta,
   type TeamSkillCandidate,
 } from '@/stores/teams';
+import { resolveTeamHumanDecision } from '@/services/team-decisions';
+import type { ManualTeamProvisionRecord, TeamSkillPackage } from '@/services/team-types';
 import {
-  createTeamRun,
-  deleteTeamInstance,
-  deleteTeamRun,
-  exportTeamRunGraphYaml,
-  importTeamRunGraphYaml,
-  submitTeamRunRoleMessage,
-  listTeamRuns,
-  provisionTeamAgents,
-  readTeamRunSnapshot,
-  resumeTeam,
-  saveTeamRunGraphProjection,
-  submitTeamRunDecision,
-  type ManualTeamProvisionRecord,
-  type TeamGraphSnapshotRecord,
-  type TeamRunSnapshot,
-  type TeamRunStatus,
-  type TeamSkillPackage,
-} from '@/services/openclaw/team-runtime-client';
+  exportTeamGraphYaml,
+  importTeamGraphYaml,
+  saveTeamGraph,
+} from '@/services/team-graph';
+import { readTeamPublicProjection } from '@/services/team-public-projection';
+import { readTeamPendingApprovals } from '@/services/team-approvals';
+import {
+  beginTeamRunCancellation,
+  createTeamRunLifecycle,
+  deleteTeamLifecycle,
+  listTeamRunLifecycle,
+  resumeTeamRunLifecycle,
+  tombstoneTeamRun,
+} from '@/services/team-lifecycle';
+import { submitTeamRoleChat } from '@/services/team-role-chat';
+import { readTeamRoleSessions } from '@/services/team-role-sessions';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const basePackage: TeamSkillPackage = {
@@ -68,7 +87,6 @@ const manualTeam: ManualTeamProvisionRecord = {
   members: [{
     agentId: 'leader-agent',
     agentName: 'Leader Agent',
-    workspace: '/work/manual-team',
     roleId: 'leader',
     skills: ['planning'],
     tools: ['terminal'],
@@ -94,6 +112,10 @@ function candidate(input: {
   };
 }
 
+function lifecycleRun(runId: string, graphStatus: 'pending' | 'ready' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' = 'running') {
+  return { state: 'available' as const, teamId: 'team-1', runId, teamRevision: 1, graphStatus };
+}
+
 function teamMeta(input: Partial<TeamMeta> = {}): TeamMeta {
   return {
     id: 'team-1',
@@ -111,7 +133,7 @@ function teamMeta(input: Partial<TeamMeta> = {}): TeamMeta {
   };
 }
 
-function buildSnapshot(status: TeamRunStatus = 'running', events = [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]): TeamRunSnapshot {
+function buildSnapshot(status: string = 'running', events = [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]) {
   const runId = events[0]?.runId ?? 'team-1-run-1.0.0-1000';
   return {
     run: {
@@ -234,24 +256,10 @@ describe('teams store', () => {
       runsById: {},
       runByTeamId: {},
       rolesByTeamId: {},
-      stagesByTeamId: {},
+      teamRoleSessionsByTeamId: {},
       graphByTeamId: {},
-      workflowPlanByTeamId: {},
-      dispatchGroupsByTeamId: {},
-      dispatchTasksByTeamId: {},
+      publicProjectionByTeamId: {},
       approvalsByTeamId: {},
-      artifactsByTeamId: {},
-      messagesByTeamId: {},
-      nodePromptDeliveryAttemptsByTeamId: {},
-      dispatchesByTeamId: {},
-      dispatchExecutionsByTeamId: {},
-      gatesByTeamId: {},
-      kickbacksByTeamId: {},
-      decisionsByTeamId: {},
-      eventsByTeamId: {},
-      eventsByRunId: {},
-      eventCursorByTeamId: {},
-      eventCursorByRunId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
     });
@@ -265,18 +273,37 @@ describe('teams store', () => {
       error: null,
     } as never);
 
-    vi.mocked(createTeamRun).mockResolvedValue({ runId: 'teamrun-generated', status: 'created', revision: 1 });
-    vi.mocked(listTeamRuns).mockResolvedValue({ teamId: 'team-1', runs: [] });
-    vi.mocked(readTeamRunSnapshot).mockResolvedValue(buildSnapshot());
-    vi.mocked(deleteTeamInstance).mockResolvedValue({ teamId: 'team-1', deleted: true, deletedRunIds: [], deletedAgentIds: [] });
-    vi.mocked(deleteTeamRun).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', deleted: true });
-    vi.mocked(exportTeamRunGraphYaml).mockResolvedValue({ fileName: 'team-run-graph.yaml', yaml: 'nodes: []\n' });
-    vi.mocked(importTeamRunGraphYaml).mockResolvedValue({ success: true, imported: true, snapshot: buildSnapshot() });
-    vi.mocked(submitTeamRunRoleMessage).mockResolvedValue({ success: true, submitted: true, snapshot: buildSnapshot() });
-    vi.mocked(provisionTeamAgents).mockResolvedValue({ teamId: 'team-1', managedAgentCount: 2 });
-    vi.mocked(resumeTeam).mockResolvedValue({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [] });
-    vi.mocked(saveTeamRunGraphProjection).mockResolvedValue({ success: true });
-    vi.mocked(submitTeamRunDecision).mockResolvedValue(undefined);
+    vi.mocked(createTeamRunLifecycle).mockResolvedValue({ runId: 'teamrun-generated', outcome: 'created' });
+    vi.mocked(listTeamRunLifecycle).mockResolvedValue([]);
+    vi.mocked(deleteTeamLifecycle).mockResolvedValue({ teamId: 'team-1', outcome: 'deleted' });
+    vi.mocked(tombstoneTeamRun).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', state: 'tombstoned' });
+    vi.mocked(beginTeamRunCancellation).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', state: 'cancelled' });
+    vi.mocked(exportTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', yaml: 'nodes: []\n' });
+    vi.mocked(importTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000' });
+    vi.mocked(readTeamPublicProjection).mockImplementation(async ({ teamId, runId }) => ({
+      teamId,
+      runId,
+      teamRevision: 1,
+      runtime: 'confirmed',
+      graph: {
+        graphId: `graph:${teamId}`,
+        workflowPlanId: `plan:${teamId}`,
+        title: 'Team graph',
+        status: 'running',
+        nodes: [],
+        edges: [],
+      },
+    }));
+    vi.mocked(readTeamPendingApprovals).mockImplementation(async ({ teamId, runId }) => ({
+      teamId,
+      runId,
+      approvals: [],
+    }));
+    vi.mocked(submitTeamRoleChat).mockResolvedValue({ success: true, submitted: true });
+    vi.mocked(readTeamRoleSessions).mockResolvedValue([]);
+    vi.mocked(resumeTeamRunLifecycle).mockResolvedValue([]);
+    vi.mocked(saveTeamGraph).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000' });
+    vi.mocked(resolveTeamHumanDecision).mockResolvedValue({ success: true, outcome: 'recorded' });
   });
 
   it('creates and selects a TeamSkill team from validated package identity', () => {
@@ -298,11 +325,11 @@ describe('teams store', () => {
     expect(state.runIdsByTeamId[id]).toEqual([]);
   });
 
-  it('creates and selects a manual team with manual source identity', () => {
-    const id = useTeamsStore.getState().createManualTeam({
+  it('records a materialized manual team with manual source identity', () => {
+    const id = useTeamsStore.getState().recordMaterializedManualTeam({
       displayName: 'Manual Ops Team',
       manualTeam,
-    });
+    }, 'team-manual');
 
     const state = useTeamsStore.getState();
     expect(state.activeTeamId).toBe(id);
@@ -367,8 +394,6 @@ describe('teams store', () => {
       runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
       rolesByTeamId: { 'team-1': [teamRoleSessionBinding({ runId: 'old-run', roleId: 'leader', agentId: 'agent-1' })] },
-      eventCursorByTeamId: { 'team-1': 8 },
-      eventCursorByRunId: { 'team-1-run-1.0.0-1000': 8 },
     });
 
     const id = useTeamsStore.getState().replaceTeamSkillVersion({
@@ -402,7 +427,6 @@ describe('teams store', () => {
     expect(state.runsById['team-1-run-1.0.0-1000']).toBeDefined();
     expect(state.runByTeamId['team-1']).toBeDefined();
     expect(state.rolesByTeamId['team-1']).toHaveLength(1);
-    expect(state.eventCursorByTeamId['team-1']).toBe(8);
   });
 
   it('rejects replacement when the expected current version is stale', () => {
@@ -424,23 +448,17 @@ describe('teams store', () => {
       runsById: { 'runtime-run-1': runtimeRun ?? undefined },
       runByTeamId: { 'team-1': runtimeRun ?? undefined },
       rolesByTeamId: { 'team-1': [] },
-      stagesByTeamId: { 'team-1': [] },
-      eventsByTeamId: { 'team-1': [{ eventId: 'e1', runId: 'runtime-run-1', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }] },
-      eventsByRunId: { 'runtime-run-1': [{ eventId: 'e1', runId: 'runtime-run-1', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }] },
-      eventCursorByTeamId: { 'team-1': 2 },
-      eventCursorByRunId: { 'runtime-run-1': 2 },
       errorByTeamId: { 'team-1': 'previous error' },
     });
     let releaseDelete!: () => void;
-    vi.mocked(deleteTeamInstance).mockReturnValueOnce(new Promise((resolve) => {
-      releaseDelete = () => resolve({ teamId: 'team-1', deleted: true, deletedRunIds: ['runtime-run-1'], deletedAgentIds: [] });
+    vi.mocked(deleteTeamLifecycle).mockReturnValueOnce(new Promise((resolve) => {
+      releaseDelete = () => resolve({ teamId: 'team-1', outcome: 'deleted' });
     }));
 
     const deletion = useTeamsStore.getState().deleteTeam('team-1');
 
-    expect(deleteTeamInstance).toHaveBeenCalledTimes(1);
-    expect(deleteTeamInstance).toHaveBeenCalledWith({ teamId: 'team-1' });
-    expect(deleteTeamRun).not.toHaveBeenCalled();
+    expect(deleteTeamLifecycle).toHaveBeenCalledTimes(1);
+    expect(deleteTeamLifecycle).toHaveBeenCalledWith({ teamId: 'team-1', idempotencyKey: 'team-1:delete' });
     expect(useTeamsStore.getState().teams).toHaveLength(1);
     expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(true);
     expect(useTeamsStore.getState().errorByTeamId['team-1']).toBeUndefined();
@@ -455,11 +473,6 @@ describe('teams store', () => {
     expect(state.runsById['runtime-run-1']).toBeUndefined();
     expect(state.runByTeamId['team-1']).toBeUndefined();
     expect(state.rolesByTeamId['team-1']).toBeUndefined();
-    expect(state.stagesByTeamId['team-1']).toBeUndefined();
-    expect(state.eventsByTeamId['team-1']).toBeUndefined();
-    expect(state.eventsByRunId['runtime-run-1']).toBeUndefined();
-    expect(state.eventCursorByTeamId['team-1']).toBeUndefined();
-    expect(state.eventCursorByRunId['runtime-run-1']).toBeUndefined();
     expect(state.loadingByTeamId['team-1']).toBeUndefined();
     expect(state.errorByTeamId['team-1']).toBeUndefined();
   });
@@ -470,25 +483,16 @@ describe('teams store', () => {
     useTeamsStore.setState({
       teams: [teamMeta({ activeRunId: 'local-run' })],
       activeTeamId: 'team-1',
-      runIdsByTeamId: { 'team-1': ['local-run'] },
+      runIdsByTeamId: { 'team-1': ['local-run', 'backend-run'] },
       runsById: { 'local-run': localRun ?? undefined, 'backend-run': backendRun ?? undefined },
-      eventsByRunId: {
-        'local-run': [{ eventId: 'local-event', runId: 'local-run', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }],
-        'backend-run': [{ eventId: 'backend-event', runId: 'backend-run', revision: 3, type: 'run:completed', payload: {}, createdAt: 3 }],
-      },
-      eventCursorByRunId: { 'local-run': 2, 'backend-run': 3 },
     });
-    vi.mocked(deleteTeamInstance).mockResolvedValueOnce({ teamId: 'team-1', deleted: true, deletedRunIds: ['backend-run'], deletedAgentIds: [] });
+    vi.mocked(deleteTeamLifecycle).mockResolvedValueOnce({ teamId: 'team-1', outcome: 'deleted' });
 
     await useTeamsStore.getState().deleteTeam('team-1');
 
     const state = useTeamsStore.getState();
     expect(state.runsById['local-run']).toBeUndefined();
     expect(state.runsById['backend-run']).toBeUndefined();
-    expect(state.eventsByRunId['local-run']).toBeUndefined();
-    expect(state.eventsByRunId['backend-run']).toBeUndefined();
-    expect(state.eventCursorByRunId['local-run']).toBeUndefined();
-    expect(state.eventCursorByRunId['backend-run']).toBeUndefined();
   });
 
   it('removes deleted TeamRun role sessions from the chat catalog when deleting a team', async () => {
@@ -515,7 +519,7 @@ describe('teams store', () => {
     } as never);
     useTeamsStore.setState({
       teams: [teamMeta({ activeRunId: 'local-run' })],
-      runIdsByTeamId: { 'team-1': ['local-run'] },
+      runIdsByTeamId: { 'team-1': ['local-run', 'backend-run'] },
       runsById: {
         'local-run': buildSnapshot('running', [{ eventId: 'local-event', runId: 'local-run', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
         'backend-run': buildSnapshot('running', [{ eventId: 'backend-event', runId: 'backend-run', revision: 3, type: 'run:started', payload: {}, createdAt: 3 }]).run ?? undefined,
@@ -523,8 +527,14 @@ describe('teams store', () => {
       rolesByTeamId: {
         'team-1': [leaderBinding, analystBinding, otherTeamRoleBinding],
       },
+      teamRoleSessionsByTeamId: {
+        'team-1': [
+          { teamId: 'team-1', runId: 'local-run', roleId: 'leader', sessionRef: leaderBinding.localSessionId, status: 'available' },
+          { teamId: 'team-1', runId: 'backend-run', roleId: 'analyst', sessionRef: analystBinding.localSessionId, status: 'available' },
+        ],
+      },
     } as never);
-    vi.mocked(deleteTeamInstance).mockResolvedValueOnce({ teamId: 'team-1', deleted: true, deletedRunIds: ['backend-run'], deletedAgentIds: [] });
+    vi.mocked(deleteTeamLifecycle).mockResolvedValueOnce({ teamId: 'team-1', outcome: 'deleted' });
 
     await useTeamsStore.getState().deleteTeam('team-1');
 
@@ -546,26 +556,19 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
       runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-      eventsByTeamId: { 'team-1': [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }] },
-      eventsByRunId: { 'team-1-run-1.0.0-1000': [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }] },
-      eventCursorByTeamId: { 'team-1': 1 },
-      eventCursorByRunId: { 'team-1-run-1.0.0-1000': 1 },
     });
-    vi.mocked(deleteTeamInstance).mockRejectedValueOnce(new Error('team runtime delete failed'));
+    vi.mocked(deleteTeamLifecycle).mockRejectedValueOnce(new Error('team lifecycle delete failed'));
 
-    await expect(useTeamsStore.getState().deleteTeam('team-1')).rejects.toThrow('team runtime delete failed');
+    await expect(useTeamsStore.getState().deleteTeam('team-1')).rejects.toThrow('team lifecycle delete failed');
 
     const state = useTeamsStore.getState();
-    expect(deleteTeamInstance).toHaveBeenCalledWith({ teamId: 'team-1' });
-    expect(deleteTeamRun).not.toHaveBeenCalled();
+    expect(deleteTeamLifecycle).toHaveBeenCalledWith({ teamId: 'team-1', idempotencyKey: 'team-1:delete' });
     expect(state.teams).toEqual([teamMeta()]);
     expect(state.runIdsByTeamId['team-1']).toEqual(['team-1-run-1.0.0-1000']);
     expect(state.runsById['team-1-run-1.0.0-1000']).toEqual(buildSnapshot().run);
     expect(state.runByTeamId['team-1']).toEqual(buildSnapshot().run);
-    expect(state.eventCursorByTeamId['team-1']).toBe(1);
-    expect(state.eventCursorByRunId['team-1-run-1.0.0-1000']).toBe(1);
     expect(state.loadingByTeamId['team-1']).toBe(false);
-    expect(state.errorByTeamId['team-1']).toBe('team runtime delete failed');
+    expect(state.errorByTeamId['team-1']).toBe('team lifecycle delete failed');
   });
 
   it('drops persisted teams with unsafe legacy run ids', async () => {
@@ -583,101 +586,38 @@ describe('teams store', () => {
     expect(useTeamsStore.getState().activeTeamId).toBeNull();
   });
 
-  it('provisions Team agents without creating a TeamRun', async () => {
-    seedTeam({ activeRunId: undefined });
-
-    await useTeamsStore.getState().provisionTeamAgents('team-1');
-
-    expect(provisionTeamAgents).toHaveBeenCalledWith({
-      teamId: 'team-1',
-      packagePath: '.tmp/team-skill',
-      idempotencyKey: 'team-1:provision-agents:ascendc-team:1.0.0',
-      sourceType: 'teamskill',
-    });
-    expect(createTeamRun).not.toHaveBeenCalled();
-    expect(useTeamsStore.getState().teams[0]?.activeRunId).toBeUndefined();
-    expect(useTeamsStore.getState().runIdsByTeamId['team-1']).toBeUndefined();
-    expect(useTeamsStore.getState().runByTeamId['team-1']).toBeUndefined();
-  });
-
-  it('provisions manual team agents with the manual source payload', async () => {
-    const id = useTeamsStore.getState().createManualTeam({
-      displayName: 'Manual Ops Team',
-      manualTeam,
-    });
-
-    await useTeamsStore.getState().provisionTeamAgents(id);
-
-    expect(provisionTeamAgents).toHaveBeenCalledWith({
-      teamId: id,
-      packagePath: `manual:${id}`,
-      idempotencyKey: `${id}:provision-agents:manual:2026.1`,
-      sourceType: 'manual',
-      manualTeam: {
-        ...manualTeam,
-        name: 'Manual Ops Team',
-        members: manualTeam.members,
-      },
-    });
-    expect(createTeamRun).not.toHaveBeenCalled();
-    expect(useTeamsStore.getState().teams[0]?.activeRunId).toBeUndefined();
-  });
-
   it('creates a new TeamRun with a frontend-generated teamrun id without starting it', async () => {
     seedTeam({ activeRunId: undefined });
-    vi.mocked(readTeamRunSnapshot).mockImplementation(async ({ runId }) => buildSnapshot('created', [
-      { eventId: 'e1', runId, revision: 1, type: 'run:created', payload: {}, createdAt: 1 },
-    ]));
-
     const createRunPromise = useTeamsStore.getState().createRun('team-1');
-    const runId = vi.mocked(createTeamRun).mock.calls[0]?.[0].runId;
-    vi.mocked(listTeamRuns).mockResolvedValueOnce({
-      teamId: 'team-1',
-      runs: [{ ...buildSnapshot('created', [{ eventId: 'e1', runId: runId!, revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!, sessions: [] }],
-    });
+    const runId = vi.mocked(createTeamRunLifecycle).mock.calls[0]?.[0].runId;
+    vi.mocked(listTeamRunLifecycle).mockResolvedValueOnce([lifecycleRun(runId!, 'pending')]);
     await createRunPromise;
 
     expect(runId).toMatch(/^teamrun-/);
-    expect(createTeamRun).toHaveBeenCalledWith({
+    expect(createTeamRunLifecycle).toHaveBeenCalledWith({
       teamId: 'team-1',
-      packagePath: '.tmp/team-skill',
       runId,
       idempotencyKey: `team-1:create:${runId}`,
-      sourceType: 'teamskill',
     });
-    expect(listTeamRuns).toHaveBeenCalledWith({ teamId: 'team-1' });
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId, eventCursor: undefined, eventLimit: 200 });
+    expect(listTeamRunLifecycle).toHaveBeenCalledWith({ teamId: 'team-1' });
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId });
     expect(useTeamsStore.getState().teams[0]?.activeRunId).toBe(runId);
     expect(useTeamsStore.getState().runIdsByTeamId['team-1']).toEqual([runId]);
-    expect(useTeamsStore.getState().runByTeamId['team-1']?.status).toBe('created');
+    expect(useTeamsStore.getState().runByTeamId['team-1']?.graphStatus).toBe('pending');
   });
 
-  it('creates a manual TeamRun with the manual source type', async () => {
-    const id = useTeamsStore.getState().createManualTeam({
+  it('does not revive legacy run creation for a materialized manual team', async () => {
+    const id = useTeamsStore.getState().recordMaterializedManualTeam({
       displayName: 'Manual Ops Team',
       manualTeam,
-    });
-    vi.mocked(readTeamRunSnapshot).mockImplementation(async ({ runId }) => buildSnapshot('created', [
-      { eventId: 'e1', runId, revision: 1, type: 'run:created', payload: {}, createdAt: 1 },
-    ]));
+    }, 'team-manual');
 
-    const createRunPromise = useTeamsStore.getState().createRun(id);
-    const runId = vi.mocked(createTeamRun).mock.calls[0]?.[0].runId;
-    vi.mocked(listTeamRuns).mockResolvedValueOnce({
-      teamId: id,
-      runs: [{ ...buildSnapshot('created', [{ eventId: 'e1', runId: runId!, revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!, sessions: [] }],
-    });
-    await createRunPromise;
+    await expect(useTeamsStore.getState().createRun(id)).rejects.toThrow(
+      'Manual Teams are materialized and started together.',
+    );
 
-    expect(createTeamRun).toHaveBeenCalledWith({
-      teamId: id,
-      packagePath: `manual:${id}`,
-      runId,
-      idempotencyKey: `${id}:create:${runId}`,
-      sourceType: 'manual',
-    });
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId, eventCursor: undefined, eventLimit: 200 });
-    expect(useTeamsStore.getState().teams[0]?.activeRunId).toBe(runId);
+    expect(createTeamRunLifecycle).not.toHaveBeenCalled();
   });
 
   it('creates a new TeamRun without renderer-side graph copying', async () => {
@@ -694,21 +634,32 @@ describe('teams store', () => {
         },
       },
     } as never);
-    vi.mocked(createTeamRun).mockImplementationOnce(async (payload) => ({ runId: payload.runId!, status: 'created', revision: 1 }));
-    vi.mocked(readTeamRunSnapshot).mockImplementation(async ({ runId }) => buildSnapshot('created', [
-      { eventId: 'e1', runId, revision: 1, type: 'run:created', payload: {}, createdAt: 1 },
-    ]));
-
+    vi.mocked(createTeamRunLifecycle).mockImplementationOnce(async (payload) => ({ runId: payload.runId, outcome: 'created' }));
     const createRunPromise = useTeamsStore.getState().createRun('team-1');
-    const runId = vi.mocked(createTeamRun).mock.calls[0]?.[0].runId;
-    vi.mocked(listTeamRuns).mockResolvedValueOnce({
-      teamId: 'team-1',
-      runs: [{ ...buildSnapshot('created', [{ eventId: 'e1', runId: runId!, revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!, sessions: [] }],
-    });
+    const runId = vi.mocked(createTeamRunLifecycle).mock.calls[0]?.[0].runId;
+    vi.mocked(listTeamRunLifecycle).mockResolvedValueOnce([lifecycleRun(runId!, 'pending')]);
     await createRunPromise;
 
-    expect(saveTeamRunGraphProjection).not.toHaveBeenCalled();
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId, eventCursor: undefined, eventLimit: 200 });
+    expect(saveTeamGraph).not.toHaveBeenCalled();
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId });
+  });
+
+  it('cancels the active TeamRun through the final lifecycle transport', async () => {
+    const activeRun = buildSnapshot('running').run!;
+    useTeamsStore.setState({
+      teams: [teamMeta({ activeRunId: activeRun.runId })],
+      runsById: { [activeRun.runId]: activeRun },
+      runByTeamId: { 'team-1': activeRun },
+      runIdsByTeamId: { 'team-1': [activeRun.runId] },
+    } as never);
+
+    await useTeamsStore.getState().cancelRun('team-1');
+
+    expect(beginTeamRunCancellation).toHaveBeenCalledWith({
+      runId: activeRun.runId,
+      idempotencyKey: `team-1:cancel:${activeRun.runId}`,
+    });
   });
 
   it('deletes only the selected TeamRun and switches to the most recent remaining run', async () => {
@@ -719,12 +670,14 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
       runsById: { 'teamrun-old': olderRun, 'teamrun-new': newerRun },
       runByTeamId: { 'team-1': newerRun },
-      eventsByRunId: { 'teamrun-old': [], 'teamrun-new': [] },
     });
 
     await useTeamsStore.getState().deleteRun('team-1', 'teamrun-new');
 
-    expect(deleteTeamRun).toHaveBeenCalledWith({ runId: 'teamrun-new' });
+    expect(tombstoneTeamRun).toHaveBeenCalledWith({
+      runId: 'teamrun-new',
+      idempotencyKey: 'team-1:tombstone:teamrun-new',
+    });
     expect(useTeamsStore.getState().teams[0]?.activeRunId).toBe('teamrun-old');
     expect(useTeamsStore.getState().runIdsByTeamId['team-1']).toEqual(['teamrun-old']);
     expect(useTeamsStore.getState().runsById['teamrun-new']).toBeUndefined();
@@ -742,13 +695,10 @@ describe('teams store', () => {
       runByTeamId: { 'team-1': { ...olderRun, runId: 'stale-run' } },
       rolesByTeamId: { 'team-1': [] },
     });
-    vi.mocked(listTeamRuns).mockResolvedValueOnce({
-      teamId: 'team-1',
-      runs: [
-        { ...newerRun, sessions: [] },
-        { ...olderRun, sessions: [teamRoleSessionBinding({ runId: 'teamrun-old', roleId: 'leader', agentId: 'agent-1', localSessionId: 'local:teamrun-old:leader', endpointSessionId: 'endpoint-teamrun-old-leader' })] },
-      ],
-    } as never);
+    vi.mocked(listTeamRunLifecycle).mockResolvedValueOnce([
+      lifecycleRun('teamrun-new', 'running'),
+      lifecycleRun('teamrun-old', 'completed'),
+    ]);
 
     await useTeamsStore.getState().syncRunList('team-1');
 
@@ -758,7 +708,8 @@ describe('teams store', () => {
     expect(state.runListByTeamId['team-1']?.map((run) => run.runId)).toEqual(['teamrun-new', 'teamrun-old']);
     expect(state.runsById['stale-run']).toBeUndefined();
     expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-old');
-    expect(state.rolesByTeamId['team-1']?.map((role) => role.roleId)).toEqual(['leader']);
+    expect(state.rolesByTeamId['team-1']).toEqual([]);
+    expect(state.teamRoleSessionsByTeamId['team-1']).toBeUndefined();
   });
 
   it('clears stale team projections when syncing selects a different active run', async () => {
@@ -770,65 +721,32 @@ describe('teams store', () => {
       runListByTeamId: { 'team-1': [] },
       runsById: { 'teamrun-missing': { ...olderRun, runId: 'teamrun-missing' } },
       runByTeamId: { 'team-1': { ...olderRun, runId: 'teamrun-missing' } },
-      stagesByTeamId: { 'team-1': [{ ...buildSnapshot().stages[0]!, runId: 'teamrun-missing' }] },
-      nodePromptDeliveryAttemptsByTeamId: {
-        'team-1': [{
-          deliveryRecordId: 'node-prompt-old',
-          runId: 'teamrun-missing',
-          nodeId: 'node-old',
-          nodeExecutionId: 'node-exec-old',
-          taskId: 'task-old',
-          roleId: 'operator',
-          toAgentId: 'agent-2',
-          localSessionId: 'local:teamrun-missing:operator',
-          kind: 'node.prompt',
-          title: 'Old node prompt',
-          prompt: 'Prompt',
-          status: 'pending',
-          idempotencyKey: 'node-prompt-old',
-          causationId: 'event-old',
-          createdAt: 1,
-        }],
-      },
-      eventsByTeamId: { 'team-1': [{ eventId: 'old-event', runId: 'teamrun-missing', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }] },
-      eventCursorByTeamId: { 'team-1': 1 },
     } as never);
-    vi.mocked(listTeamRuns).mockResolvedValueOnce({
-      teamId: 'team-1',
-      runs: [
-        { ...olderRun, sessions: [] },
-        { ...newerRun, sessions: [] },
-      ],
-    });
+    vi.mocked(listTeamRunLifecycle).mockResolvedValueOnce([
+      lifecycleRun('teamrun-old', 'completed'),
+      lifecycleRun('teamrun-new', 'running'),
+    ]);
 
     await useTeamsStore.getState().syncRunList('team-1');
 
     const state = useTeamsStore.getState();
-    expect(state.teams[0]?.activeRunId).toBe('teamrun-new');
-    expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-new');
-    expect(state.stagesByTeamId['team-1']).toEqual([]);
-    expect(state.nodePromptDeliveryAttemptsByTeamId['team-1']).toEqual([]);
-    expect(state.eventsByTeamId['team-1']).toEqual([]);
-    expect(state.eventCursorByTeamId['team-1']).toBeUndefined();
+    expect(state.teams[0]?.activeRunId).toBe('teamrun-old');
+    expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-old');
+    expect(state.publicProjectionByTeamId['team-1']).toBeUndefined();
+    expect(state.approvalsByTeamId['team-1']).toEqual([]);
   });
 
-  it('switches active run projection with the run list role session bindings', () => {
+  it('switches active run without deriving role sessions from the run list', () => {
     const olderRun = buildSnapshot('completed', [{ eventId: 'e1', runId: 'teamrun-old', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!;
     const newerRun = buildSnapshot('running', [{ eventId: 'e2', runId: 'teamrun-new', revision: 2, type: 'run:created', payload: {}, createdAt: 2 }]).run!;
-    const oldLeader = teamRoleSessionBinding({ runId: 'teamrun-old', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-old-leader' });
-    const newLeader = teamRoleSessionBinding({ runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-new-leader' });
+    const roleChatBinding = teamRoleSessionBinding({ runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-new-leader' });
     useTeamsStore.setState({
       teams: [teamMeta({ activeRunId: 'teamrun-new' })],
       runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
-      runListByTeamId: {
-        'team-1': [
-          { ...olderRun, sessions: [oldLeader] },
-          { ...newerRun, sessions: [newLeader] },
-        ],
-      },
+      runListByTeamId: { 'team-1': [olderRun, newerRun] },
       runsById: { 'teamrun-old': olderRun, 'teamrun-new': newerRun },
       runByTeamId: { 'team-1': newerRun },
-      rolesByTeamId: { 'team-1': [newLeader] },
+      rolesByTeamId: { 'team-1': [roleChatBinding] },
     });
 
     useTeamsStore.getState().setActiveRun('team-1', 'teamrun-old');
@@ -836,10 +754,10 @@ describe('teams store', () => {
     const state = useTeamsStore.getState();
     expect(state.teams[0]?.activeRunId).toBe('teamrun-old');
     expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-old');
-    expect(state.rolesByTeamId['team-1']).toEqual([oldLeader]);
+    expect(state.rolesByTeamId['team-1']).toEqual([roleChatBinding]);
   });
 
-  it('switches active run projection before refreshing that run snapshot', async () => {
+  it('refreshes selected active-run graph and approvals through independent final projections', async () => {
     const olderRun = buildSnapshot('completed', [{ eventId: 'e1', runId: 'teamrun-old', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!;
     const newerRun = buildSnapshot('running', [{ eventId: 'e2', runId: 'teamrun-new', revision: 2, type: 'run:created', payload: {}, createdAt: 2 }]).run!;
     useTeamsStore.setState({
@@ -847,52 +765,18 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
       runsById: { 'teamrun-old': olderRun, 'teamrun-new': newerRun },
       runByTeamId: { 'team-1': newerRun },
-      eventsByRunId: { 'teamrun-old': [{ eventId: 'e1', runId: 'teamrun-old', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }] },
-      eventCursorByRunId: { 'teamrun-old': 1 },
     });
-    vi.mocked(readTeamRunSnapshot).mockResolvedValue(buildSnapshot('completed', [
-      { eventId: 'e3', runId: 'teamrun-old', revision: 2, type: 'run:completed', payload: {}, createdAt: 3 },
-    ]));
 
     useTeamsStore.getState().setActiveRun('team-1', 'teamrun-old');
-    await useTeamsStore.getState().refreshSnapshot('team-1');
+    await useTeamsStore.getState().refreshActiveRunViews('team-1');
 
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId: 'teamrun-old', eventCursor: 1, eventLimit: 200 });
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'teamrun-old' });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'teamrun-old' });
     expect(useTeamsStore.getState().teams[0]?.activeRunId).toBe('teamrun-old');
     expect(useTeamsStore.getState().runByTeamId['team-1']?.runId).toBe('teamrun-old');
   });
 
-  it('keeps the run list order when refreshing an existing active run snapshot', async () => {
-    const olderRun = buildSnapshot('completed', [{ eventId: 'e1', runId: 'teamrun-old', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!;
-    const middleRun = buildSnapshot('running', [{ eventId: 'e2', runId: 'teamrun-middle', revision: 2, type: 'run:created', payload: {}, createdAt: 2 }]).run!;
-    const newerRun = buildSnapshot('completed', [{ eventId: 'e3', runId: 'teamrun-new', revision: 3, type: 'run:created', payload: {}, createdAt: 3 }]).run!;
-    useTeamsStore.setState({
-      teams: [teamMeta({ activeRunId: 'teamrun-middle' })],
-      runIdsByTeamId: { 'team-1': ['teamrun-new', 'teamrun-middle', 'teamrun-old'] },
-      runListByTeamId: {
-        'team-1': [
-          { ...newerRun, sessions: [] },
-          { ...middleRun, sessions: [] },
-          { ...olderRun, sessions: [] },
-        ],
-      },
-      runsById: { 'teamrun-old': olderRun, 'teamrun-middle': middleRun, 'teamrun-new': newerRun },
-      runByTeamId: { 'team-1': middleRun },
-      eventsByRunId: { 'teamrun-middle': [] },
-      eventCursorByRunId: { 'teamrun-middle': 0 },
-    });
-    vi.mocked(readTeamRunSnapshot).mockResolvedValue(buildSnapshot('completed', [
-      { eventId: 'e4', runId: 'teamrun-middle', revision: 4, type: 'run:completed', payload: {}, createdAt: 4 },
-    ]));
-
-    await useTeamsStore.getState().refreshSnapshot('team-1');
-
-    const runList = useTeamsStore.getState().runListByTeamId['team-1'];
-    expect(runList?.map((run) => run.runId)).toEqual(['teamrun-new', 'teamrun-middle', 'teamrun-old']);
-    expect(runList?.[1]?.status).toBe('completed');
-  });
-
-  it('keeps stale snapshot responses from overwriting the current team projection', async () => {
+  it('does not let stale final projection responses overwrite a newly selected run', async () => {
     const oldRun = buildSnapshot('running', [{ eventId: 'old-start', runId: 'teamrun-old', revision: 1, type: 'run:started', payload: {}, createdAt: 1 }]).run!;
     const newRun = buildSnapshot('created', [{ eventId: 'new-created', runId: 'teamrun-new', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!;
     useTeamsStore.setState({
@@ -900,141 +784,71 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
       runsById: { 'teamrun-old': oldRun, 'teamrun-new': newRun },
       runByTeamId: { 'team-1': oldRun },
-      stagesByTeamId: { 'team-1': [{ ...buildSnapshot().stages[0]!, runId: 'teamrun-old' }] },
-      nodePromptDeliveryAttemptsByTeamId: { 'team-1': [] },
-      eventsByRunId: { 'teamrun-old': [] },
-      eventCursorByRunId: { 'teamrun-old': 0 },
     });
-    let releaseSnapshot!: () => void;
-    vi.mocked(readTeamRunSnapshot).mockReturnValueOnce(new Promise((resolve) => {
-      releaseSnapshot = () => resolve({
-        ...buildSnapshot('completed', [{ eventId: 'old-completed', runId: 'teamrun-old', revision: 2, type: 'run:completed', payload: {}, createdAt: 2 }]),
-        nodePromptDeliveries: [{
-          deliveryRecordId: 'node-prompt-old',
-          runId: 'teamrun-old',
-          nodeId: 'node-old',
-          nodeExecutionId: 'node-exec-old',
-          taskId: 'task-old',
-          roleId: 'operator',
-          toAgentId: 'agent-2',
-          localSessionId: 'local:teamrun-missing:operator',
-          kind: 'node.prompt',
-          title: 'Old node prompt',
-          prompt: 'Prompt',
-          status: 'delivered',
-          idempotencyKey: 'node-prompt-old',
-          causationId: 'old-completed',
-          createdAt: 2,
-        }],
-      } as never);
+    let releaseProjection!: () => void;
+    let releaseApprovals!: () => void;
+    vi.mocked(readTeamPublicProjection).mockReturnValueOnce(new Promise((resolve) => {
+      releaseProjection = () => resolve({
+        teamId: 'team-1', runId: 'teamrun-old', teamRevision: 1, runtime: 'confirmed',
+        graph: { graphId: 'graph:old', workflowPlanId: 'plan:old', title: 'Old graph', status: 'completed', nodes: [], edges: [] },
+      });
+    }));
+    vi.mocked(readTeamPendingApprovals).mockReturnValueOnce(new Promise((resolve) => {
+      releaseApprovals = () => resolve({ teamId: 'team-1', runId: 'teamrun-old', approvals: [] });
     }));
 
-    const refresh = useTeamsStore.getState().refreshSnapshot('team-1');
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId: 'teamrun-old', eventCursor: 0, eventLimit: 200 });
-
+    const refresh = useTeamsStore.getState().refreshActiveRunViews('team-1');
     useTeamsStore.getState().setActiveRun('team-1', 'teamrun-new');
-    releaseSnapshot();
+    releaseProjection();
+    releaseApprovals();
     await refresh;
 
     const state = useTeamsStore.getState();
     expect(state.teams[0]?.activeRunId).toBe('teamrun-new');
-    expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-new');
-    expect(state.stagesByTeamId['team-1']).toEqual([]);
-    expect(state.nodePromptDeliveryAttemptsByTeamId['team-1']).toEqual([]);
-    expect(state.eventsByTeamId['team-1']).toEqual([]);
-    expect(state.eventsByRunId['teamrun-old']?.map((event) => event.eventId)).toEqual(['old-completed']);
-    expect(state.eventCursorByRunId['teamrun-old']).toBe(2);
+    expect(state.publicProjectionByTeamId['team-1']).toBeUndefined();
+    expect(state.approvalsByTeamId['team-1']).toEqual([]);
   });
 
-  it('merges incremental events instead of replacing history', async () => {
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-      eventsByTeamId: {
-        'team-1': [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }],
-      },
-      eventsByRunId: {
-        'team-1-run-1.0.0-1000': [{ eventId: 'e1', runId: 'team-1-run-1.0.0-1000', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }],
-      },
-      eventCursorByRunId: { 'team-1-run-1.0.0-1000': 1 },
-    });
-    vi.mocked(readTeamRunSnapshot).mockResolvedValue(buildSnapshot('running', [
-      { eventId: 'e2', runId: 'team-1-run-1.0.0-1000', revision: 2, type: 'run:started', payload: {}, createdAt: 2 },
-    ]));
-
-    await useTeamsStore.getState().refreshSnapshot('team-1');
-
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId: 'team-1-run-1.0.0-1000', eventCursor: 1, eventLimit: 200 });
-    expect(useTeamsStore.getState().eventsByTeamId['team-1']?.map((event) => event.eventId)).toEqual(['e1', 'e2']);
-  });
-
-  it('saves graph projection through the active TeamRun and updates local graph state', async () => {
-    useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot().run ?? undefined } });
+  it('saves a complete graph definition through the fixed Team graph delivery', async () => {
     const graph = {
-      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1' }],
-      edges: [{ edgeId: 'edge-1', sourceNodeId: 'node-1', targetNodeId: 'node-2', sourcePort: 'completed' }],
-      status: 'running',
-      updatedAt: 222,
+      graphId: 'graph:team-1',
+      workflowPlanId: 'plan:team-1',
+      runId: 'team-1-run-1.0.0-1000',
+      title: 'Team graph',
+      nodes: [
+        { nodeId: 'start', kind: 'start', title: 'Start', maxAttempts: 1, trigger: null },
+        { nodeId: 'work', kind: 'work', title: 'Task 1', maxAttempts: 1, taskId: 'task:one', roleId: 'role:one' },
+        { nodeId: 'end', kind: 'end', title: 'End', maxAttempts: 1 },
+      ],
+      edges: [
+        { edgeId: 'start-work', sourceNodeId: 'start', targetNodeId: 'work', sourcePort: 'completed', targetPort: 'input', action: 'activate' },
+        { edgeId: 'work-end', sourceNodeId: 'work', targetNodeId: 'end', sourcePort: 'completed', targetPort: 'input', action: 'finish' },
+      ],
     };
+    useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot().run ?? undefined } });
 
     await useTeamsStore.getState().saveGraph('team-1', graph);
 
-    expect(saveTeamRunGraphProjection).toHaveBeenCalledWith({
-      runId: 'team-1-run-1.0.0-1000',
-      graph,
-      idempotencyKey: 'team-1:graph-save:team-1-run-1.0.0-1000:222',
+    expect(saveTeamGraph).toHaveBeenCalledWith({
+      teamId: 'team-1',
+      graph: {
+        graphId: 'graph:team-1',
+        workflowPlanId: 'plan:team-1',
+        runId: 'team-1-run-1.0.0-1000',
+        title: 'Team graph',
+        nodes: [
+          { id: 'start', kind: 'start', title: 'Start', maxAttempts: 1, trigger: null },
+          { id: 'work', kind: 'work', title: 'Task 1', maxAttempts: 1, work: { taskId: 'task:one', roleId: 'role:one' } },
+          { id: 'end', kind: 'end', title: 'End', maxAttempts: 1 },
+        ],
+        edges: [
+          { id: 'start-work', from: 'start', to: 'work', sourcePort: 'completed', targetPort: 'input', action: 'activate' },
+          { id: 'work-end', from: 'work', to: 'end', sourcePort: 'completed', targetPort: 'input', action: 'finish' },
+        ],
+      },
+      idempotencyKey: expect.stringMatching(/^team-1:graph-save:team-1-run-1\.0\.0-1000:graph:/),
     });
-    expect(useTeamsStore.getState().graphByTeamId['team-1']).toEqual({
-      ...graph,
-      runId: 'team-1-run-1.0.0-1000',
-      updatedAt: 222,
-    });
-  });
-
-  it('normalizes malformed graph entries when patching a TeamRun snapshot', async () => {
-    const snapshot = buildSnapshot('running');
-    snapshot.graph = {
-      runId: 'team-1-run-1.0.0-1000',
-      status: 'running',
-      nodes: [
-        undefined,
-        { title: 'Malformed node without id' },
-        { nodeId: 'analysis-work-node', title: 'Work node without kind', status: 'running' },
-        { nodeId: 'review-node', kind: 'review', title: 'Review work', status: 'pending' },
-      ],
-      edges: [
-        undefined,
-        { edgeId: 'malformed-edge-without-endpoints' },
-        { edgeId: 'missing-target-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'missing-node' },
-        { edgeId: 'review-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'review-node', sourcePort: 'completed' },
-      ],
-      updatedAt: 300,
-    } as unknown as TeamGraphSnapshotRecord;
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': snapshot.run ?? undefined },
-      runByTeamId: { 'team-1': snapshot.run ?? undefined },
-    } as never);
-    vi.mocked(readTeamRunSnapshot).mockResolvedValueOnce(snapshot);
-
-    await useTeamsStore.getState().refreshSnapshot('team-1', { force: true });
-
-    expect(useTeamsStore.getState().graphByTeamId['team-1']).toEqual({
-      runId: 'team-1-run-1.0.0-1000',
-      status: 'running',
-      nodes: [
-        { nodeId: 'analysis-work-node', title: 'Work node without kind', status: 'running' },
-        { nodeId: 'review-node', kind: 'review', title: 'Review work', status: 'pending' },
-      ],
-      edges: [
-        { edgeId: 'missing-target-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'missing-node' },
-        { edgeId: 'review-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'review-node', sourcePort: 'completed' },
-      ],
-      updatedAt: 300,
-    });
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
   });
 
   it('exports graph YAML through the active TeamRun without mutating graph state', async () => {
@@ -1052,51 +866,52 @@ describe('teams store', () => {
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
       graphByTeamId: { 'team-1': graph },
     } as never);
-    vi.mocked(exportTeamRunGraphYaml).mockResolvedValueOnce({
-      fileName: 'unsafe:name.yaml',
+    vi.mocked(exportTeamGraphYaml).mockResolvedValueOnce({
+      runId: 'team-1-run-1.0.0-1000',
       yaml: 'nodes:\n  - id: node-1\n',
     });
 
     const result = await useTeamsStore.getState().exportGraphYaml('team-1');
 
-    expect(exportTeamRunGraphYaml).toHaveBeenCalledWith({ runId: 'team-1-run-1.0.0-1000' });
-    expect(result).toEqual({ fileName: 'unsafe:name.yaml', yaml: 'nodes:\n  - id: node-1\n' });
+    expect(exportTeamGraphYaml).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
+    expect(result).toEqual({ fileName: 'team-1-run-1.0.0-1000.team-graph.yaml', runId: 'team-1-run-1.0.0-1000', yaml: 'nodes:\n  - id: node-1\n' });
     expect(useTeamsStore.getState().graphByTeamId['team-1']).toBe(graph);
-    expect(saveTeamRunGraphProjection).not.toHaveBeenCalled();
+    expect(saveTeamGraph).not.toHaveBeenCalled();
   });
 
-  it('imports graph YAML through the active TeamRun and patches the returned graph snapshot', async () => {
-    const snapshot = buildSnapshot('running');
-    snapshot.graph = {
-      runId: 'team-1-run-1.0.0-1000',
-      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1' }],
-      edges: [],
-      status: 'running',
-      updatedAt: 300,
-    };
+  it('imports graph YAML through the fixed Team graph delivery and refreshes active views', async () => {
     useTeamsStore.setState({
       teams: [teamMeta()],
       runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': snapshot.run ?? undefined },
-      runByTeamId: { 'team-1': snapshot.run ?? undefined },
+      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
+      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
     } as never);
-    vi.mocked(importTeamRunGraphYaml).mockResolvedValueOnce({ success: true, imported: true, snapshot });
+    vi.mocked(importTeamGraphYaml).mockResolvedValueOnce({ runId: 'team-1-run-1.0.0-1000' });
 
     const result = await useTeamsStore.getState().importGraphYaml('team-1', 'nodes:\n  - id: node-1\n');
 
-    expect(importTeamRunGraphYaml).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'team-1-run-1.0.0-1000',
+    expect(importTeamGraphYaml).toHaveBeenCalledWith({
+      teamId: 'team-1',
       yaml: 'nodes:\n  - id: node-1\n',
-    }));
-    expect(result.imported).toBe(true);
-    expect(useTeamsStore.getState().graphByTeamId['team-1']).toEqual(snapshot.graph);
+      idempotencyKey: expect.stringMatching(/^team-1:graph-import-yaml:team-1-run-1\.0\.0-1000:yaml:/),
+    });
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
+    expect(result).toEqual({ runId: 'team-1-run-1.0.0-1000' });
   });
 
-  it('stores graph save errors without silently accepting failed saves', async () => {
+  it('stores fixed Team graph delivery errors without silently accepting failed saves', async () => {
     useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot().run ?? undefined } });
-    vi.mocked(saveTeamRunGraphProjection).mockRejectedValueOnce(new Error('Save failed'));
+    vi.mocked(saveTeamGraph).mockRejectedValueOnce(new Error('Save failed'));
 
-    await expect(useTeamsStore.getState().saveGraph('team-1', { nodes: [], edges: [], status: 'running' })).rejects.toThrow('Save failed');
+    await expect(useTeamsStore.getState().saveGraph('team-1', {
+      graphId: 'graph:team-1',
+      workflowPlanId: 'plan:team-1',
+      runId: 'team-1-run-1.0.0-1000',
+      title: 'Team graph',
+      nodes: [],
+      edges: [],
+    })).rejects.toThrow('Save failed');
 
     expect(useTeamsStore.getState().errorByTeamId['team-1']).toBe('Save failed');
   });
@@ -1128,8 +943,8 @@ describe('teams store', () => {
       },
     });
     let releaseSubmit!: () => void;
-    vi.mocked(submitTeamRunRoleMessage).mockReturnValueOnce(new Promise((resolve) => {
-      releaseSubmit = () => resolve({ success: true, submitted: true, snapshot: buildSnapshot() });
+    vi.mocked(submitTeamRoleChat).mockReturnValueOnce(new Promise((resolve) => {
+      releaseSubmit = () => resolve({ success: true, outcome: 'accepted' });
     }));
 
     const submit = useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '立刻显示这句');
@@ -1154,10 +969,11 @@ describe('teams store', () => {
     expect(optimisticRecord?.runtime.runPhase).toBe('submitted');
     expect(optimisticRecord?.runtime.activeRunId).toBe(optimisticItems[0]?.messageId);
     expect(optimisticRecord?.runtime.activeTurnItemKey).toBe(optimisticItems[1]?.key);
-    expect(submitTeamRunRoleMessage).toHaveBeenCalledWith(expect.objectContaining({
+    expect(submitTeamRoleChat).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-1',
       runId: 'team-1-run-1.0.0-1000',
       roleId: 'leader',
-      text: '立刻显示这句',
+      message: '立刻显示这句',
       idempotencyKey: optimisticItems[0]?.messageId,
     }));
 
@@ -1175,49 +991,27 @@ describe('teams store', () => {
       },
       runByTeamId: { 'team-1': buildSnapshot('running', [{ eventId: 'active-event', runId: 'team-1-run-active', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined },
     });
-    const snapshot = buildSnapshot('running', [
-      { eventId: 'role-message-1', runId: 'team-1-run-requested', revision: 3, type: 'role_message.submitted', payload: {}, createdAt: 3 },
-    ]);
-    vi.mocked(submitTeamRunRoleMessage).mockResolvedValueOnce({ success: true, submitted: true, snapshot });
+    vi.mocked(submitTeamRoleChat).mockResolvedValueOnce({ success: true, outcome: 'accepted' });
 
     await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '  Analyze Anthropic Series B  ', 'team-1-run-requested');
 
-    expect(submitTeamRunRoleMessage).toHaveBeenCalledWith({
+    expect(submitTeamRoleChat).toHaveBeenCalledWith({
+      teamId: 'team-1',
       runId: 'team-1-run-requested',
       roleId: 'leader',
-      text: '  Analyze Anthropic Series B  ',
+      message: '  Analyze Anthropic Series B  ',
       idempotencyKey: expect.stringMatching(/^team-1:role-message:team-1-run-requested:leader:message:/),
     });
-    expect(useTeamsStore.getState().eventsByTeamId['team-1']?.map((event) => event.eventId)).toEqual(['role-message-1']);
     expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(false);
   });
 
-  it('resolves Team role chat targets from canonical role identities across run list and binding projections', () => {
-    const runListLeader = teamRoleSessionBinding({ runId: 'run-from-list', roleId: 'leader', agentId: 'leader-agent' });
+  it('resolves Team role chat targets only from its binding owner', () => {
     const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
-    const runFromList = buildSnapshot('running', [
-      { eventId: 'run-list-event', runId: 'run-from-list', revision: 1, type: 'run:started', payload: {}, createdAt: 1 },
-    ]).run!;
     const targetsByIdentityKey = buildTeamRoleChatTargetByIdentityKey({
       teams: [teamMeta({ activeRunId: 'different-active-run' })],
-      runListByTeamId: {
-        'team-1': [{
-          ...runFromList,
-          sessions: [runListLeader],
-        }],
-      },
       rolesByTeamId: { 'team-1': [bindingAnalyst] },
     });
 
-    expect(resolveTeamRoleChatTarget(targetsByIdentityKey, runListLeader.sessionIdentity)).toMatchObject({
-      teamId: 'team-1',
-      runId: 'run-from-list',
-      roleId: 'leader',
-      agentId: 'leader-agent',
-      localSessionId: runListLeader.localSessionId,
-      endpointSessionId: `agent:leader-agent:${runListLeader.endpointSessionId}`,
-      sessionIdentity: runListLeader.sessionIdentity,
-    });
     expect(resolveTeamRoleChatTarget(targetsByIdentityKey, bindingAnalyst.sessionIdentity)).toMatchObject({
       teamId: 'team-1',
       runId: 'run-from-bindings',
@@ -1230,26 +1024,13 @@ describe('teams store', () => {
     expect(resolveTeamRoleChatTarget(targetsByIdentityKey, createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent'))).toBeNull();
   });
 
-  it('exposes Team role chat target resolution through the Teams store contract', () => {
-    const runListLeader = teamRoleSessionBinding({ runId: 'run-from-list', roleId: 'leader', agentId: 'leader-agent' });
+  it('exposes Team role chat target resolution through its binding store contract', () => {
     const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
-    const runFromList = buildSnapshot('running', [
-      { eventId: 'run-list-event', runId: 'run-from-list', revision: 1, type: 'run:started', payload: {}, createdAt: 1 },
-    ]).run!;
     useTeamsStore.setState({
       teams: [teamMeta({ activeRunId: 'different-active-run' })],
-      runListByTeamId: {
-        'team-1': [{ ...runFromList, sessions: [runListLeader] }],
-      },
       rolesByTeamId: { 'team-1': [bindingAnalyst] },
     } as never);
 
-    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: runListLeader.sessionIdentity })).toMatchObject({
-      teamId: 'team-1',
-      runId: 'run-from-list',
-      roleId: 'leader',
-      endpointSessionId: `agent:leader-agent:${runListLeader.endpointSessionId}`,
-    });
     expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toMatchObject({
       teamId: 'team-1',
       runId: 'run-from-bindings',
@@ -1258,6 +1039,56 @@ describe('teams store', () => {
     });
     expect(useTeamsStore.getState().isTeamRoleSession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toBe(true);
     expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent') })).toBeNull();
+  });
+
+  it('resolves sealed role-session refs only to already materialized local records', () => {
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:leader:local-session', 'leader');
+    const index = buildTeamRoleSessionIndex({
+      teamRoleSessionsByTeamId: {
+        'team-1': [
+          { teamId: 'team-1', runId: 'run-1', roleId: 'leader', sessionRef: 'agent:leader:local-session', status: 'available' },
+          { teamId: 'team-1', runId: 'run-1', roleId: 'missing', sessionRef: 'agent:missing:local-session', status: 'available' },
+        ],
+      },
+      loadedSessions: {
+        [buildSessionRecordKey(sessionIdentity)]: sessionRecord('agent:leader:local-session', 'leader', 'idle', sessionIdentity).record,
+      },
+    });
+
+    expect(index.byRunId.get('run-1')).toEqual([
+      { teamId: 'team-1', runId: 'run-1', roleId: 'leader', sessionRef: 'agent:leader:local-session', status: 'available' },
+    ]);
+    expect(index.localRecordKeyBySessionRef.get('agent:leader:local-session')).toBe(buildSessionRecordKey(sessionIdentity));
+    expect(index.localRecordKeyBySessionRef.has('agent:missing:local-session')).toBe(false);
+    expect([...index.localSessionKeys]).toEqual([buildSessionRecordKey(sessionIdentity)]);
+    expect(index.byRunId.get('run-1')?.[0]).not.toHaveProperty('sessionIdentity');
+    expect(index.byRunId.get('run-1')?.[0]).not.toHaveProperty('endpointSessionId');
+    expect([...index.localRecordKeyBySessionRef.values()]).not.toContain(sessionIdentity.sessionKey);
+  });
+
+  it('replaces sealed role-session projections after a tombstone refresh', async () => {
+    seedTeam();
+    vi.mocked(readTeamRoleSessions)
+      .mockResolvedValueOnce([{
+        teamId: 'team-1',
+        runId: 'run-1',
+        roleId: 'analyst',
+        sessionRef: 'local:analyst',
+        status: 'available',
+      }])
+      .mockResolvedValueOnce([]);
+
+    await useTeamsStore.getState().refreshTeamRoleSessions('team-1');
+    expect(useTeamsStore.getState().teamRoleSessionsByTeamId['team-1']).toEqual([{
+      teamId: 'team-1',
+      runId: 'run-1',
+      roleId: 'analyst',
+      sessionRef: 'local:analyst',
+      status: 'available',
+    }]);
+
+    await useTeamsStore.getState().refreshTeamRoleSessions('team-1');
+    expect(useTeamsStore.getState().teamRoleSessionsByTeamId['team-1']).toEqual([]);
   });
 
   it('resolves Team role probes by local, endpoint, and materialized session keys', () => {
@@ -1270,7 +1101,6 @@ describe('teams store', () => {
     });
     const index = buildTeamRoleChatTargetIndex({
       teams: [teamMeta()],
-      runListByTeamId: {},
       rolesByTeamId: { 'team-1': [leader] },
     });
     const materializedSessionKey = `agent:leader-agent:${leader.endpointSessionId}`;
@@ -1295,12 +1125,11 @@ describe('teams store', () => {
     const leader = teamRoleSessionBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
     const input = {
       teams: [teamMeta()],
-      runListByTeamId: {},
       rolesByTeamId: { 'team-1': [leader] },
     };
     const firstIndex = selectTeamRoleChatTargetIndex(input);
     const secondIndex = selectTeamRoleChatTargetIndex(input);
-    const emptyIndex = buildTeamRoleChatTargetIndex({ teams: [], runListByTeamId: {}, rolesByTeamId: {} });
+    const emptyIndex = buildTeamRoleChatTargetIndex({ teams: [], rolesByTeamId: {} });
 
     expect(secondIndex).toBe(firstIndex);
     expect(isKnownTeamRoleSession(firstIndex, { sessionIdentity: leader.sessionIdentity })).toBe(true);
@@ -1326,7 +1155,7 @@ describe('teams store', () => {
       runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
     });
-    vi.mocked(submitTeamRunRoleMessage).mockRejectedValueOnce(new Error('Team role session runtime is unavailable'));
+    vi.mocked(submitTeamRoleChat).mockRejectedValueOnce(new Error('Team role session runtime is unavailable'));
 
     const leaderBinding = teamRoleSessionBinding({ runId: 'team-1-run-1.0.0-1000', roleId: 'leader', agentId: 'leader-agent' });
     const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'idle', leaderBinding.sessionIdentity);
@@ -1345,28 +1174,29 @@ describe('teams store', () => {
     expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(false);
   });
 
-  it('refreshes the TeamRun snapshot after role message submit when the command returns no snapshot', async () => {
+  it('refreshes active views after role message submit', async () => {
     useTeamsStore.setState({
       teams: [teamMeta()],
       runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
       runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
     });
-    vi.mocked(submitTeamRunRoleMessage).mockResolvedValueOnce({ success: true, submitted: true });
+    vi.mocked(submitTeamRoleChat).mockResolvedValueOnce({ success: true, outcome: 'accepted' });
 
     await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', 'hello');
 
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({ runId: 'team-1-run-1.0.0-1000', eventCursor: undefined, eventLimit: 200 });
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'team-1-run-1.0.0-1000' });
   });
 
-  it('guards duplicate in-flight resume actions and creates a new id for the next explicit resume', async () => {
-    useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot().run ?? undefined } });
+  it('guards duplicate in-flight resume actions while sending the sealed request only once', async () => {
+    useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] } });
     let releaseFirstResume!: () => void;
-    vi.mocked(resumeTeam)
+    vi.mocked(resumeTeamRunLifecycle)
       .mockReturnValueOnce(new Promise((resolve) => {
-        releaseFirstResume = () => resolve({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [] });
+        releaseFirstResume = () => resolve([]);
       }))
-      .mockResolvedValueOnce({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [] });
+      .mockResolvedValueOnce([]);
 
     const firstResume = useTeamsStore.getState().resumeRun('team-1');
     const duplicateResume = useTeamsStore.getState().resumeRun('team-1');
@@ -1374,57 +1204,42 @@ describe('teams store', () => {
     await Promise.all([firstResume, duplicateResume]);
     await useTeamsStore.getState().resumeRun('team-1');
 
-    expect(resumeTeam).toHaveBeenCalledTimes(2);
-    const firstIdempotencyKey = vi.mocked(resumeTeam).mock.calls[0]?.[0].idempotencyKey;
-    const secondIdempotencyKey = vi.mocked(resumeTeam).mock.calls[1]?.[0].idempotencyKey;
-    expect(vi.mocked(resumeTeam).mock.calls[0]?.[0].teamId).toBe('team-1');
-    expect(firstIdempotencyKey).toMatch(/^team-1:resume:/);
-    expect(secondIdempotencyKey).toMatch(/^team-1:resume:/);
-    expect(secondIdempotencyKey).not.toBe(firstIdempotencyKey);
+    expect(resumeTeamRunLifecycle).toHaveBeenCalledTimes(2);
+    expect(resumeTeamRunLifecycle).toHaveBeenCalledWith({ teamId: 'team-1' });
   });
 
-  it('resumes the Team through the TeamRuntime team-level operation', async () => {
+  it('resumes the Team through the sealed lifecycle transport', async () => {
     useTeamsStore.setState({ teams: [teamMeta()] });
 
     await useTeamsStore.getState().resumeRun('team-1');
 
-    expect(resumeTeam).toHaveBeenCalledWith(expect.objectContaining({
-      teamId: 'team-1',
-      idempotencyKey: expect.stringMatching(/^team-1:resume:/),
-    }));
+    expect(resumeTeamRunLifecycle).toHaveBeenCalledWith({ teamId: 'team-1' });
   });
 
-  it('selects a restored active run from team resume before refreshing snapshot', async () => {
+  it('selects an active resumed run before refreshing its final views', async () => {
     useTeamsStore.setState({ teams: [teamMeta({ activeRunId: undefined })] });
-    vi.mocked(resumeTeam).mockResolvedValueOnce({
-      success: true,
-      teamId: 'team-1',
-      restoredRunIds: ['run-restored'],
-      activeRunIds: ['run-restored'],
-      skippedTerminalRunIds: [],
-    });
-    vi.mocked(readTeamRunSnapshot).mockResolvedValueOnce(buildSnapshot('running', [
-      { eventId: 'restored-event', runId: 'run-restored', revision: 1, type: 'run:restored', payload: {}, createdAt: 1 },
-    ]));
+    vi.mocked(resumeTeamRunLifecycle).mockResolvedValueOnce([{ runId: 'run-restored', state: 'active' }]);
+    vi.mocked(listTeamRunLifecycle).mockResolvedValueOnce([lifecycleRun('run-restored', 'running')]);
 
     await useTeamsStore.getState().resumeRun('team-1');
 
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-restored' }));
+    expect(readTeamPublicProjection).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'run-restored' });
+    expect(readTeamPendingApprovals).toHaveBeenCalledWith({ teamId: 'team-1', runId: 'run-restored' });
     const state = useTeamsStore.getState();
     expect(state.teams.find((team) => team.id === 'team-1')?.activeRunId).toBe('run-restored');
-    expect(state.runByTeamId['team-1']?.runId).toBe('run-restored');
   });
 
-  it('submits decisions with waiting-context business idempotency keys', async () => {
+  it('resolves human decisions through the sealed approval transport', async () => {
     useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot('waiting_for_user').run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot('waiting_for_user').run ?? undefined } });
 
-    await useTeamsStore.getState().submitDecision('team-1', 'retry', 'Try again');
+    await useTeamsStore.getState().resolveApproval('team-1', 'approval-1', 'approve', 'Approved');
 
-    expect(submitTeamRunDecision).toHaveBeenCalledWith({
+    expect(resolveTeamHumanDecision).toHaveBeenCalledWith({
       runId: 'team-1-run-1.0.0-1000',
-      decision: 'retry',
-      note: 'Try again',
-      idempotencyKey: 'team-1:decision:team-1-run-1.0.0-1000:stage-1:2:retry',
+      approvalId: 'approval-1',
+      decision: 'approve',
+      note: 'Approved',
+      idempotencyKey: 'team-1:approval:team-1-run-1.0.0-1000:approval-1:approve',
     });
   });
 });

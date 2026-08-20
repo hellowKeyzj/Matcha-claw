@@ -180,6 +180,8 @@ const DEFAULT_POLICY: SecurityPolicy = {
   runtime: cloneRuntimeTemplate('relaxed'),
 };
 
+const SECURITY_POLICY_OUTCOME_UNKNOWN_ERROR = 'Security policy outcome is pending confirmation';
+
 let securityPolicyCache: SecurityPolicy | null = null;
 let securitySavedPolicySnapshotCache: SecurityPolicy | null = null;
 
@@ -397,7 +399,11 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
     set({ mutating: true });
     try {
       const payload: SecurityPolicy = get().policy;
-      await hostSecurityWritePolicy(payload);
+      const receipt = await hostSecurityWritePolicy(payload);
+      if (receipt.desired.outcome !== 'confirmed') {
+        set({ error: SECURITY_POLICY_OUTCOME_UNKNOWN_ERROR });
+        return;
+      }
       const nextPolicy = cloneSecurityPolicy(payload);
       const savedSnapshot = cloneSecurityPolicy(nextPolicy);
       securityPolicyCache = nextPolicy;

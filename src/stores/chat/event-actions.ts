@@ -17,27 +17,21 @@ import {
   hydrateAttachedFilesFromItems,
   loadMissingItemPreviews,
 } from './attachment-helpers';
-import {
-  getSessionRuntime,
-  patchPendingApprovalsFromSnapshot,
-  patchSessionSnapshot,
-} from './store-state-helpers';
+import { getSessionRuntime } from './store-state-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
 import { buildSessionRecordKey, findSessionRecordKey } from './session-identity';
 import {
   logRendererTodoToolDebug,
   summarizeAssistantTurnForTodoToolDebug,
-  summarizeItemsForTodoToolDebug,
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
-import { isRunActive, type ChatStoreState } from './types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type { ChatStoreState } from './types';
 import type {
   SessionItemChunkUpdateEvent,
   SessionItemUpdateEvent,
-  SessionStateSnapshot,
   SessionUpdateEvent,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/update-event';
+import type { SessionStateSnapshot } from '../../types/session/snapshot';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -74,66 +68,6 @@ function resolveSessionUpdateRecordKey(
   return buildSessionRecordKey(identity);
 }
 
-function shouldPreserveRuntimeOnInfoUpdate(input: {
-  event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
-  current: ChatStoreState['loadedSessions'][string] | undefined;
-}): boolean {
-  const runtime = input.current?.runtime;
-  if (input.event.phase !== 'unknown' || !runtime || !isRunActive(runtime)) {
-    return false;
-  }
-  const eventRunId = normalizeIdentifier(input.event.runId);
-  return !eventRunId || eventRunId === runtime.activeRunId;
-}
-
-function applySessionIdentityRecordIndexPatch(input: {
-  index: ChatStoreState['sessionRecordKeyByIdentityKey'];
-  sessionKey: string;
-  previousIdentity: SessionIdentity | null | undefined;
-  nextIdentity: SessionIdentity | null | undefined;
-}): ChatStoreState['sessionRecordKeyByIdentityKey'] {
-  const previousIdentityKey = input.previousIdentity ? buildSessionIdentityKey(input.previousIdentity) : null;
-  const nextIdentityKey = input.nextIdentity ? buildSessionIdentityKey(input.nextIdentity) : null;
-  if (
-    previousIdentityKey === nextIdentityKey
-    && (!nextIdentityKey || input.index[nextIdentityKey] === input.sessionKey)
-  ) {
-    return input.index;
-  }
-
-  const nextIndex = { ...input.index };
-  if (previousIdentityKey && nextIndex[previousIdentityKey] === input.sessionKey) {
-    delete nextIndex[previousIdentityKey];
-  }
-  if (nextIdentityKey) {
-    nextIndex[nextIdentityKey] = input.sessionKey;
-  }
-  return nextIndex;
-}
-
-function patchSessionSnapshotWithTodoToolDebug(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  sessionKey: string,
-  snapshot: SessionStateSnapshot,
-  source: string,
-): Record<string, ChatStoreState['loadedSessions'][string]> {
-  const beforeItems = state.loadedSessions[sessionKey]?.items ?? [];
-  logRendererTodoToolDebug('renderer.patch.before', {
-    source,
-    sessionKey,
-    beforeItems: summarizeItemsForTodoToolDebug(beforeItems),
-    incomingSnapshot: summarizeSnapshotForTodoToolDebug(snapshot),
-  });
-  const nextLoadedSessions = patchSessionSnapshot(state, sessionKey, snapshot);
-  const afterItems = nextLoadedSessions[sessionKey]?.items ?? [];
-  logRendererTodoToolDebug('renderer.patch.after', {
-    source,
-    sessionKey,
-    afterItems: summarizeItemsForTodoToolDebug(afterItems),
-  });
-  return nextLoadedSessions;
-}
-
 function scheduleMissingPreviewLoads(input: CreateStoreRuntimeEventActionsInput & {
   targetSessionKey: string;
   snapshot: SessionStateSnapshot;
@@ -153,45 +87,6 @@ function scheduleMissingPreviewLoads(input: CreateStoreRuntimeEventActionsInput 
       input.targetSessionKey,
       updatedItems,
     ));
-  });
-}
-
-function applySessionSnapshotPatch(
-  input: CreateStoreRuntimeEventActionsInput & {
-    targetSessionKey: string;
-    snapshot: SessionStateSnapshot;
-    source: string;
-  },
-): void {
-  const hydratedItems = hydrateAttachedFilesFromItems(input.snapshot.items);
-  const snapshot = hydratedItems === input.snapshot.items
-    ? input.snapshot
-    : { ...input.snapshot, items: hydratedItems };
-  input.set((state) => {
-    const previousIdentity = state.loadedSessions[input.targetSessionKey]?.meta.sessionIdentity;
-    const loadedSessions = patchSessionSnapshotWithTodoToolDebug(
-      state,
-      input.targetSessionKey,
-      snapshot,
-      input.source,
-    );
-    const nextIdentity = loadedSessions[input.targetSessionKey]?.meta.sessionIdentity;
-    return {
-      loadedSessions,
-      sessionRecordKeyByIdentityKey: applySessionIdentityRecordIndexPatch({
-        index: state.sessionRecordKeyByIdentityKey,
-        sessionKey: input.targetSessionKey,
-        previousIdentity,
-        nextIdentity,
-      }),
-      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, input.targetSessionKey, snapshot),
-    };
-  });
-  scheduleMissingPreviewLoads({
-    set: input.set,
-    get: input.get,
-    targetSessionKey: input.targetSessionKey,
-    snapshot,
   });
 }
 
@@ -272,28 +167,11 @@ function applySessionLifecycleEvent(
     return;
   }
 
-  const currentRecord = get().loadedSessions[targetSessionKey];
-  const snapshot = shouldPreserveRuntimeOnInfoUpdate({ event, current: currentRecord })
-    ? {
-        ...event.snapshot,
-        runtime: {
-          ...event.snapshot.runtime,
-          activeRunId: currentRecord!.runtime.activeRunId,
-          runPhase: currentRecord!.runtime.runPhase,
-          activeTurnItemKey: currentRecord!.runtime.activeTurnItemKey,
-          pendingTurnKey: currentRecord!.runtime.pendingTurnKey,
-          pendingTurnLaneKey: currentRecord!.runtime.pendingTurnLaneKey,
-          lastUserMessageAt: currentRecord!.runtime.lastUserMessageAt,
-          runtimeActivity: currentRecord!.runtime.runtimeActivity,
-        },
-      }
-    : event.snapshot;
-  applySessionSnapshotPatch({
+  scheduleMissingPreviewLoads({
     set,
     get,
     targetSessionKey,
-    snapshot,
-    source: 'session_info_update',
+    snapshot: event.snapshot,
   });
 
   if (event.phase === 'final') {
@@ -334,11 +212,10 @@ function applySessionMessageEvent(
     );
   }
 
-  applySessionSnapshotPatch({
+  scheduleMissingPreviewLoads({
     ...input,
     targetSessionKey,
     snapshot: event.snapshot,
-    source: event.sessionUpdate,
   });
 }
 
@@ -401,12 +278,11 @@ export function handleStoreSessionUpdateEvent(
     })) {
       return;
     }
-    applySessionSnapshotPatch({
+    scheduleMissingPreviewLoads({
       set,
       get,
       targetSessionKey,
       snapshot: sessionUpdate.snapshot,
-      source: 'plan',
     });
     return;
   }

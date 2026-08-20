@@ -14,20 +14,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-type SkillMock = {
-  id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  installed: boolean;
-  eligible?: boolean;
-  icon?: string;
-};
-
 const invokeIpcMock = vi.fn();
-const hostFileStagePathsMock = vi.fn();
-const hostFileStageBufferMock = vi.fn();
-const fetchSkillsMock = vi.fn(async () => {});
 
 const testSessionIdentity = {
   endpoint: {
@@ -40,47 +27,23 @@ const testSessionIdentity = {
 };
 
 const readyNotesDialogAttachment = {
-  id: 'staged-text',
+  stagedAttachmentId: 'staged-text',
   fileName: 'notes.txt',
   mimeType: 'text/plain',
   fileSize: 128,
-  stagedPath: 'C:\\tmp\\notes.txt',
   preview: null,
 };
 
-const skillsStoreState: {
-  skills: SkillMock[];
-  snapshotReady: boolean;
-  initialLoading: boolean;
-  fetchSkills: () => Promise<void>;
-} = {
-  skills: [],
-  snapshotReady: true,
-  initialLoading: false,
-  fetchSkills: fetchSkillsMock,
-};
 
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
-vi.mock('@/lib/host-api', () => ({
-  hostFileStagePaths: (...args: unknown[]) => hostFileStagePathsMock(...args),
-  hostFileStageBuffer: (...args: unknown[]) => hostFileStageBufferMock(...args),
-}));
-
-vi.mock('@/stores/skills', () => ({
-  useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
-}));
 
 describe('chat input attachments', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
-    hostFileStagePathsMock.mockReset();
-    hostFileStageBufferMock.mockReset();
-    skillsStoreState.skills = [];
-    skillsStoreState.snapshotReady = true;
-    skillsStoreState.initialLoading = false;
+    vi.stubGlobal('atob', (value: string) => Buffer.from(value, 'base64').toString('binary'));
   });
 
   it('reconnecting 时在输入框上方显示轻量恢复提示并禁用输入', () => {
@@ -97,11 +60,10 @@ describe('chat input attachments', () => {
           canceled: false,
           attachments: [
             {
-              id: 'staged-image',
+              stagedAttachmentId: 'staged-image',
               fileName: 'image.png',
               mimeType: 'image/png',
               fileSize: 1024,
-              stagedPath: 'C:\\tmp\\image.png',
               preview: 'data:image/png;base64,abc',
             },
           ],
@@ -121,7 +83,6 @@ describe('chat input attachments', () => {
     expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageOpenAttachments', {
       properties: ['openFile', 'multiSelections'],
     });
-    expect(hostFileStagePathsMock).not.toHaveBeenCalled();
     expect(screen.queryByRole('img', { name: /image\.png/i })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /preview image\.png/i }));
@@ -146,9 +107,7 @@ describe('chat input attachments', () => {
     await waitFor(() => {
       expect(screen.getByText('huge.bin')).toBeInTheDocument();
     });
-    await waitFor(() => {
-      expect(hostFileStageBufferMock).not.toHaveBeenCalled();
-    });
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', expect.anything());
     expect(screen.getByLabelText('Remove huge.bin')).toBeInTheDocument();
   });
 
@@ -170,13 +129,17 @@ describe('chat input attachments', () => {
 
     vi.stubGlobal('FileReader', ControlledFileReader);
     vi.mocked(window.electron.getPathForFile).mockReturnValue('D:\\external\\external.txt');
-    hostFileStageBufferMock.mockResolvedValue({
-      id: 'staged-external',
-      fileName: 'external.txt',
-      mimeType: 'text/plain',
-      fileSize: 16,
-      stagedPath: 'C:\\tmp\\external.txt',
-      preview: null,
+    invokeIpcMock.mockImplementation(async (channel: string) => {
+      if (channel === 'dialog:stageRendererBufferAttachment') {
+        return {
+          stagedAttachmentId: 'staged-external',
+          fileName: 'external.txt',
+          mimeType: 'text/plain',
+          fileSize: 16,
+          preview: null,
+        };
+      }
+      return null;
     });
 
     try {
@@ -192,21 +155,19 @@ describe('chat input attachments', () => {
 
       await waitFor(() => {
         expect(window.electron.getPathForFile).toHaveBeenCalledWith(file);
-        expect(hostFileStageBufferMock).toHaveBeenCalledWith({
+        expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', {
           base64: 'ZXh0ZXJuYWwtY29udGVudA==',
           fileName: 'external.txt',
           mimeType: 'text/plain',
-          sessionIdentity: testSessionIdentity,
         });
       });
-      expect(hostFileStagePathsMock).not.toHaveBeenCalled();
-      expect(screen.getByRole('button', { name: 'Open external.txt' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Open external.txt' })).toBeNull();
     } finally {
       vi.stubGlobal('FileReader', originalFileReader);
     }
   });
 
-  it('普通文件附件支持点击打开本地路径', async () => {
+  it('普通文件附件不向 renderer 投影本地路径或打开能力', async () => {
     invokeIpcMock.mockImplementation(async (channel: string, payload?: unknown) => {
       if (channel === 'dialog:stageOpenAttachments') {
         return {
@@ -222,21 +183,19 @@ describe('chat input attachments', () => {
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /open notes\.txt/i })).toBeInTheDocument();
+      expect(screen.getByText('notes.txt')).toBeInTheDocument();
     });
 
-    expect(hostFileStagePathsMock).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: /open notes\.txt/i }));
-
-    expect(invokeIpcMock).toHaveBeenCalledWith('shell:openPath', 'C:\\tmp\\notes.txt');
+    expect(screen.queryByRole('button', { name: /open notes\.txt/i })).toBeNull();
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', expect.anything());
   });
 
-  it('onSend 拒绝时保留草稿和 ready 附件', async () => {
+  it('attachment send rejection requires reselection and preserves the draft', async () => {
     const rejectedResult = {
       accepted: false,
       reason: 'error',
       error: 'Send failed',
+      attachmentReselectionRequired: true,
     };
     const onSend = vi.fn().mockResolvedValue(rejectedResult);
     invokeIpcMock.mockImplementation(async (channel: string) => {
@@ -254,7 +213,7 @@ describe('chat input attachments', () => {
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /open notes\.txt/i })).toBeInTheDocument();
+      expect(screen.getByText('notes.txt')).toBeInTheDocument();
     });
 
     const input = screen.getByPlaceholderText('input.messagePlaceholder');
@@ -264,12 +223,59 @@ describe('chat input attachments', () => {
 
     await waitFor(() => {
       expect(onSend).toHaveBeenCalledWith(draft, [
-        { ...readyNotesDialogAttachment, status: 'ready' },
+        {
+          stagedAttachmentId: 'staged-text',
+          fileName: 'notes.txt',
+          mimeType: 'text/plain',
+          fileSize: 128,
+        },
       ]);
     });
     await expect(onSend.mock.results[0]?.value).resolves.toBe(rejectedResult);
 
     expect(input).toHaveValue(draft);
-    expect(screen.getByRole('button', { name: /open notes\.txt/i })).toBeInTheDocument();
+    expect(screen.queryByText('notes.txt')).toBeNull();
+    expect(invokeIpcMock).toHaveBeenCalledWith('dialog:releaseStagedAttachments', ['staged-text']);
+    expect(screen.queryByText('Select attachments again')).toBeNull();
+    expect(screen.queryByRole('button', { name: /open notes\.txt/i })).toBeNull();
+  });
+
+  it('releases the removed staged attachment without blocking local cleanup', async () => {
+    invokeIpcMock.mockImplementation(async (channel: string) => {
+      if (channel === 'dialog:stageOpenAttachments') {
+        return { canceled: false, attachments: [readyNotesDialogAttachment] };
+      }
+      if (channel === 'dialog:releaseStagedAttachments') {
+        throw new Error('release unavailable');
+      }
+      return null;
+    });
+
+    render(<MemoryRouter><ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByLabelText('Remove notes.txt'));
+
+    await waitFor(() => {
+      expect(screen.queryByText('notes.txt')).toBeNull();
+      expect(invokeIpcMock).toHaveBeenCalledWith('dialog:releaseStagedAttachments', ['staged-text']);
+    });
+  });
+
+  it('releases unconsumed staged attachments on unmount', async () => {
+    invokeIpcMock.mockImplementation(async (channel: string) => (
+      channel === 'dialog:stageOpenAttachments'
+        ? { canceled: false, attachments: [readyNotesDialogAttachment] }
+        : null
+    ));
+
+    const view = render(<MemoryRouter><ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    view.unmount();
+
+    expect(invokeIpcMock).toHaveBeenCalledWith('dialog:releaseStagedAttachments', ['staged-text']);
   });
 });

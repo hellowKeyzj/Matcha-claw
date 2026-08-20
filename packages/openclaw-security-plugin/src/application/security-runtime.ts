@@ -19,12 +19,22 @@ import {
   runQuickAudit,
   runSkillScan,
 } from "../infrastructure/actions.js";
+import {
+  projectPublicAdvisories,
+  projectPublicAudit,
+  projectPublicIntegrity,
+  projectPublicQuickAudit,
+  projectPublicRemediationApply,
+  projectPublicRemediationPreview,
+  projectPublicRemediationRollback,
+  projectPublicSkillScan,
+  projectPublicStartupAudit,
+} from "../infrastructure/security-public-projection.js";
 import type {
   BeforeToolCallResult,
   SecurityGuardAction,
   SecurityGuardSeverity,
   SecurityAuditItem,
-  SecurityAuditQueryResult,
   SecurityCoreRuntimeConfig,
   SecurityPolicyPayload,
   SecurityStartupAuditReport,
@@ -87,36 +97,12 @@ function normalizePositiveInt(value: unknown, fallback: number): number {
   return Math.floor(raw);
 }
 
-function sortByTsDesc<T extends { ts: number }>(items: T[]): T[] {
-  return [...items].sort((a, b) => b.ts - a.ts);
-}
-
 function withHardStopBlockReason(reason: string): string {
   const base = reason.trim();
   if (base.includes(SECURITY_BLOCK_HARD_STOP_DIRECTIVE)) {
     return base;
   }
   return `${base}\n${SECURITY_BLOCK_HARD_STOP_DIRECTIVE}`;
-}
-
-function paginateAuditItems(params: Record<string, unknown>, records: SecurityAuditItem[]): SecurityAuditQueryResult {
-  const page = normalizePositiveInt(params.page, 1);
-  const pageSize = Math.min(200, normalizePositiveInt(params.pageSize, 20));
-  const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "";
-  const filtered = agentId.length > 0
-    ? records.filter((record) => !record.agentId || record.agentId === agentId)
-    : records;
-  const ordered = sortByTsDesc(filtered);
-  const total = ordered.length;
-  const offset = (page - 1) * pageSize;
-  const items = ordered.slice(offset, offset + pageSize);
-  return {
-    page,
-    pageSize,
-    total,
-    items,
-    backend: "security-core",
-  };
 }
 
 function severityToRisk(severity: string): "critical" | "high" | "medium" | "low" | "info" {
@@ -217,6 +203,7 @@ function buildEmergencyLockdownConfig(base: SecurityCoreRuntimeConfig): Security
     logDetections: true,
     allowlistedTools: [],
     allowlistedSessions: [],
+    allowPathPrefixes: [],
     allowDomains: [],
     destructiveAction: "block",
     destructiveSeverityActions: {
@@ -972,7 +959,12 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
     api.registerGatewayMethod("security.policy.sync", handlePolicySync);
 
     const handleAuditQuery = async (options: GatewayRequestHandlerOptions): Promise<void> => {
-      options.respond(true, paginateAuditItems(options.params ?? {}, auditItems));
+      const params = options.params ?? {};
+      options.respond(true, projectPublicAudit(
+        normalizePositiveInt(params.page, 1),
+        Math.min(200, normalizePositiveInt(params.pageSize, 20)),
+        auditItems,
+      ));
     };
 
     api.registerGatewayMethod("security.audit.query", handleAuditQuery);
@@ -998,7 +990,7 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
 
     api.registerGatewayMethod("security.quick_audit.run", async (options: GatewayRequestHandlerOptions) => {
       const result = await runQuickAudit(stateDir, runtimeConfig);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, projectPublicQuickAudit(result));
     });
 
     api.registerGatewayMethod("security.emergency.run", async (options: GatewayRequestHandlerOptions) => {
@@ -1051,43 +1043,47 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
 
     api.registerGatewayMethod("security.integrity.check", async (options: GatewayRequestHandlerOptions) => {
       const result = await runIntegrityCheck(stateDir);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicIntegrity(result) });
     });
 
     api.registerGatewayMethod("security.integrity.rebaseline", async (options: GatewayRequestHandlerOptions) => {
       const result = await rebuildIntegrityBaseline(stateDir);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, {
+        backend: "security-core",
+        created: Math.min(200, result.created),
+        files: result.files.slice(0, 200).map((file) => file.replaceAll("\\\\", "/").split("/").pop() ?? "unknown"),
+      });
     });
 
     api.registerGatewayMethod("security.skills.scan", async (options: GatewayRequestHandlerOptions) => {
       const scanPath = typeof options.params?.scanPath === "string" ? options.params.scanPath : undefined;
       const result = await runSkillScan({ stateDir, scanPath });
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicSkillScan(result) });
     });
 
     api.registerGatewayMethod("security.advisories.check", async (options: GatewayRequestHandlerOptions) => {
       const feedUrl = typeof options.params?.feedUrl === "string" ? options.params.feedUrl : undefined;
       const result = await checkAdvisories(feedUrl);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicAdvisories(result) });
     });
 
     api.registerGatewayMethod("security.remediation.preview", async (options: GatewayRequestHandlerOptions) => {
       const result = await remediationPreview(stateDir);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicRemediationPreview(result) });
     });
 
     api.registerGatewayMethod("security.remediation.apply", async (options: GatewayRequestHandlerOptions) => {
       const selectedActions = Array.isArray(options.params?.actions)
-        ? options.params.actions.filter((item): item is string => typeof item === "string")
+        ? options.params.actions.filter((item): item is string => typeof item === "string").slice(0, 64)
         : undefined;
       const result = await remediationApply(stateDir, selectedActions);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicRemediationApply(result) });
     });
 
     api.registerGatewayMethod("security.remediation.rollback", async (options: GatewayRequestHandlerOptions) => {
       const snapshotId = typeof options.params?.snapshotId === "string" ? options.params.snapshotId : undefined;
       const result = await remediationRollback(stateDir, snapshotId);
-      options.respond(true, { backend: "security-core", ...result });
+      options.respond(true, { backend: "security-core", ...projectPublicRemediationRollback(result) });
     });
 
     api.logger.info("[security-core] plugin registered (secureclaw-runtime + clawguardian/shield runtime guard)");

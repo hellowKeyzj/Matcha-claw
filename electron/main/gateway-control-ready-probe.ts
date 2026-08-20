@@ -1,18 +1,23 @@
-import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from './runtime-host-capabilities';
-import type { RuntimeHostManager } from './runtime-host-manager';
+import type {
+  RuntimeHostControlCommandOptions,
+  RuntimeHostControlOutcome,
+} from './runtime-host-delivery/control';
 
 export interface GatewayControlReadyResponse {
-  readonly success?: boolean;
-  readonly phase?: string;
-  readonly retryable?: boolean;
-  readonly retryAfterMs?: number;
-  readonly error?: string;
-  readonly code?: string;
-  readonly missingMethods?: readonly string[];
+  readonly ready: boolean;
+  readonly phase: 'ready' | 'starting' | 'unavailable';
+  readonly retryable: boolean;
+}
+
+export interface GatewayControlReadyCommandHost {
+  readonly command: (
+    command: { readonly name: 'openclaw.control.ready' },
+    options?: RuntimeHostControlCommandOptions,
+  ) => Promise<RuntimeHostControlOutcome>;
 }
 
 export interface GatewayControlReadyProbeDeps {
-  readonly runtimeHostManager: RuntimeHostManager;
+  readonly directHost: GatewayControlReadyCommandHost;
   readonly nowMs: () => number;
   readonly delay: (ms: number) => Promise<void>;
 }
@@ -27,73 +32,81 @@ export class GatewayControlReadinessBudgetError extends Error {
   }
 }
 
-function resolveControlReadyRetryDelayMs(attempt: number, retryAfterMs?: number): number {
-  if (Number.isFinite(retryAfterMs) && (retryAfterMs ?? 0) > 0) {
-    return Number(retryAfterMs);
-  }
+function resolveControlReadyRetryDelayMs(attempt: number): number {
   return CONTROL_READY_RETRY_DELAYS_MS[Math.min(attempt, CONTROL_READY_RETRY_DELAYS_MS.length - 1)]!;
 }
 
 export async function waitForGatewayControlReady(
   deps: GatewayControlReadyProbeDeps,
   timeoutMs: number,
-  port: number,
-  externalToken?: string,
 ): Promise<void> {
   const startedAt = deps.nowMs();
   const deadlineMs = startedAt + timeoutMs;
   const budgetExhaustedError = new GatewayControlReadinessBudgetError();
   let attempt = 0;
   while (deps.nowMs() < deadlineMs) {
-    let remainingMs = deadlineMs - deps.nowMs();
+    const remainingMs = deadlineMs - deps.nowMs();
     if (remainingMs <= 0) {
       break;
     }
-    const endpoint = await resolveRuntimeHostEndpoint(deps.runtimeHostManager, {
-      timeoutMs: Math.min(CONTROL_READY_REQUEST_TIMEOUT_MS, remainingMs),
-    });
-    remainingMs = deadlineMs - deps.nowMs();
-    if (remainingMs <= 0) {
-      break;
-    }
-    const input: Record<string, unknown> = {
-      port,
-      ...(externalToken ? { externalToken } : {}),
-    };
-    const payload = await createRuntimeHostCapabilityPayload(
-      deps.runtimeHostManager,
-      'runtimeHost.gatewayReady',
-      input,
-      { endpoint },
+    const status = await readGatewayControlReadyStatus(
+      deps.directHost,
+      Math.min(CONTROL_READY_REQUEST_TIMEOUT_MS, remainingMs),
     );
-    remainingMs = deadlineMs - deps.nowMs();
-    if (remainingMs <= 0) {
-      break;
-    }
-    const requestTimeoutMs = Math.min(CONTROL_READY_REQUEST_TIMEOUT_MS, remainingMs);
-    const result = await deps.runtimeHostManager.request<GatewayControlReadyResponse>(
-      'POST',
-      '/api/capabilities/execute',
-      payload,
-      { timeoutMs: requestTimeoutMs },
-    );
-    if (result.data?.success === true) {
+    if (status.ready) {
+      if (status.phase !== 'ready' || status.retryable) {
+        throw new Error('Gateway control readiness response was invalid.');
+      }
       return;
     }
-    const missingMethods = Array.isArray(result.data?.missingMethods) && result.data.missingMethods.length > 0
-      ? ` missingMethods=${result.data.missingMethods.join(',')}`
-      : '';
-    const errorMessage = result.data?.error || result.data?.code || `Gateway control ready probe failed${missingMethods}`;
-    if (result.data?.phase !== 'starting' || result.data.retryable !== true) {
-      throw new Error(errorMessage);
+    if (status.phase === 'ready') {
+      throw new Error('Gateway control readiness response was invalid.');
     }
-    const retryAfterMs = resolveControlReadyRetryDelayMs(attempt, result.data?.retryAfterMs);
-    attempt += 1;
+    if (status.phase !== 'starting' || status.retryable !== true) {
+      throw new Error('Gateway control is unavailable.');
+    }
     const delayRemainingMs = deadlineMs - deps.nowMs();
     if (delayRemainingMs <= 0) {
       throw budgetExhaustedError;
     }
-    await deps.delay(Math.min(retryAfterMs, delayRemainingMs));
+    const retryDelayMs = resolveControlReadyRetryDelayMs(attempt);
+    attempt += 1;
+    await deps.delay(Math.min(retryDelayMs, delayRemainingMs));
   }
   throw budgetExhaustedError;
+}
+
+async function readGatewayControlReadyStatus(
+  directHost: GatewayControlReadyCommandHost,
+  timeoutMs: number,
+): Promise<GatewayControlReadyResponse> {
+  const outcome = await directHost.command(
+    { name: 'openclaw.control.ready' },
+    { timeoutMs },
+  );
+  if (outcome.kind === 'timed-out') {
+    throw new Error('Gateway control readiness command timed out.');
+  }
+  if (outcome.kind === 'rejected') {
+    throw new Error('Gateway control readiness command was rejected.');
+  }
+  if (!isGatewayControlReadyResponse(outcome.result)) {
+    throw new Error('Gateway control readiness response was invalid.');
+  }
+  return outcome.result;
+}
+
+function isGatewayControlReadyResponse(value: unknown): value is GatewayControlReadyResponse {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const response = value as Record<string, unknown>;
+  const keys = Object.keys(response);
+  return keys.length === 3
+    && keys.includes('ready')
+    && keys.includes('phase')
+    && keys.includes('retryable')
+    && typeof response.ready === 'boolean'
+    && (response.phase === 'ready' || response.phase === 'starting' || response.phase === 'unavailable')
+    && typeof response.retryable === 'boolean';
 }

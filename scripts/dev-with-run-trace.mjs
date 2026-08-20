@@ -24,5 +24,5 @@ function run(command, args) {
   }
 }
 
-run('pnpm', ['run', 'build:runtime-host-process']);
+run('node', ['scripts/build-runtime-host-native.mjs', '--platform', process.platform, '--arch', process.arch]);
 run('vite', []);

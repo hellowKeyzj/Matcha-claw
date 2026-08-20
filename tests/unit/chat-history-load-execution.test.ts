@@ -1,13 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { HostSessionTimelineMessage } from '@/lib/host-api';
+import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { GatewayStatus } from '@/types/gateway';
-import type { RawMessage } from './helpers/timeline-fixtures';
+import type { SessionRenderItem } from '../../src/types/session/render-item';
 import {
   createEmptySessionRecord,
   getSessionItems,
+  projectSessionViewItems,
+  resetSessionProjection,
 } from '@/stores/chat/store-state-helpers';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import {
+  assistantItem,
+  completeFact,
+  sessionView,
+  userItem,
+  windowView,
+} from './helpers/session-fixtures';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
@@ -33,51 +43,47 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
   };
 }
 
-function createSnapshot(sessionKey: string, messages: RawMessage[]) {
-  const items = buildRenderItemsFromMessages(sessionKey, messages);
-  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
-  return {
-    sessionKey,
-    catalog: {
-      key: sessionKey,
-      agentId: 'main',
-      protocolId: 'openclaw-v4',
-      runtimeEndpointId: 'local',
-      sessionIdentity,
-      kind: 'main' as const,
-      preferred: true,
-      ...(messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
-        ? { label: String(messages[messages.length - 1]?.content) }
-        : {}),
-      displayName: sessionKey,
-      updatedAt: messages.length > 0 ? messages[messages.length - 1]?.timestamp : undefined,
-    },
-    items,
-    approvals: [],
-    usage: [],
-    artifacts: [],
-    replayComplete: true,
-    runtime: {
-      activeRunId: null,
-      runPhase: 'done' as const,
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      runtimeActivity: null,
-      lastUserMessageAt: null,
-      lastError: null,
-      lastIssue: null,
-      updatedAt: 1,
-    },
-    window: {
-      totalItemCount: items.length,
-      windowStartOffset: 0,
-      windowEndOffset: items.length,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    },
-  };
+type HistoryMessage = HostSessionTimelineMessage;
+
+function createWindowItems(
+  sessionKey: string,
+  messages: readonly HistoryMessage[],
+): SessionRenderItem[] {
+  return messages.map((message, index) => {
+    const key = message.messageId ?? `${message.role}:${message.createdAt ?? index}:${index}`;
+    if (message.role === 'user') {
+      return {
+        key,
+        kind: 'user-message',
+        role: 'user',
+        sessionKey,
+        text: message.text,
+        images: [],
+        attachedFiles: [],
+        ...(message.messageId ? { messageId: message.messageId } : {}),
+        ...(message.createdAt !== undefined ? { createdAt: message.createdAt } : {}),
+        ...(message.updatedAt !== undefined ? { updatedAt: message.updatedAt } : {}),
+      };
+    }
+    return {
+      key,
+      kind: 'assistant-turn',
+      role: 'assistant',
+      sessionKey,
+      identitySource: 'message',
+      identityMode: 'message',
+      identityConfidence: 'strong',
+      status: 'final',
+      segments: [{ kind: 'message', key: `${key}:text`, text: message.text }],
+      thinking: null,
+      tools: [],
+      text: message.text,
+      images: [],
+      attachedFiles: [],
+      ...(message.createdAt !== undefined ? { createdAt: message.createdAt } : {}),
+      ...(message.updatedAt !== undefined ? { updatedAt: message.updatedAt } : {}),
+    };
+  });
 }
 
 function createTestSessionRecord(sessionKey: string) {
@@ -97,16 +103,31 @@ function createTestSessionRecord(sessionKey: string) {
   };
 }
 
-function createWindowResult(sessionKey: string, messages: RawMessage[] = []) {
+function createWindowResult(
+  sessionKey: string,
+  messages: HistoryMessage[] = [],
+): HistoryWindowResult {
+  const items = messages.map((message, index) => message.role === 'user'
+    ? userItem(message.messageId ?? `user-${index}`, message.text, {
+      ...(message.createdAt !== undefined ? { createdAt: message.createdAt } : {}),
+      ...(message.updatedAt !== undefined ? { updatedAt: message.updatedAt } : {}),
+    })
+    : assistantItem(message.messageId ?? `assistant-${index}`, message.text, {
+      ...(message.createdAt !== undefined ? { createdAt: message.createdAt } : {}),
+      ...(message.updatedAt !== undefined ? { updatedAt: message.updatedAt } : {}),
+    }));
+  const view = sessionView(sessionKey, {
+    identity: createOpenClawTestSessionIdentity(sessionKey),
+    seq: items.length,
+    cursor: items.length,
+    items: completeFact(items),
+    window: completeFact(windowView(items.length)),
+  });
   return {
-    snapshot: createSnapshot(sessionKey, messages),
+    view,
+    items: projectSessionViewItems(view),
+    sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
     thinkingLevel: null,
-    totalItemCount: messages.length,
-    windowStartOffset: 0,
-    windowEndOffset: messages.length,
-    hasMore: false,
-    hasNewer: false,
-    isAtLatest: true,
   };
 }
 
@@ -143,7 +164,7 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
   };
 }
 
-function createGatewayStatus(overrides?: Partial<GatewayStatus>): GatewayStatus {
+function createGatewayStatus(overrides: Partial<GatewayStatus> = {}): GatewayStatus {
   return {
     processState: 'running',
     port: 18789,
@@ -155,8 +176,7 @@ function createGatewayStatus(overrides?: Partial<GatewayStatus>): GatewayStatus 
       consecutiveHeartbeatMisses: 0,
       consecutiveRpcFailures: 0,
     },
-    connectedAt: Date.now(),
-    updatedAt: Date.now(),
+    updatedAt: 1,
     ...overrides,
   };
 }
@@ -164,13 +184,15 @@ function createGatewayStatus(overrides?: Partial<GatewayStatus>): GatewayStatus 
 describe('chat history load execution', () => {
   beforeEach(() => {
     fetchHistoryWindowMock.mockReset();
+    resetSessionProjection('agent:main:main');
+    resetSessionProjection('agent:worker:main');
   });
 
   it('active foreground load applies authoritative snapshot and clears loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:main:main';
-    const resultMessages: RawMessage[] = [
-      { role: 'assistant', content: 'loaded once', timestamp: 1, id: 'assistant-1' },
+    const resultMessages: HistoryMessage[] = [
+      { role: 'assistant', text: 'loaded once', createdAt: 1, messageId: 'assistant-1' },
     ];
     const { set, get } = createStateHarness({
       currentSessionKey: requestedSessionKey,
@@ -210,19 +232,19 @@ describe('chat history load execution', () => {
     ]);
   });
 
-  it('foreground refresh keeps current items when the hydration snapshot is empty', async () => {
+  it('foreground refresh clears items when the canonical SessionView is empty', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:main:main';
-    const currentMessages: RawMessage[] = [
-      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: 'streaming reply', timestamp: 2, id: 'assistant-1' },
+    const currentMessages: HistoryMessage[] = [
+      { role: 'user', text: 'hello', createdAt: 1, messageId: 'user-1' },
+      { role: 'assistant', text: 'streaming reply', createdAt: 2, messageId: 'assistant-1' },
     ];
     const { set, get } = createStateHarness({
       currentSessionKey: requestedSessionKey,
       loadedSessions: {
         [requestedSessionKey]: {
           ...createTestSessionRecord('agent:main:main'),
-          items: buildRenderItemsFromMessages(requestedSessionKey, currentMessages),
+          items: createWindowItems(requestedSessionKey, currentMessages),
         },
       },
     });
@@ -240,16 +262,14 @@ describe('chat history load execution', () => {
     });
 
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(getSessionItems(get(), requestedSessionKey).map((item) => item.key)).toEqual(
-      buildRenderItemsFromMessages(requestedSessionKey, currentMessages).map((item) => item.key),
-    );
+    expect(getSessionItems(get(), requestedSessionKey)).toEqual([]);
   });
 
   it('background load updates the target session without touching foreground loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:worker:main';
-    const loadedMessages: RawMessage[] = [
-      { role: 'assistant', content: 'background refresh', timestamp: 1, id: 'assistant-1' },
+    const loadedMessages: HistoryMessage[] = [
+      { role: 'assistant', text: 'background refresh', createdAt: 1, messageId: 'assistant-1' },
     ];
     const { set, get } = createStateHarness({
       currentSessionKey: 'agent:main:main',
@@ -301,7 +321,7 @@ describe('chat history load execution', () => {
     });
 
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
-    expect(get().error).toBe('window failed');
+    expect(get().error).toBe('Session timeline is unavailable');
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
@@ -336,7 +356,7 @@ describe('chat history load execution', () => {
       fetchHistoryWindowMock
         .mockRejectedValueOnce(new Error('request timed out'))
         .mockResolvedValueOnce(createWindowResult(requestedSessionKey, [
-          { role: 'assistant', content: 'recovered after retry', timestamp: 1, id: 'assistant-1' },
+          { role: 'assistant', text: 'recovered after retry', createdAt: 1, messageId: 'assistant-1' },
         ]));
 
       const loadPromise = executeHistoryLoad({
@@ -344,9 +364,7 @@ describe('chat history load execution', () => {
         get,
         historyRuntime: createHistoryRuntimeHarness(),
         loadingTimeoutMs: 15_000,
-        getGatewayStatus: () => createGatewayStatus({
-          connectedAt: Date.now() - 5_000,
-        }),
+        getGatewayStatus: () => createGatewayStatus(),
       }, {
         sessionKey: requestedSessionKey,
         mode: 'active',
@@ -390,9 +408,7 @@ describe('chat history load execution', () => {
         get,
         historyRuntime: createHistoryRuntimeHarness(),
         loadingTimeoutMs: 15_000,
-        getGatewayStatus: () => createGatewayStatus({
-          connectedAt: Date.now() - 2_000,
-        }),
+        getGatewayStatus: () => createGatewayStatus(),
       }, {
         sessionKey: requestedSessionKey,
         mode: 'active',
@@ -405,7 +421,7 @@ describe('chat history load execution', () => {
 
       expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(5);
       expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
-      expect(get().error).toBe('request timed out');
+      expect(get().error).toBe('Session timeline is unavailable');
     } finally {
       vi.useRealTimers();
     }
@@ -427,8 +443,9 @@ describe('chat history load execution', () => {
         getGatewayStatus: () => createGatewayStatus({
           processState: 'starting',
           gatewayReady: false,
+          healthSummary: 'degraded',
           transportState: 'disconnected',
-          connectedAt: undefined,
+          portReachable: false,
         }),
       }, {
         sessionKey: requestedSessionKey,

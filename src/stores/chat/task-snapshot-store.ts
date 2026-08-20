@@ -2,19 +2,55 @@ import { create } from 'zustand';
 import { buildSessionRecordKey } from './session-identity';
 import type {
   SessionAssistantTurnItem,
+} from '../../types/session/render-item';
+import type {
   SessionRenderToolCard,
+} from '../../types/session/tool-card';
+import type {
   SessionStateSnapshot,
+} from '../../types/session/snapshot';
+import type {
   SessionUpdateEvent,
+} from '../../types/session/update-event';
+import type {
   TaskData,
   TaskDataStatus,
   TaskScopeSnapshot,
   TaskSnapshotEvent,
   TodoItem,
-} from '../../../runtime-host/shared/session-adapter-types';
-import {
-  isTaskSnapshotToolMethod,
-  isTodoTaskToolName,
-} from '../../../runtime-host/shared/task-tool-contract';
+} from '../../types/session/task-snapshot';
+const TASK_SNAPSHOT_TOOL_METHODS = new Set([
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskList',
+  'TaskGet',
+  'TodoWrite',
+  'TodoGet',
+]);
+
+function normalizeToolName(toolName: unknown): string {
+  return typeof toolName === 'string' ? toolName.trim() : '';
+}
+
+function canonicalizeStateOnlyTaskToolName(toolName: unknown): 'TodoWrite' | 'TodoGet' | '' {
+  switch (normalizeToolName(toolName).toLowerCase()) {
+    case 'todowrite':
+      return 'TodoWrite';
+    case 'todoget':
+      return 'TodoGet';
+    default:
+      return '';
+  }
+}
+
+function isTaskSnapshotToolMethod(toolName: unknown): boolean {
+  const normalized = normalizeToolName(toolName);
+  return Boolean(canonicalizeStateOnlyTaskToolName(normalized)) || TASK_SNAPSHOT_TOOL_METHODS.has(normalized);
+}
+
+function isTodoTaskToolName(toolName: unknown): boolean {
+  return Boolean(canonicalizeStateOnlyTaskToolName(toolName));
+}
 
 export type DerivedPlanStatus = 'finished' | 'building' | 'ready' | null;
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 
 const sessionIdentity: SessionIdentity = {
   endpoint: {

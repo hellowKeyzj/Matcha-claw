@@ -1,7 +1,7 @@
 import type {
   SessionExecutionGraphItem,
   SessionExecutionGraphStep,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
 
 export type ExecutionGraphStepData = SessionExecutionGraphStep;
 export type ExecutionGraphData = SessionExecutionGraphItem;

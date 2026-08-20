@@ -3,8 +3,8 @@ import {
   fetchProviderModels,
   persistProviderModels,
   type ProviderModel,
+  type ProviderModelDraft,
 } from '@/lib/provider-model-catalog';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 
 let inflightRefreshTask: Promise<void> | null = null;
 
@@ -14,11 +14,11 @@ interface ProviderModelCatalogState {
   loading: boolean;
   saving: boolean;
   error: string | null;
+  warning: string | null;
   refresh: () => Promise<void>;
-  replaceCredentialModels: (
-    credentialId: string,
-    models: readonly Omit<ProviderModel, 'credentialId'>[],
-    vendorId?: string,
+  replaceAccountModels: (
+    accountId: string,
+    models: readonly ProviderModelDraft[],
   ) => Promise<void>;
 }
 
@@ -28,6 +28,7 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
   loading: false,
   saving: false,
   error: null,
+  warning: null,
 
   refresh: async () => {
     if (inflightRefreshTask) {
@@ -38,7 +39,7 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
       set({ loading: true, error: null });
       try {
         const models = await fetchProviderModels();
-        set({ models, ready: true, loading: false });
+        set({ models, ready: true, loading: false, warning: null });
       } catch (error) {
         set({ loading: false, error: String(error) });
       } finally {
@@ -48,24 +49,16 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
     await inflightRefreshTask;
   },
 
-  replaceCredentialModels: async (credentialId, next, vendorId) => {
-    set({ saving: true, error: null });
+  replaceAccountModels: async (accountId, next) => {
+    set({ saving: true, error: null, warning: null });
     try {
-      const result = await persistProviderModels(credentialId, next, vendorId);
-      if (!result.success) {
-        const message = result.error || 'Failed to persist provider models';
-        set({ saving: false, error: message });
-        throw new Error(message);
+      const result = await persistProviderModels(accountId, next);
+      try {
+        const models = await fetchProviderModels();
+        set({ models, saving: false, ready: true, error: null, warning: result.warning ?? null });
+      } catch (refreshError) {
+        set({ saving: false, ready: true, error: String(refreshError), warning: result.warning ?? null });
       }
-      set((state) => ({
-        models: [
-          ...state.models.filter((model) => model.credentialId !== credentialId),
-          ...result.models,
-        ],
-        saving: false,
-        ready: true,
-      }));
-      void useCapabilityRoutingStore.getState().refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ saving: false, error: message });

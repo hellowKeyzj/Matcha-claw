@@ -77,19 +77,12 @@ vi.mock('@/stores/task-center-store', () => ({
 }));
 
 vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: (selector: (state: { status: { processState: string; gatewayReady: boolean; healthSummary: string; transportState: string; portReachable: boolean; diagnostics: { consecutiveHeartbeatMisses: number; consecutiveRpcFailures: number }; updatedAt: number } }) => unknown) => selector({
-    status: {
-      processState: 'running',
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore: (selector: (state: {
+    runtimeHost: { lifecycle: string };
+    isInitialized: boolean;
+  }) => unknown) => selector({
+    runtimeHost: { lifecycle: 'running' },
+    isInitialized: true,
   }),
 }));
 
@@ -171,8 +164,6 @@ describe('chat shell task panel layout', () => {
     skillsLoading: false,
     selectedSkillIds: ['skill-a'],
     onToggleSkill: vi.fn(),
-    skillPreview: null,
-    onClearSkillPreview: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
     taskInboxTasks: [],
     taskInboxLoading: false,

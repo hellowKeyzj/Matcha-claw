@@ -1,4 +1,10 @@
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
+import {
+  decodeProviderMutationReceipt,
+  ProviderMutationCommitOutcomeUnknownError,
+  type ProviderMutationReceipt,
+} from '@/lib/host-api-transport-contract';
+import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 export type CapabilityKey =
   | 'chat'
@@ -9,7 +15,7 @@ export type CapabilityKey =
   | 'tts';
 
 export interface ModelRouteRef {
-  credentialId: string;
+  accountId: string;
   modelId: string;
 }
 
@@ -21,26 +27,21 @@ export interface ModelRoute {
 
 export type CapabilityRouting = Partial<Record<CapabilityKey, ModelRoute>>;
 
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-
-async function modelProviderCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-): Promise<TResult> {
-  const target = operationId === 'capabilityRouting.write'
-    ? { kind: 'capability-route' as const, capabilityId: MODEL_PROVIDER_CAPABILITY_ID }
-    : null;
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: MODEL_PROVIDER_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
-      target,
-      input,
-    }),
-  });
+export interface CapabilityRoutingSnapshot {
+  revision: number | null;
+  routing: CapabilityRouting;
 }
+
+export interface PersistCapabilityRoutingResult {
+  success: boolean;
+  revision: number;
+  routing: CapabilityRouting;
+  receipt?: ProviderMutationReceipt;
+  error?: string;
+  warning?: string;
+}
+
+const PROVIDER_ROUTING_PATH = '/api/provider-routing';
 
 export const CAPABILITY_KEYS: readonly Exclude<CapabilityKey, 'tts'>[] = [
   'chat',
@@ -56,73 +57,197 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizeRouteRef(value: unknown): ModelRouteRef | null {
-  if (!isRecord(value)) return null;
-  const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
-  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  if (!credentialId || !modelId) return null;
-  return { credentialId, modelId };
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
-function normalizeRoute(value: unknown): ModelRoute | null {
-  if (!isRecord(value)) return null;
-  const primary = normalizeRouteRef(value.primary);
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isCapabilityKey(value: unknown): value is CapabilityKey {
+  return ROUTING_KEYS.includes(value as CapabilityKey);
+}
+
+function decodeRouteRef(value: unknown): ModelRouteRef | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['accountId', 'modelId'])) return null;
+  const accountId = typeof value.accountId === 'string' ? value.accountId.trim() : '';
+  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
+  return accountId && modelId ? { accountId, modelId } : null;
+}
+
+function decodeRoute(value: unknown): ModelRoute | null {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['capability', 'primary', 'fallbacks', 'timeoutMs'])
+    || !Object.hasOwn(value, 'primary')
+    || !Object.hasOwn(value, 'fallbacks')
+    || !Array.isArray(value.fallbacks)) {
+    return null;
+  }
+  const primary = decodeRouteRef(value.primary);
   if (!primary) return null;
-  const fallbacks = Array.isArray(value.fallbacks)
-    ? value.fallbacks
-      .map((entry) => normalizeRouteRef(entry))
-      .filter((entry): entry is ModelRouteRef => entry !== null)
-    : [];
-  const timeoutMs = typeof value.timeoutMs === 'number' && Number.isFinite(value.timeoutMs) && value.timeoutMs > 0
-    ? Math.floor(value.timeoutMs)
-    : undefined;
+  const fallbacks: ModelRouteRef[] = [];
+  for (const fallback of value.fallbacks) {
+    const decoded = decodeRouteRef(fallback);
+    if (!decoded) return null;
+    fallbacks.push(decoded);
+  }
+  if (value.timeoutMs !== undefined && !isPositiveInteger(value.timeoutMs)) return null;
   return {
     primary,
     fallbacks,
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }),
   };
 }
 
-export function normalizeCapabilityRouting(value: unknown): CapabilityRouting {
-  if (!isRecord(value)) return {};
-  const routing: CapabilityRouting = {};
-  for (const key of ROUTING_KEYS) {
-    const route = normalizeRoute(value[key]);
-    if (route) routing[key] = route;
+function decodeRoutingDocument(value: unknown): CapabilityRoutingSnapshot | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['revision', 'routes'])
+    || !isPositiveInteger(value.revision)
+    || !Array.isArray(value.routes)) {
+    return null;
   }
-  return routing;
+  const routing: CapabilityRouting = {};
+  const seen = new Set<CapabilityKey>();
+  for (const rawRoute of value.routes) {
+    if (!isRecord(rawRoute)
+      || !hasOnlyKeys(rawRoute, ['capability', 'primary', 'fallbacks', 'timeoutMs'])
+      || !['capability', 'primary', 'fallbacks'].every((key) => Object.hasOwn(rawRoute, key))
+      || !isCapabilityKey(rawRoute.capability)) {
+      return null;
+    }
+    if (seen.has(rawRoute.capability)) return null;
+    const route = decodeRoute(rawRoute);
+    if (!route) return null;
+    seen.add(rawRoute.capability);
+    routing[rawRoute.capability] = route;
+  }
+  return { revision: value.revision, routing };
+}
+
+function decodeListResponse(value: unknown): CapabilityRoutingSnapshot {
+  if (!isRecord(value) || !hasExactKeys(value, ['routing'])) {
+    throw new Error('Provider routing response is invalid');
+  }
+  if (value.routing === null) return { revision: null, routing: {} };
+  const decoded = decodeRoutingDocument(value.routing);
+  if (!decoded) throw new Error('Provider routing response is invalid');
+  return decoded;
+}
+
+function routingToDocument(routing: CapabilityRouting, revision: number) {
+  return {
+    revision,
+    routes: ROUTING_KEYS.flatMap((capability) => {
+      const route = routing[capability];
+      if (!route) return [];
+      return [{
+        capability,
+        primary: route.primary,
+        fallbacks: route.fallbacks,
+        ...(route.timeoutMs === undefined ? {} : { timeoutMs: route.timeoutMs }),
+      }];
+    }),
+  };
+}
+
+function isStoredReplacement(value: unknown): value is {
+  success: true;
+  desired: { status: 'stored'; revision: number };
+  persisted: { status: 'confirmed' };
+  native: ProviderMutationReceipt['native'];
+  commit: 'committed';
+} {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['success', 'desired', 'persisted', 'native', 'commit'])
+    || value.success !== true) return false;
+  const receipt = decodeProviderMutationReceipt(value, 'committed');
+  return receipt?.desired.status === 'stored'
+    && receipt.desired.revision !== undefined
+    && isPositiveInteger(receipt.desired.revision)
+    && receipt.persisted.status === 'confirmed';
+}
+
+function isRejectedReplacement(value: unknown): value is { success: false; error: 'Provider routing request was rejected' } {
+  return isRecord(value)
+    && hasExactKeys(value, ['success', 'error'])
+    && value.success === false
+    && value.error === 'Provider routing request was rejected';
+}
+
+export function normalizeCapabilityRouting(value: unknown): CapabilityRouting {
+  return decodeRoutingDocument(value)?.routing ?? {};
 }
 
 export function modelRouteRefToString(ref: ModelRouteRef): string {
-  return `${ref.credentialId}/${ref.modelId}`;
+  return `${ref.accountId}/${ref.modelId}`;
 }
 
 export function parseModelRouteRefString(raw: string): ModelRouteRef | null {
   const trimmed = raw.trim();
   const slash = trimmed.indexOf('/');
   if (slash <= 0 || slash === trimmed.length - 1) return null;
-  const credentialId = trimmed.slice(0, slash).trim();
+  const accountId = trimmed.slice(0, slash).trim();
   const modelId = trimmed.slice(slash + 1).trim();
-  if (!credentialId || !modelId) return null;
-  return { credentialId, modelId };
+  if (!accountId || !modelId) return null;
+  return { accountId, modelId };
 }
 
-export async function fetchCapabilityRouting(): Promise<CapabilityRouting> {
-  return normalizeCapabilityRouting(await modelProviderCapabilityExecute<unknown>(
-    'capabilityRouting.read',
-  ));
+export async function fetchCapabilityRouting(): Promise<CapabilityRoutingSnapshot> {
+  return decodeListResponse(await hostApiFetch<unknown>(PROVIDER_ROUTING_PATH, { method: 'GET' }));
 }
 
 export async function persistCapabilityRouting(
   routing: CapabilityRouting,
-): Promise<{ success: boolean; routing: CapabilityRouting; error?: string }> {
-  const result = await modelProviderCapabilityExecute<{ success?: boolean; routing?: unknown; error?: string }>(
-    'capabilityRouting.write',
-    routing,
-  );
-  return {
-    success: result?.success === true,
-    routing: normalizeCapabilityRouting(result?.routing),
-    ...(typeof result?.error === 'string' ? { error: result.error } : {}),
-  };
+  revision: number,
+): Promise<PersistCapabilityRoutingResult> {
+  let result: unknown;
+  try {
+    result = await hostApiFetch<unknown>(PROVIDER_ROUTING_PATH, {
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'provider.routing',
+        operationId: 'providerRouting.replace',
+        scope: { kind: 'provider-routing' },
+        target: { kind: 'provider-routing' },
+        input: { kind: 'replace', routing: routingToDocument(routing, revision) },
+      }),
+    });
+  } catch (error) {
+    if (error instanceof ProviderMutationCommitOutcomeUnknownError) {
+      return {
+        success: false,
+        revision,
+        routing: {},
+        receipt: error.receipt,
+        error: 'Provider routing commit outcome is unknown; reopen before retrying',
+      };
+    }
+    throw error;
+  }
+  if (isStoredReplacement(result)) {
+    const receipt = decodeProviderMutationReceipt(result, 'committed');
+    const warning = receipt ? nativeProjectionError(receipt) : undefined;
+    return {
+      success: true,
+      revision: result.desired.revision,
+      routing,
+      ...(receipt ? { receipt } : {}),
+      ...(warning ? { warning } : {}),
+    };
+  }
+  if (isRejectedReplacement(result)) {
+    return {
+      success: false,
+      revision,
+      routing: {},
+      error: result.error,
+    };
+  }
+  throw new Error('Provider routing response is invalid');
 }

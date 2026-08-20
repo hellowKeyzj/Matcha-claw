@@ -3,7 +3,7 @@ import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTodo,
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
-import type { TodoItem } from '../../../../runtime-host/shared/session-adapter-types';
+import type { TodoItem } from '../../../types/session/task-snapshot';
 
 const EMPTY_TODOS: TodoItem[] = [];
 

@@ -7,8 +7,10 @@ import { hostFileListDir, type FilePreviewDirEntry, type WorkspaceFileContext } 
 import { classifyFileContentType, extnameOf, getMimeTypeForPath, supportsInlineDiff } from '@/lib/generated-files';
 import { cn } from '@/lib/utils';
 import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
-import type { ArtifactPreviewTarget } from './types';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 
 interface WorkspaceBrowserBodyProps {
   rootPath: string | null;
@@ -24,9 +26,15 @@ interface WorkspaceBrowserBodyProps {
   className?: string;
 }
 
-interface WorkspaceTreeNode extends FilePreviewDirEntry {
+interface WorkspaceTreeNode {
+  name: string;
+  displayPath: string;
+  relativePath: string;
+  isDirectory: boolean;
+  size: number;
   children?: WorkspaceTreeNode[];
   childrenLoaded: boolean;
+  hasChildren: boolean;
 }
 
 type TreeState =
@@ -41,8 +49,8 @@ const WORKSPACE_SPLIT_MIN_WIDTH = 560;
 const WORKSPACE_STACKED_TREE_HEIGHT = 320;
 const WORKSPACE_DIR_LIST_TIMEOUT_MS = 60000;
 
-function normalizeWorkspacePath(path: string): string {
-  const normalized = path.replace(/\\/g, '/');
+function normalizeWorkspacePath(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/');
   if (/^[A-Za-z]:\/$/.test(normalized)) {
     return normalized;
   }
@@ -52,12 +60,8 @@ function normalizeWorkspacePath(path: string): string {
   return normalized;
 }
 
-function isSameWorkspacePath(left: string, right: string): boolean {
-  return normalizeWorkspacePath(left) === normalizeWorkspacePath(right);
-}
-
-function getWorkspaceNodeName(path: string): string {
-  const normalized = normalizeWorkspacePath(path);
+function getWorkspaceNodeName(relativePath: string): string {
+  const normalized = normalizeWorkspacePath(relativePath);
   if (/^[A-Za-z]:\/$/.test(normalized)) {
     return normalized;
   }
@@ -65,57 +69,75 @@ function getWorkspaceNodeName(path: string): string {
   return segments.at(-1) ?? normalized;
 }
 
-function createWorkspaceTreeNode(entry: FilePreviewDirEntry): WorkspaceTreeNode {
+function joinWorkspaceDisplayPath(rootPath: string, relativePath: string): string {
+  if (!relativePath) {
+    return rootPath;
+  }
+  const normalizedRoot = normalizeWorkspacePath(rootPath);
+  const rootWithSeparator = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
+  const displayPath = `${rootWithSeparator}${relativePath.replace(/\\/g, '/')}`;
+  return rootPath.includes('\\') ? displayPath.replace(/\//g, '\\') : displayPath;
+}
+
+function createWorkspaceTreeNode(entry: FilePreviewDirEntry, workspaceRoot: string): WorkspaceTreeNode {
   return {
-    ...entry,
-    hasChildren: entry.isDir ? entry.hasChildren !== false : false,
-    childrenLoaded: !entry.isDir,
+    name: entry.display,
+    displayPath: joinWorkspaceDisplayPath(workspaceRoot, entry.relativePath),
+    relativePath: entry.relativePath,
+    isDirectory: entry.isDirectory,
+    size: entry.size,
+    hasChildren: entry.isDirectory,
+    childrenLoaded: !entry.isDirectory,
   };
 }
 
-function createWorkspaceRootNode(rootPath: string, entries: FilePreviewDirEntry[]): WorkspaceTreeNode {
+function createWorkspaceRootNode(
+  rootPath: string,
+  workspaceRoot: string,
+  entries: FilePreviewDirEntry[],
+): WorkspaceTreeNode {
   return {
     name: getWorkspaceNodeName(rootPath),
-    path: rootPath,
-    isDir: true,
+    displayPath: rootPath,
+    relativePath: '',
+    isDirectory: true,
     size: 0,
-    mtimeMs: 0,
     hasChildren: entries.length > 0,
     childrenLoaded: true,
-    children: entries.map(createWorkspaceTreeNode),
+    children: entries.map((entry) => createWorkspaceTreeNode(entry, workspaceRoot)),
   };
 }
 
 function nodeCanExpand(node: WorkspaceTreeNode): boolean {
-  if (!node.isDir) {
+  if (!node.isDirectory) {
     return false;
   }
   if (!node.childrenLoaded) {
     return true;
   }
-  return node.hasChildren === true;
+  return node.hasChildren;
 }
 
-function toPreviewFile(node: WorkspaceTreeNode, workspaceContext?: WorkspaceFileContext): ArtifactPreviewTarget {
-  const ext = extnameOf(node.path);
-  const mimeType = getMimeTypeForPath(node.path);
+function toPreviewFile(node: WorkspaceTreeNode): ArtifactPreviewTarget {
+  const ext = extnameOf(node.displayPath);
+  const mimeType = getMimeTypeForPath(node.displayPath);
   return {
-    filePath: node.path,
+    filePath: node.displayPath,
+    relativePath: node.relativePath,
     fileName: node.name,
     ext,
     mimeType,
     contentType: classifyFileContentType(ext, mimeType),
     fileSize: node.size > 0 ? node.size : undefined,
-    ...workspaceContext,
   };
 }
 
-function findTreeNode(root: WorkspaceTreeNode, targetPath: string): WorkspaceTreeNode | null {
-  if (isSameWorkspacePath(root.path, targetPath)) {
+function findTreeNode(root: WorkspaceTreeNode, targetRelativePath: string): WorkspaceTreeNode | null {
+  if (root.relativePath === targetRelativePath) {
     return root;
   }
   for (const child of root.children ?? []) {
-    const matched = findTreeNode(child, targetPath);
+    const matched = findTreeNode(child, targetRelativePath);
     if (matched) {
       return matched;
     }
@@ -125,10 +147,10 @@ function findTreeNode(root: WorkspaceTreeNode, targetPath: string): WorkspaceTre
 
 function replaceTreeNode(
   root: WorkspaceTreeNode,
-  targetPath: string,
+  targetRelativePath: string,
   update: (node: WorkspaceTreeNode) => WorkspaceTreeNode,
 ): WorkspaceTreeNode {
-  if (isSameWorkspacePath(root.path, targetPath)) {
+  if (root.relativePath === targetRelativePath) {
     return update(root);
   }
   if (!root.children?.length) {
@@ -137,7 +159,7 @@ function replaceTreeNode(
 
   let changed = false;
   const nextChildren = root.children.map((child) => {
-    const nextChild = replaceTreeNode(child, targetPath, update);
+    const nextChild = replaceTreeNode(child, targetRelativePath, update);
     if (nextChild !== child) {
       changed = true;
     }
@@ -154,14 +176,15 @@ function replaceTreeNode(
 
 function mergeDirectoryChildren(
   root: WorkspaceTreeNode,
-  directoryPath: string,
+  directoryRelativePath: string,
+  workspaceRoot: string,
   entries: FilePreviewDirEntry[],
 ): WorkspaceTreeNode {
-  return replaceTreeNode(root, directoryPath, (currentNode) => ({
+  return replaceTreeNode(root, directoryRelativePath, (currentNode) => ({
     ...currentNode,
     hasChildren: entries.length > 0,
     childrenLoaded: true,
-    children: entries.map(createWorkspaceTreeNode),
+    children: entries.map((entry) => createWorkspaceTreeNode(entry, workspaceRoot)),
   }));
 }
 
@@ -173,10 +196,10 @@ function buildAncestorDirectoryPaths(
   const normalizedRoot = normalizeWorkspacePath(rootPath);
   const normalizedTarget = normalizeWorkspacePath(targetPath);
   if (normalizedTarget === normalizedRoot) {
-    return [rootPath];
+    return [''];
   }
 
-  const normalizedRootPrefix = `${normalizedRoot}/`;
+  const normalizedRootPrefix = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
   if (!normalizedTarget.startsWith(normalizedRootPrefix)) {
     return [];
   }
@@ -184,20 +207,19 @@ function buildAncestorDirectoryPaths(
   const relative = normalizedTarget.slice(normalizedRootPrefix.length);
   const segments = relative.split('/').filter(Boolean);
   if (segments.length === 0) {
-    return [rootPath];
+    return [''];
   }
 
   const endIndex = includeTarget ? segments.length : segments.length - 1;
   if (endIndex <= 0) {
-    return [rootPath];
+    return [''];
   }
 
-  const useBackslash = targetPath.includes('\\');
-  const ancestors = [normalizedRoot];
+  const ancestors = [''];
   for (let index = 0; index < endIndex; index += 1) {
-    ancestors.push(`${normalizedRoot}/${segments.slice(0, index + 1).join('/')}`);
+    ancestors.push(segments.slice(0, index + 1).join('/'));
   }
-  return ancestors.map((path) => (useBackslash ? path.replace(/\//g, '\\') : path));
+  return ancestors;
 }
 
 function FileTreeNodeRow(input: {
@@ -205,19 +227,18 @@ function FileTreeNodeRow(input: {
   depth: number;
   expandedPaths: Set<string>;
   loadingPaths: Set<string>;
-  selectedFilePath: string | null;
-  onToggle: (path: string) => void;
+  selectedFileRelativePath: string | null;
+  onToggle: (relativePath: string) => void;
   onSelectFile: (file: ArtifactPreviewTarget) => void;
-  workspaceContext?: WorkspaceFileContext;
 }): React.ReactNode {
-  const { node, depth, expandedPaths, loadingPaths, selectedFilePath, onToggle, onSelectFile, workspaceContext } = input;
-  const isExpanded = expandedPaths.has(node.path);
+  const { node, depth, expandedPaths, loadingPaths, selectedFileRelativePath, onToggle, onSelectFile } = input;
+  const isExpanded = expandedPaths.has(node.relativePath);
   const hasChildren = nodeCanExpand(node);
-  const isLoading = loadingPaths.has(node.path);
-  const isSelected = selectedFilePath != null && isSameWorkspacePath(selectedFilePath, node.path);
+  const isLoading = loadingPaths.has(node.relativePath);
+  const isSelected = selectedFileRelativePath != null && selectedFileRelativePath === node.relativePath;
 
   return (
-    <div key={node.path}>
+    <div key={node.relativePath}>
       <div
         className={cn(
           'flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] leading-5 transition-colors',
@@ -227,12 +248,12 @@ function FileTreeNodeRow(input: {
         )}
         style={{ paddingLeft: `${depth * 12 + 6}px` }}
       >
-        {node.isDir ? (
+        {node.isDirectory ? (
           <button
             type="button"
             data-testid="workspace-tree-node"
-            data-path={node.path}
-            onClick={() => onToggle(node.path)}
+            data-path={node.displayPath}
+            onClick={() => onToggle(node.relativePath)}
             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 text-left"
           >
             {hasChildren ? (
@@ -251,25 +272,24 @@ function FileTreeNodeRow(input: {
           <button
             type="button"
             data-testid="workspace-tree-node"
-            data-path={node.path}
-            onClick={() => onSelectFile(toPreviewFile(node, workspaceContext))}
+            data-path={node.displayPath}
+            onClick={() => onSelectFile(toPreviewFile(node))}
             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 text-left"
           >
             <span className="ml-5 truncate">{node.name}</span>
           </button>
         )}
       </div>
-      {node.isDir && isExpanded && node.children?.length ? (
+      {node.isDirectory && isExpanded && node.children?.length ? (
         <div>
           {node.children.map((child) => FileTreeNodeRow({
             node: child,
             depth: depth + 1,
             expandedPaths,
             loadingPaths,
-            selectedFilePath,
+            selectedFileRelativePath,
             onToggle,
             onSelectFile,
-            workspaceContext,
           }))}
         </div>
       ) : null}
@@ -339,19 +359,23 @@ export function WorkspaceBrowserBody({
     });
   };
 
-  const ensureDirectoryChildrenLoaded = async (path: string, version: number): Promise<void> => {
-    const currentTree = treeRef.current;
-    const currentNode = currentTree ? findTreeNode(currentTree, path) : null;
-    if (!currentNode || !currentNode.isDir || currentNode.childrenLoaded) {
+  const ensureDirectoryChildrenLoaded = async (relativePath: string, version: number): Promise<void> => {
+    const workspaceRoot = effectiveRootPath;
+    if (!workspaceRoot) {
       return;
     }
-    if (loadingPathsRef.current.has(path)) {
+    const currentTree = treeRef.current;
+    const currentNode = currentTree ? findTreeNode(currentTree, relativePath) : null;
+    if (!currentNode || !currentNode.isDirectory || currentNode.childrenLoaded) {
+      return;
+    }
+    if (loadingPathsRef.current.has(relativePath)) {
       return;
     }
 
     updateLoadingPaths((current) => {
       const next = new Set(current);
-      next.add(path);
+      next.add(relativePath);
       return next;
     });
 
@@ -361,9 +385,9 @@ export function WorkspaceBrowserBody({
       }
       const result = await hostFileListDir(
         {
-          path,
-          sessionIdentity,
-          ...workspaceContext,
+          endpoint: sessionIdentity.endpoint,
+          sessionKey: sessionIdentity.sessionKey,
+          relativePath,
         },
         {
           timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -376,16 +400,16 @@ export function WorkspaceBrowserBody({
         return;
       }
       startTransition(() => {
-        applyReadyTree((tree) => mergeDirectoryChildren(tree, path, result.entries ?? []));
+        applyReadyTree((tree) => mergeDirectoryChildren(tree, relativePath, workspaceRoot, result.entries ?? []));
       });
     } finally {
       if (treeVersionRef.current === version) {
         updateLoadingPaths((current) => {
-          if (!current.has(path)) {
+          if (!current.has(relativePath)) {
             return current;
           }
           const next = new Set(current);
-          next.delete(path);
+          next.delete(relativePath);
           return next;
         });
       }
@@ -407,7 +431,7 @@ export function WorkspaceBrowserBody({
     treeVersionRef.current = version;
     treeRef.current = null;
     setTreeState({ status: 'loading' });
-    replaceLoadingPaths(new Set([effectiveRootPath]));
+    replaceLoadingPaths(new Set(['']));
     setExpandedPaths(new Set());
 
     void (async () => {
@@ -419,8 +443,9 @@ export function WorkspaceBrowserBody({
         }
         const result = await hostFileListDir(
           {
-            path: effectiveRootPath,
-            sessionIdentity,
+            endpoint: sessionIdentity.endpoint,
+            sessionKey: sessionIdentity.sessionKey,
+            relativePath: '',
           },
           {
             timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -435,12 +460,12 @@ export function WorkspaceBrowserBody({
           setTreeState({ status: 'error', message: String(result.error ?? 'unknown') });
           return;
         }
-        const nextTree = createWorkspaceRootNode(effectiveRootPath, result.entries);
+        const nextTree = createWorkspaceRootNode(effectiveRootPath, effectiveRootPath, result.entries);
         treeRef.current = nextTree;
         startTransition(() => {
           replaceLoadingPaths(new Set());
           setTreeState({ status: 'ready', tree: nextTree });
-          setExpandedPaths(new Set([nextTree.path]));
+          setExpandedPaths(new Set([nextTree.relativePath]));
         });
       } catch (error) {
         if (cancelled || treeVersionRef.current !== version) {
@@ -458,14 +483,20 @@ export function WorkspaceBrowserBody({
     return () => {
       cancelled = true;
     };
-  }, [effectiveRootPath, reloadToken, sessionIdentity, workspaceContext]);
+  }, [effectiveRootPath, reloadToken, sessionIdentity]);
 
   useEffect(() => {
-    if (treeState.status !== 'ready' || !selectedFilePath) {
+    const workspaceRoot = effectiveRootPath;
+    if (treeState.status !== 'ready' || !selectedFilePath || !workspaceRoot) {
       return;
     }
     const includeTarget = selectedFile?.isDirectory === true;
-    const ancestorPaths = buildAncestorDirectoryPaths(treeState.tree.path, selectedFilePath, includeTarget);
+    const selectedFileRelativePath = selectedFile?.relativePath
+      ?? resolveWorkspaceRelativePath(selectedFilePath, workspaceRoot);
+    if (selectedFileRelativePath == null) {
+      return;
+    }
+    const ancestorPaths = buildAncestorDirectoryPaths(workspaceRoot, joinWorkspaceDisplayPath(workspaceRoot, selectedFileRelativePath), includeTarget);
     if (ancestorPaths.length === 0) {
       return;
     }
@@ -474,25 +505,25 @@ export function WorkspaceBrowserBody({
     const version = treeVersionRef.current;
 
     void (async () => {
-      for (const path of ancestorPaths) {
+      for (const relativePath of ancestorPaths) {
         if (cancelled || treeVersionRef.current !== version) {
           return;
         }
         setExpandedPaths((current) => {
-          if (current.has(path)) {
+          if (current.has(relativePath)) {
             return current;
           }
           const next = new Set(current);
-          next.add(path);
+          next.add(relativePath);
           return next;
         });
 
         const currentTree = treeRef.current;
-        const node = currentTree ? findTreeNode(currentTree, path) : null;
-        if (!node || !node.isDir || node.childrenLoaded) {
+        const node = currentTree ? findTreeNode(currentTree, relativePath) : null;
+        if (!node || !node.isDirectory || node.childrenLoaded) {
           continue;
         }
-        await ensureDirectoryChildrenLoaded(path, version);
+        await ensureDirectoryChildrenLoaded(relativePath, version);
       }
     })();
 
@@ -501,14 +532,14 @@ export function WorkspaceBrowserBody({
     };
   }, [selectedFile, selectedFilePath, treeState]);
 
-  const handleTogglePath = (path: string) => {
-    const shouldExpand = !expandedPaths.has(path);
+  const handleTogglePath = (relativePath: string) => {
+    const shouldExpand = !expandedPaths.has(relativePath);
     setExpandedPaths((current) => {
       const next = new Set(current);
-      if (next.has(path)) {
-        next.delete(path);
+      if (next.has(relativePath)) {
+        next.delete(relativePath);
       } else {
-        next.add(path);
+        next.add(relativePath);
       }
       return next;
     });
@@ -516,28 +547,31 @@ export function WorkspaceBrowserBody({
     if (!shouldExpand || treeState.status !== 'ready') {
       return;
     }
-    const node = findTreeNode(treeState.tree, path);
-    if (!node || !node.isDir || node.childrenLoaded) {
+    const node = findTreeNode(treeState.tree, relativePath);
+    if (!node || !node.isDirectory || node.childrenLoaded) {
       return;
     }
-    void ensureDirectoryChildrenLoaded(path, treeVersionRef.current);
+    void ensureDirectoryChildrenLoaded(relativePath, treeVersionRef.current);
   };
 
   const treeBody = useMemo(() => {
     if (treeState.status !== 'ready') {
       return null;
     }
+    const selectedFileRelativePath = selectedFile?.relativePath
+      ?? (selectedFilePath && effectiveRootPath
+        ? resolveWorkspaceRelativePath(selectedFilePath, effectiveRootPath)
+        : null);
     return FileTreeNodeRow({
       node: treeState.tree,
       depth: 0,
       expandedPaths,
       loadingPaths,
-      selectedFilePath,
+      selectedFileRelativePath,
       onToggle: handleTogglePath,
       onSelectFile,
-      workspaceContext,
     });
-  }, [expandedPaths, loadingPaths, onSelectFile, selectedFilePath, treeState, workspaceContext]);
+  }, [effectiveRootPath, expandedPaths, loadingPaths, onSelectFile, selectedFile?.relativePath, selectedFilePath, treeState]);
 
   return (
     <div

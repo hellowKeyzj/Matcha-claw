@@ -1,40 +1,27 @@
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
 import type { ModelCapability } from '@/lib/provider-model-catalog';
 import { MODEL_CAPABILITIES } from '@/lib/provider-model-capabilities';
 import type { ModelCatalogEntry } from '@/types/subagent';
 
-type SelectableProviderModel = {
-  credentialId: string;
-  providerKey: string;
-  runtimeModelRef: string;
+interface SelectableProviderModel {
+  accountId: string;
+  selectionId: string;
   label?: string;
   modelId: string;
   capabilities: ModelCapability[];
   contextWindow?: number;
   maxTokens?: number;
-};
-
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
-
-async function modelProviderCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: MODEL_PROVIDER_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
-      target: null,
-      input,
-    }),
-  });
 }
+
+const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+const LEGACY_MODEL_FIELDS = ['credentialId', 'providerKey', 'runtimeModelRef'] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasLegacyModelFields(value: Record<string, unknown>): boolean {
+  return LEGACY_MODEL_FIELDS.some((field) => Object.hasOwn(value, field));
 }
 
 function normalizePositiveInteger(value: unknown): number | undefined {
@@ -58,22 +45,20 @@ function normalizeCapabilities(value: unknown): ModelCapability[] {
 }
 
 function normalizeSelectableModel(value: unknown): SelectableProviderModel | null {
-  if (!isRecord(value)) return null;
-  const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
-  const providerKey = typeof value.providerKey === 'string' ? value.providerKey.trim() : '';
+  if (!isRecord(value) || hasLegacyModelFields(value)) return null;
+  const accountId = typeof value.accountId === 'string' ? value.accountId.trim() : '';
+  const selectionId = typeof value.selectionId === 'string' ? value.selectionId.trim() : '';
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  const runtimeModelRef = typeof value.runtimeModelRef === 'string' ? value.runtimeModelRef.trim() : '';
   const label = typeof value.label === 'string' ? value.label.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!credentialId || !providerKey || !modelId || !runtimeModelRef || capabilities.length === 0) return null;
+  if (!accountId || !selectionId || !modelId || capabilities.length === 0) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   return {
-    credentialId,
-    providerKey,
+    accountId,
+    selectionId,
+    ...(label ? { label } : {}),
     modelId,
-    runtimeModelRef,
-    label,
     capabilities,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
@@ -84,15 +69,13 @@ export function buildSelectableProviderModels(models: readonly SelectableProvide
   const out: ModelCatalogEntry[] = [];
   const seen = new Set<string>();
   for (const model of models) {
-    const modelRef = model.runtimeModelRef?.trim();
-    if (!modelRef) continue;
-    if (seen.has(modelRef)) continue;
-    seen.add(modelRef);
-    const providerLabel = model.label || model.providerKey || model.credentialId;
+    if (seen.has(model.selectionId)) continue;
+    seen.add(model.selectionId);
+    const providerLabel = model.label || model.accountId;
     out.push({
-      id: modelRef,
-      provider: model.providerKey || model.credentialId,
-      credentialId: model.credentialId,
+      id: model.selectionId,
+      provider: providerLabel,
+      accountId: model.accountId,
       providerLabel,
       modelLabel: model.modelId,
       displayLabel: `${providerLabel} / ${model.modelId}`,
@@ -103,14 +86,20 @@ export function buildSelectableProviderModels(models: readonly SelectableProvide
   return out.sort((left, right) => left.displayLabel.localeCompare(right.displayLabel));
 }
 
-export async function fetchSelectableProviderModels(): Promise<ModelCatalogEntry[]> {
-  const payload = await modelProviderCapabilityExecute<unknown>(
-    'providerModels.listSelectable',
+export async function fetchSelectableProviderModels(
+  capability: ModelCapability = 'chat',
+): Promise<ModelCatalogEntry[]> {
+  const payload = await hostApiFetch<unknown>(
+    `/api/provider-models/selectable?capability=${encodeURIComponent(capability)}`,
   );
-  const rawModels = isRecord(payload) && Array.isArray(payload.models) ? payload.models : [];
-  return buildSelectableProviderModels(
-    rawModels
-      .map((model) => normalizeSelectableModel(model))
-      .filter((model): model is SelectableProviderModel => model !== null),
-  );
+  if (!isRecord(payload) || !Array.isArray(payload.models)) {
+    throw new Error('Provider models are unavailable');
+  }
+  const models = payload.models
+    .map((model) => normalizeSelectableModel(model))
+    .filter((model): model is SelectableProviderModel => model !== null);
+  if (models.length !== payload.models.length) {
+    throw new Error('Provider models are unavailable');
+  }
+  return buildSelectableProviderModels(models);
 }

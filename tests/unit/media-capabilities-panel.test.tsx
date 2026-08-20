@@ -22,7 +22,7 @@ const catalogState = vi.hoisted(() => ({
   saving: false,
   error: null as string | null,
   refresh: vi.fn().mockResolvedValue(undefined),
-  replaceCredentialModels: vi.fn().mockResolvedValue(undefined),
+  replaceAccountModels: vi.fn().mockResolvedValue(undefined),
 }));
 
 const providerStoreState = vi.hoisted(() => ({
@@ -55,10 +55,10 @@ describe('media capabilities panel', () => {
     routingState.saving = false;
     routingState.error = null;
     catalogState.models = [
-      { credentialId: 'openai-main', modelId: 'gpt-5.5', capabilities: ['chat'] },
-      { credentialId: 'ark-main', modelId: 'ark-code-latest', capabilities: ['chat'] },
-      { credentialId: 'ark-main', label: 'Ark Label From Catalog', modelId: 'seedream', capabilities: ['imageGenerate'] },
-      { credentialId: 'openai-main', modelId: 'tts-1', capabilities: ['tts'] },
+      { accountId: 'openai-main', modelId: 'gpt-5.5', capabilities: ['chat'] },
+      { accountId: 'ark-main', modelId: 'ark-code-latest', capabilities: ['chat'] },
+      { accountId: 'ark-main', label: 'Ark Label From Catalog', modelId: 'seedream', capabilities: ['imageGenerate'] },
+      { accountId: 'openai-main', modelId: 'tts-1', capabilities: ['tts'] },
     ];
     catalogState.ready = true;
     catalogState.loading = false;
@@ -68,7 +68,7 @@ describe('media capabilities panel', () => {
     catalogState.refresh.mockResolvedValue(undefined);
   });
 
-  it('saves capability routes using credential-scoped model refs', async () => {
+  it('saves capability routes using account-scoped model refs', async () => {
     render(<MediaCapabilitiesPanel />);
 
     expect(screen.getByRole('button', { name: 'Default Models' })).toHaveAttribute('aria-expanded', 'false');
@@ -86,8 +86,8 @@ describe('media capabilities panel', () => {
 
     await waitFor(() => {
       expect(routingState.setRoute).toHaveBeenCalledWith('chat', {
-        primary: { credentialId: 'openai-main', modelId: 'gpt-5.5' },
-        fallbacks: [{ credentialId: 'ark-main', modelId: 'ark-code-latest' }],
+        primary: { accountId: 'openai-main', modelId: 'gpt-5.5' },
+        fallbacks: [{ accountId: 'ark-main', modelId: 'ark-code-latest' }],
       });
     });
   });
@@ -104,13 +104,13 @@ describe('media capabilities panel', () => {
 
     await waitFor(() => {
       expect(routingState.setRoute).toHaveBeenCalledWith('tts', {
-        primary: { credentialId: 'openai-main', modelId: 'tts-1' },
+        primary: { accountId: 'openai-main', modelId: 'tts-1' },
         fallbacks: [],
       });
     });
   });
 
-  it('uses catalog credential labels before falling back to credential ids', async () => {
+  it('uses catalog account labels before falling back to account ids', async () => {
     render(<MediaCapabilitiesPanel />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Default Models' }));

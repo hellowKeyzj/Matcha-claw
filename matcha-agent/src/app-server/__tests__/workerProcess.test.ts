@@ -16,11 +16,7 @@ class WritableSink extends Writable {
 
   override end(cb?: () => void): this
   override end(chunk: unknown, cb?: () => void): this
-  override end(
-    chunk: unknown,
-    encoding: BufferEncoding,
-    cb?: () => void,
-  ): this
+  override end(chunk: unknown, encoding: BufferEncoding, cb?: () => void): this
   override end(
     chunk?: unknown,
     encodingOrCallback?: BufferEncoding | (() => void),
@@ -33,7 +29,9 @@ class WritableSink extends Writable {
     if (encodingOrCallback) {
       return super.end(chunk, encodingOrCallback, callback)
     }
-    return chunk === undefined ? super.end(callback) : super.end(chunk, callback)
+    return chunk === undefined
+      ? super.end(callback)
+      : super.end(chunk, callback)
   }
 
   _write(

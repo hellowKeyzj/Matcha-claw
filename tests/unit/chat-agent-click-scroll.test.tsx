@@ -5,7 +5,7 @@ import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import i18n from '@/i18n';
@@ -69,35 +69,6 @@ const anotherRecordKey = buildSessionRecordKey(anotherSessionIdentity);
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn().mockResolvedValue({}),
   hostSessionPatch: vi.fn().mockResolvedValue({ success: true }),
-  hostRuntimeEndpointsList: vi.fn().mockResolvedValue({
-    endpoints: [{
-      id: 'openclaw-local',
-      protocolId: 'openclaw-v4',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      displayName: 'OpenClaw Local',
-      agentIds: ['main', 'another'],
-      acceptsDynamicAgents: true,
-      capabilities: {
-        chat: true,
-        streaming: true,
-        tools: true,
-        approvals: true,
-        replay: true,
-        modelSelection: true,
-      },
-      capabilitySummaries: [
-        { id: 'session.prompt', scope: runtimeFixtures.mainAgentScope },
-        { id: 'session.prompt', scope: runtimeFixtures.anotherAgentScope },
-      ],
-      controlState: {
-        connection: null,
-        readiness: null,
-        capabilities: null,
-        updatedAt: null,
-      },
-    }],
-  }),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({
     kind: 'runtime-instance',
     endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
@@ -105,7 +76,6 @@ vi.mock('@/lib/host-api', () => ({
   hostSessionList: vi.fn().mockResolvedValue({ ready: true, sessions: [] }),
   hostSessionLoad: vi.fn().mockResolvedValue({ snapshot: null }),
   hostSessionWindowFetch: vi.fn().mockResolvedValue({ snapshot: null }),
-  resolveHydratedSessionSnapshot: vi.fn(async ({ initial }: { initial: { snapshot?: unknown } }) => initial.snapshot ?? null),
 }));
 
 function buildSessionRecord(
@@ -165,20 +135,8 @@ describe('chat 左侧点击链路回归', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
 
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     } as never);
 
     useSubagentsStore.setState({

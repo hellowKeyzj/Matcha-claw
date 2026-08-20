@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { waitForRuntimeJobResult } from '@/lib/host-api';
 import { Cable, CheckCircle2, CircleAlert, Clock3, Loader2, RefreshCw, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useSessionConnectorStatusStore, type SessionConnectorStatus, type SessionConnectorStatusResultType } from '@/stores/session-connector-status';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../../runtime-host/shared/runtime-address';
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
+} from '../../../../electron/desktop-contract/runtime-address';
 
 interface ChatSessionConnectorStatusProps {
   readonly sessionIdentity: SessionIdentity | null;
@@ -49,34 +51,6 @@ export function ChatSessionConnectorStatus({
     }
     void refreshSessionStatus(sessionIdentity).catch(() => undefined);
   }, [refreshSessionStatus, sessionIdentityKey]);
-
-  useEffect(() => {
-    if (!sessionIdentity) {
-      return;
-    }
-    const refreshJobIds = Array.from(new Set(statuses
-      .map((status) => status.details?.refreshJobId)
-      .filter((jobId): jobId is string => typeof jobId === 'string' && jobId.length > 0)));
-    if (refreshJobIds.length === 0) {
-      return;
-    }
-
-    let cancelled = false;
-    for (const refreshJobId of refreshJobIds) {
-      void waitForRuntimeJobResult(refreshJobId, { endpoint: sessionIdentity.endpoint })
-        .then(() => {
-          if (cancelled) {
-            return;
-          }
-          void refreshSessionStatus(sessionIdentity).catch(() => undefined);
-        })
-        .catch(() => undefined);
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshSessionStatus, sessionIdentity, statuses]);
 
   useEffect(() => {
     if (!open) {

@@ -4,7 +4,7 @@ import {
   shouldShowRuntimeErrorBannerImmediately,
 } from '@/pages/Chat/runtime-error-banner';
 import type { ChatSessionRuntimeState } from '@/stores/chat';
-import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+import type { GatewayTransportIssue } from '../../src/types/session/runtime-state';
 
 function runtime(patch: Partial<ChatSessionRuntimeState> = {}): ChatSessionRuntimeState {
   return {

@@ -301,6 +301,7 @@ export function buildAPIProviderProperties(): Property[] {
       gemini: 'Gemini API',
       grok: 'Grok API',
       openai: 'OpenAI API',
+      openaiResponses: 'OpenAI Responses API',
     }[apiProvider];
     properties.push({
       label: 'API provider',
@@ -396,10 +397,10 @@ export function buildAPIProviderProperties(): Property[] {
       label: 'Grok base URL',
       value: grokBaseUrl,
     });
-  } else if (apiProvider === 'openai') {
+  } else if (apiProvider === 'openai' || apiProvider === 'openaiResponses') {
     const openaiBaseUrl = process.env.OPENAI_BASE_URL;
     properties.push({
-      label: 'OpenAI base URL',
+      label: apiProvider === 'openaiResponses' ? 'OpenAI Responses base URL' : 'OpenAI base URL',
       value: openaiBaseUrl,
     });
   }

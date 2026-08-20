@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hostApiFetchMock = vi.fn();
 const hostSecurityFetchRuleCatalogMock = vi.fn();
 const hostSecurityReadAuditMock = vi.fn();
-
-vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
 
 vi.mock('@/lib/security-runtime', () => ({
   hostSecurityFetchRuleCatalog: (...args: unknown[]) => hostSecurityFetchRuleCatalogMock(...args),
@@ -16,32 +11,11 @@ vi.mock('@/lib/security-runtime', () => ({
 describe('security support store', () => {
   beforeEach(() => {
     vi.resetModules();
-    hostApiFetchMock.mockReset();
     hostSecurityFetchRuleCatalogMock.mockReset();
     hostSecurityReadAuditMock.mockReset();
   });
 
-  it('loadPlatformTools 会标准化并按启用状态排序', async () => {
-    hostApiFetchMock.mockResolvedValue({
-      success: true,
-      tools: [
-        { id: 'http.request', enabled: false, source: 'native' },
-        { id: 'system.run', enabled: true, source: 'native' },
-        { id: '  fs.read  ', enabled: true, source: 'builtin' },
-      ],
-    });
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
-
-    await useSecuritySupportStore.getState().loadPlatformTools({ refresh: true });
-
-    const state = useSecuritySupportStore.getState();
-    expect(state.platformToolsHydrated).toBe(true);
-    expect(state.loadingPlatformTools).toBe(false);
-    expect(state.platformTools.map((tool) => tool.id)).toEqual(['fs.read', 'system.run', 'http.request']);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/platform/tools?includeDisabled=true&refresh=true');
-  });
-
-  it('loadRuleCatalog 会过滤非法项并保留支持平台', async () => {
+  it('loadRuleCatalog filters malformed items and retains supported platforms', async () => {
     hostSecurityFetchRuleCatalogMock.mockResolvedValue({
       success: true,
       items: [
@@ -58,31 +32,72 @@ describe('security support store', () => {
     expect(state.loadingRuleCatalog).toBe(false);
     expect(state.ruleCatalog).toHaveLength(2);
     expect(state.ruleCatalog.map((item) => item.platform)).toEqual(['linux', 'windows']);
+    expect(hostSecurityFetchRuleCatalogMock).toHaveBeenCalledOnce();
   });
 
-  it('loadRecentAudits 失败时保留旧数据', async () => {
-    hostSecurityReadAuditMock.mockResolvedValueOnce({
-      items: [{ ts: 1, toolName: 'system.run', risk: 'high', action: 'block', decision: 'deny' }],
-    });
+  it('loads bounded audit projections into state and forwards the page parameters', async () => {
+    const items = [{
+      ts: 1_725_000_000_000,
+      toolName: 'shell.exec',
+      risk: 'high',
+      action: 'block',
+      decision: 'rule-match',
+      ruleId: 'destructive.shell',
+    }];
+    hostSecurityReadAuditMock.mockResolvedValue({ items });
     const { useSecuritySupportStore } = await import('@/stores/security-support-store');
-    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'running' });
 
-    hostSecurityReadAuditMock.mockRejectedValueOnce(new Error('network down'));
+    await useSecuritySupportStore.getState().loadRecentAudits({
+      gatewayProcessState: 'running',
+      page: 2,
+      pageSize: 8,
+    });
+
+    const state = useSecuritySupportStore.getState();
+    expect(hostSecurityReadAuditMock).toHaveBeenCalledWith({ page: 2, pageSize: 8 });
+    expect(state.auditItems).toEqual(items);
+    expect(state.loadingAudit).toBe(false);
+    expect(state.auditError).toBeNull();
+    expect(state.auditStale).toBe(false);
+  });
+
+  it('does not query audit state while the gateway is stopped and clears stale items', async () => {
+    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    useSecuritySupportStore.setState({
+      auditItems: [{ ts: 1, toolName: 'shell.exec', risk: 'high', action: 'block', decision: 'deny' }],
+      auditError: 'old error',
+      auditStale: true,
+    });
+
+    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'stopped' });
+
+    const state = useSecuritySupportStore.getState();
+    expect(hostSecurityReadAuditMock).not.toHaveBeenCalled();
+    expect(state.auditItems).toEqual([]);
+    expect(state.auditError).toBeNull();
+    expect(state.auditStale).toBe(false);
+  });
+
+  it('clears audit state and records an unavailable error when the read fails', async () => {
+    hostSecurityReadAuditMock.mockRejectedValue(new Error('audit unavailable'));
+    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+
     await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'running' });
 
     const state = useSecuritySupportStore.getState();
-    expect(state.auditItems).toHaveLength(1);
+    expect(state.auditItems).toEqual([]);
     expect(state.loadingAudit).toBe(false);
+    expect(state.auditError).toBe('audit unavailable');
+    expect(state.auditStale).toBe(true);
   });
 
-  it('支持 action-center 与 UI 选择态更新', async () => {
+  it('only changes live UI state for policy, remediation, and emergency actions', async () => {
     const { useSecuritySupportStore } = await import('@/stores/security-support-store');
 
     useSecuritySupportStore.getState().setActiveSection('actionCenter');
     useSecuritySupportStore.getState().setAllowlistRegexTab('secretPatterns');
-    useSecuritySupportStore.getState().setRuleCatalogPlatform('linux');
-    useSecuritySupportStore.getState().setSecurityOpBusy('quick_audit');
-    useSecuritySupportStore.getState().setSecurityOpResult('ok');
+    useSecuritySupportStore.getState().setSecurityOpBusy('emergency');
+    useSecuritySupportStore.getState().setSecurityOpResult('outcome_unknown');
     useSecuritySupportStore.getState().setRemediationActions([
       { id: 'r-1', title: 'A', description: 'D', risk: 'high' },
       { id: 'r-2', title: 'B', description: 'E', risk: 'low' },
@@ -93,9 +108,8 @@ describe('security support store', () => {
     const state = useSecuritySupportStore.getState();
     expect(state.activeSection).toBe('actionCenter');
     expect(state.allowlistRegexTab).toBe('secretPatterns');
-    expect(state.ruleCatalogPlatform).toBe('linux');
-    expect(state.securityOpBusy).toBe('quick_audit');
-    expect(state.securityOpResult).toBe('ok');
+    expect(state.securityOpBusy).toBe('emergency');
+    expect(state.securityOpResult).toBe('outcome_unknown');
     expect(state.selectedRemediationActions).toEqual(['r-1']);
     expect(state.lastRemediationSnapshotId).toBe('snap-1');
   });

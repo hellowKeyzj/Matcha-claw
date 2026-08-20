@@ -35,7 +35,9 @@ import type {
   ChatSessionRuntimeState,
   ChatSessionViewportState,
 } from '@/stores/chat';
-import type { SessionIdentity } from '../../../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../../../electron/desktop-contract/runtime-address';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
 

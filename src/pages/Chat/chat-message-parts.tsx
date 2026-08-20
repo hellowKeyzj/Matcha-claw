@@ -5,7 +5,7 @@ import type { AttachedFileMeta } from '@/stores/chat';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/tool-card';
 import type { ChatMessageImage } from './chat-message-view';
 import { formatTimestamp } from './message-utils';
 import { buildMarkdownCacheKey, getOrBuildMarkdownBody } from './md-pipeline';

@@ -67,13 +67,14 @@ describe('sheet viewer', () => {
         ['A'],
       ]);
 
-    render(<SheetViewer filePath="/workspace/demo.xlsx" sessionIdentity={sessionIdentity} />);
+    render(<SheetViewer relativePath="docs/demo.xlsx" sessionIdentity={sessionIdentity} />);
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
-        path: '/workspace/demo.xlsx',
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'docs/demo.xlsx',
         maxBytes: 50 * 1024 * 1024,
-        sessionIdentity,
       });
     });
 
@@ -95,7 +96,7 @@ describe('sheet viewer', () => {
       error: 'tooLarge',
     });
 
-    render(<SheetViewer filePath="/workspace/demo.xlsx" sessionIdentity={sessionIdentity} />);
+    render(<SheetViewer relativePath="docs/demo.xlsx" sessionIdentity={sessionIdentity} />);
 
     expect(await screen.findByText('artifacts.previewTooLarge')).toBeInTheDocument();
   });

@@ -149,6 +149,24 @@ class WorkerEntryRunner {
           await this.session?.flush()
           await this.emitSuccess(command.id)
           return
+        case 'worker.setModel':
+          if (!this.session) {
+            await this.emitFailure(
+              command.id,
+              new Error('Worker is not initialized'),
+            )
+            return
+          }
+          if (this.activePrompt) {
+            await this.emitFailure(
+              command.id,
+              new Error('A prompt is already running'),
+            )
+            return
+          }
+          this.session.setModel(command.model)
+          await this.emitSuccess(command.id)
+          return
         case 'worker.shutdown':
           await this.session?.shutdown(command.reason)
           await this.emitSuccess(command.id)

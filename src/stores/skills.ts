@@ -6,12 +6,11 @@ import { create } from 'zustand';
 import {
   hostApiFetch,
   resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+import type { LocalSkillImportPayload } from '@/services/local-path-picker';
 
 type GatewaySkillMissing = {
   bins?: string[];
@@ -56,11 +55,12 @@ type MarketplaceSearchResult = {
   error?: string;
 };
 
-type LocalSkillImportResult = {
-  success: true;
-  skillKey: string;
-  installedPath: string;
-  sourceKind: 'directory' | 'zip' | 'markdown';
+type SkillsMutationResponse = {
+  outcome: 'accepted' | 'rejected' | 'unknown';
+};
+
+type SkillsUninstallResponse = {
+  outcome: 'removed' | 'notFound' | 'rejected' | 'unknown';
 };
 
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
@@ -196,7 +196,7 @@ interface SkillsState {
   fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
-  importLocalSkill: (sourcePath: string) => Promise<string>;
+  importLocalSkill: (payload: LocalSkillImportPayload) => Promise<string>;
   uninstallSkill: (slug: string) => Promise<void>;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
@@ -395,20 +395,18 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean }> | { success: false; error?: string }>(
-        'clawhub.install',
-        { slug, version },
-        { kind: 'skill', slug },
-      );
-      if (!result.success) {
-        const appError = normalizeAppError(new Error(result.error || 'Install failed'), {
+      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/clawhub/install', {
+        method: 'POST',
+        body: JSON.stringify({ slug, ...(version ? { version } : {}) }),
+      });
+      if (result.outcome !== 'accepted') {
+        const appError = normalizeAppError(new Error('Install failed'), {
           module: 'skills',
           operation: 'install',
         });
         const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'install');
         throw new Error(errorKey ?? appError.message);
       }
-      await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       await get().enableSkill(slug);
       await get().fetchSkills({ force: true, fresh: true });
     } catch (error) {
@@ -428,41 +426,42 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  importLocalSkill: async (sourcePath: string) => {
-    const trimmedSourcePath = sourcePath.trim();
-    if (!trimmedSourcePath) {
-      throw new Error('Local skill source path is required');
+  importLocalSkill: async (payload) => {
+    const skillKey = payload.skillKey.trim();
+    if (!skillKey) {
+      throw new Error('Imported skill key is required');
     }
-    if (get().installing[trimmedSourcePath]) {
-      return trimmedSourcePath;
+    if (get().installing[skillKey]) {
+      return skillKey;
     }
     set((state) => {
-      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, trimmedSourcePath);
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillKey);
       return {
-        installing: { ...state.installing, [trimmedSourcePath]: true },
+        installing: { ...state.installing, [skillKey]: true },
         mutatingBySkillId: nextMutating,
         mutating: true,
       };
     });
     try {
-      const submission = await skillManagementCapabilityExecute<RuntimeJobSubmission<LocalSkillImportResult>>(
-        'skills.importLocal',
-        { sourcePath: trimmedSourcePath },
-        { kind: 'skill' },
-      );
-      const result = await waitForRuntimeJobResult<LocalSkillImportResult>(submission.job.id);
-      const skillKey = result.skillKey.trim();
-      if (!skillKey) {
-        throw new Error('Imported skill did not return a skill key');
+      const endpoint = payload.kind === 'markdown'
+        ? '/api/skills/import/markdown'
+        : '/api/skills/import/bundle';
+      const body = payload.kind === 'markdown'
+        ? { content: payload.content }
+        : { skillKey, files: payload.files };
+      const result = await hostApiFetch<SkillsMutationResponse>(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      if (result.outcome !== 'accepted') {
+        throw new Error('Skill import failed');
       }
-      await get().enableSkill(skillKey);
-      await get().fetchSkills({ force: true, fresh: true });
       return skillKey;
     } finally {
       set((state) => {
         const newInstalling = { ...state.installing };
-        delete newInstalling[trimmedSourcePath];
-        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, trimmedSourcePath);
+        delete newInstalling[skillKey];
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillKey);
         return {
           installing: newInstalling,
           mutatingBySkillId: nextMutating,
@@ -482,16 +481,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean }>>(
-        'clawhub.uninstall',
-        { slug },
-        { kind: 'skill', slug },
-      );
-      if (!result.success) {
+      const result = await hostApiFetch<SkillsUninstallResponse>('/api/skills/uninstall', {
+        method: 'POST',
+        body: JSON.stringify({ skillKey: slug }),
+      });
+      if (result.outcome !== 'removed') {
         throw new Error('Uninstall failed');
       }
-      await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
-      // Refresh skills after uninstall
       await get().fetchSkills({ force: true, fresh: true });
     } catch (error) {
       console.error('Uninstall error:', error);
@@ -521,12 +517,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean; error?: string }>>(
-        'skills.updateState',
-        { skillKey: skillId, enabled: true },
-        { kind: 'skill', skillId },
-      );
-      await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
+      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/config', {
+        method: 'POST',
+        body: JSON.stringify({ skillKey: skillId, enabled: true }),
+      });
+      if (result.outcome !== 'accepted') {
+        throw new Error('Failed to enable skill');
+      }
       updateSkill(skillId, { enabled: true });
     } catch (error) {
       console.error('Failed to enable skill:', error);
@@ -558,12 +555,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean; error?: string }>>(
-        'skills.updateState',
-        { skillKey: skillId, enabled: false },
-        { kind: 'skill', skillId },
-      );
-      await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
+      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/config', {
+        method: 'POST',
+        body: JSON.stringify({ skillKey: skillId, enabled: false }),
+      });
+      if (result.outcome !== 'accepted') {
+        throw new Error('Failed to disable skill');
+      }
       updateSkill(skillId, { enabled: false });
     } catch (error) {
       console.error('Failed to disable skill:', error);

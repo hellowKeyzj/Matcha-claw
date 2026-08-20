@@ -1,54 +1,60 @@
-import {
-  hostApiFetch,
-  resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
-} from '@/lib/host-api';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import { hostApiFetch } from '@/lib/host-api';
 
-const SECURITY_RUNTIME_CAPABILITY_ID = 'security.runtime';
+type SecurityOperationScopeKind = 'security-policy' | 'security-remediation';
+type SecurityOperationTarget = Readonly<{
+  kind: SecurityOperationScopeKind;
+  snapshotId?: string;
+}>;
+type SecurityOperationId =
+  | 'security.quickAudit'
+  | 'security.checkIntegrity'
+  | 'security.rebaselineIntegrity'
+  | 'security.scanSkills'
+  | 'security.checkAdvisories'
+  | 'security.previewRemediation'
+  | 'security.applyRemediation'
+  | 'security.rollbackRemediation';
 
-async function securityRuntimeCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget,
+async function hostSecurityOperation<TResult>(
+  operationId: SecurityOperationId,
+  scopeKind: SecurityOperationScopeKind,
+  input: Record<string, unknown>,
+  target: SecurityOperationTarget = { kind: scopeKind },
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+  return await hostApiFetch<TResult>('/api/security/operation', {
     method: 'POST',
     body: JSON.stringify({
-      id: SECURITY_RUNTIME_CAPABILITY_ID,
+      id: 'security.operation',
       operationId,
-      scope: await resolveSingleCapabilityScope(SECURITY_RUNTIME_CAPABILITY_ID),
+      scope: { kind: scopeKind },
       target,
       input,
     }),
   });
 }
 
-async function submitSecurityCapabilityJob<TResult = unknown>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget,
-  options?: { timeoutMs?: number },
-): Promise<TResult> {
-  const submission = await securityRuntimeCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, input, target);
-  return await waitForRuntimeJobResult<TResult>(submission.job.id, options);
-}
+export type SecurityPolicyReceipt = Readonly<{
+  desired: Readonly<{
+    revision: number;
+    outcome: 'confirmed' | 'outcome_unknown';
+  }>;
+}>;
 
 export async function hostSecurityReadPolicy<TPolicy = unknown>() {
   return await hostApiFetch<TPolicy>('/api/security');
 }
 
-export async function hostSecurityWritePolicy<TResult = unknown>(policy: unknown) {
-  const response = await securityRuntimeCapabilityExecute<RuntimeJobSubmission<TResult> & {
-    policy?: unknown;
-    sync?: RuntimeJobSubmission<TResult>;
-  }>('security.writePolicy', isRecord(policy) ? policy : {}, { kind: 'security-policy' });
-  const jobId = response.sync?.job?.id ?? response.job?.id;
-  if (jobId) {
-    await waitForRuntimeJobResult<TResult>(jobId);
-  }
-  return response as TResult;
+export async function hostSecurityWritePolicy(policy: unknown): Promise<SecurityPolicyReceipt> {
+  return await hostApiFetch<SecurityPolicyReceipt>('/api/security/policy', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'security.policy',
+      operationId: 'security.replace',
+      scope: { kind: 'security-policy' },
+      target: { kind: 'security-policy' },
+      input: { policy: isRecord(policy) ? policy : {} },
+    }),
+  });
 }
 
 export async function hostSecurityReadAudit<TResult = unknown>(params?: Record<string, string | number | undefined>) {
@@ -61,52 +67,82 @@ export async function hostSecurityReadAudit<TResult = unknown>(params?: Record<s
   return await hostApiFetch<TResult>(`/api/security/audit${suffix}`);
 }
 
-export async function hostSecurityRunQuickAudit<TResult = unknown>() {
-  return await submitSecurityCapabilityJob<TResult>('security.quickAudit', {}, { kind: 'security-policy' });
+export type SecurityEmergencyResponse = Readonly<{
+  outcome: 'applied' | 'target_rejected' | 'outcome_unknown';
+}>;
+
+export const SECURITY_EMERGENCY_TARGET_REJECTED_MESSAGE = 'Security emergency target was rejected; verify the active security runtime.';
+export const SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE = 'Security emergency outcome is unknown; verify manually.';
+
+export type SecurityEmergencyOutcome =
+  | Readonly<{ outcome: 'applied' }>
+  | Readonly<{ outcome: 'target_rejected' }>
+  | Readonly<{ outcome: 'outcome_unknown'; message: typeof SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE }>;
+
+export function resolveSecurityEmergencyOutcome(response: SecurityEmergencyResponse): SecurityEmergencyOutcome {
+  switch (response.outcome) {
+    case 'applied':
+      return { outcome: 'applied' };
+    case 'target_rejected':
+      return { outcome: 'target_rejected' };
+    case 'outcome_unknown':
+      return { outcome: 'outcome_unknown', message: SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE };
+  }
 }
 
-export async function hostSecurityRunEmergencyResponse<TResult = unknown>() {
-  return await submitSecurityCapabilityJob<TResult>('security.emergencyResponse', {}, { kind: 'security-policy' });
+export async function hostSecurityRunEmergencyResponse(): Promise<SecurityEmergencyResponse> {
+  return await hostApiFetch<SecurityEmergencyResponse>('/api/security/emergency', {
+    method: 'POST',
+    body: '{}',
+  });
 }
 
-export async function hostSecurityCheckIntegrity<TResult = unknown>() {
-  return await submitSecurityCapabilityJob<TResult>('security.checkIntegrity', {}, { kind: 'security-policy' });
+export async function hostSecurityRunQuickAudit<TResult = unknown>(): Promise<TResult> {
+  return await hostSecurityOperation<TResult>('security.quickAudit', 'security-policy', {});
 }
 
-export async function hostSecurityRebaselineIntegrity<TResult = unknown>() {
-  return await submitSecurityCapabilityJob<TResult>('security.rebaselineIntegrity', {}, { kind: 'security-policy' });
+export async function hostSecurityCheckIntegrity<TResult = unknown>(): Promise<TResult> {
+  return await hostSecurityOperation<TResult>('security.checkIntegrity', 'security-policy', {});
 }
 
-export async function hostSecurityScanSkills<TResult = unknown>(scanPath?: string) {
-  return await submitSecurityCapabilityJob<TResult>(
-    'security.scanSkills',
-    scanPath ? { scanPath } : {},
-    { kind: 'security-policy' },
-    { timeoutMs: 120000 },
+export async function hostSecurityRebaselineIntegrity<TResult = unknown>(): Promise<TResult> {
+  return await hostSecurityOperation<TResult>('security.rebaselineIntegrity', 'security-policy', {});
+}
+
+export async function hostSecurityScanSkills<TResult = unknown>(scanPath?: string): Promise<TResult> {
+  return await hostSecurityOperation<TResult>('security.scanSkills', 'security-policy', scanPath ? { scanPath } : {});
+}
+
+export async function hostSecurityCheckAdvisories<TResult = unknown>(feedUrl?: string | null): Promise<TResult> {
+  return await hostSecurityOperation<TResult>(
+    'security.checkAdvisories',
+    'security-policy',
+    feedUrl === undefined ? {} : { feedUrl },
   );
 }
 
-export async function hostSecurityCheckAdvisories<TResult = unknown>(feedUrl?: string | null) {
-  return await submitSecurityCapabilityJob<TResult>('security.checkAdvisories', feedUrl ? { feedUrl } : {}, { kind: 'security-policy' });
+export async function hostSecurityPreviewRemediation<TResult = unknown>(): Promise<TResult> {
+  return await hostSecurityOperation<TResult>('security.previewRemediation', 'security-remediation', {});
 }
 
-export async function hostSecurityPreviewRemediation<TResult = unknown>() {
-  return await submitSecurityCapabilityJob<TResult>('security.previewRemediation', {}, { kind: 'security-remediation' });
-}
-
-export async function hostSecurityApplyRemediation<TResult = unknown>(actions?: string[]) {
-  return await submitSecurityCapabilityJob<TResult>(
+export async function hostSecurityApplyRemediation<TResult = unknown>(actions?: string[]): Promise<TResult> {
+  return await hostSecurityOperation<TResult>(
     'security.applyRemediation',
-    actions && actions.length > 0 ? { actions } : {},
-    { kind: 'security-remediation' },
+    'security-remediation',
+    actions === undefined ? {} : { actions },
   );
 }
 
-export async function hostSecurityRollbackRemediation<TResult = unknown>(snapshotId?: string | null) {
-  return await submitSecurityCapabilityJob<TResult>(
+export async function hostSecurityRollbackRemediation<TResult = unknown>(snapshotId?: string | null): Promise<TResult> {
+  const input = snapshotId === undefined ? {} : { snapshotId };
+  const target = typeof snapshotId === 'string' && snapshotId.length > 0
+    ? { kind: 'security-remediation' as const, snapshotId }
+    : { kind: 'security-remediation' as const };
+  return await hostSecurityOperation<TResult>(
     'security.rollbackRemediation',
-    snapshotId ? { snapshotId } : {},
-    { kind: 'security-remediation', ...(snapshotId ? { snapshotId } : {}) },
+    'security-remediation',
+    input,
+    target,
   );
 }
 

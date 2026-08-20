@@ -1,9 +1,11 @@
 export type AppErrorCode =
   | 'AUTH_INVALID'
   | 'TIMEOUT'
+  | 'ABORTED'
   | 'RATE_LIMIT'
   | 'PERMISSION'
   | 'CHANNEL_UNAVAILABLE'
+  | 'UNAVAILABLE'
   | 'NETWORK'
   | 'CONFIG'
   | 'GATEWAY'
@@ -26,6 +28,10 @@ export function mapBackendErrorCode(code?: string): AppErrorCode {
   switch (code) {
     case 'TIMEOUT':
       return 'TIMEOUT';
+    case 'ABORTED':
+      return 'ABORTED';
+    case 'UNAVAILABLE':
+      return 'UNAVAILABLE';
     case 'PERMISSION':
       return 'PERMISSION';
     case 'GATEWAY':
@@ -58,8 +64,11 @@ function classifyMessage(message: string): AppErrorCode {
   ) {
     return 'AUTH_INVALID';
   }
-  if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('abort')) {
+  if (lower.includes('timeout') || lower.includes('timed out')) {
     return 'TIMEOUT';
+  }
+  if (lower.includes('abort')) {
+    return 'ABORTED';
   }
   if (lower.includes('rate limit') || lower.includes('429')) {
     return 'RATE_LIMIT';
@@ -91,12 +100,20 @@ function classifyMessage(message: string): AppErrorCode {
   return 'UNKNOWN';
 }
 
+function getStructuredErrorCode(err: unknown): AppErrorCode | null {
+  if (!err || typeof err !== 'object' || !('code' in err)) {
+    return null;
+  }
+  const code = mapBackendErrorCode((err as { code?: unknown }).code as string | undefined);
+  return code === 'UNKNOWN' ? null : code;
+}
+
 export function normalizeAppError(err: unknown, details?: Record<string, unknown>): AppError {
   if (err instanceof AppError) {
     return new AppError(err.code, err.message, err.cause ?? err, { ...(err.details ?? {}), ...(details ?? {}) });
   }
 
   const message = err instanceof Error ? err.message : String(err);
-  return new AppError(classifyMessage(message), message, err, details);
+  return new AppError(getStructuredErrorCode(err) ?? classifyMessage(message), message, err, details);
 }
 

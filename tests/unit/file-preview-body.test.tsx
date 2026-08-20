@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FilePreviewBody } from '@/components/file-preview/FilePreviewBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
-import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 
 const hostFileReadTextMock = vi.fn();
 const hostFileReadBinaryMock = vi.fn();
@@ -106,13 +106,18 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.ts',
+      relativePath: 'demo.ts',
       sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.ts', sessionIdentity });
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'demo.ts',
+      });
     });
     expect(await screen.findByTestId('monaco-viewer')).toHaveTextContent('export const answer = 42;');
   });
@@ -135,13 +140,18 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.html',
+      relativePath: 'demo.html',
       sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.html', sessionIdentity });
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'demo.html',
+      });
     });
     const frame = await screen.findByTestId('html-preview-frame');
     expect(frame).toHaveAttribute('srcdoc', '<!doctype html><h1>Rendered Preview</h1>');
@@ -152,7 +162,6 @@ describe('file preview body', () => {
     hostFileReadBinaryMock.mockResolvedValue({
       ok: true,
       data: 'aGVsbG8=',
-      mimeType: 'image/png',
     });
 
     const file: ArtifactPreviewTarget = {
@@ -167,13 +176,19 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.png',
+      relativePath: 'images/demo.png',
       sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({ path: '/workspace/demo.png', sessionIdentity });
+      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'images/demo.png',
+        maxBytes: 50 * 1024 * 1024,
+      });
     });
     const image = await screen.findByRole('img', { name: 'demo.png' });
     expect(createObjectUrlMock).toHaveBeenCalledTimes(1);

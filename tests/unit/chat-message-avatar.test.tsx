@@ -213,7 +213,7 @@ describe('chat message avatar', () => {
     expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('读取，README.md');
   });
 
-  it('pending typing turn shows thinking indicator instead of gray streaming block', () => {
+  it('streaming turn without content shows thinking indicator from runtime state', () => {
     const item = {
       ...buildRenderItem({
         role: 'assistant',
@@ -227,7 +227,6 @@ describe('chat message avatar', () => {
       tools: [],
       images: [],
       attachedFiles: [],
-      pendingState: 'typing' as const,
     };
 
     render(
@@ -240,6 +239,35 @@ describe('chat message avatar', () => {
     expect(screen.getByText('正在思考')).toBeInTheDocument();
     expect(document.querySelector('[data-chat-pending-mode="typing"]')).not.toBeNull();
     expect(document.querySelector('[data-chat-body-mode="streaming"]')).toBeNull();
+  });
+
+  it('stale typing pendingState does not resurrect an empty assistant turn', () => {
+    const item = {
+      ...buildRenderItem({
+        role: 'assistant',
+        content: '',
+      }),
+      kind: 'assistant-turn' as const,
+      status: 'final' as const,
+      segments: [],
+      text: '',
+      thinking: null,
+      tools: [],
+      images: [],
+      attachedFiles: [],
+      pendingState: 'typing' as const,
+    };
+
+    const { container } = render(
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
+      />,
+    );
+
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText('正在思考')).toBeNull();
+    expect(document.querySelector('[data-chat-pending-mode]')).toBeNull();
   });
 
   it('pending activity turn shows tool activity indicator', () => {

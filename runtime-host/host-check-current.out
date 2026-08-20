@@ -1,0 +1,244 @@
+warning: function `hydrate_lines` is never used
+  --> integrations\matcha-agent\src\session\hydration\mod.rs:44:15
+   |
+44 | pub(crate) fn hydrate_lines(
+   |               ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `try_new` is never used
+   --> integrations\matcha-agent\src\session\hydration\model.rs:282:19
+    |
+281 | impl HydratedMessage {
+    | -------------------- associated function in this implementation
+282 |     pub(crate) fn try_new(role: HydratedMessageRole, text: String) -> Result<Self, DecodeFailure> {
+    |                   ^^^^^^^
+
+warning: `matcha-agent` (lib) generated 2 warnings
+domains\organization\src\store\facts.rs:511:19: warning: associated functions `restore_with_materialization_lifecycles` and `restore_with_materialization_lifecycles_and_decisions` are never used
+domains\organization\src\run\task_board\model.rs:501:19: warning: method `durable_parts` is never used
+warning: `organization` (lib) generated 2 warnings
+warning: method `with_secret_references` is never used
+   --> domains\environment\src\connectors.rs:302:19
+    |
+219 | impl Connector {
+    | -------------- method in this implementation
+...
+302 |     pub(crate) fn with_secret_references(mut self, references: ConnectorSecretReferences) -> Self {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `activated_at_ms` and `plan` are never read
+  --> domains\environment\src\license\legacy.rs:54:5
+   |
+47 | struct CacheFile {
+   |        --------- fields in this struct
+...
+54 |     activated_at_ms: u64,
+   |     ^^^^^^^^^^^^^^^
+...
+61 |     plan: Option<String>,
+   |     ^^^^
+
+warning: constant `DEVICE_IDENTITY_FILE` is never used
+  --> domains\environment\src\license\store.rs:25:7
+   |
+25 | const DEVICE_IDENTITY_FILE: &str = "device-identity";
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DEVICE_IDENTITY_BYTES` is never used
+  --> domains\environment\src\license\store.rs:26:7
+   |
+26 | const DEVICE_IDENTITY_BYTES: usize = 32;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+    Checking fleet v0.1.0 (E:\code\Matcha-claw\runtime-host\domains\fleet)
+warning: `environment` (lib) generated 4 warnings
+warning: function `decode_config_base_hash` is never used
+   --> integrations\openclaw\src\gateway\wire\channel.rs:640:15
+    |
+640 | pub(crate) fn decode_config_base_hash(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `job`, `diagnostics`, `delivered`, `failure_notification_delivery`, `delivery`, and `usage` are never read
+    --> integrations\openclaw\src\gateway\wire\cron.rs:1747:5
+     |
+1743 | struct CronEventWire {
+     |        ------------- fields in this struct
+...
+1747 |     job: Option<Value>,
+     |     ^^^
+...
+1759 |     diagnostics: Option<Value>,
+     |     ^^^^^^^^^^^
+1760 |     #[serde(default)]
+1761 |     delivered: Option<bool>,
+     |     ^^^^^^^^^
+...
+1767 |     failure_notification_delivery: Option<Value>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1768 |     #[serde(default)]
+1769 |     delivery: Option<Value>,
+     |     ^^^^^^^^
+...
+1783 |     usage: Option<Value>,
+     |     ^^^^^
+
+warning: function `activate_stdio` is never used
+  --> integrations\openclaw\src\lifecycle\stdio.rs:62:4
+   |
+62 | fn activate_stdio<I, O, E>(
+   |    ^^^^^^^^^^^^^^
+
+warning: field `entry` is never read
+  --> integrations\openclaw\src\operations\channel_pairing.rs:92:5
+   |
+90 | struct OpenClawCommand {
+   |        --------------- field in this struct
+91 |     executable: PathBuf,
+92 |     entry: PathBuf,
+   |     ^^^^^
+   |
+   = note: `OpenClawCommand` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `plugin_id`, `enabled`, and `slugs` are never used
+   --> integrations\openclaw\src\projection\plugin_companion.rs:156:19
+    |
+141 | impl ManifestSkillIntent {
+    | ------------------------ methods in this implementation
+...
+156 |     pub(crate) fn plugin_id(&self) -> &str {
+    |                   ^^^^^^^^^
+...
+160 |     pub(crate) fn enabled(&self) -> bool {
+    |                   ^^^^^^^
+...
+164 |     pub(crate) fn slugs(&self) -> &[String] {
+    |                   ^^^^^
+
+warning: function `apply_transition_config` is never used
+  --> integrations\openclaw\src\projection\plugin_lifecycle.rs:54:15
+   |
+54 | pub(crate) fn apply_transition_config(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MANAGED_MARKER` is never used
+  --> integrations\openclaw\src\projection\plugins.rs:22:7
+   |
+22 | const MANAGED_MARKER: &str = ".matchaclaw-managed";
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `BYPASS_RULES_NATIVE_KEY` is never used
+  --> integrations\openclaw\src\projection\settings.rs:17:7
+   |
+17 | const BYPASS_RULES_NATIVE_KEY: Option<&str> = None;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OpenClawTeamNativeEffects` is never constructed
+  --> integrations\openclaw\src\team\native_effects.rs:30:12
+   |
+30 | pub struct OpenClawTeamNativeEffects<'gateway> {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> integrations\openclaw\src\team\native_effects.rs:35:12
+   |
+34 | impl<'gateway> OpenClawTeamNativeEffects<'gateway> {
+   | -------------------------------------------------- associated function in this implementation
+35 |     pub fn new(gateway: &'gateway mut OpenClawGateway) -> Self {
+   |            ^^^
+
+warning: function `native_delivery` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:168:4
+    |
+168 | fn native_delivery(request: PromptDeliveryRequest) -> Result<PromptDelivery, NativeEffectFailure> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `map_delivery` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:185:4
+    |
+185 | fn map_delivery(native: NativeDeliveryOutcome) -> DomainDeliveryOutcome {
+    |    ^^^^^^^^^^^^
+
+warning: function `scoped_session_key` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:204:4
+    |
+204 | fn scoped_session_key(receipt: &RoleSessionReceipt) -> Result<SessionKey, NativeEffectFailure> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `agent_scoped_session_key` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:209:4
+    |
+209 | fn agent_scoped_session_key(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_abort` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:219:4
+    |
+219 | fn map_abort(
+    |    ^^^^^^^^^
+
+warning: function `map_delete` is never used
+   --> integrations\openclaw\src\team\native_effects.rs:247:4
+    |
+247 | fn map_delete(
+    |    ^^^^^^^^^^
+
+warning: methods `read_text`, `list_dir`, and `list_root_dir` are never used
+   --> integrations\openclaw\src\workspace\access.rs:53:19
+    |
+ 41 | impl WorkspaceFiles {
+    | ------------------- methods in this implementation
+...
+ 53 |     pub(super) fn read_text(
+    |                   ^^^^^^^^^
+...
+108 |     pub(super) fn list_dir(
+    |                   ^^^^^^^^
+...
+124 |     pub(super) fn list_root_dir(&self) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: method `thumbnails` is never used
+   --> integrations\openclaw\src\workspace\media\mod.rs:153:12
+    |
+ 22 | impl WorkspaceMedia {
+    | ------------------- method in this implementation
+...
+153 |     pub fn thumbnails(
+    |            ^^^^^^^^^^
+
+warning: `openclaw` (lib) generated 18 warnings
+error[E0425]: cannot find function `exact_resource_node_id` in this scope
+   --> domains\fleet\src\query\mod.rs:418:21
+    |
+418 |                     exact_resource_node_id(facts.topology(), resource),
+    |                     ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> domains\fleet\src\query\mod.rs:416:17
+    |
+416 |                 ResourceSummary::from_source(
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+417 |                     resource,
+418 |                     exact_resource_node_id(facts.topology(), resource),
+    |                     -------------------------------------------------- unexpected argument #2
+    |
+note: associated function defined here
+   --> domains\fleet\src\query\mod.rs:935:8
+    |
+935 |     fn from_source(source: &ManagedResourceRecord) -> Self {
+    |        ^^^^^^^^^^^
+help: remove the extra argument
+    |
+417 -                     resource,
+418 -                     exact_resource_node_id(facts.topology(), resource),
+417 +                     resource,
+    |
+
+Some errors have detailed explanations: E0061, E0425.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `fleet` (lib) due to 2 previous errors

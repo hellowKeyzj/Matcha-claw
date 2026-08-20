@@ -6,11 +6,10 @@ import { create } from 'zustand';
 import {
   hostApiFetch,
   resolveSingleCapabilityScope,
-  waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
 } from '@/lib/host-api';
+import { subscribeHostEvent } from '@/lib/host-events';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 
 interface CronState {
   jobs: CronJob[];
@@ -42,8 +41,18 @@ interface CronJobsSnapshot {
 
 let inflightCronFetchPromise: Promise<void> | null = null;
 let cronSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let cronEventCleanup: (() => void) | null = null;
+let cronEventGeneration = 0;
 const CRON_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
 const SCHEDULER_CRON_CAPABILITY_ID = 'scheduler.cron';
+
+type CronMutationOperation = 'cron.create' | 'cron.update' | 'cron.delete' | 'cron.toggle';
+type CronTriggerOutcome = 'accepted' | 'skipped' | 'failed' | 'outcome-unknown';
+type CronTriggerSkipReason = 'already-running' | 'not-due' | 'invalid-spec';
+type CronTriggerResult = {
+  outcome: CronTriggerOutcome;
+  reason?: CronTriggerSkipReason;
+};
 
 function clearCronSnapshotRetry(): void {
   if (cronSnapshotRetryTimer) {
@@ -62,12 +71,13 @@ function scheduleCronSnapshotRetry(fetchJobs: () => Promise<void>): void {
   }, CRON_SNAPSHOT_NOT_READY_RETRY_MS);
 }
 
-async function cronCapabilityExecute<TResult>(
-  operationId: string,
+async function cronMutationRequest<TResult>(
+  path: string,
+  operationId: CronMutationOperation,
   input: Record<string, unknown>,
   target: CapabilityTarget,
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+  return await hostApiFetch<TResult>(path, {
     method: 'POST',
     body: JSON.stringify({
       id: SCHEDULER_CRON_CAPABILITY_ID,
@@ -78,6 +88,71 @@ async function cronCapabilityExecute<TResult>(
     }),
   });
 }
+
+async function cronTriggerRequest(id: string): Promise<CronTriggerResult> {
+  const result = await hostApiFetch<unknown>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: SCHEDULER_CRON_CAPABILITY_ID,
+      operationId: 'cron.trigger',
+      scope: await resolveSingleCapabilityScope(SCHEDULER_CRON_CAPABILITY_ID),
+      target: { kind: 'cron-job', jobId: id },
+      input: { id },
+    }),
+  });
+  if (!isRecord(result) || typeof result.success !== 'boolean' || !isRecord(result.result)
+    || !isCronTriggerOutcome(result.result.outcome)
+    || (result.result.reason !== undefined && !isCronTriggerSkipReason(result.result.reason))
+    || (result.result.outcome !== 'skipped' && result.result.reason !== undefined)) {
+    throw new Error('Invalid Cron trigger response');
+  }
+  return {
+    outcome: result.result.outcome,
+    ...(result.result.reason === undefined ? {} : { reason: result.result.reason }),
+  };
+}
+
+function isCronTriggerOutcome(value: unknown): value is CronTriggerOutcome {
+  return value === 'accepted' || value === 'skipped' || value === 'failed' || value === 'outcome-unknown';
+}
+
+function isCronTriggerSkipReason(value: unknown): value is CronTriggerSkipReason {
+  return value === 'already-running' || value === 'not-due' || value === 'invalid-spec';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCronExecutionEvent(value: unknown): value is {
+  jobId: string;
+  runId: string;
+  status: 'succeeded' | 'failed' | 'skipped' | 'cancelled' | 'outcome-unknown';
+} {
+  return isRecord(value)
+    && Object.keys(value).length === 3
+    && typeof value.jobId === 'string'
+    && /^[A-Za-z0-9._:-]+$/.test(value.jobId)
+    && value.jobId.length <= 128
+    && typeof value.runId === 'string'
+    && /^[A-Za-z0-9._:-]+$/.test(value.runId)
+    && value.runId.length <= 128
+    && isCronExecutionStatus(value.status);
+}
+
+function isCronExecutionStatus(value: unknown): value is CronExecutionEvent['status'] {
+  return value === 'succeeded'
+    || value === 'failed'
+    || value === 'skipped'
+    || value === 'cancelled'
+    || value === 'outcome-unknown';
+}
+
+type CronExecutionEvent = {
+  jobId: string;
+  runId: string;
+  status: 'succeeded' | 'failed' | 'skipped' | 'cancelled' | 'outcome-unknown';
+};
 
 function decodeCronJobsSnapshot(payload: unknown): CronJobsSnapshot {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -131,6 +206,9 @@ export const useCronStore = create<CronState>((set, get) => ({
   error: null,
   
   fetchJobs: async (options) => {
+    if (!cronEventCleanup) {
+      initCronEvents();
+    }
     const silent = options?.silent === true;
     if (inflightCronFetchPromise) {
       await inflightCronFetchPromise;
@@ -187,10 +265,21 @@ export const useCronStore = create<CronState>((set, get) => ({
   createJob: async (input) => {
     set({ mutating: true });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission<CronJob>>('cron.create', { ...input }, { kind: 'cron-job' });
-      const job = await waitForRuntimeJobResult<CronJob>(submission.job.id);
-      if (!job || typeof job.id !== 'string') {
-        throw new Error('Invalid cron create job result');
+      const job = await cronMutationRequest<CronJob>(
+        '/api/cron/jobs/create',
+        'cron.create',
+        {
+          name: input.name,
+          agentId: input.agentId ?? 'main',
+          message: input.message,
+          schedule: input.schedule,
+          delivery: input.delivery ?? { mode: 'none' },
+          enabled: input.enabled ?? true,
+        },
+        { kind: 'cron-job' },
+      );
+      if (!isRecord(job) || typeof job.id !== 'string') {
+        throw new Error('Invalid cron create response');
       }
       set((state) => ({ jobs: [...state.jobs, job], snapshotReady: true }));
       return job;
@@ -211,25 +300,17 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.update', {
-        jobId: id,
-        updates: input,
-      }, {
-        kind: 'cron-job',
-        jobId: id,
-      });
-      await waitForRuntimeJobResult(submission.job.id);
+      const job = await cronMutationRequest<CronJob>(
+        '/api/cron/jobs/update',
+        'cron.update',
+        { jobId: id, ...input },
+        { kind: 'cron-job', jobId: id },
+      );
+      if (!job || typeof job.id !== 'string' || job.id !== id) {
+        throw new Error('Invalid cron update response');
+      }
       set((state) => ({
-        jobs: state.jobs.map((job) =>
-          job.id === id
-            ? {
-              ...job,
-              ...input,
-              ...(input.agentId ? { agentId: input.agentId } : {}),
-              updatedAt: new Date().toISOString(),
-            }
-            : job
-        ),
+        jobs: state.jobs.map((current) => current.id === id ? job : current),
       }));
     } catch (error) {
       console.error('Failed to update cron job:', error);
@@ -254,11 +335,20 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.delete', { jobId: id }, { kind: 'cron-job', jobId: id });
-      await waitForRuntimeJobResult(submission.job.id);
-      set((state) => ({
-        jobs: state.jobs.filter((job) => job.id !== id),
-      }));
+      const result = await cronMutationRequest<{ removed: boolean }>(
+        '/api/cron/jobs/delete',
+        'cron.delete',
+        { jobId: id },
+        { kind: 'cron-job', jobId: id },
+      );
+      if (!result || typeof result.removed !== 'boolean') {
+        throw new Error('Invalid cron delete response');
+      }
+      if (result.removed) {
+        set((state) => ({
+          jobs: state.jobs.filter((job) => job.id !== id),
+        }));
+      }
     } catch (error) {
       console.error('Failed to delete cron job:', error);
       throw error;
@@ -282,12 +372,17 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.toggle', { id, enabled }, { kind: 'cron-job', jobId: id });
-      await waitForRuntimeJobResult(submission.job.id);
+      const job = await cronMutationRequest<CronJob>(
+        '/api/cron/jobs/toggle',
+        'cron.toggle',
+        { id, enabled },
+        { kind: 'cron-job', jobId: id },
+      );
+      if (!job || typeof job.id !== 'string' || job.id !== id) {
+        throw new Error('Invalid cron toggle response');
+      }
       set((state) => ({
-        jobs: state.jobs.map((job) =>
-          job.id === id ? { ...job, enabled } : job
-        ),
+        jobs: state.jobs.map((current) => current.id === id ? job : current),
       }));
     } catch (error) {
       console.error('Failed to toggle cron job:', error);
@@ -312,17 +407,16 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission<{ ok?: boolean; ran?: boolean; reason?: string }>>('cron.trigger', { id }, { kind: 'cron-job', jobId: id });
-      const result = await waitForRuntimeJobResult<{ ok?: boolean; ran?: boolean; reason?: string }>(
-        submission.job.id,
-      );
-      console.log('Cron trigger result:', result);
-      // Refresh jobs after trigger to update lastRun/nextRun state
-      await get().fetchJobs({ silent: true });
-      return {
-        ran: result?.ran !== false,
-        reason: typeof result?.reason === 'string' ? result.reason : undefined,
-      };
+      const result = await cronTriggerRequest(id);
+      if (result.outcome === 'accepted') {
+        return { ran: true };
+      }
+      if (result.outcome === 'skipped') {
+        return { ran: false, reason: result.reason ?? 'already-running' };
+      }
+      throw new Error(result.outcome === 'failed'
+        ? 'Cron trigger was rejected'
+        : 'Cron trigger outcome is unknown');
     } catch (error) {
       console.error('Failed to trigger cron job:', error);
       throw error;
@@ -339,3 +433,24 @@ export const useCronStore = create<CronState>((set, get) => ({
   
   setJobs: (jobs) => set({ jobs, snapshotReady: true }),
 }));
+
+export function initCronEvents(): () => void {
+  cronEventCleanup?.();
+  const generation = ++cronEventGeneration;
+  let active = true;
+  const unsubscribe = subscribeHostEvent<unknown>('openclaw:cron', (event) => {
+    if (!active || !isCronExecutionEvent(event)) return;
+    if (!useCronStore.getState().jobs.some((job) => job.id === event.jobId)) return;
+    void useCronStore.getState().fetchJobs({ silent: true });
+  });
+  const cleanup = () => {
+    if (!active) return;
+    active = false;
+    unsubscribe();
+    if (cronEventGeneration === generation) {
+      cronEventCleanup = null;
+    }
+  };
+  cronEventCleanup = cleanup;
+  return cleanup;
+}

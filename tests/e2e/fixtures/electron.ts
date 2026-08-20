@@ -1,29 +1,178 @@
 import { _electron as electron, expect, test as base, type ElectronApplication, type Page } from '@playwright/test';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createServer } from 'node:net';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 type ElectronFixtures = {
   electronApp: ElectronApplication;
   page: Page;
   homeDir: string;
+  profileDir: string;
 };
+
+function reusableProfileDir(): string | null {
+  const configured = process.env.MATCHACLAW_E2E_PROFILE_DIR?.trim();
+  if (!configured) {
+    return null;
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error('MATCHACLAW_E2E_PROFILE_DIR must be an absolute path');
+  }
+  return configured;
+}
+
+function explicitUserDataDir(): string | null {
+  const configured = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+  if (!configured) {
+    return null;
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error('MATCHACLAW_E2E_USER_DATA_DIR must be an absolute path');
+  }
+  return configured;
+}
+
+const portKeys = [
+  'MATCHACLAW_DIAGNOSTICS_TRANSPORT',
+  'MATCHACLAW_WORKSPACE_TEXT_TRANSPORT',
+  'MATCHACLAW_WORKSPACE_BINARY_TRANSPORT',
+  'MATCHACLAW_WORKSPACE_DIRECTORY_TRANSPORT',
+  'MATCHACLAW_WORKSPACE_WRITE_TRANSPORT',
+  'MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT',
+  'MATCHACLAW_SESSION_SEND_TRANSPORT',
+  'MATCHACLAW_SESSION_ABORT_TRANSPORT',
+  'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT',
+  'MATCHACLAW_MATCHA_HISTORY_TRANSPORT',
+  'MATCHACLAW_USAGE_TRANSPORT',
+  'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT',
+  'MATCHACLAW_SECURITY_EMERGENCY_TRANSPORT',
+  'MATCHACLAW_CHANNEL_STATUS_TRANSPORT',
+  'MATCHACLAW_CHANNEL_CONTROL_TRANSPORT',
+  'MATCHACLAW_CHANNEL_PAIRING_TRANSPORT',
+  'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT',
+  'MATCHACLAW_SECURITY_POLICY_TRANSPORT',
+  'MATCHACLAW_SESSION_APPROVAL_TRANSPORT',
+  'MATCHACLAW_AGENTS_TRANSPORT',
+  'MATCHACLAW_CRON_TRANSPORT',
+  'MATCHACLAW_TASK_MANAGER_TRANSPORT',
+  'MATCHACLAW_TEAM_PUBLIC_TRANSPORT',
+  'MATCHACLAW_TEAM_APPROVALS_TRANSPORT',
+  'MATCHACLAW_TEAM_DECISION_TRANSPORT',
+  'MATCHACLAW_TEAM_ROLE_CHAT_TRANSPORT',
+  'MATCHACLAW_TEAM_GRAPH_TRANSPORT',
+  'MATCHACLAW_PROVIDER_MODELS_TRANSPORT',
+  'MATCHACLAW_PROVIDER_ACCOUNTS_TRANSPORT',
+  'MATCHA_AGENT_APP_SERVER',
+  'OPENCLAW_GATEWAY',
+] as const;
+
+const directPortKeys = [
+  'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT',
+  'MATCHACLAW_SECURITY_POLICY_TRANSPORT',
+  'MATCHACLAW_TEAM_ROLE_SESSIONS_TRANSPORT',
+  'MATCHACLAW_TEAM_SKILL_TRANSPORT',
+  'MATCHACLAW_TEAM_TRIGGER_TRANSPORT',
+  'MATCHACLAW_TEAM_LIFECYCLE_TRANSPORT',
+  'MATCHACLAW_MANUAL_TEAM_TRANSPORT',
+] as const;
+
+type E2EStartupState = Readonly<{
+  outcome: unknown;
+  launchDiagnostic: unknown;
+}>;
+
+type E2EOpenClawState = Readonly<{
+  lifecycle: unknown;
+  control: unknown;
+  sessionSendBoundary: unknown;
+  hostApiBoundary: unknown;
+  sessionSendCapability: unknown;
+  cronProviderTrace: unknown;
+}>;
+
+async function readE2EStartupState(electronApp: ElectronApplication): Promise<E2EStartupState> {
+  return await electronApp.evaluate(() => {
+    const e2eProcess = process as typeof process & {
+      __matchaclawE2EStartupOutcome?: unknown;
+      __matchaclawE2ELaunchDiagnostic?: unknown;
+    };
+    return {
+      outcome: e2eProcess.__matchaclawE2EStartupOutcome ?? null,
+      launchDiagnostic: e2eProcess.__matchaclawE2ELaunchDiagnostic ?? null,
+    };
+  });
+}
+
+function startupFailed(state: E2EStartupState): boolean {
+  if (!state.outcome || typeof state.outcome !== 'object') return false;
+  const outcome = state.outcome as { readonly stage?: unknown; readonly outcome?: unknown };
+  return !(outcome.stage === 'ready' && outcome.outcome === 'started');
+}
+
+export async function readE2EOpenClawState(electronApp: ElectronApplication): Promise<E2EOpenClawState> {
+  return await electronApp.evaluate(() => {
+    const e2eProcess = process as typeof process & {
+      __matchaclawE2EOpenClawLifecycle?: unknown;
+      __matchaclawE2EOpenClawControlReadiness?: unknown;
+      __matchaclawE2ESessionSendBoundary?: unknown;
+      __matchaclawE2EHostApiBoundary?: unknown;
+      __matchaclawE2ESessionSendCapability?: unknown;
+      __matchaclawE2ECronProviderTrace?: unknown;
+    };
+    return {
+      lifecycle: e2eProcess.__matchaclawE2EOpenClawLifecycle ?? null,
+      control: e2eProcess.__matchaclawE2EOpenClawControlReadiness ?? null,
+      sessionSendBoundary: e2eProcess.__matchaclawE2ESessionSendBoundary ?? null,
+      hostApiBoundary: e2eProcess.__matchaclawE2EHostApiBoundary ?? null,
+      sessionSendCapability: e2eProcess.__matchaclawE2ESessionSendCapability ?? null,
+      cronProviderTrace: e2eProcess.__matchaclawE2ECronProviderTrace ?? null,
+    };
+  });
+}
+
+export async function ensureSetupComplete(page: Page): Promise<void> {
+  const setupHeading = page.getByRole('heading', { name: '环境检查' });
+  const chatHeading = page.getByRole('heading', { name: 'MatchaClaw 聊天' });
+  await expect(setupHeading.or(chatHeading)).toBeVisible();
+
+  if (await setupHeading.isVisible()) {
+    await expect(page.getByText('Runtime Host', { exact: true })).toBeVisible();
+    await expect(page.getByText('检查中', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '下一步' })).toBeEnabled();
+    await page.getByRole('button', { name: '下一步' }).click();
+    await expect(page.getByRole('heading', { name: '设置完成！' })).toBeVisible();
+    await page.getByRole('button', { name: '开始使用' }).click();
+  }
+  await expect(chatHeading).toBeVisible();
+}
+
 
 async function waitForPrimaryWindow(
   electronApp: ElectronApplication,
-  timeoutMs = 30_000,
+  timeoutMs = 45_000,
 ): Promise<Page> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const windows = electronApp.windows().filter((window) => !window.isClosed());
     if (windows.length > 0) {
-      return windows[0];
+      const window = windows[0];
+      const pageUrl = window.url();
+      if (pageUrl !== 'about:blank') {
+        await window.waitForLoadState('domcontentloaded');
+        return window;
+      }
+    }
+
+    const startupState = await readE2EStartupState(electronApp);
+    if (startupFailed(startupState)) {
+      throw new Error(`Electron startup failed: ${JSON.stringify(startupState)}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(`Timed out waiting for Electron window after ${timeoutMs}ms`);
+  const startupState = await readE2EStartupState(electronApp);
+  throw new Error(`Timed out waiting for Electron window after ${timeoutMs}ms: ${JSON.stringify(startupState)}`);
 }
 
 async function ensurePathExists(path: string): Promise<void> {
@@ -56,31 +205,46 @@ async function allocateFreePort(): Promise<number> {
   return port;
 }
 
+async function allocateDistinctPorts(count: number): Promise<number[]> {
+  const ports = new Set<number>();
+  while (ports.size < count) {
+    ports.add(await allocateFreePort());
+  }
+  return [...ports];
+}
+
 export const test = base.extend<ElectronFixtures>({
-  homeDir: async ({}, use) => {
-    const dir = await mkdtemp(join(tmpdir(), 'matchaclaw-e2e-home-'));
+  profileDir: [async ({}, use) => {
+    const reusable = reusableProfileDir();
+    if (reusable) {
+      await mkdir(reusable, { recursive: true });
+      await use(reusable);
+      return;
+    }
+
+    const dir = await mkdtemp(join(tmpdir(), 'matchaclaw-e2e-profile-'));
     try {
       await use(dir);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  }, { scope: 'worker' }],
+
+  homeDir: async ({ profileDir }, use) => {
+    await use(profileDir);
   },
 
   electronApp: async ({ homeDir }, use) => {
     const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
     delete process.env.ELECTRON_RUN_AS_NODE;
 
-    const userDataDir = join(homeDir, 'user-data');
+    const configuredUserDataDir = explicitUserDataDir();
+    const userDataDir = configuredUserDataDir ?? join(homeDir, 'user-data');
     const appDataDir = join(homeDir, 'AppData', 'Roaming');
     const localAppDataDir = join(homeDir, 'AppData', 'Local');
     await mkdir(userDataDir, { recursive: true });
     await mkdir(appDataDir, { recursive: true });
     await mkdir(localAppDataDir, { recursive: true });
-    await writeFile(
-      join(userDataDir, 'settings.json'),
-      JSON.stringify({ setupComplete: true }, null, 2),
-      'utf8',
-    );
 
     const mainEntry = join(process.cwd(), 'dist-electron', 'main', 'index.js');
     const preloadEntry = join(process.cwd(), 'dist-electron', 'preload', 'index.js');
@@ -89,13 +253,20 @@ export const test = base.extend<ElectronFixtures>({
     await ensurePathExists(preloadEntry);
     await ensurePathExists(rendererIndex);
 
-    const [hostApiPort, runtimeHostPort] = await Promise.all([
-      allocateFreePort(),
-      allocateFreePort(),
+    const ports = await allocateDistinctPorts(2 + portKeys.length + directPortKeys.length);
+    const [hostApiPort, runtimeHostPort, ...bootstrapPorts] = ports;
+    const bootstrapEnvironment = Object.fromEntries([
+      ...portKeys.map((key, index) => [
+        key === 'MATCHA_AGENT_APP_SERVER'
+          ? 'MATCHACLAW_MATCHA_AGENT_APP_SERVER_PORT'
+          : `MATCHACLAW_PORT_${key}`,
+        String(bootstrapPorts[index]),
+      ]),
+      ...directPortKeys.map((key, index) => [key, String(bootstrapPorts[portKeys.length + index])]),
     ]);
-
     const launchEnv = {
       ...process.env,
+      ...bootstrapEnvironment,
       MATCHACLAW_E2E: '1',
       MATCHACLAW_E2E_USER_DATA_DIR: userDataDir,
       MATCHACLAW_PORT_MATCHACLAW_HOST_API: String(hostApiPort),
@@ -108,12 +279,9 @@ export const test = base.extend<ElectronFixtures>({
     };
     delete launchEnv.ELECTRON_RUN_AS_NODE;
 
-    try {
-      const app = await electron.launch({
-        args: [mainEntry],
-        env: launchEnv,
-      });
+    const app = await electron.launch({ args: [mainEntry], env: launchEnv });
 
+    try {
       await use(app);
       await app.close();
     } finally {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { TasksPage } from '@/pages/Tasks';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { useChatStore } from '@/stores/chat';
@@ -61,20 +61,8 @@ beforeEach(() => {
 });
 
 function setupStores() {
-  useGatewayStore.setState({
-    status: {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore.setState({
+    runtimeHost: { lifecycle: 'running' },
     isInitialized: true,
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
@@ -141,21 +129,9 @@ describe('tasks status filter', () => {
 
   it('初始化前显示准备中，不显示未运行警告', async () => {
     setupStores();
-    useGatewayStore.setState({
+    useRuntimeHostStore.setState({
       isInitialized: false,
-      status: {
-        processState: 'stopped',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+      runtimeHost: { lifecycle: 'stopped' },
     } as never);
 
     render(
@@ -164,8 +140,8 @@ describe('tasks status filter', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText(/Gateway is starting/i)).toBeInTheDocument();
-    expect(screen.queryByText(/^Gateway is not running$/i)).not.toBeInTheDocument();
+    expect(screen.getByText('runtimeHostPreparing')).toBeInTheDocument();
+    expect(screen.queryByText('gatewayNotRunning')).not.toBeInTheDocument();
     await waitFor(() => expect(listTaskSnapshotMock).toHaveBeenCalled());
   });
 

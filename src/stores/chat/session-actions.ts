@@ -1,11 +1,8 @@
 import {
   hostSessionDelete,
   hostSessionList,
+  hostSessionLoad,
   hostSessionNew,
-  hostSessionResume,
-  hostSessionSwitch,
-  hostSessionWindowFetch,
-  resolveHydratedSessionSnapshot,
 } from '@/lib/host-api';
 import {
   createErrorResourceStatusState,
@@ -27,18 +24,17 @@ import {
   clearHistoryPoll,
 } from './timers';
 import {
+  applySessionView,
   createEmptySessionRecord,
   getSessionItemCount,
   getSessionMeta,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
-  patchSessionSnapshot,
   patchSessionViewportState,
   removeSessionRecord,
   resolveSessionRecord,
 } from './store-state-helpers';
-import { useTaskSnapshotStore } from './task-snapshot-store';
 import {
   buildRuntimeScopeKey,
   buildSessionIdentityRecordIndex,
@@ -49,17 +45,38 @@ import {
   sameRuntimeEndpointScope,
 } from './session-identity';
 import { pickStartupSessionFallback } from './session-selection';
+import {
+  decodeHistorySessionView,
+  resolveSessionViewError,
+} from './history-fetch-helpers';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeEndpoint,
+  summarizeError,
+  summarizeIdentifier,
+  summarizeSessionIdentity,
+} from '@/lib/session-trace';
 import type { StoreHistoryCache } from './history-cache';
-import type { AgentScope, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type {
+  AgentScope,
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 import type {
   ChatSession,
   ChatSessionRuntimeEndpointTarget,
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
-import type { SessionLoadResult } from '../../../runtime-host/shared/session-adapter-types';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
+const SESSION_CATALOG_ENDPOINT_TIMEOUT_MS = 30000;
+const SESSION_CATALOG_ENDPOINT_TIMEOUT_ERROR = 'Session catalog request timed out';
+const SESSION_DELETE_UNAVAILABLE_ERROR = 'Session delete is unavailable';
+
+type SessionDeleteReceipt = Readonly<{
+  outcome: 'succeeded' | 'target_rejected' | 'unknown';
+}>;
 
 let sessionCatalogRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionCatalogLoadSequence = 0;
@@ -183,8 +200,18 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
 }
 
 async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarget): Promise<SessionCatalogLoadResult> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   try {
-    const data = await hostSessionList({ endpoint: target.defaultSessionPromptScope.endpoint });
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(SESSION_CATALOG_ENDPOINT_TIMEOUT_ERROR)), SESSION_CATALOG_ENDPOINT_TIMEOUT_MS);
+    });
+    const data = await Promise.race([
+      hostSessionList(
+        { endpoint: target.defaultSessionPromptScope.endpoint },
+        { timeoutMs: SESSION_CATALOG_ENDPOINT_TIMEOUT_MS },
+      ),
+      timeout,
+    ]);
     const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
     return {
       target,
@@ -219,6 +246,10 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
       ready: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
   }
 }
 
@@ -264,61 +295,51 @@ function resolveNewSessionAgentScope(state: ChatStoreState, agentId?: string): A
   return resolveScopeForAgent(target, targetAgentId);
 }
 
-async function requestSessionLifecycleSnapshot(
-  action: 'switch' | 'resume',
+async function requestSessionLifecycleView(
   target: { sessionKey: string; endpointSessionId?: string; sessionIdentity: SessionIdentity },
-): Promise<SessionLoadResult> {
-  const result = action === 'switch'
-    ? await hostSessionSwitch({
-        sessionKey: target.sessionKey,
-        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
-        sessionIdentity: target.sessionIdentity,
-        limit: 200,
-      })
-    : await hostSessionResume({
-        sessionKey: target.sessionKey,
-        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
-        sessionIdentity: target.sessionIdentity,
-      });
-  const snapshot = await resolveHydratedSessionSnapshot({
-    initial: result,
-    refetch: async () => await hostSessionWindowFetch({
+  traceId?: string | null,
+) {
+  logSessionTrace('session.lifecycle.request', traceId, {
+    backendSessionKey: summarizeIdentifier(target.sessionKey),
+    endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+  });
+  try {
+    const view = decodeHistorySessionView(await hostSessionLoad({
       sessionKey: target.sessionKey,
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
-      mode: 'latest',
       limit: 200,
-    }),
-  });
-  if (!snapshot) {
-    throw new Error('session lifecycle request did not return a snapshot');
+    }, { traceId }));
+    logSessionTrace('session.lifecycle.response', traceId, {
+      sessionKey: summarizeIdentifier(view.sessionKey),
+      identity: summarizeSessionIdentity(view.identity),
+      completeness: view.completeness,
+    });
+    return view;
+  } catch (error) {
+    logSessionTrace('session.lifecycle.error', traceId, {
+      ...summarizeError(error),
+    });
+    throw resolveSessionViewError(error);
   }
-  return { snapshot };
 }
 
-function applyBackendSessionSnapshot(
+function applyBackendSessionView(
   input: {
     set: ChatStoreSetFn;
+    get: ChatStoreGetFn;
     sessionKey: string;
-    snapshot: SessionLoadResult['snapshot'];
+    view: ReturnType<typeof decodeHistorySessionView>;
   },
 ): void {
-  useTaskSnapshotStore.getState().reportSessionSnapshot(input.snapshot, 'replay');
-  input.set((state) => {
-    const loadedSessions = patchSessionMeta(
-      {
-        loadedSessions: patchSessionSnapshot(state, input.sessionKey, input.snapshot),
-      },
-      input.sessionKey,
-      {
-        historyStatus: input.snapshot.replayComplete ? 'ready' : 'loading',
-      },
-    );
-    return {
-      loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-    };
-  });
+  const result = applySessionView({ set: input.set, get: input.get }, input.view);
+  if (result.status === 'unavailable' || result.status === 'epoch-mismatch') {
+    throw new Error('Session view is unavailable');
+  }
+  input.set((state) => ({
+    loadedSessions: patchSessionMeta(state, input.sessionKey, { historyStatus: 'ready' }),
+  }));
 }
 
 function shouldMarkSessionLoadingOnSwitch(
@@ -516,17 +537,23 @@ export function executeOpenAgentConversation(input: CreateStoreSessionActionsInp
   if (!normalized) {
     return;
   }
+  const traceId = createSessionTraceId('open-agent');
   const state = get();
   const preferredSessionKey = resolvePreferredSessionKeyForAgent(
     normalized,
     readSessionsFromState(state),
     state.loadedSessions,
   );
+  logSessionTrace('open-agent.request', traceId, {
+    agentId: summarizeIdentifier(normalized),
+    preferredSessionKey: summarizeIdentifier(preferredSessionKey),
+    currentSessionKey: summarizeIdentifier(state.currentSessionKey),
+  });
   if (preferredSessionKey) {
-    get().switchSession(preferredSessionKey);
+    get().switchSession(preferredSessionKey, traceId);
     return;
   }
-  get().newSession(normalized);
+  get().newSession(normalized, traceId);
 }
 
 export function executeOpenSessionIdentity(
@@ -534,10 +561,17 @@ export function executeOpenSessionIdentity(
   target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null },
 ): void {
   const { get, set } = input;
+  const traceId = createSessionTraceId('open-session-identity');
   const identity = target.sessionIdentity;
   const endpointSessionId = normalizeCatalogString(target.endpointSessionId ?? undefined);
   const recordKey = findSessionRecordKey(get(), identity) ?? buildSessionRecordKey(identity);
   const existing = get().loadedSessions[recordKey];
+  logSessionTrace('open-session-identity.request', traceId, {
+    recordKey: summarizeIdentifier(recordKey),
+    endpointSessionId: summarizeIdentifier(endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(identity),
+    existing: Boolean(existing),
+  });
   set((state) => {
     const currentMeta = getSessionMeta(state, recordKey);
     const loadedSessions = patchSessionMeta({
@@ -560,7 +594,7 @@ export function executeOpenSessionIdentity(
     };
   });
   if (existing) {
-    get().switchSession(recordKey);
+    get().switchSession(recordKey, traceId);
     return;
   }
   void get().loadHistory({
@@ -568,31 +602,36 @@ export function executeOpenSessionIdentity(
     mode: 'active',
     scope: 'foreground',
     reason: 'open_session_identity',
+    traceId,
   });
 }
 
-export function executeSwitchSession(input: CreateStoreSessionActionsInput, key: string): void {
+export function executeSwitchSession(input: CreateStoreSessionActionsInput, key: string, inheritedTraceId?: string | null): void {
   const { set, get, historyRuntime } = input;
+  const traceId = inheritedTraceId ?? createSessionTraceId('switch-session');
   const currentState = get();
+  logSessionTrace('switch-session.request', traceId, {
+    requestedSessionKey: summarizeIdentifier(key),
+    currentSessionKey: summarizeIdentifier(currentState.currentSessionKey),
+  });
   if (key === currentState.currentSessionKey) {
     void (async () => {
       try {
-        const result = await requestSessionLifecycleSnapshot('resume', resolveOperationTarget(get(), key));
+        const result = await requestSessionLifecycleView(resolveOperationTarget(get(), key), traceId);
         if (get().currentSessionKey !== key) {
           return;
         }
-        applyBackendSessionSnapshot({
+        applyBackendSessionView({
           set,
+          get,
           sessionKey: key,
-          snapshot: result.snapshot,
+          view: result,
         });
-      } catch {
-        void get().loadHistory({
-          sessionKey: key,
-          mode: 'active',
-          scope: 'foreground',
-          reason: 'switch_session_reselect',
-        });
+      } catch (error) {
+        set((state) => ({
+          error: resolveSessionViewError(error).message,
+          loadedSessions: patchSessionMeta(state, key, { historyStatus: 'ready' }),
+        }));
       }
     })();
     return;
@@ -634,22 +673,26 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
 
   void (async () => {
     try {
-      const result = await requestSessionLifecycleSnapshot('switch', resolveOperationTarget(get(), key));
+      const result = await requestSessionLifecycleView(resolveOperationTarget(get(), key));
       if (get().currentSessionKey !== key) {
         return;
       }
-      applyBackendSessionSnapshot({
+      applyBackendSessionView({
         set,
+        get,
         sessionKey: key,
-        snapshot: result.snapshot,
+        view: result,
       });
-    } catch {
-      void get().loadHistory({
-        sessionKey: key,
-        mode: targetSessionReady ? 'quiet' : 'active',
-        scope: 'foreground',
-        reason: 'switch_session_reconcile',
-      });
+    } catch (error) {
+      if (get().currentSessionKey !== key) {
+        return;
+      }
+      set((state) => ({
+        error: resolveSessionViewError(error).message,
+        loadedSessions: patchSessionMeta(state, key, {
+          historyStatus: targetSessionReady ? 'ready' : 'error',
+        }),
+      }));
     }
   })();
 }
@@ -702,11 +745,20 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
   } = input;
   beginMutating();
   try {
+    const target = resolveOperationTarget(get(), key);
+    let receipt: SessionDeleteReceipt;
     try {
-      await hostSessionDelete(resolveOperationTarget(get(), key));
+      receipt = await hostSessionDelete({
+        sessionKey: target.sessionKey,
+        sessionIdentity: target.sessionIdentity,
+      }) as unknown as SessionDeleteReceipt;
     } catch {
-      void 0;
+      throw new Error(SESSION_DELETE_UNAVAILABLE_ERROR);
     }
+    if (receipt.outcome !== 'succeeded') {
+      return;
+    }
+
     const { currentSessionKey } = get();
     const sessions = readSessionsFromState(get());
     const remainingSessions = sessions.filter((session) => session.key !== key);
@@ -730,13 +782,29 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
         };
       });
       if (next) {
-        void get().loadHistory({
-          sessionKey: next.key,
-          mode: 'active',
-          scope: 'foreground',
-          reason: 'delete_session_promote_next',
-        });
+        try {
+          const nextTarget = resolveOperationTarget(get(), next.key);
+          const result = await requestSessionLifecycleView(nextTarget);
+          if (get().currentSessionKey === next.key) {
+            applyBackendSessionView({
+              set,
+              get,
+              sessionKey: next.key,
+              view: result,
+            });
+          }
+        } catch (error) {
+          if (get().currentSessionKey === next.key) {
+            set((state) => ({
+              error: resolveSessionViewError(error).message,
+              loadedSessions: patchSessionMeta(state, next.key, {
+                historyStatus: 'error',
+              }),
+            }));
+          }
+        }
       }
+      await get().loadSessions();
       return;
     }
 
@@ -751,6 +819,7 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
         ),
       };
     });
+    await get().loadSessions();
   } finally {
     finishMutating();
   }
@@ -805,6 +874,7 @@ function isLatestNewSessionRequest(requestSequence: number): boolean {
 async function executeNewSessionWithScopeResolver(
   input: CreateStoreSessionActionsInput,
   resolveAgentScope: NewSessionAgentScopeResolver,
+  inheritedTraceId?: string | null,
 ): Promise<void> {
   const {
     set,
@@ -815,6 +885,7 @@ async function executeNewSessionWithScopeResolver(
   } = input;
   const requestSequence = newSessionRequestSequence + 1;
   newSessionRequestSequence = requestSequence;
+  const traceId = inheritedTraceId ?? createSessionTraceId('new-session');
   beginMutating();
   try {
     clearHistoryPoll();
@@ -826,29 +897,62 @@ async function executeNewSessionWithScopeResolver(
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
     }
     const agentScope = resolveAgentScope(state);
-    const created = await hostSessionNew({
+    logSessionTrace('new-session.request', traceId, {
+      endpoint: summarizeEndpoint(agentScope.endpoint),
+      agentId: summarizeIdentifier(agentScope.agentId),
+      currentSessionKey: summarizeIdentifier(currentSessionKey),
+    });
+    const rawCreated = await hostSessionNew({
       endpoint: agentScope.endpoint,
       agentId: agentScope.agentId,
+    }, { traceId }) as unknown;
+    if (
+      rawCreated
+      && typeof rawCreated === 'object'
+      && !Array.isArray(rawCreated)
+      && 'outcome' in rawCreated
+      && typeof rawCreated.outcome === 'string'
+    ) {
+      throw new Error(`Session create ${rawCreated.outcome}`);
+    }
+    const created = decodeHistorySessionView(rawCreated);
+    logSessionTrace('new-session.response', traceId, {
+      sessionKey: summarizeIdentifier(created.sessionKey),
+      identity: summarizeSessionIdentity(created.identity),
+      completeness: created.completeness,
     });
-    const newKey = buildSessionRecordKey(created.snapshot.catalog.sessionIdentity);
-    useTaskSnapshotStore.getState().reportSessionSnapshot(created.snapshot, 'replay');
+    const createdAgentId = created.identity.agentId;
+    if (!createdAgentId) {
+      throw new Error('Session view identity is incomplete');
+    }
+    const newKey = buildSessionRecordKey({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: created.identity.endpoint.runtimeAdapterId,
+        runtimeInstanceId: created.identity.endpoint.runtimeInstanceId,
+      },
+      agentId: createdAgentId,
+      sessionKey: created.sessionKey,
+    });
+    const stateBeforeProjection = get();
+    const ownsSelection = isLatestNewSessionRequest(requestSequence);
+    const baseLoadedSessions = ownsSelection && leavingEmpty
+      ? removeSessionRecord(stateBeforeProjection, currentSessionKey)
+      : stateBeforeProjection.loadedSessions;
+    set({
+      loadedSessions: baseLoadedSessions[newKey]
+        ? baseLoadedSessions
+        : { ...baseLoadedSessions, [newKey]: createEmptySessionRecord() },
+    });
+    const projection = applySessionView({ set, get }, created);
+    if (projection.status !== 'applied') {
+      throw new Error(`Session create projection ${projection.status}`);
+    }
     set((stateValue) => {
-      const ownsSelection = isLatestNewSessionRequest(requestSequence);
-      const baseLoadedSessions = ownsSelection && leavingEmpty
-        ? removeSessionRecord(stateValue, currentSessionKey)
-        : stateValue.loadedSessions;
       const loadedSessions = patchSessionMeta(
-        {
-          loadedSessions: patchSessionSnapshot(
-            { loadedSessions: baseLoadedSessions },
-            newKey,
-            created.snapshot,
-          ),
-        },
+        { loadedSessions: stateValue.loadedSessions },
         newKey,
-        {
-          historyStatus: created.snapshot.replayComplete ? 'ready' : 'loading',
-        },
+        { historyStatus: 'ready' },
       );
       return {
         loadedSessions,
@@ -864,6 +968,9 @@ async function executeNewSessionWithScopeResolver(
       };
     });
   } catch (error) {
+    logSessionTrace('new-session.error', traceId, {
+      ...summarizeError(error),
+    });
     if (isLatestNewSessionRequest(requestSequence)) {
       set({
         error: error instanceof Error ? error.message : String(error),
@@ -874,8 +981,8 @@ async function executeNewSessionWithScopeResolver(
   }
 }
 
-export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string): Promise<void> {
-  await executeNewSessionWithScopeResolver(input, (state) => resolveNewSessionAgentScope(state, agentId));
+export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string, traceId?: string | null): Promise<void> {
+  await executeNewSessionWithScopeResolver(input, (state) => resolveNewSessionAgentScope(state, agentId), traceId);
 }
 
 export async function executeNewSessionForScope(

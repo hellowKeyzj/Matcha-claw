@@ -44,13 +44,14 @@ describe('pdf viewer', () => {
       mimeType: 'application/pdf',
     });
 
-    render(<PdfViewer filePath="/workspace/demo.pdf" fileName="demo.pdf" sessionIdentity={sessionIdentity} />);
+    render(<PdfViewer relativePath="docs/demo.pdf" fileName="demo.pdf" sessionIdentity={sessionIdentity} />);
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
-        path: '/workspace/demo.pdf',
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: 'docs/demo.pdf',
         maxBytes: 50 * 1024 * 1024,
-        sessionIdentity,
       });
     });
 
@@ -66,7 +67,7 @@ describe('pdf viewer', () => {
       error: 'tooLarge',
     });
 
-    render(<PdfViewer filePath="/workspace/demo.pdf" sessionIdentity={sessionIdentity} />);
+    render(<PdfViewer relativePath="docs/demo.pdf" sessionIdentity={sessionIdentity} />);
 
     expect(await screen.findByText('artifacts.previewTooLarge')).toBeInTheDocument();
   });

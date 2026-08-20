@@ -1,0 +1,42 @@
+diff a/tests/unit/main-quit-lifecycle.test.ts b/tests/unit/main-quit-lifecycle.test.ts	(rejected hunks)
+@@ -5,6 +5,8 @@ import {
+   requestQuitLifecycleAction,
+ } from '@electron/main/quit-lifecycle';
+ 
++const originalE2EMode = process.env.MATCHACLAW_E2E;
++
+ const hoisted = vi.hoisted(() => {
+   const appHandlers = new Map<string, Array<(...args: unknown[]) => void>>();
+   const mainWindowMock = {
+@@ -227,17 +149,11 @@ describe('main quit lifecycle coordination', () => {
+   beforeEach(() => {
+     vi.resetModules();
+     vi.clearAllMocks();
+-    mockProcessManagersForMainIndex();
+     hoisted.appHandlers.clear();
+     hoisted.hostEventBusInstances.length = 0;
+-    hoisted.gatewayManagerInstances.length = 0;
+     hoisted.electronAppMock.whenReady.mockReturnValue(Promise.resolve());
+-    hoisted.runtimeHostManagerMock.stop.mockResolvedValue(undefined);
+-    hoisted.runtimeHostManagerMock.forceTerminate.mockResolvedValue(undefined);
+-    hoisted.gatewayProcessRunnerMock.stop.mockResolvedValue(undefined);
+-    hoisted.gatewayProcessRunnerMock.forceTerminate.mockResolvedValue(undefined);
+-    hoisted.matchaAgentAppServerManagerMock.stop.mockResolvedValue(undefined);
+-    hoisted.matchaAgentAppServerManagerMock.forceTerminate.mockResolvedValue(undefined);
++    hoisted.directRuntimeHostMock.stop.mockResolvedValue(undefined);
++    hoisted.directRuntimeHostMock.forceKill.mockResolvedValue(undefined);
+   });
+ 
+   afterEach(() => {
+@@ -245,6 +161,11 @@ describe('main quit lifecycle coordination', () => {
+       restoreProcessListeners(processListeners);
+       processListeners = undefined;
+     }
++    if (originalE2EMode === undefined) {
++      delete process.env.MATCHACLAW_E2E;
++    } else {
++      process.env.MATCHACLAW_E2E = originalE2EMode;
++    }
+     vi.useRealTimers();
+   });
+ 

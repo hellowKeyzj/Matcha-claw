@@ -299,6 +299,8 @@
     "gatewayPreparing": "Шлюз запускается, данные аудита скоро станут доступны.",
     "gatewayStopped": "Gateway is not running, audit data is unavailable.",
     "loading": "Loading audits...",
+    "loadFailed": "Не удалось загрузить записи аудита.",
+    "stale": "Последнее чтение не удалось, поэтому записи аудита очищены.",
     "empty": "No recent hit records.",
     "refresh": "Refresh",
     "ruleLabel": "rule",

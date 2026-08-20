@@ -6,46 +6,32 @@ import { useDashboardUiStore } from '@/stores/dashboard-ui';
 import { useDashboardUsageStore } from '@/stores/dashboard-usage';
 
 const hostApiFetchMock = vi.fn(async (path: string) => {
-  if (path === '/api/runtime-host/usage/recent') {
-    return [
-      {
-        timestamp: new Date().toISOString(),
-        sessionId: 's-1',
-        agentId: 'main',
-        model: 'demo-model',
-        provider: 'demo-provider',
-        inputTokens: 1,
-        outputTokens: 1,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        totalTokens: 2,
-      },
-    ];
+  if (path === '/api/usage/recent') {
+    return {
+      entries: [
+        {
+          timestamp: new Date().toISOString(),
+          model: 'demo-model',
+          provider: 'demo-provider',
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 2,
+        },
+      ],
+    };
   }
   return { success: true };
 });
 
-const gatewayState = {
-  status: {
-    processState: 'running',
-    port: 18789,
-    pid: 1234,
-    connectedAt: Date.now(),
-    gatewayReady: true,
-    healthSummary: 'healthy',
-    transportState: 'connected',
-    portReachable: true,
-    diagnostics: {
-      consecutiveHeartbeatMisses: 0,
-      consecutiveRpcFailures: 0,
-    },
-    updatedAt: Date.now(),
-  },
+const runtimeHostState = {
+  runtimeHost: { lifecycle: 'running' as const },
   isInitialized: true,
 };
 
 vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
+  useRuntimeHostStore: (selector: (state: typeof runtimeHostState) => unknown) => selector(runtimeHostState),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -65,17 +51,8 @@ vi.mock('react-i18next', () => ({
 describe('dashboard page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    gatewayState.isInitialized = true;
-    gatewayState.status = {
-      ...gatewayState.status,
-      processState: 'running',
-      pid: 1234,
-      connectedAt: Date.now(),
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-    };
+    runtimeHostState.isInitialized = true;
+    runtimeHostState.runtimeHost = { lifecycle: 'running' };
     useDashboardUiStore.setState({
       dashboardHeavyContentReady: true,
       usageGroupBy: 'model',
@@ -122,16 +99,8 @@ describe('dashboard page', () => {
   });
 
   it('启动初始化前显示准备中，不显示未运行', () => {
-    gatewayState.isInitialized = false;
-    gatewayState.status = {
-      ...gatewayState.status,
-      processState: 'stopped',
-      gatewayReady: false,
-      healthSummary: 'unresponsive',
-      transportState: 'disconnected',
-      portReachable: false,
-      connectedAt: undefined,
-    } as typeof gatewayState.status;
+    runtimeHostState.isInitialized = false;
+    runtimeHostState.runtimeHost = { lifecycle: 'stopped' };
 
     render(
       <MemoryRouter>
@@ -139,7 +108,7 @@ describe('dashboard page', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('gatewayPreparing')).toBeInTheDocument();
+    expect(screen.getByText('runtimeHostPreparing')).toBeInTheDocument();
     expect(screen.queryByText('gatewayNotRunning')).not.toBeInTheDocument();
   });
 });

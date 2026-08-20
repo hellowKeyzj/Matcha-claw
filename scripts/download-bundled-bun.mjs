@@ -1,9 +1,15 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT_DIR = path.resolve(__dirname, '..');
-const BUN_VERSION = 'bun-v1.3.5';
+const scriptPath = fileURLToPath(import.meta.url);
+const ROOT_DIR = path.resolve(dirname(scriptPath), '..');
+export const BUN_VERSION = 'bun-v1.3.5';
+const BUN_SEMVER = BUN_VERSION.slice('bun-v'.length);
 const BASE_URL = `https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}`;
 const OUTPUT_BASE = path.join(ROOT_DIR, 'resources', 'bin');
 
@@ -56,7 +62,50 @@ async function extractZip(archivePath, tempDir) {
   await $`unzip -q -o ${archivePath} -d ${tempDir}`;
 }
 
-async function setupTarget(id) {
+function cachedBunMatchesTarget({ executablePath, targetId }, dependencies = {}) {
+  const pathExists = dependencies.existsSync ?? existsSync;
+  const execute = dependencies.spawnSync ?? spawnSync;
+  const readFile = dependencies.readFileSync ?? readFileSync;
+  if (!pathExists(executablePath)) return false;
+
+  try {
+    const version = execute(executablePath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    if (version.error || version.status !== 0 || String(version.stdout ?? '').trim() !== BUN_SEMVER) {
+      return false;
+    }
+    if (targetId !== 'win32-x64' && targetId !== 'win32-arm64') return true;
+
+    const binary = readFile(executablePath);
+    const peOffset = binary.readUInt32LE(0x3c);
+    const machine = binary.readUInt16LE(peOffset + 4);
+    return machine === (targetId === 'win32-x64' ? 0x8664 : 0xaa64);
+  } catch {
+    return false;
+  }
+}
+
+export function canReuseCachedBun({ executablePath, targetId }, dependencies) {
+  return cachedBunMatchesTarget({ executablePath, targetId }, dependencies);
+}
+
+export function localFunctionalBunCacheEvidence({ executablePath, targetId }, dependencies) {
+  if (targetId !== 'win32-x64' || !cachedBunMatchesTarget({ executablePath, targetId }, dependencies)) {
+    return undefined;
+  }
+  return {
+    source: 'local-cache',
+    target: 'win32-x64',
+    functionalMatch: 'exact-bun-1.3.5-win32-x64-pe',
+    independentProvenance: 'unverified',
+    supplyChainAttestation: 'not-present',
+  };
+}
+
+async function setupTarget(id, { reuseFunctionalLocalCache = false } = {}) {
   const target = TARGETS[id];
   if (!target) {
     echo(chalk.red`❌ Target ${id} is not supported by this script.`);
@@ -72,13 +121,27 @@ async function setupTarget(id) {
 
   echo(chalk.blue`\n📦 Setting up Bun for ${id}...`);
 
+  if (reuseFunctionalLocalCache && cachedBunMatchesTarget({ executablePath: outputBin, targetId: id })) {
+    echo(chalk.yellow`Using locally cached Bun with functional target match and independently unverified provenance: ${outputBin}`);
+    return;
+  }
+
   await fs.remove(tempDir);
   await fs.ensureDir(targetDir);
   await fs.ensureDir(tempDir);
 
   try {
     echo`⬇️ Downloading: ${downloadUrl}`;
-    const response = await fetch(downloadUrl);
+    let response;
+    try {
+      response = await fetch(downloadUrl);
+    } catch (error) {
+      if (id === 'win32-x64' && cachedBunMatchesTarget({ executablePath: outputBin, targetId: id })) {
+        echo(chalk.yellow`Network producer unavailable; using locally cached Bun with functional target match and independently unverified provenance: ${outputBin}`);
+        return;
+      }
+      throw error;
+    }
     if (!response.ok) throw new Error(`Failed to download ${downloadUrl}: ${response.status} ${response.statusText}`);
     const buffer = await response.arrayBuffer();
     await fs.writeFile(archivePath, Buffer.from(buffer));
@@ -110,14 +173,28 @@ async function setupTarget(id) {
   }
 }
 
-const downloadAll = argv.all;
-const platform = argv.platform;
+if (process.argv.includes(scriptPath)) {
+  const downloadAll = argv.all;
+  const platform = argv.platform;
+  const target = argv.target;
+  const reuseFunctionalLocalCache = argv['reuse-functional-local-cache'] === true;
+  if (reuseFunctionalLocalCache && target !== 'win32-x64') {
+    echo(chalk.red`❌ --reuse-functional-local-cache is restricted to --target=win32-x64.`);
+    process.exit(1);
+  }
 
-if (downloadAll) {
+  if (downloadAll) {
   echo(chalk.cyan`🌐 Downloading Bun binaries for ALL supported platforms...`);
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);
   }
+} else if (target) {
+  if (!TARGETS[target]) {
+    echo(chalk.red`❌ Unknown target: ${target}`);
+    echo(`Available targets: ${Object.keys(TARGETS).join(', ')}`);
+    process.exit(1);
+  }
+  await setupTarget(target, { reuseFunctionalLocalCache });
 } else if (platform) {
   const targets = PLATFORM_GROUPS[platform];
   if (!targets) {
@@ -144,8 +221,9 @@ if (downloadAll) {
   }
 }
 
-if (process.exitCode && process.exitCode !== 0) {
-  process.exit(process.exitCode);
-}
+  if (process.exitCode && process.exitCode !== 0) {
+    process.exit(process.exitCode);
+  }
 
-echo(chalk.green`\n🎉 Done!`);
+  echo(chalk.green`\n🎉 Done!`);
+}

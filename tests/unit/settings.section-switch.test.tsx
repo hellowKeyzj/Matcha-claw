@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import { Settings } from '@/pages/Settings';
 import { useSettingsStore } from '@/stores/settings';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import i18n from '@/i18n';
 
@@ -12,58 +12,45 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
 }));
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn(async (path: string, init?: RequestInit) => {
-  if (path === '/api/matcha-agent/app-server/restart' && init?.method === 'POST') {
-    return { success: true };
-  }
-  if (path === '/api/license/gate') {
-    return {
-      state: 'blocked',
-      reason: 'empty',
-      checkedAtMs: Date.now(),
-      hasStoredKey: false,
-      hasUsableCache: false,
-      nextRevalidateAtMs: null,
-      lastValidation: null,
-      renewalAlert: null,
-    };
-  }
-  if (path === '/api/license/stored-key') {
-    return { key: null };
-  }
-  if (path === '/api/gateway/status') {
-    return {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    };
-  }
-  if (path === '/api/plugins/runtime') {
+  if (path === '/api/openclaw/lifecycle/restart' && init?.method === 'POST') {
     return {
       success: true,
-      state: {
-        lifecycle: 'running',
-        runtimeLifecycle: 'running',
-        activePluginCount: 0,
-        enabledPluginIds: [],
-      },
-      health: {
-        ok: true,
-        lifecycle: 'running',
-        activePluginCount: 0,
-        degradedPlugins: [],
-      },
-      execution: {
-        enabledPluginIds: [],
+      status: {
+        processState: 'waitingToRestart',
       },
     };
+  }
+  if (path === '/api/openclaw/lifecycle/status') {
+    return {
+      processState: 'running',
+    };
+  }
+  if (path === '/api/openclaw/runtime/snapshot') {
+    return {
+      state: { ok: true, lifecycle: 'ready', matcha: { lifecycle: 'idle' }, openClaw: { lifecycle: 'running' } },
+      health: { ok: true, lifecycle: 'ready', matcha: { lifecycle: 'idle' }, openClaw: { lifecycle: 'running' } },
+      gateway: { availability: 'available', ok: true, timestampMs: 1, durationMs: 2, channelCount: 1, agentCount: 1, sessionCount: 1, heartbeatEnabled: true },
+      control: { ready: true, phase: 'ready', retryable: false },
+      observedAtMs: 1,
+    };
+  }
+  if (path.startsWith('/api/openclaw/logs')) {
+    return {
+      entries: [],
+      cursor: 0,
+      reset: false,
+      truncated: false,
+      lifecycleTailEvicted: false,
+    };
+  }
+  if (
+    (path === '/api/openclaw/lifecycle/start' || path === '/api/openclaw/lifecycle/stop')
+    && init?.method === 'POST'
+  ) {
+    return { success: true, status: { processState: 'running' } };
+  }
+  if (path === '/api/matcha-agent/app-server/restart' && init?.method === 'POST') {
+    return { success: true };
   }
   if (path === '/api/matcha-agent/app-server/status') {
     return {
@@ -78,10 +65,34 @@ const hostApiFetchMock = vi.hoisted(() => vi.fn(async (path: string, init?: Requ
   throw new Error(`unhandled hostApiFetch path: ${path}`);
 }));
 
+const licenseRuntimeMock = vi.hoisted(() => ({
+  clear: vi.fn().mockResolvedValue({ success: true }),
+  gate: vi.fn(),
+  revalidate: vi.fn(),
+  storedKey: vi.fn(),
+  validate: vi.fn(),
+}));
+
 vi.mock('@/lib/host-api', () => ({
   hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
   hostApiFetch: hostApiFetchMock,
+  hostOpenClawGetLifecycleStatus: () => hostApiFetchMock('/api/openclaw/lifecycle/status'),
+  hostOpenClawGetRuntimeSnapshot: () => hostApiFetchMock('/api/openclaw/runtime/snapshot'),
+  hostOpenClawGetLogs: (cursor?: number) => hostApiFetchMock(
+    cursor === undefined ? '/api/openclaw/logs' : `/api/openclaw/logs?cursor=${cursor}`,
+  ),
+  hostOpenClawStart: () => hostApiFetchMock('/api/openclaw/lifecycle/start', { method: 'POST' }),
+  hostOpenClawStop: () => hostApiFetchMock('/api/openclaw/lifecycle/stop', { method: 'POST' }),
+  hostOpenClawRestart: () => hostApiFetchMock('/api/openclaw/lifecycle/restart', { method: 'POST' }),
+}));
+
+vi.mock('@/lib/license-runtime', () => ({
+  hostLicenseClear: licenseRuntimeMock.clear,
+  hostLicenseGate: licenseRuntimeMock.gate,
+  hostLicenseRevalidate: licenseRuntimeMock.revalidate,
+  hostLicenseStoredKey: licenseRuntimeMock.storedKey,
+  hostLicenseValidate: licenseRuntimeMock.validate,
 }));
 
 describe('settings page section switch', () => {
@@ -93,6 +104,30 @@ describe('settings page section switch', () => {
 
   beforeEach(() => {
     hostApiFetchMock.mockClear();
+    licenseRuntimeMock.gate.mockResolvedValue({
+      state: 'blocked',
+      reason: 'empty',
+      checkedAtMs: Date.now(),
+      hasStoredKey: false,
+      hasUsableCache: false,
+      nextRevalidateAtMs: null,
+      lastValidation: null,
+      renewalAlert: null,
+    });
+    licenseRuntimeMock.storedKey.mockResolvedValue({ masked: null });
+    licenseRuntimeMock.validate.mockResolvedValue({
+      valid: false,
+      code: 'empty',
+      masked: null,
+      last4: null,
+    });
+    licenseRuntimeMock.revalidate.mockResolvedValue({
+      valid: false,
+      code: 'empty',
+      masked: null,
+      last4: null,
+    });
+    licenseRuntimeMock.clear.mockResolvedValue({ success: true });
     i18n.changeLanguage('en');
 
     useSettingsStore.setState((state) => ({
@@ -110,21 +145,9 @@ describe('settings page section switch', () => {
       initialized: true,
     }));
 
-    useGatewayStore.setState((state) => ({
+    useRuntimeHostStore.setState((state) => ({
       ...state,
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+      runtimeHost: { lifecycle: 'running' },
     }));
 
     useUpdateStore.setState((state) => ({
@@ -143,7 +166,28 @@ describe('settings page section switch', () => {
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Task Plugin' })).not.toBeInTheDocument();
 
-    expect(screen.getByText('OpenClaw Status')).toBeInTheDocument();
+    expect(screen.getByText('Runtime Host Status')).toBeInTheDocument();
+    const openClawLifecycleTitle = await screen.findByText('OpenClaw Lifecycle Status');
+    const openClawLifecyclePanel = openClawLifecycleTitle.closest('.space-y-3');
+    expect(openClawLifecyclePanel).not.toBeNull();
+    expect(within(openClawLifecyclePanel as HTMLElement).getByText('Running')).toBeInTheDocument();
+    expect(within(openClawLifecyclePanel as HTMLElement).queryByText('Port:')).not.toBeInTheDocument();
+    expect(within(openClawLifecyclePanel as HTMLElement).queryByText('PID:')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(within(openClawLifecyclePanel as HTMLElement).getByRole('button', { name: 'Logs' }));
+    });
+    expect(within(openClawLifecyclePanel as HTMLElement).getByText('Lifecycle logs')).toBeInTheDocument();
+    expect(within(openClawLifecyclePanel as HTMLElement).getAllByText('None')).toHaveLength(2);
+    expect(within(openClawLifecyclePanel as HTMLElement).queryByText('raw logs')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(within(openClawLifecyclePanel as HTMLElement).getByRole('button', { name: 'Restart' }));
+    });
+    await waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/openclaw/lifecycle/restart', { method: 'POST' });
+    });
+
     const matchaAgentTitle = await screen.findByText('matcha-agent app-server Status');
     const matchaAgentPanel = matchaAgentTitle.closest('.space-y-3');
     expect(matchaAgentPanel).not.toBeNull();
@@ -164,7 +208,7 @@ describe('settings page section switch', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     });
     expect(screen.getByTestId('update-settings-panel')).toBeInTheDocument();
-    expect(screen.queryByText('OpenClaw Status')).not.toBeInTheDocument();
+    expect(screen.queryByText('Runtime Host Status')).not.toBeInTheDocument();
   });
 
   it('后发的 app-server status 请求拥有最终状态，旧响应不会覆盖', async () => {
@@ -268,7 +312,7 @@ describe('settings page section switch', () => {
     });
 
     expect(screen.getByRole('button', { name: 'Runtime Status' })).toBeInTheDocument();
-    expect(screen.getByText('OpenClaw Status')).toBeInTheDocument();
+    expect(screen.getByText('Runtime Host Status')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
   });
 });

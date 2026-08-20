@@ -1,0 +1,1318 @@
+1	use std::{
+2	    ffi::{OsStr, OsString},
+3	    fmt, fs,
+4	    future::Future,
+5	    path::{Path, PathBuf},
+6	    pin::Pin,
+7	    sync::{
+8	        Arc,
+9	        atomic::{AtomicU64, Ordering},
+10	    },
+11	    time::{Duration, SystemTime, UNIX_EPOCH},
+12	};
+13	
+14	#[cfg(windows)]
+15	use foundation::process::windows_system_root;
+16	use foundation::{
+17	    execution::OperationHandle,
+18	    process::{
+19	        LaunchSpec, OneShotCompletion, OneShotContainment, OneShotRun, OneShotRunner, StdioMode,
+20	        StdioSpec,
+21	    },
+22	};
+23	use serde::Serialize;
+24	use tokio::sync::{Mutex, Notify};
+25	
+26	use crate::{lifecycle::state_dir::CanonicalStateDir, projection::tool_permission};
+27	
+28	const PYTHON_INSTALL_ARGUMENTS: [&str; 3] = ["python", "install", "3.12"];
+29	const PYTHON_READINESS_ARGUMENTS: [&str; 3] = ["python", "find", "3.12"];
+30	const PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+31	const INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
+32	const UV_TOOL_ID: &str = "uv";
+33	const PYTHON_TOOL_ID: &str = "python-3.12";
+34	const TOOLCHAIN_JOB_TYPE: &str = "toolchain.uvInstall";
+35	const TOOLCHAIN_JOB_ID_PREFIX: &str = "runtime-host:openclaw:toolchain:";
+36	const TOOLCHAIN_UNAVAILABLE_ERROR: &str = "Toolchain installation is unavailable.";
+37	const TOOLCHAIN_CANCELLED_ERROR: &str = "Toolchain installation was cancelled.";
+38	
+39	/// The platform distinction that changes the bundled executable and PATH probe names.
+40	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+41	pub enum ToolchainPlatform {
+42	    Windows,
+43	    Unix,
+44	}
+45	
+46	const UNIX_TARGET_NAME: &str = if cfg!(target_os = "macos") {
+47	    "darwin"
+48	} else if cfg!(target_os = "linux") {
+49	    "linux"
+50	} else {
+51	    "unix"
+52	};
+53	
+54	impl ToolchainPlatform {
+55	    pub fn current() -> Self {
+56	        if cfg!(windows) {
+57	            Self::Windows
+58	        } else {
+59	            Self::Unix
+60	        }
+61	    }
+62	
+63	    fn bundled_uv_name(self) -> &'static str {
+64	        match self {
+65	            Self::Windows => "uv.exe",
+66	            Self::Unix => "uv",
+67	        }
+68	    }
+69	
+70	    fn path_probe_name(self) -> &'static str {
+71	        match self {
+72	            Self::Windows => "where.exe",
+73	            Self::Unix => "which",
+74	        }
+75	    }
+76	
+77	    fn target_name(self) -> &'static str {
+78	        match self {
+79	            Self::Windows => "win32",
+80	            Self::Unix => UNIX_TARGET_NAME,
+81	        }
+82	    }
+83	}
+84	
+85	/// A process result with no native output or path details.
+86	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+87	pub enum ToolchainCommandOutcome {
+88	    Succeeded,
+89	    Failed,
+90	    Unavailable,
+91	    TimedOut,
+92	    Unknown,
+93	    Unsupported,
+94	}
+95	
+96	/// The only command seam needed by the Toolchain owner.
+97	///
+98	/// The concrete process implementation belongs to the platform/runtime integration. Keeping it as
+99	/// a narrow port lets this owner preserve command and outcome semantics without making Foundation
+100	/// execution a second Toolchain fact owner or recreating a Host-wide job queue.
+101	pub type ToolchainCommandFuture = Pin<Box<dyn Future<Output = ToolchainCommandOutcome> + Send>>;
+102	
+103	pub trait ToolchainCommandPort: Send + Sync {
+104	    fn execute(&self, request: ToolchainCommandRequest) -> ToolchainCommandFuture;
+105	
+106	    fn resolve_program(&self, program: &Path) -> Option<PathBuf> {
+107	        Some(program.to_owned())
+108	    }
+109	}
+110	
+111	/// A bounded, output-free command request.
+112	#[derive(Clone, Eq, PartialEq)]
+113	pub struct ToolchainCommandRequest {
+114	    program: PathBuf,
+115	    arguments: Vec<OsString>,
+116	    timeout: Option<Duration>,
+117	}
+118	
+119	impl ToolchainCommandRequest {
+120	    pub fn new(
+121	        program: impl Into<PathBuf>,
+122	        arguments: impl IntoIterator<Item = OsString>,
+123	        timeout: Option<Duration>,
+124	    ) -> Self {
+125	        Self {
+126	            program: program.into(),
+127	            arguments: arguments.into_iter().collect(),
+128	            timeout,
+129	        }
+130	    }
+131	
+132	    pub fn program(&self) -> &Path {
+133	        &self.program
+134	    }
+135	
+136	    pub fn arguments(&self) -> &[OsString] {
+137	        &self.arguments
+138	    }
+139	
+140	    pub const fn timeout(&self) -> Option<Duration> {
+141	        self.timeout
+142	    }
+143	}
+144	
+145	impl fmt::Debug for ToolchainCommandRequest {
+146	    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+147	        formatter.write_str("ToolchainCommandRequest([REDACTED])")
+148	    }
+149	}
+150	
+151	/// Explicit result used when no platform process seam has been wired yet.
+152	#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+153	pub struct UnsupportedToolchainCommandPort;
+154	
+155	impl ToolchainCommandPort for UnsupportedToolchainCommandPort {
+156	    fn execute(&self, _: ToolchainCommandRequest) -> ToolchainCommandFuture {
+157	        Box::pin(async { ToolchainCommandOutcome::Unsupported })
+158	    }
+159	
+160	    fn resolve_program(&self, program: &Path) -> Option<PathBuf> {
+161	        Some(program.to_owned())
+162	    }
+163	}
+164	
+165	/// Foundation-backed native command execution for the Toolchain owner.
+166	///
+167	/// The child receives only the process environment needed by uv and is always launched through
+168	/// Foundation's contained one-shot runner. No command output crosses this seam.
+169	pub struct FoundationToolchainCommandPort {
+170	    working_directory: PathBuf,
+171	    public_environment: Vec<(OsString, OsString)>,
+172	    #[cfg(unix)]
+173	    guardian_executable: PathBuf,
+174	}
+175	
+176	impl FoundationToolchainCommandPort {
+177	    #[cfg(windows)]
+178	    pub fn new(working_directory: PathBuf) -> Self {
+179	        Self {
+180	            working_directory,
+181	            public_environment: toolchain_environment(),
+182	        }
+183	    }
+184	
+185	    #[cfg(unix)]
+186	    pub fn new(working_directory: PathBuf, guardian_executable: PathBuf) -> Self {
+187	        Self {
+188	            working_directory,
+189	            public_environment: toolchain_environment(),
+190	            guardian_executable,
+191	        }
+192	    }
+193	
+194	    fn environment_value(&self, key: &OsStr) -> Option<&OsStr> {
+195	        self.public_environment
+196	            .iter()
+197	            .find(|(name, _)| name == key)
+198	            .map(|(_, value)| value.as_os_str())
+199	    }
+200	
+201	    fn resolve_path(&self, program: &Path) -> Option<PathBuf> {
+202	        if program.is_absolute() {
+203	            return is_file(program).then(|| program.to_owned());
+204	        }
+205	
+206	        let name = program.file_name()?;
+207	        #[cfg(windows)]
+208	        if name.eq_ignore_ascii_case(OsStr::new("where.exe")) {
+209	            if let Some(root) = self.environment_value(OsStr::new("SystemRoot")) {
+210	                let where_path = PathBuf::from(root).join("System32").join("where.exe");
+211	                if let Some(path) = is_file(&where_path).then_some(where_path) {
+212	                    return Some(path);
+213	                }
+214	            }
+215	        }
+216	
+217	        let path = self.environment_value(OsStr::new("PATH"))?;
+218	        for entry in std::env::split_paths(path) {
+219	            let directory = if entry.as_os_str().is_empty() {
+220	                self.working_directory.clone()
+221	            } else if entry.is_absolute() {
+222	                entry
+223	            } else {
+224	                self.working_directory.join(entry)
+225	            };
+226	            let candidate = directory.join(name);
+227	            if let Some(path) = is_file(&candidate).then_some(candidate) {
+228	                return Some(path);
+229	            }
+230	            #[cfg(windows)]
+231	            if Path::new(name).extension().is_none() {
+232	                let candidate = directory.join(format!("{}.exe", name.to_string_lossy()));
+233	                if let Some(path) = is_file(&candidate).then_some(candidate) {
+234	                    return Some(path);
+235	                }
+236	            }
+237	        }
+238	        None
+239	    }
+240	}
+241	
+242	impl ToolchainCommandPort for FoundationToolchainCommandPort {
+243	    fn execute(&self, request: ToolchainCommandRequest) -> ToolchainCommandFuture {
+244	        let Some(program) = self.resolve_path(request.program()) else {
+245	            return Box::pin(async { ToolchainCommandOutcome::Unavailable });
+246	        };
+247	        let launch = LaunchSpec::try_new(
+248	            program,
+249	            self.working_directory.clone(),
+250	            request.arguments().to_owned(),
+251	            self.public_environment.clone(),
+252	            StdioSpec::new(StdioMode::Null, StdioMode::Null, StdioMode::Null),
+253	        );
+254	        let launch = match launch {
+255	            Ok(launch) => launch,
+256	            Err(_) => return Box::pin(async { ToolchainCommandOutcome::Unavailable }),
+257	        };
+258	        #[cfg(windows)]
+259	        let containment = OneShotContainment::job();
+260	        #[cfg(unix)]
+261	        let containment = match OneShotContainment::guardian(self.guardian_executable.clone()) {
+262	            Ok(containment) => containment,
+263	            Err(_) => return Box::pin(async { ToolchainCommandOutcome::Unavailable }),
+264	        };
+265	        let deadline = request.timeout().unwrap_or(INSTALL_TIMEOUT);
+266	        let run = match OneShotRun::try_new(launch, containment, deadline) {
+267	            Ok(run) => run,
+268	            Err(_) => return Box::pin(async { ToolchainCommandOutcome::Unavailable }),
+269	        };
+270	        let mut operation = match OneShotRunner::new().start(run) {
+271	            Ok(operation) => operation,
+272	            Err(_) => return Box::pin(async { ToolchainCommandOutcome::Unavailable }),
+273	        };
+274	        Box::pin(async move { map_one_shot_completion(operation.wait().await) })
+275	    }
+276	
+277	    fn resolve_program(&self, program: &Path) -> Option<PathBuf> {
+278	        self.resolve_path(program)
+279	    }
+280	}
+281	
+282	fn is_file(path: &Path) -> bool {
+283	    fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+284	}
+285	
+286	fn toolchain_environment() -> Vec<(OsString, OsString)> {
+287	    const KEYS: [&str; 10] = [
+288	        "PATH",
+289	        "HOME",
+290	        "USERPROFILE",
+291	        "HOMEDRIVE",
+292	        "HOMEPATH",
+293	        "LOCALAPPDATA",
+294	        "APPDATA",
+295	        "TEMP",
+296	        "TMP",
+297	        "XDG_CACHE_HOME",
+298	    ];
+299	    let mut environment = KEYS
+300	        .into_iter()
+301	        .filter_map(|key| std::env::var_os(key).map(|value| (OsString::from(key), value)))
+302	        .collect::<Vec<_>>();
+303	    #[cfg(windows)]
+304	    if let Ok(root) = windows_system_root() {
+305	        environment.push((OsString::from("SystemRoot"), root));
+306	    }
+307	    environment
+308	}
+309	
+310	fn map_one_shot_completion(completion: OneShotCompletion) -> ToolchainCommandOutcome {
+311	    match completion {
+312	        OneShotCompletion::UnavailableBeforeDispatch => ToolchainCommandOutcome::Unavailable,
+313	        OneShotCompletion::Succeeded => ToolchainCommandOutcome::Succeeded,
+314	        OneShotCompletion::Failed => ToolchainCommandOutcome::Failed,
+315	        OneShotCompletion::OutcomeUnknown => ToolchainCommandOutcome::Unknown,
+316	    }
+317	}
+318	
+319	/// Integration-owned path and command environment for OpenClaw's Toolchain facts.
+320	///
+321	/// The path order follows the active delivery contract: explicit override, development resources,
+322	/// then the packaged resources root. It is intentionally not serializable.
+323	pub struct NativeToolchainRuntime {
+324	    platform: ToolchainPlatform,
+325	    arch: String,
+326	    working_directory: PathBuf,
+327	    uv_override: Option<PathBuf>,
+328	    commands: Arc<dyn ToolchainCommandPort>,
+329	}
+330	
+331	impl NativeToolchainRuntime {
+332	    pub fn new(
+333	        platform: ToolchainPlatform,
+334	        arch: impl Into<String>,
+335	        working_directory: PathBuf,
+336	        uv_override: Option<PathBuf>,
+337	        commands: Arc<dyn ToolchainCommandPort>,
+338	    ) -> Self {
+339	        Self {
+340	            platform,
+341	            arch: arch.into(),
+342	            working_directory,
+343	            uv_override,
+344	            commands,
+345	        }
+346	    }
+347	
+348	    /// Builds the environment from the current process without exposing environment values.
+349	    pub fn from_process(
+350	        commands: Arc<dyn ToolchainCommandPort>,
+351	    ) -> Result<Self, NativeToolchainRuntimeError> {
+352	        let working_directory = std::env::current_dir()
+353	            .map_err(|_| NativeToolchainRuntimeError::WorkingDirectoryUnavailable)?;
+354	        let uv_override = std::env::var_os("MATCHACLAW_UV_BIN").map(PathBuf::from);
+355	        Ok(Self::new(
+356	            ToolchainPlatform::current(),
+357	            std::env::consts::ARCH,
+358	            working_directory,
+359	            uv_override,
+360	            commands,
+361	        ))
+362	    }
+363	
+364	    pub fn bundled_uv_available(&self) -> bool {
+365	        self.bundled_uv_path_candidates()
+366	            .into_iter()
+367	            .any(|path| is_file(&path))
+368	    }
+369	
+370	    pub fn bundled_uv_path_candidates(&self) -> Vec<PathBuf> {
+371	        let executable = self.platform.bundled_uv_name();
+372	        let target = format!("{}-{}", self.platform.target_name(), self.arch);
+373	        let mut candidates = Vec::new();
+374	
+375	        if let Some(path) = self.uv_override.as_ref() {
+376	            push_candidate(&mut candidates, path, &self.working_directory);
+377	        }
+378	        push_candidate(
+379	            &mut candidates,
+380	            &self
+381	                .working_directory
+382	                .join("resources")
+383	                .join("bin")
+384	                .join(&target)
+385	                .join(executable),
+386	            &self.working_directory,
+387	        );
+388	        push_candidate(
+389	            &mut candidates,
+390	            &self.working_directory.join("bin").join(executable),
+391	            &self.working_directory,
+392	        );
+393	        candidates
+394	    }
+395	
+396	    async fn uv_path(&self) -> Result<PathBuf, UvResolution> {
+397	        if let Some(path) = self
+398	            .bundled_uv_path_candidates()
+399	            .into_iter()
+400	            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
+401	        {
+402	            return Ok(path);
+403	        }
+404	
+405	        let request = ToolchainCommandRequest::new(
+406	            self.platform.path_probe_name(),
+407	            [OsString::from(UV_TOOL_ID)],
+408	            Some(PATH_PROBE_TIMEOUT),
+409	        );
+410	        match self.commands.execute(request).await {
+411	            ToolchainCommandOutcome::Succeeded => self
+412	                .commands
+413	                .resolve_program(Path::new(UV_TOOL_ID))
+414	                .ok_or(UvResolution::Unavailable),
+415	            ToolchainCommandOutcome::Failed | ToolchainCommandOutcome::Unavailable => {
+416	                Err(UvResolution::Unavailable)
+417	            }
+418	            ToolchainCommandOutcome::TimedOut | ToolchainCommandOutcome::Unknown => {
+419	                Err(UvResolution::Unknown)
+420	            }
+421	            ToolchainCommandOutcome::Unsupported => Err(UvResolution::Unsupported),
+422	        }
+423	    }
+424	
+425	    async fn observe(&self) -> ToolchainStatus {
+426	        match self.uv_path().await {
+427	            Ok(executable) => ToolchainStatus {
+428	                uv: ToolAvailability::Available,
+429	                python: self.observe_python(&executable).await,
+430	            },
+431	            Err(UvResolution::Unavailable) => ToolchainStatus {
+432	                uv: ToolAvailability::Unavailable,
+433	                python: PythonReadiness::Unavailable,
+434	            },
+435	            Err(UvResolution::Unknown) => ToolchainStatus {
+436	                uv: ToolAvailability::Unknown,
+437	                python: PythonReadiness::Unknown,
+438	            },
+439	            Err(UvResolution::Unsupported) => ToolchainStatus {
+440	                uv: ToolAvailability::Unsupported,
+441	                python: PythonReadiness::Unsupported,
+442	            },
+443	        }
+444	    }
+445	
+446	    async fn observe_python(&self, executable: &Path) -> PythonReadiness {
+447	        let request = ToolchainCommandRequest::new(
+448	            executable.to_owned(),
+449	            PYTHON_READINESS_ARGUMENTS.iter().map(OsString::from),
+450	            Some(PATH_PROBE_TIMEOUT),
+451	        );
+452	        match self.commands.execute(request).await {
+453	            ToolchainCommandOutcome::Succeeded => PythonReadiness::Ready,
+454	            ToolchainCommandOutcome::Failed => PythonReadiness::NotReady,
+455	            ToolchainCommandOutcome::Unavailable => PythonReadiness::Unavailable,
+456	            ToolchainCommandOutcome::TimedOut | ToolchainCommandOutcome::Unknown => {
+457	                PythonReadiness::Unknown
+458	            }
+459	            ToolchainCommandOutcome::Unsupported => PythonReadiness::Unsupported,
+460	        }
+461	    }
+462	
+463	    async fn install_uv(&self) -> UvInstallOutcome {
+464	        let executable = match self.uv_path().await {
+465	            Ok(path) => path,
+466	            Err(UvResolution::Unavailable) => return UvInstallOutcome::Unavailable,
+467	            Err(UvResolution::Unknown) => return UvInstallOutcome::Unknown,
+468	            Err(UvResolution::Unsupported) => return UvInstallOutcome::Unsupported,
+469	        };
+470	        let install = ToolchainCommandRequest::new(
+471	            executable.clone(),
+472	            PYTHON_INSTALL_ARGUMENTS.iter().map(OsString::from),
+473	            Some(INSTALL_TIMEOUT),
+474	        );
+475	        match self.commands.execute(install).await {
+476	            ToolchainCommandOutcome::Succeeded => {
+477	                let readiness = ToolchainCommandRequest::new(
+478	                    executable,
+479	                    PYTHON_READINESS_ARGUMENTS.iter().map(OsString::from),
+480	                    Some(PATH_PROBE_TIMEOUT),
+481	                );
+482	                match self.commands.execute(readiness).await {
+483	                    ToolchainCommandOutcome::Succeeded => UvInstallOutcome::Installed,
+484	                    ToolchainCommandOutcome::Failed => UvInstallOutcome::Rejected,
+485	                    ToolchainCommandOutcome::Unavailable => UvInstallOutcome::Unavailable,
+486	                    ToolchainCommandOutcome::TimedOut | ToolchainCommandOutcome::Unknown => {
+487	                        UvInstallOutcome::Unknown
+488	                    }
+489	                    ToolchainCommandOutcome::Unsupported => UvInstallOutcome::Unsupported,
+490	                }
+491	            }
+492	            ToolchainCommandOutcome::Failed => UvInstallOutcome::Rejected,
+493	            ToolchainCommandOutcome::Unavailable => UvInstallOutcome::Unavailable,
+494	            ToolchainCommandOutcome::TimedOut | ToolchainCommandOutcome::Unknown => {
+495	                UvInstallOutcome::Unknown
+496	            }
+497	            ToolchainCommandOutcome::Unsupported => UvInstallOutcome::Unsupported,
+498	        }
+499	    }
+500	}
+501	
+502	impl fmt::Debug for NativeToolchainRuntime {
+503	    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+504	        formatter.write_str("NativeToolchainRuntime([REDACTED])")
+505	    }
+506	}
+507	
+508	fn push_candidate(candidates: &mut Vec<PathBuf>, path: &Path, base: &Path) {
+509	    let path = if path.is_absolute() {
+510	        path.to_owned()
+511	    } else {
+512	        base.join(path)
+513	    };
+514	    if !candidates.iter().any(|candidate| candidate == &path) {
+515	        candidates.push(path);
+516	    }
+517	}
+518	
+519	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+520	enum UvResolution {
+521	    Unavailable,
+522	    Unknown,
+523	    Unsupported,
+524	}
+525	
+526	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+527	pub enum NativeToolchainRuntimeError {
+528	    WorkingDirectoryUnavailable,
+529	}
+530	
+531	impl fmt::Display for NativeToolchainRuntimeError {
+532	    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+533	        formatter.write_str("Toolchain working directory is unavailable")
+534	    }
+535	}
+536	
+537	impl std::error::Error for NativeToolchainRuntimeError {}
+538	
+539	#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+540	#[serde(rename_all = "camelCase")]
+541	pub enum ToolAvailability {
+542	    Available,
+543	    Unavailable,
+544	    Unknown,
+545	    Unsupported,
+546	}
+547	
+548	#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+549	#[serde(rename_all = "camelCase")]
+550	pub enum PythonReadiness {
+551	    Ready,
+552	    NotReady,
+553	    Unknown,
+554	    Unavailable,
+555	    Unsupported,
+556	}
+557	
+558	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+559	#[serde(rename_all = "camelCase")]
+560	pub struct ToolchainStatus {
+561	    uv: ToolAvailability,
+562	    python: PythonReadiness,
+563	}
+564	
+565	impl ToolchainStatus {
+566	    pub fn uv(&self) -> ToolAvailability {
+567	        self.uv
+568	    }
+569	
+570	    pub fn python(&self) -> PythonReadiness {
+571	        self.python
+572	    }
+573	}
+574	
+575	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+576	#[serde(rename_all = "camelCase")]
+577	pub struct ToolchainCatalog {
+578	    entries: Vec<ToolchainEntry>,
+579	}
+580	
+581	impl ToolchainCatalog {
+582	    pub fn entries(&self) -> &[ToolchainEntry] {
+583	        &self.entries
+584	    }
+585	}
+586	
+587	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+588	#[serde(rename_all = "camelCase")]
+589	pub struct ToolchainEntry {
+590	    id: String,
+591	    status: ToolAvailability,
+592	}
+593	
+594	impl ToolchainEntry {
+595	    pub fn id(&self) -> &str {
+596	        &self.id
+597	    }
+598	
+599	    pub fn status(&self) -> ToolAvailability {
+600	        self.status
+601	    }
+602	}
+603	
+604	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+605	pub enum UvInstallOutcome {
+606	    Installed,
+607	    Rejected,
+608	    Unknown,
+609	    Unavailable,
+610	    Unsupported,
+611	}
+612	
+613	#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+614	#[serde(rename_all = "lowercase")]
+615	pub enum ToolchainJobStatus {
+616	    Queued,
+617	    Running,
+618	    Succeeded,
+619	    Failed,
+620	}
+621	
+622	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+623	#[serde(rename_all = "camelCase")]
+624	pub struct ToolchainJobProgress {
+625	    pub updated_at: u64,
+626	    #[serde(skip_serializing_if = "Option::is_none")]
+627	    pub percent: Option<u8>,
+628	    #[serde(skip_serializing_if = "Option::is_none")]
+629	    pub message: Option<String>,
+630	}
+631	
+632	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+633	#[serde(rename_all = "camelCase")]
+634	pub struct ToolchainJobSnapshot {
+635	    pub id: String,
+636	    #[serde(rename = "type")]
+637	    pub job_type: String,
+638	    pub status: ToolchainJobStatus,
+639	    pub queued_at: u64,
+640	    pub started_at: Option<u64>,
+641	    pub finished_at: Option<u64>,
+642	    pub attempts: u32,
+643	    pub max_attempts: u32,
+644	    pub progress: Option<ToolchainJobProgress>,
+645	    pub result: Option<ToolchainJobResult>,
+646	    pub error: Option<String>,
+647	}
+648	
+649	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+650	#[serde(rename_all = "lowercase")]
+651	pub enum ToolchainJobResult {
+652	    Installed,
+653	    Rejected,
+654	    Unknown,
+655	    Unavailable,
+656	}
+657	
+658	#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+659	pub struct ToolchainJobSubmission {
+660	    pub job: ToolchainJobSnapshot,
+661	}
+662	
+663	#[derive(Clone, Debug, Eq, PartialEq)]
+664	pub enum ToolchainJobLookup {
+665	    Known(ToolchainJobSnapshot),
+666	    Unknown,
+667	}
+668	
+669	pub struct ToolchainInstallOperation {
+670	    job_id: String,
+671	    snapshot: Arc<Mutex<ToolchainJobSnapshot>>,
+672	    operation: Option<OperationHandle<UvInstallOutcome>>,
+673	}
+674	
+675	impl ToolchainInstallOperation {
+676	    fn submit(
+677	        runtime: Arc<NativeToolchainRuntime>,
+678	        sequence: u64,
+679	        completion_notify: Arc<Notify>,
+680	    ) -> Self {
+681	        let job_id = format!("{TOOLCHAIN_JOB_ID_PREFIX}{sequence}");
+682	        let snapshot = ToolchainJobSnapshot {
+683	            id: job_id.clone(),
+684	            job_type: TOOLCHAIN_JOB_TYPE.to_owned(),
+685	            status: ToolchainJobStatus::Queued,
+686	            queued_at: now_millis(),
+687	            started_at: None,
+688	            finished_at: None,
+689	            attempts: 0,
+690	            max_attempts: 1,
+691	            progress: None,
+692	            result: None,
+693	            error: None,
+694	        };
+695	        let snapshot_state = Arc::new(Mutex::new(snapshot));
+696	        let task_snapshot = Arc::clone(&snapshot_state);
+697	        let (operation, _) = OperationHandle::spawn(move |cancellation| async move {
+698	            {
+699	                let mut snapshot = task_snapshot.lock().await;
+700	                snapshot.status = ToolchainJobStatus::Running;
+701	                snapshot.attempts = 1;
+702	                snapshot.started_at = Some(now_millis());
+703	                snapshot.progress = Some(ToolchainJobProgress {
+704	                    updated_at: now_millis(),
+705	                    percent: Some(10),
+706	                    message: Some("Installing uv Python runtime".to_owned()),
+707	                });
+708	            }
+709	            let outcome = tokio::select! {
+710	                _ = cancellation.cancelled() => UvInstallOutcome::Unknown,
+711	                outcome = runtime.install_uv() => outcome,
+712	            };
+713	            completion_notify.notify_waiters();
+714	            outcome
+715	        });
+716	        Self { job_id, snapshot: snapshot_state, operation: Some(operation) }
+717	    }
+718	
+719	    pub fn job_id(&self) -> &str { &self.job_id }
+720	
+721	    pub async fn snapshot(&self) -> ToolchainJobSnapshot {
+722	        self.snapshot.lock().await.clone()
+723	    }
+724	
+725	    pub async fn settle(&mut self) -> ToolchainJobSnapshot {
+726	        let outcome = self.operation.take().map(|mut operation| async move {
+727	            operation.join().await.ok().unwrap_or(UvInstallOutcome::Unknown)
+728	        });
+729	        if let Some(outcome) = outcome {
+730	            let outcome = outcome.await;
+731	            let mut snapshot = self.snapshot.lock().await;
+732	            snapshot.status = match outcome {
+733	                UvInstallOutcome::Installed | UvInstallOutcome::Rejected | UvInstallOutcome::Unknown => ToolchainJobStatus::Succeeded,
+734	                UvInstallOutcome::Unavailable | UvInstallOutcome::Unsupported => ToolchainJobStatus::Failed,
+735	            };
+736	            snapshot.finished_at = Some(now_millis());
+737	            snapshot.progress = Some(ToolchainJobProgress { updated_at: now_millis(), percent: Some(100), message: None });
+738	            snapshot.result = Some(match outcome {
+739	                UvInstallOutcome::Installed => ToolchainJobResult::Installed,
+740	                UvInstallOutcome::Rejected => ToolchainJobResult::Rejected,
+741	                UvInstallOutcome::Unknown => ToolchainJobResult::Unknown,
+742	                UvInstallOutcome::Unavailable | UvInstallOutcome::Unsupported => ToolchainJobResult::Unavailable,
+743	            });
+744	            if matches!(outcome, UvInstallOutcome::Unavailable | UvInstallOutcome::Unsupported) {
+745	                snapshot.error = Some(TOOLCHAIN_UNAVAILABLE_ERROR.to_owned());
+746	            }
+747	        }
+748	        self.snapshot().await
+749	    }
+750	
+751	    pub async fn cancel_and_join(&mut self) -> ToolchainJobSnapshot {
+752	        if let Some(mut operation) = self.operation.take() {
+753	            let _ = operation.cancel_and_join().await;
+754	            let mut snapshot = self.snapshot.lock().await;
+755	            snapshot.status = ToolchainJobStatus::Failed;
+756	            snapshot.finished_at = Some(now_millis());
+757	            snapshot.error = Some(TOOLCHAIN_CANCELLED_ERROR.to_owned());
+758	        }
+759	        self.snapshot().await
+760	    }
+761	}
+762	
+763	fn now_millis() -> u64 {
+764	    SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|duration| u64::try_from(duration.as_millis()).ok()).unwrap_or(u64::MAX)
+765	}
+766	
+767	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+768	pub enum PermissionReadOutcome {
+769	    Observed(tool_permission::Mode),
+770	    Unavailable,
+771	    Unknown,
+772	    Unsupported,
+773	}
+774	
+775	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+776	pub enum PermissionWriteOutcome {
+777	    Unchanged,
+778	    Written,
+779	    Unavailable,
+780	    Unknown,
+781	    Unsupported,
+782	}
+783	
+784	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+785	pub enum ToolchainWriteRequest {
+786	    Permission(tool_permission::Mode),
+787	    InstallUv,
+788	}
+789	
+790	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+791	pub enum ToolchainWriteOutcome {
+792	    Permission(PermissionWriteOutcome),
+793	    InstallUv(UvInstallOutcome),
+794	}
+795	
+796	/// OpenClaw Integration owner for local Toolchain facts and the existing config permission owner.
+797	pub struct OpenClawToolchain {
+798	    state_dir: CanonicalStateDir,
+799	    runtime: Arc<NativeToolchainRuntime>,
+800	    install_operation: Arc<Mutex<Option<ToolchainInstallOperation>>>,
+801	    completion_notify: Arc<Notify>,
+802	    next_job_sequence: AtomicU64,
+803	}
+804	
+805	impl OpenClawToolchain {
+806	    pub fn new(state_dir: CanonicalStateDir, runtime: NativeToolchainRuntime) -> Self {
+807	        Self {
+808	            state_dir,
+809	            runtime: Arc::new(runtime),
+810	            install_operation: Arc::new(Mutex::new(None)),
+811	            completion_notify: Arc::new(Notify::new()),
+812	            next_job_sequence: AtomicU64::new(1),
+813	        }
+814	    }
+815	
+816	    pub async fn read(&self) -> ToolchainStatus {
+817	        self.status().await
+818	    }
+819	
+820	    pub async fn status(&self) -> ToolchainStatus {
+821	        self.runtime.observe().await
+822	    }
+823	
+824	    pub async fn list(&self) -> ToolchainCatalog {
+825	        let status = self.status().await;
+826	        ToolchainCatalog {
+827	            entries: vec![
+828	                ToolchainEntry {
+829	                    id: UV_TOOL_ID.to_owned(),
+830	                    status: status.uv,
+831	                },
+832	                ToolchainEntry {
+833	                    id: PYTHON_TOOL_ID.to_owned(),
+834	                    status: match status.python {
+835	                        PythonReadiness::Ready => ToolAvailability::Available,
+836	                        PythonReadiness::NotReady => ToolAvailability::Unavailable,
+837	                        PythonReadiness::Unknown => ToolAvailability::Unknown,
+838	                        PythonReadiness::Unavailable => ToolAvailability::Unavailable,
+839	                        PythonReadiness::Unsupported => ToolAvailability::Unsupported,
+840	                    },
+841	                },
+842	            ],
+843	        }
+844	    }
+845	
+846	    pub fn read_permission(&self) -> PermissionReadOutcome {
+847	        match tool_permission::Mode::read(self.state_dir.clone()) {
+848	            Ok(mode) => PermissionReadOutcome::Observed(mode),
+849	            Err(tool_permission::Error::Unavailable) => PermissionReadOutcome::Unavailable,
+850	            Err(tool_permission::Error::Unknown) => PermissionReadOutcome::Unknown,
+851	        }
+852	    }
+853	
+854	    pub fn write_permission(&self, mode: tool_permission::Mode) -> PermissionWriteOutcome {
+855	        match mode.apply(self.state_dir.clone()) {
+856	            Ok(tool_permission::Effect::Unchanged) => PermissionWriteOutcome::Unchanged,
+857	            Ok(tool_permission::Effect::Written) => PermissionWriteOutcome::Written,
+858	            Err(tool_permission::Error::Unavailable) => PermissionWriteOutcome::Unavailable,
+859	            Err(tool_permission::Error::Unknown) => PermissionWriteOutcome::Unknown,
+860	        }
+861	    }
+862	
+863	    pub async fn install_uv(&self) -> UvInstallOutcome {
+864	        self.runtime.install_uv().await
+865	    }
+866	
+867	    pub async fn submit_install(&self) -> ToolchainJobSubmission {
+868	        let mut operation = self.install_operation.lock().await;
+869	        if let Some(existing) = operation.as_ref() {
+870	            let snapshot = existing.snapshot().await;
+871	            if matches!(snapshot.status, ToolchainJobStatus::Queued | ToolchainJobStatus::Running) {
+872	                return ToolchainJobSubmission { job: snapshot };
+873	            }
+874	        }
+875	        let sequence = self.next_job_sequence.fetch_add(1, Ordering::Relaxed);
+876	        let new_operation = ToolchainInstallOperation::submit(
+877	            Arc::clone(&self.runtime),
+878	            sequence,
+879	            Arc::clone(&self.completion_notify),
+880	        );
+881	        let snapshot = new_operation.snapshot().await;
+882	        let notify = Arc::clone(&self.completion_notify);
+883	        let operation_state = Arc::clone(&self.install_operation);
+884	        *operation = Some(new_operation);
+885	        tokio::spawn(async move {
+886	            loop {
+887	                let finished = {
+888	                    let operation = operation_state.lock().await;
+889	                    operation.as_ref().is_some_and(|operation| {
+890	                        operation.operation.as_ref().is_some_and(|task| task.is_finished())
+891	                    })
+892	                };
+893	                if finished {
+894	                    notify.notify_waiters();
+895	                    break;
+896	                }
+897	                tokio::time::sleep(Duration::from_millis(25)).await;
+898	            }
+899	        });
+900	        ToolchainJobSubmission { job: snapshot }
+901	    }
+902	
+903	    pub async fn job_get(&self, job_id: &str) -> ToolchainJobLookup {
+904	        let operation = self.install_operation.lock().await;
+905	        match operation.as_ref() {
+906	            Some(operation) if operation.job_id() == job_id => {
+907	                ToolchainJobLookup::Known(operation.snapshot().await)
+908	            }
+909	            _ => ToolchainJobLookup::Unknown,
+910	        }
+911	    }
+912	
+913	    pub async fn wait_for_install_completion(&self) {
+914	        loop {
+915	            let notified = self.completion_notify.notified();
+916	            let finished = {
+917	                let operation = self.install_operation.lock().await;
+918	                operation.as_ref().is_some_and(|operation| {
+919	                    operation.operation.as_ref().is_some_and(|task| task.is_finished())
+920	                })
+921	            };
+922	            if finished {
+923	                return;
+924	            }
+925	            notified.await;
+926	        }
+927	    }
+928	
+929	    pub async fn reap_install(&self) -> Option<ToolchainJobSnapshot> {
+930	        let mut operation = self.install_operation.lock().await;
+931	        let operation_ref = operation.as_mut()?;
+932	        if !operation_ref.operation.as_ref().is_some_and(|operation| operation.is_finished()) {
+933	            return None;
+934	        }
+935	        Some(operation_ref.settle().await)
+936	    }
+937	
+938	    pub async fn cancel_install(&self) -> Option<ToolchainJobSnapshot> {
+939	        let mut operation = self.install_operation.lock().await;
+940	        Some(operation.as_mut()?.cancel_and_join().await)
+941	    }
+942	
+943	    pub async fn write(&self, request: ToolchainWriteRequest) -> ToolchainWriteOutcome {
+944	        match request {
+945	            ToolchainWriteRequest::Permission(mode) => {
+946	                ToolchainWriteOutcome::Permission(self.write_permission(mode))
+947	            }
+948	            ToolchainWriteRequest::InstallUv => {
+949	                ToolchainWriteOutcome::InstallUv(self.install_uv().await)
+950	            }
+951	        }
+952	    }
+953	}
+954	
+955	impl fmt::Debug for OpenClawToolchain {
+956	    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+957	        formatter.write_str("OpenClawToolchain([REDACTED])")
+958	    }
+959	}
+960	
+961	#[cfg(test)]
+962	mod tests {
+963	    use std::{
+964	        collections::VecDeque,
+965	        fs,
+966	        path::PathBuf,
+967	        sync::atomic::{AtomicU64, Ordering},
+968	        sync::{Arc, Mutex},
+969	        time::{SystemTime, UNIX_EPOCH},
+970	    };
+971	
+972	    use serde_json::json;
+973	
+974	    use super::*;
+975	
+976	    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+977	
+978	    struct TestRoot {
+979	        path: PathBuf,
+980	        state_dir: CanonicalStateDir,
+981	    }
+982	
+983	    impl TestRoot {
+984	        fn new() -> Self {
+985	            let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+986	            let nanos = SystemTime::now()
+987	                .duration_since(UNIX_EPOCH)
+988	                .expect("test clock must follow Unix epoch")
+989	                .as_nanos();
+990	            let path = std::env::temp_dir().join(format!("openclaw-toolchain-{nanos}-{sequence}"));
+991	            fs::create_dir_all(&path).unwrap();
+992	            let state_dir = CanonicalStateDir::provision(path.join("state")).unwrap();
+993	            Self { path, state_dir }
+994	        }
+995	
+996	        fn runtime(
+997	            &self,
+998	            platform: ToolchainPlatform,
+999	            commands: Arc<FakeCommands>,
+1000	        ) -> NativeToolchainRuntime {
+1001	            NativeToolchainRuntime::new(platform, "x64", self.path.clone(), None, commands)
+1002	        }
+1003	
+1004	        fn bundled_uv(&self, platform: ToolchainPlatform) -> PathBuf {
+1005	            let executable = match platform {
+1006	                ToolchainPlatform::Windows => "uv.exe",
+1007	                ToolchainPlatform::Unix => "uv",
+1008	            };
+1009	            self.path
+1010	                .join("resources/bin")
+1011	                .join(format!("{}-x64", platform.target_name()))
+1012	                .join(executable)
+1013	        }
+1014	    }
+1015	
+1016	    impl Drop for TestRoot {
+1017	        fn drop(&mut self) {
+1018	            let _ = fs::remove_dir_all(&self.path);
+1019	        }
+1020	    }
+1021	
+1022	    struct FakeCommands {
+1023	        outcomes: Mutex<VecDeque<ToolchainCommandOutcome>>,
+1024	        requests: Mutex<Vec<ToolchainCommandRequest>>,
+1025	    }
+1026	
+1027	    impl FakeCommands {
+1028	        fn new(outcomes: impl IntoIterator<Item = ToolchainCommandOutcome>) -> Arc<Self> {
+1029	            Arc::new(Self {
+1030	                outcomes: Mutex::new(outcomes.into_iter().collect()),
+1031	                requests: Mutex::new(Vec::new()),
+1032	            })
+1033	        }
+1034	
+1035	        fn requests(&self) -> Vec<ToolchainCommandRequest> {
+1036	            self.requests.lock().unwrap().clone()
+1037	        }
+1038	    }
+1039	
+1040	    impl ToolchainCommandPort for FakeCommands {
+1041	        fn execute(&self, request: ToolchainCommandRequest) -> ToolchainCommandFuture {
+1042	            self.requests.lock().unwrap().push(request);
+1043	            let outcome = self
+1044	                .outcomes
+1045	                .lock()
+1046	                .unwrap()
+1047	                .pop_front()
+1048	                .unwrap_or(ToolchainCommandOutcome::Unknown);
+1049	            Box::pin(async move { outcome })
+1050	        }
+1051	
+1052	        fn resolve_program(&self, program: &Path) -> Option<PathBuf> {
+1053	            Some(program.to_owned())
+1054	        }
+1055	    }
+1056	
+1057	    #[tokio::test]
+1058	    async fn bundled_uv_is_available_without_a_path_probe() {
+1059	        let root = TestRoot::new();
+1060	        let commands = FakeCommands::new([ToolchainCommandOutcome::Succeeded]);
+1061	        let bundled = root.bundled_uv(ToolchainPlatform::Unix);
+1062	        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+1063	        fs::write(&bundled, b"uv").unwrap();
+1064	        let owner = OpenClawToolchain::new(
+1065	            root.state_dir.clone(),
+1066	            root.runtime(ToolchainPlatform::Unix, commands.clone()),
+1067	        );
+1068	
+1069	        let status = owner.read().await;
+1070	        assert_eq!(status.uv(), ToolAvailability::Available);
+1071	        assert_eq!(status.python(), PythonReadiness::Ready);
+1072	        let requests = commands.requests();
+1073	        assert_eq!(requests.len(), 1);
+1074	        assert_eq!(requests[0].program(), bundled);
+1075	        assert_eq!(
+1076	            requests[0].arguments(),
+1077	            &[
+1078	                OsString::from("python"),
+1079	                OsString::from("find"),
+1080	                OsString::from("3.12")
+1081	            ]
+1082	        );
+1083	        assert_eq!(requests[0].timeout(), Some(PATH_PROBE_TIMEOUT));
+1084	    }
+1085	
+1086	    #[tokio::test]
+1087	    async fn missing_bundled_uv_uses_the_platform_path_probe_with_the_legacy_timeout() {
+1088	        let root = TestRoot::new();
+1089	        let commands = FakeCommands::new([
+1090	            ToolchainCommandOutcome::Succeeded,
+1091	            ToolchainCommandOutcome::Succeeded,
+1092	        ]);
+1093	        let owner = OpenClawToolchain::new(
+1094	            root.state_dir.clone(),
+1095	            root.runtime(ToolchainPlatform::Windows, commands.clone()),
+1096	        );
+1097	
+1098	        let status = owner.status().await;
+1099	        assert_eq!(status.uv(), ToolAvailability::Available);
+1100	        assert_eq!(status.python(), PythonReadiness::Ready);
+1101	        let requests = commands.requests();
+1102	        assert_eq!(requests.len(), 2);
+1103	        assert_eq!(requests[0].program(), Path::new("where.exe"));
+1104	        assert_eq!(requests[0].arguments(), &[OsString::from("uv")]);
+1105	        assert_eq!(requests[0].timeout(), Some(PATH_PROBE_TIMEOUT));
+1106	        assert_eq!(requests[1].program(), Path::new("uv"));
+1107	        assert_eq!(
+1108	            requests[1].arguments(),
+1109	            &[
+1110	                OsString::from("python"),
+1111	                OsString::from("find"),
+1112	                OsString::from("3.12")
+1113	            ]
+1114	        );
+1115	        assert_eq!(requests[1].timeout(), Some(PATH_PROBE_TIMEOUT));
+1116	    }
+1117	
+1118	    #[test]
+1119	    fn native_candidates_preserve_override_development_and_packaged_layouts() {
+1120	        let root = TestRoot::new();
+1121	        let runtime = NativeToolchainRuntime::new(
+1122	            ToolchainPlatform::Windows,
+1123	            "x64",
+1124	            root.path.clone(),
+1125	            Some(PathBuf::from("override/uv.exe")),
+1126	            Arc::new(UnsupportedToolchainCommandPort),
+1127	        );
+1128	        let candidates = runtime.bundled_uv_path_candidates();
+1129	
+1130	        assert_eq!(candidates[0], root.path.join("override/uv.exe"));
+1131	        assert!(candidates.contains(&root.path.join("resources/bin/win32-x64/uv.exe")));
+1132	        assert!(candidates.contains(&root.path.join("bin/uv.exe")));
+1133	        assert_eq!(format!("{runtime:?}"), "NativeToolchainRuntime([REDACTED])");
+1134	    }
+1135	
+1136	    #[tokio::test]
+1137	    async fn install_uses_bundled_uv_and_the_fixed_python_install_arguments() {
+1138	        let root = TestRoot::new();
+1139	        let commands = FakeCommands::new([
+1140	            ToolchainCommandOutcome::Succeeded,
+1141	            ToolchainCommandOutcome::Succeeded,
+1142	        ]);
+1143	        let bundled = root.bundled_uv(ToolchainPlatform::Unix);
+1144	        fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+1145	        fs::write(&bundled, b"uv").unwrap();
+1146	        let owner = OpenClawToolchain::new(
+1147	            root.state_dir.clone(),
+1148	            root.runtime(ToolchainPlatform::Unix, commands.clone()),
+1149	        );
+1150	
+1151	        assert_eq!(owner.install_uv().await, UvInstallOutcome::Installed);
+1152	        let requests = commands.requests();
+1153	        assert_eq!(requests.len(), 2);
+1154	        assert_eq!(requests[0].program(), bundled);
+1155	        assert_eq!(
+1156	            requests[0].arguments(),
+1157	            &[
+1158	                OsString::from("python"),
+1159	                OsString::from("install"),
+1160	                OsString::from("3.12")
+1161	            ]
+1162	        );
+1163	        assert_eq!(requests[0].timeout(), Some(INSTALL_TIMEOUT));
+1164	        assert_eq!(requests[1].program(), bundled);
+1165	        assert_eq!(
+1166	            requests[1].arguments(),
+1167	            &[
+1168	                OsString::from("python"),
+1169	                OsString::from("find"),
+1170	                OsString::from("3.12")
+1171	            ]
+1172	        );
+1173	        assert_eq!(requests[1].timeout(), Some(PATH_PROBE_TIMEOUT));
+1174	    }
+1175	
+1176	    #[tokio::test]
+1177	    async fn path_probe_and_install_use_uv_when_no_bundled_binary_exists() {
+1178	        let root = TestRoot::new();
+1179	        let commands = FakeCommands::new([
+1180	            ToolchainCommandOutcome::Succeeded,
+1181	            ToolchainCommandOutcome::Succeeded,
+1182	            ToolchainCommandOutcome::Succeeded,
+1183	        ]);
+1184	        let owner = OpenClawToolchain::new(
+1185	            root.state_dir.clone(),
+1186	            root.runtime(ToolchainPlatform::Unix, commands.clone()),
+1187	        );
+1188	
+1189	        assert_eq!(owner.install_uv().await, UvInstallOutcome::Installed);
+1190	        let requests = commands.requests();
+1191	        assert_eq!(requests.len(), 3);
+1192	        assert_eq!(requests[0].program(), Path::new("which"));
+1193	        assert_eq!(requests[1].program(), Path::new("uv"));
+1194	        assert_eq!(requests[2].program(), Path::new("uv"));
+1195	        assert_eq!(
+1196	            requests[2].arguments(),
+1197	            &[
+1198	                OsString::from("python"),
+1199	                OsString::from("find"),
+1200	                OsString::from("3.12")
+1201	            ]
+1202	        );
+1203	    }
+1204	
+1205	    #[tokio::test]
+1206	    async fn command_failures_are_never_projected_as_success() {
+1207	        let root = TestRoot::new();
+1208	        for (command_outcome, expected) in [
+1209	            (ToolchainCommandOutcome::Failed, UvInstallOutcome::Rejected),
+1210	            (
+1211	                ToolchainCommandOutcome::Unavailable,
+1212	                UvInstallOutcome::Unavailable,
+1213	            ),
+1214	            (ToolchainCommandOutcome::TimedOut, UvInstallOutcome::Unknown),
+1215	            (ToolchainCommandOutcome::Unknown, UvInstallOutcome::Unknown),
+1216	            (
+1217	                ToolchainCommandOutcome::Unsupported,
+1218	                UvInstallOutcome::Unsupported,
+1219	            ),
+1220	        ] {
+1221	            let commands = FakeCommands::new([command_outcome]);
+1222	            let bundled = root.bundled_uv(ToolchainPlatform::Unix);
+1223	            fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+1224	            fs::write(&bundled, b"uv").unwrap();
+1225	            let owner = OpenClawToolchain::new(
+1226	                root.state_dir.clone(),
+1227	                root.runtime(ToolchainPlatform::Unix, commands),
+1228	            );
+1229	            assert_eq!(owner.install_uv().await, expected);
+1230	            fs::remove_file(&bundled).unwrap();
+1231	        }
+1232	    }
+1233	
+1234	    #[tokio::test]
+1235	    async fn status_and_list_expose_only_safe_facts_and_preserve_unknown_readiness() {
+1236	        let root = TestRoot::new();
+1237	        let commands = FakeCommands::new([ToolchainCommandOutcome::TimedOut]);
+1238	        let owner = OpenClawToolchain::new(
+1239	            root.state_dir.clone(),
+1240	            root.runtime(ToolchainPlatform::Unix, commands),
+1241	        );
+1242	
+1243	        let status = owner.status().await;
+1244	        assert_eq!(status.uv(), ToolAvailability::Unknown);
+1245	        assert_eq!(status.python(), PythonReadiness::Unknown);
+1246	        let catalog = owner.list().await;
+1247	        assert_eq!(
+1248	            serde_json::to_value(&catalog).unwrap(),
+1249	            json!({
+1250	                "entries": [
+1251	                    { "id": "uv", "status": "unknown" },
+1252	                    { "id": "python-3.12", "status": "unknown" }
+1253	                ]
+1254	            })
+1255	        );
+1256	        let rendered = serde_json::to_string(&catalog).unwrap();
+1257	        assert!(!rendered.contains(root.path.to_string_lossy().as_ref()));
+1258	        assert_eq!(format!("{owner:?}"), "OpenClawToolchain([REDACTED])");
+1259	    }
+1260	
+1261	    #[tokio::test]
+1262	    async fn permission_read_write_uses_the_existing_permission_owner_and_readback() {
+1263	        let root = TestRoot::new();
+1264	        let owner = OpenClawToolchain::new(
+1265	            root.state_dir.clone(),
+1266	            root.runtime(
+1267	                ToolchainPlatform::Unix,
+1268	                FakeCommands::new([ToolchainCommandOutcome::Unsupported]),
+1269	            ),
+1270	        );
+1271	
+1272	        assert_eq!(
+1273	            owner.read_permission(),
+1274	            PermissionReadOutcome::Observed(tool_permission::Mode::FullAccess)
+1275	        );
+1276	        assert_eq!(
+1277	            owner
+1278	                .write(ToolchainWriteRequest::Permission(
+1279	                    tool_permission::Mode::Default
+1280	                ))
+1281	                .await,
+1282	            ToolchainWriteOutcome::Permission(PermissionWriteOutcome::Written)
+1283	        );
+1284	        assert_eq!(
+1285	            owner.read_permission(),
+1286	            PermissionReadOutcome::Observed(tool_permission::Mode::Default)
+1287	        );
+1288	        assert_eq!(
+1289	            owner.write_permission(tool_permission::Mode::Default),
+1290	            PermissionWriteOutcome::Unchanged
+1291	        );
+1292	    }
+1293	
+1294	    #[test]
+1295	    fn permission_outcomes_retain_unavailable_and_unknown_categories() {
+1296	        assert_eq!(
+1297	            PermissionWriteOutcome::Unavailable,
+1298	            PermissionWriteOutcome::Unavailable
+1299	        );
+1300	        assert_eq!(
+1301	            PermissionWriteOutcome::Unknown,
+1302	            PermissionWriteOutcome::Unknown
+1303	        );
+1304	        assert_eq!(
+1305	            PermissionWriteOutcome::Unsupported,
+1306	            PermissionWriteOutcome::Unsupported
+1307	        );
+1308	        assert_eq!(
+1309	            PermissionReadOutcome::Unknown,
+1310	            PermissionReadOutcome::Unknown
+1311	        );
+1312	        assert_eq!(
+1313	            PermissionReadOutcome::Unsupported,
+1314	            PermissionReadOutcome::Unsupported
+1315	        );
+1316	    }
+1317	}
+1318	

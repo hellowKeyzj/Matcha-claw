@@ -6,23 +6,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
-import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/chat';
+import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
 import { useTeamsStore } from '@/stores/teams';
 import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 import { useSettingsStore } from '@/stores/settings';
-import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
-import type { SessionRenderItem, SessionWindowStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
+import type { GatewayTransportIssue } from '../../types/session/runtime-state';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
+import type {
+  SessionRenderItem,
+} from '../../types/session/render-item';
+import type {
+  SessionWindowStateSnapshot,
+} from '../../types/session/snapshot';
 import { isGatewayOperational, isGatewayPreparing as resolveGatewayPreparing } from '@/lib/gateway-status';
 import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
   patchSessionMeta,
-  patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
 import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
@@ -54,13 +61,18 @@ import {
   hostOpenClawSetToolPermissionMode,
   hostSessionPatch,
   hostSessionWindowFetch,
-  resolveHydratedSessionSnapshot,
   type OpenClawToolPermissionMode,
 } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
 import { collectChatArtifactGroups } from './artifacts';
 import { buildChatSessionMarkdownExport, downloadMarkdownFile } from './session-markdown-export';
+import {
+  decodeHistorySessionView,
+  resolveSessionViewError,
+  sessionViewWindow,
+} from '@/stores/chat/history-fetch-helpers';
+import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
 import { buildChatContextUsageViewModel } from './context-usage';
 import { resolveArtifactWorkspaceRoot } from './artifact-workspace';
 import {
@@ -104,6 +116,20 @@ const CHAT_MARKDOWN_EXPORT_WINDOW_LIMIT = 200;
 const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
 const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+
+type ChatGatewayBranch = 'not-running' | 'preparing' | 'operational';
+
+function chatStartupTraceSummary(source: string, phase: ChatGatewayBranch, status: ReturnType<typeof useGatewayStore.getState>['status']) {
+  return {
+    source,
+    phase,
+    processState: status.processState,
+    gatewayReady: status.gatewayReady,
+    healthSummary: status.healthSummary,
+    transportState: status.transportState,
+  };
+}
 
 function parseRpcFailedMessage(message: string): { method: string; reason: string } | null {
   const matched = /^Gateway RPC failed \((.+?)\):\s*(.+)$/.exec(message.trim());
@@ -272,31 +298,61 @@ function resolveEffectiveChatModelId(
     || normalizedFallbackModel;
 }
 
+function buildRuntimeAssistantPlaceholder(input: {
+  sessionKey: string;
+  runtime: ChatSessionRuntimeState;
+  items: ReadonlyArray<SessionRenderItem>;
+}): SessionRenderItem | null {
+  const activeRunId = input.runtime.activeRunId;
+  if (!activeRunId || !isRunActive(input.runtime)) {
+    return null;
+  }
+  if (input.items.some((item) => item.kind === 'assistant-turn' && item.runId === activeRunId)) {
+    return null;
+  }
+
+  const isWaitingForTool = input.runtime.runPhase === 'waiting_tool';
+  return {
+    key: `runtime-pending:${input.sessionKey}:${activeRunId}`,
+    kind: 'assistant-turn',
+    role: 'assistant',
+    sessionKey: input.sessionKey,
+    runId: activeRunId,
+    identitySource: 'run',
+    identityMode: 'run',
+    identityConfidence: 'strong',
+    status: isWaitingForTool ? 'waiting_tool' : 'streaming',
+    segments: [],
+    thinking: null,
+    tools: [],
+    text: '',
+    images: [],
+    attachedFiles: [],
+    pendingState: isWaitingForTool ? 'activity' : 'typing',
+    ...(input.runtime.lastUserMessageAt != null ? { createdAt: input.runtime.lastUserMessageAt } : {}),
+    ...(input.runtime.updatedAt != null ? { updatedAt: input.runtime.updatedAt } : {}),
+  };
+}
+
 async function fetchChatMarkdownExportWindow(input: {
   sessionKey: string;
   sessionIdentity: SessionIdentity;
   mode: 'latest' | 'older';
   offset?: number;
-}) {
-  const initial = await hostSessionWindowFetch({
-    sessionKey: input.sessionKey,
-    sessionIdentity: input.sessionIdentity,
-    mode: input.mode,
-    limit: CHAT_MARKDOWN_EXPORT_WINDOW_LIMIT,
-    ...(input.mode === 'older' ? { offset: input.offset } : {}),
-    includeCanonical: true,
-  });
-  return await resolveHydratedSessionSnapshot({
-    initial,
-    refetch: async () => await hostSessionWindowFetch({
+}): Promise<{ view: ReturnType<typeof decodeHistorySessionView>; items: SessionRenderItem[] }> {
+  try {
+    const view = decodeHistorySessionView(await hostSessionWindowFetch({
       sessionKey: input.sessionKey,
       sessionIdentity: input.sessionIdentity,
       mode: input.mode,
       limit: CHAT_MARKDOWN_EXPORT_WINDOW_LIMIT,
       ...(input.mode === 'older' ? { offset: input.offset } : {}),
       includeCanonical: true,
-    }),
-  });
+    }));
+    return { view, items: projectSessionViewItems(view) };
+  } catch (error) {
+    throw resolveSessionViewError(error);
+  }
 }
 
 function collectSessionWindowItems(input: {
@@ -326,39 +382,35 @@ async function fetchChatMarkdownExportItems(input: {
   }
 
   const itemsByOffset = new Map<number, SessionRenderItem>();
-  const latestSnapshot = await fetchChatMarkdownExportWindow({
+  const latestWindow = await fetchChatMarkdownExportWindow({
     sessionKey: input.sessionKey,
     sessionIdentity: input.sessionIdentity,
     mode: 'latest',
   });
-  if (!latestSnapshot) {
-    throw new Error('session export did not return a snapshot');
-  }
 
+  const latestWindowState = sessionViewWindow(latestWindow.view);
   collectSessionWindowItems({
     itemsByOffset,
-    window: latestSnapshot.window,
-    items: latestSnapshot.items,
+    window: latestWindowState,
+    items: latestWindow.items,
   });
 
-  let nextOffset = latestSnapshot.window.windowStartOffset;
+  let nextOffset = latestWindowState.windowStartOffset;
   while (nextOffset > 0) {
     const previousOffset = nextOffset;
-    const snapshot = await fetchChatMarkdownExportWindow({
+    const olderWindow = await fetchChatMarkdownExportWindow({
       sessionKey: input.sessionKey,
       sessionIdentity: input.sessionIdentity,
       mode: 'older',
       offset: nextOffset,
     });
-    if (!snapshot) {
-      throw new Error('session export did not return a previous snapshot');
-    }
+    const olderWindowState = sessionViewWindow(olderWindow.view);
     collectSessionWindowItems({
       itemsByOffset,
-      window: snapshot.window,
-      items: snapshot.items,
+      window: olderWindowState,
+      items: olderWindow.items,
     });
-    nextOffset = snapshot.window.windowStartOffset;
+    nextOffset = olderWindowState.windowStartOffset;
     if (nextOffset >= previousOffset) {
       break;
     }
@@ -387,6 +439,16 @@ export function Chat({ isActive = true }: ChatProps) {
   const preserveChatDuringGatewayRecovery = hasGatewayBeenOperationalRef.current
     && !isGatewayRunning
     && isGatewayPreparing;
+  const chatGatewayBranch: ChatGatewayBranch = !isGatewayRunning && isGatewayPreparing && !preserveChatDuringGatewayRecovery
+    ? 'preparing'
+    : (!isGatewayRunning && !preserveChatDuringGatewayRecovery ? 'not-running' : 'operational');
+  useEffect(() => {
+    console.info(JSON.stringify({
+      prefix: STARTUP_TRACE_PREFIX,
+      traceScope: 'renderer-boundary',
+      ...chatStartupTraceSummary('chat-page', chatGatewayBranch, gatewayStatus),
+    }));
+  }, [chatGatewayBranch, gatewayStatus]);
   const localizedGatewayIssue = useMemo(() => {
     return localizeGatewayIssue(gatewayStatus.lastIssue, t)
       ?? gatewayStatus.lastError
@@ -435,6 +497,10 @@ export function Chat({ isActive = true }: ChatProps) {
   const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
+  const chatModelRoute = useCapabilityRoutingStore((state) => state.routing.chat);
+  const routingReady = useCapabilityRoutingStore((state) => state.ready);
+  const routingLoading = useCapabilityRoutingStore((state) => state.loading);
+  const refreshCapabilityRouting = useCapabilityRoutingStore((state) => state.refresh);
   const currentAgent = currentAgentId ? agents.find((agent) => agent.id === currentAgentId) : undefined;
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
   const [skillPreview, setSkillPreview] = useState<ChatSkillPreviewState | null>(null);
@@ -570,8 +636,14 @@ export function Chat({ isActive = true }: ChatProps) {
     [agents],
   );
   const renderItems = useMemo(() => {
-    const nextItems = applyAssistantPresentationToItems({
+    const runtimePlaceholder = buildRuntimeAssistantPlaceholder({
+      sessionKey: currentSessionKey,
+      runtime: currentSession.runtime,
       items: viewportItems,
+    });
+    const protocolItems = runtimePlaceholder ? [...viewportItems, runtimePlaceholder] : viewportItems;
+    const nextItems = applyAssistantPresentationToItems({
+      items: protocolItems,
       agents: assistantCatalogAgents,
       defaultAssistant: {
         agentId: currentAgentId,
@@ -583,7 +655,7 @@ export function Chat({ isActive = true }: ChatProps) {
     });
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, viewportItems]);
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionKey, viewportItems]);
   const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
   const artifactFiles = useMemo(
     () => artifactGroups.flatMap((group) => group.files),
@@ -598,17 +670,20 @@ export function Chat({ isActive = true }: ChatProps) {
   const artifactFocusedGroupFiles = artifactWorkbenchSelection.focusedGroupFiles;
   const artifactFocusedFile = artifactWorkbenchSelection.focusedFile;
   const defaultArtifactWorkspaceRoot = useMemo(() => {
+    const endpoint = currentSession.meta.sessionIdentity?.endpoint;
+    const currentWorkspace = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw'
+      ? currentAgent?.workspace
+      : undefined;
     return resolveArtifactWorkspaceRoot({
-      currentWorkspace: currentAgent?.workspace,
+      currentWorkspace,
       artifactFiles,
       artifactFocusedFile,
     });
-  }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace]);
+  }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace, currentSession.meta.sessionIdentity?.endpoint]);
   const artifactWorkspaceRoot = defaultArtifactWorkspaceRoot;
   const artifactWorkspaceContext = useMemo(() => ({
-    workspaceId: currentAgentId || undefined,
-    sourceId: currentAgent?.workspace?.trim() || artifactWorkspaceRoot || undefined,
-  }), [artifactWorkspaceRoot, currentAgent?.workspace, currentAgentId]);
+    workspaceRoot: artifactWorkspaceRoot || undefined,
+  }), [artifactWorkspaceRoot]);
   const openGeneratedArtifact = useCallback((file: GeneratedFile, options?: OpenGeneratedArtifactOptions) => {
     const canShowChanges = supportsInlineDiff(file);
     const nextTarget = buildArtifactPreviewTargetFromGeneratedFile(file);
@@ -806,7 +881,27 @@ export function Chat({ isActive = true }: ChatProps) {
     }, TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [currentSession.runtime, gatewayStatus.lastIssue, localizedRuntimeError]);
-  const fallbackModelId = availableModels[0]?.id ?? '';
+  useEffect(() => {
+    if (!sideEffectsActive || routingReady || routingLoading) {
+      return;
+    }
+    void refreshCapabilityRouting();
+  }, [refreshCapabilityRouting, routingLoading, routingReady, sideEffectsActive]);
+
+  const fallbackModelId = useMemo(() => {
+    if (!routingReady) {
+      return '';
+    }
+    const primary = chatModelRoute?.primary;
+    if (primary) {
+      const routed = availableModels.find((model) => (
+        model.accountId === primary.accountId
+        && model.modelLabel === primary.modelId
+      ));
+      if (routed) return routed.id;
+    }
+    return availableModels[0]?.id ?? '';
+  }, [availableModels, chatModelRoute?.primary, routingReady]);
   const availableModelIds = useMemo(() => new Set(availableModels.map((model) => model.id)), [availableModels]);
   const effectiveCurrentModelId = useMemo(() => {
     return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model, fallbackModelId, availableModelIds);
@@ -913,48 +1008,36 @@ export function Chat({ isActive = true }: ChatProps) {
   const handleComposerGeometryChange = useCallback(() => {
     viewportPaneRef.current?.notifyComposerGeometryChanged();
   }, []);
-  const handleSelectModel = useCallback(async (nextModelId: string, options?: { forcePatch?: boolean }) => {
-    const normalizedNextModelId = nextModelId.trim();
-    const currentModelId = effectiveCurrentModelId;
+  const handleSelectModel = useCallback(async (modelSelectionId: string, options?: { forcePatch?: boolean }) => {
+    const normalizedModelSelectionId = modelSelectionId.trim();
+    const currentModelSelectionId = effectiveCurrentModelId;
     if (!currentSessionKey) {
       return;
     }
-    if (!normalizedNextModelId || (!options?.forcePatch && normalizedNextModelId === currentModelId)) {
+    if (!normalizedModelSelectionId || (!options?.forcePatch && normalizedModelSelectionId === currentModelSelectionId)) {
       return;
     }
     if (activeRun) {
       return;
     }
-    const previousModelId = currentSession.meta.model?.trim() || null;
-    useChatStore.setState((state) => ({
-      loadedSessions: patchSessionMeta(state, currentSessionKey, {
-        model: normalizedNextModelId,
-      }),
-    }));
     try {
       const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
       const result = await hostSessionPatch({
         sessionKey: target.sessionKey,
         ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
         sessionIdentity: target.sessionIdentity,
-        runtimeModelRef: normalizedNextModelId,
+        modelSelectionId: normalizedModelSelectionId,
       });
-      if (result.snapshot) {
-        useChatStore.setState((state) => ({
-          loadedSessions: patchSessionSnapshot(state, currentSessionKey, result.snapshot),
-        }));
+      if (result.outcome !== 'succeeded') {
+        throw new Error(result.outcome);
       }
-      const appliedModelId = result.snapshot?.catalog?.model?.trim() || normalizedNextModelId;
-      if (appliedModelId !== normalizedNextModelId) {
-        throw new Error(appliedModelId || normalizedNextModelId);
-      }
-      void loadSessions();
-    } catch (error) {
       useChatStore.setState((state) => ({
         loadedSessions: patchSessionMeta(state, currentSessionKey, {
-          model: previousModelId,
+          model: normalizedModelSelectionId,
         }),
       }));
+      void loadSessions();
+    } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
@@ -1070,8 +1153,8 @@ export function Chat({ isActive = true }: ChatProps) {
       onPreviewSkill={handlePreviewSkill}
       modelPicker={modelPicker ? {
         ...modelPicker,
-        onSelect: (modelId) => {
-          void handleSelectModel(modelId);
+        onSelect: (modelSelectionId) => {
+          void handleSelectModel(modelSelectionId);
         },
       } : null}
       permissionPicker={{
@@ -1091,7 +1174,6 @@ export function Chat({ isActive = true }: ChatProps) {
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIdsForChat}
       sessionIdentity={currentSession.meta.sessionIdentity}
-      workspaceContext={artifactWorkspaceContext}
     />
   );
 

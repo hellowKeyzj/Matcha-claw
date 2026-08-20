@@ -27,6 +27,7 @@ import {
   adaptResponsesStreamToAnthropic,
   buildResponsesRequest,
   createChatGPTResponsesStream,
+  createOpenAIResponsesStream,
   type ResponsesReasoningEffort,
 } from './responsesAdapter.js'
 import { normalizeMessagesForAPI } from '../../../utils/messages.js'
@@ -211,12 +212,15 @@ function assembleFinalAssistantOutputs(params: {
  * SSE stream back to Anthropic BetaRawMessageStreamEvent for consumption
  * by the existing query pipeline.
  */
-export async function* queryModelOpenAI(
+type OpenAIWireProtocol = 'chatCompletions' | 'responses'
+
+async function* queryModelOpenAIWithProtocol(
   messages: Message[],
   systemPrompt: SystemPrompt,
   tools: Tools,
   signal: AbortSignal,
   options: Options,
+  wireProtocol: OpenAIWireProtocol,
 ): AsyncGenerator<
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
@@ -352,40 +356,56 @@ export async function* queryModelOpenAI(
     // 11. Call OpenAI API with streaming. ChatGPT subscription auth uses the
     // Codex Responses backend; API-key/OpenAI-compatible auth keeps the
     // existing Chat Completions adapter.
-    const adaptedStream = isChatGPTAuthEnabled()
-      ? adaptResponsesStreamToAnthropic(
-          await createChatGPTResponsesStream({
-            request: buildResponsesRequest({
-              model: openaiModel,
-              messages: openaiMessages,
-              tools: openaiTools,
-              toolChoice: openaiToolChoice,
-              reasoningEffort,
+    const adaptedStream =
+      wireProtocol === 'responses'
+        ? adaptResponsesStreamToAnthropic(
+            await createOpenAIResponsesStream({
+              request: buildResponsesRequest({
+                model: openaiModel,
+                messages: openaiMessages,
+                tools: openaiTools,
+                toolChoice: openaiToolChoice,
+                reasoningEffort,
+              }),
+              signal,
+              fetchOverride: options.fetchOverride as unknown as typeof fetch,
             }),
-            signal,
-            fetchOverride: options.fetchOverride as unknown as typeof fetch,
-          }),
-          openaiModel,
-        )
-      : adaptOpenAIStreamToAnthropic(
-          await getOpenAIClient({
-            maxRetries: 0,
-            fetchOverride: options.fetchOverride as unknown as typeof fetch,
-            source: options.querySource,
-          }).chat.completions.create(
-            buildOpenAIRequestBody({
-              model: openaiModel,
-              messages: openaiMessages,
-              tools: openaiTools,
-              toolChoice: openaiToolChoice,
-              enableThinking,
-              maxTokens,
-              temperatureOverride: options.temperatureOverride,
-            }),
-            { signal },
-          ),
-          openaiModel,
-        )
+            openaiModel,
+          )
+        : isChatGPTAuthEnabled()
+          ? adaptResponsesStreamToAnthropic(
+              await createChatGPTResponsesStream({
+                request: buildResponsesRequest({
+                  model: openaiModel,
+                  messages: openaiMessages,
+                  tools: openaiTools,
+                  toolChoice: openaiToolChoice,
+                  reasoningEffort,
+                }),
+                signal,
+                fetchOverride: options.fetchOverride as unknown as typeof fetch,
+              }),
+              openaiModel,
+            )
+          : adaptOpenAIStreamToAnthropic(
+              await getOpenAIClient({
+                maxRetries: 0,
+                fetchOverride: options.fetchOverride as unknown as typeof fetch,
+                source: options.querySource,
+              }).chat.completions.create(
+                buildOpenAIRequestBody({
+                  model: openaiModel,
+                  messages: openaiMessages,
+                  tools: openaiTools,
+                  toolChoice: openaiToolChoice,
+                  enableThinking,
+                  maxTokens,
+                  temperatureOverride: options.temperatureOverride,
+                }),
+                { signal },
+              ),
+              openaiModel,
+            )
 
     // 12. Convert OpenAI stream to Anthropic events, then process into
     //     AssistantMessage + StreamEvent (matching the Anthropic path behavior)
@@ -557,4 +577,44 @@ export async function* queryModelOpenAI(
         : new Error(String(error))) as unknown as SDKAssistantMessageError,
     })
   }
+}
+
+export async function* queryModelOpenAI(
+  messages: Message[],
+  systemPrompt: SystemPrompt,
+  tools: Tools,
+  signal: AbortSignal,
+  options: Options,
+): AsyncGenerator<
+  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
+  void
+> {
+  yield* queryModelOpenAIWithProtocol(
+    messages,
+    systemPrompt,
+    tools,
+    signal,
+    options,
+    'chatCompletions',
+  )
+}
+
+export async function* queryModelOpenAIResponses(
+  messages: Message[],
+  systemPrompt: SystemPrompt,
+  tools: Tools,
+  signal: AbortSignal,
+  options: Options,
+): AsyncGenerator<
+  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
+  void
+> {
+  yield* queryModelOpenAIWithProtocol(
+    messages,
+    systemPrompt,
+    tools,
+    signal,
+    options,
+    'responses',
+  )
 }

@@ -1,97 +1,88 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { capabilityExecuteMock } from './helpers/mock-gateway-client';
-import type { RuntimeScope } from '../../runtime-host/shared/runtime-address';
-
-const modelProviderRuntimeScope: RuntimeScope = {
-  kind: 'runtime-instance',
-  endpoint: {
-    kind: 'native-runtime',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-};
-
+import { capabilityExecuteMock, hostApiFetchMock } from './helpers/mock-gateway-client';
 describe('provider accounts helper', () => {
   beforeEach(() => {
     capabilityExecuteMock.mockReset();
+    hostApiFetchMock.mockReset();
   });
 
-  it('fetchProviderSnapshot 直接消费 /api/provider-accounts snapshot', async () => {
-    capabilityExecuteMock.mockResolvedValue({
-      credentials: [{ id: 'acc-1' }],
-      statuses: [{ id: 'acc-1', hasKey: true }],
-      vendors: [{ id: 'openai' }],
-    });
+  it('fetchProviderSnapshot 仅消费固定的公开 provider account delivery', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce({
+        accounts: [{
+          id: 'acc-1', provider: 'openai', label: 'OpenAI', enabled: true, kind: 'chat',
+          authMode: 'apiKey', revision: 1,
+        }],
+      })
+      .mockResolvedValueOnce({ hasKey: true });
 
     const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
     await expect(fetchProviderSnapshot()).resolves.toEqual({
-      credentials: [{ id: 'acc-1' }],
-      statuses: [{ id: 'acc-1', hasKey: true }],
-      vendors: [{ id: 'openai' }],
+      credentials: [{
+        id: 'acc-1', vendorId: 'openai', label: 'OpenAI', authMode: 'api_key', enabled: true,
+        createdAt: '', updatedAt: '', providerKind: 'chat', apiProtocol: undefined,
+      }],
+      statuses: [{
+        id: 'acc-1', name: 'OpenAI', type: 'openai', providerKind: 'chat', enabled: true,
+        createdAt: '', updatedAt: '', hasKey: true, keyMasked: '****',
+      }],
+      vendors: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'openai',
+          category: 'official',
+          supportedAuthModes: ['api_key', 'oauth_browser'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: true,
+        }),
+      ]),
+      revisions: { 'acc-1': 1 },
     });
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'model.provider',
-      operationId: 'providers.listAccounts',
-      scope: modelProviderRuntimeScope,
-      target: null,
-      input: {},
-    }), { timeoutMs: undefined });
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/provider-accounts', undefined);
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/provider-accounts/acc-1/has-api-key', undefined);
+    expect(capabilityExecuteMock).not.toHaveBeenCalled();
   });
 
-  it('fetchProviderSnapshot 会归一化异常返回结构，避免空值崩溃', async () => {
-    capabilityExecuteMock.mockResolvedValue(undefined);
+  it('fetchProviderSnapshot 会拒绝包含私密字段的异常返回结构', async () => {
+    hostApiFetchMock.mockResolvedValue({
+      accounts: [{ id: 'acc-1', provider: 'openai', label: 'OpenAI', enabled: true, authMode: 'apiKey', credentialReference: 'credential:v1:acc-1', revision: 1, apiKey: 'secret-canary' }],
+    });
 
     const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
-    await expect(fetchProviderSnapshot()).resolves.toEqual({
-      credentials: [],
-      statuses: [],
-      vendors: [],
-    });
+    await expect(fetchProviderSnapshot()).resolves.toEqual({ credentials: [], statuses: [], vendors: [], revisions: {} });
   });
 
-  it('hostProviderValidate always uses provider-credential target', async () => {
-    capabilityExecuteMock.mockResolvedValue({ valid: true });
-
-    const { hostProviderValidate } = await import('../../src/lib/provider-projection');
-    await expect(hostProviderValidate({
-      vendorId: 'openai',
-      apiKey: 'sk-test',
-    })).resolves.toEqual({ valid: true });
-
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'model.provider',
-      operationId: 'providers.validate',
-      scope: modelProviderRuntimeScope,
-      target: { kind: 'provider-credential', accountId: 'openai', vendorId: 'openai' },
-      input: {
-        vendorId: 'openai',
-        apiKey: 'sk-test',
-      },
-    }), { timeoutMs: undefined });
+  it('normalizeProviderSnapshot 严格保留无私密字段的 vendor metadata', async () => {
+    const { normalizeProviderSnapshot } = await import('../../src/lib/provider-accounts');
+    const validVendor = {
+      id: 'openai',
+      name: 'OpenAI',
+      icon: 'openai',
+      placeholder: 'sk-...',
+      requiresApiKey: true,
+      category: 'official',
+      supportedAuthModes: ['api_key', 'oauth_browser'],
+      defaultAuthMode: 'api_key',
+      supportsMultipleAccounts: true,
+      modelCapabilities: ['chat', 'imageUnderstand'],
+    };
+    expect(normalizeProviderSnapshot({
+      vendors: [
+        validVendor,
+        { ...validVendor, apiKey: 'secret-canary' },
+        { ...validVendor, supportedAuthModes: ['api_key', 'api_key'] },
+        { ...validVendor, defaultAuthMode: 'local' },
+        { ...validVendor, modelCapabilities: ['not-a-capability'] },
+      ],
+    }).vendors).toEqual([validVendor]);
   });
 
-  it('hostProviderSubmitOAuthCode binds full OAuth flow context in target and input', async () => {
-    capabilityExecuteMock.mockResolvedValue({ success: true });
-
-    const { hostProviderSubmitOAuthCode } = await import('../../src/lib/provider-projection');
-    await expect(hostProviderSubmitOAuthCode({
-      flowId: 'flow-openai-main',
-      accountId: 'openai-main',
-      vendorId: 'openai',
-      code: 'oauth-code',
-    })).resolves.toEqual({ success: true });
-
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'model.provider',
-      operationId: 'providers.oauthSubmit',
-      scope: modelProviderRuntimeScope,
-      target: { kind: 'provider-oauth', flowId: 'flow-openai-main', accountId: 'openai-main', vendorId: 'openai' },
-      input: {
-        code: 'oauth-code',
-        flowId: 'flow-openai-main',
-        accountId: 'openai-main',
-        vendorId: 'openai',
-      },
-    }), { timeoutMs: undefined });
+  it('public provider account projection keeps account mutations on the revision contract', async () => {
+    const projection = await import('../../src/lib/provider-projection');
+    expect(Object.keys(projection)).toEqual(expect.arrayContaining([
+      'hostProviderCreateAccount',
+      'hostProviderUpdateAccount',
+      'hostProviderDeleteAccount',
+    ]));
+    expect(capabilityExecuteMock).not.toHaveBeenCalled();
   });
 });

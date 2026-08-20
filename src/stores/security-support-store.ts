@@ -12,7 +12,6 @@ export type AuditItem = {
   action: string;
   decision: string;
   ruleId?: string;
-  detail?: string;
 };
 
 export type PlatformTool = {
@@ -53,23 +52,32 @@ export type RuleCatalogItem = {
 let securityPlatformToolsCache: PlatformTool[] = [];
 let securityPlatformToolsHydratedCache = false;
 let securityRuleCatalogCache: RuleCatalogItem[] = [];
-let securityAuditItemsCache: AuditItem[] = [];
 
 function clonePlatformTools(tools: PlatformTool[]): PlatformTool[] {
   return tools.map((tool) => ({ ...tool }));
 }
+let securityAuditItemsCache: AuditItem[] = [];
 
 function cloneRuleCatalog(items: RuleCatalogItem[]): RuleCatalogItem[] {
   return items.map((item) => ({ ...item }));
 }
 
 function cloneAuditItems(items: AuditItem[]): AuditItem[] {
-  return items.map((item) => ({ ...item }));
+  return items.map(({ ts, toolName, risk, action, decision, ruleId }) => ({
+    ts,
+    toolName,
+    risk,
+    action,
+    decision,
+    ruleId,
+  }));
 }
 
 interface SecuritySupportState {
   auditItems: AuditItem[];
   loadingAudit: boolean;
+  auditError: string | null;
+  auditStale: boolean;
   platformTools: PlatformTool[];
   loadingPlatformTools: boolean;
   platformToolsError: string | null;
@@ -101,6 +109,8 @@ interface SecuritySupportState {
 export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
   auditItems: cloneAuditItems(securityAuditItemsCache),
   loadingAudit: false,
+  auditError: null,
+  auditStale: false,
   platformTools: clonePlatformTools(securityPlatformToolsCache),
   loadingPlatformTools: false,
   platformToolsError: null,
@@ -173,10 +183,7 @@ export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
 
   loadPlatformTools: async (options) => {
     const refresh = options?.refresh === true;
-    set({
-      loadingPlatformTools: true,
-      platformToolsHydrated: true,
-    });
+    set({ loadingPlatformTools: true, platformToolsHydrated: true });
     securityPlatformToolsHydratedCache = true;
     try {
       const payload = await hostApiFetch<{ success?: boolean; tools?: PlatformTool[] }>(
@@ -200,14 +207,9 @@ export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
           return a.id.localeCompare(b.id);
         });
       securityPlatformToolsCache = clonePlatformTools(normalized);
-      set({
-        platformTools: normalized,
-        platformToolsError: null,
-      });
+      set({ platformTools: normalized, platformToolsError: null });
     } catch (error) {
-      set({
-        platformToolsError: error instanceof Error ? error.message : 'errors.loadToolsFailed',
-      });
+      set({ platformToolsError: error instanceof Error ? error.message : 'errors.loadToolsFailed' });
     } finally {
       set({ loadingPlatformTools: false });
     }
@@ -244,18 +246,25 @@ export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
   loadRecentAudits: async (options) => {
     const gatewayProcessState = options?.gatewayProcessState;
     if (gatewayProcessState && gatewayProcessState !== 'running') {
+      securityAuditItemsCache = [];
+      set({ auditItems: [], auditError: null, auditStale: false });
       return;
     }
     const page = options?.page ?? 1;
     const pageSize = options?.pageSize ?? 8;
-    set({ loadingAudit: true });
+    set({ loadingAudit: true, auditError: null, auditStale: false });
     try {
       const result = await hostSecurityReadAudit<{ items?: AuditItem[] }>({ page, pageSize });
-      const nextItems = Array.isArray(result.items) ? result.items : [];
+      const nextItems = Array.isArray(result.items) ? cloneAuditItems(result.items) : [];
       securityAuditItemsCache = cloneAuditItems(nextItems);
-      set({ auditItems: nextItems });
-    } catch {
-      // Keep stale audit data on refresh failure.
+      set({ auditItems: nextItems, auditError: null, auditStale: false });
+    } catch (error) {
+      securityAuditItemsCache = [];
+      set({
+        auditItems: [],
+        auditError: error instanceof Error ? error.message : 'errors.loadAuditFailed',
+        auditStale: true,
+      });
     } finally {
       set({ loadingAudit: false });
     }

@@ -299,6 +299,8 @@
     "gatewayPreparing": "Gateway is starting, audit data will be available shortly.",
     "gatewayStopped": "Gateway is not running, audit data is unavailable.",
     "loading": "Loading audits...",
+    "loadFailed": "Failed to load audit records.",
+    "stale": "Audit records were cleared because the latest read failed.",
     "empty": "No recent hit records.",
     "refresh": "Refresh",
     "ruleLabel": "rule",

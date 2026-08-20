@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -68,17 +68,8 @@ function streamingAssistant(content: string, timestamp: number): RawMessage {
 function setupCommonStores() {
   const sessionKey = 'agent:test:main';
   const now = Date.now();
-  useGatewayStore.setState({
-    status: {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore.setState({
+    runtimeHost: { lifecycle: 'running' },
   } as never);
   useSubagentsStore.setState({
     agents: [

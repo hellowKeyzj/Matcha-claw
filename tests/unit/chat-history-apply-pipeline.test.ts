@@ -3,14 +3,19 @@ import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-load-ex
 import {
   createEmptySessionRecord,
   getSessionItems,
+  projectSessionViewItems,
+  reconcileSessionItems,
 } from '@/stores/chat/store-state-helpers';
+import type { SessionWireItem } from '@/types/session/snapshot';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { ChatStoreState } from '@/stores/chat/types';
-import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { buildRuntimeScopeKey } from '../../src/stores/chat/session-identity';
-import { createOpenClawTestSessionIdentity, openClawTestRuntimeIdentity } from './helpers/runtime-address-fixtures';
+import {
+  assistantItem,
+  completeFact,
+  sessionView,
+  userItem,
+} from './helpers/session-fixtures';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -29,78 +34,28 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
   };
 }
 
-function createSnapshot(
-  sessionKey: string,
-  messages: RawMessage[],
-  runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {},
-  catalogOverrides: Partial<HistoryWindowResult['snapshot']['catalog']> = {},
-) {
-  const items = buildRenderItemsFromMessages(sessionKey, messages);
-  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
-  const agentId = sessionKey.split(':')[1] ?? 'main';
-  const suffix = sessionKey.split(':').slice(2).join(':');
-  const kind = suffix === 'main'
-    ? 'main'
-    : (suffix.startsWith('subagent:') ? 'subsession' : 'session');
-  return {
-    sessionKey,
-    catalog: {
-      key: sessionKey,
-      agentId,
-      kind,
-      preferred: kind === 'main',
-      protocolId: openClawTestRuntimeIdentity.protocolId,
-      runtimeEndpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
-      sessionIdentity,
-      displayName: sessionKey,
-      updatedAt: items[items.length - 1]?.createdAt,
-      ...catalogOverrides,
-    },
-    items,
-    approvals: [],
-    usage: [],
-    artifacts: [],
-    replayComplete: true,
-    runtime: {
-      activeRunId: null,
-      runPhase: 'done' as const,
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      runtimeActivity: null,
-      lastUserMessageAt: null,
-      lastError: null,
-      lastIssue: null,
-      updatedAt: 1,
-      ...runtimeOverrides,
-    },
-    window: {
-      totalItemCount: items.length,
-      windowStartOffset: 0,
-      windowEndOffset: items.length,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    },
-  };
-}
-
 function createHistoryWindow(
   sessionKey: string,
-  messages: RawMessage[],
-  overrides: Partial<HistoryWindowResult> = {},
+  items: SessionWireItem[],
 ): HistoryWindowResult {
-  const snapshot = overrides.snapshot ?? createSnapshot(sessionKey, messages);
+  const view = sessionView(sessionKey, {
+    epoch: 2,
+    seq: items.length,
+    cursor: items.length,
+    items: completeFact(items),
+  });
   return {
-    snapshot,
-    thinkingLevel: overrides.thinkingLevel ?? null,
-    totalItemCount: snapshot.window.totalItemCount,
-    windowStartOffset: 0,
-    windowEndOffset: messages.length,
-    hasMore: false,
-    hasNewer: false,
-    isAtLatest: true,
-    ...overrides,
+    view,
+    sessionIdentity: {
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      agentId: view.identity.agentId ?? 'main',
+      sessionKey,
+    },
+    thinkingLevel: null,
   };
 }
 
@@ -119,22 +74,15 @@ function createStateHarness(state: ChatStoreState) {
 }
 
 describe('chat history apply pipeline', () => {
-  it('foreground apply writes authoritative snapshot into the requested session', async () => {
+  it('foreground apply writes authoritative SessionView items into the requested session', async () => {
     const sessionKey = 'agent:main:main';
-    const rawMessages: RawMessage[] = [
-      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
-    ];
     const historyRuntime = createHistoryRuntimeHarness();
     const harness = createStateHarness({
       currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: createEmptySessionRecord(),
-      },
+      loadedSessions: { [sessionKey]: createEmptySessionRecord() },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: sessionKey,
     } as ChatStoreState);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -145,86 +93,40 @@ describe('chat history apply pipeline', () => {
       shouldAbortHistoryProcessing: () => false,
     });
 
-    await applyLoadedMessages(createHistoryWindow(sessionKey, rawMessages));
+    await applyLoadedMessages(createHistoryWindow(sessionKey, [
+      userItem('item-user-1', 'hello'),
+      assistantItem('item-assistant-1', 'done', { runId: 'run-1' }),
+    ]));
 
     expect(harness.get().loadedSessions[sessionKey]?.meta.historyStatus).toBe('ready');
     expect(getSessionItems(harness.get(), sessionKey)).toMatchObject([
-      expect.objectContaining({ text: 'hello' }),
-      expect.objectContaining({ text: 'done' }),
+      expect.objectContaining({ key: 'item-user-1', text: 'hello' }),
+      expect.objectContaining({ key: 'item-assistant-1', text: 'done', runId: 'run-1' }),
     ]);
-    expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
   });
 
-  it('preserves a manually renamed session label when applying a transcript-derived snapshot label', async () => {
-    const sessionKey = 'agent:main:main';
-    const historyRuntime = createHistoryRuntimeHarness();
-    const harness = createStateHarness({
-      currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: {
-          ...createEmptySessionRecord(),
-          meta: {
-            ...createEmptySessionRecord().meta,
-            label: 'Custom name',
-            titleSource: 'user',
-            manualLabel: true,
-          },
-        },
-      },
-      pendingApprovalsBySession: {},
-      foregroundHistorySessionKey: sessionKey,
-    } as ChatStoreState);
-
-    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
-      set: harness.set,
-      get: harness.get,
-      historyRuntime,
-      requestedSessionKey: sessionKey,
-      scope: 'foreground',
-      abortSignal: new AbortController().signal,
-      shouldAbortHistoryProcessing: () => false,
-    });
-
-    await applyLoadedMessages(createHistoryWindow(
-      sessionKey,
-      [{ role: 'user', content: 'transcript title', timestamp: 1, id: 'user-1' }],
-      {
-        snapshot: createSnapshot(
-          sessionKey,
-          [{ role: 'user', content: 'transcript title', timestamp: 1, id: 'user-1' }],
-          {},
-          { label: 'transcript title', titleSource: 'user' },
-        ),
-      },
-    ));
-
-    expect(harness.get().loadedSessions[sessionKey]?.meta.label).toBe('Custom name');
-  });
-
-  it('background apply only updates the target session snapshot', async () => {
+  it('background apply only updates the target session', async () => {
     const currentSessionKey = 'agent:main:main';
     const requestedSessionKey = 'agent:worker:main';
-    const currentMessages: RawMessage[] = [
-      { role: 'assistant', content: 'keep me', timestamp: 1, id: 'assistant-current' },
-    ];
-    const targetMessages: RawMessage[] = [
-      { role: 'assistant', content: 'worker update', timestamp: 2, id: 'assistant-worker' },
-    ];
     const historyRuntime = createHistoryRuntimeHarness();
+    const currentView = createHistoryWindow(currentSessionKey, [
+      assistantItem('item-assistant-current', 'keep me'),
+    ]).view;
+    const currentProjectedItems = projectSessionViewItems(currentView);
     const harness = createStateHarness({
       currentSessionKey,
       loadedSessions: {
-        [currentSessionKey]: {
-          ...createEmptySessionRecord(),
-          items: createSnapshot(currentSessionKey, currentMessages).items,
-        },
+        [currentSessionKey]: { ...createEmptySessionRecord(), items: [] },
         [requestedSessionKey]: createEmptySessionRecord(),
       },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
     } as ChatStoreState);
+    harness.set({ loadedSessions: {
+      ...harness.get().loadedSessions,
+      [currentSessionKey]: { ...harness.get().loadedSessions[currentSessionKey]!, items: currentProjectedItems as never },
+    } });
     const currentItemsRef = getSessionItems(harness.get(), currentSessionKey);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -235,53 +137,50 @@ describe('chat history apply pipeline', () => {
       shouldAbortHistoryProcessing: () => false,
     });
 
-    await applyLoadedMessages(createHistoryWindow(requestedSessionKey, targetMessages));
+    await applyLoadedMessages(createHistoryWindow(requestedSessionKey, [
+      assistantItem('item-assistant-worker', 'worker update'),
+    ]));
 
     expect(getSessionItems(harness.get(), currentSessionKey)).toBe(currentItemsRef);
     expect(getSessionItems(harness.get(), requestedSessionKey)).toMatchObject([
-      expect.objectContaining({ text: 'worker update' }),
+      expect.objectContaining({ key: 'item-assistant-worker', text: 'worker update' }),
     ]);
   });
 
-  it('authoritative snapshot replaces stale local optimistic messages instead of front-end canonical reconcile', async () => {
+  it('authoritative SessionView items replace stale local optimistic assistant placeholders', async () => {
     const sessionKey = 'agent:main:main';
-    const localOptimistic: RawMessage[] = [
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-        id: 'user-local-1',
-        messageId: 'user-local-1',
-        status: 'sending',
-      },
-    ];
-    const authoritative: RawMessage[] = [
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-        id: 'user-server-1',
-      },
-      {
-        role: 'assistant',
-        content: 'done',
-        timestamp: 2,
-        id: 'assistant-1',
-      },
-    ];
     const historyRuntime = createHistoryRuntimeHarness();
     const harness = createStateHarness({
       currentSessionKey: sessionKey,
       loadedSessions: {
         [sessionKey]: {
           ...createEmptySessionRecord(),
-          items: createSnapshot(sessionKey, localOptimistic).items,
+          items: [{
+            key: 'session:agent:main:main|assistant-turn:main:run-1:main',
+            kind: 'assistant-turn',
+            role: 'assistant',
+            sessionKey,
+            turnKey: 'main:run-1',
+            laneKey: 'main',
+            identitySource: 'client',
+            identityMode: 'client',
+            identityConfidence: 'weak',
+            status: 'streaming',
+            segments: [],
+            thinking: null,
+            tools: [],
+            embeddedToolResults: [],
+            text: '',
+            images: [],
+            attachedFiles: [],
+            pendingState: 'typing',
+            updatedAt: 1,
+          }],
         },
       },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: sessionKey,
     } as ChatStoreState);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -292,56 +191,30 @@ describe('chat history apply pipeline', () => {
       shouldAbortHistoryProcessing: () => false,
     });
 
-    await applyLoadedMessages(createHistoryWindow(sessionKey, authoritative));
+    await applyLoadedMessages(createHistoryWindow(sessionKey, [
+      userItem('item-user-server-1', 'hello'),
+      assistantItem('item-assistant-1', 'done'),
+    ]));
 
     expect(getSessionItems(harness.get(), sessionKey)).toMatchObject([
-      expect.objectContaining({ kind: 'user-message', messageId: 'user-server-1', text: 'hello' }),
-      expect.objectContaining({ kind: 'assistant-turn', text: 'done' }),
+      expect.objectContaining({ kind: 'user-message', key: 'item-user-server-1', text: 'hello' }),
+      expect.objectContaining({ kind: 'assistant-turn', key: 'item-assistant-1', text: 'done' }),
     ]);
     expect(getSessionItems(harness.get(), sessionKey)).toHaveLength(2);
+    expect(getSessionItems(harness.get(), sessionKey)).not.toContainEqual(
+      expect.objectContaining({ identitySource: 'client', pendingState: 'typing' }),
+    );
   });
 
-  it('does not collapse repeated same-text user messages during optimistic reconciliation', async () => {
+  it('does not collapse repeated same-text authoritative SessionView items', async () => {
     const sessionKey = 'agent:main:main';
-    const localOptimistic: RawMessage[] = [
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-        id: 'user-local-1',
-        messageId: 'user-local-1',
-        status: 'sending',
-      },
-    ];
-    const authoritativeWithNextPending: RawMessage[] = [
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-        id: 'user-server-1',
-      },
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 2,
-        id: 'user-local-2',
-        messageId: 'user-local-2',
-        status: 'sending',
-      },
-    ];
     const historyRuntime = createHistoryRuntimeHarness();
     const harness = createStateHarness({
       currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: {
-          ...createEmptySessionRecord(),
-          items: createSnapshot(sessionKey, localOptimistic).items,
-        },
-      },
+      loadedSessions: { [sessionKey]: createEmptySessionRecord() },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: sessionKey,
     } as ChatStoreState);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -352,235 +225,39 @@ describe('chat history apply pipeline', () => {
       shouldAbortHistoryProcessing: () => false,
     });
 
-    await applyLoadedMessages(createHistoryWindow(sessionKey, authoritativeWithNextPending));
+    await applyLoadedMessages(createHistoryWindow(sessionKey, [
+      userItem('item-user-server-1', 'hello'),
+      userItem('item-user-server-2', 'hello'),
+    ]));
 
     expect(getSessionItems(harness.get(), sessionKey)).toMatchObject([
-      expect.objectContaining({ kind: 'user-message', messageId: 'user-server-1', text: 'hello' }),
-      expect.objectContaining({ kind: 'user-message', messageId: 'user-local-2', text: 'hello' }),
+      expect.objectContaining({ key: 'item-user-server-1', text: 'hello' }),
+      expect.objectContaining({ key: 'item-user-server-2', text: 'hello' }),
     ]);
     expect(getSessionItems(harness.get(), sessionKey)).toHaveLength(2);
   });
 
-  it('keeps loaded session and approvals references when applying an unchanged snapshot', async () => {
+  it('does not restore a renderer receipt when SessionView omits it', async () => {
     const sessionKey = 'agent:main:main';
-    const rawMessages: RawMessage[] = [
-      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
-    ];
-    const snapshot = createSnapshot(sessionKey, rawMessages);
-    const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
-    const approvals = [{
-      id: 'approval-1',
+    const historyRuntime = createHistoryRuntimeHarness();
+    const receipt = {
+      key: 'renderer-receipt:run-attachment-1',
+      kind: 'user-message' as const,
+      role: 'user' as const,
       sessionKey,
-      sessionIdentity,
-      runId: 'run-1',
-      title: 'Run command',
-      command: 'pnpm test',
-      allowedDecisions: ['allow-once', 'deny'] as const,
-      createdAtMs: 1_700_000_000_000,
-    }];
-    const historyRuntime = createHistoryRuntimeHarness();
-    const initialRecord = {
-      ...createEmptySessionRecord(),
-      meta: {
-        ...createEmptySessionRecord().meta,
-        backendSessionKey: snapshot.sessionKey,
-        runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
-        agentId: snapshot.catalog.agentId,
-        protocolId: snapshot.catalog.protocolId,
-        runtimeEndpointId: snapshot.catalog.runtimeEndpointId,
-        sessionIdentity,
-        kind: snapshot.catalog.kind,
-        preferred: snapshot.catalog.preferred,
-        label: null,
-        titleSource: 'none',
-        displayName: snapshot.catalog.displayName,
-        lastActivityAt: 2_000,
-        historyStatus: 'ready' as const,
-      },
-      runtime: snapshot.runtime,
-      items: snapshot.items,
-      contextTokens: snapshot.catalog.contextTokens,
-      window: {
-        ...snapshot.window,
-        isLoadingMore: false,
-        isLoadingNewer: false,
-        anchorItemKey: null,
-      },
+      text: 'same text',
+      runId: 'run-attachment-1',
+      rendererReceiptRunId: 'run-attachment-1',
+      createdAt: 1,
+      images: [{ url: 'https://preview.example/receipt.png', mimeType: 'image/png' }],
+      attachedFiles: [],
     };
-    const initialApprovals = approvals.map((approval) => ({
-      ...approval,
-      backendSessionKey: approval.sessionKey,
-      allowedDecisions: [...approval.allowedDecisions],
-    }));
     const harness = createStateHarness({
       currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: initialRecord,
-      },
-      pendingApprovalsBySession: {
-        [sessionKey]: initialApprovals,
-      },
-      foregroundHistorySessionKey: sessionKey,
-    } as ChatStoreState);
-    const approvalsRef = harness.get().pendingApprovalsBySession;
-
-    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
-      set: harness.set,
-      get: harness.get,
-      historyRuntime,
-      requestedSessionKey: sessionKey,
-      scope: 'foreground',
-      abortSignal: new AbortController().signal,
-      shouldAbortHistoryProcessing: () => false,
-    });
-
-    await applyLoadedMessages({
-      ...createHistoryWindow(sessionKey, rawMessages),
-      snapshot: {
-        ...snapshot,
-        approvals,
-      },
-    });
-
-    expect(harness.get().loadedSessions[sessionKey]).toBe(initialRecord);
-    expect(harness.get().pendingApprovalsBySession).toBe(approvalsRef);
-  });
-
-  it('updates pending approvals when SessionIdentity changes for the same approval id', async () => {
-    const sessionKey = 'agent:main:main';
-    const firstSessionIdentity = createOpenClawTestSessionIdentity(sessionKey, 'main');
-    const nextSessionIdentity = createOpenClawTestSessionIdentity(sessionKey, 'other-agent');
-    const historyRuntime = createHistoryRuntimeHarness();
-    const harness = createStateHarness({
-      currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: createEmptySessionRecord(),
-      },
-      pendingApprovalsBySession: {
-        [sessionKey]: [{
-          id: 'approval-1',
-          sessionKey,
-          sessionIdentity: firstSessionIdentity,
-          title: 'Run command',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1,
-        }],
-      },
-      foregroundHistorySessionKey: sessionKey,
-    } as ChatStoreState);
-
-    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
-      set: harness.set,
-      get: harness.get,
-      historyRuntime,
-      requestedSessionKey: sessionKey,
-      scope: 'foreground',
-      abortSignal: new AbortController().signal,
-      shouldAbortHistoryProcessing: () => false,
-    });
-    const snapshot = createSnapshot(sessionKey, []);
-
-    await applyLoadedMessages({
-      ...createHistoryWindow(sessionKey, []),
-      snapshot: {
-        ...snapshot,
-        approvals: [{
-          id: 'approval-1',
-          sessionKey,
-          sessionIdentity: nextSessionIdentity,
-          title: 'Run command',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1,
-        }],
-      },
-    });
-
-    expect(harness.get().pendingApprovalsBySession[sessionKey]?.[0]?.sessionIdentity).toEqual(nextSessionIdentity);
-  });
-
-  it('syncs pending approvals from authoritative Runtime Host snapshot', async () => {
-    const sessionKey = 'agent:main:main';
-    const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
-    const historyRuntime = createHistoryRuntimeHarness();
-    const harness = createStateHarness({
-      currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: createEmptySessionRecord(),
-      },
-      pendingApprovalsBySession: {
-        [sessionKey]: [{
-          id: 'stale-approval',
-          sessionKey,
-          sessionIdentity,
-          title: 'stale',
-          allowedDecisions: ['deny'],
-          createdAtMs: 1,
-        }],
-      },
-      foregroundHistorySessionKey: sessionKey,
-    } as ChatStoreState);
-
-    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
-      set: harness.set,
-      get: harness.get,
-      historyRuntime,
-      requestedSessionKey: sessionKey,
-      scope: 'foreground',
-      abortSignal: new AbortController().signal,
-      shouldAbortHistoryProcessing: () => false,
-    });
-    const snapshot = createSnapshot(sessionKey, []);
-
-    await applyLoadedMessages({
-      ...createHistoryWindow(sessionKey, []),
-      snapshot: {
-        ...snapshot,
-        approvals: [{
-          id: 'approval-1',
-          sessionKey,
-          sessionIdentity,
-          runId: 'run-1',
-          title: 'Run command',
-          command: 'pnpm test',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1_700_000_000_000,
-        }],
-      },
-    });
-
-    expect(harness.get().pendingApprovalsBySession[sessionKey]).toEqual([{
-      id: 'approval-1',
-      sessionKey,
-      backendSessionKey: sessionKey,
-      sessionIdentity,
-      runId: 'run-1',
-      title: 'Run command',
-      command: 'pnpm test',
-      allowedDecisions: ['allow-once', 'deny'],
-      createdAtMs: 1_700_000_000_000,
-    }]);
-  });
-
-  it('completed snapshot clears pending run state through authoritative runtime', async () => {
-    const sessionKey = 'agent:main:main';
-    const historyRuntime = createHistoryRuntimeHarness();
-    const harness = createStateHarness({
-      currentSessionKey: sessionKey,
-      loadedSessions: {
-        [sessionKey]: {
-          ...createEmptySessionRecord(),
-          runtime: {
-            ...createEmptySessionRecord().runtime,
-            activeRunId: 'run-1',
-            runPhase: 'streaming',
-          },
-        },
-      },
+      loadedSessions: { [sessionKey]: { ...createEmptySessionRecord(), items: [receipt] } },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: sessionKey,
     } as ChatStoreState);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -591,23 +268,51 @@ describe('chat history apply pipeline', () => {
       shouldAbortHistoryProcessing: () => false,
     });
 
-    await applyLoadedMessages({
-      ...createHistoryWindow(sessionKey, [
-        { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
-      ]),
-      snapshot: createSnapshot(sessionKey, [
-        { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
-      ], {
-        activeRunId: null,
-        runPhase: 'done',
-      }),
-    });
+    await applyLoadedMessages(createHistoryWindow(sessionKey, [
+      userItem('item-user-server-1', 'same text'),
+      assistantItem('item-assistant-attachment-1', '', { runId: 'run-attachment-1' }),
+    ]));
 
-    expect(harness.get().loadedSessions[sessionKey]?.runtime.activeRunId).toBeNull();
-    expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
+    expect(getSessionItems(harness.get(), sessionKey)).toEqual([
+      expect.objectContaining({ key: 'item-user-server-1', text: 'same text' }),
+      expect.objectContaining({ key: 'item-assistant-attachment-1', runId: 'run-attachment-1' }),
+    ]);
   });
 
-  it('active run期间的history snapshot不能冲掉当前pending assistant turn', async () => {
+  it('keeps an attachment receipt when only an assistant item carries its run id', () => {
+    const receipt = {
+      key: 'renderer-receipt:run-attachment-1',
+      kind: 'user-message' as const,
+      role: 'user' as const,
+      sessionKey: 'agent:main:main',
+      runId: 'run-attachment-1',
+      rendererReceiptRunId: 'run-attachment-1',
+      text: 'same text',
+      images: [],
+      attachedFiles: [],
+    };
+    const assistant = {
+      key: 'assistant:run-attachment-1',
+      kind: 'assistant-turn' as const,
+      role: 'assistant' as const,
+      sessionKey: 'agent:main:main',
+      runId: 'run-attachment-1',
+      identitySource: 'run' as const,
+      identityMode: 'run' as const,
+      identityConfidence: 'strong' as const,
+      status: 'streaming' as const,
+      segments: [],
+      thinking: null,
+      tools: [],
+      text: '',
+      images: [],
+      attachedFiles: [],
+    };
+
+    expect(reconcileSessionItems([receipt], [assistant])).toEqual([assistant, receipt]);
+  });
+
+  it('clears renderer items when the canonical SessionView is empty', async () => {
     const sessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
     const harness = createStateHarness({
@@ -648,7 +353,6 @@ describe('chat history apply pipeline', () => {
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: sessionKey,
     } as ChatStoreState);
-
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
       get: harness.get,
@@ -658,32 +362,8 @@ describe('chat history apply pipeline', () => {
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
     });
+    await applyLoadedMessages(createHistoryWindow(sessionKey, []));
 
-    const currentItemsRef = getSessionItems(harness.get(), sessionKey);
-
-    await applyLoadedMessages({
-      ...createHistoryWindow(sessionKey, []),
-      snapshot: createSnapshot(sessionKey, [], {
-        activeRunId: 'run-1',
-        runPhase: 'submitted',
-        pendingTurnKey: 'main:run-1',
-        pendingTurnLaneKey: 'main',
-      }),
-    });
-
-    expect(getSessionItems(harness.get(), sessionKey)).toBe(currentItemsRef);
-    expect(getSessionItems(harness.get(), sessionKey)).toEqual([
-      expect.objectContaining({
-        kind: 'assistant-turn',
-        turnKey: 'main:run-1',
-        laneKey: 'main',
-        status: 'streaming',
-      }),
-    ]);
-    expect(harness.get().loadedSessions[sessionKey]?.runtime).toMatchObject({
-      activeRunId: 'run-1',
-      pendingTurnKey: 'main:run-1',
-      runPhase: 'submitted',
-    });
+    expect(getSessionItems(harness.get(), sessionKey)).toEqual([]);
   });
 });

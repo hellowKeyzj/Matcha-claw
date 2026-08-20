@@ -12,23 +12,19 @@ import {
   agentScope,
   runtimeInstanceScope,
   sessionScope,
-  type CapabilityTarget,
   type RuntimeEndpointRef,
   type RuntimeScope,
   type SessionIdentity,
-} from '../../runtime-host/shared/runtime-address';
-import type { CapabilityDescriptor } from '../../runtime-host/shared/capability-descriptor';
-import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../../runtime-host/shared/runtime-topology';
+} from '../../electron/desktop-contract/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+import type { CapabilityDescriptor } from '../../electron/desktop-contract/capability-descriptor';
+import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../types/runtime-topology';
 import type {
   SessionApprovalRequestItem,
   SessionCatalogItem,
-  SessionLoadResult,
   SessionListResult,
-  SessionNewResult,
-  SessionPromptResult,
-  SessionStateSnapshot,
-  SessionWindowResult,
-} from '../../runtime-host/shared/session-adapter-types';
+  SessionView,
+} from '../types/session/snapshot';
 
 const DEFAULT_HOST_API_PORT = 13210;
 const DEFAULT_HOST_API_BASE = `http://127.0.0.1:${DEFAULT_HOST_API_PORT}`;
@@ -50,7 +46,15 @@ const capabilityScopeInflight = new Map<string, Promise<RuntimeScope>>();
 
 type HostApiRequestInit = RequestInit & {
   timeoutMs?: number;
+  traceId?: string | null;
 };
+
+type SessionCapabilityOptions = {
+  timeoutMs?: number;
+  traceId?: string | null;
+};
+
+const SESSION_TRACE_HEADER = 'X-MatchaClaw-Session-Trace';
 
 export interface RuntimeJobSnapshot<TResult = unknown> {
   id: string;
@@ -92,65 +96,63 @@ export type FilePreviewError =
   | 'notDirectory'
   | 'notFound'
   | 'tooLarge'
-  | string;
+  | 'invalidPath'
+  | 'outcomeUnknown'
+  | 'unavailable';
 
 export interface FilePreviewDirEntry {
-  name: string;
-  path: string;
-  isDir: boolean;
+  relativePath: string;
+  display: string;
+  isDirectory: boolean;
   size: number;
-  mtimeMs: number;
-  hasChildren?: boolean;
 }
 
 export interface ReadTextFileResult {
   ok: boolean;
-  path?: string;
   content?: string;
-  mimeType?: string;
   size?: number;
-  readOnly?: boolean;
   error?: FilePreviewError;
 }
 
 export interface WriteTextFileResult {
   ok: boolean;
-  path?: string;
+  name?: string;
+  size?: number;
   error?: FilePreviewError;
-}
-
-export interface StagedFilePayload {
-  id: string;
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-  stagedPath: string;
-  preview: string | null;
 }
 
 export interface FileThumbnailResult {
   preview: string | null;
   fileSize: number;
+  error?: FilePreviewError;
+}
+
+export interface StagedFilePayload {
+  stagedAttachmentId: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  preview: string | null;
 }
 
 export interface WorkspaceFileContext {
-  workspaceId?: string;
-  sourceId?: string;
+  workspaceRoot?: string;
 }
 
 export interface ReadBinaryFileResult {
   ok: boolean;
-  path?: string;
+  name?: string;
   data?: string;
-  mimeType?: string;
   size?: number;
-  readOnly?: boolean;
   error?: FilePreviewError;
 }
 
 export interface FilePreviewStatResult {
   ok: boolean;
-  entry?: FilePreviewDirEntry;
+  name?: string;
+  isDirectory?: boolean;
+  size?: number;
+  mtimeMs?: number;
   error?: FilePreviewError;
 }
 
@@ -174,13 +176,22 @@ export interface OpenClawToolPermissionModePayload {
 
 export type HostSessionCatalogItem = SessionCatalogItem;
 
-export type HostSessionLoadResult = Partial<SessionLoadResult> & {
-  hydrationJob?: RuntimeJobSnapshot<SessionLoadResult>;
-};
+export type HostSessionLoadResult = SessionView;
 
-export type HostSessionWindowResult = Partial<SessionWindowResult> & {
-  hydrationJob?: RuntimeJobSnapshot<SessionWindowResult>;
-};
+export type HostSessionWindowResult = SessionView;
+
+export type HostSessionAbortResult = Readonly<{ outcome?: string; projection?: unknown }>;
+
+export type HostSessionPromptResult = Readonly<{
+  success?: boolean;
+  outcome?: 'queued' | 'succeeded' | 'target_rejected' | 'unknown';
+  routeKey?: string;
+  runId?: string;
+  status?: 'started' | 'in_flight' | 'ok';
+  projection?: unknown;
+  snapshot?: unknown;
+  error?: string;
+}>;
 
 function capabilityScopeCacheKey(capabilityId: string, scope?: RuntimeScope): string {
   return scope ? `${capabilityId}:${buildCapabilityScopeKey(scope)}` : capabilityId;
@@ -254,6 +265,14 @@ function headersToRecord(headers?: HeadersInit): Record<string, string> {
   return { ...headers };
 }
 
+function withSessionTraceHeader(headers: HeadersInit | undefined, traceId: string | null | undefined): Record<string, string> {
+  const record = headersToRecord(headers);
+  if (traceId) {
+    record[SESSION_TRACE_HEADER] = traceId;
+  }
+  return record;
+}
+
 function parseUnifiedProxyResponse<T>(
   envelope: HostApiProxyEnvelope,
   path: string,
@@ -297,7 +316,7 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
       requestId,
       path,
       method,
-      headers: headersToRecord(init?.headers),
+      headers: withSessionTraceHeader(init?.headers, init?.traceId),
       body: init?.body ?? null,
       timeoutMs: init?.timeoutMs,
     });
@@ -421,43 +440,243 @@ export async function hostUvInstallAll(endpoint: RuntimeEndpointRef): Promise<Ru
   }));
 }
 
-async function workspaceFileCapabilityExecute<TResult>(operationId: string, input: { sessionIdentity: SessionIdentity } & WorkspaceFileContext, options?: { timeoutMs?: number }): Promise<TResult> {
-  const path = typeof (input as { path?: unknown }).path === 'string' ? (input as { path?: string }).path! : '';
-  const { workspaceId: _workspaceId, sourceId: _sourceId, ...body } = input;
-  const target = operationId === 'files.stagePaths' || operationId === 'files.stageBuffer'
-    ? { kind: 'workspace-staging' as const, identity: input.sessionIdentity }
-    : { kind: 'workspace-file' as const, path, identity: input.sessionIdentity };
-  return hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
+type WorkspaceFileRequest = {
+  endpoint: RuntimeEndpointRef;
+  sessionKey: string;
+  relativePath: string;
+};
+
+function workspaceFileInput(
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+  includeHiddenDefault: boolean,
+): Record<string, unknown> {
+  return {
+    endpoint: payload.endpoint,
+    sessionKey: payload.sessionKey,
+    relativePath: payload.relativePath,
+    ...(payload.maxBytes === undefined ? {} : { maxBytes: payload.maxBytes }),
+    ...(payload.content === undefined ? {} : { content: payload.content }),
+    ...(includeHiddenDefault ? { includeHidden: payload.includeHidden ?? false } : {}),
+  };
+}
+
+function workspaceFileScope(payload: WorkspaceFileRequest): RuntimeScope {
+  return {
+    kind: 'session',
+    endpoint: payload.endpoint,
+    sessionKey: payload.sessionKey,
+  } as unknown as RuntimeScope;
+}
+
+function workspaceFilePayload(
+  operationId: string,
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+) {
+  return buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
     operationId,
-    scope: { kind: 'workspace', endpoint: input.sessionIdentity.endpoint },
-    target,
-    body: body as unknown as Record<string, unknown>,
-  }), options);
+    scope: workspaceFileScope(payload),
+    target: { kind: 'workspace-file' },
+    body: workspaceFileInput(payload, operationId === 'files.listDir'),
+  });
+}
+
+function workspaceFailure(error: unknown): FilePreviewError {
+  if (typeof error !== 'string') {
+    return 'unavailable';
+  }
+  switch (error) {
+    case 'Workspace text path is invalid':
+    case 'Workspace binary path is invalid':
+    case 'Workspace directory path is invalid':
+    case 'Workspace write path is invalid':
+    case 'Workspace media path is invalid':
+    case 'Workspace media reference is invalid':
+      return 'invalidPath';
+    case 'Workspace text target is not a file':
+    case 'Workspace binary target is not a file':
+    case 'Workspace write target is not a file':
+    case 'Workspace media target is not a file':
+      return 'notFound';
+    case 'Workspace directory target is not a directory':
+      return 'notDirectory';
+    case 'Workspace text target exceeds the limit':
+    case 'Workspace binary target exceeds the limit':
+    case 'Workspace write content exceeds the limit':
+    case 'Workspace media target exceeds the limit':
+      return 'tooLarge';
+    case 'Workspace write outcome is unknown':
+      return 'outcomeUnknown';
+    case 'Workspace media is unavailable':
+      return 'unavailable';
+    case 'Workspace text target is binary':
+      return 'binary';
+    default:
+      return 'unavailable';
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (value.length === 0 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    return false;
+  }
+  try {
+    return btoa(atob(value)) === value;
+  } catch {
+    return false;
+  }
+}
+
+function isCanonicalPreview(value: string): boolean {
+  const match = /^data:[^;,]+;base64,([A-Za-z0-9+/]*={0,2})$/.exec(value);
+  return match !== null && isCanonicalBase64(match[1]);
+}
+
+function isWorkspaceFileResponse(value: unknown): value is { name: string; content: string; size: number } {
+  return isRecord(value)
+    && hasExactKeys(value, ['name', 'content', 'size'])
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && typeof value.content === 'string'
+    && isSafeNonNegativeInteger(value.size);
+}
+
+function isWorkspaceBinaryResponse(value: unknown): value is { name: string; data: string; size: number } {
+  return isRecord(value)
+    && hasExactKeys(value, ['name', 'data', 'size'])
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && typeof value.data === 'string'
+    && isSafeNonNegativeInteger(value.size);
+}
+
+function isWorkspaceStatResponse(value: unknown): value is { name: string; isDirectory: boolean; size: number; mtimeMs: number } {
+  return isRecord(value)
+    && hasExactKeys(value, ['name', 'isDirectory', 'size', 'mtimeMs'])
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && typeof value.isDirectory === 'boolean'
+    && isSafeNonNegativeInteger(value.size)
+    && isSafeNonNegativeInteger(value.mtimeMs);
+}
+
+function isWorkspaceDirectoryEntry(value: unknown): value is FilePreviewDirEntry {
+  return isRecord(value)
+    && hasExactKeys(value, ['relativePath', 'display', 'isDirectory', 'size'])
+    && typeof value.relativePath === 'string'
+    && value.relativePath.length > 0
+    && typeof value.display === 'string'
+    && value.display.length > 0
+    && typeof value.isDirectory === 'boolean'
+    && isSafeNonNegativeInteger(value.size);
+}
+
+function isWorkspaceDirectoryResponse(value: unknown): value is { entries: FilePreviewDirEntry[] } {
+  return isRecord(value)
+    && hasExactKeys(value, ['entries'])
+    && Array.isArray(value.entries)
+    && value.entries.every(isWorkspaceDirectoryEntry);
+}
+
+function isWorkspaceWriteResponse(value: unknown): value is { name: string; size: number } {
+  return isRecord(value)
+    && hasExactKeys(value, ['name', 'size'])
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && isSafeNonNegativeInteger(value.size);
+}
+
+async function workspaceFileFetch<TResult>(
+  path: string,
+  operationId: string,
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+  decode: (value: unknown) => TResult | null,
+  options?: { timeoutMs?: number },
+): Promise<TResult | FilePreviewError> {
+  try {
+    const result = decode(await hostApiFetch<unknown>(path, {
+      method: 'POST',
+      body: JSON.stringify(workspaceFilePayload(operationId, payload)),
+      timeoutMs: options?.timeoutMs,
+    }));
+    return result ?? 'unavailable';
+  } catch (error) {
+    return workspaceFailure(error instanceof Error ? error.message : error);
+  }
 }
 
 export async function hostFileReadText(
-  payload: {
-    path: string;
-    maxBytes?: number;
-    sessionIdentity: SessionIdentity;
-  } & WorkspaceFileContext,
+  payload: WorkspaceFileRequest & { maxBytes?: number } & WorkspaceFileContext,
 ): Promise<ReadTextFileResult> {
-  return await workspaceFileCapabilityExecute<ReadTextFileResult>('files.readText', payload);
+  const result = await workspaceFileFetch('/api/files/read-text', 'files.readText', payload, (value) => (
+    isWorkspaceFileResponse(value) ? { ok: true, content: value.content, size: value.size } : null
+  ));
+  return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
 export async function hostFileWriteText(
-  payload: {
-    path: string;
-    content: string;
-    sessionIdentity: SessionIdentity;
-  } & WorkspaceFileContext,
+  payload: WorkspaceFileRequest & { content: string } & WorkspaceFileContext,
 ): Promise<WriteTextFileResult> {
-  return await workspaceFileCapabilityExecute<WriteTextFileResult>('files.writeText', payload);
+  const result = await workspaceFileFetch('/api/files/write-text', 'files.writeText', payload, (value) => (
+    isWorkspaceWriteResponse(value) ? { ok: true, name: value.name, size: value.size } : null
+  ));
+  return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
-export async function hostFileStagePaths(payload: { filePaths: string[]; sessionIdentity: SessionIdentity } & WorkspaceFileContext): Promise<StagedFilePayload[]> {
-  return await workspaceFileCapabilityExecute<StagedFilePayload[]>('files.stagePaths', payload);
+function workspaceMediaScope(identity: SessionIdentity): RuntimeScope {
+  return {
+    kind: 'session',
+    endpoint: identity.endpoint,
+    sessionKey: identity.sessionKey,
+  } as unknown as RuntimeScope;
+}
+
+function workspaceMediaPayload(
+  operationId: string,
+  identity: SessionIdentity,
+  input: Record<string, unknown>,
+) {
+  return buildCapabilityExecutePayload({
+    id: 'workspace.media',
+    operationId,
+    scope: workspaceMediaScope(identity),
+    target: { kind: 'workspace-media' },
+    body: {
+      endpoint: identity.endpoint,
+      sessionKey: identity.sessionKey,
+      ...input,
+    },
+  });
+}
+
+function stagedFilePayload(value: unknown): StagedFilePayload {
+  if (!isWorkspaceMediaAttachment(value)) {
+    throw new Error('Workspace attachment staging failed');
+  }
+  return value;
+}
+
+export async function hostFileStagePaths(
+  payload: { filePaths: string[]; sessionIdentity: SessionIdentity } & WorkspaceFileContext,
+): Promise<StagedFilePayload[]> {
+  const result = await invokeIpc<unknown>('dialog:stageDroppedAttachments', payload.filePaths);
+  if (!isRecord(result) || !hasExactKeys(result, ['attachments']) || !Array.isArray(result.attachments)) {
+    throw new Error('Workspace attachment staging failed');
+  }
+  return result.attachments.map(stagedFilePayload);
 }
 
 export async function hostFileStageBuffer(payload: {
@@ -466,49 +685,240 @@ export async function hostFileStageBuffer(payload: {
   mimeType: string;
   sessionIdentity: SessionIdentity;
 } & WorkspaceFileContext): Promise<StagedFilePayload> {
-  return await workspaceFileCapabilityExecute<StagedFilePayload>('files.stageBuffer', payload);
+  const result = await invokeIpc<unknown>('dialog:stageRendererBufferAttachment', {
+    base64: payload.base64,
+    fileName: payload.fileName,
+    mimeType: payload.mimeType,
+  });
+  return stagedFilePayload(result);
 }
 
-export async function hostFileThumbnail(payload: {
+export async function hostFileThumbnail(payload: ({
   path: string;
   mimeType: string;
   sessionIdentity: SessionIdentity;
-} & WorkspaceFileContext): Promise<FileThumbnailResult> {
-  return await workspaceFileCapabilityExecute<FileThumbnailResult>('files.thumbnail', payload);
+} | {
+  gatewayUrl: string;
+  mimeType: string;
+  agentId: string;
+  sessionIdentity: SessionIdentity;
+}) & WorkspaceFileContext): Promise<FileThumbnailResult> {
+  if ('gatewayUrl' in payload) {
+    return hostWorkspaceMediaThumbnail({
+      gatewayUrl: payload.gatewayUrl,
+      mimeType: payload.mimeType,
+      agentId: payload.agentId,
+      sessionIdentity: payload.sessionIdentity,
+    });
+  }
+
+  const relativePath = resolveWorkspaceRelativePath(payload.path, payload.workspaceRoot);
+  if (!relativePath) return { preview: null, fileSize: 0, error: 'invalidPath' };
+  return hostWorkspaceMediaThumbnail({
+    relativePath,
+    mimeType: payload.mimeType,
+    sessionIdentity: payload.sessionIdentity,
+  });
+}
+
+export async function hostFileThumbnails(payload: {
+  paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType?: string }>;
+  sessionIdentity: SessionIdentity;
+} & WorkspaceFileContext): Promise<Record<string, FileThumbnailResult>> {
+  const result: Record<string, FileThumbnailResult> = {};
+  const validPaths: Array<{
+    key: string;
+    input: Record<string, string>;
+    resultKey: string;
+  }> = [];
+
+  for (const entry of payload.paths) {
+    const resultKey = entry.gatewayUrl ?? entry.filePath ?? '';
+    if (!resultKey) continue;
+    result[resultKey] = { preview: null, fileSize: 0 };
+    const mimeType = entry.mimeType || 'application/octet-stream';
+
+    if (entry.gatewayUrl !== undefined) {
+      if (isWorkspaceGatewayUrl(entry.gatewayUrl) && isIdentifier(payload.sessionIdentity.agentId)) {
+        validPaths.push({
+          key: entry.gatewayUrl,
+          input: {
+            key: entry.gatewayUrl,
+            gatewayUrl: entry.gatewayUrl,
+            mimeType,
+            agentId: payload.sessionIdentity.agentId,
+          },
+          resultKey,
+        });
+      }
+      continue;
+    }
+
+    if (!entry.filePath) continue;
+    const relativePath = resolveWorkspaceRelativePath(entry.filePath, payload.workspaceRoot);
+    if (relativePath) {
+      validPaths.push({
+        key: entry.filePath,
+        input: { key: entry.filePath, relativePath, mimeType },
+        resultKey,
+      });
+    }
+  }
+
+  if (validPaths.length === 0) return result;
+  try {
+    const thumbnails = await hostCapabilityExecute<unknown>(workspaceMediaPayload(
+      'media.thumbnails',
+      payload.sessionIdentity,
+      { paths: validPaths.map(({ input }) => input) },
+    ));
+    if (!isRecord(thumbnails)) return result;
+    for (const entry of validPaths) {
+      const thumbnail = thumbnails[entry.key];
+      if (isMediaThumbnailResult(thumbnail)) result[entry.resultKey] = thumbnail;
+    }
+  } catch {
+    // Batch thumbnail failures are soft failures per legacy contract.
+  }
+  return result;
+}
+
+type WorkspaceMediaThumbnailPayload = {
+  relativePath: string;
+  mimeType: string;
+  sessionIdentity: SessionIdentity;
+} | {
+  gatewayUrl: string;
+  mimeType: string;
+  agentId: string;
+  sessionIdentity: SessionIdentity;
+};
+
+export async function hostWorkspaceMediaThumbnail(
+  payload: WorkspaceMediaThumbnailPayload,
+): Promise<FileThumbnailResult> {
+  if ('relativePath' in payload && !isSafeWorkspaceRelativePath(payload.relativePath)) {
+    return { preview: null, fileSize: 0, error: 'invalidPath' };
+  }
+  if ('gatewayUrl' in payload && (!isWorkspaceGatewayUrl(payload.gatewayUrl) || !isIdentifier(payload.agentId))) {
+    return { preview: null, fileSize: 0, error: 'invalidPath' };
+  }
+
+  try {
+    const input = 'relativePath' in payload
+      ? { relativePath: payload.relativePath, mimeType: payload.mimeType }
+      : {
+        gatewayUrl: payload.gatewayUrl,
+        mimeType: payload.mimeType,
+        agentId: payload.agentId,
+      };
+    const thumbnail = await hostCapabilityExecute<unknown>(workspaceMediaPayload(
+      'media.thumbnail',
+      payload.sessionIdentity,
+      input,
+    ));
+    return isMediaThumbnailResult(thumbnail)
+      ? thumbnail
+      : { preview: null, fileSize: 0, error: 'unavailable' };
+  } catch (error) {
+    return {
+      preview: null,
+      fileSize: 0,
+      error: workspaceFailure(error instanceof Error ? error.message : error),
+    };
+  }
+}
+
+function isWorkspaceMediaAttachment(value: unknown): value is StagedFilePayload {
+  return isRecord(value)
+    && hasExactKeys(value, ['stagedAttachmentId', 'fileName', 'mimeType', 'fileSize', 'preview'])
+    && typeof value.stagedAttachmentId === 'string'
+    && value.stagedAttachmentId.length > 0
+    && typeof value.fileName === 'string'
+    && value.fileName.length > 0
+    && typeof value.mimeType === 'string'
+    && value.mimeType.length > 0
+    && isSafeNonNegativeInteger(value.fileSize)
+    && (value.preview === null || typeof value.preview === 'string');
+}
+
+function isMediaThumbnailResult(value: unknown): value is FileThumbnailResult {
+  return isRecord(value)
+    && hasExactKeys(value, ['preview', 'fileSize'])
+    && (value.preview === null || (typeof value.preview === 'string' && isCanonicalPreview(value.preview)))
+    && isSafeNonNegativeInteger(value.fileSize);
+}
+
+function resolveWorkspaceRelativePath(value: string, workspaceRoot?: string): string | null {
+  const normalized = value.trim().replace(/\\/g, '/');
+  if (isSafeWorkspaceRelativePath(normalized)) return normalized;
+  if (!workspaceRoot) return null;
+  const root = workspaceRoot.trim().replace(/\\/g, '/').replace(/\/$/, '');
+  const comparableRoot = /^[A-Za-z]:\//.test(root) ? root.toLowerCase() : root;
+  const comparableValue = /^[A-Za-z]:\//.test(root) ? normalized.toLowerCase() : normalized;
+  const prefix = root === '/' || root.endsWith('/') ? comparableRoot : `${comparableRoot}/`;
+  if (!comparableValue.startsWith(prefix)) return null;
+  const relativePath = normalized.slice(root.length + (root.endsWith('/') ? 0 : 1));
+  return isSafeWorkspaceRelativePath(relativePath) ? relativePath : null;
+}
+
+function isSafeWorkspaceRelativePath(value: string): boolean {
+  return value.length > 0
+    && value.length <= 4096
+    && !value.includes('\0')
+    && !value.startsWith('/')
+    && !value.startsWith('\\')
+    && !value.includes(':')
+    && value.split(/[\\/]/).every((component) => component !== '' && component !== '.' && component !== '..');
+}
+
+function isWorkspaceGatewayUrl(value: string): boolean {
+  return value.length > 0
+    && value.length <= 4096
+    && !hasControlCharacter(value);
+}
+
+function isIdentifier(value: string): boolean {
+  return value.length > 0
+    && value.length <= 4096
+    && !hasControlCharacter(value);
+}
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127;
+  });
 }
 
 export async function hostFileReadBinary(
-  payload: {
-    path: string;
-    maxBytes?: number;
-    sessionIdentity: SessionIdentity;
-  } & WorkspaceFileContext,
+  payload: WorkspaceFileRequest & { maxBytes?: number } & WorkspaceFileContext,
 ): Promise<ReadBinaryFileResult> {
-  return await workspaceFileCapabilityExecute<ReadBinaryFileResult>('files.readBinary', payload);
+  const result = await workspaceFileFetch('/api/files/binary', 'files.readBinary', payload, (value) => (
+    isWorkspaceBinaryResponse(value) ? { ok: true, name: value.name, data: value.data, size: value.size } : null
+  ));
+  return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
 export async function hostFileStat(
-  payload: {
-    path: string;
-    sessionIdentity: SessionIdentity;
-  } & WorkspaceFileContext,
+  payload: WorkspaceFileRequest & WorkspaceFileContext,
 ): Promise<FilePreviewStatResult> {
-  return await workspaceFileCapabilityExecute<FilePreviewStatResult>('files.stat', payload);
+  const result = await workspaceFileFetch('/api/files/binary', 'files.stat', payload, (value) => (
+    isWorkspaceStatResponse(value)
+      ? { ok: true, name: value.name, isDirectory: value.isDirectory, size: value.size, mtimeMs: value.mtimeMs }
+      : null
+  ));
+  return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
 export async function hostFileListDir(
-  payload: {
-    path: string;
-    includeHidden?: boolean;
-    sessionIdentity: SessionIdentity;
-  } & WorkspaceFileContext,
-  options?: {
-    timeoutMs?: number;
-  },
+  payload: WorkspaceFileRequest & WorkspaceFileContext & { includeHidden?: boolean },
+  options?: { timeoutMs?: number },
 ): Promise<FilePreviewListDirResult> {
-  return await workspaceFileCapabilityExecute<FilePreviewListDirResult>('files.listDir', payload, {
-    timeoutMs: options?.timeoutMs ?? 60000,
-  });
+  const result = await workspaceFileFetch('/api/files/list-dir', 'files.listDir', payload, (value) => (
+    isWorkspaceDirectoryResponse(value) ? { ok: true, entries: value.entries } : null
+  ), { timeoutMs: options?.timeoutMs ?? 60000 });
+  return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
 function sessionCapabilityExecute<TResult>(input: {
@@ -517,7 +927,7 @@ function sessionCapabilityExecute<TResult>(input: {
   payload: Record<string, unknown>;
   scope: RuntimeScope;
   target?: CapabilityTarget | null;
-}, options?: { timeoutMs?: number }): Promise<TResult> {
+}, options?: SessionCapabilityOptions): Promise<TResult> {
   return hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
     id: input.capabilityId,
     operationId: input.operationId,
@@ -532,7 +942,7 @@ function sessionIdentityCapabilityExecute<TResult>(input: {
   operationId: string;
   payload: Record<string, unknown> & { sessionIdentity: SessionIdentity };
   target?: CapabilityTarget | null;
-}, options?: { timeoutMs?: number }): Promise<TResult> {
+}, options?: SessionCapabilityOptions): Promise<TResult> {
   const identity = input.payload.sessionIdentity;
   return sessionCapabilityExecute<TResult>({
     capabilityId: input.capabilityId,
@@ -545,6 +955,7 @@ function sessionIdentityCapabilityExecute<TResult>(input: {
 
 export async function hostSessionList(
   payload: { endpoint: RuntimeEndpointRef },
+  options?: { timeoutMs?: number },
 ): Promise<SessionListResult> {
   return sessionCapabilityExecute<SessionListResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
@@ -552,7 +963,7 @@ export async function hostSessionList(
     scope: runtimeInstanceScope(payload.endpoint),
     target: { kind: 'runtime-endpoint' },
     payload,
-  });
+  }, options);
 }
 
 export async function hostCapabilitiesList(): Promise<{ capabilities: CapabilityDescriptor[] }> {
@@ -631,24 +1042,14 @@ async function hostCapabilityExecute<TResult = unknown>(
     target?: CapabilityTarget | null;
     input?: unknown;
   },
-  options?: {
-    timeoutMs?: number;
-  },
+  options?: SessionCapabilityOptions,
 ): Promise<TResult> {
   return hostApiFetch('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify(payload),
     timeoutMs: options?.timeoutMs,
+    traceId: options?.traceId,
   });
-}
-
-function runtimeHostOperationTarget(operationId: string): CapabilityTarget {
-  return operationId === 'runtimeHost.prepareGatewayLaunch'
-    || operationId === 'runtimeHost.gatewayLifecycle'
-    || operationId === 'runtimeHost.gatewayReady'
-    || operationId === 'runtimeHost.gatewayControlUiAutoApprove'
-    ? { kind: 'gateway-control' }
-    : (operationId === 'runtimeHost.jobGet' ? { kind: 'runtime-job' } : { kind: 'runtime-endpoint' });
 }
 
 async function runtimeHostCapabilityExecute<TResult>(operationId: string, endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<TResult> {
@@ -656,7 +1057,7 @@ async function runtimeHostCapabilityExecute<TResult>(operationId: string, endpoi
     id: RUNTIME_HOST_CAPABILITY_ID,
     operationId,
     scope: runtimeInstanceScope(endpoint),
-    target: runtimeHostOperationTarget(operationId),
+    target: { kind: 'gateway-control' },
     body: input,
   }));
 }
@@ -667,31 +1068,6 @@ async function resolveRuntimeHostJobEndpoint(): Promise<RuntimeEndpointRef> {
     throw new Error(`runtime.host job lookup requires runtime-instance scope, got ${scope.kind}`);
   }
   return scope.endpoint;
-}
-
-export async function hostRuntimePrepareGatewayLaunch(payload: {
-  gatewayToken?: string;
-  proxyEnabled?: boolean;
-  proxyServer?: string;
-  proxyBypassRules?: string;
-}, endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.prepareGatewayLaunch', endpoint, payload);
-}
-
-export async function hostRuntimeGatewayLifecycle(payload: Record<string, unknown>, endpoint: RuntimeEndpointRef): Promise<{ success: boolean; job?: RuntimeJobSnapshot }> {
-  return await runtimeHostCapabilityExecute<{ success: boolean; job?: RuntimeJobSnapshot }>('runtimeHost.gatewayLifecycle', endpoint, payload);
-}
-
-export async function hostRuntimeGatewayReady(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayReady', endpoint, input);
-}
-
-export async function hostRuntimeGatewayControlUiAutoApprove(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayControlUiAutoApprove', endpoint, input);
-}
-
-export async function hostDiagnosticsCollect(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('diagnostics.collect', endpoint);
 }
 
 export async function hostRuntimeJobGet<TResult = unknown>(jobId: string, endpoint: RuntimeEndpointRef): Promise<RuntimeJobLookupResult<TResult>> {
@@ -796,27 +1172,20 @@ export async function waitForRuntimeJobResult<TResult = void>(
   });
 }
 
-export async function resolveHydratedSessionSnapshot(input: {
-  initial: { hydrationJob?: RuntimeJobSnapshot<unknown>; snapshot?: SessionStateSnapshot };
-  refetch: () => Promise<{ snapshot?: SessionStateSnapshot }>;
-  timeoutMs?: number;
-}): Promise<SessionStateSnapshot | null> {
-  if (input.initial.snapshot) {
-    return input.initial.snapshot;
-  }
-  const hydrationJobId = input.initial.hydrationJob?.id;
-  if (!hydrationJobId) {
-    return null;
-  }
-  const endpoint = input.initial.hydrationJob?.result && typeof input.initial.hydrationJob.result === 'object' && 'sessionIdentity' in input.initial.hydrationJob.result
-    ? (input.initial.hydrationJob.result as { sessionIdentity?: SessionIdentity }).sessionIdentity?.endpoint
-    : undefined;
-  await waitForRuntimeJobResult(hydrationJobId, {
-    timeoutMs: input.timeoutMs,
-    endpoint,
-  });
-  const result = await input.refetch();
-  return result.snapshot ?? null;
+export async function hostRuntimePrepareGatewayLaunch(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.prepareGatewayLaunch', endpoint, input);
+}
+
+export async function hostRuntimeGatewayLifecycle(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayLifecycle', endpoint, input);
+}
+
+export async function hostRuntimeGatewayReady(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayReady', endpoint, input);
+}
+
+export async function hostRuntimeGatewayControlUiAutoApprove(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayControlUiAutoApprove', endpoint, input);
 }
 
 export async function hostSessionWindowFetch(
@@ -844,14 +1213,15 @@ export async function hostSessionNew(
     endpoint: RuntimeEndpointRef;
     agentId: string;
   },
-): Promise<SessionNewResult> {
-  return sessionCapabilityExecute<SessionNewResult>({
+  options?: Pick<SessionCapabilityOptions, 'traceId'>,
+): Promise<SessionView | { outcome: 'target_rejected' | 'unknown' }> {
+  return sessionCapabilityExecute<SessionView | { outcome: 'target_rejected' | 'unknown' }>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: 'sessions.create',
     scope: agentScope(payload.endpoint, payload.agentId),
     target: { kind: 'agent', agentId: payload.agentId },
     payload,
-  });
+  }, { traceId: options?.traceId });
 }
 
 export async function hostSessionDelete(
@@ -928,9 +1298,7 @@ export async function hostSessionLoad(
     sessionIdentity: SessionIdentity;
     limit?: number;
   },
-  options?: {
-    timeoutMs?: number;
-  },
+  options?: SessionCapabilityOptions,
 ): Promise<HostSessionLoadResult> {
   return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
@@ -989,8 +1357,8 @@ export async function hostSessionAbort(
     sessionIdentity: SessionIdentity;
     approvalIds?: string[];
   },
-): Promise<SessionLoadResult & { success?: boolean }> {
-  return sessionIdentityCapabilityExecute<SessionLoadResult & { success?: boolean }>({
+): Promise<HostSessionAbortResult> {
+  return sessionIdentityCapabilityExecute<HostSessionAbortResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: 'sessions.abort',
     payload,
@@ -1024,18 +1392,22 @@ export async function hostSessionResolveApproval(
   });
 }
 
+export type HostSessionModelSelectionResult = Readonly<{
+  outcome: 'succeeded' | 'target_rejected' | 'outcome_unknown';
+}>;
+
 export async function hostSessionPatch(
   payload: {
     sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
-    runtimeModelRef: string;
+    modelSelectionId: string;
   },
-): Promise<SessionLoadResult & { success?: boolean; error?: string }> {
-  return sessionIdentityCapabilityExecute<SessionLoadResult & { success?: boolean; error?: string }>({
+): Promise<HostSessionModelSelectionResult> {
+  return sessionIdentityCapabilityExecute<HostSessionModelSelectionResult>({
     capabilityId: SESSION_MODEL_SELECTION_CAPABILITY_ID,
     operationId: 'sessions.patchModel',
-    target: { kind: 'model-selection', identity: payload.sessionIdentity, runtimeModelRef: payload.runtimeModelRef },
+    target: { kind: 'model-selection', identity: payload.sessionIdentity, modelSelectionId: payload.modelSelectionId },
     payload,
   }, { timeoutMs: SESSION_PATCH_TIMEOUT_MS });
 }
@@ -1048,18 +1420,18 @@ export async function hostSessionPrompt(
     message: string;
     idempotencyKey?: string;
     deliver?: boolean;
-    media?: Array<{
-      filePath: string;
-      mimeType?: string;
-      fileName?: string;
-      fileSize?: number;
-      preview?: string | null;
+    attachments?: Array<{
+      stagedAttachmentId: string;
+      fileName: string;
+      mimeType: string;
+      fileSize: number;
     }>;
   },
-): Promise<SessionPromptResult> {
-  return sessionIdentityCapabilityExecute<SessionPromptResult>({
+  options?: Pick<SessionCapabilityOptions, 'traceId'>,
+): Promise<HostSessionPromptResult> {
+  return sessionIdentityCapabilityExecute<HostSessionPromptResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
-    operationId: payload.media?.length ? 'sessions.sendWithMedia' : 'sessions.prompt',
+    operationId: payload.attachments?.length ? 'sessions.sendWithMedia' : 'sessions.prompt',
     payload,
-  }, { timeoutMs: SESSION_PROMPT_TIMEOUT_MS });
+  }, { timeoutMs: SESSION_PROMPT_TIMEOUT_MS, traceId: options?.traceId });
 }

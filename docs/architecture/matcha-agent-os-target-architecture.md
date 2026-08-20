@@ -554,6 +554,24 @@ Composition Root 是唯一全局装配点，它验证：
 
 这将当前 `RuntimeHostModuleManifest` 的雏形提升为最终静态模块系统。
 
+### 8.1 Rust crate/module naming manifest
+
+层名、Module Manifest 和 Cargo crate 不是同一层面的名称：`Foundation Kernel`、`Matcha Platform Core`、`Domain Module`、`Runtime Integration`、`Native Runtime Edge` 与 `Delivery` 表达 owner 边界，不能据此自动推导或预建同名 package。Cargo crate 只在某个已冻结的 atomic owner block 已有真实 consumer、独立依赖/交付/trust 边界时创建；同一 owner 内部的内聚职责优先使用 module。
+
+| owner boundary | Cargo package / crate | public import | physical state | freeze rule |
+|---|---|---|---|---|
+| Foundation Kernel | `foundation-kernel` / `foundation_kernel` | `foundation_kernel::process` | 已创建 | 仅承载跨 Runtime 的受管进程树 authority；不得吸收 runtime-specific readiness、recovery 或领域状态。 |
+| Rust Local Process Host | 未冻结 | 未冻结 | 不创建空 Host crate | 仅在 OpenClaw 与 matcha-agent 的 concrete lifecycle contract、readiness 和 recovery oracle 已分别冻结后，为固定、具名的双 peer composition 创建。 |
+| OpenClaw Runtime Integration | 未冻结 | 未冻结 | 不创建空 integration crate | OpenClaw Gateway protocol、profile、event/config translation 的具体 Rust owner 激活时，连同真实 consumer 与 contract fixture 一起冻结。 |
+| matcha-agent Runtime Integration | 未冻结 | 未冻结 | 不创建空 integration crate | app-server client、transport、event bridge 的具体 Rust owner 激活时，连同版本化协议和 replay/fault oracle 一起冻结。 |
+| Matcha Platform Core | 未冻结 | 未冻结 | 不创建空 core crate | 只在已有至少两个 concrete Runtime consumer 的 identity、capability/scope、execution/receipt/correlation contract 形成独立编译或 trust boundary 时创建。 |
+| Session、TeamRun、Remote Fleet、Provider、Plugin 等 Domain Module | 各自未冻结 | 各自未冻结 | 不按旧 TypeScript 目录预建 | 每个领域以自己的事实源、状态机、公开 port、storage owner 和真实 consumer 单独冻结；不得从 `application/**`、`composition/**` 或 adapter 目录机械映射。 |
+| Native Runtime Edge 与 Delivery | 不属于本 Rust workspace 的预设 crate | 不适用 | 不创建 | OpenClaw/matcha-agent 保留其 LLM loop、worker、session/store 与 tool harness；Electron 保留桌面交付。二者的边界由协议与 lifecycle contract 表达，而不是由 Rust wrapper crate 伪装。 |
+
+每个后续 atomic owner block 在写代码前必须将下列记录追加到本 manifest：旧 active owner 与入口、目标 Rust owner、Cargo package/crate（若真实 crate 边界成立）、module 路径、预期 public import、稳定术语与例外、允许修改路径、真实 consumer、验证 oracle、旧路径删除范围及 cutover 条件。未能填全的行保持“未冻结”，不得通过 alias、re-export、临时目录、placeholder trait 或空 binary 代替决策。
+
+当前可继续的依赖顺序固定为：`foundation_kernel::process` 的可信 tree authority → 两个 peer 的 Native Runtime Edge lifecycle contract → 两个 concrete Runtime Integration owner → 固定、具名的 Local Process Host composition → Rust binary E2E → Electron Delivery atomic cutover。该顺序不是预建 crate 清单，也不授权跳过任一 peer 的协议、secret 或 fault oracle。
+
 严格区分：
 
 ```text

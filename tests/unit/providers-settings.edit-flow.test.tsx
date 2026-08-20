@@ -24,8 +24,6 @@ const hoisted = vi.hoisted(() => {
         vendorId: 'custom',
         label: '自定义',
         authMode: 'api_key',
-        baseUrl: 'https://api.example.com/v1',
-        apiProtocol: 'openai-completions',
         enabled: true,
         createdAt: '2026-03-15T00:00:00.000Z',
         updatedAt: '2026-03-15T00:00:00.000Z',
@@ -62,7 +60,6 @@ const providerStoreState = vi.hoisted(() => ({
   createAccount: vi.fn().mockResolvedValue(undefined),
   removeAccount: vi.fn().mockResolvedValue(undefined),
   updateAccount: vi.fn().mockResolvedValue(undefined),
-  validateAccountApiKey: vi.fn().mockResolvedValue({ valid: true }),
 }));
 
 const catalogState = vi.hoisted(() => ({
@@ -72,20 +69,16 @@ const catalogState = vi.hoisted(() => ({
   saving: false,
   error: null as string | null,
   refresh: vi.fn().mockResolvedValue(undefined),
-  replaceCredentialModels: vi.fn().mockResolvedValue(undefined),
+  replaceAccountModels: vi.fn().mockResolvedValue(undefined),
 }));
 
 const settingsState = vi.hoisted(() => ({
   devModeUnlocked: false,
 }));
 
-const gatewayState = vi.hoisted(() => ({
-  status: {
-    processState: 'running',
-    gatewayReady: true,
-    healthSummary: 'healthy',
-    transportState: 'connected',
-  },
+const runtimeHostState = vi.hoisted(() => ({
+  runtimeHost: { lifecycle: 'running' },
+  isInitialized: true,
 }));
 
 vi.mock('@/stores/providers', () => ({
@@ -103,7 +96,7 @@ vi.mock('@/stores/settings', () => ({
 }));
 
 vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
+  useRuntimeHostStore: (selector: (state: typeof runtimeHostState) => unknown) => selector(runtimeHostState),
 }));
 
 describe('providers settings edit flow', () => {
@@ -111,14 +104,13 @@ describe('providers settings edit flow', () => {
     i18n.changeLanguage('en');
     vi.clearAllMocks();
     providerStoreState.providerSnapshot = structuredClone(hoisted.defaultProviderSnapshot);
-    providerStoreState.validateAccountApiKey.mockResolvedValue({ valid: true });
     catalogState.models = [];
     catalogState.ready = true;
     catalogState.loading = false;
     catalogState.saving = false;
     catalogState.error = null;
     catalogState.refresh.mockResolvedValue(undefined);
-    catalogState.replaceCredentialModels.mockResolvedValue(undefined);
+    catalogState.replaceAccountModels.mockResolvedValue(undefined);
   });
 
   function expandProviderCard(label: string) {
@@ -153,15 +145,16 @@ describe('providers settings edit flow', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
-  it('编辑态只显示凭证配置，不再显示模型和回退配置', () => {
+  it('编辑态只接受私密 API key，不显示旧账号配置字段', () => {
     render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));
 
+    expect(screen.getByTestId('provider-edit-key-input-custom-1')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Base URL')).toBeNull();
+    expect(screen.queryByLabelText('Protocol')).toBeNull();
     expect(screen.queryByLabelText('User-Agent')).toBeNull();
-    expect(screen.getByLabelText('Base URL')).toBeInTheDocument();
-    expect(screen.getByLabelText('Protocol')).toBeInTheDocument();
     expect(screen.queryByLabelText('Model ID')).toBeNull();
     expect(screen.queryByLabelText('Context Window')).toBeNull();
     expect(screen.queryByLabelText('Max Tokens')).toBeNull();
@@ -170,7 +163,7 @@ describe('providers settings edit flow', () => {
 
   it('在 provider 卡片内管理模型清单', async () => {
     catalogState.models = [{
-      credentialId: 'custom-1',
+      accountId: 'custom-1',
       modelId: 'gpt-5.4',
       capabilities: ['chat'],
       contextWindow: 200000,
@@ -195,7 +188,7 @@ describe('providers settings edit flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
-      expect(catalogState.replaceCredentialModels).toHaveBeenCalledWith('custom-1', [
+      expect(catalogState.replaceAccountModels).toHaveBeenCalledWith('custom-1', [
         { modelId: 'gpt-5.4', capabilities: ['chat'], contextWindow: 200000 },
         { modelId: 'gpt-5.5', capabilities: ['chat'] },
       ], 'custom');
@@ -245,7 +238,7 @@ describe('providers settings edit flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add ark-code-latest' }));
 
     await waitFor(() => {
-      expect(catalogState.replaceCredentialModels).toHaveBeenCalledWith('ark-main', [
+      expect(catalogState.replaceAccountModels).toHaveBeenCalledWith('ark-main', [
         { modelId: 'ark-code-latest', capabilities: ['chat'] },
       ], 'ark');
     });
@@ -266,30 +259,31 @@ describe('providers settings edit flow', () => {
     expect(screen.queryByRole('button', { name: 'Transcription' })).toBeNull();
   });
 
-  it('新增自定义 provider 时只提交凭证配置', async () => {
+  it('新增自定义 provider 时只提交固定账号事实和私密 API key', async () => {
     render(<ProvidersSettings />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
     fireEvent.click(within(dialog).getAllByText('Custom')[0]!);
 
+    expect(screen.queryByLabelText('Base URL')).toBeNull();
+    expect(screen.queryByLabelText('Protocol')).toBeNull();
     expect(screen.queryByLabelText('User-Agent')).toBeNull();
-    expect(screen.getByLabelText('Base URL')).toBeInTheDocument();
-    expect(screen.getByLabelText('Protocol')).toBeInTheDocument();
     expect(screen.queryByLabelText('Model ID')).toBeNull();
     expect(screen.queryByLabelText('Context Window')).toBeNull();
     expect(screen.queryByLabelText('Max Tokens')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-custom' } });
-    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://custom.example/v1' } });
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add AI Provider' })).getByRole('button', { name: 'Add Provider' }));
 
     await waitFor(() => {
       expect(providerStoreState.createAccount).toHaveBeenCalledWith(
         expect.objectContaining({
+          id: expect.any(String),
           vendorId: 'custom',
-          baseUrl: 'https://custom.example/v1',
-          apiProtocol: 'openai-completions',
+          label: 'Custom',
+          authMode: 'api_key',
+          enabled: true,
         }),
         'sk-custom',
       );
@@ -338,93 +332,78 @@ describe('providers settings edit flow', () => {
     });
   });
 
-  it('新增自定义媒体 provider 时只提交接口契约，不登记模型', async () => {
+  it('OAuth provider 启动时提交聊天账号 kind', async () => {
+    providerStoreState.providerSnapshot.credentials = [];
+    providerStoreState.providerSnapshot.statuses = [];
+    providerStoreState.providerSnapshot.vendors = [{
+      id: 'openai',
+      name: 'OpenAI',
+      icon: '💚',
+      placeholder: 'sk-proj-...',
+      requiresApiKey: true,
+      isOAuth: true,
+      supportsApiKey: true,
+      category: 'official',
+      supportedAuthModes: ['oauth_browser', 'api_key'],
+      defaultAuthMode: 'oauth_browser',
+      supportsMultipleAccounts: true,
+    }];
+    vi.mocked(window.electron.ipcRenderer.invoke).mockResolvedValue({
+      flowId: 'flow-1',
+      status: 'started',
+    });
+
     render(<ProvidersSettings />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
-    fireEvent.click(within(dialog).getAllByText('Custom')[0]!);
-    fireEvent.click(screen.getByRole('button', { name: 'Media provider' }));
-
-    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-media' } });
-    fireEvent.change(screen.getByLabelText('Display Name'), { target: { value: 'OpenAI Images' } });
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add AI Provider' })).getByRole('button', { name: 'Add Provider' }));
+    fireEvent.click(within(dialog).getByText('OpenAI'));
+    fireEvent.click(screen.getByRole('button', { name: 'Login with Browser' }));
 
     await waitFor(() => {
-      expect(providerStoreState.createAccount).toHaveBeenCalledWith(
+      expect(window.electron.ipcRenderer.invoke).toHaveBeenCalledWith(
+        'providers:startOAuth',
         expect.objectContaining({
-          vendorId: 'custom',
-          providerKind: 'media',
-          label: 'OpenAI Images',
-          mediaApiProtocol: 'openai',
-          apiProtocol: undefined,
+          provider: 'openai',
+          account: {
+            id: expect.any(String),
+            provider: 'openai',
+            label: 'OpenAI',
+            enabled: true,
+            kind: 'chat',
+            authMode: 'oauthBrowser',
+            revision: 1,
+          },
         }),
-        'sk-media',
       );
     });
-    expect(catalogState.replaceCredentialModels).not.toHaveBeenCalled();
   });
 
-  it('媒体 provider 的图像生成模型不显示聊天模型限制字段', () => {
-    providerStoreState.providerSnapshot.credentials = [
-      {
-        id: 'custom-media-1',
-        vendorId: 'custom',
-        providerKind: 'media',
-        label: 'Images',
-        authMode: 'api_key',
-        baseUrl: 'https://media.example/v1beta',
-        mediaApiProtocol: 'google',
-        enabled: true,
-        createdAt: '2026-05-19T00:00:00.000Z',
-        updatedAt: '2026-05-19T00:00:00.000Z',
-      },
-    ];
-    providerStoreState.providerSnapshot.statuses = [];
-    catalogState.models = [{
-      credentialId: 'custom-media-1',
-      modelId: 'gemini-2.5-flash-image',
-      capabilities: ['imageGenerate'],
-      contextWindow: 128000,
-      maxTokens: 8192,
-      timeoutMs: 90000,
-      aspectRatio: '16:9',
-      resolution: '2K',
-    }];
-
+  it('删除 provider 时将当前 accountId 交给 store mutation', async () => {
     render(<ProvidersSettings />);
 
-    expandProviderCard('Images');
+    expandProviderCard('Custom');
+    fireEvent.click(screen.getByTitle('Delete provider'));
 
-    expect(screen.getByDisplayValue('gemini-2.5-flash-image')).toBeInTheDocument();
-    expect(screen.getByLabelText('Timeout ms')).toBeInTheDocument();
-    expect(screen.getByLabelText('Ratio')).toBeInTheDocument();
-    expect(screen.getByLabelText('Resolution')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Context window')).toBeNull();
-    expect(screen.queryByLabelText('Max output tokens')).toBeNull();
+    await waitFor(() => {
+      expect(providerStoreState.removeAccount).toHaveBeenCalledWith('custom-1');
+    });
   });
 
-  it('编辑 provider 时验证失败应显示行内错误且不保存', async () => {
-    providerStoreState.validateAccountApiKey.mockResolvedValueOnce({
-      valid: false,
-      error: 'Invalid API key',
-    });
-
+  it('编辑 provider 时直接将新的 API key 交给私密 Main ingress', async () => {
     render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));
     fireEvent.change(screen.getByTestId('provider-edit-key-input-custom-1'), {
-      target: { value: 'sk-bad' },
+      target: { value: 'sk-next' },
     });
     fireEvent.click(screen.getByTestId('provider-edit-save-custom-1'));
 
-    expect(await screen.findByTestId('provider-edit-validation-error-custom-1')).toHaveTextContent('Failed: Invalid API key');
-    expect(providerStoreState.updateAccount).not.toHaveBeenCalled();
-
-    fireEvent.change(screen.getByTestId('provider-edit-key-input-custom-1'), {
-      target: { value: 'sk-good' },
-    });
-    expect(screen.queryByTestId('provider-edit-validation-error-custom-1')).toBeNull();
+    await waitFor(() => expect(providerStoreState.updateAccount).toHaveBeenCalledWith(
+      'custom-1',
+      {},
+      'sk-next',
+    ));
   });
 });

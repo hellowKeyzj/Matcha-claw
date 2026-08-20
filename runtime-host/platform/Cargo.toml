@@ -1,0 +1,18 @@
+[package]
+name = "platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zeroize.workspace = true

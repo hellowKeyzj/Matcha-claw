@@ -20,6 +20,8 @@
 
 ## 3. 事件帧结构
 
+Rust Integration 的 control connection 与 OpenClaw Web 一致：`connect.challenge -> connect -> hello-ok` 后，在同一条 backend WebSocket 上同时接收 RPC response 与 Gateway event。Integration frame loop 只按 `id` 分流 response、按事件名投递 event；未知 response id 直接丢弃，socket close 会释放 pending 请求。
+
 Gateway 事件统一使用 `event` 帧：
 
 ```json

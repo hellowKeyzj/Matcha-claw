@@ -8,8 +8,6 @@ import {
 function createEntry(day: number, totalTokens: number): UsageHistoryEntry {
   return {
     timestamp: `2026-03-${String(day).padStart(2, '0')}T12:00:00.000Z`,
-    sessionId: `session-${day}`,
-    agentId: 'main',
     model: 'gpt-5',
     inputTokens: totalTokens,
     outputTokens: 0,

@@ -1,0 +1,212 @@
+    Checking matcha-agent v0.1.0 (E:\code\Matcha-claw\runtime-host\integrations\matcha-agent)
+warning: associated functions `restore_with_materialization_lifecycles` and `restore_with_materialization_lifecycles_and_decisions` are never used
+   --> domains\organization\src\store\facts.rs:414:19
+    |
+324 | impl OrganizationFacts {
+    | ---------------------- associated functions in this implementation
+...
+414 |     pub(crate) fn restore_with_materialization_lifecycles(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+426 |     pub(crate) fn restore_with_materialization_lifecycles_and_decisions(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `durable_parts` is never used
+   --> domains\organization\src\run\task_board\model.rs:501:19
+    |
+443 | impl TaskBoardFacts {
+    | ------------------- method in this implementation
+...
+501 |     pub(crate) fn durable_parts(
+    |                   ^^^^^^^^^^^^^
+
+warning: `organization` (lib) generated 2 warnings
+    Checking environment v0.1.0 (E:\code\Matcha-claw\runtime-host\domains\environment)
+warning: associated function `from_delete_ids` is never used
+   --> domains\fleet\src\environment\mod.rs:549:19
+    |
+548 | impl EnvironmentCleanupPlan {
+    | --------------------------- associated function in this implementation
+549 |     pub(crate) fn from_delete_ids(delete: Vec<ManagedResourceId>) -> Self {
+    |                   ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `leases_mut` is never used
+   --> domains\fleet\src\store\facts.rs:284:19
+    |
+ 72 | impl FleetFacts {
+    | --------------- method in this implementation
+...
+284 |     pub(crate) fn leases_mut(&mut self) -> &mut LeaseBook<platform::endpoint::EndpointId> {
+    |                   ^^^^^^^^^^
+
+warning: `fleet` (lib) generated 2 warnings
+warning: unused import: `HydrationResult`
+  --> integrations\matcha-agent\src\session\canonical.rs:12:36
+   |
+12 |         self, HydrationIncomplete, HydrationResult, HydrationSnapshot, HydrationWindowRequest,
+   |                                    ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `with_secret_references` is never used
+   --> domains\environment\src\connectors.rs:302:19
+    |
+219 | impl Connector {
+    | -------------- method in this implementation
+...
+302 |     pub(crate) fn with_secret_references(mut self, references: ConnectorSecretReferences) -> Self {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `activated_at_ms` and `plan` are never read
+  --> domains\environment\src\license\legacy.rs:54:5
+   |
+47 | struct CacheFile {
+   |        --------- fields in this struct
+...
+54 |     activated_at_ms: u64,
+   |     ^^^^^^^^^^^^^^^
+...
+61 |     plan: Option<String>,
+   |     ^^^^
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+  --> integrations\matcha-agent\src\session\hydration\mod.rs:93:17
+   |
+93 |     let facts = NativeSessionFacts::from_native(session, snapshot, replay)
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                    ------ argument #3 of type `HydrationSnapshot` is missing
+   |
+note: associated function defined here
+  --> integrations\matcha-agent\src\session\facts.rs:84:19
+   |
+84 |     pub(crate) fn from_native(
+   |                   ^^^^^^^^^^^
+...
+87 |         transcript: HydrationSnapshot,
+   |         -----------------------------
+help: provide the argument
+   |
+93 |     let facts = NativeSessionFacts::from_native(session, snapshot, /* HydrationSnapshot */, replay)
+   |                                                                    ++++++++++++++++++++++++
+
+error[E0599]: no method named `facts` found for struct `HydrationSnapshot` in the current scope
+   --> integrations\matcha-agent\src\session\canonical.rs:31:14
+    |
+ 30 | /         self.hydration
+ 31 | |             .facts()
+    | |             -^^^^^ method not found in `HydrationSnapshot`
+    | |_____________|
+    |
+    |
+   ::: integrations\matcha-agent\src\session\hydration\model.rs:428:1
+    |
+428 |   pub struct HydrationSnapshot {
+    |   ---------------------------- method `facts` not found for this struct
+
+error[E0599]: no method named `facts` found for struct `HydrationSnapshot` in the current scope
+   --> integrations\matcha-agent\src\session\canonical.rs:43:14
+    |
+ 41 |           &self
+    |  __________-
+ 42 | |             .hydration
+ 43 | |             .facts()
+    | |             -^^^^^ method not found in `HydrationSnapshot`
+    | |_____________|
+    |
+    |
+   ::: integrations\matcha-agent\src\session\hydration\model.rs:428:1
+    |
+428 |   pub struct HydrationSnapshot {
+    |   ---------------------------- method `facts` not found for this struct
+
+warning: `environment` (lib) generated 2 warnings
+    Checking openclaw v0.1.0 (E:\code\Matcha-claw\runtime-host\integrations\openclaw)
+Some errors have detailed explanations: E0061, E0599.
+For more information about an error, try `rustc --explain E0061`.
+warning: `matcha-agent` (lib) generated 1 warning
+error: could not compile `matcha-agent` (lib) due to 3 previous errors; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused import: `OsStr`
+ --> integrations\openclaw\src\lifecycle\launch.rs:2:11
+  |
+2 |     ffi::{OsStr, OsString},
+  |           ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `decode_config_base_hash` is never used
+   --> integrations\openclaw\src\gateway\wire\channel.rs:640:15
+    |
+640 | pub(crate) fn decode_config_base_hash(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `activate_stdio` is never used
+  --> integrations\openclaw\src\lifecycle\stdio.rs:62:4
+   |
+62 | fn activate_stdio<I, O, E>(
+   |    ^^^^^^^^^^^^^^
+
+warning: field `entry` is never read
+  --> integrations\openclaw\src\operations\channel_pairing.rs:92:5
+   |
+90 | struct OpenClawCommand {
+   |        --------------- field in this struct
+91 |     executable: PathBuf,
+92 |     entry: PathBuf,
+   |     ^^^^^
+   |
+   = note: `OpenClawCommand` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `plugin_id`, `enabled`, and `slugs` are never used
+   --> integrations\openclaw\src\projection\plugin_companion.rs:156:19
+    |
+141 | impl ManifestSkillIntent {
+    | ------------------------ methods in this implementation
+...
+156 |     pub(crate) fn plugin_id(&self) -> &str {
+    |                   ^^^^^^^^^
+...
+160 |     pub(crate) fn enabled(&self) -> bool {
+    |                   ^^^^^^^
+...
+164 |     pub(crate) fn slugs(&self) -> &[String] {
+    |                   ^^^^^
+
+warning: function `apply_transition_config` is never used
+  --> integrations\openclaw\src\projection\plugin_lifecycle.rs:54:15
+   |
+54 | pub(crate) fn apply_transition_config(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MANAGED_MARKER` is never used
+  --> integrations\openclaw\src\projection\plugins.rs:22:7
+   |
+22 | const MANAGED_MARKER: &str = ".matchaclaw-managed";
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `BYPASS_RULES_NATIVE_KEY` is never used
+  --> integrations\openclaw\src\projection\settings.rs:17:7
+   |
+17 | const BYPASS_RULES_NATIVE_KEY: Option<&str> = None;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `list_dir` and `list_root_dir` are never used
+   --> integrations\openclaw\src\workspace\access.rs:92:19
+    |
+ 41 | impl WorkspaceFiles {
+    | ------------------- methods in this implementation
+...
+ 92 |     pub(super) fn list_dir(
+    |                   ^^^^^^^^
+...
+108 |     pub(super) fn list_root_dir(&self) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: `openclaw` (lib) generated 9 warnings (run `cargo fix --lib -p openclaw` to apply 1 suggestion)

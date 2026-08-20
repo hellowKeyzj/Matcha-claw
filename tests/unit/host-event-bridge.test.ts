@@ -1,493 +1,606 @@
-import { EventEmitter } from 'node:events';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { RendererEventRouteRegistry } from '../../electron/main/renderer-event-routes';
 
-vi.mock('../../electron/services/providers/oauth/browser-oauth-manager', () => ({
-  browserOAuthManager: new EventEmitter(),
-}));
+import type {
+  DirectRuntimeHostExit,
+} from '../../electron/main/runtime-host-delivery/direct-host';
+import {
+  type RuntimeHostControlCommand,
+  type RuntimeHostControlOutcome,
+  type RuntimeHostSafeEvent,
+} from '../../electron/main/runtime-host-delivery/control';
 
-vi.mock('../../electron/services/providers/oauth/device-oauth-manager', () => ({
-  deviceOAuthManager: new EventEmitter(),
-}));
+function succeeded(result: Record<string, unknown>): RuntimeHostControlOutcome {
+  return { kind: 'succeeded', result };
+}
 
-class FakeGatewayManager extends EventEmitter {
-  private status: { processState: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting'; port: number };
+function createEventBus() {
+  const listeners = new Map<string, (payload: unknown) => void>();
+  return {
+    emit: vi.fn((eventName: string, payload: unknown) => {
+      listeners.get(eventName)?.(payload);
+    }),
+    on: vi.fn((eventName: string, listener: (payload: unknown) => void) => {
+      listeners.set(eventName, listener);
+      return () => listeners.delete(eventName);
+    }),
+  };
+}
 
-  constructor() {
-    super();
-    this.status = { processState: 'stopped', port: 18789 };
-  }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
-  getStatus() {
-    return this.status;
+function createSessionDelta(overrides: Record<string, unknown> = {}) {
+  return {
+    sessionKey: 'session-1',
+    routeKey: 'renderer-route:bound',
+    epoch: 1,
+    seq: 1,
+    cursor: 1,
+    changes: [{ kind: 'runtimeChanged', runtime: {
+      phase: 'started', activeRunId: null, issue: null,
+    } }],
+    ...overrides,
+  };
+}
+
+async function flushBridge(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) {
+    await Promise.resolve();
   }
 }
 
-describe('host event bridge runtime-host lifecycle', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.clearAllMocks();
-  });
-
-  it('会透传 runtime-host status/error/restart 事件到 host event 通道', async () => {
-    const gatewayManager = new FakeGatewayManager();
-    let gatewayEventHandler: ((eventName: string, payload: unknown) => void) | null = null;
-
-    let runtimeState = {
-      lifecycle: 'running' as 'running' | 'stopping',
-      runtimeLifecycle: 'running' as 'running' | 'stopping',
-      pid: 1111,
-      activePluginCount: 2,
-    };
-    let runtimeHealth = {
-      ok: true,
-      lifecycle: 'running' as const,
-      activePluginCount: 2,
-      degradedPlugins: [] as string[],
-    };
-
-    let stateChangeHandler: (() => void) | null = null;
-    const runtimeHostManager = {
-      getState: vi.fn(() => runtimeState),
-      checkHealth: vi.fn(async () => runtimeHealth),
-      readGatewayStatus: vi.fn(async () => ({
-        state: 'connected',
-        portReachable: true,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 123,
-      })),
-      emitGatewayEvent: vi.fn(),
-      onGatewayEvent: vi.fn((handler: (eventName: string, payload: unknown) => void) => {
-        gatewayEventHandler = handler;
-        return () => {
-          gatewayEventHandler = null;
-        };
-      }),
-      emitRuntimeJobEvent: vi.fn(),
-      onRuntimeJobEvent: vi.fn(() => () => {}),
-      onStateChange: vi.fn((handler: () => void) => {
-        stateChangeHandler = handler;
-        return () => {
-          stateChangeHandler = null;
-        };
-      }),
-    };
-    const eventBus = { emit: vi.fn() };
-    const send = vi.fn();
-    const mainWindow = { webContents: { send } };
-
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-
-    registerHostEventBridge({
-      gatewayManager: gatewayManager as never,
-      runtimeHostManager: runtimeHostManager as never,
-      hostEventBus: eventBus as never,
-      getMainWindow: () => mainWindow as never,
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'running',
-        pid: 1111,
-      }),
-    );
-
-    runtimeState = {
-      ...runtimeState,
-      lifecycle: 'stopping',
-      runtimeLifecycle: 'stopping',
-    };
-    stateChangeHandler?.();
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'stopping',
-        hostLifecycle: 'stopping',
-        runtimeLifecycle: 'stopping',
-      }),
-    );
-    runtimeState = {
-      ...runtimeState,
-      lifecycle: 'running',
-      runtimeLifecycle: 'running',
-      pid: 2222,
-    };
-    stateChangeHandler?.();
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:restart',
-      expect.objectContaining({
-        previousPid: 1111,
-        pid: 2222,
-        status: 'running',
-      }),
-    );
-
-    runtimeHealth = {
-      ...runtimeHealth,
-      ok: false,
-      lifecycle: 'error',
-      degradedPlugins: ['security-core'],
-      error: 'runtime-host child health check failed',
-    } as never;
-    stateChangeHandler?.();
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:error',
-      expect.objectContaining({
-        status: 'degraded',
-        message: 'runtime-host child health check failed',
-      }),
-    );
-
-    expect(send).toHaveBeenCalledWith(
-      'host:event',
-      expect.objectContaining({
-        eventName: 'runtime-host:status',
-      }),
-    );
-
-    gatewayEventHandler?.('gateway:notification', {
-      method: 'agent',
-      params: { runId: 'run-1' },
-    });
-    gatewayEventHandler?.('session:update', {
-      sessionUpdate: 'session_info_update',
-      phase: 'started',
-      runId: 'run-1',
-      sessionKey: 'agent:main:main',
-      laneKey: 'main',
-    });
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'gateway:notification',
-      expect.objectContaining({
-        method: 'agent',
-      }),
-    );
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'session:update',
-      expect.objectContaining({
-        sessionUpdate: 'session_info_update',
-        phase: 'started',
-      }),
-    );
-
-    gatewayEventHandler?.('task:snapshot', {
-      sessionKey: 'agent:main:main',
-      tasks: [],
-      todos: [{ content: '同步 todo', status: 'completed' }],
-      source: 'todo',
-    });
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'task:snapshot',
-      expect.objectContaining({
-        sessionKey: 'agent:main:main',
-        source: 'todo',
-      }),
-    );
-    expect(send).toHaveBeenCalledWith(
-      'host:event',
-      expect.objectContaining({
-        eventName: 'task:snapshot',
-      }),
-    );
-
-    gatewayEventHandler?.('gateway:channel-status', {
-      eventName: 'channel:weixin-qr',
-      payload: { qrDataUrl: 'data:image/png;base64,abc' },
-      updatedAt: 1234,
-    });
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'gateway:channel-status',
-      expect.objectContaining({
-        eventName: 'channel:weixin-qr',
-      }),
-    );
-    expect(eventBus.emit).not.toHaveBeenCalledWith('channel:weixin-qr', expect.anything());
-  });
-
-  it('Gateway 状态变化只发布宿主可见状态，不触发业务同步', async () => {
-    const gatewayManager = new FakeGatewayManager();
-    const emitGatewayEvent = vi.fn();
-    const runtimeHostManager = {
-      getState: vi.fn(() => ({
-        lifecycle: 'running',
-        runtimeLifecycle: 'running',
-        activePluginCount: 0,
-      })),
-      checkHealth: vi.fn(async () => ({
+function createRuntimeHost(input: {
+  readonly snapshot?: RuntimeHostControlOutcome;
+  readonly snapshots?: Array<RuntimeHostControlOutcome | Promise<RuntimeHostControlOutcome>>;
+  readonly commandError?: Error;
+}) {
+  const snapshots = [...(input.snapshots ?? [])];
+  let safeEventHandler: ((event: RuntimeHostSafeEvent) => void) | null = null;
+  let exitHandler: ((exit: DirectRuntimeHostExit) => void) | null = null;
+  let restartHandler: ((restart: { status: 'running'; recoveredAt: number }) => void) | null = null;
+  const command = vi.fn(async (request: RuntimeHostControlCommand) => {
+    if (input.commandError) throw input.commandError;
+    const health = {
+      state: {
         ok: true,
-        lifecycle: 'running',
-        activePluginCount: 0,
-        degradedPlugins: [],
-      })),
-      readGatewayStatus: vi.fn(async () => null),
-      emitGatewayEvent,
-      onGatewayEvent: vi.fn(() => () => {}),
-      emitRuntimeJobEvent: vi.fn(),
-      onRuntimeJobEvent: vi.fn(() => () => {}),
-      onStateChange: vi.fn(() => () => {}),
+        lifecycle: 'ready',
+        matcha: { lifecycle: 'idle' },
+        openClaw: { lifecycle: 'running' },
+      },
+      health: {
+        ok: true,
+        lifecycle: 'ready',
+        matcha: { lifecycle: 'idle' },
+        openClaw: { lifecycle: 'running' },
+      },
     };
-
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-    registerHostEventBridge({
-      gatewayManager: gatewayManager as never,
-      runtimeHostManager: runtimeHostManager as never,
-      hostEventBus: { emit: vi.fn() } as never,
-      getMainWindow: () => null,
-    });
-
-    gatewayManager['status'] = { processState: 'running', port: 18789 };
-    gatewayManager.emit('status', gatewayManager.getStatus());
-
-    expect(emitGatewayEvent).not.toHaveBeenCalled();
-  });
-
-  it('process stop failure error takes precedence over the facade stopping projection', async () => {
-    const gatewayManager = new FakeGatewayManager();
-    const runtimeHostManager = {
-      getState: vi.fn(() => ({
-        lifecycle: 'stopping',
-        runtimeLifecycle: 'error',
-        pid: 1111,
-        activePluginCount: 0,
-        lastError: 'runtime-host process termination failed',
-      })),
-      checkHealth: vi.fn(async () => ({
-        ok: false,
-        lifecycle: 'error',
-        activePluginCount: 0,
-        degradedPlugins: [],
-        error: 'Runtime-host transport health failed: fetch failed',
-      })),
-      readGatewayStatus: vi.fn(async () => null),
-      emitGatewayEvent: vi.fn(),
-      onGatewayEvent: vi.fn(() => () => {}),
-      emitRuntimeJobEvent: vi.fn(),
-      onRuntimeJobEvent: vi.fn(() => () => {}),
-      onStateChange: vi.fn(() => () => {}),
-    };
-    const eventBus = { emit: vi.fn() };
-
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-    registerHostEventBridge({
-      gatewayManager: gatewayManager as never,
-      runtimeHostManager: runtimeHostManager as never,
-      hostEventBus: eventBus as never,
-      getMainWindow: () => null,
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'error',
-        hostLifecycle: 'stopping',
-        runtimeLifecycle: 'error',
-        error: 'runtime-host process termination failed',
-      }),
-    );
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:error',
-      expect.objectContaining({
-        status: 'error',
-        message: 'runtime-host process termination failed',
-      }),
-    );
-  });
-
-  it('runtime-host 重启期间不会把临时 transport health 失败发成错误事件', async () => {
-    const gatewayManager = new FakeGatewayManager();
-    let runtimeState = {
-      lifecycle: 'restarting' as const,
-      runtimeLifecycle: 'restarting' as const,
-      pid: 1111,
-      activePluginCount: 2,
-    };
-    let runtimeHealth = {
-      ok: false,
-      lifecycle: 'error' as const,
-      activePluginCount: 0,
-      degradedPlugins: [] as string[],
-      error: 'Runtime-host transport health failed: fetch failed',
-    };
-    let stateChangeHandler: (() => void) | null = null;
-    const runtimeHostManager = {
-      getState: vi.fn(() => runtimeState),
-      checkHealth: vi.fn(async () => runtimeHealth),
-      readGatewayStatus: vi.fn(async () => null),
-      emitGatewayEvent: vi.fn(),
-      onGatewayEvent: vi.fn(() => () => {}),
-      emitRuntimeJobEvent: vi.fn(),
-      onRuntimeJobEvent: vi.fn(() => () => {}),
-      onStateChange: vi.fn((handler: () => void) => {
-        stateChangeHandler = handler;
-        return () => {
-          stateChangeHandler = null;
-        };
-      }),
-    };
-    const eventBus = { emit: vi.fn() };
-    const mainWindow = { webContents: { send: vi.fn() } };
-
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-    registerHostEventBridge({
-      gatewayManager: gatewayManager as never,
-      runtimeHostManager: runtimeHostManager as never,
-      hostEventBus: eventBus as never,
-      getMainWindow: () => mainWindow as never,
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'restarting',
-      }),
-    );
-    expect(eventBus.emit).not.toHaveBeenCalledWith(
-      'runtime-host:error',
-      expect.anything(),
-    );
-
-    runtimeState = {
-      ...runtimeState,
-      lifecycle: 'running',
-      runtimeLifecycle: 'running',
-      pid: 2222,
-    };
-    runtimeHealth = {
-      ok: true,
-      lifecycle: 'running',
-      activePluginCount: 2,
-      degradedPlugins: [],
-    };
-    stateChangeHandler?.();
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:restart',
-      expect.objectContaining({
-        previousPid: 1111,
-        pid: 2222,
-        status: 'running',
-      }),
-    );
-  });
-
-  it('runtime-host 状态发布进行中又发生变化时会补发最新 running 状态', async () => {
-    const gatewayManager = new FakeGatewayManager();
-    let runtimeState = {
-      lifecycle: 'restarting' as const,
-      runtimeLifecycle: 'restarting' as const,
-      pid: 1111,
-      activePluginCount: 2,
-    };
-    let runtimeHealth = {
-      ok: false,
-      lifecycle: 'error' as const,
-      activePluginCount: 0,
-      degradedPlugins: [] as string[],
-      error: 'Runtime-host transport health failed: fetch failed',
-    };
-    let resolveFirstHealth: ((health: typeof runtimeHealth) => void) | null = null;
-    const firstHealth = new Promise<typeof runtimeHealth>((resolve) => {
-      resolveFirstHealth = resolve;
-    });
-    let stateChangeHandler: (() => void) | null = null;
-    let checkHealthCallCount = 0;
-    const runtimeHostManager = {
-      getState: vi.fn(() => runtimeState),
-      checkHealth: vi.fn(() => {
-        checkHealthCallCount += 1;
-        return checkHealthCallCount === 1
-          ? firstHealth
-          : Promise.resolve(runtimeHealth);
-      }),
-      readGatewayStatus: vi.fn(async () => null),
-      emitGatewayEvent: vi.fn(),
-      onGatewayEvent: vi.fn(() => () => {}),
-      emitRuntimeJobEvent: vi.fn(),
-      onRuntimeJobEvent: vi.fn(() => () => {}),
-      onStateChange: vi.fn((handler: () => void) => {
-        stateChangeHandler = handler;
-        return () => {
-          stateChangeHandler = null;
-        };
-      }),
-    };
-    const eventBus = { emit: vi.fn() };
-
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-    registerHostEventBridge({
-      gatewayManager: gatewayManager as never,
-      runtimeHostManager: runtimeHostManager as never,
-      hostEventBus: eventBus as never,
-      getMainWindow: () => null,
-    });
-
-    runtimeState = {
-      lifecycle: 'running',
-      runtimeLifecycle: 'running',
-      pid: 2222,
-      activePluginCount: 2,
-    };
-    runtimeHealth = {
-      ok: true,
-      lifecycle: 'running',
-      activePluginCount: 2,
-      degradedPlugins: [],
-    };
-    stateChangeHandler?.();
-    resolveFirstHealth?.({
-      ok: false,
-      lifecycle: 'error',
-      activePluginCount: 0,
-      degradedPlugins: [],
-      error: 'Runtime-host transport health failed: fetch failed',
-    });
-
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
+    if (request.name === 'host.health') {
+      return succeeded(health);
     }
+    if (request.name === 'host.runtime.snapshot') {
+      if (snapshots.length) {
+        const nextSnapshot = snapshots.shift();
+        if (nextSnapshot) return nextSnapshot;
+      }
+      return input.snapshot ?? succeeded({
+        ...health,
+        gateway: {
+          availability: 'available',
+          ok: true,
+          timestampMs: 1_725_000_000_000,
+          durationMs: 12,
+          channelCount: 0,
+          agentCount: 0,
+          sessionCount: 0,
+          heartbeatEnabled: true,
+        },
+        control: { ready: true, phase: 'ready', retryable: false },
+        observedAtMs: 1_725_000_000_100,
+      });
+    }
+    throw new Error('unexpected command');
+  });
+
+  return {
+    command,
+    onSafeEvent: vi.fn((handler: (event: RuntimeHostSafeEvent) => void) => {
+      safeEventHandler = handler;
+      return () => {
+        safeEventHandler = null;
+      };
+    }),
+    onExit: vi.fn((handler: (exit: DirectRuntimeHostExit) => void) => {
+      exitHandler = handler;
+      return () => {
+        exitHandler = null;
+      };
+    }),
+    onRestart: vi.fn((handler: (restart: { status: 'running'; recoveredAt: number }) => void) => {
+      restartHandler = handler;
+      return () => {
+        restartHandler = null;
+      };
+    }),
+    emitSafeEvent(event: RuntimeHostSafeEvent) {
+      safeEventHandler?.(event);
+    },
+    emitExit(exit: DirectRuntimeHostExit) {
+      exitHandler?.(exit);
+    },
+    emitRestart(restart: { status: 'running'; recoveredAt: number }) {
+      restartHandler?.(restart);
+    },
+  };
+}
+
+describe('host event bridge', () => {
+  it('只投影 Rust health、lifecycle 与 safe activity 标记', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    await flushBridge();
+
+    expect(runtimeHost.command).toHaveBeenCalledWith({ name: 'host.health' });
+    expect(eventBus.emit).toHaveBeenCalledWith('runtime-host:status', {
+      status: 'running',
+      hostLifecycle: 'ready',
+      runtimeLifecycle: 'ready',
+      updatedAt: expect.any(Number),
+    });
+
+    const gatewayStatusEmitsBeforeLifecycle = eventBus.emit.mock.calls
+      .filter(([eventName]) => eventName === 'gateway:status')
+      .length;
+    runtimeHost.emitSafeEvent({
+      type: 'openclaw.lifecycle',
+      sequence: 7,
+      hasRun: false,
+      hasMessage: true,
+      hasSessionActivity: false,
+    });
+    await flushBridge();
+
+    expect(eventBus.emit).toHaveBeenCalledWith('openclaw:lifecycle', { active: true });
+    expect(eventBus.emit.mock.calls
+      .filter(([eventName]) => eventName === 'gateway:status')
+      .length).toBeGreaterThan(gatewayStatusEmitsBeforeLifecycle);
+    const payloads = eventBus.emit.mock.calls.map(([, payload]) => JSON.stringify(payload));
+    for (const privateValue of [
+      'endpoint',
+      'token',
+      'path',
+      'pid',
+      'sequence',
+      'sessionId',
+      'messageId',
+      'runId',
+      'rawPayload',
+    ]) {
+      expect(payloads.join('\n')).not.toContain(privateValue);
+    }
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'openclaw:lifecycle',
+      payload: { active: true },
+    });
+  });
+
+  it('将 parent callback team:event 原样投影为 Renderer 事件', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+
+    const payload = {
+      teamId: 'team-1',
+      runId: 'run-1',
+      event: {
+        eventId: 'team-event-1',
+        runId: 'run-1',
+        sequence: 1,
+        eventType: 'node_progressed',
+        createdAt: 1_725_000_000_000,
+        nodeExecutionId: 'node-exec-1',
+      },
+    };
+    eventBus.emit('team:event', payload);
+
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'team:event',
+      payload,
+    });
+  });
+
+  it('将 parent callback runtime-job done/progress 原样投影为 Renderer 事件', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+
+    const donePayload = {
+      jobId: 'job-1',
+      result: { status: 'completed', native: { privateValue: 'opaque' } },
+    };
+    const progressPayload = {
+      jobId: 'job-1',
+      progress: 0.5,
+      native: { privateValue: 'opaque-progress' },
+    };
+    eventBus.emit('runtime-job:done', donePayload);
+    eventBus.emit('runtime-job:progress', progressPayload);
+
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'runtime-job:done',
+      payload: donePayload,
+    });
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'runtime-job:progress',
+      payload: progressPayload,
+    });
+  });
+
+  it('将 Cron 终态安全投影为最小 Renderer 事件', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'openclaw.cron.execution',
+      jobId: 'cron-job-1',
+      runId: 'cron-run-1',
+      status: 'failed',
+    });
+
+    expect(eventBus.emit).toHaveBeenCalledWith('openclaw:cron', {
+      jobId: 'cron-job-1',
+      runId: 'cron-run-1',
+      status: 'failed',
+    });
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'openclaw:cron',
+      payload: { jobId: 'cron-job-1', runId: 'cron-run-1', status: 'failed' },
+    });
+    const serialized = JSON.stringify(eventBus.emit.mock.calls);
+    for (const privateValue of ['payload', 'socket', 'sessionKey', 'token', 'workingDirectory', 'error']) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it('在 Rust child replacement 后投影已恢复的 runtime-host restart 事件', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    runtimeHost.emitRestart({ status: 'running', recoveredAt: 123 });
+    await flushBridge();
+
+    expect(eventBus.emit).toHaveBeenCalledWith('runtime-host:restart', {
+      status: 'running',
+      recoveredAt: 123,
+    });
+  });
+
+  it('在 Rust 报告 OpenClaw runtime 状态变迁时刷新 fresh gateway status 投影', async () => {
+    const pending = deferred<RuntimeHostControlOutcome>();
+    const runtimeHost = createRuntimeHost({
+      snapshots: [pending.promise, succeeded({
+        state: {
+          ok: true,
+          lifecycle: 'ready',
+          matcha: { lifecycle: 'idle' },
+          openClaw: { lifecycle: 'running' },
+        },
+        health: {
+          ok: true,
+          lifecycle: 'ready',
+          matcha: { lifecycle: 'idle' },
+          openClaw: { lifecycle: 'running' },
+        },
+        gateway: {
+          availability: 'available',
+          ok: true,
+          timestampMs: 1_725_000_000_200,
+          durationMs: 11,
+          channelCount: 0,
+          agentCount: 0,
+          sessionCount: 0,
+          heartbeatEnabled: true,
+        },
+        control: { ready: true, phase: 'ready', retryable: false },
+        observedAtMs: 1_725_000_000_200,
+      })],
+    });
+    const eventBus = createEventBus();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    await flushBridge();
+
+    runtimeHost.emitSafeEvent({ type: 'openclaw.runtime' });
+    await flushBridge();
+    pending.resolve(succeeded({
+      state: {
+        ok: true,
+        lifecycle: 'ready',
+        matcha: { lifecycle: 'idle' },
+        openClaw: { lifecycle: 'running' },
+      },
+      health: {
+        ok: true,
+        lifecycle: 'ready',
+        matcha: { lifecycle: 'idle' },
+        openClaw: { lifecycle: 'running' },
+      },
+      gateway: {
+        availability: 'available',
+        ok: false,
+        timestampMs: 1_725_000_000_100,
+        durationMs: 15,
+        channelCount: 0,
+        agentCount: 0,
+        sessionCount: 0,
+        heartbeatEnabled: true,
+      },
+      control: { ready: false, phase: 'starting', retryable: true },
+      observedAtMs: 1_725_000_000_100,
+    }));
+    await flushBridge();
+
+    expect(runtimeHost.command).toHaveBeenCalledTimes(4);
+    expect(eventBus.emit.mock.calls.some(([eventName, payload]) => eventName === 'gateway:status'
+      && payload && typeof payload === 'object'
+      && (payload as Record<string, unknown>).processState === 'running'
+      && (payload as Record<string, unknown>).gatewayReady === true
+      && (payload as Record<string, unknown>).transportState === 'connected')).toBe(true);
+    expect(JSON.stringify(eventBus.emit.mock.calls)).not.toContain('openclaw.runtime');
+  });
+
+  it('只通过现有 route binding 投影唯一 session.delta wire，并保留原始 delta 形状', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const routes = new RendererEventRouteRegistry();
+    const routeKey = routes.issue({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'matcha-agent',
+        runtimeInstanceId: 'local',
+      },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    });
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: routes,
+    });
+    const delta = createSessionDelta({ routeKey });
+    runtimeHost.emitSafeEvent({ type: 'session.delta', delta });
+
+    expect(eventBus.emit).toHaveBeenCalledWith('session.delta', delta);
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'session.delta',
+      payload: delta,
+    });
+    expect(delta).not.toHaveProperty('endpoint');
+    expect(delta).not.toHaveProperty('agentId');
+  });
+
+  it('将旧 session:update 里可解码的 delta 投影到唯一 session.delta 路径', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const routes = new RendererEventRouteRegistry();
+    const routeKey = routes.issue({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'matcha-agent',
+        runtimeInstanceId: 'local',
+      },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    });
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: routes,
+    });
+    const delta = createSessionDelta({ routeKey });
+
+    eventBus.emit('session:update', { kind: 'delta', delta });
+    eventBus.emit('session:update', { sessionUpdate: 'session_info_update', sessionKey: 'session-1', snapshot: { private: true } });
+
+    expect(eventBus.emit).toHaveBeenCalledWith('session.delta', delta);
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'session.delta',
+      payload: delta,
+    });
+    expect(send).not.toHaveBeenCalledWith('host:event', expect.objectContaining({
+      eventName: 'session:update',
+    }));
+  });
+
+  it('对严格 decode 失败、未绑定、已释放和 stale session.delta fail closed', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const routes = new RendererEventRouteRegistry();
+    const routeKey = routes.issue({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    });
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: routes,
+    });
+
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({ routeKey: 'renderer-route:missing' }),
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({ routeKey, sessionKey: 'session-stale' }),
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: { ...createSessionDelta({ routeKey }), extra: true },
+    });
+    routes.release(routeKey);
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({ routeKey }),
+    });
+
+    expect(eventBus.emit).not.toHaveBeenCalledWith('session.delta', expect.anything());
+  });
+
+  it('在唯一 session.delta 的 run terminal 后释放 route，并拒绝后续 stale delta', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const routes = new RendererEventRouteRegistry();
+    const routeKey = routes.issue({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'matcha-agent',
+        runtimeInstanceId: 'local',
+      },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    });
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: routes,
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({
+        routeKey,
+        changes: [{ kind: 'runPhaseChanged', runId: 'run-1', phase: 'completed' }],
+      }),
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({
+        routeKey,
+        seq: 2,
+        cursor: 2,
+        changes: [{ kind: 'runtimeChanged', runtime: {
+          phase: 'started', activeRunId: null, issue: null,
+        } }],
+      }),
+    });
+
+    expect(eventBus.emit).toHaveBeenCalledTimes(1);
+    expect(eventBus.emit).toHaveBeenCalledWith('session.delta', expect.objectContaining({ routeKey }));
+    expect(routes.matchesSession(routeKey, 'session-1')).toBe(false);
+  });
+
+  it('将无效 control projection 与异常退出降格为固定错误', async () => {
+    const runtimeHost = createRuntimeHost({
+      snapshot: succeeded({ health: { ok: true, lifecycle: 'ready', openClaw: { lifecycle: 'running' }, endpoint: 'secret' } }),
+    });
+    const eventBus = createEventBus();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    await flushBridge();
+
+    runtimeHost.emitExit({ kind: 'failed' });
 
     expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'restarting',
-        pid: 1111,
-      }),
+      'runtime-host:error',
+      { message: 'Runtime Host is unavailable.' },
     );
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:status',
-      expect.objectContaining({
-        status: 'running',
-        pid: 2222,
-      }),
-    );
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'runtime-host:restart',
-      expect.objectContaining({
-        previousPid: 1111,
-        pid: 2222,
-        status: 'running',
-      }),
-    );
+    expect(JSON.stringify(eventBus.emit.mock.calls)).not.toContain('secret');
+  });
+
+  it('仅在成功退出时投影 shutdown lifecycle', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    runtimeHost.emitExit({ kind: 'exited', code: 0, signal: null });
+
+    expect(eventBus.emit).toHaveBeenCalledWith('runtime-host:status', {
+      status: 'stopped',
+      hostLifecycle: 'shutDown',
+      runtimeLifecycle: 'shutDown',
+      updatedAt: expect.any(Number),
+    });
   });
 });

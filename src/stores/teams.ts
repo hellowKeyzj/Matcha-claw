@@ -4,8 +4,8 @@ import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex, findSessionRecordKey } from '@/stores/chat/session-identity';
 import { patchSessionItemsAndViewport, patchSessionRecord } from '@/stores/chat/store-state-helpers';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type { SessionRenderItem } from '../types/session/render-item';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 import {
   cancelTeamRun,
   createTeamRun,
@@ -241,7 +241,7 @@ function teamRoleTargetFromBinding(teamId: string, role: TeamRoleBindingRecord):
 }
 
 function teamRoleTargetsFromRun(teamId: string, run: TeamRunListItem): TeamRoleChatTargetIndexEntry[] {
-  return run.sessions.map((role) => teamRoleTargetFromBinding(teamId, role));
+  return (run.sessions ?? []).map((role) => teamRoleTargetFromBinding(teamId, role));
 }
 
 function teamRoleTargetsFromBindings(teamId: string, roles: readonly TeamRoleBindingRecord[]): TeamRoleChatTargetIndexEntry[] {

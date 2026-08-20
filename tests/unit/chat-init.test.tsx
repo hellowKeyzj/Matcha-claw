@@ -2,12 +2,19 @@ import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatInit } from '@/pages/Chat/useChatInit';
 import { useChatStore } from '@/stores/chat';
-import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { useSubagentsStore } from '@/stores/subagents';
-import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
+
+const openClawTestRuntimeEndpoint = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+} as const;
+
+function createOpenClawTestSessionIdentity(sessionKey: string, agentId: string) {
+  return { endpoint: openClawTestRuntimeEndpoint, agentId, sessionKey };
+}
 
 const idleResource = {
   status: 'idle' as const,
@@ -49,12 +56,8 @@ function markSessionRuntimeReady() {
   } as never);
 }
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
-  sessionKey?: string;
-  messages?: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: unknown; timestamp?: number }>;
-}) {
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
-  const sessionKey = overrides?.sessionKey ?? 'agent:main:main';
   return {
     meta: {
       ...base.meta,
@@ -64,9 +67,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    items: overrides?.messages
-      ? buildRenderItemsFromMessages(sessionKey, overrides.messages)
-      : (overrides?.items ?? base.items),
+    items: overrides?.items ?? base.items,
     window: overrides?.window ?? base.window,
   };
 }
@@ -98,7 +99,7 @@ describe('useChatInit', () => {
     } as never);
   });
 
-  it('gateway running 后并发触发 loadAgents 与 loadSessions', async () => {
+  it('OpenClaw running 后并发触发 loadAgents 与 loadSessions', async () => {
     let resolveAgentsLoad: (() => void) | null = null;
     const loadAgents = vi.fn(() => new Promise<void>((resolve) => {
       resolveAgentsLoad = () => {
@@ -117,8 +118,6 @@ describe('useChatInit', () => {
     const bootstrapSessionRuntime = vi.fn().mockImplementation(async () => {
       markSessionRuntimeReady();
     });
-    const loadHistory = vi.fn().mockResolvedValue(undefined);
-
     const { unmount } = renderHook(() => useChatInit({
       isActive: true,
       isGatewayRunning: true,
@@ -129,7 +128,7 @@ describe('useChatInit', () => {
       bootstrapSessionRuntime,
       loadAgents,
       loadSessions,
-      loadHistory,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn(),
     }));
 
@@ -150,47 +149,47 @@ describe('useChatInit', () => {
     unmount();
   });
 
-  it('首次失败后会有限重试，并在重试成功后自动恢复 agents/sessions 资源', async () => {
+  it('等待 OpenClaw running 投影后才加载 peer 目录', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const bootstrapSessionRuntime = vi.fn().mockImplementation(async () => {
+      markSessionRuntimeReady();
+    });
+    const { rerender } = renderHook(({ isGatewayRunning }) => useChatInit({
+      isActive: true,
+      isGatewayRunning,
+      locationSearch: '',
+      navigate: vi.fn(),
+      switchSession: vi.fn(),
+      openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime,
+      loadAgents,
+      loadSessions,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      cleanupEmptySession: vi.fn(),
+    }), { initialProps: { isGatewayRunning: false } });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bootstrapSessionRuntime).not.toHaveBeenCalled();
+    expect(loadAgents).not.toHaveBeenCalled();
+    expect(loadSessions).not.toHaveBeenCalled();
+
+    rerender({ isGatewayRunning: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bootstrapSessionRuntime).toHaveBeenCalledTimes(1);
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('重试未完成的 peer 目录加载', async () => {
     vi.useFakeTimers();
     try {
-      let agentsAttempts = 0;
-      const loadAgents = vi.fn().mockImplementation(async () => {
-        agentsAttempts += 1;
-        if (agentsAttempts === 1) {
-          useSubagentsStore.setState({
-            agentsResource: {
-              status: 'error',
-              error: 'agents failed',
-              hasLoadedOnce: false,
-              lastLoadedAt: null,
-            },
-          } as never);
-          return;
-        }
-        useSubagentsStore.setState({
-          agentsResource: readyResource,
-          agents: [{ id: 'main', name: 'Main', isDefault: true }],
-        } as never);
-      });
-
-      let sessionsAttempts = 0;
-      const loadSessions = vi.fn().mockImplementation(async () => {
-        sessionsAttempts += 1;
-        if (sessionsAttempts === 1) {
-          useChatStore.setState({
-            sessionCatalogStatus: {
-              status: 'error',
-              error: 'sessions failed',
-              hasLoadedOnce: false,
-              lastLoadedAt: null,
-            },
-          } as never);
-          return;
-        }
-        useChatStore.setState({
-          sessionCatalogStatus: readyResource,
-        } as never);
-      });
+      const loadAgents = vi.fn().mockResolvedValue(undefined);
+      const loadSessions = vi.fn().mockResolvedValue(undefined);
 
       renderHook(() => useChatInit({
         isActive: true,
@@ -210,21 +209,11 @@ describe('useChatInit', () => {
 
       await act(async () => {
         await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(5_000);
       });
 
-      expect(loadAgents).toHaveBeenCalledTimes(1);
-      expect(loadSessions).toHaveBeenCalledTimes(1);
-      expect(useSubagentsStore.getState().agentsResource.status).toBe('error');
-      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('error');
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_600);
-      });
-
-      expect(loadAgents).toHaveBeenCalledTimes(2);
-      expect(loadSessions).toHaveBeenCalledTimes(2);
-      expect(useSubagentsStore.getState().agentsResource.status).toBe('ready');
-      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('ready');
+      expect(loadAgents).toHaveBeenCalledTimes(3);
+      expect(loadSessions).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }
@@ -237,7 +226,6 @@ describe('useChatInit', () => {
         sessionCatalogStatus: readyResource,
       } as never);
     });
-    const loadHistory = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       currentSessionKey: '',
       loadedSessions: {},
@@ -256,7 +244,7 @@ describe('useChatInit', () => {
       }),
       loadAgents,
       loadSessions,
-      loadHistory,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn(),
     }));
 
@@ -266,14 +254,12 @@ describe('useChatInit', () => {
 
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(loadSessions).toHaveBeenCalledTimes(1);
-    expect(loadHistory).not.toHaveBeenCalled();
     expect(useChatStore.getState().currentSessionKey).toBe('');
   });
 
-  it('bootstrap 未得到 ready runtime 时，不加载会话目录或历史', async () => {
+  it('固定 target 初始化失败时，不加载目录或声明 timeline 成功', async () => {
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     const loadSessions = vi.fn().mockResolvedValue(undefined);
-    const loadHistory = vi.fn().mockResolvedValue(undefined);
 
     renderHook(() => useChatInit({
       isActive: true,
@@ -286,7 +272,7 @@ describe('useChatInit', () => {
         useChatStore.setState({
           sessionRuntimeCatalog: {
             status: 'error',
-            error: 'No session runtime endpoint is available',
+            error: 'OpenClaw local session target is unavailable',
             endpoints: [],
             defaultSessionPromptScope: null,
           },
@@ -294,7 +280,7 @@ describe('useChatInit', () => {
       }),
       loadAgents,
       loadSessions,
-      loadHistory,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn(),
     }));
 
@@ -304,45 +290,28 @@ describe('useChatInit', () => {
 
     expect(loadAgents).not.toHaveBeenCalled();
     expect(loadSessions).not.toHaveBeenCalled();
-    expect(loadHistory).not.toHaveBeenCalled();
   });
 
-  it('当前会话已有 viewport 快照时，初始化走 quiet refresh，不回退到阻塞加载', async () => {
-    const loadHistory = vi.fn().mockResolvedValue(undefined);
+  it('目录加载后通过同一 session reselect 触发 sealed timeline projection', async () => {
+    const switchSession = vi.fn();
     useChatStore.setState({
       currentSessionKey: mainRecordKey,
-      loadedSessions: {
-        [mainRecordKey]: buildSessionRecord({
-          sessionKey: mainRecordKey,
-          messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
-          meta: { historyStatus: 'ready' },
-          window: createViewportWindowState({
-            ...createEmptySessionViewportState(),
-            totalItemCount: 1,
-            windowStartOffset: 0,
-            windowEndOffset: 1,
-            hasMore: false,
-            hasNewer: false,
-            isAtLatest: true,
-          }),
-        }),
-      },
       sessionCatalogStatus: readyResource,
     } as never);
 
     renderHook(() => useChatInit({
       isActive: true,
       isGatewayRunning: true,
-      locationSearch: '',
+      locationSearch: `?session=${encodeURIComponent(mainRecordKey)}`,
       navigate: vi.fn(),
-      switchSession: vi.fn(),
+      switchSession,
       openAgentConversation: vi.fn(),
       bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
         markSessionRuntimeReady();
       }),
       loadAgents: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
-      loadHistory,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn(),
     }));
 
@@ -350,17 +319,6 @@ describe('useChatInit', () => {
       await Promise.resolve();
     });
 
-    expect(loadHistory).not.toHaveBeenCalled();
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    });
-
-    expect(loadHistory).toHaveBeenCalledWith({
-      sessionKey: mainRecordKey,
-      mode: 'quiet',
-      scope: 'foreground',
-      reason: 'chat_init_snapshot_quiet_refresh',
-    });
+    expect(switchSession).toHaveBeenCalledWith(mainRecordKey);
   });
 });

@@ -1,12 +1,18 @@
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
+import { nativeProjectionError } from '@/lib/provider-projection-errors';
+import {
+  decodeProviderMutationReceipt,
+  ProviderMutationCommitOutcomeUnknownError,
+  type ProviderMutationReceipt,
+} from '@/lib/host-api-transport-contract';
+import { summarizeIdentifier } from '@/lib/session-trace';
 import type { ModelCapability } from '@/lib/providers';
-import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 import { MODEL_CAPABILITIES } from '@/lib/provider-model-capabilities';
 
 export type { ModelCapability } from '@/lib/providers';
 
 export interface ProviderModel {
-  credentialId: string;
+  accountId: string;
   label?: string;
   modelId: string;
   capabilities: ModelCapability[];
@@ -18,28 +24,23 @@ export interface ProviderModel {
   quality?: string;
 }
 
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+export type ProviderModelDraft = Omit<ProviderModel, 'accountId' | 'label'>;
 
-async function modelProviderCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  target: CapabilityTarget | null = null,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: MODEL_PROVIDER_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
-      target,
-      input,
-    }),
-  });
+export interface ProviderModelsReplaceResult {
+  desired: { status: 'stored' };
+  receipt: ProviderMutationReceipt;
+  warning?: string;
 }
+
+const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+const LEGACY_MODEL_FIELDS = ['credentialId', 'providerKey', 'runtimeModelRef'] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasLegacyModelFields(value: Record<string, unknown>): boolean {
+  return LEGACY_MODEL_FIELDS.some((field) => Object.hasOwn(value, field));
 }
 
 function normalizePositiveInteger(value: unknown): number | undefined {
@@ -69,12 +70,12 @@ function normalizeCapabilities(value: unknown): ModelCapability[] {
 }
 
 function normalizeProviderModel(value: unknown): ProviderModel | null {
-  if (!isRecord(value)) return null;
-  const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
+  if (!isRecord(value) || hasLegacyModelFields(value)) return null;
+  const accountId = typeof value.accountId === 'string' ? value.accountId.trim() : '';
   const label = typeof value.label === 'string' ? value.label.trim() : '';
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!credentialId || !modelId || capabilities.length === 0) return null;
+  if (!accountId || !modelId || capabilities.length === 0) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   const timeoutMs = normalizePositiveInteger(value.timeoutMs);
@@ -82,7 +83,7 @@ function normalizeProviderModel(value: unknown): ProviderModel | null {
   const resolution = normalizeOptionalString(value.resolution);
   const quality = normalizeOptionalString(value.quality);
   return {
-    credentialId,
+    accountId,
     ...(label ? { label } : {}),
     modelId,
     capabilities,
@@ -103,7 +104,7 @@ export function normalizeProviderModels(value: unknown): ProviderModel[] {
   for (const raw of rawModels) {
     const model = normalizeProviderModel(raw);
     if (!model) continue;
-    const key = `${model.credentialId}\n${model.modelId}`;
+    const key = `${model.accountId}\n${model.modelId}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(model);
@@ -111,27 +112,100 @@ export function normalizeProviderModels(value: unknown): ProviderModel[] {
   return out;
 }
 
+function decodeModelList(value: unknown): ProviderModel[] {
+  if (!isRecord(value) || !Array.isArray(value.models)) {
+    throw new Error('Provider models are unavailable');
+  }
+  const models = normalizeProviderModels(value.models);
+  if (models.length !== value.models.length) {
+    throw new Error('Provider models are unavailable');
+  }
+  return models;
+}
+
+function decodeReplaceResult(value: unknown): ProviderModelsReplaceResult {
+  if (isRecord(value)
+    && value.success === false
+    && value.error === 'Provider model request was rejected') {
+    throw new Error('Provider model request was rejected');
+  }
+  if (!isRecord(value) || value.success !== true) {
+    throw new Error('Provider models are unavailable');
+  }
+  const receipt = decodeProviderMutationReceipt(value, 'committed');
+  if (!receipt || receipt.desired.status !== 'stored' || receipt.persisted.status !== 'confirmed') {
+    throw new Error('Provider models are unavailable');
+  }
+  const warning = nativeProjectionError(receipt);
+  return {
+    desired: { status: 'stored' },
+    receipt,
+    ...(warning ? { warning } : {}),
+  };
+}
+
+function logProviderConfigTrace(phase: string, payload: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({
+    prefix: '[startup-trace]',
+    source: 'provider-model-catalog',
+    phase,
+    ...payload,
+  }));
+}
+
+function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<string, unknown> {
+  return {
+    changed: receipt.native.changed,
+    applied: receipt.native.applied.status,
+    observed: receipt.native.observed.status,
+    diagnostic: receipt.native.diagnostic
+      ? {
+          phase: receipt.native.diagnostic.phase,
+          reason: receipt.native.diagnostic.reason,
+          configPath: receipt.native.diagnostic.configPath,
+          method: receipt.native.diagnostic.method,
+          expectedPath: receipt.native.diagnostic.expectedPath,
+          detail: receipt.native.diagnostic.detail
+            ? summarizeIdentifier(receipt.native.diagnostic.detail)
+            : undefined,
+        }
+      : undefined,
+  };
+}
+
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
-  return normalizeProviderModels(await modelProviderCapabilityExecute<unknown>(
-    'providerModels.list',
-  ));
+  return decodeModelList(await hostApiFetch<unknown>('/api/provider-models'));
 }
 
 export async function persistProviderModels(
-  credentialId: string,
-  models: readonly Omit<ProviderModel, 'credentialId'>[],
-  vendorId?: string,
-): Promise<{ success: boolean; credentialId: string; models: ProviderModel[]; error?: string }> {
-  const input = { credentialId, models, ...(vendorId ? { vendorId } : {}) };
-  const result = await modelProviderCapabilityExecute<{ success?: boolean; credentialId?: string; models?: unknown; error?: string }>(
-    'providerModels.replace',
-    input,
-    { kind: 'provider-credential', accountId: credentialId, ...(vendorId ? { vendorId } : {}) },
-  );
-  return {
-    success: result?.success === true,
-    credentialId: typeof result?.credentialId === 'string' ? result.credentialId : credentialId,
-    models: normalizeProviderModels(result?.models),
-    ...(typeof result?.error === 'string' ? { error: result.error } : {}),
-  };
+  accountId: string,
+  models: readonly ProviderModelDraft[],
+): Promise<ProviderModelsReplaceResult> {
+  try {
+    logProviderConfigTrace('request-start', { accountId: summarizeIdentifier(accountId), modelCount: models.length });
+    const result = await hostApiFetch<unknown>('/api/provider-models', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'provider.models',
+        operationId: 'providerModels.replace',
+        scope: { kind: 'provider-model-catalog' },
+        target: { kind: 'provider-models' },
+        input: { kind: 'replace', accountId, models },
+      }),
+    });
+    const decoded = decodeReplaceResult(result);
+    logProviderConfigTrace('request-finished', providerProjectionTrace(decoded.receipt));
+    return decoded;
+  } catch (error) {
+    logProviderConfigTrace('request-failed', {
+      errorName: error instanceof Error ? error.name : typeof error,
+      message: summarizeIdentifier(error instanceof Error ? error.message : String(error)),
+    });
+    if (error instanceof ProviderMutationCommitOutcomeUnknownError) {
+      const unknown = new Error('Provider model commit outcome is unknown; reopen before retrying');
+      unknown.cause = error;
+      throw unknown;
+    }
+    throw error;
+  }
 }

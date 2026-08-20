@@ -1,5 +1,7 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type {
+  SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 import {
   classifyFileContentType,
   extnameOf,
@@ -26,8 +28,109 @@ export interface ArtifactPreviewTarget {
   lineStats?: GeneratedFileLineStats;
   toolId?: string;
   sessionIdentity?: SessionIdentity;
-  workspaceId?: string;
-  sourceId?: string;
+  relativePath?: string;
+}
+
+function normalizeWorkspacePathSeparators(value: string): string {
+  return value.replace(/\\/g, '/');
+}
+
+function trimWorkspaceRootTrailingSeparators(value: string): string {
+  if (/^[A-Za-z]:\/+$/u.test(value)) {
+    return `${value.slice(0, 2)}/`;
+  }
+  if (/^\/+$/u.test(value)) {
+    return '/';
+  }
+  return value.replace(/\/+$/u, '');
+}
+
+type ParsedWorkspacePath = {
+  kind: 'drive' | 'posix' | 'unc' | 'relative';
+  segments: string[];
+  normalized: string;
+};
+
+function parseWorkspacePath(value: string, trimTrailingSeparators = false): ParsedWorkspacePath | null {
+  if (value.includes('\0')) {
+    return null;
+  }
+
+  const source = normalizeWorkspacePathSeparators(value);
+  const normalized = trimTrailingSeparators ? trimWorkspaceRootTrailingSeparators(source) : source;
+  if (normalized.includes(':') && !/^[A-Za-z]:\//u.test(normalized)) {
+    return null;
+  }
+
+  let kind: ParsedWorkspacePath['kind'] = 'relative';
+  let remainder = normalized;
+  if (/^[A-Za-z]:\//u.test(normalized)) {
+    kind = 'drive';
+    remainder = normalized.slice(3);
+  } else if (normalized.startsWith('//')) {
+    kind = 'unc';
+    remainder = normalized.slice(2);
+  } else if (normalized.startsWith('/')) {
+    kind = 'posix';
+    remainder = normalized.slice(1);
+  } else if (/^[A-Za-z]:/u.test(normalized)) {
+    return null;
+  }
+
+  if (remainder.length === 0) {
+    return { kind, segments: [], normalized };
+  }
+  const segments = remainder.split('/');
+  if (segments.some((segment) => (
+    segment.length === 0
+    || segment === '.'
+    || segment === '..'
+    || segment.includes(':')
+  ))) {
+    return null;
+  }
+  return { kind, segments, normalized };
+}
+
+function workspacePathSegmentsEqual(left: string[], right: string[], caseInsensitive: boolean): boolean {
+  return left.length === right.length
+    && left.every((segment, index) => caseInsensitive
+      ? segment.toLowerCase() === right[index]?.toLowerCase()
+      : segment === right[index]);
+}
+
+/** Resolve a display path to a safe workspace-relative transport path. */
+export function resolveWorkspaceRelativePath(
+  displayPath: string,
+  workspaceRoot?: string,
+): string | null {
+  const candidate = parseWorkspacePath(displayPath);
+  if (!candidate) {
+    return null;
+  }
+  if (candidate.kind === 'relative') {
+    return candidate.normalized;
+  }
+  if (!workspaceRoot) {
+    return null;
+  }
+
+  const root = parseWorkspacePath(workspaceRoot, true);
+  if (!root || root.kind !== candidate.kind) {
+    return null;
+  }
+  const caseInsensitive = root.kind === 'drive' || root.kind === 'unc';
+  if (candidate.segments.length < root.segments.length) {
+    return null;
+  }
+  if (!workspacePathSegmentsEqual(
+    root.segments,
+    candidate.segments.slice(0, root.segments.length),
+    caseInsensitive,
+  )) {
+    return null;
+  }
+  return candidate.segments.slice(root.segments.length).join('/');
 }
 
 export function buildArtifactPreviewTargetFromGeneratedFile(file: GeneratedFile): ArtifactPreviewTarget {

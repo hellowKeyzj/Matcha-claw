@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatSidePanelController } from '@/pages/Chat/useChatSidePanelController';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { useChatStore } from '@/stores/chat';
@@ -19,19 +19,8 @@ describe('chat side panel controller', () => {
   beforeEach(() => {
     window.localStorage.clear();
 
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
+    useRuntimeHostStore.setState({
+      runtimeHost: { lifecycle: 'running' },
     } as never);
     useTaskSnapshotStore.getState().cleanup('agent:main:main');
     useTaskSnapshotStore.getState().cleanup('agent:worker:session-1');
@@ -61,6 +50,37 @@ describe('chat side panel controller', () => {
     useLayoutStore.setState({
       chatTakeoverMode: 'none',
     });
+  });
+
+  it('does not load sessions before Chat initializes the fixed runtime catalog', async () => {
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      sessionCatalogStatus: {
+        status: 'idle',
+        error: null,
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+      sessionRuntimeCatalog: {
+        status: 'idle',
+        error: null,
+        endpoints: [],
+        defaultSessionPromptScope: null,
+      },
+      loadSessions,
+    } as never);
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    await Promise.resolve();
+
+    expect(loadSessions).not.toHaveBeenCalled();
   });
 
   it('restores and persists side panel width with container clamping', () => {

@@ -298,7 +298,9 @@ describe('readSessionTranscriptReplayLines', () => {
       summaries.find(summary => summary.sessionId === metadataSessionId),
     ).not.toMatchObject({ hasConversation: true })
 
-    await expect(loadSessionHistorySummary(realUserSessionId)).resolves.toMatchObject({
+    await expect(
+      loadSessionHistorySummary(realUserSessionId),
+    ).resolves.toMatchObject({
       hasConversation: true,
     })
     await expect(

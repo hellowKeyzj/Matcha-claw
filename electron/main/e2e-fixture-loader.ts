@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+
 type HostApiFetchRequest = {
   path?: string;
   method?: string;
@@ -22,51 +24,35 @@ type HostApiProxyEnvelope =
   };
 
 export type E2EDialogStagedAttachmentPayload = {
-  id: string;
+  stagedAttachmentId: string;
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;
   preview: string | null;
 };
 
-type E2EFixtureModule = {
-  handleE2EHostApiFetch: (request: HostApiFetchRequest) => HostApiProxyEnvelope | null;
-  getE2EDialogOpenResult: () => { canceled: boolean; filePaths: string[] } | null;
-  getE2EDialogStagedAttachments: () => E2EDialogStagedAttachmentPayload[] | null;
-  getE2EGatewayStatus: () => unknown | null;
-};
-
-let fixtureModulePromise: Promise<E2EFixtureModule | null> | null = null;
-
-function isE2EEnabled(): boolean {
-  return process.env.MATCHACLAW_E2E === '1';
-}
-
-async function loadFixtureModule(): Promise<E2EFixtureModule | null> {
-  if (!isE2EEnabled()) {
-    return null;
-  }
-  if (!fixtureModulePromise) {
-    fixtureModulePromise = import('../../tests/e2e/fixtures/host-api-fixture') as Promise<E2EFixtureModule>;
-  }
-  return await fixtureModulePromise;
-}
-
 export async function handleE2EHostApiFetch(
-  request: HostApiFetchRequest,
+  _request: HostApiFetchRequest,
 ): Promise<HostApiProxyEnvelope | null> {
-  return (await loadFixtureModule())?.handleE2EHostApiFetch(request) ?? null;
+  return null;
 }
 
 export async function getE2EDialogOpenResult(): Promise<{ canceled: boolean; filePaths: string[] } | null> {
-  return (await loadFixtureModule())?.getE2EDialogOpenResult() ?? null;
+  return null;
 }
 
 export async function getE2EDialogStagedAttachments(): Promise<E2EDialogStagedAttachmentPayload[] | null> {
-  return (await loadFixtureModule())?.getE2EDialogStagedAttachments() ?? null;
+  return null;
+}
+
+export async function getE2EDiagnosticsArchiveSavePath(): Promise<string | null> {
+  const configured = process.env.MATCHACLAW_E2E_DIAGNOSTICS_SAVE_PATH?.trim();
+  const userDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+  return configured || (process.env.MATCHACLAW_E2E === '1' && userDataDir
+    ? join(userDataDir, 'diagnostics-archive.zip')
+    : null);
 }
 
 export async function getE2EGatewayStatus<TStatus>(): Promise<TStatus | null> {
-  return ((await loadFixtureModule())?.getE2EGatewayStatus() ?? null) as TStatus | null;
+  return null;
 }

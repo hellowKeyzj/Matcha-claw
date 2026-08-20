@@ -3,7 +3,7 @@
  * Cross-platform path resolution helpers
  */
 import { app } from 'electron';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { existsSync, mkdirSync, realpathSync } from 'fs';
 
@@ -26,10 +26,33 @@ export function expandPath(path: string): string {
 }
 
 /**
- * Get OpenClaw config directory
+ * Get the OpenClaw-owned config/state directory.
  */
 export function getOpenClawConfigDir(): string {
-  return join(homedir(), '.openclaw');
+  const configuredDirectory = process.env.OPENCLAW_CONFIG_DIR?.trim();
+  if (configuredDirectory) {
+    return resolve(expandPath(configuredDirectory));
+  }
+  const e2eUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+  if (process.env.MATCHACLAW_E2E === '1' && e2eUserDataDir) {
+    return resolve(join(e2eUserDataDir, 'openclaw'));
+  }
+  return resolve(join(homedir(), '.openclaw'));
+}
+
+/**
+ * Get the MatchaClaw-owned runtime-host state directory.
+ */
+export function getRuntimeHostStateDir(): string {
+  return join(getUserDataRoot(), 'runtime-host');
+}
+
+function getUserDataRoot(): string {
+  const e2eUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+  if (process.env.MATCHACLAW_E2E === '1' && e2eUserDataDir) {
+    return e2eUserDataDir;
+  }
+  return app.getPath('userData');
 }
 
 /**
@@ -51,6 +74,13 @@ export function getLogsDir(): string {
  */
 export function getDataDir(): string {
   return app.getPath('userData');
+}
+
+/**
+ * Get Electron Main-owned runtime-neutral attachment staging directory.
+ */
+export function getAttachmentStagingDir(): string {
+  return join(getDataDir(), 'attachments');
 }
 
 /**

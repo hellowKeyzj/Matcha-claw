@@ -18,13 +18,14 @@ import {
   hostSecurityRunEmergencyResponse,
   hostSecurityRunQuickAudit,
   hostSecurityScanSkills,
+  resolveSecurityEmergencyOutcome,
+  SECURITY_EMERGENCY_TARGET_REJECTED_MESSAGE,
 } from '@/lib/security-runtime';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSecurityPolicyStore } from '@/stores/security-policy-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import {
   useSecuritySupportStore,
-  type AuditItem,
   type AllowlistRegexTab,
   type PlatformTool,
   type RemediationActionItem,
@@ -154,6 +155,8 @@ export function SecurityPage() {
   const savePolicy = useSecurityPolicyStore((state) => state.savePolicy);
   const auditItems = useSecuritySupportStore((state) => state.auditItems);
   const loadingAudit = useSecuritySupportStore((state) => state.loadingAudit);
+  const auditError = useSecuritySupportStore((state) => state.auditError);
+  const auditStale = useSecuritySupportStore((state) => state.auditStale);
   const platformTools = useSecuritySupportStore((state) => state.platformTools);
   const loadingPlatformTools = useSecuritySupportStore((state) => state.loadingPlatformTools);
   const platformToolsError = useSecuritySupportStore((state) => state.platformToolsError);
@@ -200,6 +203,11 @@ export function SecurityPage() {
     }
     try {
       await savePolicy();
+      const saveError = useSecurityPolicyStore.getState().error;
+      if (saveError) {
+        toast.error(saveError.startsWith('errors.') ? t(saveError) : saveError);
+        return;
+      }
       toast.success(t('messages.saved'));
     } catch {
       toast.error(t('messages.saveFailed'));
@@ -211,8 +219,7 @@ export function SecurityPage() {
   }, [gatewayProcessState, loadRecentAudits]);
 
   useEffect(() => {
-    if (activeSection !== 'allowlistRegex') return;
-    if (platformToolsHydrated) return;
+    if (activeSection !== 'allowlistRegex' || platformToolsHydrated) return;
     void loadPlatformTools({ refresh: false });
   }, [activeSection, loadPlatformTools, platformToolsHydrated]);
 
@@ -220,7 +227,11 @@ export function SecurityPage() {
     void loadRuleCatalog();
   }, [loadRuleCatalog]);
 
-  const runSecurityOp = useCallback(async (name: string, runner: () => Promise<unknown>) => {
+  const runSecurityOp = useCallback(async <T,>(
+    name: string,
+    runner: () => Promise<T>,
+    consumeResult?: (result: T) => { display: string; success: boolean; message?: string },
+  ) => {
     if (!gatewayOperational) {
       toast.error(gatewayPreparing ? t('actionCenter.gatewayPreparing') : t('actionCenter.gatewayNotRunning'));
       return;
@@ -228,8 +239,13 @@ export function SecurityPage() {
     setSecurityOpBusy(name);
     try {
       const result = await runner();
-      setSecurityOpResult(JSON.stringify(result, null, 2));
-      toast.success(t('actionCenter.runSuccess', { name }));
+      const consumed = consumeResult?.(result);
+      setSecurityOpResult(consumed?.display ?? JSON.stringify(result, null, 2));
+      if (consumed?.success === false) {
+        toast.error(consumed.message ?? t('actionCenter.runFailed', { name }));
+      } else {
+        toast.success(t('actionCenter.runSuccess', { name }));
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setSecurityOpResult(`ERROR: ${message}`);
@@ -290,21 +306,6 @@ export function SecurityPage() {
       },
     }));
   };
-
-  const localizeAuditDetail = useCallback((item: AuditItem): string => {
-    if (!item.detail) return '';
-    if (item.ruleId === 'SC-SKILL-001') {
-      const matched = item.detail.match(/^(\d+)\s+skill\(s\)\s+installed$/i);
-      if (matched) {
-        const count = Number(matched[1]);
-        return t('audit.findings.SC-SKILL-001', { count, defaultValue: item.detail });
-      }
-    }
-    if (item.ruleId) {
-      return t(`audit.findings.${item.ruleId}`, { defaultValue: item.detail });
-    }
-    return item.detail;
-  }, [t]);
 
   const localizeRuleCatalogPlatform = useCallback((platform: string): string => (
     t(`ruleCatalog.platform.${platform}`, { defaultValue: platform })
@@ -836,7 +837,21 @@ export function SecurityPage() {
               title={t('actionCenter.emergencyTitle')}
               variant="destructive"
               disabled={securityOpBusy !== null || !gatewayOperational}
-              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async () => await hostSecurityRunEmergencyResponse())}
+              onClick={() => void runSecurityOp(
+                t('actionCenter.emergency'),
+                async () => await hostSecurityRunEmergencyResponse(),
+                (response) => {
+                  const outcome = resolveSecurityEmergencyOutcome(response);
+                  const display = JSON.stringify({ outcome: outcome.outcome });
+                  if (outcome.outcome === 'target_rejected') {
+                    return { display: `ERROR: ${SECURITY_EMERGENCY_TARGET_REJECTED_MESSAGE}`, success: false, message: SECURITY_EMERGENCY_TARGET_REJECTED_MESSAGE };
+                  }
+                  if (outcome.outcome === 'outcome_unknown') {
+                    return { display: `ERROR: ${outcome.message}`, success: false, message: outcome.message };
+                  }
+                  return { display, success: true };
+                },
+              )}
             >
               {t('actionCenter.emergency')}
             </Button>
@@ -884,7 +899,13 @@ export function SecurityPage() {
           <Button variant="outline" size="sm" onClick={() => void loadRecentAudits({ gatewayProcessState, page: 1, pageSize: 8 })}>{t('audit.refresh')}</Button>
         </CardHeader>
         <CardContent>
-          {!gatewayOperational ? <p className="text-sm text-muted-foreground">{gatewayPreparing ? t('audit.gatewayPreparing') : t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (
+          {!gatewayOperational ? <p className="text-sm text-muted-foreground">{gatewayPreparing ? t('audit.gatewayPreparing') : t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditError ? (
+            <div className="space-y-1 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+              <p>{t('audit.loadFailed')}</p>
+              <p className="text-xs">{auditError.startsWith('errors.') ? t(auditError) : auditError}</p>
+              {auditStale && <p className="text-xs">{t('audit.stale')}</p>}
+            </div>
+          ) : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (
             <div className="space-y-2">
               {auditItems.map((item, index) => (
                 <div key={`${item.ts}-${index}`} className="rounded-md border p-3">
@@ -893,7 +914,6 @@ export function SecurityPage() {
                     <div className="flex items-center gap-2"><Badge variant="outline">{localizeAuditRisk(item.risk)}</Badge><Badge variant="outline">{localizeAuditAction(item.action)}</Badge></div>
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">{new Date(item.ts).toLocaleString()} · {t('audit.ruleLabel')}: {item.ruleId || '-'} · {t('audit.decisionLabel')}: {item.decision || '-'}</div>
-                  {item.detail && <p className="mt-1 text-xs text-muted-foreground">{localizeAuditDetail(item)}</p>}
                 </div>
               ))}
             </div>

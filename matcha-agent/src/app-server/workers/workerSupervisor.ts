@@ -114,7 +114,8 @@ export class WorkerSupervisor {
     }
     this.requestTimeoutMs = options.requestTimeoutMs
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs
-    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? options.requestTimeoutMs
+    this.shutdownTimeoutMs =
+      options.shutdownTimeoutMs ?? options.requestTimeoutMs
     this.stderrTailBytes = options.stderrTailBytes
     this.ports = options.ports ?? {}
     this.spawnWorker = options.spawnWorker
@@ -247,11 +248,13 @@ export class WorkerSupervisor {
   ): Promise<WorkerResponse> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     const result = await Promise.race([
-      process.send({
-        id: this.createRequestId(),
-        type: 'worker.shutdown',
-        reason,
-      }).then(response => ({ resultType: 'response' as const, response })),
+      process
+        .send({
+          id: this.createRequestId(),
+          type: 'worker.shutdown',
+          reason,
+        })
+        .then(response => ({ resultType: 'response' as const, response })),
       new Promise<{ resultType: 'timedOut' }>(resolve => {
         timeout = setTimeout(
           () => resolve({ resultType: 'timedOut' }),
@@ -271,7 +274,9 @@ export class WorkerSupervisor {
   ): Promise<void> {
     let timeout: ReturnType<typeof setTimeout> | undefined
     const exitedGracefully = await Promise.race([
-      process.close(`worker shutdown for session ${sessionId}`).then(() => true),
+      process
+        .close(`worker shutdown for session ${sessionId}`)
+        .then(() => true),
       new Promise<false>(resolve => {
         timeout = setTimeout(() => resolve(false), this.shutdownTimeoutMs)
       }),

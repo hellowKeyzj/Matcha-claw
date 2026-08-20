@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
+} from '../../electron/desktop-contract/runtime-address';
 
 export type SessionConnectorStatusResultType =
   | 'connected'
@@ -16,7 +19,6 @@ export interface SessionConnectorStatusDetails {
   readonly sessionKey?: string;
   readonly toolCount?: number;
   readonly launchSummary?: string;
-  readonly refreshJobId?: string;
 }
 
 export interface SessionConnectorStatus {

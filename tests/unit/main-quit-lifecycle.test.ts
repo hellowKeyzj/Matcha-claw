@@ -54,50 +54,14 @@ const hoisted = vi.hoisted(() => {
     getName: vi.fn(() => 'MatchaClaw'),
   };
   const hostEventBusInstances: Array<{ closeAll: ReturnType<typeof vi.fn> }> = [];
-  const gatewayManagerInstances: Array<{
-    start: ReturnType<typeof vi.fn>;
-    stop: ReturnType<typeof vi.fn>;
-    restart: ReturnType<typeof vi.fn>;
-  }> = [];
-  const runtimeHostManagerMock = {
-    start: vi.fn(async () => undefined),
+  const directRuntimeHostMock = {
     stop: vi.fn(async () => undefined),
-    restart: vi.fn(async () => undefined),
-    forceTerminate: vi.fn(async () => undefined),
-    checkHealth: vi.fn(async () => ({ ok: true, lifecycle: 'running', activePluginCount: 0, degradedPlugins: [] })),
-    getState: vi.fn(() => ({ lifecycle: 'running', runtimeLifecycle: 'running', activePluginCount: 0 })),
-    onStateChange: vi.fn(() => () => undefined),
-    request: vi.fn(),
-    readGatewayStatus: vi.fn(),
-    executeShellAction: vi.fn(),
-    emitGatewayEvent: vi.fn(),
-    onGatewayEvent: vi.fn(() => () => undefined),
-    emitRuntimeJobEvent: vi.fn(),
-    onRuntimeJobEvent: vi.fn(() => () => undefined),
-    getInternalDispatchToken: vi.fn(() => 'test-token'),
-  };
-  const gatewayProcessRunnerMock = {
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => undefined),
-    restart: vi.fn(async () => undefined),
-    forceTerminate: vi.fn(async () => undefined),
-    checkReadiness: vi.fn(async () => ({ status: 'ready' })),
-    getState: vi.fn(() => ({ lifecycle: 'running' })),
-    onStateChange: vi.fn(() => () => undefined),
-  };
-  const matchaAgentAppServerManagerMock = {
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => undefined),
-    restart: vi.fn(async () => undefined),
-    forceTerminate: vi.fn(async () => undefined),
-    checkReadiness: vi.fn(async () => ({ status: 'ready' })),
-    getState: vi.fn(() => ({ lifecycle: 'running' })),
-    getEndpointSnapshot: vi.fn(() => undefined),
-    onStateChange: vi.fn(() => () => undefined),
+    forceKill: vi.fn(async () => undefined),
   };
   const bootstrapMainApplicationMock = vi.fn(async () => ({
     mainWindow: mainWindowMock,
     hostApiServer: hostApiServerMock,
+    directRuntimeHost: directRuntimeHostMock,
   }));
   const loggerMock = {
     debug: vi.fn(),
@@ -109,13 +73,9 @@ const hoisted = vi.hoisted(() => {
   return {
     appHandlers,
     electronAppMock,
-    mainWindowMock,
     hostApiServerMock,
     hostEventBusInstances,
-    gatewayManagerInstances,
-    runtimeHostManagerMock,
-    gatewayProcessRunnerMock,
-    matchaAgentAppServerManagerMock,
+    directRuntimeHostMock,
     bootstrapMainApplicationMock,
     loggerMock,
   };
@@ -125,30 +85,6 @@ vi.mock('electron', () => ({
   app: hoisted.electronAppMock,
   BrowserWindow: {
     getAllWindows: vi.fn(() => []),
-  },
-}));
-
-vi.mock('@electron/main/process-runtime/openclaw-gateway/manager', () => ({
-  GatewayManager: class {
-    private processController: typeof hoisted.gatewayProcessRunnerMock | undefined;
-
-    start = vi.fn(async () => {
-      await this.processController?.start();
-    });
-    stop = vi.fn(async () => undefined);
-    restart = vi.fn(async () => {
-      await this.processController?.restart();
-      return { status: 'restarted' as const };
-    });
-    setRuntimeHostManager = vi.fn();
-    setControlReadyProbe = vi.fn();
-    setProcessController = vi.fn((controller: typeof hoisted.gatewayProcessRunnerMock) => {
-      this.processController = controller;
-    });
-
-    constructor() {
-      hoisted.gatewayManagerInstances.push(this);
-    }
   },
 }));
 
@@ -166,24 +102,12 @@ vi.mock('@electron/api/event-bus', () => ({
   },
 }));
 
-function mockProcessManagersForMainIndex(): void {
-  vi.doMock('@electron/main/runtime-host-manager', () => ({
-    createRuntimeHostManager: vi.fn(() => hoisted.runtimeHostManagerMock),
-  }));
-  vi.doMock('@electron/main/process-runtime/matcha-agent-app-server-process-manager', () => ({
-    createMatchaAgentAppServerProcessManager: vi.fn(() => hoisted.matchaAgentAppServerManagerMock),
-  }));
-  vi.doMock('@electron/main/process-runtime/openclaw-gateway-process-manager', () => ({
-    createOpenClawGatewayProcessManager: vi.fn(() => hoisted.gatewayProcessRunnerMock),
-  }));
-}
-
 vi.mock('@electron/main/app-bootstrap', () => ({
   bootstrapMainApplication: (...args: unknown[]) => hoisted.bootstrapMainApplicationMock(...args),
 }));
 
 vi.mock('@electron/main/main-window', () => ({
-  createMainWindow: vi.fn(() => hoisted.mainWindowMock),
+  createMainWindow: vi.fn(),
   loadMainWindowContent: vi.fn(),
 }));
 
@@ -192,10 +116,6 @@ vi.mock('@electron/main/process-instance-lock', () => ({
     acquired: true,
     release: vi.fn(),
   })),
-}));
-
-vi.mock('@electron/main/gateway-control-ready-probe', () => ({
-  waitForGatewayControlReady: vi.fn(async () => undefined),
 }));
 
 type ProcessListener = Parameters<typeof process.removeListener>[1];
@@ -295,7 +215,30 @@ describe('main quit lifecycle coordination', () => {
     expect(requestQuitLifecycleAction(state)).toBe('allow-quit');
   });
 
-  it('closes host events/server and stops all app-owned processes without force termination before the timeout', async () => {
+  it('keeps only DirectRuntimeHost as the main-process peer runtime owner', async () => {
+    processListeners = await importMainIndex();
+
+    expect(hoisted.bootstrapMainApplicationMock).toHaveBeenCalledWith(expect.objectContaining({
+      hostEventBus: expect.anything(),
+    }));
+    expect(hoisted.bootstrapMainApplicationMock.mock.calls[0]?.[0]).not.toHaveProperty('gatewayManager');
+    expect(hoisted.bootstrapMainApplicationMock.mock.calls[0]?.[0]).not.toHaveProperty('runtimeHostManager');
+    expect(hoisted.bootstrapMainApplicationMock.mock.calls[0]?.[0]).not.toHaveProperty('matchaAgentAppServerManager');
+  });
+
+  it('E2E bootstrap failure keeps the process available and logs no raw error', async () => {
+    process.env.MATCHACLAW_E2E = '1';
+    const failure = new Error('C:\\private\\runtime-host.exe token');
+    hoisted.bootstrapMainApplicationMock.mockRejectedValueOnce(failure);
+
+    processListeners = await importMainIndex();
+
+    expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
+    expect(hoisted.loggerMock.error).toHaveBeenCalledWith('Failed to bootstrap main application');
+    expect(hoisted.loggerMock.error).not.toHaveBeenCalledWith(expect.anything(), failure);
+  });
+
+  it('closes shell resources and gracefully stops only DirectRuntimeHost', async () => {
     vi.useFakeTimers();
     processListeners = await importMainIndex();
 
@@ -303,69 +246,41 @@ describe('main quit lifecycle coordination', () => {
 
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
     expect(hoisted.hostEventBusInstances[0]?.closeAll).toHaveBeenCalledTimes(1);
-    expect(hoisted.hostApiServerMock.close).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayManagerInstances[0]?.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.stop).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).not.toHaveBeenCalled();
+    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
     expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(5000);
 
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).not.toHaveBeenCalled();
+    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
     expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
   });
 
-  it('guards process starts and restarts once quit cleanup has started', async () => {
+  it('force-kills only DirectRuntimeHost when graceful stop fails', async () => {
+    vi.useFakeTimers();
+    hoisted.directRuntimeHostMock.stop.mockRejectedValue(new Error('graceful stop failed'));
     processListeners = await importMainIndex();
-    await Promise.resolve();
-    const bootstrapArgs = hoisted.bootstrapMainApplicationMock.mock.calls[0]?.[0] as {
-      gatewayManager: {
-        start: () => Promise<void>;
-        restart: () => Promise<{ status: 'restarted' | 'deferred' }>;
-      };
-      runtimeHostManager: typeof hoisted.runtimeHostManagerMock;
-      matchaAgentAppServerManager: typeof hoisted.matchaAgentAppServerManagerMock;
-    };
-    expect(bootstrapArgs).toBeTruthy();
 
     dispatchBeforeQuit();
-    await bootstrapArgs.runtimeHostManager.start();
-    await bootstrapArgs.runtimeHostManager.restart();
-    await bootstrapArgs.gatewayManager.start();
-    await bootstrapArgs.gatewayManager.restart();
-    await bootstrapArgs.matchaAgentAppServerManager.start();
-    await bootstrapArgs.matchaAgentAppServerManager.restart();
+    await vi.advanceTimersByTimeAsync(0);
 
-    expect(hoisted.runtimeHostManagerMock.start).not.toHaveBeenCalled();
-    expect(hoisted.runtimeHostManagerMock.restart).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.start).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.restart).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.start).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.restart).not.toHaveBeenCalled();
-    expect(hoisted.loggerMock.debug).toHaveBeenCalledWith(
-      '[quit] Skip OpenClaw gateway start because quit cleanup is in progress',
-    );
+    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
+    expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
   });
 
-  it('force terminates all registered owned processes once and waits for every emergency cleanup to settle', async () => {
+  it('force-kills DirectRuntimeHost once after the five-second stop deadline and waits for it', async () => {
     vi.useFakeTimers();
-    let resolveRuntimeHostForceTerminate!: () => void;
-    const runtimeHostForceTerminatePromise = new Promise<void>((resolve) => {
-      resolveRuntimeHostForceTerminate = resolve;
+    let resolveForceKill!: () => void;
+    const forceKillPromise = new Promise<void>((resolve) => {
+      resolveForceKill = resolve;
     });
-    hoisted.runtimeHostManagerMock.stop.mockReturnValue(new Promise(() => undefined));
-    hoisted.runtimeHostManagerMock.forceTerminate.mockReturnValue(runtimeHostForceTerminatePromise);
-    hoisted.gatewayProcessRunnerMock.stop.mockReturnValue(new Promise(() => undefined));
-    hoisted.gatewayProcessRunnerMock.forceTerminate.mockRejectedValue(new Error('gateway force terminate failed'));
-    hoisted.matchaAgentAppServerManagerMock.stop.mockReturnValue(new Promise(() => undefined));
+    hoisted.directRuntimeHostMock.stop.mockReturnValue(new Promise(() => undefined));
+    hoisted.directRuntimeHostMock.forceKill.mockReturnValue(forceKillPromise);
     processListeners = await importMainIndex();
 
     const firstEvent = dispatchBeforeQuit();
@@ -373,32 +288,21 @@ describe('main quit lifecycle coordination', () => {
 
     expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1);
     expect(secondEvent.preventDefault).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayManagerInstances[0]?.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).not.toHaveBeenCalled();
+    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
     expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(4999);
 
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).not.toHaveBeenCalled();
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).not.toHaveBeenCalled();
+    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
     expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(hoisted.runtimeHostManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayManagerInstances[0]?.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
     expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
 
-    resolveRuntimeHostForceTerminate();
+    resolveForceKill();
     await vi.waitFor(() => {
       expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
     });
@@ -407,13 +311,8 @@ describe('main quit lifecycle coordination', () => {
 
     expect(thirdEvent.preventDefault).not.toHaveBeenCalled();
     expect(hoisted.hostEventBusInstances[0]?.closeAll).toHaveBeenCalledTimes(1);
-    expect(hoisted.hostApiServerMock.close).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayManagerInstances[0]?.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.runtimeHostManagerMock.forceTerminate).toHaveBeenCalledTimes(1);
-    expect(hoisted.gatewayProcessRunnerMock.forceTerminate).toHaveBeenCalledTimes(1);
-    expect(hoisted.matchaAgentAppServerManagerMock.forceTerminate).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
+    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
     expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
   });
 });

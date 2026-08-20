@@ -12,6 +12,23 @@ describe('Windows NSIS installer script', () => {
     expect(script).toContain('Old uninstaller exited with code $R0. Continuing with overwrite install');
   });
 
+  it('skips orphan cleanup on fresh installs', () => {
+    const existingInstallGuard = 'IfFileExists "$INSTDIR\\" 0 _existing_install_cleanup_done';
+    const orphanCleanupStart = '; Even if MatchaClaw.exe was not detected';
+    const orphanProcessScan = 'Get-CimInstance -ClassName Win32_Process';
+    const handleReleaseWait = 'Sleep 2000\n  _existing_install_cleanup_done:';
+    const orphanCleanupIndex = script.indexOf(orphanCleanupStart);
+    const orphanProcessScanIndex = script.indexOf(
+      orphanProcessScan,
+      orphanCleanupIndex,
+    );
+
+    expect(orphanCleanupIndex).toBeGreaterThan(-1);
+    expect(script.indexOf(existingInstallGuard)).toBeLessThan(orphanCleanupIndex);
+    expect(orphanProcessScanIndex).toBeGreaterThan(orphanCleanupIndex);
+    expect(script.indexOf(handleReleaseWait)).toBeGreaterThan(orphanProcessScanIndex);
+  });
+
   it('moves the existing install directory aside before extraction', () => {
     expect(script).toContain('SetOutPath $TEMP');
     expect(script).toContain('Rename "$INSTDIR" "$INSTDIR._stale_$R8"');

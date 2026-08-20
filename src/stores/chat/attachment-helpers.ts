@@ -1,4 +1,4 @@
-import { hostFileThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
+import { hostWorkspaceMediaThumbnail } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
 import {
   getSessionItems,
@@ -9,10 +9,12 @@ import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState, ChatSessionM
 import { buildSessionIdentityRecordIndex } from './session-identity';
 import type {
   SessionAssistantTurnItem,
-  SessionRenderAttachedFile,
   SessionRenderItem,
   SessionRenderUserMessageItem,
-} from '../../../runtime-host/shared/session-adapter-types';
+} from '../../types/session/render-item';
+import type {
+  SessionRenderAttachedFile,
+} from '../../types/session/tool-card';
 
 const IMAGE_CACHE_KEY = 'matchaclaw:image-cache';
 const IMAGE_CACHE_MAX = 100;
@@ -55,7 +57,8 @@ function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
 
 const imageCache = loadImageCache();
 
-interface AttachmentPreviewLoadContext extends WorkspaceFileContext {
+interface AttachmentPreviewLoadContext {
+  workspaceRoot?: string;
   sessionIdentity: NonNullable<ChatSessionMetaState['sessionIdentity']>;
 }
 
@@ -391,14 +394,49 @@ export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean 
   ));
 }
 
-function resolveAttachmentPreviewPath(file: AttachedFileMeta): string | null {
-  if (typeof file.filePath === 'string' && file.filePath.trim()) {
-    return file.filePath;
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+function isSafeRelativePath(path: string): boolean {
+  return path.length > 0
+    && !isAbsolutePath(path)
+    && !path.includes('\0')
+    && !path.includes(':')
+    && path.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
+}
+
+function resolveAttachmentPreviewRelativePath(
+  file: AttachedFileMeta,
+  workspaceRoot?: string,
+): string | null {
+  if (typeof file.filePath !== 'string' || !file.filePath.trim()) {
+    return null;
   }
-  if (typeof file.gatewayUrl === 'string' && file.gatewayUrl.trim()) {
-    return file.gatewayUrl;
+  const filePath = file.filePath.trim().replace(/\\/g, '/');
+  if (!isAbsolutePath(filePath)) {
+    return isSafeRelativePath(filePath) ? filePath : null;
   }
-  return null;
+
+  if (typeof workspaceRoot !== 'string' || !workspaceRoot.trim()) {
+    return null;
+  }
+  const normalizedRoot = workspaceRoot.trim().replace(/\\/g, '/');
+  const root = normalizedRoot === '/' || /^[A-Za-z]:\/$/.test(normalizedRoot)
+    ? normalizedRoot
+    : normalizedRoot.replace(/\/+$/, '');
+  if (!isAbsolutePath(root)) {
+    return null;
+  }
+  const caseInsensitive = /^[A-Za-z]:\//.test(root) || root.startsWith('//');
+  const comparableRoot = caseInsensitive ? root.toLowerCase() : root;
+  const comparableFilePath = caseInsensitive ? filePath.toLowerCase() : filePath;
+  const rootPrefix = root.endsWith('/') ? comparableRoot : `${comparableRoot}/`;
+  if (!comparableFilePath.startsWith(rootPrefix)) {
+    return null;
+  }
+  const relativePath = filePath.slice(root.length + (root.endsWith('/') ? 0 : 1));
+  return isSafeRelativePath(relativePath) ? relativePath : null;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -434,7 +472,12 @@ export async function loadMissingItemPreviews(
     throwIfHistoryLoadAborted(abortSignal);
   }
   const normalizedItems = hydrateAttachedFilesFromItems(items);
-  const needPreview: Array<{ refKey: string; path: string; mimeType: string }> = [];
+  const needPreview: Array<{
+    refKey: string;
+    file: AttachedFileMeta;
+    relativePath?: string;
+    gatewayUrl?: string;
+  }> = [];
   const seenRefs = new Set<string>();
 
   for (const item of normalizedItems) {
@@ -446,12 +489,15 @@ export async function loadMissingItemPreviews(
       if (!refKey || seenRefs.has(refKey) || !fileNeedsPreviewLoad(file)) {
         continue;
       }
-      const path = resolveAttachmentPreviewPath(file);
-      if (!path) {
+      const gatewayUrl = typeof file.gatewayUrl === 'string' && file.gatewayUrl.trim()
+        ? file.gatewayUrl
+        : undefined;
+      const relativePath = gatewayUrl ? null : resolveAttachmentPreviewRelativePath(file, context.workspaceRoot);
+      if (!relativePath && !gatewayUrl) {
         continue;
       }
       seenRefs.add(refKey);
-      needPreview.push({ refKey, path, mimeType: file.mimeType });
+      needPreview.push({ refKey, file, ...(gatewayUrl ? { gatewayUrl } : { relativePath: relativePath! }) });
     }
   }
 
@@ -460,16 +506,25 @@ export async function loadMissingItemPreviews(
   }
 
   try {
-    const thumbnails = Object.fromEntries(await mapWithConcurrency(needPreview, THUMBNAIL_LOAD_CONCURRENCY, async (entry) => [
-      entry.refKey,
-      await hostFileThumbnail({
-        path: entry.path,
-        mimeType: entry.mimeType,
-        sessionIdentity: context.sessionIdentity,
-        workspaceId: context.workspaceId,
-        sourceId: context.sourceId,
-      }),
-    ] as const)) as Record<string, { preview: string | null; fileSize: number }>;
+    const thumbnails = Object.fromEntries(await mapWithConcurrency(needPreview, THUMBNAIL_LOAD_CONCURRENCY, async (entry) => {
+      try {
+        const thumbnail = entry.gatewayUrl
+          ? await hostWorkspaceMediaThumbnail({
+            gatewayUrl: entry.gatewayUrl,
+            mimeType: entry.file.mimeType,
+            agentId: context.sessionIdentity.agentId,
+            sessionIdentity: context.sessionIdentity,
+          })
+          : await hostWorkspaceMediaThumbnail({
+            relativePath: entry.relativePath!,
+            mimeType: entry.file.mimeType,
+            sessionIdentity: context.sessionIdentity,
+          });
+        return [entry.refKey, thumbnail] as const;
+      } catch {
+        return [entry.refKey, { preview: null, fileSize: 0 }] as const;
+      }
+    })) as Record<string, { preview: string | null; fileSize: number }>;
 
     let changed = normalizedItems !== items;
     const nextItems = normalizedItems.map((item) => {
@@ -534,12 +589,11 @@ export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {
     return;
   }
   for (const attachment of attachments) {
-    imageCache.set(attachment.stagedPath, {
+    imageCache.set(attachment.stagedAttachmentId, {
       fileName: attachment.fileName,
       mimeType: attachment.mimeType,
       fileSize: attachment.fileSize,
       preview: attachment.preview,
-      filePath: attachment.stagedPath,
       source: 'user-upload',
     });
   }

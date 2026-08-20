@@ -1,5 +1,8 @@
-import { buildRuntimeScopeKey } from './session-identity';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex } from './session-identity';
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
+} from '../../../electron/desktop-contract/runtime-address';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -14,14 +17,28 @@ import type {
 import type {
   SessionAssistantTurnItem,
   SessionExecutionGraphStep,
-  SessionRenderAttachedFile,
   SessionRenderExecutionGraphItem,
-  SessionRenderImage,
   SessionRenderItem,
-  SessionContextTokenSnapshot,
   SessionRenderSystemItem,
+} from '../../types/session/render-item';
+import type {
+  SessionAssistantTurnSegment,
+  SessionRenderAttachedFile,
+  SessionRenderImage,
+  SessionRenderToolCard,
+} from '../../types/session/tool-card';
+import type {
+  SessionContextTokenSnapshot,
+  SessionDelta,
+  SessionFact,
   SessionStateSnapshot,
-} from '../../../runtime-host/shared/session-adapter-types';
+  SessionView,
+  SessionWireContent,
+  SessionWireItem,
+  SessionWireRuntime,
+  SessionWireTool,
+  SessionWireWindow,
+} from '../../types/session/snapshot';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,
@@ -31,7 +48,12 @@ import {
 import { findLatestAssistantTextFromItems } from './timeline-message';
 import { sanitizeCanonicalUserText } from './message-helpers';
 import { syncViewportState } from './viewport-state';
-
+import { useTaskSnapshotStore } from './task-snapshot-store';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
 export function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
@@ -279,6 +301,8 @@ function buildProtocolItemSignature(item: SessionRenderItem): string {
       item.kind,
       item.role,
       item.messageId ?? '',
+      item.clientId ?? '',
+      item.status ?? '',
       item.createdAt ?? '',
       item.updatedAt ?? '',
       hashText(item.text),
@@ -298,16 +322,16 @@ function buildProtocolItemSignature(item: SessionRenderItem): string {
 }
 
 function isPendingUserItem(item: SessionRenderItem): boolean {
-  if (item.kind !== 'user-message') {
-    return false;
-  }
-  const status = (item as { status?: unknown }).status;
-  return status === 'pending' || status === 'sending';
+  return item.kind === 'user-message' && (item.status === 'pending' || item.status === 'sending');
 }
 
 function buildUserConfirmationKey(item: SessionRenderItem): string | null {
   if (item.kind !== 'user-message') {
     return null;
+  }
+  const clientId = item.clientId?.trim();
+  if (clientId) {
+    return `client:${clientId}`;
   }
   const messageId = item.messageId?.trim();
   if (messageId) {
@@ -321,32 +345,62 @@ function buildUserConfirmationKey(item: SessionRenderItem): string | null {
   return `echo:${hashStringDjb2(text)}:${createdAt}`;
 }
 
-function dropReconciledOptimisticUserItems(
+function authoritativeUserMatchesPending(
+  authoritative: SessionRenderItem,
+  pending: SessionRenderItem,
+): boolean {
+  if (authoritative.kind !== 'user-message' || pending.kind !== 'user-message') {
+    return false;
+  }
+  const authoritativeKey = buildUserConfirmationKey(authoritative);
+  const pendingKey = buildUserConfirmationKey(pending);
+  if (authoritativeKey && authoritativeKey === pendingKey) {
+    return true;
+  }
+  const authoritativeText = sanitizeCanonicalUserText(authoritative.text).trim();
+  return authoritativeText.length > 0
+    && authoritativeText === sanitizeCanonicalUserText(pending.text).trim();
+}
+
+function dropReconciledOptimisticItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
 ): SessionRenderItem[] {
-  const pendingUserKeys = new Set(
-    currentItems.flatMap((item) => {
-      const key = buildUserConfirmationKey(item);
-      return key && isPendingUserItem(item) ? [key] : [];
-    }),
-  );
-  if (pendingUserKeys.size === 0) {
+  const authoritativeUsers = nextItems.filter((item) => item.kind === 'user-message' && !isPendingUserItem(item));
+  const pendingItems = currentItems.filter((item) => (
+    isPendingUserItem(item)
+      && !authoritativeUsers.some((authoritative) => authoritativeUserMatchesPending(authoritative, item))
+  ));
+  if (pendingItems.length === 0) {
     return nextItems;
   }
-  const authoritativeUserKeys = new Set(
-    nextItems.flatMap((item) => {
-      const key = buildUserConfirmationKey(item);
-      return key && !isPendingUserItem(item) ? [key] : [];
-    }),
-  );
-  if (authoritativeUserKeys.size === 0) {
-    return nextItems;
+  const nextByKey = new Map(nextItems.map((item) => [item.key, item] as const));
+  const emittedNextKeys = new Set<string>();
+  const emittedPendingKeys = new Set<string>();
+  const merged: SessionRenderItem[] = [];
+  for (const currentItem of currentItems) {
+    if (pendingItems.some((pending) => pending.key === currentItem.key)) {
+      emittedPendingKeys.add(currentItem.key);
+      merged.push(currentItem);
+      continue;
+    }
+    const nextItem = nextByKey.get(currentItem.key);
+    if (nextItem) {
+      emittedNextKeys.add(nextItem.key);
+      merged.push(nextItem);
+    }
   }
-  return nextItems.filter((item) => {
-    const key = buildUserConfirmationKey(item);
-    return !key || !isPendingUserItem(item) || !pendingUserKeys.has(key) || !authoritativeUserKeys.has(key);
-  });
+  for (const pending of pendingItems) {
+    if (!emittedPendingKeys.has(pending.key)) {
+      merged.push(pending);
+    }
+  }
+  for (const nextItem of nextItems) {
+    if (!emittedNextKeys.has(nextItem.key)) {
+      merged.push(nextItem);
+    }
+  }
+  return merged;
 }
 
 export function reconcileSessionItems(
@@ -356,7 +410,7 @@ export function reconcileSessionItems(
   if (currentItems === nextItems) {
     return currentItems;
   }
-  const canonicalNextItems = dropReconciledOptimisticUserItems(currentItems, nextItems);
+  const canonicalNextItems = dropReconciledOptimisticItems(currentItems, nextItems);
   if (canonicalNextItems.length === 0) {
     return currentItems.length === 0 ? currentItems : canonicalNextItems;
   }
@@ -381,8 +435,29 @@ export function reconcileSessionItems(
     }
     return currentItem;
   });
+  const preservedReceipts = currentItems.filter((item) => (
+    item.kind === 'user-message'
+    && item.rendererReceiptRunId
+    && !canonicalNextItems.some((nextItem) => nextItem.key === item.key)
+    && !canonicalNextItems.some((nextItem) => authoritativeUserMatchesPending(nextItem, item))
+    && canonicalNextItems.some((nextItem) => (
+      (
+        nextItem.kind === 'assistant-turn'
+        && nextItem.runId === item.rendererReceiptRunId
+      )
+      || (
+        nextItem.kind === 'user-message'
+        && !nextItem.runId
+        && nextItem.text === item.text
+        && nextItem.createdAt === item.createdAt
+      )
+    ))
+  ));
+  if (preservedReceipts.length > 0) {
+    changed = true;
+  }
 
-  return changed ? reconciled : currentItems;
+  return changed ? [...reconciled, ...preservedReceipts] : currentItems;
 }
 
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
@@ -926,6 +1001,526 @@ export function patchPendingApprovalsFromSnapshot(
     ...state.pendingApprovalsBySession,
     [sessionKey]: nextApprovals,
   };
+}
+
+type SessionProjectionState = SessionView;
+type SessionProjectionStore = Map<string, SessionProjectionState>;
+
+const sessionProjectionByStore = new WeakMap<() => ChatStoreState, SessionProjectionStore>();
+const sessionProjectionStores = new Set<SessionProjectionStore>();
+
+function projectionStore(get: () => ChatStoreState): SessionProjectionStore {
+  const existing = sessionProjectionByStore.get(get);
+  if (existing) {
+    return existing;
+  }
+  const created: SessionProjectionStore = new Map();
+  sessionProjectionByStore.set(get, created);
+  sessionProjectionStores.add(created);
+  return created;
+}
+
+export type SessionProjectionApplyResult =
+  | { status: 'applied'; sessionKey: string; epoch: number; seq: number; cursor: number }
+  | { status: 'duplicate' | 'stale'; sessionKey: string; epoch: number; seq: number; cursor: number }
+  | { status: 'gap' | 'epoch-mismatch' | 'unavailable'; sessionKey: string; reason: string };
+
+type SessionProjectionApplyInput = {
+  set: (partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState)) => void;
+  get: () => ChatStoreState;
+};
+
+function factValue<T>(fact: SessionFact<T>): T | null {
+  if (fact === 'unknown' || fact === 'unavailable') return null;
+  if ('complete' in fact) return fact.complete;
+  return fact.incomplete.facts;
+}
+
+function sessionIdentityForProjection(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  view: SessionView,
+): SessionIdentity | null {
+  const existing = state.loadedSessions[view.sessionKey]?.meta.sessionIdentity
+    ?? Object.values(state.loadedSessions).find((record) => (
+      record.meta.backendSessionKey === view.sessionKey
+      || record.meta.sessionIdentity?.sessionKey === view.sessionKey
+    ))?.meta.sessionIdentity;
+  if (existing) return existing;
+  if (!view.identity.agentId || view.identity.endpoint.kind !== 'native-runtime') return null;
+  return {
+    endpoint: {
+      kind: 'native-runtime',
+      runtimeAdapterId: view.identity.endpoint.runtimeAdapterId,
+      runtimeInstanceId: view.identity.endpoint.runtimeInstanceId,
+    },
+    agentId: view.identity.agentId,
+    sessionKey: view.identity.sessionKey,
+  };
+}
+
+function projectionRecordKey(
+  state: Pick<ChatStoreState, 'loadedSessions' | 'sessionRecordKeyByIdentityKey'>,
+  view: SessionView,
+  identity: SessionIdentity | null,
+): string | null {
+  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, view.sessionKey)) {
+    return view.sessionKey;
+  }
+  const byBackendKey = Object.entries(state.loadedSessions).find(([, record]) => (
+    record.meta.backendSessionKey === view.sessionKey
+    || record.meta.sessionIdentity?.sessionKey === view.sessionKey
+  ));
+  if (byBackendKey) return byBackendKey[0];
+  if (!identity) return null;
+  return state.sessionRecordKeyByIdentityKey[buildSessionIdentityKey(identity)]
+    ?? buildSessionIdentityKey(identity);
+}
+
+function projectionRuntimePhase(phase: SessionWireRuntime['phase']): ChatSessionRuntimeState['runPhase'] {
+  switch (phase) {
+    case 'queued': return 'submitted';
+    case 'started': return 'streaming';
+    case 'waiting_for_approval': return 'waiting_tool';
+    case 'cancellation_requested': return 'stopping';
+    case 'cancelled': return 'aborted';
+    case 'completed': return 'done';
+    case 'failed':
+    case 'interrupted': return 'error';
+  }
+}
+
+function projectionItemStatus(status: SessionWireItem['status']): SessionAssistantTurnItem['status'] {
+  switch (status) {
+    case 'pending':
+    case 'streaming': return 'streaming';
+    case 'waiting_for_tool': return 'waiting_tool';
+    case 'final': return 'final';
+    case 'error': return 'error';
+    case 'aborted': return 'aborted';
+  }
+}
+
+function projectionToolCard(tool: SessionWireTool): SessionRenderToolCard {
+  const status = tool.phase === 'failed'
+    ? 'error'
+    : tool.phase === 'completed' ? 'completed' : 'running';
+  const summary = tool.summary ?? undefined;
+  return {
+    id: tool.toolCallId,
+    toolCallId: tool.toolCallId,
+    name: tool.name ?? 'tool',
+    displayTitle: tool.name ?? 'tool',
+    input: {},
+    status,
+    ...(summary ? { summary } : {}),
+    result: summary
+      ? { kind: 'text', surface: 'tool-card', collapsedPreview: summary, bodyText: summary }
+      : { kind: 'none', surface: 'tool-card' },
+  };
+}
+
+function safeMediaReference(reference: string | undefined): string | undefined {
+  if (typeof reference !== 'string') {
+    return undefined;
+  }
+  const value = reference.trim();
+  if (!value || value.startsWith('data:') || value.startsWith('file:')) {
+    return undefined;
+  }
+  return value.startsWith('http://')
+    || value.startsWith('https://')
+    || value.startsWith('/api/')
+    ? value
+    : undefined;
+}
+
+function projectionMedia(content: SessionWireContent): { images: SessionRenderImage[]; attachedFiles: SessionRenderAttachedFile[] } {
+  if (content.kind !== 'media') return { images: [], attachedFiles: [] };
+  const reference = safeMediaReference(content.reference);
+  if (!reference) return { images: [], attachedFiles: [] };
+  const mimeType = content.mediaType || 'application/octet-stream';
+  if (mimeType.toLowerCase().startsWith('image/')) {
+    return { images: [{ url: reference, mimeType }], attachedFiles: [] };
+  }
+  return {
+    images: [],
+    attachedFiles: [{
+      fileName: 'media',
+      mimeType,
+      fileSize: 0,
+      preview: null,
+      gatewayUrl: reference,
+      source: 'message-ref',
+    }],
+  };
+}
+
+export function projectSessionViewItems(view: SessionView): SessionRenderItem[] {
+  const items = factValue(view.items);
+  if (!items) {
+    return [];
+  }
+  const tools = factValue(view.tools) ?? [];
+  const toolsById = new Map(tools.map((tool) => [tool.toolCallId, projectionToolCard(tool)] as const));
+  return items.map((item) => {
+    if (item.kind === 'userMessage') {
+      const media = item.content.flatMap((content) => projectionMedia(content));
+      return {
+        key: item.itemId,
+        kind: 'user-message',
+        role: 'user',
+        sessionKey: view.sessionKey,
+        text: item.text,
+        images: media.flatMap((entry) => entry.images),
+        attachedFiles: media.flatMap((entry) => entry.attachedFiles),
+        ...(item.messageId ? { messageId: item.messageId } : {}),
+      };
+    }
+    if (item.kind === 'system') {
+      return {
+        key: item.itemId,
+        kind: 'system',
+        role: 'system',
+        sessionKey: view.sessionKey,
+        text: item.text,
+        level: item.status === 'error' ? 'error' : item.status === 'aborted' ? 'warning' : 'info',
+      };
+    }
+    const segments: SessionAssistantTurnSegment[] = [];
+    let messageIndex = 0;
+    let thinkingIndex = 0;
+    let mediaIndex = 0;
+    for (const [index, content] of item.segments.entries()) {
+      if (content.kind === 'text') {
+        segments.push({ kind: 'message', key: `${item.itemId}:message:${messageIndex++}`, text: content.text });
+      } else if (content.kind === 'thinking') {
+        segments.push({ kind: 'thinking', key: `${item.itemId}:thinking:${thinkingIndex++}`, text: content.text });
+      } else if (content.kind === 'media') {
+        const media = projectionMedia(content);
+        if (media.images.length || media.attachedFiles.length) {
+          segments.push({ kind: 'media', key: `${item.itemId}:media:${mediaIndex++}`, ...media });
+        }
+      } else if (content.kind === 'toolUse' || content.kind === 'toolResult') {
+        const tool = toolsById.get(content.toolCallId);
+        if (tool) {
+          segments.push({ kind: 'tool', key: `${item.itemId}:tool:${content.toolCallId}:${index}`, tool });
+        }
+      }
+    }
+    const toolSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'tool' }> => segment.kind === 'tool');
+    const thinkingSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'thinking' }> => segment.kind === 'thinking');
+    const messageSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'message' }> => segment.kind === 'message');
+    const mediaSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'media' }> => segment.kind === 'media');
+    return {
+      key: item.itemId,
+      kind: 'assistant-turn',
+      role: 'assistant',
+      sessionKey: view.sessionKey,
+      identitySource: item.runId ? 'run' : 'message',
+      identityMode: item.runId ? 'run' : 'message',
+      identityConfidence: 'strong',
+      status: projectionItemStatus(item.status),
+      segments,
+      thinking: thinkingSegments.length ? thinkingSegments.map((segment) => segment.text).join('\\n') : null,
+      tools: toolSegments.map((segment) => segment.tool),
+      text: messageSegments.length ? messageSegments.map((segment) => segment.text).join('') : item.text,
+      images: mediaSegments.flatMap((segment) => segment.images),
+      attachedFiles: mediaSegments.flatMap((segment) => segment.attachedFiles),
+      ...(item.messageId ? { messageId: item.messageId } : {}),
+      ...(item.runId ? { runId: item.runId } : {}),
+    };
+  });
+}
+
+function projectionRuntime(
+  current: ChatSessionRuntimeState,
+  fact: SessionFact<SessionWireRuntime>,
+): ChatSessionRuntimeState {
+  const runtime = factValue(fact);
+  if (!runtime) return createEmptySessionRuntime();
+  const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
+  return {
+    ...current,
+    activeRunId: runtime.activeRunId,
+    runPhase: projectionRuntimePhase(runtime.phase),
+    activeTurnItemKey: null,
+    pendingTurnKey: null,
+    pendingTurnLaneKey: null,
+    runtimeActivity: null,
+    lastUserMessageAt: null,
+    lastError: runtime.issue === 'rejected' ? issueMessage : null,
+    lastIssue: issueMessage ? { message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
+    updatedAt: Date.now(),
+  };
+}
+
+function projectionWindow(current: ChatSessionViewportState, fact: SessionFact<SessionWireWindow>): ChatSessionViewportState {
+  const window = factValue(fact);
+  if (!window) return createEmptySessionViewportState();
+  return syncViewportState(current, {
+    ...window,
+    isLoadingMore: false,
+    isLoadingNewer: false,
+    anchorItemKey: current.anchorItemKey,
+  });
+}
+
+function projectionApprovals(
+  state: ChatStoreState,
+  recordKey: string,
+  view: SessionView,
+): Record<string, ApprovalItem[]> {
+  const fact = factValue(view.approvals);
+  if (!fact) {
+    return { ...state.pendingApprovalsBySession, [recordKey]: [] };
+  }
+  const identity = sessionIdentityForProjection(state, view);
+  if (!identity) {
+    return { ...state.pendingApprovalsBySession, [recordKey]: [] };
+  }
+  const endpointSessionId = state.loadedSessions[recordKey]?.meta.endpointSessionId;
+  const approvals = fact
+    .filter((approval) => approval.phase === 'requested')
+    .map((approval) => ({
+      id: approval.approvalId,
+      sessionKey: recordKey,
+      backendSessionKey: view.sessionKey,
+      ...(endpointSessionId ? { endpointSessionId } : {}),
+      sessionIdentity: identity,
+      ...(approval.runId ? { runId: approval.runId } : {}),
+      title: 'Approval required',
+      allowedDecisions: approval.optionIds.filter((option): option is ApprovalItem['allowedDecisions'][number] => (
+        option === 'allow-once' || option === 'allow-always' || option === 'deny'
+      )),
+      createdAtMs: Date.now(),
+    }));
+  return { ...state.pendingApprovalsBySession, [recordKey]: approvals };
+}
+
+function applyDecodedSessionView(
+  input: SessionProjectionApplyInput,
+  view: SessionView,
+  epochChanged = false,
+): boolean {
+  const state = input.get();
+  const identity = sessionIdentityForProjection(state, view);
+  const recordKey = projectionRecordKey(state, view, identity);
+  if (!recordKey) return false;
+  if (epochChanged) {
+    useTaskSnapshotStore.getState().reset(recordKey);
+  }
+  input.set((nextState) => {
+    const current = getSessionRecord(nextState, recordKey);
+    const nextIdentity = identity ?? current.meta.sessionIdentity;
+    const nextMeta = nextIdentity ? {
+      ...current.meta,
+      backendSessionKey: view.sessionKey,
+      runtimeScopeKey: buildRuntimeScopeKey(nextIdentity.endpoint),
+      agentId: nextIdentity.agentId,
+      protocolId: null,
+      runtimeEndpointId: nextIdentity.endpoint.runtimeInstanceId,
+      sessionIdentity: nextIdentity,
+    } : current.meta;
+    const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));
+    const nextRuntime = projectionRuntime(current.runtime, view.runtime);
+    const nextWindow = projectionWindow(current.window, view.window);
+    const loadedSessions = patchSessionRecord(nextState, recordKey, {
+      meta: nextMeta,
+      items: nextItems,
+      runtime: nextRuntime,
+      window: nextWindow,
+    });
+    const nextApprovals = projectionApprovals(nextState, recordKey, view);
+    return {
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      pendingApprovalsBySession: nextApprovals,
+    };
+  });
+  return true;
+}
+
+export function applySessionView(
+  input: SessionProjectionApplyInput,
+  view: SessionView,
+): SessionProjectionApplyResult {
+  if (view.sessionKey !== view.identity.sessionKey) {
+    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'identity mismatch' };
+  }
+  const store = projectionStore(input.get);
+  const previous = store.get(view.sessionKey);
+  if (previous) {
+    if (view.epoch < previous.epoch) {
+      return { status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+    }
+    if (view.epoch === previous.epoch) {
+      if (view.cursor < previous.cursor || view.seq < previous.seq) {
+        return { status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+      }
+      if (view.cursor === previous.cursor && view.seq === previous.seq) {
+        return { status: 'duplicate', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+      }
+    }
+  }
+  const epochChanged = previous !== undefined && view.epoch > previous.epoch;
+  if (!applyDecodedSessionView(input, view, epochChanged)) {
+    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
+  }
+  store.set(view.sessionKey, view);
+  return { status: 'applied', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+}
+
+function updateProjectionFact<T>(
+  fact: SessionFact<T>,
+  seed: () => T,
+  update: (facts: T) => T,
+): SessionFact<T> {
+  if (fact === 'unknown' || fact === 'unavailable') {
+    return { incomplete: { facts: update(seed()), gaps: ['event_only'] } };
+  }
+  if ('complete' in fact) return { complete: update(fact.complete) };
+  return { incomplete: { facts: update(fact.incomplete.facts), gaps: fact.incomplete.gaps } };
+}
+
+function applyProjectionChange(view: SessionView, change: SessionDelta['changes'][number]): SessionView {
+  switch (change.kind) {
+    case 'messageDelta':
+      return { ...view, items: updateProjectionFact(view.items, () => [], (items) => {
+        const next = [...items];
+        const index = next.findIndex((item) => item.itemId === change.itemId);
+        if (index >= 0) {
+          const current = next[index];
+          if (current.kind !== 'assistantTurn'
+            || current.runId !== change.runId
+            || current.messageId !== change.messageId) {
+            return next;
+          }
+          const text = change.replace ? change.text : `${current.text}${change.text}`;
+          next[index] = { ...current, status: change.status, text, segments: [{ kind: 'text', text }] };
+        } else {
+          next.push({
+            kind: 'assistantTurn',
+            itemId: change.itemId,
+            runId: change.runId,
+            messageId: change.messageId,
+            status: change.status,
+            segments: [{ kind: 'text', text: change.text }],
+            text: change.text,
+          });
+        }
+        return next;
+      }) };
+    case 'messageUpdated':
+      return { ...view, items: updateProjectionFact(view.items, () => [], (items) => {
+        const next = [...items];
+        const index = next.findIndex((item) => item.itemId === change.item.itemId);
+        if (index >= 0) next[index] = change.item;
+        else next.push(change.item);
+        return next;
+      }) };
+    case 'toolUpdated':
+      return { ...view, tools: updateProjectionFact(view.tools, () => [], (tools) => {
+        const next = [...tools];
+        const index = next.findIndex((tool) => tool.toolCallId === change.tool.toolCallId);
+        if (index >= 0) next[index] = change.tool;
+        else next.push(change.tool);
+        return next;
+      }) };
+    case 'approvalUpdated':
+      return { ...view, approvals: updateProjectionFact(view.approvals, () => [], (approvals) => {
+        const next = [...approvals];
+        const index = next.findIndex((approval) => approval.approvalId === change.approval.approvalId);
+        if (index >= 0) next[index] = change.approval;
+        else next.push(change.approval);
+        return next;
+      }) };
+    case 'runtimeChanged':
+      return { ...view, runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null }), () => change.runtime) };
+    case 'windowChanged':
+      return { ...view, window: { incomplete: { facts: change.window, gaps: ['bounded_history'] } } };
+    case 'runPhaseChanged':
+      return { ...view, runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null }), (runtime) => ({
+        ...runtime,
+        phase: change.phase,
+        activeRunId: ['cancelled', 'completed', 'failed', 'interrupted'].includes(change.phase) ? null : change.runId,
+      })) };
+    case 'recoveryRequired':
+      return { ...view, completeness: change.reason === 'native_unavailable' ? 'unavailable' : change.reason === 'native_unknown' ? 'unknown' : { incomplete: { missing: ['replay_cursor'] } } };
+  }
+}
+
+export function applySessionDelta(
+  input: SessionProjectionApplyInput,
+  delta: SessionDelta,
+): SessionProjectionApplyResult {
+  const traceId = createSessionTraceId('session.delta.apply-boundary');
+  const store = projectionStore(input.get);
+  const previous = store.get(delta.sessionKey);
+  logSessionTrace('session.delta.apply.start', traceId, {
+    sessionKey: summarizeIdentifier(delta.sessionKey),
+    incomingEpoch: delta.epoch,
+    incomingSeq: delta.seq,
+    incomingCursor: delta.cursor,
+    previousEpoch: previous?.epoch ?? null,
+    previousSeq: previous?.seq ?? null,
+    previousCursor: previous?.cursor ?? null,
+    changeKinds: delta.changes.map((change) => change.kind),
+    runtimePhase: previous ? projectionRuntimePhase(factValue(previous.runtime)?.phase ?? 'started') : null,
+    activeRunId: summarizeIdentifier(factValue(previous?.runtime ?? 'unknown')?.activeRunId),
+  });
+  if (!previous) {
+    const historyReason = 'session_delta_without_view';
+    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+    logSessionTrace('session.delta.history-load', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      reason: historyReason,
+    });
+    return { status: 'gap', sessionKey: delta.sessionKey, reason: 'missing SessionView' };
+  }
+  if (delta.epoch < previous.epoch) {
+    return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  }
+  if (delta.epoch > previous.epoch) {
+    const historyReason = 'session_delta_epoch_mismatch';
+    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+    logSessionTrace('session.delta.history-load', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      reason: historyReason,
+    });
+    return { status: 'epoch-mismatch', sessionKey: delta.sessionKey, reason: 'epoch mismatch' };
+  }
+  if (delta.cursor < previous.cursor || delta.seq < previous.seq) {
+    return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  }
+  if (delta.cursor === previous.cursor && delta.seq === previous.seq) {
+    return { status: 'duplicate', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  }
+  if (delta.cursor !== previous.cursor + 1 || delta.seq !== previous.seq + 1) {
+    const historyReason = 'session_delta_gap';
+    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+    logSessionTrace('session.delta.history-load', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      reason: historyReason,
+    });
+    return { status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` };
+  }
+  const nextView = delta.changes.reduce(applyProjectionChange, previous);
+  const projected: SessionView = {
+    ...nextView,
+    seq: delta.seq,
+    cursor: delta.cursor,
+  };
+  if (!applyDecodedSessionView(input, projected)) {
+    return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
+  }
+  store.set(delta.sessionKey, projected);
+  return { status: 'applied', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+}
+
+export function resetSessionProjection(sessionKey: string): void {
+  for (const store of sessionProjectionStores) {
+    store.delete(sessionKey);
+  }
 }
 
 export function getPendingApprovals(

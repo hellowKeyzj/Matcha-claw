@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { sessionView } from './helpers/session-fixtures';
 
 const hostSessionPromptMock = vi.fn();
 const sessionIdentity = {
@@ -15,93 +16,77 @@ vi.mock('@/lib/host-api', () => ({
   hostSessionPrompt: (...args: unknown[]) => hostSessionPromptMock(...args),
 }));
 
-function buildPromptSnapshot(entryId: string, content: string) {
-  return {
-    sessionKey: 'agent:main:main',
-    replayComplete: true,
-    items: [
-      {
-        key: `session:agent:main:main|entry:${entryId}`,
-        kind: 'user-message',
-        sessionKey: 'agent:main:main',
-        role: 'user',
-        text: content,
-        createdAt: 1,
-        updatedAt: 1,
-        images: [],
-        attachedFiles: [],
-        messageId: entryId,
-      },
-    ],
-    runtime: {
-      activeRunId: 'run-1',
-      runPhase: 'submitted',
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      lastUserMessageAt: 1,
-      lastError: null,
-      updatedAt: 1,
-    },
-    window: {
-      totalItemCount: 1,
-      windowStartOffset: 0,
-      windowEndOffset: 1,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    },
-  };
-}
-
 describe('chat send transport', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('纯文本发送会走 session.prompt translator，并返回 authoritative snapshot', async () => {
+  it('纯文本发送使用 hostSessionPrompt 并返回 canonical projection', async () => {
+    const view = sessionView(sessionIdentity.sessionKey, { identity: sessionIdentity });
     hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      runId: 'run-1',
-      sessionKey: 'agent:main:main',
-      snapshot: buildPromptSnapshot('user-local-1', 'hello'),
+      sessionKey: sessionIdentity.sessionKey,
+      runId: '  run-1  ',
+      item: null,
+      snapshot: view,
     });
 
     const { sendChatTransport } = await import('@/stores/chat/send-transport');
     const result = await sendChatTransport({
-      sessionKey: 'agent:main:main',
+      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-1',
     });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
+      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-1',
       deliver: false,
     });
-    expect(result).toMatchObject({
-      ok: true,
-      runId: 'run-1',
-      snapshot: expect.objectContaining({
-        sessionKey: 'agent:main:main',
-      }),
-    });
+    expect(result).toEqual({ ok: true, runId: 'run-1', projection: { kind: 'view', view } });
   });
 
-  it('带附件发送也统一走 session.prompt translator，并透传本地附件元数据给 runtime-host', async () => {
+  it('does not add the caller timeout to the hostSessionPrompt payload', async () => {
     hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      runId: 'run-2',
-      sessionKey: 'agent:main:main',
-      snapshot: buildPromptSnapshot('user-local-2', 'hello'),
+      sessionKey: sessionIdentity.sessionKey,
+      runId: 'user-local-deadline',
+      item: null,
+      projection: null,
     });
 
     const { sendChatTransport } = await import('@/stores/chat/send-transport');
     await sendChatTransport({
-      sessionKey: 'agent:main:main',
+      sessionKey: sessionIdentity.sessionKey,
+      sessionIdentity,
+      message: 'hello',
+      idempotencyKey: 'user-local-deadline',
+      timeoutMs: 120_000,
+    });
+
+    expect(hostSessionPromptMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: sessionIdentity.sessionKey,
+      idempotencyKey: 'user-local-deadline',
+      deliver: false,
+    }));
+    expect(hostSessionPromptMock.mock.calls[0]?.[0]).not.toHaveProperty('timeoutMs');
+  });
+
+  it('通用附件发送只将 staged attachment 引用交给 hostSessionPrompt', async () => {
+    hostSessionPromptMock.mockResolvedValueOnce({
+      success: true,
+      sessionKey: sessionIdentity.sessionKey,
+      runId: 'user-local-2',
+      item: null,
+      projection: null,
+    });
+
+    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    await expect(sendChatTransport({
+      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-2',
@@ -109,44 +94,58 @@ describe('chat send transport', () => {
         fileName: 'a.png',
         mimeType: 'image/png',
         fileSize: 1,
-        stagedPath: 'C:\\a.png',
+        stagedAttachmentId: 'attachment-a',
         preview: 'data:image/png;base64,AA==',
       }],
-    });
+    })).resolves.toEqual({ ok: true, runId: 'user-local-2', projection: null });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
+      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-2',
       deliver: false,
-      media: [{
-        filePath: 'C:\\a.png',
+      attachments: [{
+        stagedAttachmentId: 'attachment-a',
         mimeType: 'image/png',
         fileName: 'a.png',
         fileSize: 1,
-        preview: 'data:image/png;base64,AA==',
       }],
     });
+    expect(JSON.stringify(hostSessionPromptMock.mock.calls)).not.toContain('base64');
   });
 
-  it('发送失败时应保留后端原始错误文案', async () => {
+  it('maps prompt rejection errors to the transport failure result', async () => {
+    const { sendChatTransport } = await import('@/stores/chat/send-transport');
     hostSessionPromptMock.mockResolvedValueOnce({
       success: false,
-      error: 'model unavailable: quota exceeded',
+      sessionKey: sessionIdentity.sessionKey,
+      runId: null,
+      item: null,
+      projection: null,
+      error: 'Target rejected the prompt',
     });
 
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
-    const result = await sendChatTransport({
-      sessionKey: 'agent:main:main',
+    await expect(sendChatTransport({
+      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
-      idempotencyKey: 'user-local-3',
+      idempotencyKey: 'user-local-rejected',
+    })).resolves.toEqual({ ok: false, error: 'Target rejected the prompt' });
+
+    hostSessionPromptMock.mockResolvedValueOnce({
+      success: false,
+      sessionKey: sessionIdentity.sessionKey,
+      runId: null,
+      item: null,
+      projection: null,
     });
 
-    expect(result).toEqual({
-      ok: false,
-      error: 'model unavailable: quota exceeded',
-    });
+    await expect(sendChatTransport({
+      sessionKey: sessionIdentity.sessionKey,
+      sessionIdentity,
+      message: 'hello',
+      idempotencyKey: 'user-local-unknown',
+    })).resolves.toEqual({ ok: false, error: 'Failed to send message' });
   });
 });

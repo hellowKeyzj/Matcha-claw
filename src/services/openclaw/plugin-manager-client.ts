@@ -1,4 +1,4 @@
-import { hostApiFetch, resolveSingleCapabilityScope, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -30,25 +30,6 @@ type PluginRuntimePayload = {
   };
 };
 
-const PLUGIN_RUNTIME_CAPABILITY_ID = 'plugin.runtime';
-
-async function pluginRuntimeCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown>,
-  pluginId?: string,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: PLUGIN_RUNTIME_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(PLUGIN_RUNTIME_CAPABILITY_ID),
-      target: { kind: 'plugin', ...(pluginId ? { pluginId } : {}) },
-      input,
-    }),
-  });
-}
-
 export async function getPluginCatalog(): Promise<PluginCatalogPayload> {
   return await hostApiFetch<PluginCatalogPayload>('/api/plugins/catalog');
 }
@@ -61,12 +42,14 @@ export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRu
   if (pluginIds.length !== 1) {
     throw new Error('setEnabledPluginIds requires exactly one pluginId');
   }
-  const submission = await pluginRuntimeCapabilityExecute<RuntimeJobSubmission<PluginRuntimePayload>>(
-    'plugins.setEnabled',
-    { pluginIds, enabled: true },
-    pluginIds[0],
-  );
-  return await waitForRuntimeJobResult<PluginRuntimePayload>(submission.job.id);
+  const response = await hostApiFetch<{ outcome: 'configured' | 'rejected' | 'unknown' }>('/api/plugins/configuration', {
+    method: 'POST',
+    body: JSON.stringify({ runtime: 'openclaw', pluginId: pluginIds[0], enabled: true }),
+  });
+  if (response.outcome !== 'configured') {
+    throw new Error('Plugin configuration was not accepted');
+  }
+  return await getPluginRuntime();
 }
 
 export async function ensurePluginEnabled(pluginId: string): Promise<PluginRuntimePayload> {

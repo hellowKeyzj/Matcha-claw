@@ -22,7 +22,34 @@ function getAppIcon(): Electron.NativeImage | undefined {
   return icon.isEmpty() ? undefined : icon;
 }
 
-export function createMainWindow(): BrowserWindow {
+const RENDERER_STARTUP_TRACE_FORWARDING_ENV = 'MATCHACLAW_FORWARD_RENDERER_STARTUP_TRACE';
+const RENDERER_STARTUP_TRACE_PREFIX = '[startup-trace]';
+const RENDERER_SESSION_TRACE_PREFIX = 'session-trace';
+const RENDERER_STARTUP_TRACE_LIMIT = 500;
+
+function shouldForwardRendererStartupTrace(): boolean {
+  return !app.isPackaged && process.env[RENDERER_STARTUP_TRACE_FORWARDING_ENV] === '1';
+}
+
+function sanitizeRendererStartupTrace(message: string): string {
+  return message
+    .replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp|private)\/)[^\s"'<>)]*/g, '[path]')
+    .replace(/(token|authorization|password|secret|api[-_ ]?key)(["'\s:=]+)[^\s"',}]+/gi, '$1$2[redacted]')
+    .slice(0, RENDERER_STARTUP_TRACE_LIMIT);
+}
+
+function forwardRendererStartupTrace(win: BrowserWindow): void {
+  if (!shouldForwardRendererStartupTrace()) return;
+  win.webContents.on('console-message', (_event, _level, message) => {
+    const isStartupTrace = message.includes(RENDERER_STARTUP_TRACE_PREFIX);
+    const isSessionTrace = message.includes(`"prefix":"${RENDERER_SESSION_TRACE_PREFIX}"`);
+    if (!isStartupTrace && !isSessionTrace) return;
+    const tracePrefix = isStartupTrace ? RENDERER_STARTUP_TRACE_PREFIX : `[${RENDERER_SESSION_TRACE_PREFIX}]`;
+    logger.info(`${tracePrefix} source=renderer-console message=${sanitizeRendererStartupTrace(message)}`);
+  });
+}
+
+export function createMainWindow(options: { showOnReady?: boolean } = {}): BrowserWindow {
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
   const useCustomTitleBar = isWindows;
@@ -47,10 +74,13 @@ export function createMainWindow(): BrowserWindow {
   });
 
   registerZoomShortcuts(win);
+  forwardRendererStartupTrace(win);
 
-  win.once('ready-to-show', () => {
-    win.show();
-  });
+  if (options.showOnReady ?? true) {
+    win.once('ready-to-show', () => {
+      win.show();
+    });
+  }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     try {

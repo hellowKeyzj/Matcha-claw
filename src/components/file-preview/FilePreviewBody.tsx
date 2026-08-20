@@ -22,7 +22,7 @@ import { MarkdownPreview } from './MarkdownPreview';
 import { HtmlPreview } from './HtmlPreview';
 import { PdfViewer } from './PdfViewer';
 import { SheetViewer } from './SheetViewer';
-import type { ArtifactPreviewTarget } from './types';
+import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
 import {
   confirmAndOpenArtifactPath,
   openArtifactPathExternally,
@@ -153,10 +153,12 @@ export function FilePreviewBody({
   const previewInstanceKey = `${file.filePath || file.fileName}:${mode}`;
   const shouldUseInlineSnapshot = file.sourceTool !== 'write' && !!file.content;
   const fileSessionIdentity = sessionIdentity ?? file.sessionIdentity;
-  const effectiveWorkspaceContext = useMemo(() => workspaceContext ?? {
-    workspaceId: file.workspaceId,
-    sourceId: file.sourceId,
-  }, [file.sourceId, file.workspaceId, workspaceContext]);
+  const fileEndpoint = fileSessionIdentity?.endpoint;
+  const fileSessionKey = fileSessionIdentity?.sessionKey;
+  const transportRelativePath = resolveWorkspaceRelativePath(
+    file.relativePath ?? file.filePath,
+    workspaceContext?.workspaceRoot,
+  );
   const canDirectOpen = !!file.filePath;
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
   const shouldConfirmDirectOpen = shouldOfferDirectOpenFallback(file.ext, file.fileSize);
@@ -234,13 +236,16 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileSessionIdentity) {
+        if (!fileEndpoint || !fileSessionKey) {
           throw new Error('SessionIdentity is required');
         }
+        if (!transportRelativePath) {
+          throw new Error('Workspace relative path is unavailable');
+        }
         const result: ReadTextFileResult = await hostFileReadText({
-          path: file.filePath,
-          sessionIdentity: fileSessionIdentity,
-          ...effectiveWorkspaceContext,
+          endpoint: fileEndpoint,
+          sessionKey: fileSessionKey,
+          relativePath: transportRelativePath,
         });
         if (cancelled) {
           return;
@@ -272,7 +277,7 @@ export function FilePreviewBody({
     return () => {
       cancelled = true;
     };
-  }, [effectiveWorkspaceContext, file.filePath, fileSessionIdentity, shouldLoadTextPreview]);
+  }, [fileEndpoint, file.filePath, fileSessionKey, shouldLoadTextPreview, transportRelativePath]);
 
   const shouldLoadBinaryPreview = useMemo(() => (
     mode === 'preview' && file.contentType === 'image'
@@ -290,13 +295,17 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileSessionIdentity) {
+        if (!fileEndpoint || !fileSessionKey) {
           throw new Error('SessionIdentity is required');
         }
+        if (!transportRelativePath) {
+          throw new Error('Workspace relative path is unavailable');
+        }
         const result = await hostFileReadBinary({
-          path: file.filePath,
-          sessionIdentity: fileSessionIdentity,
-          ...effectiveWorkspaceContext,
+          endpoint: fileEndpoint,
+          sessionKey: fileSessionKey,
+          relativePath: transportRelativePath,
+          maxBytes: INLINE_BINARY_PREVIEW_MAX_BYTES,
         });
         if (cancelled) {
           return;
@@ -309,10 +318,7 @@ export function FilePreviewBody({
           setBinaryState({ status: 'error', message: String(result.error ?? 'unknown') });
           return;
         }
-        objectUrl = toBlobObjectUrl(
-          result.data,
-          result.mimeType || file.mimeType || 'application/octet-stream',
-        );
+        objectUrl = toBlobObjectUrl(result.data, file.mimeType);
         setBinaryState({
           status: 'ready',
           objectUrl,
@@ -334,7 +340,7 @@ export function FilePreviewBody({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [effectiveWorkspaceContext, file.filePath, file.mimeType, fileSessionIdentity, shouldLoadBinaryPreview]);
+  }, [file.filePath, file.mimeType, fileEndpoint, fileSessionKey, shouldLoadBinaryPreview, transportRelativePath]);
 
   const content = (() => {
     if (file.isDirectory) {
@@ -398,7 +404,22 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'pdf') {
-      return <PdfViewer key={previewInstanceKey} filePath={file.filePath} fileName={file.fileName} sessionIdentity={fileSessionIdentity} workspaceContext={effectiveWorkspaceContext} className="h-full" />;
+      if (!transportRelativePath) {
+        return (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">
+            {t('artifacts.previewLoadFailed', { error: 'Workspace relative path is unavailable' })}
+          </div>
+        );
+      }
+      return (
+        <PdfViewer
+          key={previewInstanceKey}
+          relativePath={transportRelativePath}
+          fileName={file.fileName}
+          sessionIdentity={fileSessionIdentity}
+          className="h-full"
+        />
+      );
     }
 
     if (file.contentType === 'image') {
@@ -435,7 +456,21 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'sheet' && (file.ext === '.xls' || file.ext === '.xlsx')) {
-      return <SheetViewer key={previewInstanceKey} filePath={file.filePath} sessionIdentity={fileSessionIdentity} workspaceContext={effectiveWorkspaceContext} className="h-full" />;
+      if (!transportRelativePath) {
+        return (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-destructive">
+            {t('artifacts.previewLoadFailed', { error: 'Workspace relative path is unavailable' })}
+          </div>
+        );
+      }
+      return (
+        <SheetViewer
+          key={previewInstanceKey}
+          relativePath={transportRelativePath}
+          sessionIdentity={fileSessionIdentity}
+          className="h-full"
+        />
+      );
     }
 
     if (file.contentType === 'sheet' && file.ext === '.csv') {

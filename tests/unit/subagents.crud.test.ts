@@ -32,24 +32,13 @@ describe('subagents crud', () => {
     });
   });
 
-  it('calls agents.create, writes description through description.set, and updates model separately', async () => {
+  it('passes the model to agents.create and writes description once through description.set', async () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockImplementation(async (method) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer-v2' } };
       }
       if (method === 'description.set') {
-        return { success: true, result: { revision: 'cfg-revision-description', updatedAt: Date.now(), config: {} } };
-      }
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'writer-v2' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
         return { success: true, result: {} };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
@@ -66,34 +55,28 @@ describe('subagents crud', () => {
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
       {
+        kind: 'create',
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
         name: 'writer',
         workspace: '/tmp/writer',
-        workspaceInitialization: 'mainAgentTemplate',
+        model: 'gpt-4.1-mini',
       },
       undefined,
     );
     expect(rpc).toHaveBeenCalledWith(
       'description.set',
       {
+        kind: 'setDescription',
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
         agentId: 'writer-v2',
         description: 'Writes vendor briefs',
       },
       undefined,
     );
-    expect(rpc).toHaveBeenCalledWith(
-      'agents.update',
-      expect.objectContaining({ agentId: 'writer-v2', model: 'gpt-4.1-mini' }),
-      undefined,
-    );
+    expect(rpc.mock.calls.some(([method]) => method === 'agents.update')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.patch')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
-    expect(rpc.mock.calls.some(([method, params]) => (
-      method === 'agents.update'
-      && typeof params === 'object'
-      && params !== null
-      && 'description' in params
-    ))).toBe(false);
     expect(window.localStorage.getItem(AVATAR_STORAGE_KEY)).toBeNull();
   });
 
@@ -122,17 +105,6 @@ describe('subagents crud', () => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'writer' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
-        return { success: true, result: {} };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
@@ -147,9 +119,11 @@ describe('subagents crud', () => {
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
       {
+        kind: 'create',
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
         name: 'writer',
         workspace: '/tmp/writer',
-        workspaceInitialization: 'mainAgentTemplate',
+        model: 'gpt-4.1-mini',
       },
       undefined,
     );
@@ -161,31 +135,13 @@ describe('subagents crud', () => {
     });
   });
 
-  it('create 成功后若首次 agents.update 返回 not found，会自动重试并成功', async () => {
+  it('does not replay a model mutation after create succeeds', async () => {
     const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({ loadAgents });
-    let updateCallCount = 0;
-    let listCallCount = 0;
-    rpc.mockImplementation(async (method, params) => {
+    rpc.mockImplementation(async (method) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'test4' } };
-      }
-      if (method === 'agents.list') {
-        listCallCount += 1;
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'test4' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
-        updateCallCount += 1;
-        if (updateCallCount === 1) {
-          return { success: false, error: 'Error: agent "test4" not found' };
-        }
-        return { success: true, result: { ok: true } };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
@@ -196,48 +152,12 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
     })).resolves.toEqual({ agentId: 'test4' });
 
-    expect(updateCallCount).toBe(2);
-    expect(listCallCount).toBeGreaterThanOrEqual(2);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything(), undefined);
     expect(rpc).not.toHaveBeenCalledWith('secrets.reload', {});
     expect(rpc).not.toHaveBeenCalledWith('config.patch', expect.anything());
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(useSubagentsStore.getState().error).toBeNull();
-  });
-
-  it('create 在后置配置失败时返回 warning，但不把成功态写成 error', async () => {
-    const rpc = gatewayClientRpcMock;
-    const loadAgents = vi.fn().mockResolvedValue(undefined);
-    useSubagentsStore.setState({ loadAgents });
-    rpc.mockImplementation(async (method) => {
-      if (method === 'agents.create') {
-        return { success: true, result: { agentId: 'writer' } };
-      }
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'writer' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
-        return { success: false, error: 'RPC timeout: agents.update' };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
-
-    await expect(useSubagentsStore.getState().createAgent({
-      name: 'writer',
-      workspace: '/tmp/writer',
-      model: 'gpt-4.1-mini',
-    })).resolves.toEqual({
-      agentId: 'writer',
-      warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
-    });
-
-    expect(loadAgents).toHaveBeenCalledTimes(1);
-    expect(useSubagentsStore.getState().error).toBeNull();
-    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
   });
 
   it('create 在本地头像展示配置写入失败时返回 warning，但不回滚已创建 agent', async () => {
@@ -251,17 +171,6 @@ describe('subagents crud', () => {
       rpc.mockImplementation(async (method) => {
         if (method === 'agents.create') {
           return { success: true, result: { agentId: 'writer' } };
-        }
-        if (method === 'agents.list') {
-          return {
-            success: true,
-            result: {
-              agents: [{ id: 'writer' }],
-            },
-          };
-        }
-        if (method === 'agents.update') {
-          return { success: true, result: {} };
         }
         throw new Error(`Unexpected rpc method in test: ${String(method)}`);
       });
@@ -289,30 +198,18 @@ describe('subagents crud', () => {
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
         expect(params).toEqual({
+          kind: 'create',
+          endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
           name: 'Brand Guardian',
           workspace: '/home/dev/.openclaw/workspace-subagents/brand-guardian',
-          workspaceInitialization: 'emptyWorkspace',
+          model: 'gpt-4.1-mini',
         });
         return { success: true, result: { agentId: 'brand-guardian' } };
       }
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'brand-guardian' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
-        expect(params).toEqual({
-          agentId: 'brand-guardian',
-          model: 'gpt-4.1-mini',
-        });
-        expect(params).not.toHaveProperty('workspaceInitialization');
-        return { success: true, result: {} };
-      }
       if (method === 'agents.files.set') {
         expect(params).toEqual({
+          kind: 'filesSet',
+          endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
           agentId: 'brand-guardian',
           name: 'AGENTS.md',
           content: 'template agents content',
@@ -358,7 +255,7 @@ describe('subagents crud', () => {
       name: 'test-missing-id',
       workspace: '/tmp/test-missing-id',
       model: 'gpt-4.1-mini',
-    })).rejects.toThrow('agents.create returned missing agentId');
+    })).rejects.toThrow('Subagent creation returned an invalid receipt');
 
     expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything());
     expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
@@ -378,6 +275,8 @@ describe('subagents crud', () => {
     expect(rpc).toHaveBeenCalledWith(
       'agents.update',
       {
+        kind: 'update',
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
         agentId: 'writer',
         name: 'writer-v2',
         workspace: '/tmp/writer-v2',
@@ -460,7 +359,12 @@ describe('subagents crud', () => {
       model: undefined,
     });
 
-    expect(rpc).toHaveBeenCalledWith('model.set', { agentId: 'writer' }, undefined);
+    expect(rpc).toHaveBeenCalledWith('model.set', {
+      kind: 'setConfigurationModel',
+      endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'writer',
+      model: null,
+    }, undefined);
     expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
     const updateCalls = rpc.mock.calls.filter(([method]) => method === 'agents.update');
@@ -506,6 +410,8 @@ describe('subagents crud', () => {
     expect(rpc).toHaveBeenCalledWith(
       'skills.set',
       {
+        kind: 'setSkills',
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
         agentId: 'writer',
         skills: ['web-search', 'feishu-doc'],
       },
@@ -552,7 +458,7 @@ describe('subagents crud', () => {
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.delete',
-      { agentId: 'writer', deleteFiles: true }
+      { kind: 'delete', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'writer', deleteFiles: true }
       ,
       undefined
     );

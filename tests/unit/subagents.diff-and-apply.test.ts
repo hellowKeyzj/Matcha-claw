@@ -112,12 +112,11 @@ describe('subagents diff and apply', () => {
   });
 
   it('deletes session and clears draft when cancelDraft is called', async () => {
-    hostSessionDeleteMock.mockResolvedValue({ success: true });
+    hostSessionDeleteMock.mockResolvedValue({ outcome: 'succeeded' });
 
     await useSubagentsStore.getState().cancelDraft('writer');
 
     expect(hostSessionDeleteMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:writer:subagent-draft-123',
       sessionIdentity: {
         endpoint: openClawEndpoint,
         agentId: 'writer',
@@ -130,4 +129,18 @@ describe('subagents diff and apply', () => {
     expect(state.draftSessionKeyByAgent.writer).toBeUndefined();
     expect(state.draftPromptByAgent.writer).toBeUndefined();
   });
+
+  it.each([{ outcome: 'target_rejected' }, { outcome: 'unknown' }])(
+    'keeps the draft projection after cleanup returns $outcome',
+    async (result) => {
+      hostSessionDeleteMock.mockResolvedValue(result);
+
+      await useSubagentsStore.getState().cancelDraft('writer');
+
+      const state = useSubagentsStore.getState();
+      expect(state.draftSessionKeyByAgent.writer).toBe('agent:writer:subagent-draft-123');
+      expect(state.draftPromptByAgent.writer).toBe('old prompt');
+      expect(state.draftByFile).not.toEqual({});
+    },
+  );
 });

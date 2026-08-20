@@ -1,51 +1,53 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
 import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir } from '../../utils/paths';
-import type { LogApiContext } from '../context';
-import { readTail } from '../log-tail';
+import type { RuntimeHostApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
 const DEFAULT_TAIL_LINES = 100;
-const HOST_GATEWAY_LOG_SCAN_LINES = 1_000;
-const HOST_GATEWAY_LOG_PATTERN = /\[OpenClaw gateway(?::stderr)?\]|\bOpenClaw\b|\bGateway\b/;
+const OPENCLAW_LOGS_UNAVAILABLE = 'OpenClaw logs are unavailable';
+const MAX_OPENCLAW_LOG_ENTRIES = 1024;
+const MAX_OPENCLAW_LOG_LINE_BYTES = 1024;
+const OPENCLAW_LOG_SOURCES = ['stdout', 'stderr', 'gateway'] as const;
+
+type OpenClawLogSource = (typeof OPENCLAW_LOG_SOURCES)[number];
+
+type OpenClawLogEntry = Readonly<{
+  source: OpenClawLogSource;
+  line: string;
+}>;
+
+type OpenClawLogSnapshot = Readonly<{
+  entries: readonly OpenClawLogEntry[];
+  cursor: number;
+  reset: boolean;
+  truncated: boolean;
+  lifecycleTailEvicted: boolean;
+}>;
 
 function parseTailLines(url: URL): number {
   const tailLines = Number(url.searchParams.get('tailLines') || String(DEFAULT_TAIL_LINES));
   return Number.isFinite(tailLines) ? Math.max(1, Math.floor(tailLines)) : DEFAULT_TAIL_LINES;
 }
 
+function parseCursor(url: URL): number | undefined {
+  const value = url.searchParams.get('cursor');
+  if (!value) return undefined;
+  const cursor = Number(value);
+  return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : undefined;
+}
+
 function getOpenClawLogDir(): string {
   return join(getOpenClawConfigDir(), 'logs');
-}
-
-function selectHostGatewayLogTail(content: string, tailLines: number): string {
-  const seen = new Set<string>();
-  const lines = content
-    .split('\n')
-    .filter((line) => HOST_GATEWAY_LOG_PATTERN.test(line))
-    .filter((line) => {
-      if (seen.has(line)) {
-        return false;
-      }
-      seen.add(line);
-      return true;
-    });
-  return lines.slice(-tailLines).join('\n');
-}
-
-async function readHostGatewayLogTail(tailLines: number): Promise<string> {
-  const scanLines = Math.max(HOST_GATEWAY_LOG_SCAN_LINES, tailLines * 10);
-  const logFileTail = await logger.readLogFile(scanLines);
-  const recentLogTail = logger.getRecentLogs(scanLines).join('\n');
-  return selectHostGatewayLogTail([logFileTail, recentLogTail].filter(Boolean).join('\n'), tailLines);
 }
 
 export async function handleLogRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: LogApiContext,
+  ctx: RuntimeHostApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/logs' && req.method === 'GET') {
     sendJson(res, 200, { content: await logger.readLogFile(parseTailLines(url)) });
@@ -63,17 +65,7 @@ export async function handleLogRoutes(
   }
 
   if (url.pathname === '/api/openclaw/logs' && req.method === 'GET') {
-    const logDir = getOpenClawLogDir();
-    const tailLines = parseTailLines(url);
-    const gatewayLogTail = await readTail(join(logDir, 'gateway.log'), tailLines);
-    const gatewayErrLogTail = await readTail(join(logDir, 'gateway.err.log'), tailLines);
-    const hostGatewayLogTail = await readHostGatewayLogTail(tailLines);
-    const content = [
-      gatewayLogTail ? `== gateway.log ==\n${gatewayLogTail.trimEnd()}` : '',
-      gatewayErrLogTail ? `== gateway.err.log ==\n${gatewayErrLogTail.trimEnd()}` : '',
-      hostGatewayLogTail ? `== MatchaClaw host gateway events ==\n${hostGatewayLogTail.trimEnd()}` : '',
-    ].filter(Boolean).join('\n\n');
-    sendJson(res, 200, { content, gatewayLogTail, gatewayErrLogTail, hostGatewayLogTail });
+    await handleOpenClawLogs(res, url, ctx);
     return true;
   }
 
@@ -83,4 +75,110 @@ export async function handleLogRoutes(
   }
 
   return false;
+}
+
+async function handleOpenClawLogs(
+  res: ServerResponse,
+  url: URL,
+  ctx: RuntimeHostApiContext,
+): Promise<void> {
+  try {
+    const cursor = parseCursor(url);
+    const logs = decodeOpenClawLogs(await ctx.runtimeHost.command({
+      name: 'openclaw.logs',
+      input: cursor === undefined ? {} : { cursor },
+    }));
+    if (!logs) {
+      sendOpenClawLogsUnavailable(res);
+      return;
+    }
+    sendJson(res, 200, { content: renderOpenClawLogContent(logs, parseTailLines(url)) });
+  } catch {
+    sendOpenClawLogsUnavailable(res);
+  }
+}
+
+function decodeOpenClawLogs(outcome: RuntimeHostControlOutcome): OpenClawLogSnapshot | null {
+  if (outcome.kind !== 'succeeded'
+    || !isRecord(outcome.result)
+    || !hasExactKeys(outcome.result, ['result'])) {
+    return null;
+  }
+
+  const result = outcome.result.result;
+  if (!isRecord(result)
+    || !hasExactKeys(result, ['entries', 'cursor', 'reset', 'truncated', 'lifecycleTailEvicted'])
+    || !Array.isArray(result.entries)
+    || result.entries.length > MAX_OPENCLAW_LOG_ENTRIES
+    || !isSafeNonNegativeInteger(result.cursor)
+    || typeof result.reset !== 'boolean'
+    || typeof result.truncated !== 'boolean'
+    || typeof result.lifecycleTailEvicted !== 'boolean') {
+    return null;
+  }
+
+  const entries: OpenClawLogEntry[] = [];
+  for (const value of result.entries) {
+    const entry = decodeOpenClawLogEntry(value);
+    if (!entry) return null;
+    entries.push(entry);
+  }
+
+  return {
+    entries,
+    cursor: result.cursor,
+    reset: result.reset,
+    truncated: result.truncated,
+    lifecycleTailEvicted: result.lifecycleTailEvicted,
+  };
+}
+
+function decodeOpenClawLogEntry(value: unknown): OpenClawLogEntry | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['source', 'line'])
+    || !isOpenClawLogSource(value.source)
+    || !isBoundedLogLine(value.line)) {
+    return null;
+  }
+  return { source: value.source, line: value.line };
+}
+
+function renderOpenClawLogContent(snapshot: OpenClawLogSnapshot, tailLines: number): string {
+  return OPENCLAW_LOG_SOURCES.flatMap((source) => {
+    const lines = snapshot.entries
+      .filter((entry) => entry.source === source)
+      .slice(-tailLines)
+      .map((entry) => entry.line);
+    return lines.length === 0 ? [] : [`== OpenClaw ${source} ==\n${lines.join('\n')}`];
+  }).join('\n\n');
+}
+
+function sendOpenClawLogsUnavailable(res: ServerResponse): void {
+  sendJson(res, 503, { success: false, error: OPENCLAW_LOGS_UNAVAILABLE });
+}
+
+function isOpenClawLogSource(value: unknown): value is OpenClawLogSource {
+  return typeof value === 'string' && OPENCLAW_LOG_SOURCES.includes(value as OpenClawLogSource);
+}
+
+function isBoundedLogLine(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && Buffer.byteLength(value, 'utf8') <= MAX_OPENCLAW_LOG_LINE_BYTES
+    && !value.includes('\r')
+    && !value.includes('\n')
+    && !value.includes('\0');
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

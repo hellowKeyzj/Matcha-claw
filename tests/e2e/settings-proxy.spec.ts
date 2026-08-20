@@ -1,5 +1,5 @@
-import { expect, test } from './fixtures/electron';
-import type { Locator, Page } from '@playwright/test';
+import { ensureSetupComplete, expect, test } from './fixtures/electron';
+import type { Locator } from '@playwright/test';
 
 async function ensureSwitchState(
   toggle: Locator,
@@ -11,47 +11,11 @@ async function ensureSwitchState(
   }
 }
 
-async function ensureSetupComplete(page: Page): Promise<void> {
-  await page.evaluate(async () => {
-    const storageKey = 'matchaclaw-settings';
-    const raw = window.localStorage.getItem(storageKey);
-    let parsed: { state?: Record<string, unknown>; version?: number } = {};
-    if (raw) {
-      try {
-        parsed = JSON.parse(raw) as { state?: Record<string, unknown>; version?: number };
-      } catch {
-        parsed = {};
-      }
-    }
-    parsed.state = { ...(parsed.state ?? {}), setupComplete: true };
-    parsed.version = typeof parsed.version === 'number' ? parsed.version : 0;
-    window.localStorage.setItem(storageKey, JSON.stringify(parsed));
-
-    const putResponse = await window.electron.ipcRenderer.invoke('hostapi:fetch', {
-      path: '/api/settings/setupComplete',
-      method: 'PUT',
-      body: { value: true },
-    }) as { ok?: boolean; data?: { ok?: boolean; status?: number } };
-    if (!putResponse?.ok || putResponse.data?.ok === false) {
-      throw new Error(`failed to set setupComplete via hostapi:fetch (status=${putResponse?.data?.status ?? 'unknown'})`);
-    }
-    const getResponse = await window.electron.ipcRenderer.invoke('hostapi:fetch', {
-      path: '/api/settings/setupComplete',
-      method: 'GET',
-    }) as { ok?: boolean; data?: { ok?: boolean; status?: number; json?: { value?: unknown } } };
-    if (!getResponse?.ok || getResponse.data?.ok === false || getResponse.data?.json?.value !== true) {
-      throw new Error(`setupComplete verification failed: ${JSON.stringify(getResponse?.data?.json ?? null)}`);
-    }
-  });
-  await page.reload({ waitUntil: 'domcontentloaded' });
-}
-
 test.describe('MatchaClaw developer proxy settings', () => {
   test('禁用代理时仍可保存', async ({ page }) => {
     await ensureSetupComplete(page);
     await page.evaluate(() => {
-      window.history.pushState({}, '', '/settings?section=gateway');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      window.location.hash = '#/settings?section=gateway';
     });
     await expect(page.getByTestId('settings-page')).toBeVisible();
     await page.locator('nav[aria-label] button').first().click();
@@ -69,6 +33,7 @@ test.describe('MatchaClaw developer proxy settings', () => {
     await expect(proxySaveButton).toBeDisabled();
 
     await ensureSwitchState(proxyToggle, true);
+    await page.getByRole('textbox', { name: '代理服务器' }).fill('http://127.0.0.1:7890');
     await expect(proxySaveButton).toBeEnabled();
     await proxySaveButton.click();
     await expect(proxySaveButton).toBeDisabled();

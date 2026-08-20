@@ -44,10 +44,8 @@ export function createTray(
 
   let icon = nativeImage.createFromPath(iconPath);
 
-  // Fallback to icon.png if platform-specific icon not found
   if (icon.isEmpty()) {
     icon = nativeImage.createFromPath(join(iconsDir, 'icon.png'));
-    // Still try to set as template for macOS
     if (process.platform === 'darwin') {
       icon.setTemplateImage(true);
     }

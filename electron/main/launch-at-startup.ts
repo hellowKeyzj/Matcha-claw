@@ -60,20 +60,22 @@ function applyWindowsOrMacLaunchAtStartup(enabled: boolean): void {
   logger.info(`Launch-at-startup ${enabled ? 'enabled' : 'disabled'} via login items`);
 }
 
-export async function applyLaunchAtStartupSetting(enabled: boolean): Promise<void> {
+export async function applyLaunchAtStartupSetting(enabled: boolean): Promise<boolean> {
   try {
     if (process.platform === 'linux') {
       await applyLinuxLaunchAtStartup(enabled);
-      return;
+      return true;
     }
 
     if (process.platform === 'win32' || process.platform === 'darwin') {
       applyWindowsOrMacLaunchAtStartup(enabled);
-      return;
+      return true;
     }
 
     logger.warn(`Launch-at-startup unsupported on platform: ${process.platform}`);
+    return false;
   } catch (error) {
     logger.error(`Failed to apply launch-at-startup=${enabled}:`, error);
+    return false;
   }
 }

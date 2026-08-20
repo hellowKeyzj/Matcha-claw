@@ -1,11 +1,10 @@
-import { rmSync } from 'node:fs';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
 
-const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//];
+const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//, '@lydell/node-pty'];
 const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
 const ignoredWorkspaceDirs = [
   '**/.claude/**',
@@ -26,23 +25,6 @@ function clearElectronRunAsNodeForDev(): void {
 }
 
 clearElectronRunAsNodeForDev();
-
-function cleanDistElectronBeforeBuild(): Plugin {
-  let hasCleanedDistElectron = false;
-
-  return {
-    name: 'matchaclaw-clean-dist-electron',
-    apply: 'build',
-    buildStart() {
-      if (hasCleanedDistElectron) {
-        return;
-      }
-
-      hasCleanedDistElectron = true;
-      rmSync(resolve(__dirname, 'dist-electron'), { recursive: true, force: true });
-    },
-  };
-}
 
 function getNodeModulePackageName(id: string): string | null {
   const normalizedId = id.replace(/\\/g, '/');
@@ -148,14 +130,13 @@ export default defineConfig(({ command, mode }) => ({
   // build remains correct even if plugin order ever changes.
   base: './',
   plugins: [
-    cleanDistElectronBeforeBuild(),
     react(),
     electron([
       {
         // Main process entry file
         entry: 'electron/main/index.ts',
         onstart(options) {
-          options.startup();
+          options.startup(['.', '--no-sandbox', '--remote-debugging-port=9222']);
         },
         vite: {
           resolve: {

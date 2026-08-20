@@ -1,219 +1,122 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CHAT_HISTORY_FULL_LIMIT,
+  decodeHistorySessionView,
   fetchHistoryWindow,
 } from '@/stores/chat/history-fetch-helpers';
+import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
 import {
-  buildRenderItemsFromMessages,
-  type RawMessage,
-} from './helpers/timeline-fixtures';
+  assistantItem,
+  completeFact,
+  sessionView,
+  userItem,
+  windowView,
+} from './helpers/session-fixtures';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const hostSessionLoadMock = vi.fn();
-const hostSessionWindowFetchMock = vi.fn();
-const resolveHydratedSessionSnapshotMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: vi.fn(),
   hostSessionLoad: (...args: unknown[]) => hostSessionLoadMock(...args),
-  hostSessionWindowFetch: (...args: unknown[]) => hostSessionWindowFetchMock(...args),
-  resolveHydratedSessionSnapshot: (...args: unknown[]) => resolveHydratedSessionSnapshotMock(...args),
 }));
 
 describe('chat history fetch pipeline helpers', () => {
-  beforeEach(() => {
-    resolveHydratedSessionSnapshotMock.mockImplementation(async ({ initial, refetch }: { initial: { snapshot?: unknown }; refetch: () => Promise<{ snapshot?: unknown }> }) => {
-      if (initial.snapshot) {
-        return initial.snapshot;
-      }
-      const result = await refetch();
-      return result.snapshot ?? null;
-    });
-  });
-  it('returns host session load result directly when adapter already provides render items', async () => {
-    const requestedSessionKey = 'agent:main:main';
-    const sourceMessages: RawMessage[] = [
-      { role: 'assistant', content: 'a', timestamp: 1 },
-      { role: 'assistant', content: 'b', timestamp: 2 },
-    ];
-    hostSessionLoadMock.mockReset();
-    hostSessionWindowFetchMock.mockReset();
-    resolveHydratedSessionSnapshotMock.mockClear();
-    hostSessionLoadMock.mockResolvedValueOnce({
-      snapshot: {
-        sessionKey: requestedSessionKey,
-        items: buildRenderItemsFromMessages(requestedSessionKey, sourceMessages),
-        approvals: [],
-        replayComplete: true,
-        runtime: {
-          activeRunId: null,
-          runPhase: 'idle',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          runtimeActivity: null,
-          lastUserMessageAt: null,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: null,
-        },
-        window: {
-          totalItemCount: sourceMessages.length,
-          windowStartOffset: 0,
-          windowEndOffset: sourceMessages.length,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
+  it('projects a canonical SessionView with identity, cursor facts, and item identity', () => {
+    const sessionKey = 'agent:main:main';
+    const view = sessionView(sessionKey, {
+      epoch: 3,
+      seq: 4,
+      cursor: 4,
+      items: completeFact([
+        userItem('item-user-1', 'hello'),
+        assistantItem('item-assistant-1', 'hi', { runId: 'run-1' }),
+      ]),
+      window: completeFact(windowView(2)),
     });
 
-    const result = await fetchHistoryWindow({
-      recordKey: requestedSessionKey,
-      backendSessionKey: requestedSessionKey,
-      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
-      sessions: [{ key: requestedSessionKey, thinkingLevel: 'medium', updatedAt: 1 }],
-      limit: CHAT_HISTORY_FULL_LIMIT,
+    expect(view).toMatchObject({
+      sessionKey,
+      identity: { sessionKey, endpoint: { runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } },
+      epoch: 3,
+      seq: 4,
+      cursor: 4,
+      completeness: 'complete',
     });
-
-    expect(result).toEqual(expect.objectContaining({
-      thinkingLevel: 'medium',
-      totalItemCount: sourceMessages.length,
-      windowStartOffset: 0,
-      windowEndOffset: sourceMessages.length,
-    }));
-    expect(result.snapshot?.items).toMatchObject([
+    expect(projectSessionViewItems(view)).toMatchObject([
       {
-        role: 'assistant',
-        text: 'a',
-        laneKey: 'main',
-        turnKey: expect.any(String),
+        key: 'item-user-1',
+        kind: 'user-message',
+        text: 'hello',
+        messageId: 'item-user-1',
       },
       {
-        role: 'assistant',
-        text: 'b',
-        laneKey: 'main',
-        turnKey: expect.any(String),
+        key: 'item-assistant-1',
+        kind: 'assistant-turn',
+        text: 'hi',
+        runId: 'run-1',
+        status: 'final',
+        thinking: null,
+        tools: [],
+        segments: [{ kind: 'message', text: 'hi' }],
       },
     ]);
   });
 
-  it('fetches latest window after hydration job completes without reading job result', async () => {
+  it('uses the canonical SessionView and preserves its window', async () => {
     const requestedSessionKey = 'agent:main:main';
-    const sourceMessages: RawMessage[] = [
-      { role: 'assistant', content: 'hydrated', timestamp: 1 },
-    ];
-    hostSessionLoadMock.mockReset();
-    hostSessionWindowFetchMock.mockReset();
-    resolveHydratedSessionSnapshotMock.mockClear();
-    hostSessionLoadMock.mockResolvedValueOnce({
-      hydrationJob: {
-        id: 'hydrate-1',
-        type: 'sessions.hydrateTimeline',
-        status: 'queued',
-        queuedAt: 1,
-        attempts: 0,
-        maxAttempts: 1,
-      },
-    });
-    const hydratedSnapshot = {
-      sessionKey: requestedSessionKey,
-      items: buildRenderItemsFromMessages(requestedSessionKey, sourceMessages),
-      approvals: [],
-      replayComplete: true,
-      runtime: {
-        activeRunId: null,
-        runPhase: 'idle',
-        activeTurnItemKey: null,
-        pendingTurnKey: null,
-        pendingTurnLaneKey: null,
-        runtimeActivity: null,
-        lastUserMessageAt: null,
-        lastError: null,
-        lastIssue: null,
-        updatedAt: null,
-      },
-      window: {
-        totalItemCount: sourceMessages.length,
-        windowStartOffset: 0,
-        windowEndOffset: sourceMessages.length,
-        hasMore: false,
+    const identity = createOpenClawTestSessionIdentity(requestedSessionKey);
+    const view = sessionView(requestedSessionKey, {
+      identity,
+      epoch: 7,
+      seq: 9,
+      cursor: 11,
+      items: completeFact([assistantItem('item-assistant-1', 'loaded')]),
+      window: completeFact(windowView(4, {
+        windowStartOffset: 2,
+        windowEndOffset: 3,
+        hasMore: true,
         hasNewer: false,
-        isAtLatest: true,
-      },
-    };
-    resolveHydratedSessionSnapshotMock.mockResolvedValueOnce(hydratedSnapshot);
-
-    const result = await fetchHistoryWindow({
-      recordKey: requestedSessionKey,
-      backendSessionKey: requestedSessionKey,
-      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
-      sessions: [{ key: requestedSessionKey, updatedAt: 1 }],
-      limit: CHAT_HISTORY_FULL_LIMIT,
+        isAtLatest: false,
+      })),
     });
-
-    expect(resolveHydratedSessionSnapshotMock).toHaveBeenCalledWith({
-      initial: expect.objectContaining({
-        hydrationJob: expect.objectContaining({ id: 'hydrate-1' }),
-      }),
-      timeoutMs: undefined,
-      refetch: expect.any(Function),
-    });
-    expect(result.snapshot?.items).toMatchObject([{ text: 'hydrated' }]);
-  });
-
-  it('does not fall back to gateway history for normal sessions when adapter returns empty replay', async () => {
-    const requestedSessionKey = 'agent:test:session-1';
     hostSessionLoadMock.mockReset();
-    hostSessionWindowFetchMock.mockReset();
-    resolveHydratedSessionSnapshotMock.mockClear();
-    hostSessionLoadMock.mockResolvedValueOnce({
-      snapshot: {
-        sessionKey: requestedSessionKey,
-        items: [],
-        approvals: [],
-        replayComplete: true,
-        runtime: {
-          activeRunId: null,
-          runPhase: 'idle',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          runtimeActivity: null,
-          lastUserMessageAt: null,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: null,
-        },
-        window: {
-          totalItemCount: 0,
-          windowStartOffset: 0,
-          windowEndOffset: 0,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
-    });
+    hostSessionLoadMock.mockResolvedValueOnce(view);
 
     const result = await fetchHistoryWindow({
       recordKey: requestedSessionKey,
       backendSessionKey: requestedSessionKey,
-      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
-      sessions: [{ key: requestedSessionKey, updatedAt: 1 }],
+      sessionIdentity: identity,
+      sessions: [{ key: requestedSessionKey, thinkingLevel: 'medium', updatedAt: 1 }],
       limit: CHAT_HISTORY_FULL_LIMIT,
     });
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
-      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
+      sessionIdentity: identity,
       limit: CHAT_HISTORY_FULL_LIMIT,
-    }, {
-      timeoutMs: undefined,
+    }, { timeoutMs: undefined });
+    expect(result.thinkingLevel).toBe('medium');
+    expect(result.view).toMatchObject({ epoch: 7, seq: 9, cursor: 11 });
+    expect(projectSessionViewItems(result.view)).toMatchObject([{ kind: 'assistant-turn', text: 'loaded' }]);
+    expect(result.view.window).toEqual(expect.objectContaining({
+      complete: expect.objectContaining({ totalItemCount: 4, windowStartOffset: 2, windowEndOffset: 3 }),
+    }));
+  });
+
+  it('accepts an explicitly incomplete SessionView while rejecting unavailable completeness', () => {
+    const requestedSessionKey = 'agent:test:session-1';
+    const incomplete = sessionView(requestedSessionKey, {
+      completeness: { incomplete: { missing: ['bounded_history'] } },
+      items: { incomplete: { facts: [], gaps: ['bounded_history'] } },
+      window: { incomplete: { facts: windowView(0), gaps: ['bounded_history'] } },
     });
-    expect(result.snapshot?.items).toEqual([]);
-    expect(result.totalItemCount).toBe(0);
-    expect(result.isAtLatest).toBe(true);
+
+    expect(decodeHistorySessionView(incomplete)).toMatchObject({
+      sessionKey: requestedSessionKey,
+      completeness: { incomplete: { missing: ['bounded_history'] } },
+    });
+    expect(() => decodeHistorySessionView({ ...incomplete, completeness: 'unavailable' })).toThrow(
+      'Session view is unavailable',
+    );
   });
 });
-

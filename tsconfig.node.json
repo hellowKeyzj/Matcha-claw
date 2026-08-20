@@ -24,7 +24,8 @@
     /* Paths */
     "baseUrl": ".",
     "paths": {
-      "@electron/*": ["electron/*"]
+      "@electron/*": ["electron/*"],
+      "@electron/e2e-fixture-loader": ["electron/main/e2e-fixture-loader.noop.ts"]
     }
   },
   "include": ["electron", "vite.config.ts"]

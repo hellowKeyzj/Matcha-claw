@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
-import { agentScope } from '../../runtime-host/shared/runtime-address';
-import type { AgentScope, CapabilityTarget, SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import {
+  agentScope,
+} from '../../electron/desktop-contract/runtime-address';
+import type {
+  AgentScope,
+  SessionIdentity,
+} from '../../electron/desktop-contract/runtime-address';
+import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 import { buildLineDiff } from '@/lib/line-diff';
 import {
   createErrorResourceState,
@@ -61,7 +67,6 @@ const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const SUBAGENT_AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
-const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 const SUBAGENT_CONFIG_PACKAGE_SCHEMA = 'matchaclaw.agent-config' as const;
 const SUBAGENT_CONFIG_PACKAGE_VERSION = 1 as const;
 let configDisplayCache:
@@ -90,23 +95,6 @@ function buildSubagentScope(scope: AgentScope, agentId: string): AgentScope {
   return agentScope(scope.endpoint, agentId);
 }
 
-async function skillManagementCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown>,
-  target: CapabilityTarget,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: SKILL_MANAGEMENT_CAPABILITY_ID,
-      operationId,
-      scope: await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID),
-      target,
-      input,
-    }),
-  });
-}
-
 async function subagentManagementCapabilityExecute<TResult>(
   operationId: string,
   scope: AgentScope,
@@ -114,7 +102,7 @@ async function subagentManagementCapabilityExecute<TResult>(
   target: CapabilityTarget,
   timeoutMs?: number,
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+  return await hostApiFetch<TResult>('/api/subagents/agents', {
     method: 'POST',
     body: JSON.stringify({
       id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
@@ -135,6 +123,9 @@ interface AgentFileGetResult {
 
 interface AgentsCreateResult {
   agentId?: unknown;
+  agent?: {
+    id?: unknown;
+  };
   name?: unknown;
   workspace?: unknown;
 }
@@ -202,10 +193,9 @@ async function resolveSubagentManagementScope(): Promise<AgentScope> {
   return scope;
 }
 
-function buildSubagentTarget(scope: AgentScope, subagentId: string): CapabilityTarget {
+function buildSubagentTarget(_scope: AgentScope, subagentId: string): CapabilityTarget {
   return {
     kind: 'subagent',
-    agentId: scope.agentId,
     subagentId,
   };
 }
@@ -278,15 +268,82 @@ async function rpc<T>(method: string, params?: unknown, options?: SubagentRpcOpt
   const capabilityOperationId = resolveSubagentCapabilityOperation(method);
   if (capabilityOperationId) {
     const scope = options?.scope ?? await resolveSubagentManagementScope();
+    const input = buildSubagentCapabilityInput(capabilityOperationId, scope, readRpcParams(params));
     return await subagentManagementCapabilityExecute<T>(
       capabilityOperationId,
       scope,
-      readRpcParams(params),
-      options?.target ?? { kind: 'agent', agentId: scope.agentId },
+      input,
+      options?.target ?? buildSubagentCapabilityTarget(capabilityOperationId, scope, input),
       options?.timeoutMs,
     );
   }
   throw new Error(`Unsupported subagent runtime method: ${method}`);
+}
+
+function buildSubagentCapabilityInput(
+  operationId: string,
+  scope: AgentScope,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const endpoint = scope.endpoint;
+  if (operationId === 'subagents.list') return { kind: 'list', endpoint };
+  if (operationId === 'subagents.displayConfig.get') return { kind: 'displayConfiguration', endpoint };
+  if (operationId === 'subagents.create') {
+    return {
+      kind: 'create',
+      endpoint,
+      name: getRequiredString(params.name, 'Subagent name is required'),
+      workspace: getRequiredString(params.workspace, 'Subagent workspace is required'),
+      model: getOptionalString(params.model) ?? null,
+    };
+  }
+
+  const agentId = getRequiredString(params.agentId, 'Subagent id is required');
+  if (operationId === 'subagents.description.set') {
+    return { kind: 'setDescription', endpoint, agentId, description: getOptionalString(params.description) ?? null };
+  }
+  if (operationId === 'subagents.model.set') {
+    const model = getOptionalString(params.model);
+    return { kind: 'setConfigurationModel', endpoint, agentId, model: model ? { primary: model, fallbacks: [] } : null };
+  }
+  if (operationId === 'subagents.skills.set') {
+    return { kind: 'setSkills', endpoint, agentId, skills: getOptionalStringArray(params.skills) };
+  }
+  if (operationId === 'subagents.update') {
+    return {
+      kind: 'update',
+      endpoint,
+      agentId,
+      name: getOptionalString(params.name) ?? null,
+      workspace: getOptionalString(params.workspace) ?? null,
+      model: getOptionalString(params.model) ?? null,
+    };
+  }
+  if (operationId === 'subagents.delete') {
+    return { kind: 'delete', endpoint, agentId, deleteFiles: params.deleteFiles === true };
+  }
+  if (operationId === 'subagents.files.get') {
+    return { kind: 'filesGet', endpoint, agentId, name: getRequiredString(params.name, 'Subagent file name is required') };
+  }
+  if (operationId === 'subagents.files.set') {
+    return {
+      kind: 'filesSet',
+      endpoint,
+      agentId,
+      name: getRequiredString(params.name, 'Subagent file name is required'),
+      content: typeof params.content === 'string' ? params.content : '',
+    };
+  }
+  if (operationId === 'subagents.files.list') return { kind: 'filesList', endpoint, agentId };
+  return params;
+}
+
+function buildSubagentCapabilityTarget(operationId: string, scope: AgentScope, input: Record<string, unknown>): CapabilityTarget {
+  if (operationId === 'subagents.list' || operationId === 'subagents.displayConfig.get') {
+    return { kind: 'agent', agentId: scope.agentId };
+  }
+  const agentId = getOptionalString(input.agentId);
+  return agentId ? { kind: 'subagent', subagentId: agentId } : { kind: 'subagent' };
 }
 
 function resolveSubagentCapabilityOperation(method: string): string | null {
@@ -817,13 +874,32 @@ async function updateAgentSkillsConfig(scope: AgentScope, agentId: string, skill
 async function exportSkillBundles(
   skillKeys: string[],
 ): Promise<NonNullable<SubagentConfigPackage['agent']['skillBundles']>> {
-  return await skillManagementCapabilityExecute('skills.exportBundles', { skillKeys }, { kind: 'skill-bundle' });
+  const result = await hostApiFetch<{
+    outcome?: unknown;
+    skillBundles?: unknown;
+  }>('/api/subagents/skill-bundles/export', {
+    method: 'POST',
+    body: JSON.stringify({ skillKeys }),
+  });
+  return Array.isArray(result.skillBundles)
+    ? result.skillBundles as NonNullable<SubagentConfigPackage['agent']['skillBundles']>
+    : [];
 }
 
 async function importSkillBundles(
   skillBundles: NonNullable<SubagentConfigPackage['agent']['skillBundles']>,
 ): Promise<SkillBundleImportResult> {
-  return await skillManagementCapabilityExecute('skills.importBundles', { skillBundles }, { kind: 'skill-bundle' });
+  const result = await hostApiFetch<{
+    outcome?: unknown;
+    error?: unknown;
+  }>('/api/subagents/skill-bundles/import', {
+    method: 'POST',
+    body: JSON.stringify({ skillBundles }),
+  });
+  return {
+    ok: result.outcome === 'accepted',
+    ...(typeof result.error === 'string' ? { error: result.error } : {}),
+  };
 }
 
 async function updateAgentDescriptionConfig(scope: AgentScope, agentId: string, description: string | undefined): Promise<void> {
@@ -1047,15 +1123,11 @@ async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Rec
   const managementScope = await resolveSubagentManagementScope();
   const target = buildSubagentTarget(managementScope, agentId);
   await Promise.all(SUBAGENT_TARGET_FILES.map(async (name) => {
-    try {
-      const result = await rpc<AgentFileGetResult>('agents.files.get', { agentId, name }, {
-        scope: managementScope,
-        target,
-      });
-      fileByName[name] = normalizeAgentFileContent(result);
-    } catch {
-      fileByName[name] = '';
-    }
+    const result = await rpc<AgentFileGetResult>('agents.files.get', { agentId, name }, {
+      scope: managementScope,
+      target,
+    });
+    fileByName[name] = normalizeAgentFileContent(result);
   }));
   return fileByName;
 }
@@ -1254,12 +1326,37 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             return;
           }
           const current = get().agentsResource;
+          const hasUsableSnapshot = current.hasLoadedOnce || current.data.length > 0;
+          const message = getOptionalString(result.error);
+          if (hasUsableSnapshot) {
+            set({
+              agentsResource: {
+                ...current,
+                status: 'ready',
+                error: null,
+                hasLoadedOnce: true,
+              },
+              error: message ?? null,
+            });
+            scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true }));
+            return;
+          }
+          if (message) {
+            set({
+              agentsResource: createErrorResourceState({
+                ...current,
+                hasLoadedOnce: false,
+              }, message),
+              error: message,
+            });
+            return;
+          }
           set({
             agentsResource: createLoadingResourceState({
               ...current,
-              hasLoadedOnce: current.hasLoadedOnce || current.data.length > 0,
+              hasLoadedOnce: false,
             }),
-            error: result.error ?? null,
+            error: null,
           });
           scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true }));
           return;
@@ -1368,7 +1465,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       set({
         error: getErrorMessage(error) || 'Failed to load agent files',
       });
-      return {};
+      throw error;
     }
   },
   setDraftPromptForAgent: (agentId, prompt) => set((state) => ({
@@ -1466,13 +1563,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         workspaceInitialization,
       }, {
         scope: managementScope,
-        target: {
-          kind: 'subagent',
-          agentId: managementScope.agentId,
-          subagentId: predictedAgentId || undefined,
-        },
+        target: { kind: 'subagent' },
       });
-      const createdAgentId = getOptionalString(createResult?.agentId);
+      const createdAgentId = getOptionalString(createResult?.agentId) ?? getOptionalString(createResult?.agent?.id);
       if (!createdAgentId) {
         throw new Error('agents.create returned missing agentId');
       }

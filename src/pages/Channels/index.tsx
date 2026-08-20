@@ -38,6 +38,7 @@ import {
   hostChannelsActivate,
   hostChannelsApprovePairingRequest,
   hostChannelsCancelSession,
+  hostChannelsLoginWait,
   hostChannelsListPairingRequests,
   hostChannelsReadConfig,
   hostChannelsValidateCredentials,
@@ -63,57 +64,8 @@ import { useTranslation } from 'react-i18next';
 
 const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
 const CHANNELS_STATUS_POLL_MS = 10_000;
-const QR_EVENT_PREFIX_BY_TYPE: Partial<Record<ChannelType, string>> = {
-  whatsapp: 'channel:whatsapp',
-  'openclaw-weixin': 'channel:weixin',
-};
 const WEIXIN_ADVANCED_FIELD_KEYS = new Set(['baseUrl', 'cdnBaseUrl', 'logUploadUrl', 'routeTag']);
 const QR_GENERATE_TIMEOUT_MS = 12_000;
-
-function tryDecodeUriComponent(value: string): string {
-  if (!/%[0-9A-Fa-f]{2}/.test(value)) {
-    return value;
-  }
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function isLikelyBase64(value: string): boolean {
-  const normalized = value.replace(/\s+/g, '');
-  return normalized.length > 64 && /^[A-Za-z0-9+/=]+$/.test(normalized);
-}
-
-function normalizeQrImageSource(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = tryDecodeUriComponent(value.trim());
-  if (!trimmed) {
-    return null;
-  }
-  if (/^data:image\//i.test(trimmed)) {
-    return trimmed;
-  }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
-  }
-  const compact = trimmed.replace(/\s+/g, '');
-  if (isLikelyBase64(compact)) {
-    return `data:image/png;base64,${compact}`;
-  }
-  return null;
-}
-
-function resolveQrImageSource(payload: { qrDataUrl?: string; qr?: string; raw?: string }): string | null {
-  return (
-    normalizeQrImageSource(payload.qrDataUrl)
-    ?? normalizeQrImageSource(payload.qr)
-    ?? normalizeQrImageSource(payload.raw)
-  );
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -526,19 +478,6 @@ interface ChannelPairingDialogProps {
   onClose: () => void;
 }
 
-function formatPairingTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timestamp));
-}
-
 function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
   const { t } = useTranslation('channels');
   const [requests, setRequests] = useState<ChannelPairingRequest[]>([]);
@@ -652,22 +591,11 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
             ) : requests.length > 0 ? (
               <div className="space-y-2">
                 {requests.map((request) => (
-                  <div key={`${request.id}-${request.code}`} className="flex items-center justify-between rounded-lg border p-3">
+                  <div key={request.id} className="flex items-center justify-between rounded-lg border p-3">
                     <div className="min-w-0">
-                      <p className="truncate font-mono text-sm">{request.code}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {request.id} · {formatPairingTime(request.lastSeenAt)}
-                      </p>
+                      <p className="truncate font-mono text-sm">{request.id}</p>
+                      <p className="truncate text-xs text-muted-foreground">{request.status}</p>
                     </div>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => { void approveCode(request.code); }}
-                      disabled={submitting}
-                    >
-                      <Check className="h-4 w-4" />
-                      {t('pairing.approve')}
-                    </Button>
                   </div>
                 ))}
               </div>
@@ -704,6 +632,8 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [isExistingConfig, setIsExistingConfig] = useState(false);
   const qrGenerateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qrAccountIdRef = useRef<string | null>(null);
+  const qrWaitAbortControllerRef = useRef<AbortController | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
   const onChannelAddedRef = useRef(onChannelAdded);
   const [validationResult, setValidationResult] = useState<{
@@ -730,6 +660,9 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   useEffect(() => {
     if (!selectedType) {
       clearQrGenerateTimeout();
+      qrWaitAbortControllerRef.current?.abort();
+      qrWaitAbortControllerRef.current = null;
+      qrAccountIdRef.current = null;
       setConnecting(false);
       setConfigValues({});
       setChannelName('');
@@ -777,79 +710,20 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     }
   }, [selectedType, loadingConfig]);
 
-  // 监听二维码渠道事件（WhatsApp / WeChat）
   useEffect(() => {
-    if (!selectedType || CHANNEL_META[selectedType].connectionType !== 'qr') return;
-    const eventPrefix = QR_EVENT_PREFIX_BY_TYPE[selectedType];
-    if (!eventPrefix) return;
-
-    const onQr = (data: { qr?: string; qrDataUrl?: string; raw?: string }) => {
-      clearQrGenerateTimeout();
-      const resolved = resolveQrImageSource(data ?? {});
-      if (resolved) {
-        setQrImageFailed(false);
-        setQrCode(resolved);
-        setConnecting(false);
-      } else {
-        setQrCode(null);
-      }
-    };
-
-    const onSuccess = async (data?: { accountId?: string }) => {
-      clearQrGenerateTimeout();
-      if (selectedType === 'whatsapp') {
-        toast.success(t('toast.whatsappConnected'));
-      } else {
-        toast.success(t('toast.channelSaved', { name: CHANNEL_NAMES[selectedType] }));
-      }
-      void data;
-      onChannelAddedRef.current();
-      setConnecting(false);
-    };
-
-    const onError = (raw: unknown) => {
-      clearQrGenerateTimeout();
-      const err = typeof raw === 'string' ? raw : String(raw ?? '');
-      console.error('QR Login Error:', err);
-      if (selectedType === 'whatsapp') {
-        toast.error(t('toast.whatsappFailed', { error: err }));
-      } else {
-        toast.error(t('toast.configFailed', { error: err }));
-      }
-      setQrCode(null);
-      setQrImageFailed(false);
-      setConnecting(false);
-    };
-
-    const removeChannelStatusListener = subscribeHostEvent('gateway:channel-status', (raw: unknown) => {
-      if (!isRecord(raw) || typeof raw.eventName !== 'string') {
-        return;
-      }
-      const payload = raw.payload;
-      if (raw.eventName === `${eventPrefix}-qr`) {
-        onQr(isRecord(payload) ? {
-          qr: typeof payload.qr === 'string' ? payload.qr : undefined,
-          qrDataUrl: typeof payload.qrDataUrl === 'string' ? payload.qrDataUrl : undefined,
-          raw: typeof payload.raw === 'string' ? payload.raw : undefined,
-        } : {});
-        return;
-      }
-      if (raw.eventName === `${eventPrefix}-success`) {
-        void onSuccess(isRecord(payload) ? { accountId: typeof payload.accountId === 'string' ? payload.accountId : undefined } : undefined);
-        return;
-      }
-      if (raw.eventName === `${eventPrefix}-error`) {
-        onError(payload);
-      }
-    });
-
+    if (!selectedType || CHANNEL_META[selectedType].connectionType !== 'qr') return undefined;
     return () => {
-      if (typeof removeChannelStatusListener === 'function') removeChannelStatusListener();
       clearQrGenerateTimeout();
       const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-      void hostChannelsCancelSession(qrChannelType).catch(() => { });
+      qrWaitAbortControllerRef.current?.abort();
+      qrWaitAbortControllerRef.current = null;
+      const activeAccountId = qrAccountIdRef.current;
+      qrAccountIdRef.current = null;
+      if (activeAccountId) {
+        void hostChannelsCancelSession(qrChannelType, activeAccountId).catch(() => { });
+      }
     };
-  }, [selectedType, t, clearQrGenerateTimeout]);
+  }, [selectedType, clearQrGenerateTimeout]);
 
   const handleValidate = async () => {
     if (!selectedType) return;
@@ -901,8 +775,62 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         }, QR_GENERATE_TIMEOUT_MS);
         const accountId = channelName.trim() || 'default';
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-        await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues });
-        // The QR code will be set via event listener
+        qrAccountIdRef.current = accountId;
+        const startResult = await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues });
+        const progress = startResult.progress;
+        if (!progress || (progress.outcome !== 'progress' && progress.outcome !== 'connected')) {
+          throw new Error(startResult.error || 'Channel activation outcome is unknown');
+        }
+        if (progress.qrDataUrl) {
+          setQrImageFailed(false);
+          setQrCode(progress.qrDataUrl);
+          clearQrGenerateTimeout();
+        }
+        if (progress.outcome === 'connected') {
+          clearQrGenerateTimeout();
+          setConnecting(false);
+          onChannelAddedRef.current();
+          return;
+        }
+        const waitController = new AbortController();
+        qrWaitAbortControllerRef.current = waitController;
+        let currentQrDataUrl = progress.qrDataUrl;
+        let sessionKey = progress.sessionKey;
+        while (!waitController.signal.aborted) {
+          let waitResult;
+          try {
+            waitResult = await hostChannelsLoginWait(qrChannelType, accountId, {
+              timeoutMs: 300_000,
+              sessionKey,
+              currentQrDataUrl,
+              signal: waitController.signal,
+            });
+          } catch (error) {
+            if (waitController.signal.aborted) return;
+            throw error;
+          }
+          if (waitController.signal.aborted) return;
+          if (waitResult.sessionKey) {
+            sessionKey = waitResult.sessionKey;
+          }
+          if (waitResult.qrDataUrl) {
+            clearQrGenerateTimeout();
+            currentQrDataUrl = waitResult.qrDataUrl;
+            setQrImageFailed(false);
+            setQrCode(waitResult.qrDataUrl);
+          }
+          if (waitResult.outcome === 'connected') {
+            clearQrGenerateTimeout();
+            setConnecting(false);
+            onChannelAddedRef.current();
+            return;
+          }
+          if (waitResult.outcome !== 'progress') {
+            throw new Error(waitResult.outcome === 'target_rejected'
+              ? 'Channel activation was rejected'
+              : 'Channel activation outcome is unknown');
+          }
+        }
         return;
       }
 

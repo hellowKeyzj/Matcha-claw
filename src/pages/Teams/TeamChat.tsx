@@ -143,7 +143,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     });
   };
 
-  const runs = [...runList].sort((left, right) => right.updatedAt - left.updatedAt);
+  const runs = [...runList];
 
   if (!team || !resolvedTeamId) {
     return (

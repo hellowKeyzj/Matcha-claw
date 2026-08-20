@@ -1,0 +1,143 @@
+# Renderer API 与 capability contract
+
+## 1. Renderer 到 Host API 的固定入口
+
+Renderer 的统一入口是 `hostApiFetch()`：
+
+```ts
+hostApiFetch(path, {
+  method,
+  headers,
+  body,
+  timeoutMs,
+  signal,
+})
+```
+
+它会生成 request ID，经 `hostapi:fetch` 发送给 Electron；`AbortSignal` 触发时另发 `hostapi:abort`。Renderer 不接触 Host API bearer token 或 child dispatch token。来源：[host-api.ts](../../src/lib/host-api.ts#L274-L332)、[hostapi-proxy-ipc.ts](../../electron/main/ipc/hostapi-proxy-ipc.ts#L35-L132)。
+
+固定 IPC contract：
+
+```text
+hostapi:fetch({ requestId?, path?, method?, headers?, body?, timeoutMs? })
+hostapi:abort({ requestId? })
+hostapi:base-url()
+```
+
+来源：[ipc-contract.ts](../../electron/preload/ipc-contract.ts#L1-L78)、[hostapi-proxy-ipc.ts](../../electron/main/ipc/hostapi-proxy-ipc.ts#L8-L22)。
+
+## 2. capability 是主要业务入口
+
+Renderer 的 session、workspace、provider、channel、skill、plugin、cron 等大部分 mutation 通过：
+
+```http
+POST /api/capabilities/execute
+```
+
+```json
+{
+  "id": "session.prompt",
+  "operationId": "sessions.prompt",
+  "scope": { "kind": "..." },
+  "target": { "kind": "..." },
+  "input": {}
+}
+```
+
+字段规则：
+
+| 字段 | 规则 |
+| --- | --- |
+| `id` | 非空 capability ID。 |
+| `operationId` | 非空 operation ID。 |
+| `scope` | 必须为现有 `RuntimeScope`；不接受旧 `runtimeAddress`。 |
+| `target` | 可为 `null`，否则必须是现有 `CapabilityTarget`。 |
+| `input` | operation-specific JSON；可为 `undefined`。 |
+
+来源：[capability-routes.ts](../../runtime-host/api/routes/capability-routes.ts#L17-L91)、[host-api.ts](../../src/lib/host-api.ts#L610-L643)。
+
+相关 discovery API：
+
+| Method | Path | 返回 |
+| --- | --- | --- |
+| `GET` | `/api/capabilities/list` | `{ capabilities }` |
+| `POST` | `/api/capabilities/describe` | `{ capability }`，body `{ id, scope }` |
+| `POST` | `/api/capabilities/execute` | operation-specific data / application response |
+
+## 3. 已确认 Renderer capability families
+
+此表记录 Renderer 已引用的 capability ID 与 operation family；完整 descriptor/target schema 以 runtime capability descriptor 和相应 wrapper 为准。
+
+| capability ID | Renderer operation / 用途 | 关键 wrapper / evidence |
+| --- | --- | --- |
+| `workspace.file` | `files.readText`、`writeText`、`stagePaths`、`stageBuffer`、`thumbnail`、`readBinary`、`stat`、`listDir` | [host-api.ts](../../src/lib/host-api.ts#L424-L512) |
+| `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L983) |
+| `session.prompt` | `sessions.create`、`load`、`abort`、`prompt`、`sendWithMedia` | [host-api.ts](../../src/lib/host-api.ts#L840-L855)、[host-api.ts](../../src/lib/host-api.ts#L924-L1065) |
+| `session.approval` | `approvals.list`、`approvals.resolve` | [host-api.ts](../../src/lib/host-api.ts#L1000-L1025) |
+| `session.modelSelection` | `sessions.patchModel` | [host-api.ts](../../src/lib/host-api.ts#L1027-L1041) |
+| `runtime.host` | `runtimeHost.prepareGatewayLaunch`、`gatewayLifecycle`、`gatewayReady`、`gatewayControlUiAutoApprove`、`jobGet`；Rust private control validates native OpenClaw runtime-instance scope and runtime-job target/input一致性 | [host-api.ts](../../src/lib/host-api.ts#L645-L705)、[dispatch.rs](../../runtime-host/host/src/control/dispatch.rs) |
+| `platform.runtime` | `toolchain.installUv` 保留旧 public `hostUvInstallAll(endpoint): Promise<RuntimeJobSubmission>` 异步契约；Electron `/api/capabilities/execute` 是 public adapter，Rust OpenClaw Toolchain owner-local operation/projection 是事实源，`runtimeHost.jobGet` + `runtime-job:done/progress` 仅作兼容投影；当前 adapter、terminal projection 与 cutover 仍在实现中 | [host-api.ts](../../src/lib/host-api.ts#L406-L417)、[Setup/index.tsx](../../src/pages/Setup/index.tsx#L846-L860)、[capabilities.ts](../../electron/api/routes/capabilities.ts#L164-L283) |
+| `provider.routing` | provider routing capability projection；provider accounts/models 仍有 direct Host API reads/writes | [capability-routing.ts](../../src/lib/capability-routing.ts)、[provider-accounts.ts](../../src/lib/provider-accounts.ts)、[provider-models.ts](../../src/lib/provider-models.ts) |
+| `integration.channel` | channel integration operations | [channel-runtime.ts](../../src/lib/channel-runtime.ts) |
+| `skill.management` | skill operations / import / gateway sync | [skills.ts](../../src/stores/skills.ts)、[Skills/index.tsx](../../src/pages/Skills/index.tsx) |
+| `plugin.runtime` | plugin runtime operations | [plugins-store.ts](../../src/stores/plugins-store.ts)、[plugin-manager-client.ts](../../src/services/openclaw/plugin-manager-client.ts) |
+| `scheduler.cron` | cron create/update/delete/toggle/trigger | [cron.ts](../../src/stores/cron.ts) |
+| `settings.runtime` | 已从 Renderer capability envelope 退休；Settings 使用扁平 intent `GET /api/settings` + `POST /api/settings/desired`，由 Electron Main 适配到 Rust desired transport | [settings-runtime.ts](../../src/lib/settings-runtime.ts)、[settings-desired.ts](../../electron/api/routes/settings-desired.ts) |
+| `security.runtime` | security operations | [security-runtime.ts](../../src/lib/security-runtime.ts) |
+| `license.runtime` | license operations | [license-runtime.ts](../../src/lib/license-runtime.ts) |
+| `subagent.management` / `subagent.skills` / `subagent.tools` | agent and subagent configuration | [subagents.ts](../../src/stores/subagents.ts)、[agent-skill-config.ts](../../src/stores/agent-skill-config.ts)、[agent-tool-config.ts](../../src/stores/agent-tool-config.ts) |
+| `team.runtime` | team package/run/graph/trigger/role chat/approval/cancel/delete operations；Rust control path已解码为 Organization owner command，unsupported legacy projection返回 unavailable/unknown/rejected，不伪造成功 | [team-runtime-client.ts](../../src/services/openclaw/team-runtime-client.ts)、[dispatch.rs](../../runtime-host/host/src/control/dispatch.rs)、[command.rs](../../runtime-host/host/src/owner/command.rs) |
+
+`OPEN`: 这不是对每个 operation input/output 的替代类型定义；对应 Renderer wrapper 和 runtime capability descriptor 是字段级权威。后续 Rust cutover 应以 operation family 为单元采集实际 request/response fixture。
+
+## 4. session prompt 的关键兼容语义
+
+`hostSessionPrompt()` 按 `media` 是否非空选择 operation：
+
+```text
+无 media → sessions.prompt
+有 media → sessions.sendWithMedia
+```
+
+请求语义包含：
+
+- `sessionKey`；
+- 可选 `endpointSessionId`；
+- `sessionIdentity`；
+- `message`；
+- 可选 `idempotencyKey`；
+- 可选 `deliver`；
+- media 的 `filePath`、`mimeType?`、`fileName?`、`fileSize?`、`preview?`。
+
+`sessionIdentity` 是 `endpoint + agentId + sessionKey`；`endpointSessionId` 只是 peer runtime 本地 session id，不参与 Host 侧 identity。
+
+session prompt timeout 是 `10s`，abort `5s`，model patch `15s`。来源：[host-api.ts](../../src/lib/host-api.ts#L33-L47)、[host-api.ts](../../src/lib/host-api.ts#L985-L1065)。
+
+Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempotency key，并把空 message + attachment 转为 fallback prompt。来源：[send-transport.ts](../../src/stores/chat/send-transport.ts)。
+
+## 5. Renderer 直接使用的非-capability Host API
+
+| Method | Path | 现有 Renderer wrapper / consumer | child / main status |
+| --- | --- | --- | --- |
+| `GET` | `/api/openclaw/{status,ready,dir,config-dir,subagent-templates,workspace-dir,task-workspace-dirs,skills-dir,cli-command,tool-permission-mode}` | [host-api.ts](../../src/lib/host-api.ts#L358-L409) | child business route |
+| `PUT` | `/api/openclaw/tool-permission-mode` | [host-api.ts](../../src/lib/host-api.ts#L402-L409) | child business route |
+| `GET` | `/api/toolchain/uv/check` | [host-api.ts](../../src/lib/host-api.ts#L411-L422) | child business route |
+| `GET` | `/api/runtime-{adapters,connectors,endpoints}/...` | [host-api.ts](../../src/lib/host-api.ts#L558-L608) | child topology projection |
+| `POST` | `/api/runtime-connectors/{connect,disconnect}` | [host-api.ts](../../src/lib/host-api.ts#L578-L598) | `LEGACY-REJECTED` by child; Renderer wrapper exists, so replacement must preserve observed rejection unless API migration is separately approved. |
+| `POST` | `/api/gateway/stop` | [gateway.ts](../../src/stores/gateway.ts#L355) | Electron main-owned, not child |
+
+The Electron public allowlist is authoritative for which Renderer `hostapi:fetch` requests are accepted: [route-boundary.ts](../../electron/api/route-boundary.ts#L190-L217)。
+
+## 6. Response and error behavior Renderer relies on
+
+Renderer proxy decoder:
+
+- IPC success is `{ ok:true, data:{status, ok, json?, text?} }`;
+- non-2xx `status` or `ok:false` causes an error;
+- server `{ error: string }`、`{ error:{message} }` 或 `{ message }` is converted into message;
+- `204` returns `undefined`;
+- JSON wins over text.
+
+来源：[host-api-transport-contract.ts](../../src/lib/host-api-transport-contract.ts#L1-L128)。
+
+因此 Rust 不能因为内部错误模型变化而改变已返回到 Host API 的 JSON error shape、状态码或 `null`/field omission 行为。

@@ -1,9 +1,9 @@
 import { ipcMain } from 'electron';
-import { isHostApiProxyAllowedRoute } from '../../api/route-boundary';
+import { isHostApiRequestAllowed } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
-import { getPort } from '../../utils/config';
 import { getHostApiBaseUrl, getHostApiToken } from '../../api/server';
 import { handleE2EHostApiFetch } from '@electron/e2e-fixture-loader';
+import { SESSION_TRACE_HEADER } from '../runtime-host-delivery/transport/sessions/trace';
 
 type HostApiFetchRequest = {
   requestId?: string;
@@ -19,7 +19,31 @@ type HostApiAbortRequest = {
 };
 
 const DEFAULT_HOST_API_TIMEOUT_MS = 30_000;
-const REQUEST_TIMEOUT_HEADER = 'x-matchaclaw-request-timeout-ms';
+
+type SafeHostApiProxyFailureCode = 'TIMEOUT' | 'ABORTED' | 'UNAVAILABLE';
+
+type InflightHostApiRequest = {
+  controller: AbortController;
+  failureCode: SafeHostApiProxyFailureCode;
+};
+
+type E2EProcess = typeof process & {
+  __matchaclawE2EHostApiBoundary?: Readonly<{
+    stage: 'proxy-failure';
+    method: string;
+    path: string;
+  }>;
+};
+
+function publishE2EHostApiBoundary(boundary: NonNullable<E2EProcess['__matchaclawE2EHostApiBoundary']>): void {
+  if (process.env.MATCHACLAW_E2E !== '1') return;
+  Object.defineProperty(process as E2EProcess, '__matchaclawE2EHostApiBoundary', {
+    configurable: true,
+    enumerable: false,
+    value: Object.freeze(boundary),
+    writable: false,
+  });
+}
 
 function normalizeHostApiProxyPath(path: unknown): string {
   if (typeof path !== 'string') {
@@ -32,21 +56,35 @@ function normalizeHostApiProxyPath(path: unknown): string {
   return trimmedPath.startsWith('/') ? trimmedPath : `/${trimmedPath}`;
 }
 
+function withoutRendererAuthenticationHeaders(headers: unknown): Record<string, string> {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(headers).filter(([name, value]) => (
+    typeof value === 'string' && !['authorization', 'proxy-authorization'].includes(name.toLowerCase())
+  )));
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  return Object.keys(headers).some((headerName) => headerName.toLowerCase() === name);
+}
+
 export function registerHostApiProxyHandlers(): void {
   // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
   // 避免页面切换后还白白等几秒再丢弃响应。
-  const inflightControllers = new Map<string, AbortController>();
+  const inflightRequests = new Map<string, InflightHostApiRequest>();
 
   ipcMain.handle('hostapi:abort', (_, request: HostApiAbortRequest) => {
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     if (!requestId) {
       return { ok: false };
     }
-    const controller = inflightControllers.get(requestId);
-    if (!controller) {
+    const inflightRequest = inflightRequests.get(requestId);
+    if (!inflightRequest) {
       return { ok: false };
     }
-    controller.abort();
+    inflightRequest.failureCode = 'ABORTED';
+    inflightRequest.controller.abort();
     return { ok: true };
   });
 
@@ -58,38 +96,49 @@ export function registerHostApiProxyHandlers(): void {
       return e2eMock;
     }
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
+    const normalizedPath = normalizeHostApiProxyPath(request?.path);
+    const method = (request?.method || 'GET').toUpperCase();
+    let inflightRequest: InflightHostApiRequest | null = null;
     try {
-      const port = getPort('MATCHACLAW_HOST_API');
-      const normalizedPath = normalizeHostApiProxyPath(request?.path);
-      const method = (request?.method || 'GET').toUpperCase();
       const routeUrl = new URL(normalizedPath, 'http://127.0.0.1');
-      if (!isHostApiProxyAllowedRoute(method, routeUrl.pathname)) {
-        throw new Error(`hostapi proxy route is not allowed: ${method} ${routeUrl.pathname}`);
+      if (!isHostApiRequestAllowed(method, routeUrl.pathname)) {
+        throw new Error(`hostapi route is not available: ${method} ${routeUrl.pathname}`);
       }
       const timeoutMs =
         typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
           ? request.timeoutMs
           : DEFAULT_HOST_API_TIMEOUT_MS;
 
-      const headers: Record<string, string> = { ...(request?.headers ?? {}) };
+      const headers = withoutRendererAuthenticationHeaders(request?.headers);
+      const traceId = typeof request?.headers?.[SESSION_TRACE_HEADER] === 'string'
+        ? request.headers[SESSION_TRACE_HEADER]
+        : typeof request?.headers?.[SESSION_TRACE_HEADER.toLowerCase()] === 'string'
+          ? request.headers[SESSION_TRACE_HEADER.toLowerCase()]
+          : null;
+      if (traceId) {
+        headers[SESSION_TRACE_HEADER] = traceId;
+      }
       headers.Authorization = `Bearer ${getHostApiToken()}`;
-      headers[REQUEST_TIMEOUT_HEADER] = String(timeoutMs);
       let body: string | undefined;
       if (request?.body !== undefined && request.body !== null && method !== 'GET' && method !== 'HEAD') {
         body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
-        if (!headers['Content-Type'] && !headers['content-type']) {
+        if (!hasHeader(headers, 'content-type')) {
           headers['Content-Type'] = 'application/json';
         }
       }
 
       const controller = new AbortController();
+      inflightRequest = { controller, failureCode: 'UNAVAILABLE' };
       if (requestId) {
-        inflightControllers.set(requestId, controller);
+        inflightRequests.set(requestId, inflightRequest);
       }
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => {
+        inflightRequest.failureCode = 'TIMEOUT';
+        controller.abort();
+      }, timeoutMs);
       let response: Awaited<ReturnType<typeof proxyAwareFetch>>;
       try {
-        response = await proxyAwareFetch(`http://127.0.0.1:${port}${normalizedPath}`, {
+        response = await proxyAwareFetch(`${getHostApiBaseUrl()}${normalizedPath}`, {
           method,
           headers,
           body,
@@ -98,7 +147,7 @@ export function registerHostApiProxyHandlers(): void {
       } finally {
         clearTimeout(timer);
         if (requestId) {
-          inflightControllers.delete(requestId);
+          inflightRequests.delete(requestId);
         }
       }
 
@@ -124,10 +173,14 @@ export function registerHostApiProxyHandlers(): void {
           text,
         },
       };
-    } catch (error) {
+    } catch {
+      publishE2EHostApiBoundary({ stage: 'proxy-failure', method, path: normalizedPath });
       return {
         ok: false,
-        error: { message: String(error) },
+        error: {
+          message: 'Host API request is unavailable.',
+          code: inflightRequest?.failureCode ?? 'UNAVAILABLE',
+        },
       };
     }
   });

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 import { render, screen } from '@testing-library/react';
 import { ApprovalActionsPanel } from '@/pages/Chat/components/ChatStates';
 import { ChatApprovalDock, ChatErrorBanner } from '@/pages/Chat/components/ChatRuntimeDock';
@@ -66,27 +65,19 @@ describe('chat floating overlays layout', () => {
     expect(controls?.className).toContain('backdrop-blur-xl');
   });
 
-  it('approval panel renders request details and only allowed decisions', () => {
+  it('approval panel projects only opaque native option IDs', () => {
     render(
       <ApprovalActionsPanel
         approvals={[{
-          id: 'approval-1',
+          approvalId: 'approval-1',
           sessionKey: 'agent:main:main',
-          backendSessionKey: 'agent:main:main',
-          sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
-          title: 'gateway',
-          command: 'Remove-Item demo.txt',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1,
+          optionIds: ['option-1', 'option-2'],
         }]}
         onResolve={vi.fn()}
       />,
     );
 
-    expect(screen.getByText('gateway')).toBeInTheDocument();
-    expect(screen.getByText('Remove-Item demo.txt')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'approval.allowOnce' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'approval.deny' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'approval.allowAlways' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'option-1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'option-2' })).toBeInTheDocument();
   });
 });

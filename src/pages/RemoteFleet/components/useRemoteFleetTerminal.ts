@@ -14,6 +14,13 @@ const DEFAULT_TERMINAL_COLS = 80;
 const SOCKET_CONNECTING_STATE = 0;
 const SOCKET_OPEN_STATE = 1;
 
+interface TerminalSocketContext {
+  readonly socket: WebSocket;
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly requestToken: number;
+}
+
 interface UseRemoteFleetTerminalOptions {
   readonly openTerminal: (request: RemoteFleetTerminalConnectionRequest) => Promise<RemoteFleetTerminalOpenResult>;
   readonly reconnectTerminal: (sessionId: string) => Promise<RemoteFleetTerminalOpenResult>;
@@ -117,7 +124,11 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const socketContextRef = useRef<TerminalSocketContext | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const terminalReadyRef = useRef(false);
+  const requestTokenRef = useRef(0);
+  const generationRef = useRef(0);
   const currentConnectionRef = useRef<RemoteFleetTerminalConnection | null>(null);
   const currentSessionRef = useRef<RemoteFleetTerminalSessionSummary | null>(null);
   const currentTargetKeyRef = useRef<string | null>(null);
@@ -130,7 +141,7 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
 
   const syncTerminalSize = useCallback((socket: WebSocket | null = socketRef.current) => {
     const terminal = terminalRef.current;
-    if (!terminal) return;
+    if (!terminalReadyRef.current || !terminal || socket !== socketRef.current) return;
     fitTerminalToContainer();
     sendControlFrame(socket, { type: 'terminal.resize', ...terminalSize(terminal) });
   }, [fitTerminalToContainer]);
@@ -151,27 +162,38 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
   const disposeSocket = useCallback(() => {
     const socket = socketRef.current;
     socketRef.current = null;
+    socketContextRef.current = null;
+    terminalReadyRef.current = false;
     if (isReusableTerminalConnection(socket)) {
-      socket.close(1000, 'terminal closed');
+      socket.close();
     }
   }, []);
 
   const disposeTerminal = useCallback(() => {
     disconnectResizeObserver();
+    terminalReadyRef.current = false;
     terminalRef.current?.dispose();
     fitAddonRef.current?.dispose();
     terminalRef.current = null;
     fitAddonRef.current = null;
   }, [disconnectResizeObserver]);
 
+  const isCurrentSocketContext = useCallback((context: TerminalSocketContext | null = socketContextRef.current): boolean => (
+    context !== null
+    && requestTokenRef.current === context.requestToken
+    && generationRef.current === context.generation
+    && socketRef.current === context.socket
+    && socketContextRef.current === context
+    && currentSessionRef.current?.id === context.sessionId
+  ), []);
+
   const ensureTerminal = useCallback(() => {
     if (!terminalRef.current) {
       const { terminal, fitAddon } = createTerminal();
       terminal.onData((data) => {
-        const socket = socketRef.current;
-        if (socket?.readyState === SOCKET_OPEN_STATE) {
-          socket.send(encodeTerminalInput(data));
-        }
+        const context = socketContextRef.current;
+        if (!context || !terminalReadyRef.current || !isCurrentSocketContext(context) || context.socket.readyState !== SOCKET_OPEN_STATE) return;
+        context.socket.send(encodeTerminalInput(data));
       });
       terminalRef.current = terminal;
       fitAddonRef.current = fitAddon;
@@ -183,62 +205,94 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
     }
 
     return terminalRef.current;
-  }, [syncTerminalSize]);
+  }, [isCurrentSocketContext, syncTerminalSize]);
 
-  const attachSocket = useCallback(async (connection: RemoteFleetTerminalConnection) => {
-    disposeSocket();
-    currentConnectionRef.current = connection;
+  const attachSocket = useCallback(async (connection: RemoteFleetTerminalConnection, requestToken: number) => {
     const terminal = ensureTerminal();
-    const socket = new WebSocket(await buildTerminalWebSocketUrl(connection.websocketPath));
+    const generation = generationRef.current + 1;
+    const websocketUrl = await buildTerminalWebSocketUrl(connection.websocketPath);
+    if (requestToken !== requestTokenRef.current || currentSessionRef.current?.id !== connection.sessionId) return;
+
+    disposeSocket();
+    const socket = new WebSocket(websocketUrl);
+    const context: TerminalSocketContext = {
+      socket,
+      sessionId: connection.sessionId,
+      generation,
+      requestToken,
+    };
+    generationRef.current = generation;
+    currentConnectionRef.current = connection;
+    terminalReadyRef.current = false;
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
+    socketContextRef.current = context;
     setSnapshot((current) => ({ ...current, status: 'connecting', errorKind: undefined }));
     terminal.focus();
 
+    const isCurrentSocket = (): boolean => (
+      requestTokenRef.current === context.requestToken
+      && generationRef.current === context.generation
+      && socketRef.current === context.socket
+      && socketContextRef.current === context
+      && currentSessionRef.current?.id === context.sessionId
+    );
+
     socket.addEventListener('open', () => {
-      syncTerminalSize(socket);
+      if (!isCurrentSocket()) return;
+      socket.send(JSON.stringify({ ticket: connection.ticket }));
     });
 
     socket.addEventListener('message', (event) => {
+      if (!isCurrentSocket()) return;
       if (typeof event.data === 'string') {
         void parseTextFrame(event.data).then((frame) => {
-          if (!frame) return;
+          if (!frame || !isCurrentSocket()) return;
           if (frame.type === 'terminal.ready') {
+            terminalReadyRef.current = true;
             setSnapshot((current) => ({ ...current, status: 'ready', errorKind: undefined }));
+            syncTerminalSize(socket);
             return;
           }
           if (frame.type === 'terminal.error') {
+            terminalReadyRef.current = false;
             setSnapshot((current) => ({ ...current, status: 'error', errorKind: 'remote-error' }));
             return;
           }
           if (frame.type === 'terminal.exit') {
+            terminalReadyRef.current = false;
             setSnapshot((current) => ({
               ...current,
               status: 'exited',
               exitCode: frame.exitCode,
               signal: frame.signal,
             }));
-            return;
           }
         });
         return;
       }
 
       if (event.data instanceof ArrayBuffer) {
-        terminal.write(new Uint8Array(event.data));
+        if (isCurrentSocket()) terminal.write(new Uint8Array(event.data));
         return;
       }
 
       if (event.data instanceof Blob) {
-        void event.data.arrayBuffer().then((buffer) => terminal.write(new Uint8Array(buffer)));
+        void event.data.arrayBuffer().then((buffer) => {
+          if (isCurrentSocket()) terminal.write(new Uint8Array(buffer));
+        });
       }
     });
 
     socket.addEventListener('error', () => {
+      if (!isCurrentSocket()) return;
+      terminalReadyRef.current = false;
       setSnapshot((current) => ({ ...current, status: 'error', errorKind: 'connection-failed' }));
     });
 
     socket.addEventListener('close', () => {
+      if (!isCurrentSocket()) return;
+      terminalReadyRef.current = false;
       setSnapshot((current) => current.status === 'exited' || current.status === 'error'
         ? current
         : { ...current, status: 'closed' });
@@ -249,17 +303,13 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
     const targetKey = terminalRequestTargetKey(request);
     const terminal = ensureTerminal();
     if (currentTargetKeyRef.current === targetKey && currentSessionRef.current && isReusableTerminalConnection(socketRef.current)) {
-      setSnapshot((current) => ({
-        ...current,
-        status: current.status === 'idle' || current.status === 'closed' ? 'ready' : current.status,
-        session: currentSessionRef.current ?? current.session,
-        errorKind: undefined,
-      }));
       terminal.focus();
       syncTerminalSize();
       return;
     }
 
+    const requestToken = requestTokenRef.current + 1;
+    requestTokenRef.current = requestToken;
     const previousSessionId = currentConnectionRef.current?.sessionId ?? currentSessionRef.current?.id;
     const shouldClosePreviousSession = Boolean(
       previousSessionId && currentTargetKeyRef.current && (
@@ -267,23 +317,26 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
       ),
     );
     if (previousSessionId && shouldClosePreviousSession) {
-      sendControlFrame(socketRef.current, { type: 'terminal.close', reason: 'terminal replaced' });
       disposeSocket();
-      await closeTerminal(previousSessionId, 'terminal replaced').catch(() => undefined);
+      await closeTerminal(previousSessionId).catch(() => undefined);
     }
+    if (requestTokenRef.current !== requestToken) return;
 
     currentConnectionRef.current = null;
     currentSessionRef.current = null;
     currentTargetKeyRef.current = targetKey;
+    terminalReadyRef.current = false;
     setSnapshot({ status: 'opening' });
     terminal.clear();
     const size = request.size ?? terminalSize(terminal);
     try {
       const result = await openTerminal({ ...request, size });
+      if (requestTokenRef.current !== requestToken) return;
       currentSessionRef.current = result.session;
       setSnapshot({ status: 'connecting', session: result.session });
-      await attachSocket(result.terminalConnection);
+      await attachSocket(result.terminalConnection, requestToken);
     } catch {
+      if (requestTokenRef.current !== requestToken) return;
       currentTargetKeyRef.current = null;
       setSnapshot({ status: 'error', errorKind: 'open-failed' });
     }
@@ -292,29 +345,38 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
   const reconnect = useCallback(async () => {
     const sessionId = currentConnectionRef.current?.sessionId ?? currentSessionRef.current?.id;
     if (!sessionId) return;
+    const requestToken = requestTokenRef.current + 1;
+    requestTokenRef.current = requestToken;
+    disposeSocket();
+    terminalReadyRef.current = false;
     setSnapshot((current) => ({ ...current, status: 'opening', errorKind: undefined }));
     try {
       const result = await reconnectTerminal(sessionId);
+      if (requestTokenRef.current !== requestToken || currentSessionRef.current?.id !== sessionId) return;
       currentSessionRef.current = result.session;
       setSnapshot({ status: 'connecting', session: result.session });
-      await attachSocket(result.terminalConnection);
+      await attachSocket(result.terminalConnection, requestToken);
     } catch {
+      if (requestTokenRef.current !== requestToken) return;
       setSnapshot((current) => ({ ...current, status: 'error', errorKind: 'reconnect-failed' }));
     }
-  }, [attachSocket, reconnectTerminal]);
+  }, [attachSocket, disposeSocket, reconnectTerminal]);
 
-  const close = useCallback(async (reason?: string) => {
+  const close = useCallback(async (_reason?: string) => {
+    const requestToken = requestTokenRef.current + 1;
+    requestTokenRef.current = requestToken;
     const sessionId = currentConnectionRef.current?.sessionId ?? currentSessionRef.current?.id;
-    sendControlFrame(socketRef.current, { type: 'terminal.close', ...(reason ? { reason } : {}) });
     disposeSocket();
     disposeTerminal();
     currentConnectionRef.current = null;
     currentSessionRef.current = null;
     currentTargetKeyRef.current = null;
     if (sessionId) {
-      await closeTerminal(sessionId, reason);
+      await closeTerminal(sessionId);
     }
-    setSnapshot((current) => ({ ...current, status: 'closed' }));
+    if (requestTokenRef.current === requestToken) {
+      setSnapshot((current) => ({ ...current, status: 'closed' }));
+    }
   }, [disposeSocket, disposeTerminal, closeTerminal]);
 
   const containerRef = useCallback((element: HTMLDivElement | null) => {
@@ -327,12 +389,12 @@ export function useRemoteFleetTerminal({ openTerminal, reconnectTerminal, closeT
 
   useEffect(() => {
     return () => {
+      requestTokenRef.current += 1;
       const sessionId = currentConnectionRef.current?.sessionId ?? currentSessionRef.current?.id;
-      sendControlFrame(socketRef.current, { type: 'terminal.close', reason: 'drawer unmounted' });
       disposeSocket();
       disposeTerminal();
       if (sessionId) {
-        void closeTerminal(sessionId, 'drawer unmounted').catch(() => undefined);
+        void closeTerminal(sessionId).catch(() => undefined);
       }
       currentConnectionRef.current = null;
       currentSessionRef.current = null;

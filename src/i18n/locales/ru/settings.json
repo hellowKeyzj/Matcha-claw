@@ -118,6 +118,23 @@
       "step2": "Откройте страницу входа в браузере.",
       "step3": "Вставьте код для подтверждения доступа.",
       "requestingCode": "Запрос кода безопасного входа..."
+    },
+    "projectionErrors": {
+      "diagnostic": "Не удалось синхронизировать конфигурацию OpenClaw: {{reason}}",
+      "readbackMismatch": "Прочитанная конфигурация OpenClaw не совпадает с сохранёнными настройками провайдера.",
+      "readbackUnavailable": "Конфигурация OpenClaw записана, но её не удалось прочитать для проверки.",
+      "outcomeUnknown": "Результат синхронизации конфигурации OpenClaw неизвестен.",
+      "privateResolver": {
+        "credentialMissing": "Для этой учётной записи нет сохранённого API-ключа. Введите ключ заново и сохраните.",
+        "credentialDecryptFailed": "Сохранённый API-ключ нельзя расшифровать на этом устройстве. Введите его заново и сохраните.",
+        "credentialProviderMismatch": "Сохранённый API-ключ относится к другому провайдеру. Введите ключ этого провайдера заново.",
+        "credentialInvalid": "Сохранённые учётные данные недействительны. Введите их заново и сохраните.",
+        "authProfileReadInvalid": "Файл профилей авторизации OpenClaw недействителен. Исправьте или удалите его и сохраните снова.",
+        "authProfileWriteFailed": "Не удалось записать файл профилей авторизации OpenClaw. Проверьте права доступа.",
+        "credentialStoreUnavailable": "Не удалось прочитать локальное хранилище учётных данных провайдеров. Введите API-ключ заново.",
+        "invalidRequest": "Внутренний запрос синхронизации авторизации недействителен. Повторите попытку.",
+        "unknown": "Синхронизация авторизации OpenClaw не удалась. Введите API-ключ заново и сохраните."
+      }
     }
   },
   "license": {
@@ -161,15 +178,15 @@
   "diagnostics": {
     "title": "Diagnostics",
     "description": "Collect a local diagnostics bundle for troubleshooting",
-    "collect": "Collect Bundle",
-    "collecting": "Collecting",
-    "openFolder": "Open Folder",
-    "lastBundle": "Last Bundle",
-    "lastMeta": "Generated at {{generatedAt}}, files: {{count}}",
+    "collect": "Export Bundle",
+    "collecting": "Exporting",
+    "lastBundle": "Last Archive",
+    "lastMeta": "Entries: {{count}}, bytes: {{bytes}}",
     "toast": {
-      "success": "Diagnostics bundle generated, files: {{count}}",
-      "failed": "Failed to generate diagnostics bundle: {{error}}",
-      "openFailed": "Failed to open diagnostics folder: {{error}}"
+      "success": "Diagnostics archive exported, entries: {{count}}",
+      "failed": "Failed to export diagnostics archive: {{error}}",
+      "cancelled": "Diagnostics archive export cancelled",
+      "exportFailed": "Diagnostics archive export failed"
     }
   },
   "gateway": {

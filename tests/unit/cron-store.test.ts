@@ -3,52 +3,45 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CronJob } from '@/types/cron';
 
 const hostApiFetchMock = vi.fn();
-const hostCapabilityExecuteMock = vi.fn();
-const waitForRuntimeJobResultMock = vi.fn();
+const subscribeHostEventMock = vi.fn();
+const cronEventUnsubscribeMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
-    if (path === '/api/capabilities/execute') {
-      const payload = init?.body ? JSON.parse(init.body) : {};
-      return await hostCapabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
-    }
-    return await hostApiFetchMock(path, init);
-  },
-  resolveSingleCapabilityScope: () => ({ kind: 'app' }),
-  waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
+  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  resolveSingleCapabilityScope: () => ({ kind: 'runtime-instance', endpoint: {
+    kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+  } }),
 }));
 
-function buildJob(id: string): CronJob {
+vi.mock('@/lib/host-events', () => ({
+  subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
+}));
+
+function wireJob(id: string, updatedAtMs = 1): CronJob {
+  return projectedJob(id, updatedAtMs);
+}
+
+function projectedJob(id: string, updatedAtMs = 1): CronJob {
   return {
     id,
     name: `job-${id}`,
     agentId: 'main',
     message: 'hello',
-    schedule: '0 9 * * *',
+    schedule: { kind: 'cron', expr: '0 9 * * *', tz: null },
+    delivery: { mode: 'none' },
     enabled: true,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-  };
-}
-
-function jobsSnapshot(jobs: CronJob[], ready = true) {
-  return {
-    success: true,
-    jobs,
-    ready,
-    refreshing: !ready,
-    updatedAt: ready ? 1 : null,
-    error: null,
+    createdAt: new Date(1).toISOString(),
+    updatedAt: new Date(updatedAtMs).toISOString(),
   };
 }
 
 describe('cron session utils', () => {
-  it('rejects cron session keys without an explicit agent id', async () => {
-    const { parseCronSessionKey, isCronSessionKey } = await import('@/stores/chat/cron-session-utils');
+  it('keeps cron session classification local and exposes no history route', async () => {
+    const cronSessionUtils = await import('@/stores/chat/cron-session-utils');
 
-    expect(parseCronSessionKey('agent::cron:job-1')).toBeNull();
-    expect(isCronSessionKey('agent::cron:job-1')).toBe(false);
-    expect(parseCronSessionKey('agent:test:cron:job-1')).toEqual({ agentId: 'test', jobId: 'job-1' });
+    expect(cronSessionUtils.parseCronSessionKey('agent::cron:job-1')).toBeNull();
+    expect(cronSessionUtils.isCronSessionKey('agent::cron:job-1')).toBe(false);
+    expect(cronSessionUtils.parseCronSessionKey('agent:test:cron:job-1')).toEqual({ agentId: 'test', jobId: 'job-1' });
   });
 });
 
@@ -56,220 +49,293 @@ describe('cron store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
-    hostCapabilityExecuteMock.mockReset();
-    waitForRuntimeJobResultMock.mockReset();
+    subscribeHostEventMock.mockReset();
+    cronEventUnsubscribeMock.mockReset();
+    subscribeHostEventMock.mockReturnValue(cronEventUnsubscribeMock);
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
-    const jobs = [buildJob('job-1')];
-    let resolveFetch: ((value: ReturnType<typeof jobsSnapshot>) => void) | null = null;
-    hostApiFetchMock.mockReturnValue(new Promise<ReturnType<typeof jobsSnapshot>>((resolve) => {
-      resolveFetch = resolve;
-    }));
-
-    const { useCronStore } = await import('@/stores/cron');
-    const fetchPromise = useCronStore.getState().fetchJobs();
-
-    expect(useCronStore.getState().initialLoading).toBe(true);
-    expect(useCronStore.getState().refreshing).toBe(false);
-
-    resolveFetch?.(jobsSnapshot(jobs));
-    await fetchPromise;
-
-    const state = useCronStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.jobs).toEqual(jobs);
-    expect(state.error).toBeNull();
-  });
-
-  it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
-    const jobs = [buildJob('job-2')];
-    hostApiFetchMock.mockResolvedValueOnce(jobsSnapshot(jobs));
+  it('fetches and projects the Rust-owned cron list response', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ jobs: [wireJob('job-1')] });
 
     const { useCronStore } = await import('@/stores/cron');
     await useCronStore.getState().fetchJobs();
 
-    hostApiFetchMock.mockRejectedValueOnce(new Error('network down'));
-    await useCronStore.getState().fetchJobs();
-
-    const state = useCronStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.jobs).toEqual(jobs);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.error).toBe('network down');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs');
+    expect(useCronStore.getState()).toMatchObject({
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      error: null,
+      jobs: [projectedJob('job-1')],
+    });
   });
 
-  it('fetchJobs 并发请求会单飞去重', async () => {
-    const jobs = [buildJob('job-3')];
-    let resolveFetch: ((value: ReturnType<typeof jobsSnapshot>) => void) | null = null;
-    hostApiFetchMock.mockReturnValue(new Promise<ReturnType<typeof jobsSnapshot>>((resolve) => {
-      resolveFetch = resolve;
-    }));
+  it('preserves an existing snapshot if the final list transport fails', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce({ jobs: [wireJob('job-2')] })
+      .mockRejectedValueOnce(new Error('Cron service is unavailable'));
+
+    const { useCronStore } = await import('@/stores/cron');
+    await useCronStore.getState().fetchJobs();
+    await useCronStore.getState().fetchJobs();
+
+    expect(useCronStore.getState()).toMatchObject({
+      snapshotReady: true,
+      jobs: [projectedJob('job-2')],
+      error: 'Cron service is unavailable',
+    });
+  });
+
+  it('deduplicates concurrent list calls', async () => {
+    let resolveFetch: ((value: { jobs: ReturnType<typeof wireJob>[] }) => void) | undefined;
+    hostApiFetchMock.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve; }));
 
     const { useCronStore } = await import('@/stores/cron');
     const first = useCronStore.getState().fetchJobs();
     const second = useCronStore.getState().fetchJobs();
-
-    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-
-    resolveFetch?.(jobsSnapshot(jobs));
+    resolveFetch?.({ jobs: [wireJob('job-3')] });
     await Promise.all([first, second]);
-  });
 
-  it('jobs 快照未 ready 时保持加载并自动重试', async () => {
-    vi.useFakeTimers();
-    const jobs = [buildJob('job-ready-later')];
-    hostApiFetchMock
-      .mockResolvedValueOnce(jobsSnapshot([], false))
-      .mockResolvedValueOnce(jobsSnapshot(jobs));
-
-    const { useCronStore } = await import('@/stores/cron');
-    await useCronStore.getState().fetchJobs();
-
-    expect(useCronStore.getState().snapshotReady).toBe(false);
-    expect(useCronStore.getState().initialLoading).toBe(true);
-    expect(useCronStore.getState().refreshing).toBe(true);
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(1200);
-
-    const state = useCronStore.getState();
-    expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.jobs).toEqual(jobs);
+    expect(useCronStore.getState().jobs).toEqual([projectedJob('job-3')]);
   });
 
-  it('updateJob 会维护 mutatingByJobId 生命周期', async () => {
-    const job = buildJob('job-4');
-    const { useCronStore } = await import('@/stores/cron');
-    useCronStore.getState().setJobs([job]);
-
-    let resolveUpdate: (() => void) | null = null;
-    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
-      if (payload.operationId === 'cron.update') {
-        await new Promise<void>((resolve) => {
-          resolveUpdate = resolve;
-        });
-        return {
-          success: true,
-          job: {
-            id: 'runtime-job-4',
-            type: 'cron.update',
-            status: 'queued',
-            queuedAt: 1,
-            attempts: 0,
-            maxAttempts: 1,
-          },
-        };
-      }
-      throw new Error(`unexpected operation: ${payload.operationId}`);
-    });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce({ success: true });
-
-    const updatePromise = useCronStore.getState().updateJob('job-4', { name: 'updated-name' });
-    await waitFor(() => {
-      expect(useCronStore.getState().mutating).toBe(true);
-      expect(useCronStore.getState().mutatingByJobId['job-4']).toBe(1);
-    });
-
-    resolveUpdate?.();
-    await updatePromise;
-
-    const state = useCronStore.getState();
-    expect(state.mutating).toBe(false);
-    expect(state.mutatingByJobId['job-4']).toBeUndefined();
-    expect(state.jobs[0]?.name).toBe('updated-name');
-    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-4');
-  });
-
-  it('createJob 会保留返回的 agentId', async () => {
-    const createdJob = { ...buildJob('job-5'), agentId: 'agent-alpha' };
-    hostCapabilityExecuteMock.mockResolvedValueOnce({
-      success: true,
-      job: {
-        id: 'runtime-job-5',
-        type: 'cron.create',
-        status: 'queued',
-        queuedAt: 1,
-        attempts: 0,
-        maxAttempts: 1,
-      },
-    });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce(createdJob);
+  it('creates through the typed Cron route and stores the sealed Rust projection', async () => {
+    const createdJob = {
+      ...projectedJob('job-create', 8),
+      agentId: 'agent-alpha',
+      enabled: false,
+    };
+    hostApiFetchMock.mockResolvedValueOnce(createdJob);
 
     const { useCronStore } = await import('@/stores/cron');
     const result = await useCronStore.getState().createJob({
       name: createdJob.name,
-      agentId: 'agent-alpha',
+      agentId: createdJob.agentId,
       message: createdJob.message,
       schedule: '0 9 * * *',
-      enabled: true,
+      enabled: createdJob.enabled,
     });
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'scheduler.cron',
-      operationId: 'cron.create',
-      input: expect.objectContaining({
-        name: createdJob.name,
-        agentId: 'agent-alpha',
-        message: createdJob.message,
-        schedule: '0 9 * * *',
-        enabled: true,
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs/create', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'scheduler.cron',
+        operationId: 'cron.create',
+        scope: { kind: 'runtime-instance', endpoint: {
+          kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+        } },
+        target: { kind: 'cron-job' },
+        input: {
+          name: createdJob.name,
+          agentId: createdJob.agentId,
+          message: createdJob.message,
+          schedule: '0 9 * * *',
+          delivery: { mode: 'none' },
+          enabled: false,
+        },
       }),
-    }), { timeoutMs: undefined });
-    expect(result.agentId).toBe('agent-alpha');
-    expect(useCronStore.getState().jobs[0]?.agentId).toBe('agent-alpha');
+    }));
+    expect(result).toEqual(createdJob);
+    expect(useCronStore.getState().jobs).toEqual([createdJob]);
   });
 
-  it('triggerJob 提交后台任务并等待任务结果后刷新列表', async () => {
-    const job = buildJob('job-6');
-    const refreshedJob = { ...job, updatedAt: '2026-01-01T00:01:00.000Z' };
-    hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/cron/jobs') {
-        return jobsSnapshot([refreshedJob]);
-      }
-      throw new Error(`unexpected path: ${path}`);
-    });
-    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
-      if (payload.operationId === 'cron.trigger') {
-        return {
-          success: true,
-          job: {
-            id: 'runtime-job-6',
-            type: 'cron.trigger',
-            status: 'queued',
-            queuedAt: 1,
-            attempts: 0,
-            maxAttempts: 1,
-          },
-        };
-      }
-      throw new Error(`unexpected operation: ${payload.operationId}`);
-    });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce({ ok: true, ran: true });
-
+  it('uses the delete response as the only source of local removal', async () => {
+    const job = projectedJob('job-delete');
     const { useCronStore } = await import('@/stores/cron');
     useCronStore.getState().setJobs([job]);
 
-    const result = await useCronStore.getState().triggerJob('job-6');
+    hostApiFetchMock.mockResolvedValueOnce({ removed: false });
+    await useCronStore.getState().deleteJob(job.id);
+    expect(useCronStore.getState().jobs).toEqual([job]);
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'scheduler.cron',
-      operationId: 'cron.trigger',
-      input: expect.objectContaining({ id: 'job-6' }),
-    }), { timeoutMs: undefined });
-    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-6');
-    expect(result).toEqual({ ran: true, reason: undefined });
-    expect(useCronStore.getState().jobs).toEqual([refreshedJob]);
-    expect(useCronStore.getState().mutating).toBe(false);
+    hostApiFetchMock.mockResolvedValueOnce({ removed: true });
+    await useCronStore.getState().deleteJob(job.id);
+    expect(useCronStore.getState().jobs).toEqual([]);
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/cron/jobs/delete', expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"operationId":"cron.delete"'),
+    }));
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/cron/jobs/delete', expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"input":{"jobId":"job-delete"}'),
+    }));
+  });
+
+  it('replaces a toggled job with the sealed Rust response', async () => {
+    const job = projectedJob('job-toggle');
+    const toggledJob = { ...job, enabled: false, updatedAt: new Date(9).toISOString() };
+    hostApiFetchMock.mockResolvedValueOnce(toggledJob);
+
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([job]);
+    await useCronStore.getState().toggleJob(job.id, false);
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs/toggle', expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"operationId":"cron.toggle"'),
+    }));
+    expect(useCronStore.getState().jobs).toEqual([toggledJob]);
+  });
+
+  it('sends a closed update DTO and tracks the job mutation lifetime', async () => {
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([projectedJob('job-4')]);
+    let resolveUpdate: ((value: ReturnType<typeof wireJob>) => void) | undefined;
+    hostApiFetchMock.mockReturnValue(new Promise((resolve) => { resolveUpdate = resolve; }));
+
+    const update = useCronStore.getState().updateJob('job-4', { name: 'updated' });
+    await waitFor(() => expect(useCronStore.getState().mutatingByJobId['job-4']).toBe(1));
+    resolveUpdate?.({ ...wireJob('job-4'), name: 'updated' });
+    await update;
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs/update', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'scheduler.cron',
+        operationId: 'cron.update',
+        scope: { kind: 'runtime-instance', endpoint: {
+          kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+        } },
+        target: { kind: 'cron-job', jobId: 'job-4' },
+        input: { jobId: 'job-4', name: 'updated' },
+      }),
+    }));
+    expect(useCronStore.getState()).toMatchObject({
+      mutating: false,
+      mutatingByJobId: {},
+      jobs: [{ ...projectedJob('job-4'), name: 'updated' }],
+    });
+  });
+
+  it('does not collapse an ambiguous mutation into a retry or local success', async () => {
+    hostApiFetchMock.mockRejectedValueOnce(new Error('Cron operation outcome is unknown'));
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([projectedJob('job-5')]);
+
+    await expect(useCronStore.getState().toggleJob('job-5', false)).rejects.toThrow('Cron operation outcome is unknown');
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(useCronStore.getState()).toMatchObject({
+      mutating: false,
+      jobs: [projectedJob('job-5')],
+    });
+  });
+
+  it('keeps admission separate from the terminal Cron event', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/capabilities/execute') return { success: true, result: { outcome: 'accepted' } };
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([projectedJob('job-6')]);
+
+    await expect(useCronStore.getState().triggerJob('job-6')).resolves.toEqual({ ran: true });
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/capabilities/execute', expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"operationId":"cron.trigger"'),
+    }));
+    expect(useCronStore.getState().jobs).toEqual([projectedJob('job-6')]);
+  });
+
+  it('maps a skipped manual trigger to the frozen already-running callback result', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome: 'skipped' } });
+
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([projectedJob('job-skipped')]);
+
+    await expect(useCronStore.getState().triggerJob('job-skipped')).resolves.toEqual({
+      ran: false,
+      reason: 'already-running',
+    });
+    expect(useCronStore.getState()).toMatchObject({ mutating: false, mutatingByJobId: {} });
+  });
+
+  it.each([
+    ['failed', 'Cron trigger was rejected'],
+    ['outcome-unknown', 'Cron trigger outcome is unknown'],
+  ] as const)('rejects a %s manual trigger outcome without local success', async (outcome, message) => {
+    hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome } });
+
+    const { useCronStore } = await import('@/stores/cron');
+    const job = projectedJob(`job-${outcome}`);
+    useCronStore.getState().setJobs([job]);
+
+    await expect(useCronStore.getState().triggerJob(job.id)).rejects.toThrow(message);
+    expect(useCronStore.getState()).toMatchObject({
+      mutating: false,
+      mutatingByJobId: {},
+      jobs: [job],
+    });
+  });
+
+  it('refreshes the Rust-owned snapshot for matching terminal Cron events', async () => {
+    const { useCronStore, initCronEvents } = await import('@/stores/cron');
+    const refreshedJobs = [
+      { ...projectedJob('job-success'), lastRun: { time: new Date(3).toISOString(), success: true } },
+      { ...projectedJob('job-failure'), lastRun: {
+        time: new Date(4).toISOString(),
+        success: false,
+        error: 'Cron execution outcome is unknown',
+      } },
+    ];
+    useCronStore.getState().setJobs([
+      { ...projectedJob('job-success'), runningAt: new Date(2).toISOString() },
+      { ...projectedJob('job-failure'), runningAt: new Date(2).toISOString() },
+    ]);
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      ready: true,
+      refreshing: false,
+      updatedAt: 5,
+      error: null,
+      jobs: refreshedJobs,
+    });
+    const unsubscribe = initCronEvents();
+    const handler = subscribeHostEventMock.mock.calls.at(-1)?.[1] as ((event: unknown) => void);
+    expect(handler).toBeTypeOf('function');
+
+    handler({ jobId: 'job-success', runId: 'job-success-run', status: 'succeeded' });
+    await waitFor(() => expect(useCronStore.getState().jobs).toEqual(refreshedJobs));
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs');
+    expect(useCronStore.getState().jobs).toEqual(refreshedJobs);
+    unsubscribe();
+    expect(cronEventUnsubscribeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects malformed Renderer events without mutating the snapshot', async () => {
+    const { useCronStore, initCronEvents } = await import('@/stores/cron');
+    const job = { ...projectedJob('job-7'), runningAt: new Date(2).toISOString() };
+    useCronStore.getState().setJobs([job]);
+    initCronEvents();
+    const handler = subscribeHostEventMock.mock.calls.at(-1)?.[1] as ((event: unknown) => void);
+
+    for (const invalid of [
+      { jobId: '', runId: 'foreign-run', status: 'failed' },
+      { jobId: 'job-7', runId: 'foreign/run', status: 'failed' },
+      { jobId: 'job-7', runId: 'foreign-run', status: 'success' },
+      { jobId: 'job-7', runId: 'foreign-run', status: 'failed', payload: {} },
+    ]) {
+      handler(invalid);
+    }
+
+    expect(useCronStore.getState().jobs).toEqual([job]);
+  });
+
+  it('fences an old cleanup from disposing a replacement subscription', async () => {
+    const { initCronEvents } = await import('@/stores/cron');
+    const firstCleanup = initCronEvents();
+    const secondCleanup = initCronEvents();
+
+    firstCleanup();
+    expect(cronEventUnsubscribeMock).toHaveBeenCalledTimes(1);
+    secondCleanup();
+    expect(cronEventUnsubscribeMock).toHaveBeenCalledTimes(2);
   });
 });

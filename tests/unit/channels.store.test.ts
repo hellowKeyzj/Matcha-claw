@@ -1,313 +1,223 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hostChannelsFetchSnapshotMock = vi.fn();
-const hostChannelsDeleteConfigMock = vi.fn();
+const hostChannelsFetchCatalogMock = vi.fn();
+const hostChannelsFetchStatusMock = vi.fn();
+const hostChannelsConfigureMock = vi.fn();
 const hostChannelsConnectMock = vi.fn();
 const hostChannelsDisconnectMock = vi.fn();
-const hostChannelsRequestQrCodeMock = vi.fn();
+const hostChannelsLogoutMock = vi.fn();
+const hostChannelsDeleteConfigMock = vi.fn();
 
 vi.mock('../../src/lib/channel-runtime', () => ({
-  hostChannelsFetchSnapshot: (...args: unknown[]) => hostChannelsFetchSnapshotMock(...args),
-  hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),
+  hostChannelsFetchCatalog: (...args: unknown[]) => hostChannelsFetchCatalogMock(...args),
+  hostChannelsFetchStatus: (...args: unknown[]) => hostChannelsFetchStatusMock(...args),
+  hostChannelsConfigure: (...args: unknown[]) => hostChannelsConfigureMock(...args),
   hostChannelsConnect: (...args: unknown[]) => hostChannelsConnectMock(...args),
   hostChannelsDisconnect: (...args: unknown[]) => hostChannelsDisconnectMock(...args),
-  hostChannelsRequestQrCode: (...args: unknown[]) => hostChannelsRequestQrCodeMock(...args),
+  hostChannelsLogout: (...args: unknown[]) => hostChannelsLogoutMock(...args),
+  hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),
 }));
 
-function buildSnapshot(channelId: string, accountId = 'main') {
-  return {
-    success: true,
-    snapshot: {
-      channelOrder: [channelId],
-      channels: { [channelId]: { configured: true } },
-      channelAccounts: { [channelId]: [{ accountId, connected: true, name: accountId }] },
-      channelDefaultAccountId: { [channelId]: accountId },
-    },
-  };
+function status(accounts: Array<{
+  channel: string;
+  accountId: string;
+  connection: 'connected' | 'disconnected' | 'unknown';
+}>) {
+  return { accounts };
+}
+
+function catalog(entries: Array<{
+  id: string;
+  label: string;
+  detailLabel?: string;
+  systemImage?: string;
+  configured: boolean;
+}>) {
+  return { entries };
 }
 
 describe('channels store', () => {
   beforeEach(() => {
     vi.resetModules();
-    hostChannelsFetchSnapshotMock.mockReset();
-    hostChannelsDeleteConfigMock.mockReset();
+    hostChannelsFetchCatalogMock.mockReset();
+    hostChannelsFetchStatusMock.mockReset();
+    hostChannelsConfigureMock.mockReset();
     hostChannelsConnectMock.mockReset();
     hostChannelsDisconnectMock.mockReset();
-    hostChannelsRequestQrCodeMock.mockReset();
+    hostChannelsLogoutMock.mockReset();
+    hostChannelsDeleteConfigMock.mockReset();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
-    let resolveFetch: ((value: ReturnType<typeof buildSnapshot>) => void) | null = null;
-    hostChannelsFetchSnapshotMock.mockReturnValue(
-      new Promise<ReturnType<typeof buildSnapshot>>((resolve) => {
-        resolveFetch = resolve;
-      }),
-    );
-
-    const { useChannelsStore } = await import('../../src/stores/channels');
-    const fetchPromise = useChannelsStore.getState().fetchChannels();
-
-    expect(useChannelsStore.getState().snapshotReady).toBe(false);
-    expect(useChannelsStore.getState().initialLoading).toBe(true);
-    expect(useChannelsStore.getState().refreshing).toBe(false);
-
-    resolveFetch?.(buildSnapshot('wecom'));
-    await fetchPromise;
-
-    const state = useChannelsStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.error).toBeNull();
-    expect(state.channels).toEqual([
-      {
-        id: 'wecom-main',
-        type: 'wecom',
-        name: 'main',
-        status: 'connected',
-        accountId: 'main',
-        error: undefined,
-      },
-    ]);
-  });
-
-  it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValueOnce(buildSnapshot('wecom'));
+  it('loads the closed account status DTO without inferring status from native fields', async () => {
+    hostChannelsFetchStatusMock.mockResolvedValue(status([
+      { channel: 'wecom', accountId: 'main', connection: 'connected' },
+      { channel: 'wecom', accountId: 'backup', connection: 'unknown' },
+    ]));
 
     const { useChannelsStore } = await import('../../src/stores/channels');
     await useChannelsStore.getState().fetchChannels();
 
-    hostChannelsFetchSnapshotMock.mockRejectedValueOnce(new Error('network down'));
-    const refreshPromise = useChannelsStore.getState().fetchChannels();
-    expect(useChannelsStore.getState().refreshing).toBe(true);
-    expect(useChannelsStore.getState().initialLoading).toBe(false);
-
-    await refreshPromise;
-
-    const state = useChannelsStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.refreshing).toBe(false);
-    expect(state.channels).toEqual([
-      expect.objectContaining({
-        id: 'wecom-main',
-        type: 'wecom',
-        status: 'connected',
-      }),
+    expect(useChannelsStore.getState()).toMatchObject({
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      error: null,
+    });
+    expect(useChannelsStore.getState().channels).toEqual([
+      { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'main' },
+      { id: 'wecom-backup', type: 'wecom', name: 'WeCom', status: 'unknown', accountId: 'backup' },
     ]);
-    expect(state.error).toBe('network down');
   });
 
-  it('fetchChannels 并发请求会单飞去重', async () => {
-    let resolveFetch: ((value: ReturnType<typeof buildSnapshot>) => void) | null = null;
-    hostChannelsFetchSnapshotMock.mockReturnValue(
-      new Promise<ReturnType<typeof buildSnapshot>>((resolve) => {
-        resolveFetch = resolve;
-      }),
-    );
+  it('keeps catalog entries independent when no configured accounts exist', async () => {
+    hostChannelsFetchCatalogMock.mockResolvedValue(catalog([
+      { id: 'wecom', label: 'WeCom', detailLabel: 'Enterprise messaging', configured: false },
+    ]));
+    hostChannelsFetchStatusMock.mockResolvedValue(status([]));
 
     const { useChannelsStore } = await import('../../src/stores/channels');
-    const first = useChannelsStore.getState().fetchChannels();
-    const second = useChannelsStore.getState().fetchChannels();
+    await Promise.all([
+      useChannelsStore.getState().fetchCatalog(),
+      useChannelsStore.getState().fetchChannels(),
+    ]);
 
-    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
-
-    resolveFetch?.(buildSnapshot('wecom'));
-    await Promise.all([first, second]);
+    expect(useChannelsStore.getState().catalogEntries).toEqual([
+      { id: 'wecom', label: 'WeCom', detailLabel: 'Enterprise messaging', configured: false },
+    ]);
+    expect(useChannelsStore.getState().channels).toEqual([]);
   });
 
-  it('快照未 ready 时保持加载并自动重试', async () => {
-    vi.useFakeTimers();
-    hostChannelsFetchSnapshotMock
-      .mockResolvedValueOnce({ success: true, ready: false })
-      .mockResolvedValueOnce(buildSnapshot('wecom'));
+  it('does not apply a silent-refresh freshness window', async () => {
+    hostChannelsFetchStatusMock.mockResolvedValue(status([]));
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels({ silent: true });
+    await useChannelsStore.getState().fetchChannels({ silent: true });
+
+    expect(hostChannelsFetchStatusMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the last observed accounts when a refresh fails', async () => {
+    hostChannelsFetchStatusMock
+      .mockResolvedValueOnce(status([{ channel: 'wecom', accountId: 'main', connection: 'connected' }]))
+      .mockRejectedValueOnce(new Error('network down'));
 
     const { useChannelsStore } = await import('../../src/stores/channels');
     await useChannelsStore.getState().fetchChannels();
+    await useChannelsStore.getState().fetchChannels();
 
-    expect(useChannelsStore.getState().snapshotReady).toBe(false);
-    expect(useChannelsStore.getState().initialLoading).toBe(true);
-    expect(useChannelsStore.getState().refreshing).toBe(true);
-    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(1200);
-
-    const state = useChannelsStore.getState();
-    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(2);
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.channels[0]?.id).toBe('wecom-main');
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({ id: 'wecom-main', status: 'connected' }),
+    ]);
+    expect(useChannelsStore.getState().error).toBe('network down');
   });
 
-  it('deleteChannel 会维护 mutatingByChannelId 生命周期', async () => {
-    let resolveDelete: (() => void) | null = null;
-    hostChannelsDeleteConfigMock.mockImplementation(
-      () => new Promise<void>((resolve) => {
-        resolveDelete = resolve;
-      }),
-    );
+  it('refreshes catalog and status only after confirmed configuration', async () => {
+    hostChannelsConfigureMock.mockResolvedValue({ outcome: 'confirmed' });
+    hostChannelsFetchCatalogMock.mockResolvedValue(catalog([
+      { id: 'wecom', label: 'WeCom', configured: true },
+    ]));
+    hostChannelsFetchStatusMock.mockResolvedValue(status([
+      { channel: 'wecom', accountId: 'main', connection: 'disconnected' },
+    ]));
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await expect(useChannelsStore.getState().configureChannel('wecom', 'main', { enabled: true })).resolves.toBe('confirmed');
+
+    expect(hostChannelsConfigureMock).toHaveBeenCalledWith({ channel: 'wecom', accountId: 'main', patch: { enabled: true } });
+    expect(hostChannelsFetchCatalogMock).toHaveBeenCalledTimes(1);
+    expect(hostChannelsFetchStatusMock).toHaveBeenCalledTimes(1);
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({ id: 'wecom-main', status: 'disconnected' }),
+    ]);
+  });
+
+  it('does not optimistically insert an account when configuration outcome is unknown', async () => {
+    hostChannelsConfigureMock.mockResolvedValue({ outcome: 'unknown' });
 
     const { useChannelsStore } = await import('../../src/stores/channels');
     useChannelsStore.getState().setChannels([
-      { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected', accountId: 'main' },
+      { id: 'wecom-existing', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'existing' },
     ]);
+    await expect(useChannelsStore.getState().configureChannel('wecom', 'main', { enabled: true })).resolves.toBe('unknown');
 
-    const deletePromise = useChannelsStore.getState().deleteChannel('wecom-main');
-    expect(useChannelsStore.getState().mutating).toBe(true);
-    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
-
-    resolveDelete?.();
-    await deletePromise;
-
-    const state = useChannelsStore.getState();
-    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom');
-    expect(state.mutating).toBe(false);
-    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
-    expect(state.channels).toEqual([]);
+    expect(hostChannelsFetchCatalogMock).not.toHaveBeenCalled();
+    expect(hostChannelsFetchStatusMock).not.toHaveBeenCalled();
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({ id: 'wecom-existing', accountId: 'existing' }),
+    ]);
+    expect(useChannelsStore.getState().error).toBe('Channel configuration outcome is unknown');
   });
 
-  it('多账号场景下，存在健康账号时整体状态应保持 connected', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValue({
-      success: true,
-      snapshot: {
-        channelOrder: ['telegram'],
-        channels: { telegram: { configured: true } },
-        channelAccounts: {
-          telegram: [
-            { accountId: 'default', running: true, linked: false, name: 'default' },
-            { accountId: 'backup', running: false, connected: false, linked: false, lastError: 'secondary failed', name: 'backup' },
-          ],
-        },
-        channelDefaultAccountId: { telegram: 'default' },
-      },
-    });
+  it('keeps logout separate and refreshes only after confirmed logout', async () => {
+    hostChannelsLogoutMock.mockResolvedValue({ outcome: 'confirmed' });
+    hostChannelsFetchCatalogMock.mockResolvedValue(catalog([{ id: 'whatsapp', label: 'WhatsApp', configured: true }]));
+    hostChannelsFetchStatusMock.mockResolvedValue(status([{ channel: 'whatsapp', accountId: 'main', connection: 'disconnected' }]));
 
     const { useChannelsStore } = await import('../../src/stores/channels');
-    await useChannelsStore.getState().fetchChannels();
+    useChannelsStore.getState().setChannels([{ id: 'whatsapp-main', type: 'whatsapp', name: 'WhatsApp', status: 'connected', accountId: 'main' }]);
+    await expect(useChannelsStore.getState().logoutChannel('whatsapp-main')).resolves.toBe('confirmed');
 
-    expect(useChannelsStore.getState().channels).toEqual([
-      expect.objectContaining({
-        type: 'telegram',
-        status: 'connected',
-      }),
-    ]);
+    expect(hostChannelsLogoutMock).toHaveBeenCalledWith('whatsapp', 'main');
+    expect(useChannelsStore.getState().channels[0]?.status).toBe('disconnected');
   });
 
-  it('账号显式 connected=false 时不应被 running 误判 connected', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValue({
-      success: true,
-      snapshot: {
-        channelOrder: ['feishu'],
-        channels: { feishu: { configured: true } },
-        channelAccounts: {
-          feishu: [{ accountId: 'default', running: true, connected: false, name: 'default' }],
-        },
-        channelDefaultAccountId: { feishu: 'default' },
-      },
-    });
-
-    const { useChannelsStore } = await import('../../src/stores/channels');
-    await useChannelsStore.getState().fetchChannels();
-
-    expect(useChannelsStore.getState().channels).toEqual([
-      expect.objectContaining({
-        type: 'feishu',
-        status: 'connecting',
-      }),
-    ]);
-  });
-
-  it('账号 probe 成功时应识别为 connected', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValue({
-      success: true,
-      snapshot: {
-        channelOrder: ['feishu'],
-        channels: { feishu: { configured: true } },
-        channelAccounts: {
-          feishu: [{ accountId: 'default', running: false, connected: false, probe: { ok: true }, name: 'default' }],
-        },
-        channelDefaultAccountId: { feishu: 'default' },
-      },
-    });
-
-    const { useChannelsStore } = await import('../../src/stores/channels');
-    await useChannelsStore.getState().fetchChannels();
-
-    expect(useChannelsStore.getState().channels).toEqual([
-      expect.objectContaining({
-        type: 'feishu',
-        status: 'connected',
-      }),
-    ]);
-  });
-
-  it('connectChannel 会维护 mutatingByChannelId 生命周期', async () => {
-    let resolveConnect: (() => void) | null = null;
-    hostChannelsConnectMock.mockImplementation(
-      () => new Promise<void>((resolve) => {
-        resolveConnect = resolve;
-      }),
-    );
+  it('deletes only after confirmation, then refreshes catalog and observed status', async () => {
+    hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'confirmed' });
+    hostChannelsFetchCatalogMock.mockResolvedValue(catalog([{ id: 'wecom', label: 'WeCom', configured: false }]));
+    hostChannelsFetchStatusMock.mockResolvedValue(status([]));
 
     const { useChannelsStore } = await import('../../src/stores/channels');
     useChannelsStore.getState().setChannels([
-      { id: 'wecom-main', type: 'wecom', name: 'main', status: 'disconnected', accountId: 'main' },
+      { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'main' },
+    ]);
+    await expect(useChannelsStore.getState().deleteChannel('wecom-main')).resolves.toBe('confirmed');
+
+    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', 'main');
+    expect(hostChannelsFetchCatalogMock).toHaveBeenCalledTimes(1);
+    expect(hostChannelsFetchStatusMock).toHaveBeenCalledTimes(1);
+    expect(useChannelsStore.getState().channels).toEqual([]);
+  });
+
+  it('retains observed state and surfaces deletion rejection or unknown outcomes', async () => {
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    useChannelsStore.getState().setChannels([
+      { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'main' },
+    ]);
+    hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'target_rejected' });
+
+    await expect(useChannelsStore.getState().deleteChannel('wecom-main')).resolves.toBe('target_rejected');
+    expect(useChannelsStore.getState().channels).toHaveLength(1);
+    expect(useChannelsStore.getState().error).toBe('Channel deletion was rejected');
+    expect(hostChannelsFetchCatalogMock).not.toHaveBeenCalled();
+    expect(hostChannelsFetchStatusMock).not.toHaveBeenCalled();
+
+    hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'unknown' });
+    await expect(useChannelsStore.getState().deleteChannel('wecom-main')).resolves.toBe('unknown');
+    expect(useChannelsStore.getState().channels).toHaveLength(1);
+    expect(useChannelsStore.getState().error).toBe('Channel deletion outcome is unknown');
+  });
+
+  it('refreshes only after confirmed mutations and retains observed state otherwise', async () => {
+    hostChannelsConnectMock.mockResolvedValue({ outcome: 'confirmed' });
+    hostChannelsDisconnectMock.mockResolvedValue({ outcome: 'unknown' });
+    hostChannelsFetchStatusMock
+      .mockResolvedValueOnce(status([{ channel: 'wecom', accountId: 'main', connection: 'connected' }]))
+      .mockResolvedValueOnce(status([{ channel: 'wecom', accountId: 'main', connection: 'connected' }]));
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    useChannelsStore.getState().setChannels([
+      { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'disconnected', accountId: 'main' },
     ]);
 
-    const connectPromise = useChannelsStore.getState().connectChannel('wecom-main');
-    expect(useChannelsStore.getState().mutating).toBe(true);
-    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
-    expect(useChannelsStore.getState().channels[0]?.status).toBe('connecting');
-
-    resolveConnect?.();
-    await connectPromise;
-
-    const state = useChannelsStore.getState();
+    await useChannelsStore.getState().connectChannel('wecom-main');
     expect(hostChannelsConnectMock).toHaveBeenCalledWith('wecom', 'main');
-    expect(state.mutating).toBe(false);
-    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
-    expect(state.channels[0]?.status).toBe('connected');
-  });
+    expect(useChannelsStore.getState().channels[0]?.status).toBe('connected');
 
-  it('disconnectChannel 会维护 mutatingByChannelId 生命周期', async () => {
-    let resolveDisconnect: (() => void) | null = null;
-    hostChannelsDisconnectMock.mockImplementation(
-      () => new Promise<void>((resolve) => {
-        resolveDisconnect = resolve;
-      }),
-    );
-
-    const { useChannelsStore } = await import('../../src/stores/channels');
-    useChannelsStore.getState().setChannels([
-      { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected', accountId: 'main' },
-    ]);
-
-    const disconnectPromise = useChannelsStore.getState().disconnectChannel('wecom-main');
-    expect(useChannelsStore.getState().mutating).toBe(true);
-    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
-
-    resolveDisconnect?.();
-    await disconnectPromise;
-
-    const state = useChannelsStore.getState();
+    await useChannelsStore.getState().disconnectChannel('wecom-main');
     expect(hostChannelsDisconnectMock).toHaveBeenCalledWith('wecom', 'main');
-    expect(state.mutating).toBe(false);
-    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
-    expect(state.channels[0]?.status).toBe('disconnected');
-  });
-
-  it('requestQrCode 通过 channel runtime helper 执行', async () => {
-    const { useChannelsStore } = await import('../../src/stores/channels');
-
-    hostChannelsRequestQrCodeMock.mockResolvedValue({ success: true, qrCode: 'qr', sessionId: 's-1' });
-
-    const qr = await useChannelsStore.getState().requestQrCode('whatsapp');
-
-    expect(hostChannelsRequestQrCodeMock).toHaveBeenCalledWith('whatsapp');
-    expect(qr).toEqual({ qrCode: 'qr', sessionId: 's-1' });
+    expect(useChannelsStore.getState().channels[0]).toMatchObject({
+      status: 'connected',
+    });
   });
 });

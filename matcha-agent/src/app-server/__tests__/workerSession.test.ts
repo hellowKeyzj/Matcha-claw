@@ -16,6 +16,42 @@ const restores: (() => void)[] = []
 const tempRoots: string[] = []
 const originalCwd = process.cwd()
 const originalRunTraceEnv = process.env.MATCHA_AGENT_RUN_TRACE
+const PROVIDER_ENV_KEYS = [
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GROK',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_OPENAI_RESPONSES',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'GEMINI_API_KEY',
+  'GEMINI_BASE_URL',
+  'GEMINI_MODEL',
+  'OPENAI_AUTH_MODE',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+] as const
+const originalProviderEnv = new Map(
+  PROVIDER_ENV_KEYS.map(key => [key, process.env[key]]),
+)
+
+function restoreProviderEnv(): void {
+  for (const key of PROVIDER_ENV_KEYS) {
+    const value = originalProviderEnv.get(key)
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+}
 
 function mockModulePreservingExports(
   tsPath: string,
@@ -263,6 +299,7 @@ afterAll(async () => {
   }
   restores.length = 0
   process.chdir(originalCwd)
+  restoreProviderEnv()
   if (originalRunTraceEnv === undefined) {
     delete process.env.MATCHA_AGENT_RUN_TRACE
   } else {
@@ -292,6 +329,7 @@ beforeEach(() => {
   deserializeMessagesMock.mockClear()
   getClaudeCodeMcpConfigsMock.mockClear()
   getMcpToolsCommandsAndResourcesMock.mockClear()
+  restoreProviderEnv()
   if (originalRunTraceEnv === undefined) {
     delete process.env.MATCHA_AGENT_RUN_TRACE
   } else {
@@ -355,6 +393,118 @@ describe('createWorkerSession', () => {
       pluginReconnectKey: 0,
     })
     expect(mockSetModel).toHaveBeenCalledWith('test-model')
+  })
+
+  test('applies host-managed OpenAI provider runtime before QueryEngine creation', async () => {
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+    process.env.OPENAI_AUTH_MODE = 'chatgpt'
+    process.env.OPENAI_MODEL = 'old-model'
+    process.env.OPENAI_BASE_URL = 'https://old.example/v1'
+    process.env.OPENAI_API_KEY = 'old-secret'
+    let managedByHostAtApply: string | undefined
+    applySafeConfigEnvironmentVariablesMock.mockImplementationOnce(() => {
+      managedByHostAtApply = process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    })
+    const payload: WorkerInitializePayload = {
+      sessionId: 'session-1',
+      cwd: originalCwd,
+      model: 'ark-code-latest',
+      permissionMode: 'acceptEdits',
+      providerRuntime: {
+        kind: 'openAiChatCompletions',
+        baseUrl: 'https://ark.example/v1',
+        apiKey: 'ark-secret',
+      },
+    }
+
+    await createWorkerSession(payload, { emit: mock(() => {}) })
+
+    expect(managedByHostAtApply).toBe('1')
+    expect(process.env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_AUTH_MODE).toBeUndefined()
+    expect(process.env.OPENAI_MODEL).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBe('https://ark.example/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('ark-secret')
+    expect(queryEngineConfigs[0]?.userSpecifiedModel).toBe('ark-code-latest')
+  })
+
+  test('applies host-managed OpenAI Responses provider runtime before QueryEngine creation', async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_AUTH_MODE = 'chatgpt'
+    process.env.OPENAI_BASE_URL = 'https://old.example/v1'
+    const payload: WorkerInitializePayload = {
+      sessionId: 'session-1',
+      cwd: originalCwd,
+      model: 'gpt-5',
+      permissionMode: 'acceptEdits',
+      providerRuntime: {
+        kind: 'openAiResponses',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'openai-secret',
+      },
+    }
+
+    await createWorkerSession(payload, { emit: mock(() => {}) })
+
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.OPENAI_AUTH_MODE).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://api.openai.com/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('openai-secret')
+    expect(queryEngineConfigs[0]?.userSpecifiedModel).toBe('gpt-5')
+  })
+
+  test('applies host-managed Gemini provider runtime before QueryEngine creation', async () => {
+    process.env.CLAUDE_CODE_USE_OPENAI = '1'
+    process.env.OPENAI_BASE_URL = 'https://old.example/v1'
+    const payload: WorkerInitializePayload = {
+      sessionId: 'session-1',
+      cwd: originalCwd,
+      model: 'gemini-2.5-pro',
+      permissionMode: 'acceptEdits',
+      providerRuntime: {
+        kind: 'googleGenerativeAi',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        apiKey: 'gemini-secret',
+      },
+    }
+
+    await createWorkerSession(payload, { emit: mock(() => {}) })
+
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_GEMINI).toBe('1')
+    expect(process.env.GEMINI_BASE_URL).toBe(
+      'https://generativelanguage.googleapis.com/v1beta',
+    )
+    expect(process.env.GEMINI_API_KEY).toBe('gemini-secret')
+    expect(queryEngineConfigs[0]?.userSpecifiedModel).toBe('gemini-2.5-pro')
+  })
+
+  test('applies host-managed Anthropic provider runtime before QueryEngine creation', async () => {
+    process.env.CLAUDE_CODE_USE_GEMINI = '1'
+    process.env.GEMINI_API_KEY = 'old-gemini-secret'
+    const payload: WorkerInitializePayload = {
+      sessionId: 'session-1',
+      cwd: originalCwd,
+      model: 'claude-sonnet-5',
+      permissionMode: 'acceptEdits',
+      providerRuntime: {
+        kind: 'anthropicMessages',
+        baseUrl: 'https://api.anthropic.com',
+        apiKey: 'anthropic-secret',
+      },
+    }
+
+    await createWorkerSession(payload, { emit: mock(() => {}) })
+
+    expect(process.env.CLAUDE_CODE_USE_GEMINI).toBeUndefined()
+    expect(process.env.GEMINI_API_KEY).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com')
+    expect(process.env.ANTHROPIC_API_KEY).toBe('anthropic-secret')
+    expect(queryEngineConfigs[0]?.userSpecifiedModel).toBe('claude-sonnet-5')
   })
 
   test('loads existing transcript history into QueryEngine without extending the worker protocol', async () => {

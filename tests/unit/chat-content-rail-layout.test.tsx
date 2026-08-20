@@ -8,7 +8,7 @@ import {
   applyAssistantPresentationToItems,
   type ChatRenderItem,
 } from '@/pages/Chat/chat-render-item-model';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const chatMessageRenderSpy = vi.fn();

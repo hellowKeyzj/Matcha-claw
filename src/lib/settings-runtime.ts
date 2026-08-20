@@ -1,30 +1,59 @@
-import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
-import { appScope } from '../../runtime-host/shared/runtime-address';
+import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 
-const SETTINGS_RUNTIME_CAPABILITY_ID = 'settings.runtime';
+const SETTINGS_UNAVAILABLE = 'Settings are unavailable';
+const SETTINGS_DESIRED_UNAVAILABLE = 'Settings desired is unavailable';
+const SETTINGS_DESIRED_OUTCOME_UNKNOWN = 'Settings desired outcome is unknown; the change may still be applying. Refresh settings before retrying.';
 
-function requiresSettingsJob(payload: unknown): payload is { job: { id: string } } {
-  return Boolean(
-    payload
-      && typeof payload === 'object'
-      && 'job' in payload
-      && typeof (payload as { job?: { id?: unknown } }).job?.id === 'string'
-  );
-}
+let settingsDesiredQueue: Promise<void> = Promise.resolve();
 
-async function settingsRuntimeCapabilityExecute<TResult>(
-  operationId: string,
-  input: Record<string, unknown> = {},
-  key?: string,
-): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+type SettingsBrowserMode = 'native' | 'relay' | 'off';
+
+type SettingsDesiredInput = Readonly<{
+  browserMode: SettingsBrowserMode;
+  launchAtStartup: boolean;
+  gatewayAutoStart: boolean;
+  proxy: Readonly<{
+    enabled: boolean;
+    server: string;
+    bypassRules: string;
+  }>;
+}>;
+
+export type SettingsDesiredReceipt = Readonly<{
+  desired: Readonly<{
+    revision: number;
+    outcome: 'confirmed' | 'outcome_unknown';
+  }>;
+}>;
+
+type SanitizedProxyIntent = Readonly<{
+  enabled: boolean;
+  server: string;
+  bypassRules: string;
+  credentialReference?: unknown;
+}>;
+
+type SettingsPublicSnapshot = Readonly<{
+  browserMode: SettingsBrowserMode;
+  launchAtStartup: boolean;
+  gatewayAutoStart: boolean;
+  proxyEnabled: boolean;
+  proxyServer: string;
+  proxyBypassRules: string;
+}>;
+
+async function submitSettingsDesired(input: SettingsDesiredInput): Promise<SettingsDesiredReceipt> {
+  const proxy = await invokeIpc<SanitizedProxyIntent>('settings:splitProxyIntent', input.proxy);
+  return await hostApiFetch<SettingsDesiredReceipt>('/api/settings/desired', {
     method: 'POST',
     body: JSON.stringify({
-      id: SETTINGS_RUNTIME_CAPABILITY_ID,
-      operationId,
-      scope: appScope(),
-      target: { kind: 'setting', ...(key ? { key } : {}) },
-      input,
+      browserMode: input.browserMode,
+      launchAtStartup: input.launchAtStartup,
+      gatewayAutoStart: input.gatewayAutoStart,
+      proxyEnabled: proxy.enabled,
+      proxyServer: proxy.server,
+      proxyBypassRules: proxy.bypassRules,
     }),
   });
 }
@@ -33,33 +62,39 @@ export async function hostSettingsFetchAll<TSettings extends Record<string, unkn
   return await hostApiFetch<TSettings>('/api/settings');
 }
 
-export async function hostSettingsPutPatch(patch: Record<string, unknown>) {
-  const response = await settingsRuntimeCapabilityExecute<{ success: boolean } | RuntimeJobSubmission<{ success: boolean }>>(
-    'settings.patch',
-    patch,
-  );
-  if (requiresSettingsJob(response)) {
-    await waitForRuntimeJobResult<{ success: boolean }>(response.job.id);
-  }
+export function hostSettingsPutPatch(patch: Record<string, unknown>): Promise<SettingsDesiredReceipt> {
+  const operation = settingsDesiredQueue.then(async () => {
+    const current = await hostSettingsFetchAll<SettingsPublicSnapshot>().catch(() => {
+      throw new Error(SETTINGS_UNAVAILABLE);
+    });
+    const input: SettingsDesiredInput = {
+      browserMode: patch.browserMode === undefined ? current.browserMode : patch.browserMode as SettingsBrowserMode,
+      launchAtStartup: patch.launchAtStartup === undefined ? current.launchAtStartup : patch.launchAtStartup as boolean,
+      gatewayAutoStart: patch.gatewayAutoStart === undefined ? current.gatewayAutoStart : patch.gatewayAutoStart as boolean,
+      proxy: {
+        enabled: patch.proxyEnabled === undefined ? current.proxyEnabled : patch.proxyEnabled as boolean,
+        server: patch.proxyServer === undefined ? current.proxyServer : patch.proxyServer as string,
+        bypassRules: patch.proxyBypassRules === undefined ? current.proxyBypassRules : patch.proxyBypassRules as string,
+      },
+    };
+    if (!isSettingsDesiredInput(input)) {
+      throw new Error(SETTINGS_DESIRED_UNAVAILABLE);
+    }
+    const receipt = await submitSettingsDesired(input);
+    if (receipt.desired.outcome !== 'confirmed') {
+      throw new Error(SETTINGS_DESIRED_OUTCOME_UNKNOWN);
+    }
+    return receipt;
+  });
+  settingsDesiredQueue = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
-export async function hostSettingsGetValue<TValue = unknown>(key: string) {
-  const response = await hostApiFetch<{ value: TValue }>(`/api/settings/${encodeURIComponent(key)}`);
-  return response.value;
-}
-
-export async function hostSettingsPutValue(key: string, value: unknown) {
-  const response = await settingsRuntimeCapabilityExecute<{ success: boolean } | RuntimeJobSubmission<{ success: boolean }>>(
-    'settings.setValue',
-    { key, value },
-    key,
-  );
-  if (requiresSettingsJob(response)) {
-    await waitForRuntimeJobResult<{ success: boolean }>(response.job.id);
-  }
-}
-
-export async function hostSettingsReset<TSettings extends Record<string, unknown>>() {
-  const response = await settingsRuntimeCapabilityExecute<{ success: boolean; settings: TSettings }>('settings.reset');
-  return response.settings;
+function isSettingsDesiredInput(value: SettingsDesiredInput): value is SettingsDesiredInput {
+  return (value.browserMode === 'native' || value.browserMode === 'relay' || value.browserMode === 'off')
+    && typeof value.launchAtStartup === 'boolean'
+    && typeof value.gatewayAutoStart === 'boolean'
+    && typeof value.proxy.enabled === 'boolean'
+    && typeof value.proxy.server === 'string'
+    && typeof value.proxy.bypassRules === 'string';
 }

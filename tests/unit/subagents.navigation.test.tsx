@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import { useRuntimeHostStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -49,20 +49,8 @@ function enableMainAppRoutes() {
     switchSession: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
   } as never);
-  useGatewayStore.setState({
-    status: {
-      processState: 'running',
-      port: 18789,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    },
+  useRuntimeHostStore.setState({
+    runtimeHost: { lifecycle: 'running' },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
   i18n.changeLanguage('en');
