@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use openclaw::skill::ClawHubSkillInstall;
+use clawhub::ClawHubInstallRequest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{
+    facade::SkillsHandle,
     skill_install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
@@ -59,7 +60,7 @@ impl InstallRequest {
         }
         let request = serde_json::from_value::<Self>(value).map_err(|_| RequestError::Invalid)?;
         let force = request.force;
-        let install = ClawHubSkillInstall::try_new(request.slug, request.version, force)
+        let install = ClawHubInstallRequest::try_new(request.slug, request.version, force)
             .map_err(|_| RequestError::Invalid)?;
         let slug = install.slug().to_owned();
         let version = install.version().map(str::to_owned);
@@ -120,7 +121,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: SkillsHandle,
     now: u64,
 ) -> Result<Delivery, RequestError> {
     let authorization = headers
@@ -138,7 +139,7 @@ pub(crate) async fn handle(
         slug,
         version,
     } = command;
-    let delivery = match owner.install_clawhub_skill(command).await {
+    let delivery = match handle.install_clawhub_skill(command).await {
         Ok(SkillInstallOutcome::Accepted { .. }) => Delivery::accepted(slug, version),
         Ok(SkillInstallOutcome::Rejected) => Delivery::rejected(slug, version),
         Ok(SkillInstallOutcome::Unknown) | Err(_) => Delivery::unknown(slug, version),

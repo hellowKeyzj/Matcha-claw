@@ -2,7 +2,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -10,6 +10,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer as _, SigningKey};
+use foundation::execution::{ObservationObserver, ObservationRecord, ObservationSink};
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::{
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
@@ -24,7 +25,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, owner};
+use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -66,6 +67,28 @@ impl Drop for TestRoot {
     }
 }
 
+struct RecordingObserver {
+    records: StdMutex<Vec<ObservationRecord>>,
+}
+
+impl RecordingObserver {
+    fn new() -> Self {
+        Self {
+            records: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn records(&self) -> Vec<ObservationRecord> {
+        self.records.lock().expect("records lock").clone()
+    }
+}
+
+impl ObservationObserver for RecordingObserver {
+    fn observe(&self, record: ObservationRecord) {
+        self.records.lock().expect("records lock").push(record);
+    }
+}
+
 struct RunningServer {
     root: TestRoot,
     owner: owner::Owner,
@@ -75,12 +98,16 @@ struct RunningServer {
 
 impl RunningServer {
     async fn start() -> Self {
+        Self::start_with_observation(ObservationSink::disabled()).await
+    }
+
+    async fn start_with_observation(observation: ObservationSink) -> Self {
         let root = TestRoot::new();
-        let (mut host, events) = Host::new(host_input(&root)).expect("construct host");
+        let (mut host, events, handles) = Host::new(host_input(&root)).expect("construct host");
         host.start().await.expect("start host");
         let owner = owner::Owner::spawn(host, events);
         let verifier = CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
-        let server = Server::bind(0, verifier, owner.handle())
+        let server = Server::bind(0, verifier, handles.diagnostics.clone(), observation)
             .await
             .expect("bind server");
         let port = server.port();
@@ -188,6 +215,122 @@ async fn localhost_transport_enforces_fixed_authorized_redacted_archive_request(
         })
     );
     assert!(!invalid_body.to_string().contains("private"));
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn localhost_transport_observes_ingress_without_sensitive_material() {
+    let observer = Arc::new(RecordingObserver::new());
+    let sink = {
+        let observer: Arc<dyn ObservationObserver> = observer.clone();
+        ObservationSink::new(observer)
+    };
+    let server = RunningServer::start_with_observation(sink).await;
+
+    let unknown_path = "/api/private-raw-path";
+    let missing_auth = server
+        .request(&http_request(
+            "POST",
+            "/api/diagnostics/archive",
+            None,
+            "{}",
+        ))
+        .await;
+    assert_eq!(missing_auth["status"], 401);
+
+    let rejected_path = server
+        .request(&http_request("POST", unknown_path, None, "{}"))
+        .await;
+    assert_eq!(rejected_path["status"], 404);
+
+    let bad_json = server
+        .request(&http_request(
+            "POST",
+            "/api/diagnostics/archive",
+            Some(&decision(
+                "/api/diagnostics/archive",
+                "diagnostics:write",
+                "diagnostics.archive",
+            )),
+            "{private-json",
+        ))
+        .await;
+    assert_eq!(bad_json["status"], 400);
+
+    let private_decision = "private-capability-decision";
+    let capability_rejected = server
+        .request(&http_request(
+            "POST",
+            "/api/diagnostics/archive",
+            Some(private_decision),
+            r#"{"token":"private-token"}"#,
+        ))
+        .await;
+    assert_eq!(capability_rejected["status"], 401);
+
+    let accepted = server
+        .request(&http_request(
+            "POST",
+            "/api/diagnostics/archive",
+            Some(&decision(
+                "/api/diagnostics/archive",
+                "diagnostics:write",
+                "diagnostics.archive",
+            )),
+            "{}",
+        ))
+        .await;
+    assert_eq!(accepted["status"], 200);
+
+    let archive_id = "0123456789abcdef0123456789abcdef";
+    let download_missing = server
+        .request(&http_request(
+            "POST",
+            "/api/diagnostics/archive/download",
+            Some(&decision(
+                "/api/diagnostics/archive/download",
+                "diagnostics:read",
+                "diagnostics.archive.download",
+            )),
+            &serde_json::to_string(&json!({ "archiveId": archive_id })).unwrap(),
+        ))
+        .await;
+    assert_eq!(download_missing["status"], 404);
+
+    let records = format!("{:?}", observer.records());
+    for expected in [
+        "unknown",
+        "diagnostics.archive",
+        "diagnostics.download",
+        "diagnostics.ingress.methodOrPathRejected",
+        "diagnostics.ingress.missingAuthorization",
+        "diagnostics.ingress.badJson",
+        "diagnostics.ingress.capabilityRejected",
+        "diagnostics.archive.accepted",
+        "diagnostics.archive.completed",
+        "diagnostics.download.accepted",
+        "diagnostics.download.archiveNotFound",
+    ] {
+        assert!(
+            records.contains(expected),
+            "missing {expected} in {records}"
+        );
+    }
+    for forbidden in [
+        private_decision,
+        "private-token",
+        "private-json",
+        unknown_path,
+        archive_id,
+        "authorization",
+        "headers",
+    ] {
+        assert!(
+            !records.contains(forbidden),
+            "leaked {forbidden} in {records}"
+        );
+    }
 
     server.stop().await;
 }
@@ -559,6 +702,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
         cron_transport_port: 18_791,
+        runtime_observation: RuntimeObservationConfig::off(),
     }
 }
 

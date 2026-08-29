@@ -7,6 +7,35 @@ import { sendJson } from '../route-utils';
 const STATUS_UNAVAILABLE = 'Matcha Agent app server status is unavailable';
 const RESTART_UNAVAILABLE = 'Matcha Agent app server restart failed';
 const RESTART_UNKNOWN = 'Matcha Agent app server restart outcome is unknown';
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+
+function summarizeMatchaStatusTrace(status: {
+  processState: MatchaLifecycle;
+  port: number | null;
+  pid: number | null;
+  ready: boolean;
+  lastError: string | null;
+  updatedAt: number;
+} | null) {
+  if (!status) return null;
+  return {
+    processState: status.processState,
+    ready: status.ready,
+    port: status.port,
+    pid: status.pid,
+    observedAtMs: status.updatedAt,
+    hasLastError: Boolean(status.lastError),
+  };
+}
+
+function traceMatchaStatusRoute(phase: string, payload: Record<string, unknown>): void {
+  console.info(STARTUP_TRACE_PREFIX, {
+    source: 'api.matcha-agent',
+    phase,
+    atMs: Date.now(),
+    ...payload,
+  });
+}
 
 type MatchaLifecycle =
   | 'unavailable'
@@ -25,15 +54,28 @@ export async function handleMatchaAgentAppServerRoutes(
   ctx: RuntimeHostApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/matcha-agent/app-server/status' && req.method === 'GET') {
+    const startedAtMs = Date.now();
+    traceMatchaStatusRoute('matcha-agent-status-request-start', {});
     try {
       const outcome = await ctx.runtimeHost.command({ name: 'matcha.lifecycle.status' });
       const status = readMatchaStatus(outcome);
       if (!status) {
+        traceMatchaStatusRoute('matcha-agent-status-unavailable', {
+          durationMs: Date.now() - startedAtMs,
+        });
         sendJson(res, 503, { success: false, error: STATUS_UNAVAILABLE });
         return true;
       }
+      traceMatchaStatusRoute('matcha-agent-status-response', {
+        durationMs: Date.now() - startedAtMs,
+        ...(summarizeMatchaStatusTrace(status) ?? {}),
+      });
       sendJson(res, 200, status);
-    } catch {
+    } catch (error) {
+      traceMatchaStatusRoute('matcha-agent-status-error', {
+        durationMs: Date.now() - startedAtMs,
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
       sendJson(res, 503, { success: false, error: STATUS_UNAVAILABLE });
     }
     return true;

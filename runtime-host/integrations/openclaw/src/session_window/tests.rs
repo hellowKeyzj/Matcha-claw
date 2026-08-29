@@ -9,6 +9,22 @@ fn request(direction: Direction, limit: usize, offset: Option<usize>) -> PageReq
     PageRequest::new(direction, limit, offset).expect("valid page request")
 }
 
+fn assert_diagnostic(
+    result: Result<super::SessionWindow, HistoryError>,
+    message_index: Option<usize>,
+    block_index: Option<usize>,
+    field: &str,
+    reason: &str,
+    actual: &str,
+) {
+    let diagnostic = result.unwrap_err().diagnostic();
+    assert_eq!(diagnostic.message_index(), message_index);
+    assert_eq!(diagnostic.block_index(), block_index);
+    assert_eq!(diagnostic.field(), field);
+    assert_eq!(diagnostic.reason(), reason);
+    assert_eq!(diagnostic.actual(), actual);
+}
+
 fn payload() -> serde_json::Value {
     json!({
         "messages": [
@@ -73,6 +89,8 @@ fn projects_renderer_text_and_safe_message_metadata() {
     assert_eq!(window.range().end(), 5);
     assert_eq!(window.messages().len(), 2);
     assert_eq!(window.total_item_count(), 5);
+    assert_eq!(window.session_key(), Some("agent:main:main"));
+    assert_eq!(window.native_session_id(), Some("session-id"));
     assert_eq!(window.messages()[0].role(), MessageRole::Assistant);
     assert_eq!(window.messages()[0].text(), "second\nreply");
     assert_eq!(window.messages()[0].message_id(), Some("four"));
@@ -83,6 +101,101 @@ fn projects_renderer_text_and_safe_message_metadata() {
     assert_eq!(window.messages()[1].message_id(), Some("five"));
     assert_eq!(window.messages()[1].created_at(), Some(50));
     assert_eq!(window.messages()[1].updated_at(), None);
+}
+
+#[test]
+fn accepts_empty_legacy_message_content() {
+    let window = decode_window(
+        json!({
+            "messages": [
+                { "role": "user", "messageId": "empty-user", "content": [], "timestamp": 10 },
+                { "role": "assistant", "id": "reply", "content": [{ "type": "text", "text": "visible" }], "ts": 20 }
+            ]
+        }),
+        request(Direction::Latest, 2, None),
+    )
+    .unwrap();
+
+    assert_eq!(window.messages().len(), 2);
+    assert_eq!(window.total_item_count(), 2);
+    assert_eq!(window.messages()[0].role(), MessageRole::User);
+    assert_eq!(window.messages()[0].text(), "");
+    assert!(window.messages()[0].content().is_empty());
+    assert_eq!(window.messages()[0].message_id(), Some("empty-user"));
+}
+
+#[test]
+fn accepts_openclaw_tool_call_aliases() {
+    let window = decode_window(
+        json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    { "type": "toolCall", "name": "tool-a", "id": "call-a" },
+                    { "type": "toolUse", "name": "tool-b", "call_id": "call-b" },
+                    { "type": "functionCall", "toolName": "tool-c", "toolCallId": "call-c" },
+                    { "type": "tool_call", "name": "tool-d", "toolUseId": "call-d" },
+                    { "type": "tool_use", "name": "tool-e", "tool_call_id": "call-e" },
+                    { "type": "function_call", "name": "tool-f", "tool_use_id": "call-f" },
+                    { "type": "tool_result", "toolName": "tool-g", "tool_use_id": "call-g", "content": "result", "is_error": true }
+                ]
+            }]
+        }),
+        request(Direction::Latest, 1, None),
+    )
+    .unwrap();
+
+    let content = window.messages()[0].content();
+    assert!(
+        matches!(&content[0], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-a" && id == "call-a")
+    );
+    assert!(
+        matches!(&content[1], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-b" && id == "call-b")
+    );
+    assert!(
+        matches!(&content[2], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-c" && id == "call-c")
+    );
+    assert!(
+        matches!(&content[3], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-d" && id == "call-d")
+    );
+    assert!(
+        matches!(&content[4], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-e" && id == "call-e")
+    );
+    assert!(
+        matches!(&content[5], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-f" && id == "call-f")
+    );
+    assert!(
+        matches!(&content[6], MessageContent::ToolResult { tool_name: Some(name), tool_call_id: Some(id), summary: Some(summary), is_error: Some(true) } if name == "tool-g" && id == "call-g" && summary == "result")
+    );
+}
+
+#[test]
+fn decodes_role_level_tool_result_as_tool_content() {
+    let window = decode_window(
+        json!({
+            "messages": [{
+                "role": "toolResult",
+                "toolCallId": "call-1",
+                "toolName": "read",
+                "content": [{ "type": "text", "text": "file list" }],
+                "isError": false
+            }]
+        }),
+        request(Direction::Latest, 1, None),
+    )
+    .unwrap();
+
+    let message = &window.messages()[0];
+    assert_eq!(message.role(), MessageRole::ToolResult);
+    assert!(message.content().iter().any(|content| matches!(
+        content,
+        MessageContent::ToolResult {
+            tool_name: Some(name),
+            tool_call_id: Some(id),
+            summary: Some(summary),
+            is_error: Some(false),
+        } if name == "read" && id == "call-1" && summary == "file list"
+    )));
 }
 
 #[test]
@@ -100,6 +213,8 @@ fn falls_back_to_bounded_text_history_projection() {
 
     assert_eq!(window.messages().len(), 2);
     assert_eq!(window.messages()[0].role(), MessageRole::User);
+    assert_eq!(window.session_key(), None);
+    assert_eq!(window.native_session_id(), None);
     assert_eq!(window.messages()[0].text(), "request");
     assert_eq!(window.messages()[1].role(), MessageRole::Assistant);
     assert_eq!(window.messages()[1].text(), "reply");
@@ -133,48 +248,72 @@ fn rejects_malformed_tool_blocks_without_required_names() {
     let mut tool_block = payload();
     tool_block["messages"][1]["content"] =
         json!([{ "type": "toolCall", "input": { "cwd": "C:/private" } }]);
-    assert_eq!(
+    assert_diagnostic(
         decode_window(tool_block, request(Direction::Latest, 2, None)),
-        Err(HistoryError::Malformed)
+        Some(1),
+        Some(0),
+        "name|toolName",
+        "missing",
+        "missing",
     );
 }
 
 #[test]
 fn rejects_malformed_payloads_and_ambiguous_timestamps() {
-    assert_eq!(
+    assert_diagnostic(
         decode_window(
             json!({ "messages": {} }),
-            request(Direction::Latest, 2, None)
+            request(Direction::Latest, 2, None),
         ),
-        Err(HistoryError::Malformed)
+        None,
+        None,
+        "messages",
+        "expected_array",
+        "object",
     );
 
     let mut malformed_envelope = payload();
     malformed_envelope["fastMode"] = json!("false");
-    assert_eq!(
+    assert_diagnostic(
         decode_window(malformed_envelope, request(Direction::Latest, 2, None)),
-        Err(HistoryError::Malformed)
+        None,
+        None,
+        "fastMode",
+        "expected_boolean",
+        "string",
     );
 
     let mut malformed_content = payload();
     malformed_content["messages"][0]["content"] = json!({ "text": "not a text payload" });
-    assert_eq!(
+    assert_diagnostic(
         decode_window(malformed_content, request(Direction::Latest, 2, None)),
-        Err(HistoryError::Malformed)
+        Some(0),
+        None,
+        "content",
+        "expected_string_or_array",
+        "object",
     );
 
     let mut malformed = payload();
     malformed["messages"][0]["role"] = json!("tool");
-    assert_eq!(
+    assert_diagnostic(
         decode_window(malformed, request(Direction::Latest, 2, None)),
-        Err(HistoryError::Malformed)
+        Some(0),
+        None,
+        "role",
+        "unsupported_role",
+        "string",
     );
 
     let mut ambiguous = payload();
     ambiguous["messages"][0]["ts"] = json!(10);
-    assert_eq!(
+    assert_diagnostic(
         decode_window(ambiguous, request(Direction::Latest, 2, None)),
-        Err(HistoryError::Malformed)
+        Some(0),
+        None,
+        "createdAt|timestamp|ts",
+        "alias_conflict",
+        "number",
     );
 }
 

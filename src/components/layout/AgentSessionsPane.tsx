@@ -724,8 +724,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   showRightDivider = true,
 }: AgentSessionsPaneProps) {
   const { t, i18n } = useTranslation();
-  const agentsResource = useSubagentsStore((state) => state.agentsResource);
-  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
+  const subagentManagementAgentsResource = useSubagentsStore((state) => state.agentsResource);
+  const subagentManagementAgents = Array.isArray(subagentManagementAgentsResource.data) ? subagentManagementAgentsResource.data : [];
   const {
     sessionEntries,
     sessionsLoading,
@@ -800,12 +800,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const agentPaneSessionEntries = sessionEntries.filter((entry) => !isKnownTeamRoleSession(teamRoleChatTargetIndex, {
     sessionIdentity: entry.session.sessionIdentity,
     sessionKey: entry.session.key,
-    backendSessionKey: entry.session.backendSessionKey,
     endpointSessionId: entry.session.endpointSessionId,
   }));
   const paneViewModel = useAgentSessionsPaneViewModel({
-    agents,
-    agentsResource,
+    subagentManagementAgents,
+    subagentManagementAgentsResource,
     sessionEntries: agentPaneSessionEntries,
     sessionsLoading,
     sessionsLoadedOnce,

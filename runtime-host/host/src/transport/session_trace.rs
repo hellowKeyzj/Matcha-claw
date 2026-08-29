@@ -15,16 +15,30 @@ pub(crate) fn trace_id<'a>(headers: &'a [(String, String)]) -> Option<&'a str> {
 }
 
 pub(crate) fn log(stage: &str, trace_id: Option<&str>, payload: Value) {
-    if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+    if trace_id.is_none() || !enabled() {
         return;
     }
+    emit(stage, trace_id, payload);
+}
+
+pub(crate) fn log_unscoped(stage: &str, payload: Value) {
+    if !enabled() {
+        return;
+    }
+    emit(stage, None, payload);
+}
+
+fn enabled() -> bool {
+    std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() == Ok("1")
+}
+
+fn emit(stage: &str, trace_id: Option<&str>, payload: Value) {
     let mut event = Map::new();
     event.insert("prefix".into(), Value::String("session-trace".into()));
     event.insert("source".into(), Value::String("runtime-host".into()));
-    event.insert(
-        "traceId".into(),
-        Value::String(trace_id.unwrap_or_default().into()),
-    );
+    if let Some(trace_id) = trace_id {
+        event.insert("traceId".into(), Value::String(trace_id.into()));
+    }
     event.insert("stage".into(), Value::String(stage.into()));
     event.insert("at".into(), Value::Number(now_millis().into()));
     if let Value::Object(fields) = payload {

@@ -13,7 +13,6 @@ const DISPATCH_TOKEN_HEADER: &str = "x-runtime-host-dispatch-token";
 pub enum ParentCallbackEndpoint {
     ShellActions,
     GatewayEvents,
-    RuntimeJobs,
 }
 
 impl ParentCallbackEndpoint {
@@ -21,7 +20,6 @@ impl ParentCallbackEndpoint {
         match self {
             Self::ShellActions => "/internal/runtime-host/shell-actions",
             Self::GatewayEvents => "/internal/runtime-host/gateway-events",
-            Self::RuntimeJobs => "/internal/runtime-host/runtime-jobs",
         }
     }
 }
@@ -75,25 +73,9 @@ impl ParentGatewayEventName {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentRuntimeJobEventName {
-    RuntimeJobDone,
-    RuntimeJobProgress,
-}
-
-impl ParentRuntimeJobEventName {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RuntimeJobDone => "runtime-job:done",
-            Self::RuntimeJobProgress => "runtime-job:progress",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentCallbackNameKind {
     ShellAction,
     GatewayEvent,
-    RuntimeJobEvent,
 }
 
 impl ParentCallbackNameKind {
@@ -101,7 +83,6 @@ impl ParentCallbackNameKind {
         match self {
             Self::ShellAction => "shell action",
             Self::GatewayEvent => "gateway event",
-            Self::RuntimeJobEvent => "runtime job event",
         }
     }
 }
@@ -162,24 +143,6 @@ impl TryFrom<&str> for ParentGatewayEventName {
             _ => {
                 return Err(ParentCallbackNameError {
                     kind: ParentCallbackNameKind::GatewayEvent,
-                    name: value.to_owned(),
-                });
-            }
-        };
-        Ok(event_name)
-    }
-}
-
-impl TryFrom<&str> for ParentRuntimeJobEventName {
-    type Error = ParentCallbackNameError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let event_name = match value {
-            "runtime-job:done" => Self::RuntimeJobDone,
-            "runtime-job:progress" => Self::RuntimeJobProgress,
-            _ => {
-                return Err(ParentCallbackNameError {
-                    kind: ParentCallbackNameKind::RuntimeJobEvent,
                     name: value.to_owned(),
                 });
             }
@@ -494,16 +457,6 @@ impl ParentCallbackClient {
     ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
         self.inner.emit_parent_session_update(availability).await
     }
-
-    pub async fn emit_parent_runtime_job_event(
-        &self,
-        event_name: ParentRuntimeJobEventName,
-        payload: Value,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner
-            .emit_parent_runtime_job_event(event_name, payload)
-            .await
-    }
 }
 
 impl ParentCallbackHandle {
@@ -532,16 +485,6 @@ impl ParentCallbackHandle {
         availability: ParentSessionUpdateAvailability,
     ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
         self.inner.emit_parent_session_update(availability).await
-    }
-
-    pub async fn emit_parent_runtime_job_event(
-        &self,
-        event_name: ParentRuntimeJobEventName,
-        payload: Value,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner
-            .emit_parent_runtime_job_event(event_name, payload)
-            .await
     }
 }
 
@@ -597,23 +540,6 @@ impl ParentCallbackClientInner {
         availability: ParentSessionUpdateAvailability,
     ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
         Err(ParentCallbackError::SessionUpdateUnavailable { availability })
-    }
-
-    async fn emit_parent_runtime_job_event(
-        &self,
-        event_name: ParentRuntimeJobEventName,
-        payload: Value,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        let endpoint = ParentCallbackEndpoint::RuntimeJobs;
-        let request = EventNotificationRequest {
-            version: TRANSPORT_VERSION,
-            event_name: event_name.as_str(),
-            payload,
-        };
-        let body = encode_request(endpoint, &request)?;
-        self.send_json(endpoint, body, self.notification_timeout)
-            .await?;
-        Ok(ParentCallbackDeliveryReceipt { endpoint })
     }
 
     fn endpoint_url(&self, endpoint: ParentCallbackEndpoint) -> Url {
@@ -954,38 +880,6 @@ mod tests {
                 },
             }
         );
-    }
-
-    #[tokio::test]
-    async fn runtime_job_notification_uses_only_its_allowlisted_names() {
-        assert_eq!(
-            ParentRuntimeJobEventName::try_from("runtime-job:done").unwrap(),
-            ParentRuntimeJobEventName::RuntimeJobDone
-        );
-        assert_eq!(
-            ParentRuntimeJobEventName::try_from("runtime-job:progress").unwrap(),
-            ParentRuntimeJobEventName::RuntimeJobProgress
-        );
-        assert!(ParentRuntimeJobEventName::try_from("runtime-job:other").is_err());
-
-        let (base_url, server) = spawn_server(http_response("204 No Content", ""), None).await;
-        let client = test_client(
-            &base_url,
-            "dispatch-secret",
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        );
-        let receipt = client
-            .emit_parent_runtime_job_event(
-                ParentRuntimeJobEventName::RuntimeJobDone,
-                json!({ "jobId": "job-1" }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(receipt.endpoint(), ParentCallbackEndpoint::RuntimeJobs);
-        let request = server.await.unwrap();
-        assert_eq!(request.target, ParentCallbackEndpoint::RuntimeJobs.path());
-        assert_eq!(request.body["eventName"], "runtime-job:done");
     }
 
     #[tokio::test]

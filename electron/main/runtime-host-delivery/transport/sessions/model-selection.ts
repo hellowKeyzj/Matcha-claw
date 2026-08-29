@@ -1,6 +1,11 @@
 import { logger } from '../../../../utils/logger';
 import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-import { isSessionTraceEnabled } from './trace';
+import {
+  isSessionTraceEnabled,
+  logSessionTrace,
+  summarizeIdentifier,
+  traceHeader,
+} from './trace';
 
 const DECISION_TTL_MS = 30_000;
 const REJECTION_REASON_HEADER = 'x-runtime-host-session-model-rejection';
@@ -44,6 +49,7 @@ export type SessionModelSelectionRequest = Readonly<{
   input: Readonly<{
     endpoint: Endpoint;
     sessionKey: string;
+    endpointSessionId?: string;
     modelSelectionId: string;
   }>;
 }>;
@@ -58,7 +64,7 @@ export type SessionModelSelectionTransportResponse = Readonly<{
 }>;
 
 export interface SessionModelSelectionTransport {
-  select(request: unknown): Promise<SessionModelSelectionTransportResponse>;
+  select(request: unknown, traceId?: string | null): Promise<SessionModelSelectionTransportResponse>;
 }
 
 export function createSessionModelSelectionTransport(
@@ -68,10 +74,21 @@ export function createSessionModelSelectionTransport(
 ): SessionModelSelectionTransport {
   const url = `http://127.0.0.1:${sessionModelSelectionTransportPort}/api/sessions/model`;
   return {
-    async select(request: unknown): Promise<SessionModelSelectionTransportResponse> {
+    async select(request: unknown, traceId?: string | null): Promise<SessionModelSelectionTransportResponse> {
+      const startedAt = Date.now();
       if (!isSessionModelSelectionRequest(request)) {
+        logSessionTrace('electron.model-selection.rejected', traceId, {
+          reason: 'request-invalid',
+          envelope: summarizeRequestShape(request),
+        });
         return { status: 503, body: UNAVAILABLE };
       }
+      logSessionTrace('electron.model-selection.request', traceId, {
+        adapter: request.input.endpoint.runtimeAdapterId,
+        sessionKey: summarizeIdentifier(request.input.sessionKey),
+        endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
+        modelSelectionId: summarizeIdentifier(request.input.modelSelectionId),
+      });
       try {
         const response = await fetcher(url, {
           method: 'POST',
@@ -86,10 +103,17 @@ export function createSessionModelSelectionTransport(
               revision: '1',
             })}`,
             'Content-Type': 'application/json',
+            ...traceHeader(traceId),
           },
           body: JSON.stringify(request),
         });
         const body: unknown = await response.json();
+        const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
+        logSessionTrace('electron.model-selection.response', traceId, {
+          status: response.status,
+          contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
+          elapsedMs: Date.now() - startedAt,
+        });
         if (
           response.status === 200
           && isSessionModelSelectionResponse(body)
@@ -107,6 +131,7 @@ export function createSessionModelSelectionTransport(
             authMode: response.headers?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? undefined,
             modelSelectionId: request.input.modelSelectionId,
             sessionKeyLength: request.input.sessionKey.length,
+            endpointSessionIdLength: request.input.endpointSessionId?.length,
           });
         }
         if (response.status === 200 && isSessionModelSelectionResponse(body)) {
@@ -115,6 +140,9 @@ export function createSessionModelSelectionTransport(
         if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
         if (response.status === 422) return { status: 422, body: UNSUPPORTED };
       } catch {
+        logSessionTrace('electron.model-selection.failure', traceId, {
+          elapsedMs: Date.now() - startedAt,
+        });
         // The public contract deliberately suppresses transport details.
       }
       return { status: 503, body: UNAVAILABLE };
@@ -130,6 +158,24 @@ function isSessionModelSelectionResponse(value: unknown): value is SessionModelS
       || value.outcome === 'outcome_unknown');
 }
 
+function summarizeRequestShape(value: unknown) {
+  if (!isRecord(value)) {
+    return { type: typeof value };
+  }
+  const scope = isRecord(value.scope) ? value.scope : null;
+  const input = isRecord(value.input) ? value.input : null;
+  return {
+    bodyKeys: Object.keys(value).sort(),
+    scopeKeys: scope ? Object.keys(scope).sort() : null,
+    targetKeys: isRecord(value.target) ? Object.keys(value.target).sort() : null,
+    inputKeys: input ? Object.keys(input).sort() : null,
+    scopeSessionKey: summarizeIdentifier(typeof scope?.sessionKey === 'string' ? scope.sessionKey : null),
+    inputSessionKey: summarizeIdentifier(typeof input?.sessionKey === 'string' ? input.sessionKey : null),
+    endpointSessionId: summarizeIdentifier(typeof input?.endpointSessionId === 'string' ? input.endpointSessionId : null),
+    modelSelectionId: summarizeIdentifier(typeof input?.modelSelectionId === 'string' ? input.modelSelectionId : null),
+  };
+}
+
 function isSessionModelSelectionRequest(value: unknown): value is SessionModelSelectionRequest {
   if (!isRecord(value)
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
@@ -140,13 +186,14 @@ function isSessionModelSelectionRequest(value: unknown): value is SessionModelSe
     || !hasExactKeys(value.target, ['kind'])
     || value.target.kind !== 'model-selection'
     || !isRecord(value.input)
-    || !hasExactKeys(value.input, ['endpoint', 'sessionKey', 'modelSelectionId'])
+    || !hasAllowedKeys(value.input, ['endpoint', 'sessionKey', 'modelSelectionId'], ['endpointSessionId'])
     || !isEndpoint(value.input.endpoint)
     || value.scope.endpoint.runtimeAdapterId !== value.input.endpoint.runtimeAdapterId
     || value.scope.endpoint.runtimeInstanceId !== value.input.endpoint.runtimeInstanceId
     || value.scope.sessionKey !== value.input.sessionKey
     || typeof value.input.sessionKey !== 'string'
     || !value.input.sessionKey
+    || (value.input.endpointSessionId !== undefined && !isIdentifier(value.input.endpointSessionId))
     || typeof value.input.modelSelectionId !== 'string'
     || !value.input.modelSelectionId.trim()) {
     return false;
@@ -175,7 +222,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isIdentifier(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 4096
+    && value.trim() === value
+    && ![...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || (codePoint >= 127 && codePoint <= 159);
+    });
+}
+
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasAllowedKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => allowed.has(key));
 }

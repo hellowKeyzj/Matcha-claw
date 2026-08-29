@@ -12,6 +12,7 @@ import {
   userItem,
   windowView,
 } from './helpers/session-fixtures';
+import { buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const hostSessionLoadMock = vi.fn();
@@ -82,19 +83,18 @@ describe('chat history fetch pipeline helpers', () => {
     hostSessionLoadMock.mockReset();
     hostSessionLoadMock.mockResolvedValueOnce(view);
 
+    const recordKey = buildSessionRecordKey(identity);
     const result = await fetchHistoryWindow({
-      recordKey: requestedSessionKey,
-      backendSessionKey: requestedSessionKey,
+      recordKey,
       sessionIdentity: identity,
-      sessions: [{ key: requestedSessionKey, thinkingLevel: 'medium', updatedAt: 1 }],
+      sessions: [{ key: recordKey, thinkingLevel: 'medium', updatedAt: 1 }],
       limit: CHAT_HISTORY_FULL_LIMIT,
     });
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
-      sessionKey: requestedSessionKey,
       sessionIdentity: identity,
       limit: CHAT_HISTORY_FULL_LIMIT,
-    }, { timeoutMs: undefined });
+    }, { timeoutMs: undefined, traceId: undefined });
     expect(result.thinkingLevel).toBe('medium');
     expect(result.view).toMatchObject({ epoch: 7, seq: 9, cursor: 11 });
     expect(projectSessionViewItems(result.view)).toMatchObject([{ kind: 'assistant-turn', text: 'loaded' }]);

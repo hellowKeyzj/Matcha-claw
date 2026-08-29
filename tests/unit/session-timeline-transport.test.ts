@@ -15,7 +15,7 @@ const identity = {
     runtimeAdapterId: 'openclaw' as const,
     runtimeInstanceId: 'local' as const,
   },
-  agentId: 'agent:test',
+  agentId: 'test',
   sessionKey: 'agent:test:main',
 };
 
@@ -166,15 +166,15 @@ describe('SessionTimelineTransport', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
     const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
 
-    await expect(transport.load(request('sessions.load', { endpointSessionId: 'native-session-1' })))
+    await expect(transport.load(request('sessions.load', { endpointSessionId: 'main' })))
       .resolves.toEqual({ status: 200, body: view });
-    await expect(transport.window(request('sessions.window', { endpointSessionId: 'native-session-1' })))
+    await expect(transport.window(request('sessions.window', { endpointSessionId: 'main' })))
       .resolves.toEqual({ status: 200, body: view });
 
     for (const [, init] of fetcher.mock.calls) {
       const sent = JSON.parse(init.body as string) as { input: Record<string, unknown> };
       expect(sent.input).toMatchObject({
-        endpointSessionId: 'native-session-1',
+        endpointSessionId: 'main',
         sessionKey: identity.sessionKey,
         sessionIdentity: identity,
       });

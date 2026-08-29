@@ -75,7 +75,11 @@ fn open_existing(parent: F::HANDLE, name: &str) -> Result<Option<OwnedHandle>, (
     };
     open(
         &attributes,
-        FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC | FS::FILE_ADD_FILE | FS::SYNCHRONIZE,
+        FS::FILE_READ_ATTRIBUTES
+            | FS::READ_CONTROL
+            | FS::WRITE_DAC
+            | FS::FILE_ADD_FILE
+            | FS::SYNCHRONIZE,
         FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE,
         NFS::FILE_OPEN,
         NFS::FILE_DIRECTORY_FILE | NFS::FILE_OPEN_REPARSE_POINT | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
@@ -96,7 +100,11 @@ fn create(parent: F::HANDLE, name: &str) -> Result<OwnedHandle, StateDirError> {
     };
     let directory = open(
         &attributes,
-        FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC | FS::FILE_ADD_FILE | FS::SYNCHRONIZE,
+        FS::FILE_READ_ATTRIBUTES
+            | FS::READ_CONTROL
+            | FS::WRITE_DAC
+            | FS::FILE_ADD_FILE
+            | FS::SYNCHRONIZE,
         FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE,
         NFS::FILE_CREATE,
         NFS::FILE_DIRECTORY_FILE | NFS::FILE_OPEN_REPARSE_POINT | NFS::FILE_SYNCHRONOUS_IO_NONALERT,

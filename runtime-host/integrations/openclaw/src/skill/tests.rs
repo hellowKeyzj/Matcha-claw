@@ -29,56 +29,6 @@ const SHARED_CONTROL_METHODS: [&str; 7] = [
     SKILLS_STATUS_METHOD,
     wire::SYSTEM_PRESENCE_METHOD,
 ];
-const INSTALL_CONTROL_METHODS: [&str; 8] = [
-    "status",
-    "config.get",
-    "config.patch",
-    "config.apply",
-    "agents.list",
-    SKILLS_STATUS_METHOD,
-    wire::SYSTEM_PRESENCE_METHOD,
-    SKILLS_INSTALL_METHOD,
-];
-
-#[test]
-fn request_validates_the_native_clawhub_slug_boundary_without_paths() {
-    for slug in ["skill", "skill-2", "a1", "Skill"] {
-        assert!(ClawHubSkillInstall::try_new(slug.into(), None, false).is_ok());
-    }
-    for slug in [
-        "",
-        "skill/escape",
-        "skill\\escape",
-        "skill..escape",
-        "-skill",
-        "skill-",
-    ] {
-        assert_eq!(
-            ClawHubSkillInstall::try_new(slug.into(), None, false),
-            Err(SkillInputError::InvalidSlug)
-        );
-    }
-    for version in ["", "   "] {
-        assert_eq!(
-            ClawHubSkillInstall::try_new("safe-skill".into(), Some(version.into()), false),
-            Err(SkillInputError::InvalidVersion)
-        );
-    }
-
-    let request =
-        ClawHubSkillInstall::try_new("safe-skill".into(), Some(" 1.2.3 ".into()), true).unwrap();
-    assert_eq!(
-        request.into_install_params(),
-        json!({"source": "clawhub", "slug": "safe-skill", "version": "1.2.3", "force": true})
-    );
-    let request =
-        ClawHubSkillInstall::try_new("safe-skill".into(), Some("1.2.3".into()), true).unwrap();
-    let debug = format!("{request:?}");
-    assert!(!debug.contains("safe-skill"));
-    assert!(!debug.contains("1.2.3"));
-    assert!(debug.contains("REDACTED"));
-}
-
 #[test]
 fn installed_catalog_projects_only_selectable_normalized_skill_names() {
     let catalog = decode_installed_catalog(GatewayResponse::Success {
@@ -334,7 +284,7 @@ fn detail_projection_preserves_nested_renderer_safe_fields() {
 }
 
 #[test]
-fn skill_slug_requests_reject_path_fragments() {
+fn detail_slug_requests_reject_path_fragments() {
     for slug in [
         "skill/escape",
         "skill\\\\escape",
@@ -343,176 +293,7 @@ fn skill_slug_requests_reject_path_fragments() {
         "skill/",
     ] {
         assert!(SkillDetailRequest::try_new(slug.to_owned()).is_err());
-        assert!(SkillInstallRequest::clawhub(slug.to_owned(), None, false).is_err());
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn gateway_port_projects_native_install_acknowledgement_without_status_readback() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let identity = TestTlsIdentity::generate();
-    let gateway = test_gateway(&listener, identity.fingerprint());
-    let acceptor = identity.acceptor();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket).await;
-        let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], SKILLS_INSTALL_METHOD);
-        assert_eq!(
-            request["params"],
-            json!({"source": "clawhub", "slug": "safe-skill", "version": "1.2.3", "force": true})
-        );
-        let request_id = request["id"].as_str().unwrap();
-        send_json(
-            &mut socket,
-            json!({
-                "type": "res", "id": request_id, "ok": true,
-                "payload": {
-                    "ok": true, "slug": "safe-skill", "version": "1.2.3",
-                    "targetDir": "private-target-dir", "stdout": "private-stdout", "stderr": "private-stderr"
-                }
-            }),
-        )
-        .await;
-        socket.close(None).await.unwrap();
-    });
-
-    let request =
-        ClawHubSkillInstall::try_new("safe-skill".into(), Some("1.2.3".into()), true).unwrap();
-    let outcome = gateway.install_clawhub_skill(request).await;
-    server.await.unwrap();
-
-    assert_eq!(outcome, ClawHubSkillInstallOutcome::Accepted);
-    let debug = format!("{gateway:?}");
-    for private in ["private-target-dir", "private-stdout", "private-stderr"] {
-        assert!(!debug.contains(private));
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn install_capability_gate_prevents_mutation_without_the_native_effect_method() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let identity = TestTlsIdentity::generate();
-    let installer = test_installer(&listener, identity.fingerprint());
-    let acceptor = identity.acceptor();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello_with_methods(&mut socket, &[]).await;
-        socket.close(None).await.unwrap();
-    });
-
-    let outcome = installer
-        .install(ClawHubSkillInstall::try_new("safe-skill".into(), None, false).unwrap())
-        .await;
-    server.await.unwrap();
-
-    assert_eq!(outcome, ClawHubSkillInstallOutcome::Unknown);
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn install_version_gate_prevents_mutation() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let identity = TestTlsIdentity::generate();
-    let gateway = test_gateway(&listener, identity.fingerprint());
-    let acceptor = identity.acceptor();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello_with_methods_and_version(
-            &mut socket,
-            &INSTALL_CONTROL_METHODS,
-            "unexpected-openclaw-version",
-        )
-        .await;
-        socket.close(None).await.unwrap();
-    });
-
-    let outcome = gateway
-        .install_clawhub_skill(
-            ClawHubSkillInstall::try_new("safe-skill".into(), None, false).unwrap(),
-        )
-        .await;
-    server.await.unwrap();
-
-    assert_eq!(outcome, ClawHubSkillInstallOutcome::Unknown);
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn an_explicit_native_rejection_is_rejected_without_exposure() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let identity = TestTlsIdentity::generate();
-    let installer = test_installer(&listener, identity.fingerprint());
-    let acceptor = identity.acceptor();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket).await;
-        let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], SKILLS_INSTALL_METHOD);
-        let request_id = request["id"].as_str().unwrap();
-        send_json(
-            &mut socket,
-            json!({
-                "type": "res", "id": request_id, "ok": false,
-                "error": {
-                    "code": "UNAVAILABLE", "message": "private native failure",
-                    "details": {"targetDir": "private-target-dir"}, "retryable": false, "retryAfterMs": null
-                }
-            }),
-        )
-        .await;
-        socket.close(None).await.unwrap();
-    });
-
-    let outcome = installer
-        .install(ClawHubSkillInstall::try_new("safe-skill".into(), None, false).unwrap())
-        .await;
-    server.await.unwrap();
-
-    assert_eq!(outcome, ClawHubSkillInstallOutcome::Rejected);
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn connection_loss_after_send_is_unknown_and_never_attempts_a_retry_or_readback() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let identity = TestTlsIdentity::generate();
-    let installer = test_installer(&listener, identity.fingerprint());
-    let acceptor = identity.acceptor();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket).await;
-        let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], SKILLS_INSTALL_METHOD);
-        socket.send(Message::Close(None)).await.unwrap();
-    });
-
-    let outcome = installer
-        .install(ClawHubSkillInstall::try_new("safe-skill".into(), None, false).unwrap())
-        .await;
-    server.await.unwrap();
-
-    assert_eq!(outcome, ClawHubSkillInstallOutcome::Unknown);
-}
-
-fn test_installer(
-    listener: &TcpListener,
-    certificate_fingerprint: platform::listener_identity::CertificateFingerprint,
-) -> ClawHubSkillInstaller {
-    ClawHubSkillInstaller::new(test_client(listener, certificate_fingerprint))
-}
-
-fn test_gateway(
-    listener: &TcpListener,
-    certificate_fingerprint: platform::listener_identity::CertificateFingerprint,
-) -> crate::port::OpenClawGateway {
-    let (events, _) = tokio::sync::mpsc::channel(1);
-    let (canonical_events, _) = tokio::sync::mpsc::channel(32);
-    crate::port::OpenClawGateway::new(
-        GatewayEndpoint::try_new(listener.local_addr().unwrap()).unwrap(),
-        certificate_fingerprint,
-        Arc::new(GatewaySecret::new("fake-gateway-token".into()).unwrap()),
-        GatewayClientMetadata::try_new("1.2.3".into(), "windows".into()).unwrap(),
-        events,
-        canonical_events,
-    )
 }
 
 fn test_client(
@@ -525,10 +306,6 @@ fn test_client(
         Arc::new(GatewaySecret::new("fake-gateway-token".into()).unwrap()),
         GatewayClientMetadata::try_new("1.2.3".into(), "windows".into()).unwrap(),
     ))
-}
-
-async fn serve_hello(socket: &mut TestSocket) {
-    serve_hello_with_methods(socket, &INSTALL_CONTROL_METHODS).await;
 }
 
 async fn serve_status_hello(socket: &mut TestSocket) {

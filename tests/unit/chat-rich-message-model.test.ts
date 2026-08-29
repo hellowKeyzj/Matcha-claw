@@ -121,7 +121,6 @@ describe('rich renderer message model', () => {
       loadedSessions: {
         [sessionKey]: {
           meta: {
-            backendSessionKey: sessionKey,
             runtimeScopeKey: 'native-runtime:openclaw:local',
             agentId: 'main',
             protocolId: 'openclaw-v4',

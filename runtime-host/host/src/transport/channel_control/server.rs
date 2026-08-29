@@ -4,13 +4,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
     time::timeout,
+};
+
+use crate::{
+    channel::{ChannelHandle, ChannelKey},
+    transport::authorization::CapabilityDecisionVerifier,
 };
 
 use super::{ChannelControlDelivery, DecodeError, decode};
@@ -27,19 +32,22 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        channel: ChannelHandle,
+        endpoint: RuntimeEndpoint,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            channel,
+            endpoint,
         })
     }
 
@@ -47,9 +55,10 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let channel = self.channel.clone();
+            let endpoint = self.endpoint.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, channel, endpoint).await;
             });
         }
     }
@@ -58,7 +67,8 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> io::Result<()> {
     let request = match timeout(CONTROL_REQUEST_DEADLINE, read_request(&mut stream)).await {
         Ok(Ok(Ok(request))) => request,
@@ -73,7 +83,7 @@ async fn serve(
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
     let response = if request.path == "/api/channels/login" {
-        let response = handle(request, verifier, owner, cancellation.clone());
+        let response = handle(request, verifier, channel, endpoint, cancellation.clone());
         tokio::pin!(response);
         tokio::select! {
             response = &mut response => response,
@@ -88,7 +98,12 @@ async fn serve(
             },
         }
     } else {
-        match timeout(deadline, handle(request, verifier, owner, cancellation)).await {
+        match timeout(
+            deadline,
+            handle(request, verifier, channel, endpoint, cancellation),
+        )
+        .await
+        {
             Ok(response) => response,
             Err(_) => Response::bad_request(),
         }
@@ -99,7 +114,8 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Response {
     if request.path == "/api/channels/login" {
@@ -109,14 +125,15 @@ async fn handle(
             &request.headers,
             &request.body,
             verifier,
-            owner,
+            channel,
+            endpoint,
             cancellation,
         )
         .await;
         return Response { status, body };
     }
     if request.path == DELETE_CONFIG_PATH {
-        return handle_delete_config(request, verifier, owner).await;
+        return handle_delete_config(request, verifier, channel, endpoint).await;
     }
     if request.method != "POST" || request.path != "/api/channels/control" {
         return Response::not_found();
@@ -140,10 +157,11 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    match owner
-        .control_open_claw_channel_account(command.action, command.channel, command.account)
-        .await
-    {
+    let key = match ChannelKey::try_new(endpoint, command.channel, Some(command.account)) {
+        Ok(key) => key,
+        Err(_) => return Response::bad_request(),
+    };
+    match channel.control(key, command.action).await {
         Ok(outcome) => Response::from_delivery(ChannelControlDelivery::Outcome(outcome.into())),
         Err(_) => Response::unavailable(),
     }
@@ -152,7 +170,8 @@ async fn handle(
 async fn handle_delete_config(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> Response {
     if request.method != "POST" {
         return Response::not_found();
@@ -185,10 +204,11 @@ async fn handle_delete_config(
         }
     };
     drop(verifier);
-    let delivery = match owner
-        .delete_channel_config(command.channel, command.account_id)
-        .await
-    {
+    let key = match ChannelKey::try_new(endpoint, command.channel, Some(command.account_id)) {
+        Ok(key) => key,
+        Err(_) => return Response::bad_request(),
+    };
+    let delivery = match channel.delete_config(key).await {
         Ok(outcome) => crate::transport::channel_delete::Delivery::Outcome(outcome),
         Err(_) => crate::transport::channel_delete::Delivery::Unavailable,
     };

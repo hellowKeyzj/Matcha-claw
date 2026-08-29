@@ -33,7 +33,7 @@ Rust Host 不是 OpenClaw 或 Matcha 的业务替代品；它组合 peer，并�
 
 - global external connector JSON；
 - OpenClaw config；
-- Host-wide cron、usage、RuntimeJob；
+- Host-wide cron、usage 或 generic operation owner；
 - Renderer canonical session state；
 - legacy transcript JSONL writer。
 
@@ -47,6 +47,8 @@ OpenClaw/Gateway native subsystem 拥有：
 - native session/runtime status；
 - Gateway apply/readback；
 - pairing/conversation runtime facts。
+
+OpenClaw/Gateway native subsystem 不拥有 ClawHub marketplace registry search；该 search 是 Rust `external/clawhub` 的第三方 HTTP lookup。
 
 OpenClaw integration 负责：
 

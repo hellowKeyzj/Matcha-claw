@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-use crate::session_state::SessionDelta as SessionDeltaDto;
+use crate::sessions::state::SessionDelta as SessionDeltaDto;
 
 pub(crate) const CONTROL_VERSION: u8 = 1;
 pub(crate) const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -13,7 +13,7 @@ const MAX_ACTIVITY_OPTION_IDS: usize = 32;
 const MAX_ACTIVITY_TEXT_BYTES: usize = 16 * 1024;
 const MAX_ACTIVITY_SUMMARY_BYTES: usize = 256;
 /// Bounds an untrusted parent's command wait and keeps a stuck child command recoverable.
-pub(crate) const MAX_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const MAX_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WireError {
@@ -45,6 +45,16 @@ where
         )),
         sequence => Ok(sequence),
     }
+}
+
+fn deserialize_safe_millis<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    (value <= MAX_SAFE_SEQUENCE)
+        .then_some(value)
+        .ok_or_else(|| D::Error::custom("control event timestamp exceeds the safe integer range"))
 }
 
 fn deserialize_session_delta<'de, D>(deserializer: D) -> Result<SessionDeltaDto, D::Error>
@@ -195,8 +205,6 @@ pub(crate) enum Command {
     HostCapabilitiesList {},
     #[serde(rename = "host.capabilities.describe")]
     HostCapabilitiesDescribe { input: CommandInput },
-    #[serde(rename = "host.runtime.execute")]
-    HostRuntimeExecute { input: CommandInput },
     #[serde(rename = "host.runtime.snapshot")]
     HostRuntimeSnapshot {},
     #[serde(rename = "matcha.lifecycle.status")]
@@ -237,10 +245,6 @@ pub(crate) enum Command {
     OpenClawToolchainStatus {},
     #[serde(rename = "openclaw.toolchain.install-uv")]
     OpenClawToolchainInstallUv {},
-    #[serde(rename = "openclaw.toolchain.install-submit")]
-    OpenClawToolchainInstallSubmit {},
-    #[serde(rename = "openclaw.toolchain.job-get")]
-    OpenClawToolchainJobGet { input: CommandInput },
     #[serde(rename = "openclaw.subagent-templates.list")]
     OpenClawSubagentTemplateCatalog {},
     #[serde(rename = "openclaw.subagent-templates.get")]
@@ -412,6 +416,13 @@ pub(crate) enum SafeEvent {
     },
     #[serde(rename = "openclaw.runtime")]
     OpenClawRuntime,
+    #[serde(rename = "matcha.lifecycle", rename_all = "camelCase")]
+    MatchaLifecycle {
+        lifecycle: SafeRuntimeLifecycle,
+        ready: bool,
+        #[serde(deserialize_with = "deserialize_safe_millis")]
+        observed_at_ms: u64,
+    },
     #[serde(rename = "openclaw.cron.execution", rename_all = "camelCase")]
     OpenClawCronExecution {
         job_id: CronExecutionId,
@@ -423,6 +434,19 @@ pub(crate) enum SafeEvent {
         #[serde(deserialize_with = "deserialize_session_delta")]
         delta: SessionDeltaDto,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SafeRuntimeLifecycle {
+    Unavailable,
+    Idle,
+    Starting,
+    Running,
+    Stopping,
+    WaitingToRestart,
+    Failed,
+    ShutDown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

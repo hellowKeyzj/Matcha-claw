@@ -1,6 +1,12 @@
 use std::fmt;
 
-use foundation::process::{ShutdownOutcome, supervision::SupervisorSnapshot};
+use foundation::{
+    execution::{
+        ObservationRecord, ObservationSink, ShutdownObservation, ShutdownReason, ShutdownStage,
+        TraceContext,
+    },
+    process::{ShutdownOutcome, supervision::SupervisorSnapshot},
+};
 
 use super::{Host, HostTransitionError};
 use crate::composition::{
@@ -10,17 +16,50 @@ use crate::composition::{
 
 impl Host {
     pub async fn shutdown(&mut self) -> Result<ShutdownReport, HostShutdownError> {
+        let observation = shutdown_observation_sink(self);
         match self.admission.state().phase() {
             super::super::admission::HostPhase::Created
             | super::super::admission::HostPhase::Starting
-            | super::super::admission::HostPhase::Ready => self
-                .admission
-                .begin_shutdown()
-                .map_err(HostShutdownError::Transition)?,
-            super::super::admission::HostPhase::ShuttingDown => {}
+            | super::super::admission::HostPhase::Ready => {
+                observe_shutdown_start(&observation, "closeAdmission");
+                let result = self
+                    .admission
+                    .begin_shutdown()
+                    .map_err(HostShutdownError::Transition);
+                observe_shutdown_settle(
+                    &observation,
+                    "closeAdmission",
+                    shutdown_reason_from_result(&result),
+                );
+                result?
+            }
+            super::super::admission::HostPhase::ShuttingDown => {
+                observe_shutdown_start(&observation, "closeAdmission");
+                observe_shutdown_settle(
+                    &observation,
+                    "closeAdmission",
+                    ShutdownReason::AlreadyClosed,
+                );
+            }
             super::super::admission::HostPhase::ShutDown => {
+                observe_shutdown_start(&observation, "closeAdmission");
+                observe_shutdown_settle(
+                    &observation,
+                    "closeAdmission",
+                    ShutdownReason::AlreadyClosed,
+                );
                 let failures = self.shutdown_failures.failures();
                 let report = self.shutdown_failures.report();
+                observe_shutdown_start(&observation, "shutdownReport");
+                observe_shutdown_settle(
+                    &observation,
+                    "shutdownReport",
+                    if failures.any() {
+                        ShutdownReason::Unresolved
+                    } else {
+                        ShutdownReason::Completed
+                    },
+                );
                 return if failures.any() {
                     Err(HostShutdownError::Resources { failures, report })
                 } else {
@@ -29,26 +68,51 @@ impl Host {
             }
         }
 
-        self.cancel_open_claw_toolchain_install().await;
-        self.cancel_fleet_operations().await;
-        self.cancel_peer_lifecycle_operations().await;
+        observe_shutdown_start(&observation, "ownerRuntimeTasks");
+        self.owner_runtime_tasks.cancel_and_join().await;
+        observe_shutdown_settle(&observation, "ownerRuntimeTasks", ShutdownReason::Completed);
+        observe_shutdown_start(&observation, "sessionDeltaSinkClose");
         self.event_sinks.close_session_delta();
-        shutdown_open_claw_session(self).await;
-        shutdown_open_claw(self).await;
-        shutdown_matcha(self).await;
+        observe_shutdown_settle(
+            &observation,
+            "sessionDeltaSinkClose",
+            ShutdownReason::Completed,
+        );
+        shutdown_open_claw_session(self, &observation).await;
+        shutdown_open_claw(self, &observation).await;
+        shutdown_matcha(self, &observation).await;
         if !self.shutdown_failures.all_settled() {
-            return Err(HostShutdownError::Resources {
-                failures: self.shutdown_failures.failures(),
-                report: self.shutdown_failures.report(),
-            });
+            let failures = self.shutdown_failures.failures();
+            let report = self.shutdown_failures.report();
+            observe_shutdown_start(&observation, "shutdownReport");
+            observe_shutdown_settle(&observation, "shutdownReport", ShutdownReason::Unresolved);
+            return Err(HostShutdownError::Resources { failures, report });
         }
         if self.admission.state().phase() == super::super::admission::HostPhase::ShuttingDown {
-            self.admission
+            observe_shutdown_start(&observation, "closeAdmission");
+            let result = self
+                .admission
                 .complete_shutdown()
-                .map_err(HostShutdownError::Transition)?;
+                .map_err(HostShutdownError::Transition);
+            observe_shutdown_settle(
+                &observation,
+                "closeAdmission",
+                shutdown_reason_from_result(&result),
+            );
+            result?;
         }
         let failures = self.shutdown_failures.failures();
         let report = self.shutdown_failures.report();
+        observe_shutdown_start(&observation, "shutdownReport");
+        observe_shutdown_settle(
+            &observation,
+            "shutdownReport",
+            if failures.any() {
+                ShutdownReason::Unresolved
+            } else {
+                ShutdownReason::Completed
+            },
+        );
         if failures.any() {
             Err(HostShutdownError::Resources { failures, report })
         } else {
@@ -57,23 +121,96 @@ impl Host {
     }
 }
 
-async fn shutdown_open_claw_session(host: &mut Host) {
-    host.cancel_cron_operations().await;
+fn shutdown_observation_sink(host: &Host) -> ObservationSink {
+    host.runtime_observation.sink()
+}
+
+fn observe_shutdown_start(sink: &ObservationSink, step: &'static str) {
+    observe_shutdown_step(sink, step, ShutdownStage::Start, None);
+}
+
+fn observe_shutdown_settle(sink: &ObservationSink, step: &'static str, reason: ShutdownReason) {
+    observe_shutdown_step(sink, step, ShutdownStage::Settle, Some(reason));
+}
+
+fn observe_shutdown_step(
+    sink: &ObservationSink,
+    step: &'static str,
+    stage: ShutdownStage,
+    reason: Option<ShutdownReason>,
+) {
+    sink.observe(ObservationRecord::Shutdown(ShutdownObservation {
+        trace: TraceContext::absent(),
+        step,
+        stage,
+        reason,
+    }));
+}
+
+fn shutdown_reason_from_result<T, E>(result: &Result<T, E>) -> ShutdownReason {
+    match result {
+        Ok(_) => ShutdownReason::Completed,
+        Err(_) => ShutdownReason::Unresolved,
+    }
+}
+
+fn shutdown_outcome_reason<E>(result: &Result<ShutdownOutcome, E>) -> ShutdownReason {
+    match result {
+        Ok(ShutdownOutcome::Unresolved { .. }) => ShutdownReason::Unresolved,
+        Ok(_) => ShutdownReason::Completed,
+        Err(_) => ShutdownReason::ConfirmationFailed,
+    }
+}
+
+fn session_shutdown_reason(failure: Option<SessionShutdownFailure>) -> ShutdownReason {
+    match failure {
+        None => ShutdownReason::Completed,
+        Some(SessionShutdownFailure::Close) => ShutdownReason::Unresolved,
+        Some(SessionShutdownFailure::Join) => ShutdownReason::JoinFailed,
+    }
+}
+
+async fn shutdown_open_claw_session(host: &mut Host, observation: &ObservationSink) {
+    observe_shutdown_start(observation, "openClawSession");
+    let already_settled = host.shutdown_failures.open_claw_session.is_settled();
+    host.cron_handle.cancel_operations().await;
     host.shutdown_failures.open_claw_session.finish().await;
     if host.shutdown_failures.open_claw_session.is_settled() {
         host.event_sinks.close_open_claw();
     }
+    let reason = if already_settled {
+        ShutdownReason::AlreadyClosed
+    } else {
+        session_shutdown_reason(host.shutdown_failures.open_claw_session.failure())
+    };
+    observe_shutdown_settle(observation, "openClawSession", reason);
 }
 
-async fn shutdown_open_claw(host: &mut Host) {
-    if host.open_claw.owner_if_present().is_some() {
+async fn shutdown_open_claw(host: &mut Host, observation: &ObservationSink) {
+    let mut join_started = false;
+    if host.open_claw.owner_if_present().is_none() {
+        observe_shutdown_start(observation, "openClawConfirm");
+        observe_shutdown_settle(
+            observation,
+            "openClawConfirm",
+            ShutdownReason::AlreadyClosed,
+        );
+    } else {
+        observe_shutdown_start(observation, "openClawConfirm");
         let confirmation = host.open_claw.owner().confirm_shutdown().await;
+        observe_shutdown_settle(
+            observation,
+            "openClawConfirm",
+            shutdown_outcome_reason(&confirmation),
+        );
         match confirmation {
             Ok(outcome @ ShutdownOutcome::Unresolved { .. }) => {
                 host.shutdown_failures.open_claw = SlotState::Unresolved { outcome };
             }
             Ok(outcome) => {
                 let snapshot = host.open_claw.owner().snapshot();
+                observe_shutdown_start(observation, "openClawJoin");
+                join_started = true;
                 let join = host.open_claw.take_owner().begin_join();
                 host.shutdown_failures.open_claw = SlotState::Joining {
                     snapshot,
@@ -92,27 +229,69 @@ async fn shutdown_open_claw(host: &mut Host) {
             Err(_) => {}
         }
     }
+    let already_settled = matches!(
+        host.shutdown_failures.open_claw,
+        SlotState::JoinFailed { .. } | SlotState::Settled { .. }
+    );
+    let pending_join = matches!(host.shutdown_failures.open_claw, SlotState::Joining { .. });
+    if pending_join && !join_started {
+        observe_shutdown_start(observation, "openClawJoin");
+    }
     host.shutdown_failures.open_claw.finish_join().await;
+    if already_settled {
+        observe_shutdown_start(observation, "openClawJoin");
+        observe_shutdown_settle(observation, "openClawJoin", ShutdownReason::AlreadyClosed);
+    } else if pending_join || join_started {
+        let reason = host
+            .shutdown_failures
+            .open_claw
+            .settle_reason()
+            .unwrap_or(ShutdownReason::Unresolved);
+        observe_shutdown_settle(observation, "openClawJoin", reason);
+    } else if host.open_claw.owner_if_present().is_none() {
+        observe_shutdown_start(observation, "openClawJoin");
+        observe_shutdown_settle(observation, "openClawJoin", ShutdownReason::AlreadyClosed);
+    }
 }
 
-async fn shutdown_matcha(host: &mut Host) {
-    host.cancel_matcha_renderer_events();
+async fn shutdown_matcha(host: &mut Host, observation: &ObservationSink) {
+    let _ = host
+        .matcha
+        .peer_if_present()
+        .map(|peer| peer.advance_source_epoch());
     host.event_sinks.close_matcha();
     if host.matcha.peer_if_present().is_none() {
+        observe_shutdown_start(observation, "matchaConfirm");
+        observe_shutdown_settle(observation, "matchaConfirm", ShutdownReason::AlreadyClosed);
+        observe_shutdown_start(observation, "matchaJoin");
+        observe_shutdown_settle(observation, "matchaJoin", ShutdownReason::AlreadyClosed);
         return;
     }
+    observe_shutdown_start(observation, "matchaConfirm");
     let confirmation = host.matcha.confirm_shutdown().await;
+    observe_shutdown_settle(
+        observation,
+        "matchaConfirm",
+        shutdown_outcome_reason(&confirmation),
+    );
     match confirmation {
         Ok(outcome @ ShutdownOutcome::Unresolved { .. }) => {
             host.shutdown_failures.matcha = SlotState::Unresolved { outcome };
         }
         Ok(outcome) => {
             let snapshot = host.matcha.snapshot();
+            observe_shutdown_start(observation, "matchaJoin");
             let peer = host.matcha.take_peer();
             host.shutdown_failures.matcha = match peer.join().await {
                 Ok(()) => SlotState::Settled { snapshot, outcome },
                 Err(_) => SlotState::JoinFailed { snapshot, outcome },
             };
+            let reason = host
+                .shutdown_failures
+                .matcha
+                .settle_reason()
+                .unwrap_or(ShutdownReason::Unresolved);
+            observe_shutdown_settle(observation, "matchaJoin", reason);
         }
         Err(_) if !matches!(host.shutdown_failures.matcha, SlotState::Unresolved { .. }) => {
             host.shutdown_failures.matcha = SlotState::Shutdown;
@@ -285,6 +464,16 @@ impl SlotState {
             Self::Pending | Self::Settled { .. } => None,
             Self::Shutdown | Self::Unresolved { .. } => Some(OwnerShutdownFailure::Shutdown),
             Self::Joining { .. } | Self::JoinFailed { .. } => Some(OwnerShutdownFailure::Join),
+        }
+    }
+
+    const fn settle_reason(&self) -> Option<ShutdownReason> {
+        match self {
+            Self::Settled { .. } => Some(ShutdownReason::Completed),
+            Self::JoinFailed { .. } => Some(ShutdownReason::JoinFailed),
+            Self::Unresolved { .. } => Some(ShutdownReason::Unresolved),
+            Self::Shutdown => Some(ShutdownReason::ConfirmationFailed),
+            Self::Pending | Self::Joining { .. } => None,
         }
     }
 

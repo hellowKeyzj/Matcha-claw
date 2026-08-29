@@ -10,17 +10,6 @@ const platformRuntimeEndpoint = {
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
 } as const;
-const installationSubmission = {
-  success: true as const,
-  job: {
-    id: 'setup-uv-install',
-    type: 'toolchain.installUv',
-    status: 'queued' as const,
-    queuedAt: 1,
-    attempts: 0,
-    maxAttempts: 1,
-  },
-};
 const hostOpenClawGetStatusMock = vi.hoisted(() => vi.fn());
 const licenseRuntimeMock = vi.hoisted(() => ({
   gate: vi.fn(),
@@ -30,7 +19,6 @@ const licenseRuntimeMock = vi.hoisted(() => ({
 const runtimeInstallMock = vi.hoisted(() => ({
   resolveScope: vi.fn(),
   hostUvInstallAll: vi.fn(),
-  waitForRuntimeJobResult: vi.fn(),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -46,7 +34,6 @@ vi.mock('@/lib/host-api', () => ({
   hostOpenClawGetStatus: (...args: unknown[]) => hostOpenClawGetStatusMock(...args),
   resolveSingleCapabilityScope: (...args: unknown[]) => runtimeInstallMock.resolveScope(...args),
   hostUvInstallAll: (...args: unknown[]) => runtimeInstallMock.hostUvInstallAll(...args),
-  waitForRuntimeJobResult: (...args: unknown[]) => runtimeInstallMock.waitForRuntimeJobResult(...args),
 }));
 
 vi.mock('@/lib/license-runtime', () => ({
@@ -135,8 +122,7 @@ describe('setup navigation', () => {
       kind: 'runtime-instance',
       endpoint: platformRuntimeEndpoint,
     });
-    runtimeInstallMock.hostUvInstallAll.mockResolvedValue(installationSubmission);
-    runtimeInstallMock.waitForRuntimeJobResult.mockResolvedValue({ installed: true });
+    runtimeInstallMock.hostUvInstallAll.mockResolvedValue(undefined);
 
     hostOpenClawGetStatusMock.mockResolvedValue({
       packageExists: true,
@@ -155,11 +141,10 @@ describe('setup navigation', () => {
       expect(runtimeInstallMock.hostUvInstallAll).toHaveBeenCalledWith(platformRuntimeEndpoint);
       expect(screen.getAllByText('Installing...')).toHaveLength(5);
     });
-    expect(runtimeInstallMock.waitForRuntimeJobResult).not.toHaveBeenCalled();
     expect(screen.queryByRole('heading', { name: 'All Set!' })).not.toBeInTheDocument();
   });
 
-  it('completes the four-step flow after the submitted runtime job succeeds', async () => {
+  it('completes the four-step flow after uv installation succeeds', async () => {
     await advanceToInstalling();
 
     expect(await screen.findByRole('heading', { name: 'All Set!' }, { timeout: 4000 })).toBeInTheDocument();
@@ -167,14 +152,10 @@ describe('setup navigation', () => {
     expect(screen.queryByRole('heading', { name: 'Setting Up' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'AI Provider' })).not.toBeInTheDocument();
     expect(runtimeInstallMock.hostUvInstallAll).toHaveBeenCalledWith(platformRuntimeEndpoint);
-    expect(runtimeInstallMock.waitForRuntimeJobResult).toHaveBeenCalledWith('setup-uv-install', {
-      timeoutMs: 120000,
-      intervalMs: 500,
-    });
   });
 
   it('shows failed installation and exposes the reload retry action', async () => {
-    runtimeInstallMock.waitForRuntimeJobResult.mockRejectedValue(new Error('UV installation failed'));
+    runtimeInstallMock.hostUvInstallAll.mockRejectedValue(new Error('UV installation failed'));
 
     await advanceToInstalling();
 
@@ -183,10 +164,6 @@ describe('setup navigation', () => {
     expect(screen.getByRole('button', { name: 'Try restarting the app' })).toBeEnabled();
     expect(screen.queryByRole('heading', { name: 'All Set!' })).not.toBeInTheDocument();
     expect(runtimeInstallMock.hostUvInstallAll).toHaveBeenCalledWith(platformRuntimeEndpoint);
-    expect(runtimeInstallMock.waitForRuntimeJobResult).toHaveBeenCalledWith('setup-uv-install', {
-      timeoutMs: 120000,
-      intervalMs: 500,
-    });
 
     expect(() => fireEvent.click(screen.getByRole('button', { name: 'Try restarting the app' }))).not.toThrow();
   });

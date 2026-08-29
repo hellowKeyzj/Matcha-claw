@@ -125,7 +125,7 @@ describe('useProviderStore mutation states', () => {
       undefined,
     );
     expect(useProviderStore.getState().providerSnapshot.credentials[0]?.label).toBe('OpenAI primary');
-    expect(useProviderStore.getState().refreshing).toBe(false);
+    expect(useProviderStore.getState().refreshing).toBe(true);
 
     resolveSnapshot?.({
       statuses: [{ id: 'openai-main', hasKey: true }],
@@ -171,15 +171,15 @@ describe('useProviderStore mutation states', () => {
 
     await createTask;
     expect(hostProviderCreateAccountMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'ollama-local' }), undefined);
-    expect(useProviderStore.getState().providerSnapshot.credentials).toEqual([
+    expect(useProviderStore.getState().providerSnapshot.credentials).toContainEqual(
       expect.objectContaining({ id: 'ollama-local', vendorId: 'ollama' }),
-    ]);
+    );
 
     resolveInitialSnapshot?.({ statuses: [], credentials: [], vendors: [], revisions: {} });
     await refreshTask;
-    expect(useProviderStore.getState().providerSnapshot.credentials).toEqual([
+    expect(useProviderStore.getState().providerSnapshot.credentials).toContainEqual(
       expect.objectContaining({ id: 'ollama-local', vendorId: 'ollama' }),
-    ]);
+    );
   });
 
   it('removeAccount 期间会暴露 mutating 行级状态，并在结束后清理', async () => {

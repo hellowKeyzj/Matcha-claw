@@ -3,7 +3,7 @@ use std::{
     num::NonZeroU32,
 };
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GraphRunId(String);
 
 impl GraphRunId {

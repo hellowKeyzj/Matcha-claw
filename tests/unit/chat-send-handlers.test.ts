@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend, NO_RESPONSE_RECEIVED_ERROR, startStoreSendWatchers } from '@/stores/chat/send-handlers';
 import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
+import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import type { ChatStoreState } from '@/stores/chat/types';
-import { getSessionItems } from '@/stores/chat/store-state-helpers';
+import { getSessionItems, applySessionView } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
-import { completeFact, sessionView, userItem } from './helpers/session-fixtures';
+import { assistantItem, completeFact, sessionView, userItem } from './helpers/session-fixtures';
 
 interface RawMessage {
   role: 'user';
@@ -61,7 +62,6 @@ function createSessionRecord(input?: {
   const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
   return {
     meta: {
-      backendSessionKey: sessionKey,
       runtimeScopeKey: 'native-runtime:openclaw:local',
       agentId: sessionKey.split(':')[1] ?? null,
       protocolId: 'openclaw-v4',
@@ -136,20 +136,182 @@ describe('chat send handlers', () => {
     expect(record.items).toEqual([]);
   });
 
-  it('applies a canonical view returned by send transport', async () => {
+  it('binds the immediate assistant placeholder to the ack run and authoritative projection', async () => {
+    const sessionKey = 'agent:main:session-1';
+    let resolveSend: ((value: unknown) => void) | null = null;
+    sendChatTransportMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSend = resolve;
+    }));
+
+    const loadedSessions = { [sessionKey]: createSessionRecord({ sessionKey }) };
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const sendPromise = executeStoreSend({
+      set,
+      get,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'hello',
+    });
+
+    await Promise.resolve();
+
+    const beforeAck = getSessionItems(state, sessionKey);
+    expect(beforeAck).toEqual([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: 'hello',
+        status: 'pending',
+        clientId: expect.any(String),
+      }),
+      expect.objectContaining({
+        key: expect.stringMatching(/^renderer-assistant:/),
+        kind: 'assistant-turn',
+        identitySource: 'client',
+        identityMode: 'client',
+        status: 'streaming',
+        pendingState: 'typing',
+        text: '',
+      }),
+    ]);
+
+    resolveSend?.({ ok: true, runId: 'native-run-1', projection: null });
+    await sendPromise;
+
+    const afterAck = getSessionItems(state, sessionKey);
+    expect(afterAck).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        key: 'renderer-assistant:native-run-1',
+        runId: 'native-run-1',
+        identitySource: 'run',
+        identityMode: 'run',
+        pendingState: 'typing',
+      }),
+    ]));
+    expect(state.loadedSessions[sessionKey]!.runtime).toMatchObject({
+      activeRunId: 'native-run-1',
+      runPhase: 'submitted',
+      activeTurnItemKey: null,
+      pendingTurnKey: 'renderer-assistant:native-run-1',
+    });
+
+    applySessionView({ set, get }, sessionView(sessionKey, {
+      seq: 1,
+      cursor: 1,
+      identity: createOpenClawTestSessionIdentity(sessionKey),
+      items: completeFact([
+        userItem('user-1', 'hello'),
+        assistantItem('assistant-1', 'real assistant text', { runId: 'native-run-1' }),
+      ]),
+    }));
+
+    const assistantItems = getSessionItems(state, sessionKey).filter((item) => item.kind === 'assistant-turn');
+    expect(assistantItems).toHaveLength(1);
+    expect(assistantItems[0]).toMatchObject({
+      key: 'assistant-1',
+      runId: 'native-run-1',
+      identitySource: 'run',
+      identityMode: 'run',
+      text: 'real assistant text',
+    });
+    expect(getSessionItems(state, sessionKey)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        identitySource: 'client',
+        pendingState: 'typing',
+      }),
+    ]));
+  });
+
+  it('clears the immediate assistant placeholder when chat send fails', async () => {
+    const sessionKey = 'agent:main:session-1';
+    let resolveSend: ((value: unknown) => void) | null = null;
+    sendChatTransportMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSend = resolve;
+    }));
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: { [sessionKey]: createSessionRecord({ sessionKey }) },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+
+    const sendPromise = executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'hello',
+    });
+
+    await Promise.resolve();
+
+    expect(getSessionItems(state, sessionKey)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        identitySource: 'client',
+        pendingState: 'typing',
+      }),
+    ]));
+
+    resolveSend?.({ ok: false, error: 'Target rejected the prompt' });
+    await expect(sendPromise).resolves.toEqual({
+      accepted: false,
+      reason: 'error',
+      error: 'Target rejected the prompt',
+    });
+
+    expect(state.error).toBe('Target rejected the prompt');
+    expect(getSessionItems(state, sessionKey)).toEqual([]);
+  });
+
+  it('applies a canonical view returned by send transport without keeping the local assistant placeholder', async () => {
     const sessionKey = 'agent:main:session-1';
     const view = sessionView(sessionKey, {
       identity: createOpenClawTestSessionIdentity(sessionKey),
-      items: completeFact([userItem('user-1', 'hello')]),
+      items: completeFact([
+        userItem('user-1', 'hello'),
+        assistantItem('assistant-1', 'real assistant text', { runId: 'run-1' }),
+      ]),
     });
     sendChatTransportMock.mockResolvedValueOnce({
       ok: true,
       runId: 'run-1',
       projection: { kind: 'view', view },
     });
+    const loadedSessions = { [sessionKey]: createSessionRecord({ sessionKey }) };
     let state = {
       currentSessionKey: sessionKey,
-      loadedSessions: { [sessionKey]: createSessionRecord({ sessionKey }) },
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       rendererRouteRecordKeys: {},
       pendingApprovalsBySession: {},
       error: null,
@@ -186,6 +348,15 @@ describe('chat send handlers', () => {
         messageId: 'user-1',
       }),
     ]));
+    const assistantItems = items.filter((item) => item.kind === 'assistant-turn');
+    expect(assistantItems).toHaveLength(1);
+    expect(assistantItems[0]).toMatchObject({
+      key: 'assistant-1',
+      runId: 'run-1',
+      identitySource: 'run',
+      identityMode: 'run',
+      text: 'real assistant text',
+    });
   });
 
   it('accepted attachment send writes a metadata-only renderer receipt keyed by its run', async () => {
@@ -247,15 +418,17 @@ describe('chat send handlers', () => {
       attachments: expect.arrayContaining([expect.objectContaining({ fileName: 'attachment.txt' })]),
     }));
     const record = state.loadedSessions[sessionKey]!;
-    expect(record.runtime.activeRunId).toBeNull();
-    expect(record.runtime.pendingTurnKey).toBeNull();
+    expect(record.runtime.activeRunId).toBe('run-attachment-1');
+    expect(record.runtime.pendingTurnKey).toBe('renderer-assistant:run-attachment-1');
     const items = getSessionItems(state, sessionKey);
-    expect(items).not.toEqual(expect.arrayContaining([
+    expect(items).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: 'assistant-turn',
         role: 'assistant',
-        identitySource: 'client',
-        identityMode: 'client',
+        key: 'renderer-assistant:run-attachment-1',
+        runId: 'run-attachment-1',
+        identitySource: 'run',
+        identityMode: 'run',
         pendingState: 'typing',
       }),
     ]));

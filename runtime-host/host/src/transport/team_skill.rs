@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/skill";
 const AUTHORIZATION_SCOPE: &str = "team:write";
@@ -170,20 +172,20 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn dispatch(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> Delivery {
     match request {
         Request::Authorize { package_root } => owner
-            .authorize_team_skill_selection(package_root)
+            .team_skill_authorize(package_root)
             .await
             .ok()
             .and_then(Result::ok)
             .map_or(Delivery::Unavailable, Delivery::Authorized),
         Request::Validate { selection_id } => owner
-            .validate_team_skill_selection(selection_id)
+            .team_skill_selection_validate(selection_id)
             .await
             .map_or(Delivery::Unavailable, Delivery::Validation),
         Request::DependencyPlan { selection_id } => owner
-            .plan_team_skill_dependencies(selection_id)
+            .team_skill_selection_dependency_plan(selection_id)
             .await
             .map_or(Delivery::Unavailable, Delivery::DependencyPlan),
         Request::Materialize {
@@ -191,7 +193,7 @@ pub(crate) async fn dispatch(owner: &owner::Handle, request: Request) -> Deliver
             team_id,
             idempotency_key,
         } => match owner
-            .materialize_team_skill_selection(selection_id, team_id, idempotency_key)
+            .team_skill_materialize(selection_id, team_id, idempotency_key)
             .await
         {
             Ok(crate::composition::TeamMaterializationCommandOutcome::Materialized) => {

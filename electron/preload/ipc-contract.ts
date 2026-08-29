@@ -13,6 +13,7 @@ export const SHELL_INVOKE_CHANNELS = [
   'window:maximize',
   'window:close',
   'window:isMaximized',
+  'window:setRightDockWidth',
   'shell:openExternal',
   'shell:openResourcePath',
   'shell:openChromeExtensions',

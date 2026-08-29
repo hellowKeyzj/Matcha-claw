@@ -190,7 +190,7 @@ async fn native_session_exists(
 fn map_runtime_receipt_error(error: OpenClawSessionError) -> RuntimeReceiptOutcome {
     match error {
         OpenClawSessionError::TargetRejected => RuntimeReceiptOutcome::Rejected,
-        OpenClawSessionError::Protocol | OpenClawSessionError::UnknownResponse => {
+        OpenClawSessionError::Protocol(_) | OpenClawSessionError::UnknownResponse => {
             RuntimeReceiptOutcome::OutcomeUnknown
         }
         OpenClawSessionError::SessionConnection

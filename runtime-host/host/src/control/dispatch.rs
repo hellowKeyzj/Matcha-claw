@@ -8,14 +8,19 @@ use serde_json::{Value, json};
 
 use crate::{
     RuntimeSessionError, capability_directory,
+    composition::PeerHandle,
+    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    fleet::handle::FleetHandle,
     openclaw_session::{
         AbortChatRequest, AbortChatResponse, ChatHistoryResponse, InvalidPayload, SendChatRequest,
         SendChatResponse,
     },
-    owner::{
-        Handle, TeamNodeEventCommandOutcome, TeamRuntimeCommand, TeamRuntimeCommandOutcome,
-        TeamRuntimeCreateSource, TeamRuntimeStatus,
+    organization::{
+        OrganizationHandle, TeamNodeEventCommandOutcome, TeamRuntimeCommand,
+        TeamRuntimeCommandOutcome, TeamRuntimeCreateSource, TeamRuntimePromptPhase,
+        TeamRuntimeStatus,
     },
+    owner::Handle,
     runtime_driver::RuntimeDriverIdentity,
 };
 
@@ -24,60 +29,72 @@ use super::wire::{Command, CommandInput, CommandOutcome, RejectionCode};
 const INVALID_INPUT_MESSAGE: &str = "Runtime Host command input is invalid.";
 const RUNTIME_UNAVAILABLE_MESSAGE: &str = "Runtime Host is unavailable.";
 const COMMAND_FAILED_MESSAGE: &str = "Runtime Host command failed.";
-const CRON_DESCRIPTOR_NOT_GENERIC_EXECUTE_MESSAGE: &str =
-    "Scheduler Cron operations are not generic execute commands.";
 
-pub(crate) async fn execute(owner: &Handle, command: Command) -> CommandOutcome {
+pub(crate) async fn execute(
+    owner: &Handle,
+    organization: &OrganizationHandle,
+    peer: &PeerHandle,
+    fleet: &FleetHandle,
+    session: &crate::sessions::SessionHandle,
+    platform_runtime: &PlatformRuntimeHandle,
+    plugins: &PluginsHandle,
+    skills: &SkillsHandle,
+    cron: &CronHandle,
+    command: Command,
+) -> CommandOutcome {
     match command {
         Command::HostHealth {} => super::lifecycle::host_health(owner).await,
-        Command::HostRuntimeSnapshot {} => super::lifecycle::runtime_snapshot(owner).await,
+        Command::HostRuntimeSnapshot {} => super::lifecycle::runtime_snapshot(owner, peer).await,
         Command::HostCapabilitiesList {} => capability_directory::list(),
         Command::HostCapabilitiesDescribe { input } => capability_directory::describe(input),
-        Command::HostRuntimeExecute { input } => runtime_host_execute(owner, input).await,
-        Command::OpenClawSkillsExecute { input } => openclaw_skills_execute(owner, input).await,
-        Command::TeamRuntimeExecute { input } => team_runtime_execute(owner, input).await,
-        Command::OpenClawPluginsExecute { input } => openclaw_plugins_execute(owner, input).await,
-        Command::MatchaStatus {} => super::lifecycle::matcha_status(owner).await,
-        Command::MatchaStart {} => super::lifecycle::start_matcha(owner).await,
-        Command::MatchaStop {} => super::lifecycle::stop_matcha(owner).await,
-        Command::MatchaRestart {} => super::lifecycle::restart_matcha(owner).await,
-        Command::OpenClawStatus {} => super::lifecycle::status(owner).await,
-        Command::OpenClawPluginsCatalog {} => plugins_catalog(owner).await,
-        Command::OpenClawPluginsRuntime {} => plugins_runtime(owner).await,
-        Command::OpenClawPluginsSetEnabled { input } => plugins_set_enabled(owner, input).await,
-        Command::OpenClawPluginsOperation { input } => plugins_operation(owner, input).await,
-        Command::OpenClawEnvironmentStatus {} => openclaw_environment_status(owner).await,
-        Command::OpenClawRuntimePaths {} => openclaw_runtime_paths(owner).await,
-        Command::OpenClawCliCommand {} => openclaw_cli_command(owner).await,
-        Command::OpenClawToolPermissionGet {} => openclaw_tool_permission_get(owner).await,
+        Command::OpenClawSkillsExecute { input } => openclaw_skills_execute(skills, input).await,
+        Command::TeamRuntimeExecute { input } => team_runtime_execute(organization, input).await,
+        Command::OpenClawPluginsExecute { input } => openclaw_plugins_execute(plugins, input).await,
+        Command::MatchaStatus {} => super::lifecycle::matcha_status(peer).await,
+        Command::MatchaStart {} => super::lifecycle::start_matcha(peer).await,
+        Command::MatchaStop {} => super::lifecycle::stop_matcha(peer).await,
+        Command::MatchaRestart {} => super::lifecycle::restart_matcha(peer).await,
+        Command::OpenClawStatus {} => super::lifecycle::status(peer).await,
+        Command::OpenClawPluginsCatalog {} => plugins_catalog(plugins).await,
+        Command::OpenClawPluginsRuntime {} => plugins_runtime(plugins).await,
+        Command::OpenClawPluginsSetEnabled { input } => plugins_set_enabled(plugins, input).await,
+        Command::OpenClawPluginsOperation { input } => plugins_operation(plugins, input).await,
+        Command::OpenClawEnvironmentStatus {} => {
+            openclaw_environment_status(platform_runtime).await
+        }
+        Command::OpenClawRuntimePaths {} => openclaw_runtime_paths(platform_runtime).await,
+        Command::OpenClawCliCommand {} => openclaw_cli_command(platform_runtime).await,
+        Command::OpenClawToolPermissionGet {} => {
+            openclaw_tool_permission_get(platform_runtime).await
+        }
         Command::OpenClawToolPermissionSet { input } => {
-            openclaw_tool_permission_set(owner, input).await
+            openclaw_tool_permission_set(platform_runtime, input).await
         }
-        Command::OpenClawToolchainStatus {} => openclaw_toolchain_status(owner).await,
-        Command::OpenClawToolchainInstallUv {} => openclaw_toolchain_install_uv(owner).await,
-        Command::OpenClawToolchainInstallSubmit {} => {
-            openclaw_toolchain_install_submit(owner).await
+        Command::OpenClawToolchainStatus {} => openclaw_toolchain_status(platform_runtime).await,
+        Command::OpenClawToolchainInstallUv {} => {
+            openclaw_toolchain_install_uv(platform_runtime).await
         }
-        Command::OpenClawToolchainJobGet { input } => {
-            openclaw_toolchain_job_get(owner, input).await
+        Command::OpenClawSubagentTemplateCatalog {} => {
+            subagent_template_catalog(platform_runtime).await
         }
-        Command::OpenClawSubagentTemplateCatalog {} => subagent_template_catalog(owner).await,
-        Command::OpenClawSubagentTemplate { input } => subagent_template(owner, input).await,
-        Command::OpenClawStart {} => super::lifecycle::start(owner).await,
-        Command::OpenClawStop {} => super::lifecycle::stop(owner).await,
-        Command::OpenClawRestart {} => super::lifecycle::restart(owner).await,
-        Command::OpenClawLogs { input } => super::lifecycle::logs(owner, input).await,
-        Command::OpenClawControlReady {} => super::lifecycle::control_ready(owner).await,
-        Command::OpenClawGatewayHealth {} => super::lifecycle::gateway_health(owner).await,
-        Command::OpenClawGatewayStatus {} => super::lifecycle::gateway_status(owner).await,
-        Command::OpenClawControlUiUrl {} => super::lifecycle::control_ui_url(owner).await,
+        Command::OpenClawSubagentTemplate { input } => {
+            subagent_template(platform_runtime, input).await
+        }
+        Command::OpenClawStart {} => super::lifecycle::start(peer).await,
+        Command::OpenClawStop {} => super::lifecycle::stop(peer).await,
+        Command::OpenClawRestart {} => super::lifecycle::restart(peer).await,
+        Command::OpenClawLogs { input } => super::lifecycle::logs(peer, input).await,
+        Command::OpenClawControlReady {} => super::lifecycle::control_ready(peer).await,
+        Command::OpenClawGatewayHealth {} => super::lifecycle::gateway_health(peer).await,
+        Command::OpenClawGatewayStatus {} => super::lifecycle::gateway_status(peer).await,
+        Command::OpenClawControlUiUrl {} => super::lifecycle::control_ui_url(peer).await,
         Command::OpenClawManualCronTrigger { input } => {
-            manually_trigger_openclaw_cron(owner, input).await
+            manually_trigger_openclaw_cron(cron, input).await
         }
-        Command::OpenClawChatHistory { input } => history_openclaw_chat(owner, input).await,
-        Command::OpenClawChatSend { input } => send_openclaw_chat(owner, input).await,
-        Command::OpenClawChatAbort { input } => abort_openclaw_chat(owner, input).await,
-        Command::FleetCredentialsWrite { input } => fleet_credentials_write(owner, input).await,
+        Command::OpenClawChatHistory { input } => history_openclaw_chat(session, input).await,
+        Command::OpenClawChatSend { input } => send_openclaw_chat(session, input).await,
+        Command::OpenClawChatAbort { input } => abort_openclaw_chat(session, input).await,
+        Command::FleetCredentialsWrite { input } => fleet_credentials_write(fleet, input).await,
     }
 }
 
@@ -91,78 +108,7 @@ struct CapabilityExecuteRequest {
     input: Value,
 }
 
-async fn runtime_host_execute(owner: &Handle, input: CommandInput) -> CommandOutcome {
-    let request = match decode::<CapabilityExecuteRequest>(input) {
-        Ok(request) => request,
-        Err(_) => return invalid_input(),
-    };
-    if is_scheduler_cron_descriptor_execute_request(&request) {
-        return scheduler_cron_not_generic_execute();
-    }
-    if request.id != "runtime.host" || !is_native_runtime_scope(&request.scope) {
-        return invalid_input();
-    }
-    match request.operation_id.as_str() {
-        "runtimeHost.prepareGatewayLaunch" => {
-            if !is_gateway_control_target(&request.target) || !request.input.is_object() {
-                return invalid_input();
-            }
-            super::lifecycle::start(owner).await
-        }
-        "runtimeHost.gatewayLifecycle" => {
-            if !is_gateway_control_target(&request.target) || !request.input.is_object() {
-                return invalid_input();
-            }
-            super::lifecycle::status(owner).await
-        }
-        "runtimeHost.gatewayReady" => {
-            if !is_gateway_control_target(&request.target) || !request.input.is_object() {
-                return invalid_input();
-            }
-            super::lifecycle::control_ready(owner).await
-        }
-        "runtimeHost.gatewayControlUiAutoApprove" => {
-            if !is_gateway_control_target(&request.target) || !request.input.is_object() {
-                return invalid_input();
-            }
-            super::lifecycle::control_ui_url(owner).await
-        }
-        "runtimeHost.jobGet" => {
-            let Some(target_job_id) = runtime_job_target_id(&request.target) else {
-                return invalid_input();
-            };
-            if request.input.get("jobId").and_then(Value::as_str) != Some(target_job_id) {
-                return invalid_input();
-            }
-            openclaw_toolchain_job_get(owner, CommandInput(request.input)).await
-        }
-        _ => unavailable(),
-    }
-}
-
-fn is_scheduler_cron_descriptor_execute_request(request: &CapabilityExecuteRequest) -> bool {
-    request.id == "scheduler.cron"
-        && is_native_runtime_scope(&request.scope)
-        && matches!(
-            request.operation_id.as_str(),
-            "cron.trigger" | "cron.create" | "cron.update" | "cron.delete" | "cron.toggle"
-        )
-}
-
-fn is_gateway_control_target(value: &Value) -> bool {
-    value.as_object().is_some_and(|target| {
-        target.len() == 1 && target.get("kind") == Some(&json!("gateway-control"))
-    })
-}
-
-fn runtime_job_target_id(value: &Value) -> Option<&str> {
-    value.as_object().and_then(|target| {
-        (target.len() == 2 && target.get("kind") == Some(&json!("runtime-job")))
-            .then(|| target.get("jobId").and_then(Value::as_str))?
-    })
-}
-
-async fn team_runtime_execute(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn team_runtime_execute(owner: &OrganizationHandle, input: CommandInput) -> CommandOutcome {
     let request = match decode::<CapabilityExecuteRequest>(input) {
         Ok(request) if request.id == "team.runtime" => request,
         _ => return invalid_input(),
@@ -189,9 +135,469 @@ async fn team_runtime_execute(owner: &Handle, input: CommandInput) -> CommandOut
         Err(TeamRuntimeDecodeError::Unavailable) => return unavailable(),
         Err(TeamRuntimeDecodeError::InvalidInput) => return invalid_input(),
     };
-    match owner.team_runtime(command).await {
-        Ok(outcome) => team_runtime_outcome(outcome, team_id.as_deref(), run_id.as_deref()),
-        Err(_) => unavailable(),
+    let outcome = match execute_team_runtime(owner, command).await {
+        Some(outcome) => outcome,
+        None => return unavailable(),
+    };
+    team_runtime_outcome(outcome, team_id.as_deref(), run_id.as_deref())
+}
+
+async fn execute_team_runtime(
+    owner: &OrganizationHandle,
+    command: TeamRuntimeCommand,
+) -> Option<TeamRuntimeCommandOutcome> {
+    Some(match command {
+        TeamRuntimeCommand::PackageValidate { package_root } => {
+            TeamRuntimeCommandOutcome::PackageValidate(
+                owner.team_skill_validate(package_root).await.ok()?,
+            )
+        }
+        TeamRuntimeCommand::DependencyPlan { package_root } => {
+            TeamRuntimeCommandOutcome::DependencyPlan(
+                owner.team_skill_dependency_plan(package_root).await.ok()?,
+            )
+        }
+        TeamRuntimeCommand::ProvisionAgents {
+            package_root,
+            team_id: Some(team_id),
+            idempotency_key,
+            source: TeamRuntimeCreateSource::TeamSkill,
+        } => {
+            let selection_id = match owner.team_skill_authorize(package_root).await.ok()? {
+                Ok(selection_id) => selection_id,
+                Err(organization::package::TeamSkillSelectionError::InvalidSelection) => {
+                    return Some(TeamRuntimeCommandOutcome::ProvisionAgents(
+                        crate::composition::TeamMaterializationCommandOutcome::Rejected,
+                    ));
+                }
+                Err(organization::package::TeamSkillSelectionError::Unavailable) => {
+                    return Some(TeamRuntimeCommandOutcome::ProvisionAgents(
+                        crate::composition::TeamMaterializationCommandOutcome::Unavailable,
+                    ));
+                }
+            };
+            TeamRuntimeCommandOutcome::ProvisionAgents(
+                owner
+                    .team_skill_materialize(selection_id, team_id, idempotency_key)
+                    .await
+                    .ok()?,
+            )
+        }
+        TeamRuntimeCommand::ProvisionAgents { .. } => TeamRuntimeCommandOutcome::ProvisionAgents(
+            crate::composition::TeamMaterializationCommandOutcome::Rejected,
+        ),
+        TeamRuntimeCommand::Delete {
+            team_id,
+            idempotency_key,
+            observed_at,
+        } => TeamRuntimeCommandOutcome::Delete(
+            owner
+                .team_delete(team_id, idempotency_key, observed_at)
+                .await
+                .ok()?,
+        ),
+        TeamRuntimeCommand::RunCreate {
+            team_id,
+            package_root,
+            run_id,
+            idempotency_key,
+            source,
+        } => {
+            let run_id = run_id.unwrap_or_else(|| {
+                organization::GraphRunId::new(format!("team-run:{}", idempotency_key.as_str()))
+            });
+            match source {
+                TeamRuntimeCreateSource::TeamSkill => {
+                    let selection_id = match owner.team_skill_authorize(package_root).await.ok()? {
+                        Ok(selection_id) => selection_id,
+                        Err(organization::package::TeamSkillSelectionError::InvalidSelection) => {
+                            return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                                TeamRuntimeStatus::Rejected,
+                            )));
+                        }
+                        Err(organization::package::TeamSkillSelectionError::Unavailable) => {
+                            return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                                TeamRuntimeStatus::Unavailable,
+                            )));
+                        }
+                    };
+                    let team_id = match team_id {
+                        Some(team_id) => team_id,
+                        None => match owner
+                            .team_skill_selection_validate(selection_id.clone())
+                            .await
+                            .ok()?
+                        {
+                            organization::package::TeamSkillPackageValidation::Valid {
+                                package,
+                            } => match organization::TeamId::try_new(package.name().to_owned()) {
+                                Ok(team_id) => team_id,
+                                Err(_) => {
+                                    return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                                        TeamRuntimeStatus::Rejected,
+                                    )));
+                                }
+                            },
+                            organization::package::TeamSkillPackageValidation::Invalid => {
+                                return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                                    TeamRuntimeStatus::Rejected,
+                                )));
+                            }
+                            organization::package::TeamSkillPackageValidation::Unavailable => {
+                                return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                                    TeamRuntimeStatus::Unavailable,
+                                )));
+                            }
+                        },
+                    };
+                    match owner
+                        .team_skill_materialize(
+                            selection_id,
+                            team_id.clone(),
+                            idempotency_key.clone(),
+                        )
+                        .await
+                        .ok()?
+                    {
+                        crate::composition::TeamMaterializationCommandOutcome::Materialized => {
+                            TeamRuntimeCommandOutcome::RunCreate(
+                                owner
+                                    .run_create_from_team_template(
+                                        team_id,
+                                        run_id,
+                                        idempotency_key,
+                                        now_millis(),
+                                    )
+                                    .await
+                                    .ok()?,
+                            )
+                        }
+                        outcome => TeamRuntimeCommandOutcome::RunCreate(Err(
+                            team_materialization_status(outcome),
+                        )),
+                    }
+                }
+                TeamRuntimeCreateSource::Manual => {
+                    let Some(team_id) = team_id else {
+                        return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
+                            TeamRuntimeStatus::Rejected,
+                        )));
+                    };
+                    TeamRuntimeCommandOutcome::RunCreate(
+                        owner
+                            .run_create_from_team_template(
+                                team_id,
+                                run_id,
+                                idempotency_key,
+                                now_millis(),
+                            )
+                            .await
+                            .ok()?,
+                    )
+                }
+            }
+        }
+        TeamRuntimeCommand::RunList { team_id } => {
+            TeamRuntimeCommandOutcome::RunList(owner.run_list(team_id).await.ok()?)
+        }
+        TeamRuntimeCommand::TriggerList { team_id } => {
+            TeamRuntimeCommandOutcome::TriggerList(owner.trigger_list(team_id).await.ok()?)
+        }
+        TeamRuntimeCommand::WebhookTriggerFire {
+            webhook_path,
+            idempotency_key,
+            fired_at,
+        } => TeamRuntimeCommandOutcome::WebhookTriggerFire(
+            owner
+                .webhook_trigger_fire(webhook_path, idempotency_key, fired_at)
+                .await
+                .ok()?,
+        ),
+        TeamRuntimeCommand::RunSnapshot {
+            team_id,
+            run_id,
+            event_cursor,
+            event_limit,
+        } => match owner
+            .team_run_public_snapshot(team_id, run_id, event_cursor, event_limit)
+            .await
+            .ok()?
+        {
+            Some(outcome) => TeamRuntimeCommandOutcome::RunSnapshot(outcome),
+            None => TeamRuntimeCommandOutcome::RunSnapshotInvalidInput,
+        },
+        TeamRuntimeCommand::GraphSave {
+            command,
+            definition,
+        } => {
+            TeamRuntimeCommandOutcome::GraphSave(owner.graph_save(*command, definition).await.ok()?)
+        }
+        TeamRuntimeCommand::GraphPatch { command, patch } => {
+            TeamRuntimeCommandOutcome::GraphPatch(owner.graph_patch(*command, patch).await.ok()?)
+        }
+        TeamRuntimeCommand::GraphContext {
+            team_id,
+            run_id,
+            view,
+            node_execution_id,
+        } => {
+            let outcome = if let Some(team_id) = team_id {
+                match organization::TeamGraphContextQuery::new(
+                    team_id,
+                    run_id,
+                    view,
+                    node_execution_id,
+                ) {
+                    Ok(query) => owner
+                        .graph_context(query)
+                        .await
+                        .unwrap_or(organization::TeamGraphContextResult::Unavailable),
+                    Err(_) => organization::TeamGraphContextResult::Unavailable,
+                }
+            } else {
+                organization::TeamGraphContextResult::Unavailable
+            };
+            TeamRuntimeCommandOutcome::GraphContext(outcome)
+        }
+        TeamRuntimeCommand::GraphExportYaml { run_id } => {
+            let outcome = owner
+                .graph_yaml(run_id)
+                .await
+                .ok()?
+                .ok_or(TeamRuntimeStatus::Unavailable);
+            TeamRuntimeCommandOutcome::GraphExportYaml(outcome)
+        }
+        TeamRuntimeCommand::GraphImportYaml {
+            command,
+            definition,
+        } => TeamRuntimeCommandOutcome::GraphImportYaml(
+            owner.graph_save(*command, definition).await.ok()?,
+        ),
+        TeamRuntimeCommand::TriggerFire { request, fired_at } => {
+            TeamRuntimeCommandOutcome::TriggerFire(
+                owner.trigger_fire(request, fired_at).await.ok()?,
+            )
+        }
+        TeamRuntimeCommand::RoleMessageSubmit { admission } => {
+            TeamRuntimeCommandOutcome::RoleMessageSubmit(
+                owner.role_message_submit(admission).await.ok()?,
+            )
+        }
+        TeamRuntimeCommand::RoleMessageSubmitForRun {
+            run_id,
+            role_id,
+            message,
+            idempotency_key,
+            requested_at,
+        } => TeamRuntimeCommandOutcome::RoleMessageSubmitForRun(
+            owner
+                .role_message_submit_for_run(
+                    run_id,
+                    role_id,
+                    message,
+                    idempotency_key,
+                    requested_at,
+                )
+                .await
+                .ok()?,
+        ),
+        TeamRuntimeCommand::NodePromptRetryDue { run_id } => {
+            TeamRuntimeCommandOutcome::NodePromptRetryDue(
+                owner.node_prompt_retry_due(run_id).await.ok()?,
+            )
+        }
+        TeamRuntimeCommand::NodePromptSettled {
+            run_id,
+            session_key,
+            prompt_run_id,
+            phase,
+        } => TeamRuntimeCommandOutcome::NodePromptSettled(
+            owner
+                .node_prompt_settled(
+                    run_id,
+                    session_key.as_str().to_owned(),
+                    prompt_run_id.as_str().to_owned(),
+                    phase,
+                    now_millis(),
+                )
+                .await
+                .ok()?,
+        ),
+        TeamRuntimeCommand::NodeEvent {
+            run_id,
+            node_execution_id,
+            event,
+            summary,
+            role_id,
+            requested_action,
+            idempotency_key,
+            terminal_resolution,
+            output_port,
+        } => TeamRuntimeCommandOutcome::NodeEvent(
+            execute_team_node_event(
+                owner,
+                run_id,
+                node_execution_id,
+                event,
+                summary,
+                role_id,
+                requested_action,
+                idempotency_key,
+                terminal_resolution,
+                output_port,
+            )
+            .await,
+        ),
+        TeamRuntimeCommand::RunDiagnostics { run_id } => TeamRuntimeCommandOutcome::RunDiagnostics(
+            owner.team_run_diagnostics(run_id).await.ok()?,
+        ),
+        TeamRuntimeCommand::RunDecisionSubmit {
+            run_id,
+            decision,
+            note,
+            idempotency_key,
+            resolved_at,
+        } => {
+            let command = organization::TeamDecisionCommand::try_new(
+                format!("team-decision-{}", idempotency_key.as_str()),
+                run_id.as_str().to_owned(),
+                "run",
+                decision,
+                note,
+                idempotency_key.as_str().to_owned(),
+                resolved_at,
+            );
+            TeamRuntimeCommandOutcome::RunDecisionSubmit(match command {
+                Ok(command) => owner
+                    .decision_submit(command)
+                    .await
+                    .ok()?
+                    .map_err(|_| TeamRuntimeStatus::Unavailable),
+                Err(_) => Err(TeamRuntimeStatus::Rejected),
+            })
+        }
+        TeamRuntimeCommand::Resume { team_id } => {
+            TeamRuntimeCommandOutcome::Resume(owner.resume(team_id).await.ok()?)
+        }
+        TeamRuntimeCommand::ApprovalResolve { command } => {
+            TeamRuntimeCommandOutcome::ApprovalResolve(owner.approval_resolve(command).await.ok()?)
+        }
+        TeamRuntimeCommand::RunCancel {
+            run_id,
+            idempotency_key,
+            requested_at,
+        } => TeamRuntimeCommandOutcome::RunCancel(
+            owner
+                .run_cancel(run_id, idempotency_key.as_str().to_owned(), requested_at)
+                .await
+                .ok()?,
+        ),
+        TeamRuntimeCommand::RunDelete {
+            run_id,
+            idempotency_key,
+            tombstoned_at,
+        } => TeamRuntimeCommandOutcome::RunDelete(
+            owner
+                .run_delete_and_purge(run_id, idempotency_key.as_str().to_owned(), tombstoned_at)
+                .await
+                .ok()?,
+        ),
+    })
+}
+
+async fn execute_team_node_event(
+    owner: &OrganizationHandle,
+    run_id: organization::GraphRunId,
+    node_execution_id: organization::run::event::OpaqueId,
+    event: organization::run::event::OpaqueId,
+    summary: String,
+    role_id: Option<organization::run::event::OpaqueId>,
+    requested_action: Option<String>,
+    idempotency_key: organization::IdempotencyKey,
+    terminal_resolution: Option<crate::composition::team_run_mcp::TeamNodeTerminalResolution>,
+    output_port: Option<String>,
+) -> Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus> {
+    if matches!(event.as_str(), "complete" | "reject") {
+        let Some(terminal) = terminal_resolution else {
+            return Err(TeamRuntimeStatus::Rejected);
+        };
+        return owner
+            .node_terminal_resolve(
+                run_id,
+                node_execution_id,
+                event.as_str().to_owned(),
+                Some(terminal),
+                summary,
+                output_port,
+                idempotency_key.as_str().to_owned(),
+                now_millis(),
+            )
+            .await
+            .map_err(|_| TeamRuntimeStatus::Unavailable)?
+            .map(TeamNodeEventCommandOutcome::Terminal)
+            .map_err(|_| TeamRuntimeStatus::Unavailable);
+    }
+    let event = match event.as_str() {
+        "progress" => organization::TeamNodeEvent::progress(node_execution_id, role_id),
+        "request_input" => organization::TeamNodeEvent::request_input(node_execution_id, role_id),
+        "request_approval" => match requested_action.as_deref().and_then(team_approval_action) {
+            Some(action) => {
+                organization::TeamNodeEvent::request_approval(node_execution_id, role_id, action)
+            }
+            None => return Err(TeamRuntimeStatus::Rejected),
+        },
+        _ => return Err(TeamRuntimeStatus::Rejected),
+    };
+    let command_id = organization::run::event::OpaqueId::try_new(format!(
+        "team-node-event-{}",
+        idempotency_key.as_str()
+    ))
+    .map_err(|_| TeamRuntimeStatus::Rejected)?;
+    let event = organization::TeamNodeEventProducer::non_terminal(
+        organization::run::event::OpaqueId::try_new(run_id.as_str())
+            .map_err(|_| TeamRuntimeStatus::Rejected)?,
+        command_id,
+        organization::run::event::OpaqueId::try_new(idempotency_key.as_str().to_owned())
+            .map_err(|_| TeamRuntimeStatus::Rejected)?,
+        event,
+        now_millis(),
+    )
+    .map_err(|_| TeamRuntimeStatus::Rejected)?;
+    let (command, event) = event.into_parts();
+    owner
+        .node_event(command, event)
+        .await
+        .map_err(|_| TeamRuntimeStatus::Unavailable)?
+        .map(TeamNodeEventCommandOutcome::NonTerminal)
+        .map_err(|_| TeamRuntimeStatus::Unavailable)
+}
+
+fn team_approval_action(value: &str) -> Option<organization::ApprovalAction> {
+    match value {
+        "continue_node" => Some(organization::ApprovalAction::ContinueNode),
+        "execute_tool" => Some(organization::ApprovalAction::ExecuteTool),
+        "publish_result" => Some(organization::ApprovalAction::PublishResult),
+        "external_action" => Some(organization::ApprovalAction::ExternalAction),
+        _ => None,
+    }
+}
+
+fn team_materialization_status(
+    outcome: crate::composition::TeamMaterializationCommandOutcome,
+) -> TeamRuntimeStatus {
+    match outcome {
+        crate::composition::TeamMaterializationCommandOutcome::Materialized => {
+            TeamRuntimeStatus::OutcomeUnknown
+        }
+        crate::composition::TeamMaterializationCommandOutcome::Rejected => {
+            TeamRuntimeStatus::Rejected
+        }
+        crate::composition::TeamMaterializationCommandOutcome::OutcomeUnknown => {
+            TeamRuntimeStatus::OutcomeUnknown
+        }
+        crate::composition::TeamMaterializationCommandOutcome::Unavailable => {
+            TeamRuntimeStatus::Unavailable
+        }
     }
 }
 
@@ -1330,21 +1736,18 @@ fn decode_team_node_prompt_settled(
     input: &serde_json::Map<String, Value>,
     target: &Value,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    if !(target.is_null()
-        || target
-            .as_object()
-            .is_some_and(|target| target.len() == 1 && target.get("kind") == Some(&json!("none"))))
-        || input.len() != 3
-    {
+    let (_, run_id) = decode_team_target(target, input, false)?;
+    if input.len() != 4 {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     let phase = match input.get("phase").and_then(Value::as_str) {
-        Some("final") => crate::owner::TeamRuntimePromptPhase::Final,
-        Some("error") => crate::owner::TeamRuntimePromptPhase::Error,
-        Some("aborted") => crate::owner::TeamRuntimePromptPhase::Aborted,
+        Some("final") => TeamRuntimePromptPhase::Final,
+        Some("error") => TeamRuntimePromptPhase::Error,
+        Some("aborted") => TeamRuntimePromptPhase::Aborted,
         _ => return Err(TeamRuntimeDecodeError::InvalidInput),
     };
     Ok(TeamRuntimeCommand::NodePromptSettled {
+        run_id,
         session_key: decode_opaque(input, "sessionKey")?,
         prompt_run_id: decode_opaque(input, "promptRunId")?,
         phase,
@@ -2083,7 +2486,7 @@ fn node_prompt_retry_due_invalid_reason(
     }
 }
 
-async fn openclaw_skills_execute(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn openclaw_skills_execute(skills: &SkillsHandle, input: CommandInput) -> CommandOutcome {
     let request = match decode::<CapabilityExecuteRequest>(input) {
         Ok(request) if request.id == "skill.management" => request,
         _ => return invalid_input(),
@@ -2093,10 +2496,10 @@ async fn openclaw_skills_execute(owner: &Handle, input: CommandInput) -> Command
     {
         return invalid_input();
     }
-    dispatch_skill_operation(owner, request.operation_id, request.target, request.input).await
+    dispatch_skill_operation(skills, request.operation_id, request.target, request.input).await
 }
 
-async fn openclaw_plugins_execute(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn openclaw_plugins_execute(plugins: &PluginsHandle, input: CommandInput) -> CommandOutcome {
     let request = match decode::<CapabilityExecuteRequest>(input) {
         Ok(request) if request.id == "plugin.runtime" => request,
         _ => return invalid_input(),
@@ -2113,10 +2516,7 @@ async fn openclaw_plugins_execute(owner: &Handle, input: CommandInput) -> Comman
     let Some(enabled) = request.input.get("enabled").and_then(Value::as_bool) else {
         return invalid_input();
     };
-    match owner
-        .plugins_set_enabled(plugin_id.to_owned(), enabled)
-        .await
-    {
+    match plugins.set_enabled(plugin_id.to_owned(), enabled).await {
         Ok(crate::plugin::ConfigurationOutcome::Configured) => {
             CommandOutcome::succeeded(json!({ "success": true, "outcome": "configured" }))
         }
@@ -2277,7 +2677,7 @@ fn is_plugin_target(target: &Value, input: &Value) -> bool {
 }
 
 async fn dispatch_skill_operation(
-    owner: &Handle,
+    skills: &SkillsHandle,
     operation_id: String,
     target: Value,
     input: Value,
@@ -2305,7 +2705,7 @@ async fn dispatch_skill_operation(
                 Ok(command) => command,
                 Err(_) => return invalid_input(),
             };
-            skill_management_outcome(owner.manage_skills(command).await)
+            skill_management_outcome(skills.manage_skills(command).await)
         }
         "skills.updateState" => {
             let Some(skill_key) = input.get("skillKey").and_then(Value::as_str) else {
@@ -2323,7 +2723,7 @@ async fn dispatch_skill_operation(
                 Ok(command) => command,
                 Err(_) => return invalid_input(),
             };
-            skill_management_outcome(owner.manage_skills(command).await)
+            skill_management_outcome(skills.manage_skills(command).await)
         }
         "skills.updateBatchState" => {
             let Some(skill_keys) = input
@@ -2358,14 +2758,14 @@ async fn dispatch_skill_operation(
                     Ok(command) => command,
                     Err(_) => return invalid_input(),
                 };
-                outcome = skill_management_outcome(owner.manage_skills(command).await);
+                outcome = skill_management_outcome(skills.manage_skills(command).await);
                 if !matches!(outcome, CommandOutcome::Succeeded { .. }) {
                     return outcome;
                 }
             }
             outcome
         }
-        "skills.refreshStatus" => skill_status_outcome(owner.skill_status().await),
+        "skills.refreshStatus" => skill_status_outcome(skills.skill_status().await),
         "skills.exportBundles" => {
             let Some(skill_keys) = input
                 .get("skillKeys")
@@ -2380,7 +2780,7 @@ async fn dispatch_skill_operation(
             else {
                 return invalid_input();
             };
-            match owner
+            match skills
                 .skill_bundles(crate::skill_bundle::Command::Export { skill_keys })
                 .await
             {
@@ -2403,7 +2803,7 @@ async fn dispatch_skill_operation(
             let Some(bundles) = decode_skill_bundles(&input) else {
                 return invalid_input();
             };
-            match owner
+            match skills
                 .skill_bundles(crate::skill_bundle::Command::Import { bundles })
                 .await
             {
@@ -2439,7 +2839,7 @@ async fn dispatch_skill_operation(
                 Ok(command) => command,
                 Err(_) => return invalid_input(),
             };
-            match owner.manage_skills(command).await {
+            match skills.manage_skills(command).await {
                 Ok(crate::skill_management::Outcome::Readme(Ok(receipt))) => {
                     CommandOutcome::succeeded(json!({
                         "success": true,
@@ -2497,7 +2897,7 @@ fn decode_skill_bundles(input: &Value) -> Option<Vec<crate::skill_bundle::Bundle
 }
 
 fn skill_management_outcome(
-    result: Result<crate::skill_management::Outcome, crate::owner::Error>,
+    result: Result<crate::skill_management::Outcome, ()>,
 ) -> CommandOutcome {
     match result {
         Ok(crate::skill_management::Outcome::Mutation(
@@ -2523,9 +2923,7 @@ fn skill_management_outcome(
     }
 }
 
-fn skill_status_outcome(
-    result: Result<crate::skill_status::Outcome, crate::owner::Error>,
-) -> CommandOutcome {
+fn skill_status_outcome(result: Result<crate::skill_status::Outcome, ()>) -> CommandOutcome {
     match result {
         Ok(crate::skill_status::Outcome::Available(catalog)) => CommandOutcome::succeeded(json!({
             "skills": catalog.entries.iter().map(|entry| json!({
@@ -2546,15 +2944,15 @@ fn skill_status_outcome(
     }
 }
 
-async fn plugins_catalog(owner: &Handle) -> CommandOutcome {
-    match owner.plugins_catalog().await {
+async fn plugins_catalog(plugins: &PluginsHandle) -> CommandOutcome {
+    match plugins.catalog().await {
         Ok(Ok(catalog)) => CommandOutcome::succeeded(json!({ "result": catalog })),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
 }
 
-async fn plugins_runtime(owner: &Handle) -> CommandOutcome {
-    match owner.plugins_runtime().await {
+async fn plugins_runtime(plugins: &PluginsHandle) -> CommandOutcome {
+    match plugins.runtime().await {
         Ok(Ok(runtime)) => CommandOutcome::succeeded(json!({ "result": runtime })),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
@@ -2567,13 +2965,13 @@ struct PluginSetEnabledRequest {
     enabled: bool,
 }
 
-async fn plugins_set_enabled(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn plugins_set_enabled(plugins: &PluginsHandle, input: CommandInput) -> CommandOutcome {
     let request: PluginSetEnabledRequest = match decode::<PluginSetEnabledRequest>(input) {
         Ok(request) if !request.plugin_id.trim().is_empty() => request,
         Err(_) | Ok(_) => return invalid_input(),
     };
-    match owner
-        .plugins_set_enabled(request.plugin_id, request.enabled)
+    match plugins
+        .set_enabled(request.plugin_id, request.enabled)
         .await
     {
         Ok(crate::plugin::ConfigurationOutcome::Configured) => {
@@ -2597,7 +2995,7 @@ struct PluginOperationRequest {
     plugin_id: String,
 }
 
-async fn plugins_operation(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn plugins_operation(plugins: &PluginsHandle, input: CommandInput) -> CommandOutcome {
     let request: PluginOperationRequest = match decode::<PluginOperationRequest>(input) {
         Ok(request) if !request.plugin_id.trim().is_empty() => request,
         Err(_) | Ok(_) => return invalid_input(),
@@ -2608,7 +3006,7 @@ async fn plugins_operation(owner: &Handle, input: CommandInput) -> CommandOutcom
         "uninstall" => crate::plugin::Operation::Uninstall,
         _ => return invalid_input(),
     };
-    match owner.plugins_operation(operation, request.plugin_id).await {
+    match plugins.operation(operation, request.plugin_id).await {
         Ok(crate::plugin::OperationOutcome::Configured) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "configured" } }))
         }
@@ -2622,15 +3020,15 @@ async fn plugins_operation(owner: &Handle, input: CommandInput) -> CommandOutcom
     }
 }
 
-async fn openclaw_environment_status(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_installation_status().await {
+async fn openclaw_environment_status(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.installation_status().await {
         Ok(Some(status)) => CommandOutcome::succeeded(json!({ "result": status })),
         Ok(None) | Err(_) => unavailable(),
     }
 }
 
-async fn openclaw_runtime_paths(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_runtime_paths().await {
+async fn openclaw_runtime_paths(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.runtime_paths().await {
         Ok(Ok(paths)) => CommandOutcome::succeeded(json!({
             "result": {
                 "openclawDirectory": paths.openclaw_directory(),
@@ -2644,8 +3042,8 @@ async fn openclaw_runtime_paths(owner: &Handle) -> CommandOutcome {
     }
 }
 
-async fn openclaw_cli_command(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_cli_command().await {
+async fn openclaw_cli_command(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.cli_command().await {
         Ok(Ok(command)) => {
             CommandOutcome::succeeded(json!({ "result": { "command": command.command() } }))
         }
@@ -2653,8 +3051,8 @@ async fn openclaw_cli_command(owner: &Handle) -> CommandOutcome {
     }
 }
 
-async fn openclaw_tool_permission_get(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_tool_permission_mode().await {
+async fn openclaw_tool_permission_get(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.tool_permission_mode().await {
         Ok(Ok(mode)) => CommandOutcome::succeeded(json!({ "result": { "mode": mode } })),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
@@ -2666,12 +3064,18 @@ struct ToolPermissionModeRequest {
     mode: openclaw::projection::tool_permission::Mode,
 }
 
-async fn openclaw_tool_permission_set(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn openclaw_tool_permission_set(
+    platform_runtime: &PlatformRuntimeHandle,
+    input: CommandInput,
+) -> CommandOutcome {
     let request = match decode::<ToolPermissionModeRequest>(input) {
         Ok(request) => request,
         Err(_) => return invalid_input(),
     };
-    match owner.set_open_claw_tool_permission_mode(request.mode).await {
+    match platform_runtime
+        .set_tool_permission_mode(request.mode)
+        .await
+    {
         Ok(Ok(openclaw::projection::tool_permission::Effect::Unchanged)) => {
             CommandOutcome::succeeded(
                 json!({ "result": { "mode": request.mode, "changed": false } }),
@@ -2687,8 +3091,8 @@ async fn openclaw_tool_permission_set(owner: &Handle, input: CommandInput) -> Co
     }
 }
 
-async fn openclaw_toolchain_status(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_toolchain_status().await {
+async fn openclaw_toolchain_status(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.toolchain_status().await {
         Ok(Ok(status)) => CommandOutcome::succeeded(json!({
             "result": serde_json::to_value(status).expect("toolchain status serializable")
         })),
@@ -2696,8 +3100,8 @@ async fn openclaw_toolchain_status(owner: &Handle) -> CommandOutcome {
     }
 }
 
-async fn openclaw_toolchain_install_uv(owner: &Handle) -> CommandOutcome {
-    match owner.install_open_claw_uv().await {
+async fn openclaw_toolchain_install_uv(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.install_uv().await {
         Ok(Ok(openclaw::toolchain::UvInstallOutcome::Installed)) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "installed" } }))
         }
@@ -2713,38 +3117,8 @@ async fn openclaw_toolchain_install_uv(owner: &Handle) -> CommandOutcome {
     }
 }
 
-async fn openclaw_toolchain_install_submit(owner: &Handle) -> CommandOutcome {
-    match owner.submit_open_claw_toolchain_install().await {
-        Ok(Ok(submission)) => CommandOutcome::succeeded(
-            serde_json::to_value(submission).unwrap_or_else(|_| json!({ "job": null })),
-        ),
-        Ok(Err(_)) | Err(_) => unavailable(),
-    }
-}
-
-async fn openclaw_toolchain_job_get(owner: &Handle, input: CommandInput) -> CommandOutcome {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct JobGetInput {
-        job_id: String,
-    }
-    let Ok(input) = decode::<JobGetInput>(input) else {
-        return invalid_input();
-    };
-    if input.job_id.trim().is_empty() || input.job_id.len() > 128 {
-        return invalid_input();
-    }
-    match owner.get_compatible_runtime_job(input.job_id).await {
-        Ok(Ok(lookup)) => CommandOutcome::succeeded(
-            serde_json::to_value(lookup)
-                .unwrap_or_else(|_| json!({ "job": null, "outcome": "unknown" })),
-        ),
-        Ok(Err(_)) | Err(_) => unavailable(),
-    }
-}
-
-async fn subagent_template_catalog(owner: &Handle) -> CommandOutcome {
-    match owner.list_subagent_templates().await {
+async fn subagent_template_catalog(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
+    match platform_runtime.subagent_template_catalog().await {
         Ok(Ok(catalog)) => CommandOutcome::succeeded(json!({ "result": catalog })),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
@@ -2756,12 +3130,15 @@ struct SubagentTemplateRequest {
     id: String,
 }
 
-async fn subagent_template(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn subagent_template(
+    platform_runtime: &PlatformRuntimeHandle,
+    input: CommandInput,
+) -> CommandOutcome {
     let request: SubagentTemplateRequest = match decode::<SubagentTemplateRequest>(input) {
         Ok(request) if !request.id.trim().is_empty() => request,
         Err(_) | Ok(_) => return invalid_input(),
     };
-    match owner.subagent_template(request.id).await {
+    match platform_runtime.subagent_template(&request.id).await {
         Ok(Ok(template)) => CommandOutcome::succeeded(json!({ "result": template })),
         Ok(Err(openclaw::projection::subagent_templates::SubagentTemplateError::NotFound)) => {
             CommandOutcome::rejected(RejectionCode::InvalidInput, INVALID_INPUT_MESSAGE)
@@ -2771,16 +3148,16 @@ async fn subagent_template(owner: &Handle, input: CommandInput) -> CommandOutcom
     }
 }
 
-async fn manually_trigger_openclaw_cron(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn manually_trigger_openclaw_cron(cron: &CronHandle, input: CommandInput) -> CommandOutcome {
     let request = match decode_manual_cron_trigger(input) {
         Ok(request) => request,
         Err(_) => return invalid_input(),
     };
-    match owner.trigger_open_claw_cron(request.job_id).await {
-        Ok(Ok(openclaw::port::CronTriggerOutcome::Accepted)) => {
+    match cron.trigger(request.job_id).await {
+        Ok(openclaw::port::CronTriggerOutcome::Accepted) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "accepted" } }))
         }
-        Ok(Ok(openclaw::port::CronTriggerOutcome::Skipped(disposition))) => {
+        Ok(openclaw::port::CronTriggerOutcome::Skipped(disposition)) => {
             let reason = match disposition {
                 openclaw::port::CronRunDisposition::AlreadyRunning => "already-running",
                 openclaw::port::CronRunDisposition::NotDue => "not-due",
@@ -2790,21 +3167,22 @@ async fn manually_trigger_openclaw_cron(owner: &Handle, input: CommandInput) -> 
                 json!({ "result": { "outcome": "skipped", "reason": reason } }),
             )
         }
-        Ok(Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown)) => {
+        Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "outcome-unknown" } }))
         }
-        Ok(Err(_)) | Err(_) => {
-            CommandOutcome::rejected(RejectionCode::Unavailable, RUNTIME_UNAVAILABLE_MESSAGE)
-        }
+        Err(_) => CommandOutcome::rejected(RejectionCode::Unavailable, RUNTIME_UNAVAILABLE_MESSAGE),
     }
 }
 
-async fn send_openclaw_chat(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn send_openclaw_chat(
+    session: &crate::sessions::SessionHandle,
+    input: CommandInput,
+) -> CommandOutcome {
     let params = match decode_send(input) {
         Ok(params) => params,
         Err(_) => return invalid_input(),
     };
-    let outcome = match owner.send_open_claw_chat(params).await {
+    let outcome = match session.send_openclaw_chat(params).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) => return session_failure(error),
         Err(_) => return internal_error(),
@@ -2812,12 +3190,15 @@ async fn send_openclaw_chat(owner: &Handle, input: CommandInput) -> CommandOutco
     CommandOutcome::succeeded(json!({ "result": SendChatResponse::from(outcome) }))
 }
 
-async fn history_openclaw_chat(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn history_openclaw_chat(
+    session: &crate::sessions::SessionHandle,
+    input: CommandInput,
+) -> CommandOutcome {
     let params = match decode_history(input) {
         Ok(params) => params,
         Err(_) => return invalid_input(),
     };
-    let result = match owner.history_open_claw_chat(params).await {
+    let result = match session.openclaw_history(params).await {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => return session_failure(error),
         Err(_) => return internal_error(),
@@ -2834,7 +3215,7 @@ struct FleetCredentialWriteCommand {
     plaintext_value: String,
 }
 
-async fn fleet_credentials_write(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn fleet_credentials_write(fleet: &FleetHandle, input: CommandInput) -> CommandOutcome {
     let request: FleetCredentialWriteCommand = match decode::<FleetCredentialWriteCommand>(input) {
         Ok(request)
             if !request.operation_id.trim().is_empty()
@@ -2863,7 +3244,7 @@ async fn fleet_credentials_write(owner: &Handle, input: CommandInput) -> Command
         plaintext,
         written_at: chrono::Utc::now().to_rfc3339(),
     };
-    match owner.fleet_write_credential(write).await {
+    match fleet.write_credential(write).await {
         Ok(Ok(crate::fleet::credentials::FleetCredentialWriteOutcome::Written(receipt))) => {
             CommandOutcome::succeeded(
                 json!({"credentialRef": receipt.credential_ref.as_str(), "operationId": receipt.operation_id, "credentialName": receipt.credential_name.as_str(), "writtenAt": receipt.written_at}),
@@ -2879,12 +3260,15 @@ async fn fleet_credentials_write(owner: &Handle, input: CommandInput) -> Command
     }
 }
 
-async fn abort_openclaw_chat(owner: &Handle, input: CommandInput) -> CommandOutcome {
+async fn abort_openclaw_chat(
+    session: &crate::sessions::SessionHandle,
+    input: CommandInput,
+) -> CommandOutcome {
     let params = match decode_abort(input) {
         Ok(params) => params,
         Err(_) => return invalid_input(),
     };
-    let outcome = match owner.abort_open_claw_chat(params).await {
+    let outcome = match session.abort_openclaw_chat(params).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) => return session_failure(error),
         Err(_) => return internal_error(),
@@ -2940,13 +3324,6 @@ fn internal_error() -> CommandOutcome {
 
 fn unavailable() -> CommandOutcome {
     CommandOutcome::rejected(RejectionCode::Unavailable, RUNTIME_UNAVAILABLE_MESSAGE)
-}
-
-fn scheduler_cron_not_generic_execute() -> CommandOutcome {
-    CommandOutcome::rejected(
-        RejectionCode::InvalidInput,
-        CRON_DESCRIPTOR_NOT_GENERIC_EXECUTE_MESSAGE,
-    )
 }
 
 fn session_failure<E>(error: RuntimeSessionError<E>) -> CommandOutcome {

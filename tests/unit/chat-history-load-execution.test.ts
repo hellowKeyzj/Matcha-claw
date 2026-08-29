@@ -3,7 +3,6 @@ import type { HostSessionTimelineMessage } from '@/lib/host-api';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
-import type { GatewayStatus } from '@/types/gateway';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import {
   createEmptySessionRecord,
@@ -18,6 +17,7 @@ import {
   userItem,
   windowView,
 } from './helpers/session-fixtures';
+import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
@@ -93,7 +93,6 @@ function createTestSessionRecord(sessionKey: string) {
     ...record,
     meta: {
       ...record.meta,
-      backendSessionKey: sessionKey,
       runtimeScopeKey: 'native-runtime:openclaw:local',
       agentId: sessionIdentity.agentId,
       protocolId: 'openclaw-v4',
@@ -101,6 +100,10 @@ function createTestSessionRecord(sessionKey: string) {
       sessionIdentity,
     },
   };
+}
+
+function testRecordKey(sessionKey: string): string {
+  return buildSessionRecordKey(createOpenClawTestSessionIdentity(sessionKey));
 }
 
 function createWindowResult(
@@ -132,10 +135,14 @@ function createWindowResult(
 }
 
 function createStateHarness(overrides: Partial<ChatStoreState>) {
+  const defaultRecordKey = testRecordKey('agent:main:main');
   let state = {
-    currentSessionKey: 'agent:main:main',
+    currentSessionKey: defaultRecordKey,
     loadedSessions: {
-      'agent:main:main': createTestSessionRecord('agent:main:main'),
+      [defaultRecordKey]: createTestSessionRecord('agent:main:main'),
+    },
+    sessionRecordKeyByIdentityKey: {
+      [defaultRecordKey]: defaultRecordKey,
     },
     foregroundHistorySessionKey: null,
     pendingApprovalsBySession: {},
@@ -150,6 +157,10 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
     error: 'stale',
   } as ChatStoreState;
   state = { ...state, ...overrides } as ChatStoreState;
+  state = {
+    ...state,
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(state.loadedSessions),
+  } as ChatStoreState;
 
   const set = (
     partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -164,23 +175,6 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
   };
 }
 
-function createGatewayStatus(overrides: Partial<GatewayStatus> = {}): GatewayStatus {
-  return {
-    processState: 'running',
-    port: 18789,
-    gatewayReady: true,
-    healthSummary: 'healthy',
-    transportState: 'connected',
-    portReachable: true,
-    diagnostics: {
-      consecutiveHeartbeatMisses: 0,
-      consecutiveRpcFailures: 0,
-    },
-    updatedAt: 1,
-    ...overrides,
-  };
-}
-
 describe('chat history load execution', () => {
   beforeEach(() => {
     fetchHistoryWindowMock.mockReset();
@@ -190,14 +184,15 @@ describe('chat history load execution', () => {
 
   it('active foreground load applies authoritative snapshot and clears loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
+    const sessionKey = 'agent:main:main';
+    const requestedSessionKey = testRecordKey(sessionKey);
     const resultMessages: HistoryMessage[] = [
       { role: 'assistant', text: 'loaded once', createdAt: 1, messageId: 'assistant-1' },
     ];
     const { set, get } = createStateHarness({
       currentSessionKey: requestedSessionKey,
       loadedSessions: {
-        [requestedSessionKey]: createTestSessionRecord('agent:main:main'),
+        [requestedSessionKey]: createTestSessionRecord(sessionKey),
       },
     });
     let sawLoadingState = false;
@@ -208,7 +203,7 @@ describe('chat history load execution', () => {
         && current.error === null
         && current.loadedSessions[requestedSessionKey]?.meta.historyStatus === 'loading'
       );
-      return createWindowResult(requestedSessionKey, resultMessages);
+      return createWindowResult(sessionKey, resultMessages);
     });
 
     await executeHistoryLoad({
@@ -234,7 +229,8 @@ describe('chat history load execution', () => {
 
   it('foreground refresh clears items when the canonical SessionView is empty', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
+    const sessionKey = 'agent:main:main';
+    const requestedSessionKey = testRecordKey(sessionKey);
     const currentMessages: HistoryMessage[] = [
       { role: 'user', text: 'hello', createdAt: 1, messageId: 'user-1' },
       { role: 'assistant', text: 'streaming reply', createdAt: 2, messageId: 'assistant-1' },
@@ -243,12 +239,12 @@ describe('chat history load execution', () => {
       currentSessionKey: requestedSessionKey,
       loadedSessions: {
         [requestedSessionKey]: {
-          ...createTestSessionRecord('agent:main:main'),
-          items: createWindowItems(requestedSessionKey, currentMessages),
+          ...createTestSessionRecord(sessionKey),
+          items: createWindowItems(sessionKey, currentMessages),
         },
       },
     });
-    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(requestedSessionKey, []));
+    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(sessionKey, []));
 
     await executeHistoryLoad({
       set,
@@ -267,20 +263,23 @@ describe('chat history load execution', () => {
 
   it('background load updates the target session without touching foreground loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:worker:main';
+    const sessionKey = 'agent:worker:main';
+    const requestedSessionKey = testRecordKey(sessionKey);
     const loadedMessages: HistoryMessage[] = [
       { role: 'assistant', text: 'background refresh', createdAt: 1, messageId: 'assistant-1' },
     ];
+    const foregroundSessionKey = 'agent:main:main';
+    const foregroundRecordKey = testRecordKey(foregroundSessionKey);
     const { set, get } = createStateHarness({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: foregroundRecordKey,
       foregroundHistorySessionKey: null,
       loadedSessions: {
-        'agent:main:main': createTestSessionRecord('agent:main:main'),
-        [requestedSessionKey]: createTestSessionRecord(requestedSessionKey),
+        [foregroundRecordKey]: createTestSessionRecord(foregroundSessionKey),
+        [requestedSessionKey]: createTestSessionRecord(sessionKey),
       },
       error: 'keep',
     });
-    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(requestedSessionKey, loadedMessages));
+    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(sessionKey, loadedMessages));
 
     await executeHistoryLoad({
       set,
@@ -304,7 +303,8 @@ describe('chat history load execution', () => {
 
   it('active foreground load marks error when authoritative snapshot fetch fails', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
+    const sessionKey = 'agent:main:main';
+    const requestedSessionKey = testRecordKey(sessionKey);
     const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
     const historyRuntime = createHistoryRuntimeHarness();
     fetchHistoryWindowMock.mockRejectedValueOnce(new Error('window failed'));
@@ -328,8 +328,8 @@ describe('chat history load execution', () => {
 
   it('aborts before apply when foreground session already changed', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
-    const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:other', error: null });
+    const requestedSessionKey = testRecordKey('agent:main:main');
+    const { set, get } = createStateHarness({ currentSessionKey: testRecordKey('agent:main:other'), error: null });
     const historyRuntime = createHistoryRuntimeHarness();
 
     await executeHistoryLoad({
@@ -351,11 +351,12 @@ describe('chat history load execution', () => {
     vi.useFakeTimers();
     try {
       const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-      const requestedSessionKey = 'agent:main:main';
+      const sessionKey = 'agent:main:main';
+      const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
       fetchHistoryWindowMock
         .mockRejectedValueOnce(new Error('request timed out'))
-        .mockResolvedValueOnce(createWindowResult(requestedSessionKey, [
+        .mockResolvedValueOnce(createWindowResult(sessionKey, [
           { role: 'assistant', text: 'recovered after retry', createdAt: 1, messageId: 'assistant-1' },
         ]));
 
@@ -364,7 +365,6 @@ describe('chat history load execution', () => {
         get,
         historyRuntime: createHistoryRuntimeHarness(),
         loadingTimeoutMs: 15_000,
-        getGatewayStatus: () => createGatewayStatus(),
       }, {
         sessionKey: requestedSessionKey,
         mode: 'active',
@@ -378,12 +378,12 @@ describe('chat history load execution', () => {
       expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(2);
       expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
         recordKey: requestedSessionKey,
-        backendSessionKey: requestedSessionKey,
+        sessionIdentity: expect.objectContaining({ sessionKey }),
         timeoutMs: 35_000,
       }));
       expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
         recordKey: requestedSessionKey,
-        backendSessionKey: requestedSessionKey,
+        sessionIdentity: expect.objectContaining({ sessionKey }),
         timeoutMs: 35_000,
       }));
       expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
@@ -399,7 +399,8 @@ describe('chat history load execution', () => {
     vi.useFakeTimers();
     try {
       const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-      const requestedSessionKey = 'agent:main:main';
+      const sessionKey = 'agent:main:main';
+      const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
       fetchHistoryWindowMock.mockRejectedValue(new Error('request timed out'));
 
@@ -408,7 +409,6 @@ describe('chat history load execution', () => {
         get,
         historyRuntime: createHistoryRuntimeHarness(),
         loadingTimeoutMs: 15_000,
-        getGatewayStatus: () => createGatewayStatus(),
       }, {
         sessionKey: requestedSessionKey,
         mode: 'active',
@@ -427,26 +427,20 @@ describe('chat history load execution', () => {
     }
   });
 
-  it('chat_init_cold_start 遇到 gateway startup 特殊错误时会扩大重试预算并在耗尽后保持非失败态', async () => {
+  it('chat_init_cold_start 遇到 runtime startup 特殊错误时会扩大重试预算并在耗尽后保持非失败态', async () => {
     vi.useFakeTimers();
     try {
       const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-      const requestedSessionKey = 'agent:main:main';
+      const sessionKey = 'agent:main:main';
+      const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
-      fetchHistoryWindowMock.mockRejectedValue(new Error('Service not initialized: unavailable during gateway startup'));
+      fetchHistoryWindowMock.mockRejectedValue(new Error('Service not initialized: unavailable during runtime startup'));
 
       const loadPromise = executeHistoryLoad({
         set,
         get,
         historyRuntime: createHistoryRuntimeHarness(),
         loadingTimeoutMs: 15_000,
-        getGatewayStatus: () => createGatewayStatus({
-          processState: 'starting',
-          gatewayReady: false,
-          healthSummary: 'degraded',
-          transportState: 'disconnected',
-          portReachable: false,
-        }),
       }, {
         sessionKey: requestedSessionKey,
         mode: 'active',
@@ -469,7 +463,8 @@ describe('chat history load execution', () => {
 
   it('非冷启动前台加载不会吃启动期重试预算', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
+    const sessionKey = 'agent:main:main';
+    const requestedSessionKey = testRecordKey(sessionKey);
     const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
     fetchHistoryWindowMock.mockRejectedValueOnce(new Error('request timed out'));
 
@@ -478,7 +473,6 @@ describe('chat history load execution', () => {
       get,
       historyRuntime: createHistoryRuntimeHarness(),
       loadingTimeoutMs: 15_000,
-      getGatewayStatus: () => createGatewayStatus(),
     }, {
       sessionKey: requestedSessionKey,
       mode: 'active',
@@ -490,7 +484,7 @@ describe('chat history load execution', () => {
     const [firstCall] = fetchHistoryWindowMock.mock.calls[0] ?? [];
     expect(firstCall).toMatchObject({
       recordKey: requestedSessionKey,
-      backendSessionKey: requestedSessionKey,
+      sessionIdentity: expect.objectContaining({ sessionKey }),
       limit: 200,
     });
     expect(firstCall).not.toHaveProperty('timeoutMs');

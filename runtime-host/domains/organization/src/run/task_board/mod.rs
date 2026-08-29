@@ -9,6 +9,6 @@ pub use model::{
     TaskId, TaskPlanInput, TaskRecord, TaskStatus,
 };
 pub use transition::{
-    claim_next, close_runner, heartbeat, pause_runner, reclaim_expired, release, start_runner,
-    transition, upsert_plan,
+    claim_next, close_runner, heartbeat, pause_runner, reclaim_expired, reclaim_expired_for_run,
+    release, start_runner, transition, upsert_plan,
 };

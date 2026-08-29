@@ -12,6 +12,7 @@ export type QueryRunTraceStage =
   | 'query_engine.system_prompt.end'
   | 'query_engine.process_user_input.start'
   | 'query_engine.process_user_input.end'
+  | 'query_engine.model.resolved'
   | 'query_engine.transcript.start'
   | 'query_engine.transcript.end'
   | 'query_engine.skills_plugins.start'
@@ -58,7 +59,29 @@ export function sanitizeRunTraceDetails(
 export function isRunTraceEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return isTruthyEnvValue(env.MATCHA_AGENT_RUN_TRACE)
+  return (
+    isTruthyEnvValue(env.MATCHA_AGENT_RUN_TRACE) ||
+    isTruthyEnvValue(env.MATCHACLAW_SESSION_TRACE)
+  )
+}
+
+export function logProcessSessionTrace(
+  source: string,
+  stage: string,
+  details?: RunTraceDetails,
+): void {
+  if (!isRunTraceEnabled()) return
+
+  const sanitizedDetails = sanitizeRunTraceDetails(details)
+  process.stderr.write(
+    `${JSON.stringify({
+      prefix: 'session-trace',
+      source,
+      stage,
+      at: Date.now(),
+      ...(sanitizedDetails ?? {}),
+    })}\n`,
+  )
 }
 
 function isTruthyEnvValue(value: string | undefined): boolean {

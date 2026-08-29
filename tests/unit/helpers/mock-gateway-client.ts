@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 import * as hostApiModule from '@/lib/host-api';
-import type { RuntimeScope } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef, RuntimeScope } from '../../../electron/desktop-contract/runtime-address';
 
 type GatewayRpcEnvelope<TResult = unknown> = {
   success: boolean;
@@ -48,7 +48,9 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
 
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
+export const hostSessionNewMock = vi.fn();
 export const hostSessionSendMock = vi.fn();
+export const hostSessionDeleteMock = vi.fn();
 export const hostSessionWindowFetchMock = vi.fn();
 export const capabilityExecuteMock = vi.fn();
 
@@ -178,6 +180,18 @@ vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (payl
   return await hostSessionWindowFetchMock(payload, options);
 });
 
+vi.spyOn(hostApiModule, 'hostSessionNew').mockImplementation(async (payload, options) => {
+  return await hostSessionNewMock(payload, options);
+});
+
+vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (payload, options) => {
+  return await hostSessionSendMock(payload, options);
+});
+
+vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (payload) => {
+  return await hostSessionDeleteMock(payload);
+});
+
 vi.spyOn(hostApiModule, 'resolveSingleCapabilityScope').mockImplementation(async (
   capabilityId: string,
 ) => capabilityScope(capabilityId));
@@ -203,6 +217,20 @@ async function mockedCapabilityExecute<TResult = unknown>(
       options?.timeoutMs,
     );
   }
+  if (payload.id === 'agent.run' && payload.operationId === 'agent.wait' && payload.scope.kind === 'agent') {
+    capabilityExecuteMock(payload, options);
+    const input = readCapabilityInput(payload.input);
+    return await invokeMockedGatewayRpc<TResult>(
+      'agent.wait',
+      {
+        kind: 'draftWait',
+        endpoint: payload.scope.endpoint,
+        agentId: payload.scope.agentId,
+        ...input,
+      },
+      options?.timeoutMs,
+    );
+  }
   if (payload.id === 'settings.runtime' && settingsCapabilityRoutes[payload.operationId]) {
     capabilityExecuteMock(payload, options);
     return await hostApiFetchMock(
@@ -216,7 +244,9 @@ async function mockedCapabilityExecute<TResult = unknown>(
 export function resetGatewayClientMocks(): void {
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
+  hostSessionNewMock.mockReset();
   hostSessionSendMock.mockReset();
+  hostSessionDeleteMock.mockReset();
   hostSessionWindowFetchMock.mockReset();
   capabilityExecuteMock.mockReset();
 }

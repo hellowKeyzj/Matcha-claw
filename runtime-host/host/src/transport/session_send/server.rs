@@ -19,26 +19,26 @@ use super::{SessionSendDelivery, SessionSendRequest};
 const MAX_REQUEST_BYTES: usize = (20_usize * 1024 * 1024).div_ceil(3) * 4 + 64 * 1024 + 128 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        session: crate::sessions::SessionHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            session,
         })
     }
 
@@ -46,9 +46,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, session).await;
             });
         }
     }
@@ -69,7 +69,7 @@ mod server_tests;
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> io::Result<()> {
     let mut request_received = false;
     let response = match timeout(REQUEST_DEADLINE, async {
@@ -77,7 +77,7 @@ async fn serve(
         Ok::<_, io::Error>(match request {
             Ok(request) => {
                 request_received = true;
-                handle(request, verifier, owner).await
+                handle(request, verifier, session).await
             }
             Err(response) => response,
         })
@@ -95,7 +95,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/sessions/send" {
         return Response::not_found();
@@ -162,18 +162,19 @@ async fn handle(
             "endpoint": format!("{:?}", command.endpoint),
             "sessionKey": session_trace::id_shape(Some(&command.session_key)),
             "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
-            "runId": session_trace::id_shape(command.run_id.as_deref().or(command.idempotency_key.as_deref())),
+            "runId": session_trace::id_shape(command.run_id.as_deref()),
+            "idempotencyKey": session_trace::id_shape(command.idempotency_key.as_deref()),
             "attachmentCount": command.attachments.len(),
         }),
     );
     if matches!(
         command.endpoint,
-        crate::session_send::NativeEndpoint::Unsupported
+        crate::sessions::send::NativeEndpoint::Unsupported
     ) {
         return Response::from_delivery(SessionSendDelivery::Unsupported);
     }
     drop(verifier);
-    let outcome = match owner.send_session(command).await {
+    let outcome = match session.send_session(command).await {
         Ok(outcome) => outcome,
         Err(_) => {
             session_trace::log(
@@ -189,12 +190,12 @@ async fn handle(
         trace_id.as_deref(),
         serde_json::json!({
             "outcome": match &outcome {
-                crate::session_send::SessionSendOutcome::Queued { .. } => "queued",
-                crate::session_send::SessionSendOutcome::Succeeded { .. } => "succeeded",
-                crate::session_send::SessionSendOutcome::Rejected => "rejected",
-                crate::session_send::SessionSendOutcome::Unknown => "unknown",
-                crate::session_send::SessionSendOutcome::Unsupported => "unsupported",
-                crate::session_send::SessionSendOutcome::Unavailable => "unavailable",
+                crate::sessions::send::SessionSendOutcome::Queued { .. } => "queued",
+                crate::sessions::send::SessionSendOutcome::Succeeded { .. } => "succeeded",
+                crate::sessions::send::SessionSendOutcome::Rejected => "rejected",
+                crate::sessions::send::SessionSendOutcome::Unknown => "unknown",
+                crate::sessions::send::SessionSendOutcome::Unsupported => "unsupported",
+                crate::sessions::send::SessionSendOutcome::Unavailable => "unavailable",
             }
         }),
     );

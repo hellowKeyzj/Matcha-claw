@@ -14,14 +14,15 @@ const request = {
   input: { endpoint },
 } as const;
 const session = {
-  key: 'session-1',
+  key: 'agent:agent-1:session-1',
   agentId: 'agent-1',
   sessionIdentity: {
     endpoint,
     agentId: 'agent-1',
-    sessionKey: 'session-1',
+    sessionKey: 'agent:agent-1:session-1',
   },
-  kind: 'direct',
+  kind: 'session',
+  endpointSessionId: 'session-1',
   updatedAt: 1_717_171_717_000,
 } as const;
 

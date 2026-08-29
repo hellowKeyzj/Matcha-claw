@@ -57,6 +57,16 @@ pub struct MatchaPeer {
 #[derive(Clone)]
 pub struct MatchaPeerLifecycleHandle {
     handle: SupervisorHandle,
+    source_epoch: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+pub struct MatchaPeerSessionHandle {
+    handle: SupervisorHandle,
+    working_directory: PathBuf,
+    endpoint: AppServerEndpoint,
+    secret: Arc<Secret>,
+    source_epoch: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -671,6 +681,16 @@ impl MatchaPeer {
         }
     }
 
+    pub fn session_handle(&self) -> MatchaPeerSessionHandle {
+        MatchaPeerSessionHandle {
+            handle: self.handle.clone(),
+            working_directory: self.working_directory.clone(),
+            endpoint: self.endpoint,
+            secret: Arc::clone(&self.secret),
+            source_epoch: Arc::clone(&self.source_epoch),
+        }
+    }
+
     pub fn role_session_native_handle(&self) -> RoleSessionNativeHandle {
         RoleSessionNativeHandle {
             handle: self.handle.clone(),
@@ -788,149 +808,16 @@ impl MatchaPeer {
         if !receipt_reading_admitted(self.snapshot().phase()) {
             return Err(RendererSubscriptionError::RuntimeUnavailable);
         }
-        let (client, _) =
-            AppServerClient::connect_and_initialize_raw_only(self.endpoint, &self.secret)
-                .await
-                .map_err(RendererSubscriptionError::Client)?;
-        let mut raw_events = client.raw_events();
-        let subscription = client
-            .subscribe_events_with_cursor(session_id.clone(), None)
-            .await
-            .map_err(RendererSubscriptionError::Client)?;
-        let source_epoch = self.next_source_epoch();
-        let cursor = match subscription {
-            EventSubscriptionCursor::Subscribed(replay) => replay.cursor(),
-            EventSubscriptionCursor::ClientNotFound => {
-                let _ = client.close().await;
-                return Err(RendererSubscriptionError::Client(
-                    AppServerClientError::SessionNotFound,
-                ));
-            }
-            EventSubscriptionCursor::ClientRequired => {
-                let _ = client.close().await;
-                return Err(RendererSubscriptionError::Client(
-                    AppServerClientError::PeerRejected,
-                ));
-            }
-        };
-        Ok(tokio::spawn(async move {
-            let mut replay_cursor = cursor;
-            let mut projector = SessionEventProjector::resume_after(
-                session_id.clone(),
-                run_id.clone(),
-                replay_cursor,
-            );
-            loop {
-                if client.is_closed() {
-                    let recovery = SessionRecovery::from_raw_event(
-                        session_id.clone(),
-                        projector.cursor(),
-                        &RawEvent::Closed,
-                    )
-                    .expect("closed raw event always produces recovery")
-                    .with_source_epoch(source_epoch);
-                    let _ = send_recovery(&events, &route_key, run_id.as_str(), recovery).await;
-                    break;
-                }
-                let recovery = match raw_events.recv().await {
-                    Ok(RawEvent::Envelope(event)) => {
-                        match renderer_subscription_projection_step(
-                            &mut projector,
-                            replay_cursor,
-                            event,
-                        ) {
-                            Ok(Some(projection)) => {
-                                let terminal = projection.event.is_terminal();
-                                let event = RendererEventEnvelope::new(
-                                    route_key.clone(),
-                                    projection.session_key,
-                                    projection.run_id,
-                                    projection.source_cursor,
-                                    Some(source_epoch),
-                                    projection.event,
-                                );
-                                match send_renderer_event(
-                                    &events,
-                                    event,
-                                    session_id.clone(),
-                                    projector.cursor(),
-                                    source_epoch,
-                                )
-                                .await
-                                {
-                                    SubscriptionDelivery::Sent if !terminal => continue,
-                                    SubscriptionDelivery::Sent
-                                    | SubscriptionDelivery::Recovering
-                                    | SubscriptionDelivery::Closed => break,
-                                }
-                            }
-                            Ok(None) => {
-                                continue;
-                            }
-                            Err(failure) => renderer_projection_recovery(
-                                session_id.clone(),
-                                projector.cursor(),
-                                source_epoch,
-                                failure,
-                            ),
-                        }
-                    }
-                    Ok(raw @ (RawEvent::Overflow | RawEvent::Closed)) => {
-                        let Some(recovery) = SessionRecovery::from_raw_event(
-                            session_id.clone(),
-                            projector.cursor(),
-                            &raw,
-                        ) else {
-                            break;
-                        };
-                        recovery.with_source_epoch(source_epoch)
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        SessionRecovery::from_broadcast_lagged(
-                            session_id.clone(),
-                            projector.cursor(),
-                            skipped,
-                        )
-                        .with_source_epoch(source_epoch)
-                    }
-                    Err(broadcast::error::RecvError::Closed) => SessionRecovery::from_raw_event(
-                        session_id.clone(),
-                        projector.cursor(),
-                        &RawEvent::Closed,
-                    )
-                    .expect("closed raw event always produces recovery")
-                    .with_source_epoch(source_epoch),
-                };
-                let should_recover = matches!(recovery, SessionRecovery::RecoveryRequired { .. });
-                if !send_recovery(&events, &route_key, run_id.as_str(), recovery).await {
-                    break;
-                }
-                if !should_recover {
-                    break;
-                }
-                match client
-                    .recover_events(
-                        crate::session::client::EventRecoveryCursor::resume_after(
-                            session_id.clone(),
-                            projector.cursor(),
-                        ),
-                        None,
-                    )
-                    .await
-                {
-                    Ok(recovered) => {
-                        replay_cursor = recovered.cursor().sequence();
-                        projector = SessionEventProjector::resume_after(
-                            session_id.clone(),
-                            run_id.clone(),
-                            replay_cursor,
-                        );
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = client.close().await;
-        }))
+        subscribe_renderer_events_raw(
+            self.endpoint,
+            &self.secret,
+            self.next_source_epoch(),
+            session_id,
+            run_id,
+            route_key,
+            events,
+        )
+        .await
     }
 
     pub async fn prompt_session(
@@ -1152,6 +1039,7 @@ impl MatchaPeer {
     pub fn lifecycle_handle(&self) -> MatchaPeerLifecycleHandle {
         MatchaPeerLifecycleHandle {
             handle: self.handle.clone(),
+            source_epoch: Arc::clone(&self.source_epoch),
         }
     }
 
@@ -1202,6 +1090,14 @@ impl MatchaPeerLifecycleHandle {
         self.handle.snapshot()
     }
 
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<SupervisorSnapshot> {
+        self.handle.subscribe()
+    }
+
+    pub fn advance_source_epoch(&self) -> u64 {
+        self.source_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     pub async fn request_start(&self) -> Result<(), LifecycleError> {
         match self.handle.start().await {
             CommandReceipt::Accepted(_)
@@ -1246,6 +1142,309 @@ impl MatchaPeerLifecycleHandle {
             CommandReceipt::Busy => Err(LifecycleError::Busy),
             CommandReceipt::Rejected(rejection) => Err(LifecycleError::Rejected(rejection)),
             CommandReceipt::ShuttingDown => Err(LifecycleError::ShuttingDown),
+        }
+    }
+}
+
+async fn subscribe_renderer_events_raw(
+    endpoint: AppServerEndpoint,
+    secret: &Arc<Secret>,
+    source_epoch: u64,
+    session_id: SessionId,
+    run_id: RunId,
+    route_key: String,
+    events: mpsc::Sender<SessionSubscriptionItem>,
+) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
+    let (client, _) = AppServerClient::connect_and_initialize_raw_only(endpoint, secret)
+        .await
+        .map_err(RendererSubscriptionError::Client)?;
+    let mut raw_events = client.raw_events();
+    let subscription = client
+        .subscribe_events_with_cursor(session_id.clone(), None)
+        .await
+        .map_err(RendererSubscriptionError::Client)?;
+    let cursor = match subscription {
+        EventSubscriptionCursor::Subscribed(replay) => replay.cursor(),
+        EventSubscriptionCursor::ClientNotFound => {
+            let _ = client.close().await;
+            return Err(RendererSubscriptionError::Client(
+                AppServerClientError::SessionNotFound,
+            ));
+        }
+        EventSubscriptionCursor::ClientRequired => {
+            let _ = client.close().await;
+            return Err(RendererSubscriptionError::Client(
+                AppServerClientError::PeerRejected,
+            ));
+        }
+    };
+    Ok(tokio::spawn(async move {
+        let mut replay_cursor = cursor;
+        let mut projector =
+            SessionEventProjector::resume_after(session_id.clone(), run_id.clone(), replay_cursor);
+        loop {
+            if client.is_closed() {
+                let recovery = SessionRecovery::from_raw_event(
+                    session_id.clone(),
+                    projector.cursor(),
+                    &RawEvent::Closed,
+                )
+                .expect("closed raw event always produces recovery")
+                .with_source_epoch(source_epoch);
+                let _ = send_recovery(&events, &route_key, run_id.as_str(), recovery).await;
+                break;
+            }
+            let recovery = match raw_events.recv().await {
+                Ok(RawEvent::Envelope(event)) => {
+                    match renderer_subscription_projection_step(
+                        &mut projector,
+                        replay_cursor,
+                        event,
+                    ) {
+                        Ok(Some(projection)) => {
+                            let terminal = projection.event.is_terminal();
+                            let event = RendererEventEnvelope::new(
+                                route_key.clone(),
+                                projection.session_key,
+                                projection.run_id,
+                                projection.source_cursor,
+                                Some(source_epoch),
+                                projection.event,
+                            );
+                            match send_renderer_event(
+                                &events,
+                                event,
+                                session_id.clone(),
+                                projector.cursor(),
+                                source_epoch,
+                            )
+                            .await
+                            {
+                                SubscriptionDelivery::Sent if !terminal => continue,
+                                SubscriptionDelivery::Sent
+                                | SubscriptionDelivery::Recovering
+                                | SubscriptionDelivery::Closed => break,
+                            }
+                        }
+                        Ok(None) => {
+                            continue;
+                        }
+                        Err(failure) => renderer_projection_recovery(
+                            session_id.clone(),
+                            projector.cursor(),
+                            source_epoch,
+                            failure,
+                        ),
+                    }
+                }
+                Ok(raw @ (RawEvent::Overflow | RawEvent::Closed)) => {
+                    let Some(recovery) = SessionRecovery::from_raw_event(
+                        session_id.clone(),
+                        projector.cursor(),
+                        &raw,
+                    ) else {
+                        break;
+                    };
+                    recovery.with_source_epoch(source_epoch)
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    SessionRecovery::from_broadcast_lagged(
+                        session_id.clone(),
+                        projector.cursor(),
+                        skipped,
+                    )
+                    .with_source_epoch(source_epoch)
+                }
+                Err(broadcast::error::RecvError::Closed) => SessionRecovery::from_raw_event(
+                    session_id.clone(),
+                    projector.cursor(),
+                    &RawEvent::Closed,
+                )
+                .expect("closed raw event always produces recovery")
+                .with_source_epoch(source_epoch),
+            };
+            let should_recover = matches!(recovery, SessionRecovery::RecoveryRequired { .. });
+            if !send_recovery(&events, &route_key, run_id.as_str(), recovery).await {
+                break;
+            }
+            if !should_recover {
+                break;
+            }
+            match client
+                .recover_events(
+                    crate::session::client::EventRecoveryCursor::resume_after(
+                        session_id.clone(),
+                        projector.cursor(),
+                    ),
+                    None,
+                )
+                .await
+            {
+                Ok(recovered) => {
+                    replay_cursor = recovered.cursor().sequence();
+                    projector = SessionEventProjector::resume_after(
+                        session_id.clone(),
+                        run_id.clone(),
+                        replay_cursor,
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = client.close().await;
+    }))
+}
+
+impl MatchaPeerSessionHandle {
+    pub async fn subscribe_renderer_events(
+        &self,
+        session_id: SessionId,
+        run_id: RunId,
+        route_key: String,
+        events: mpsc::Sender<SessionSubscriptionItem>,
+    ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return Err(RendererSubscriptionError::RuntimeUnavailable);
+        }
+        subscribe_renderer_events_raw(
+            self.endpoint,
+            &self.secret,
+            self.source_epoch.fetch_add(1, Ordering::Relaxed),
+            session_id,
+            run_id,
+            route_key,
+            events,
+        )
+        .await
+    }
+
+    async fn connect_client(&self) -> Result<AppServerClient, AppServerClientError> {
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return Err(AppServerClientError::ConnectionClosed);
+        }
+        let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
+        AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events)
+            .await
+            .map(|(client, _)| client)
+    }
+
+    pub async fn list_history(&self) -> HistoryListResult {
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return crate::session::history::HistoryResult::Unavailable;
+        }
+        crate::session::history::list(self.endpoint, &self.secret).await
+    }
+
+    pub async fn read_canonical_session(
+        &self,
+        session_id: SessionId,
+        request: HydrationWindowRequest,
+    ) -> CanonicalSessionReadResult {
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return crate::session::history::HistoryResult::Unavailable;
+        }
+        read_canonical_session(self.endpoint, &self.secret, session_id, request).await
+    }
+
+    pub async fn create_session(
+        &self,
+        session_id: SessionId,
+    ) -> InvocationOutcome<SessionId, AppServerClientError> {
+        let client = match self.connect_client().await {
+            Ok(client) => client,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let outcome =
+            super::session_create::create_native(&client, &self.working_directory, session_id)
+                .await;
+        match client.close().await {
+            Ok(()) => outcome,
+            Err(_) => InvocationOutcome::Unknown,
+        }
+    }
+
+    pub async fn prompt_session(
+        &self,
+        params: crate::session::request::SessionPromptParams,
+    ) -> InvocationOutcome<crate::session::model::SessionPromptResult, AppServerClientError> {
+        let client = match self.connect_client().await {
+            Ok(client) => client,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let outcome = client.prompt_session(params).await;
+        match client.close().await {
+            Ok(()) => outcome,
+            Err(_) => InvocationOutcome::Unknown,
+        }
+    }
+
+    pub async fn pending_approvals(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<(ApprovalId, Vec<OptionId>)>, AppServerClientError> {
+        let client = self.connect_client().await?;
+        let snapshot = client
+            .snapshot_session(SessionSnapshotParams::new(session_id))
+            .await;
+        let close = client.close().await;
+        match (snapshot, close) {
+            (Ok(snapshot), Ok(())) => Ok(snapshot
+                .pending_approvals
+                .into_iter()
+                .map(|approval| {
+                    (
+                        approval.approval_id().clone(),
+                        approval.option_ids().to_vec(),
+                    )
+                })
+                .collect()),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) => Err(error),
+        }
+    }
+
+    pub async fn respond_to_approval(
+        &self,
+        params: crate::session::approval::ApprovalRespondParams,
+    ) -> InvocationOutcome<(), AppServerClientError> {
+        let client = match self.connect_client().await {
+            Ok(client) => client,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let outcome = client.respond_to_approval(params).await;
+        match client.close().await {
+            Ok(()) => outcome,
+            Err(_) => InvocationOutcome::Unknown,
+        }
+    }
+
+    pub async fn set_session_model(
+        &self,
+        params: SessionSetModelParams,
+    ) -> InvocationOutcome<crate::session::model::SessionRecord, AppServerClientError> {
+        let client = match self.connect_client().await {
+            Ok(client) => client,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let outcome = client.set_session_model(params).await;
+        match client.close().await {
+            Ok(()) => outcome,
+            Err(_) => InvocationOutcome::Unknown,
+        }
+    }
+
+    pub async fn cancel_session(
+        &self,
+        params: crate::session::request::SessionCancelParams,
+    ) -> InvocationOutcome<crate::session::model::SessionCancelResult, AppServerClientError> {
+        let client = match self.connect_client().await {
+            Ok(client) => client,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let outcome = client.cancel_session(params).await;
+        match client.close().await {
+            Ok(()) => outcome,
+            Err(_) => InvocationOutcome::Unknown,
         }
     }
 }
@@ -1310,6 +1509,22 @@ impl RoleSessionNativeHandle {
             Ok(()) => outcome,
             Err(_) => InvocationOutcome::Unknown,
         }
+    }
+
+    pub async fn watch_role_terminal(
+        &self,
+        session_id: RoleSessionId,
+        run_id: RoleRunId,
+    ) -> Option<TerminalRunStatus> {
+        receipt_reading_admitted(self.handle.snapshot().phase())
+            .then_some(RoleTerminalWatch {
+                endpoint: self.endpoint,
+                secret: Arc::clone(&self.secret),
+                session_id: session_id.native(),
+                run_id: run_id.native(),
+            })?
+            .wait()
+            .await
     }
 }
 

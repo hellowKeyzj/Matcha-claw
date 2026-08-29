@@ -101,11 +101,6 @@ export async function handleFleetRoutes(
     await handleRegistrationRoute(url.pathname, body, res, transport);
     return true;
   }
-  if (url.pathname === '/api/remote-fleet/register') {
-    await handleNodeRegistrationRoute(body, res, transport);
-    return true;
-  }
-
   const mutation = buildMutationRequest(url.pathname, body);
   if (mutation.kind === 'invalid') {
     sendJson(res, 400, INVALID);
@@ -122,92 +117,123 @@ export async function handleFleetRoutes(
 
   try {
     const response = await transport.mutate(mutation.request);
-    sendJson(res, response.status, response.body);
+    sendJson(
+      res,
+      response.status,
+      response.status === 200 ? projectFleetMutationResponse(url.pathname, mutation.request, response.body) : response.body,
+    );
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;
 }
 
-async function handleNodeRegistrationRoute(
-  body: unknown,
-  res: ServerResponse,
-  transport: FleetTransport,
-): Promise<void> {
-  const node = readNodeRegistration(body);
-  if (!node) {
-    sendJson(res, 400, INVALID);
-    return;
-  }
+function projectFleetMutationResponse(pathname: string, request: FleetMutationRequest, body: unknown): unknown {
+  if (!isRecord(body)) return body;
+  const command = fleetCommandForPath(pathname, request, body);
+  if (!command) return body;
+  return {
+    ...body,
+    command,
+  };
+}
 
-  const agentId = `${node.id}:agent`;
-  const runtimeId = `${node.id}:openclaw`;
-  const requests: readonly FleetMutationRequest[] = [
-    {
-      operation: 'fleet.nodes.upsert',
-      input: {
-        kind: 'nodeUpsert',
-        payload: {
-          id: node.id,
-          health: node.enabled === false ? 'disabled' : 'unknown',
-          connectionId: node.connectionId,
-          environmentId: null,
-          managedResourceId: null,
-        },
-      },
-    },
-    {
-      operation: 'fleet.agents.upsert',
-      input: {
-        kind: 'agentUpsert',
-        payload: {
-          id: agentId,
-          nodeId: node.id,
-          connectionId: node.connectionId,
-          environmentId: null,
-          managedResourceId: null,
-        },
-      },
-    },
-    {
-      operation: 'fleet.runtimes.upsert',
-      input: {
-        kind: 'runtimeUpsert',
-        payload: {
-          id: runtimeId,
-          nodeId: node.id,
-          agentId,
-          connectionId: node.connectionId,
-          environmentId: null,
-          managedResourceId: null,
-          kind: 'openClaw',
-          state: 'discovered',
-        },
-      },
-    },
-  ];
-
-  try {
-    for (const request of requests) {
-      if (!isFleetMutationRequest(request)) {
-        sendJson(res, 400, INVALID);
-        return;
-      }
-      const response = await transport.mutate(request);
-      if (response.status !== 200) {
-        sendJson(res, 503, UNAVAILABLE);
-        return;
-      }
-    }
-    sendJson(res, 200, {
-      success: true,
-      node: { id: node.id },
-      agent: { id: agentId, nodeId: node.id },
-      runtime: { id: runtimeId, nodeId: node.id, agentId },
-    });
-  } catch {
-    sendJson(res, 503, UNAVAILABLE);
+function fleetCommandForPath(pathname: string, request: FleetMutationRequest, body: Record<string, unknown>): Record<string, unknown> | null {
+  const payload = readPayload(request);
+  if (!payload) return null;
+  switch (pathname) {
+    case '/api/remote-fleet/probe':
+      return projectDispatchCommand(body, payload, 'probeNode');
+    case '/api/remote-fleet/install-agent':
+      return projectDispatchCommand(body, payload, 'installAgent');
+    case '/api/remote-fleet/probe-connection':
+      return projectOperationCommand(body, payload, 'probeConnection', 'connectionId', {
+        probeCompleted: 'succeeded',
+        probeRejected: 'failed',
+        probeUnknown: 'unknown',
+      });
+    case '/api/remote-fleet/start-runtime':
+      return projectOperationCommand(body, payload, 'startRuntime', 'runtimeId', {
+        runtimeLifecycleUpdated: 'queued',
+      });
+    case '/api/remote-fleet/stop-runtime':
+      return projectOperationCommand(body, payload, 'stopRuntime', 'runtimeId', {
+        runtimeLifecycleUpdated: 'queued',
+      });
+    case '/api/remote-fleet/sync-capabilities':
+      return projectOperationCommand(body, payload, 'syncCapabilities', 'endpointId', {
+        capabilitySyncStarted: 'queued',
+      });
+    case '/api/remote-fleet/deploy-environment':
+      return projectOperationCommand(body, payload, 'deployEnvironment', 'environmentId', {
+        deploymentCompleted: 'succeeded',
+        deploymentFailed: 'failed',
+        deploymentUnknown: 'unknown',
+      });
+    default:
+      return null;
   }
+}
+
+function projectDispatchCommand(
+  body: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  command: string,
+): Record<string, unknown> | null {
+  if (!isIdentifier(body.dispatchId)) return null;
+  const status = dispatchCommandStatus(body.outcome);
+  if (!status) return null;
+  const target: Record<string, unknown> = isRecord(body.target) ? body.target : {};
+  return compactCommand({
+    id: isIdentifier(payload.commandId) ? payload.commandId : body.dispatchId,
+    nodeId: readIdentifier(target.nodeId ?? payload.nodeId),
+    runtimeId: readIdentifier(target.runtimeId),
+    endpointId: readIdentifier(target.endpointId),
+    command,
+    status,
+  });
+}
+
+function projectOperationCommand(
+  body: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  command: string,
+  identity: 'connectionId' | 'environmentId' | 'runtimeId' | 'endpointId',
+  outcomes: Readonly<Record<string, string>>,
+): Record<string, unknown> | null {
+  if (!isIdentifier(payload.commandId) || typeof body.outcome !== 'string') return null;
+  const status = outcomes[body.outcome];
+  if (!status) return null;
+  return compactCommand({
+    id: payload.commandId,
+    [identity]: readIdentifier(payload.id),
+    command,
+    status,
+    message: readText(body.message),
+  });
+}
+
+function dispatchCommandStatus(outcome: unknown): string | null {
+  switch (outcome) {
+    case 'accepted': return 'queued';
+    case 'completed': return 'succeeded';
+    case 'rejected': return 'failed';
+    case 'outcomeUnknown': return 'unknown';
+    default: return null;
+  }
+}
+
+function readPayload(request: FleetMutationRequest): Record<string, unknown> | null {
+  const input = request.input;
+  return isRecord(input) && isRecord(input.payload) ? input.payload : null;
+}
+
+function compactCommand(command: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(command).filter(([, value]) => value !== undefined));
+}
+
+function readIdentifier(value: unknown): string | undefined {
+  return isIdentifier(value) ? value : undefined;
 }
 
 async function handleRegistrationRoute(
@@ -507,13 +533,15 @@ function isFleetMutationPath(pathname: string): boolean {
   return pathname === '/api/remote-fleet/delete-connection'
     || pathname === '/api/remote-fleet/register-connection'
     || pathname === '/api/remote-fleet/register-environment'
-    || pathname === '/api/remote-fleet/register'
     || pathname === '/api/remote-fleet/remove-node'
     || pathname === '/api/remote-fleet/revoke-agent'
     || pathname === '/api/remote-fleet/drain-endpoint'
     || pathname === '/api/remote-fleet/retire-endpoint'
     || pathname === '/api/remote-fleet/probe'
     || pathname === '/api/remote-fleet/probe-connection'
+    || pathname === '/api/remote-fleet/start-runtime'
+    || pathname === '/api/remote-fleet/stop-runtime'
+    || pathname === '/api/remote-fleet/sync-capabilities'
     || pathname === '/api/remote-fleet/install-agent'
     || pathname === '/api/remote-fleet/deploy-environment'
     || pathname === '/api/remote-fleet/delete-environment'
@@ -553,6 +581,42 @@ function buildMutationRequest(pathname: string, body: unknown): MutationBuildRes
         request: {
           operation: 'fleet.connections.probe.begin',
           input: { kind: 'connectionProbeBegin', payload: { id, commandId: fleetCommandId('probe-connection', id) } },
+        },
+      }
+      : { kind: 'invalid' };
+  }
+  if (pathname === '/api/remote-fleet/start-runtime') {
+    const id = readIdentifierField(body, 'runtimeId');
+    return id
+      ? {
+        kind: 'request',
+        request: {
+          operation: 'fleet.runtimes.start.begin',
+          input: { kind: 'runtimeStartBegin', payload: { id, commandId: fleetCommandId('start-runtime', id) } },
+        },
+      }
+      : { kind: 'invalid' };
+  }
+  if (pathname === '/api/remote-fleet/stop-runtime') {
+    const id = readIdentifierField(body, 'runtimeId');
+    return id
+      ? {
+        kind: 'request',
+        request: {
+          operation: 'fleet.runtimes.stop.begin',
+          input: { kind: 'runtimeStopBegin', payload: { id, commandId: fleetCommandId('stop-runtime', id) } },
+        },
+      }
+      : { kind: 'invalid' };
+  }
+  if (pathname === '/api/remote-fleet/sync-capabilities') {
+    const id = readIdentifierField(body, 'endpointId');
+    return id
+      ? {
+        kind: 'request',
+        request: {
+          operation: 'fleet.capabilities.sync.begin',
+          input: { kind: 'capabilitySyncBegin', payload: { id, commandId: fleetCommandId('sync-capabilities', id) } },
         },
       }
       : { kind: 'invalid' };
@@ -650,19 +714,6 @@ function buildMutationRequest(pathname: string, body: unknown): MutationBuildRes
   return { kind: 'unavailable' };
 }
 
-function readNodeRegistration(value: unknown): { id: string; connectionId: string | null; enabled: boolean | undefined } | null {
-  const node = isRecord(value) && isRecord(value.node) ? value.node : value;
-  if (!isRecord(node)) return null;
-  const id = isIdentifier(node.id) ? node.id : `node:${Date.now()}`;
-  if (node.connectionId !== undefined && !isIdentifier(node.connectionId)) return null;
-  if (node.enabled !== undefined && typeof node.enabled !== 'boolean') return null;
-  return {
-    id,
-    connectionId: isIdentifier(node.connectionId) ? node.connectionId : null,
-    enabled: node.enabled,
-  };
-}
-
 function readTerminalOpenPayload(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const payload: Record<string, unknown> = {};
@@ -685,6 +736,10 @@ function readIdentifierField(value: unknown, key: string): string | null {
 
 function fleetCommandId(action: string, id: string): string {
   return `${action}:${id}:${Date.now()}`;
+}
+
+function readText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function isTerminalDimension(value: unknown): value is number {

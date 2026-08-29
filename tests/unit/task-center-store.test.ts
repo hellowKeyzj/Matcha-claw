@@ -15,12 +15,10 @@ const firstSessionIdentity = createOpenClawTestSessionIdentity('agent:main:first
 const secondSessionIdentity = createOpenClawTestSessionIdentity('agent:main:second');
 
 const listTaskSnapshotMock = vi.fn<(payload: { sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }) => Promise<TaskListSnapshot>>();
-const createTaskMock = vi.fn();
 const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   listTaskSnapshot: (...args: [{ sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }]) => listTaskSnapshotMock(...args),
-  createTask: (...args: unknown[]) => createTaskMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
@@ -55,7 +53,6 @@ describe('task center store', () => {
   beforeEach(() => {
     vi.resetModules();
     listTaskSnapshotMock.mockReset();
-    createTaskMock.mockReset();
     updateTaskMock.mockReset();
   });
 
@@ -66,7 +63,7 @@ describe('task center store', () => {
     ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     const state = useTaskCenterStore.getState();
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
@@ -91,7 +88,7 @@ describe('task center store', () => {
   it('refreshTasks keeps previous snapshot when request fails', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([task({ id: '1', status: 'pending' })]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     listTaskSnapshotMock.mockRejectedValueOnce(new Error('refresh failed'));
     await useTaskCenterStore.getState().refreshTasks();
@@ -132,8 +129,8 @@ describe('task center store', () => {
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
 
-    const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', backendSessionKey: 'agent:main:first', sessionIdentity: firstSessionIdentity, silent: true });
-    const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', backendSessionKey: 'agent:main:second', sessionIdentity: secondSessionIdentity, silent: true });
+    const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', sessionIdentity: firstSessionIdentity, silent: true });
+    const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', sessionIdentity: secondSessionIdentity, silent: true });
     await secondRefresh;
 
     expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:first', sessionIdentity: firstSessionIdentity });
@@ -145,45 +142,6 @@ describe('task center store', () => {
 
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:first').map((item) => item.subject)).toEqual(['first task']);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
-  });
-
-  it('createTask uses TaskCreate then refreshes the authoritative task snapshot', async () => {
-    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([]));
-    createTaskMock.mockResolvedValueOnce({
-      outcome: 'applied',
-      snapshot: snapshot([task({ id: '2', subject: 'created task', status: 'pending' })]),
-    });
-    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
-      task({ id: '2', subject: 'created task', status: 'pending' }),
-    ]));
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
-
-    await useTaskCenterStore.getState().createTask({ subject: 'created task', description: 'created description' });
-
-    expect(createTaskMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
-      sessionIdentity,
-      subject: 'created task',
-      description: 'created description',
-    });
-    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['2']);
-  });
-
-  it.each(['rejected', 'unknown'] as const)('createTask retains the current snapshot when TaskCreate is %s', async (outcome) => {
-    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([task({ id: '1', status: 'pending' })]));
-    createTaskMock.mockResolvedValueOnce({ outcome });
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
-
-    await useTaskCenterStore.getState().createTask({ subject: 'created task', description: 'created description' });
-
-    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1']);
-    expect(useTaskCenterStore.getState().error).toBe(outcome === 'unknown' ? 'Task creation outcome is unknown' : 'Task creation was rejected');
   });
 
   it('deleteTaskById 调用 TaskUpdate(status=deleted) 后用 TaskList 全量刷新', async () => {
@@ -202,7 +160,7 @@ describe('task center store', () => {
     ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
 
@@ -216,20 +174,24 @@ describe('task center store', () => {
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '3']);
   });
 
-  it.each(['rejected', 'unknown'] as const)('deleteTaskById retains the current snapshot when TaskUpdate is %s', async (outcome) => {
+  it.each(['rejected', 'unknown'] as const)('deleteTaskById refreshes the authoritative task snapshot when TaskUpdate is %s', async (outcome) => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
       task({ id: '1', status: 'pending' }),
       task({ id: '2', status: 'in_progress' }),
     ]));
     updateTaskMock.mockResolvedValueOnce({ outcome });
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
+      task({ id: '1', status: 'pending' }),
+      task({ id: '2', status: 'in_progress' }),
+    ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', backendSessionKey: 'agent:main:main', sessionIdentity });
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
 
-    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
-    expect(useTaskCenterStore.getState().error).toBe(outcome === 'unknown' ? 'Task deletion outcome is unknown' : 'Task deletion was rejected');
+    expect(useTaskCenterStore.getState().error).toBeNull();
   });
 });

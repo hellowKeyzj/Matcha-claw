@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -12,6 +13,7 @@ use tokio::{
     time::timeout,
 };
 
+use crate::channel::{ChannelHandle, ChannelKey};
 use crate::transport::authorization::CapabilityDecisionVerifier;
 
 use super::{ChannelPairingDelivery, DecodeError, decode_approval, decode_list};
@@ -26,19 +28,22 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        channel: ChannelHandle,
+        endpoint: RuntimeEndpoint,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            channel,
+            endpoint,
         })
     }
 
@@ -46,9 +51,10 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let channel = self.channel.clone();
+            let endpoint = self.endpoint.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, channel, endpoint).await;
             });
         }
     }
@@ -57,12 +63,13 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, channel, endpoint).await,
             Err(response) => response,
         })
     })
@@ -78,7 +85,8 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/channels/pairing" {
         return Response::not_found();
@@ -100,14 +108,11 @@ async fn handle(
         match decode_approval(value, authorization, &mut verifier, now_millis()) {
             Ok(command) => {
                 drop(verifier);
-                match owner
-                    .approve_open_claw_channel_pairing(
-                        command.channel,
-                        command.account,
-                        command.code,
-                    )
-                    .await
-                {
+                let key = match ChannelKey::try_new(endpoint, command.channel, command.account) {
+                    Ok(key) => key,
+                    Err(_) => return Response::bad_request(),
+                };
+                match channel.approve_pairing(key, command.code).await {
                     Ok(outcome) => Response::approval(outcome),
                     Err(_) => Response::unavailable(),
                 }
@@ -117,14 +122,11 @@ async fn handle(
         }
     } else {
         match decode_list(value, authorization, &mut verifier, now_millis()) {
-            Ok((channel, account)) => {
+            Ok((channel_id, account)) => {
                 drop(verifier);
-                match owner.list_open_claw_channel_pairing(channel, account).await {
-                    Ok(outcome) => {
-                        Response::from_delivery(ChannelPairingDelivery::from_outcome(outcome))
-                    }
-                    Err(_) => Response::unavailable(),
-                }
+                Response::from_delivery(ChannelPairingDelivery::from_outcome(
+                    channel.pairing(channel_id, account).await,
+                ))
             }
             Err(DecodeError::Unauthorized) => Response::unauthorized(),
             Err(DecodeError::Invalid) => Response::bad_request(),
@@ -175,7 +177,7 @@ impl Response {
         }
     }
 
-    fn approval(outcome: crate::channel_status::ChannelPairingApprovalOutcome) -> Self {
+    fn approval(outcome: crate::channel::status::ChannelPairingApprovalOutcome) -> Self {
         Self {
             status: 200,
             body: serde_json::to_value(outcome)

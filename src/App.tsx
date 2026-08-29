@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Component, Suspense, useCallback, useEffect } from 'react';
+import { Component, Suspense, useCallback, useEffect, useLayoutEffect } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -235,7 +235,7 @@ function App() {
   }, [navigate]);
 
   // Apply theme
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = window.document.documentElement;
     const body = window.document.body;
     const staleTheme = resolvedTheme === 'dark' ? 'light' : 'dark';
@@ -246,6 +246,7 @@ function App() {
         && !root.classList.contains(staleTheme)
         && !body.classList.contains('light')
         && !body.classList.contains('dark')
+        && root.dataset.themeSurface === resolvedTheme
       ) {
         return;
       }

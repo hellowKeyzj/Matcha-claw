@@ -7,7 +7,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::SkillInputError;
 use crate::lifecycle::state_dir::CanonicalStateDir;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -440,12 +439,6 @@ impl fmt::Debug for SkillBundleStore {
 pub enum BundleError {
     Rejected,
     Unknown,
-}
-
-impl From<SkillInputError> for BundleError {
-    fn from(_: SkillInputError) -> Self {
-        Self::Rejected
-    }
 }
 
 fn is_managed_skill(path: &Path, skill_key: &str) -> bool {

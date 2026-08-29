@@ -169,6 +169,12 @@ impl FleetDeliveryOwner {
         })
     }
 
+    pub fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+        Ok(Self {
+            store: FleetStore::open_live(path)?,
+        })
+    }
+
     pub fn from_store(store: FleetStore) -> Self {
         Self { store }
     }
@@ -227,7 +233,7 @@ impl FleetDeliveryOwner {
                 .upsert(reachability, now)
                 .map_err(FleetDeliveryError::Reachability)?;
             let records = current.records().cloned().collect::<Vec<_>>();
-            *facts = FleetFacts::restore(FleetFactsRestoreInput {
+            *facts = FleetFacts::restore_live(FleetFactsRestoreInput {
                 commands: facts.command_records().cloned().collect(),
                 dispatches: facts.dispatch_records().cloned().collect(),
                 secret_references: facts.secret_references().cloned().collect(),
@@ -262,6 +268,10 @@ impl FleetDeliveryOwner {
         command_id: &CommandId,
     ) -> Option<&crate::outbox::OutboxRecord> {
         self.store.facts().record_for_command(command_id)
+    }
+
+    pub fn pending_dispatches(&self) -> impl Iterator<Item = &crate::outbox::OutboxRecord> {
+        self.store.facts().outbox().pending()
     }
 
     pub fn begin_dispatch_for_command(
@@ -1903,11 +1913,16 @@ mod tests {
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     use super::*;
     use crate::{
         command::{CommandKind, CommandTarget, IdempotencyKey},
+        reachability::{
+            ExternalRelayOrigin, LoopbackIngressListener, ReachabilityStatus, RelayAuthority,
+            RelayAuthorityId, RelayBinding, RelayBindingId, RelayKind, RelayScheme,
+        },
         secret_ref::FleetSecretRef,
         target::{
             DockerTargetConfig, FleetTargetConfig, FleetTargetSelector, TargetId, TargetKind,
@@ -1928,7 +1943,11 @@ mod tests {
     }
 
     fn owner() -> FleetDeliveryOwner {
-        let mut owner = FleetDeliveryOwner::open(store_path()).unwrap();
+        owner_at(store_path())
+    }
+
+    fn owner_at(path: PathBuf) -> FleetDeliveryOwner {
+        let mut owner = FleetDeliveryOwner::open(path).unwrap();
         owner
             .put_target(
                 TargetId::try_new("docker-a").unwrap(),
@@ -1967,6 +1986,26 @@ mod tests {
                 NativeAgentId::try_new("agent-1").unwrap(),
                 selector,
             ),
+        )
+        .unwrap()
+    }
+
+    fn reachability(now: SystemTime) -> RuntimeAgentIngressReachabilityFacts {
+        let authority = RelayAuthority::try_new(
+            RelayAuthorityId::try_new("relay-authority-1").unwrap(),
+            ExternalRelayOrigin::try_new(RelayScheme::Https, "relay.example.test", 443).unwrap(),
+            RelayKind::ReverseProxy,
+        );
+        RuntimeAgentIngressReachabilityFacts::try_new(
+            NativeAgentId::try_new("agent-1").unwrap(),
+            RelayBinding::new(
+                RelayBindingId::try_new("binding-1").unwrap(),
+                authority,
+                LoopbackIngressListener::try_new(34123).unwrap(),
+            ),
+            ReachabilityStatus::Reachable { verified_at: now },
+            now,
+            now + Duration::from_secs(60),
         )
         .unwrap()
     }
@@ -2047,6 +2086,75 @@ mod tests {
     }
 
     #[test]
+    fn reachability_upsert_preserves_active_in_flight_dispatch() {
+        let at = SystemTime::UNIX_EPOCH;
+        let mut owner = owner();
+        let dispatch = DispatchId::try_new("dispatch-1").unwrap();
+        owner
+            .submit(request("command-1", "key-1", "dispatch-1", at), at)
+            .unwrap();
+        owner.begin_dispatch(&dispatch, at).unwrap();
+
+        owner
+            .upsert_runtime_agent_reachability(reachability(at), at)
+            .unwrap();
+
+        assert_eq!(
+            owner.facts().outbox().record(&dispatch).unwrap().phase(),
+            DispatchPhase::InFlight
+        );
+        assert_eq!(
+            owner.begin_dispatch(&dispatch, at),
+            Err(FleetDeliveryError::AlreadyInFlight)
+        );
+    }
+
+    #[test]
+    fn cold_restore_keeps_unknown_dispatch_out_of_pending_until_replay_is_authorized() {
+        let at = SystemTime::UNIX_EPOCH;
+        let path = store_path();
+        let command_id = CommandId::try_new("command-replay").unwrap();
+        let dispatch_id = DispatchId::try_new("dispatch-replay").unwrap();
+
+        {
+            let mut owner = owner_at(path.clone());
+            owner
+                .submit(
+                    request("command-replay", "key-replay", "dispatch-replay", at),
+                    at,
+                )
+                .unwrap();
+            owner.begin_dispatch(&dispatch_id, at).unwrap();
+        }
+
+        let mut restored = FleetDeliveryOwner::open(path).unwrap();
+        assert_eq!(
+            restored.record_for_command(&command_id).unwrap().phase(),
+            DispatchPhase::OutcomeUnknown
+        );
+        assert!(restored.pending_dispatches().next().is_none());
+
+        assert_eq!(
+            restored.authorize_replay(&command_id, &dispatch_id, at),
+            Ok(FleetDeliveryOutcome::Replayed)
+        );
+        let pending = restored
+            .pending_dispatches()
+            .map(|record| record.intent().dispatch_id().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(pending, vec!["dispatch-replay"]);
+        assert_eq!(
+            restored.record_for_command(&command_id).unwrap().phase(),
+            DispatchPhase::Pending
+        );
+        let replay = restored
+            .begin_dispatch_for_command(&command_id, at)
+            .unwrap();
+        assert_eq!(replay.dispatch().dispatch_id(), &dispatch_id);
+        assert_eq!(replay.attempt().sequence(), 2);
+    }
+
+    #[test]
     fn command_lookup_uses_durable_dispatch_identity_across_delivery_phases() {
         let at = SystemTime::UNIX_EPOCH;
         let command = CommandId::try_new("command-lookup").unwrap();
@@ -2087,7 +2195,7 @@ mod tests {
         );
         assert_eq!(
             owner.begin_dispatch_for_command(&command, at),
-            Err(FleetDeliveryError::DeliveryOutcomeUnknown)
+            Err(FleetDeliveryError::AlreadyInFlight)
         );
 
         assert_eq!(
@@ -2307,7 +2415,7 @@ mod tests {
         );
         assert_eq!(
             owner.facts().outbox().record(&dispatch).unwrap().phase(),
-            DispatchPhase::OutcomeUnknown
+            DispatchPhase::InFlight
         );
         assert!(matches!(
             owner
@@ -2382,7 +2490,7 @@ mod tests {
         );
         assert_eq!(
             owner.facts().outbox().record(&dispatch).unwrap().phase(),
-            DispatchPhase::OutcomeUnknown
+            DispatchPhase::InFlight
         );
         assert!(matches!(
             owner

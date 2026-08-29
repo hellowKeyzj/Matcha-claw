@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::TaskManagerHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{
     CREATE_PATH, DecodeError, Delivery, GET_PATH, LIST_PATH, OUTPUT_PATH, STOP_PATH,
@@ -22,26 +22,26 @@ use super::{
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: TaskManagerHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        handle: TaskManagerHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            handle,
         })
     }
 
@@ -49,9 +49,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let task_manager_handle = self.handle.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, task_manager_handle).await;
             });
         }
     }
@@ -60,12 +60,16 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: TaskManagerHandle,
 ) -> io::Result<()> {
+    let mut request_received = false;
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => {
+                request_received = true;
+                self::handle(request, verifier, handle).await
+            }
             Err(response) => response,
         })
     })
@@ -73,6 +77,7 @@ async fn serve(
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(error),
+        Err(_) if request_received => Response::from_delivery(Delivery::unavailable()),
         Err(_) => Response::bad_request(),
     };
     write_response(&mut stream, response).await
@@ -81,7 +86,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: TaskManagerHandle,
 ) -> Response {
     if !accepts_route(&request.method, &request.path) {
         return Response::not_found();
@@ -111,7 +116,7 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    match owner.task_manager(request.into_command()).await {
+    match handle.task_manager(request.into_command()).await {
         Ok(outcome) => Response::from_delivery(Delivery::from_outcome(outcome)),
         Err(_) => Response::from_delivery(Delivery::unavailable()),
     }

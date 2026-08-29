@@ -8,6 +8,7 @@ import type { MatchaSessionListTransport } from '../../main/runtime-host-deliver
 import type { SessionAbortRequest, SessionAbortTransport } from '../../main/runtime-host-delivery/transport/sessions/abort';
 import type {
   SessionApprovalListRequest,
+  SessionApprovalListTransportResponse,
   SessionApprovalRespondRequest,
   SessionApprovalTransport,
 } from '../../main/runtime-host-delivery/transport/sessions/approvals';
@@ -81,10 +82,10 @@ export async function dispatchSessionCapability(
   }
   if ((body.id === 'session.prompt' || body.id === 'session.management')
     && body.operationId === 'sessions.load') {
-    return await dispatchSessionTimeline(deps, adaptSessionTimelineRequest(body, 'sessions.load'), 'load', traceId);
+    return await dispatchSessionTimeline(deps, adaptSessionTimelineRequest(body, 'sessions.load', traceId), 'load', traceId);
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.window') {
-    return await dispatchSessionTimeline(deps, adaptSessionTimelineRequest(body, 'sessions.window'), 'window', traceId);
+    return await dispatchSessionTimeline(deps, adaptSessionTimelineRequest(body, 'sessions.window', traceId), 'window', traceId);
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.delete') {
     return await deps.sessionDeleteTransport.delete(adaptSessionDeleteRequest(body));
@@ -105,13 +106,15 @@ export async function dispatchSessionCapability(
     return await deps.sessionAbortTransport.abort(adaptSessionAbortRequest(body));
   }
   if (body.id === 'session.approval' && body.operationId === 'approvals.list') {
-    return await deps.sessionApprovalTransport.list(adaptSessionApprovalListRequest(body));
+    const request = adaptSessionApprovalListRequest(body);
+    const response = await deps.sessionApprovalTransport.list(request.native);
+    return projectSessionApprovalListResponse(response, request);
   }
   if (body.id === 'session.approval' && body.operationId === 'approvals.resolve') {
     return await deps.sessionApprovalTransport.respond(adaptSessionApprovalRespondRequest(body));
   }
   if (body.id === 'session.modelSelection' && body.operationId === 'sessions.patchModel') {
-    return await deps.sessionModelSelectionTransport.select(adaptSessionModelSelectionRequest(body));
+    return await deps.sessionModelSelectionTransport.select(adaptSessionModelSelectionRequest(body, traceId), traceId);
   }
   if (body.id === 'session.prompt'
     && (body.operationId === 'sessions.prompt' || body.operationId === 'sessions.sendWithMedia')) {
@@ -154,29 +157,20 @@ async function dispatchSessionSend(
       adapter: request.scope.endpoint.runtimeAdapterId,
       sessionKey: summarizeIdentifier(request.input.sessionKey),
       endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
-      runId: summarizeIdentifier(request.input.runId ?? request.input.idempotencyKey),
+      runId: summarizeIdentifier(request.input.runId),
+      idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
       attachmentCount: request.input.attachments.length,
     });
     const response = traceId === undefined
       ? await deps.sessionSendTransport.send(request)
       : await deps.sessionSendTransport.send(request, traceId);
     const projected = projectSessionSendResponse(response, request);
+    const retainsRoute = projected !== null && retainsSessionRoute(projected, request);
     logSessionTrace('capability.send.response', traceId, {
       status: response.status,
       projected: Boolean(projected),
-      retainedRoute: projected && (
-        (isQueuedSessionSendResponse(projected.body, request)
-          && request.scope.endpoint.runtimeAdapterId === 'openclaw')
-        || (isSucceededSessionSendResponse(projected.body, request)
-          && deps.rendererEventRoutes.isMatchaRoute(request.scope.routeKey))
-      ),
+      retainedRoute: retainsRoute,
     });
-    const retainsRoute = projected && (
-      (isQueuedSessionSendResponse(projected.body, request)
-        && request.scope.endpoint.runtimeAdapterId === 'openclaw')
-      || (isSucceededSessionSendResponse(projected.body, request)
-        && deps.rendererEventRoutes.isMatchaRoute(request.scope.routeKey))
-    );
     if (!retainsRoute) deps.rendererEventRoutes.release(request.scope.routeKey);
     return projected ?? { status: 503, body: SESSION_SEND_UNAVAILABLE };
   } catch (error) {
@@ -194,7 +188,7 @@ type SessionSendResponse = Readonly<{
       routeKey?: string;
       status: 'started' | 'in_flight' | 'ok';
     }>
-    | Readonly<{ outcome: 'target_rejected' | 'unknown' }>
+    | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>
     | typeof SESSION_SEND_INVALID
     | typeof SESSION_SEND_UNAVAILABLE;
 }>;
@@ -238,17 +232,26 @@ function projectSessionSendResponse(
   return null;
 }
 
+function retainsSessionRoute(
+  response: SessionSendResponse,
+  request: SessionSendRequest,
+): boolean {
+  return isQueuedSessionSendResponse(response.body, request)
+    || isSucceededSessionSendResponse(response.body, request)
+    || isTerminalSessionSendResponse(response.body);
+}
+
 function isQueuedSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
   outcome: 'queued';
   runId: string;
   routeKey?: string;
 }> {
-  const expectedRunId = request.input.runId ?? request.input.idempotencyKey;
   return request.scope.endpoint.runtimeAdapterId === 'openclaw'
     && isRecord(value)
     && hasAllowedKeys(value, ['outcome', 'runId'], ['routeKey'])
     && value.outcome === 'queued'
-    && value.runId === expectedRunId;
+    && isIdentifier(value.runId)
+    && (value.routeKey === undefined || value.routeKey === request.scope.routeKey);
 }
 
 function isSucceededSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
@@ -261,17 +264,18 @@ function isSucceededSessionSendResponse(value: unknown, request: SessionSendRequ
   return isRecord(value)
     && hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['routeKey'])
     && value.outcome === 'succeeded'
-    && value.runId === expectedRunId
+    && isIdentifier(value.runId)
+    && (request.scope.endpoint.runtimeAdapterId === 'openclaw' || value.runId === expectedRunId)
     && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok')
     && (value.routeKey === undefined || value.routeKey === request.scope.routeKey);
 }
 
 function isTerminalSessionSendResponse(value: unknown): value is Readonly<{
-  outcome: 'target_rejected' | 'unknown';
+  outcome: 'target_rejected' | 'unavailable' | 'unknown';
 }> {
   return isRecord(value)
     && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'target_rejected' || value.outcome === 'unknown');
+    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown');
 }
 
 function isExactFailure(
@@ -754,20 +758,13 @@ function adaptSessionCreateRequest(body: Record<string, unknown>): Record<string
     || !isIdentifier(body.target.agentId)
     || body.target.agentId !== body.scope.agentId
     || !isRecord(body.input)
-    || !hasAllowedKeys(body.input, ['endpoint', 'agentId'], ['sessionKey', 'endpointSessionId'])
+    || !hasAllowedKeys(body.input, ['endpoint', 'agentId'], ['endpointSessionId'])
     || !isRuntimeEndpoint(body.input.endpoint)
     || !sameEndpoint(body.input.endpoint, body.scope.endpoint)
     || body.input.agentId !== body.scope.agentId
-    || (body.input.sessionKey !== undefined && !isIdentifier(body.input.sessionKey))
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))) {
     throw new Error('Session create request is invalid');
   }
-  const endpointSessionId = body.input.endpointSessionId as string | undefined
-    ?? deriveEndpointSessionId(
-      body.input.endpoint,
-      body.input.agentId as string,
-      body.input.sessionKey as string | undefined,
-    );
   return {
     id: 'session.prompt',
     operationId: 'sessions.create',
@@ -780,34 +777,15 @@ function adaptSessionCreateRequest(body: Record<string, unknown>): Record<string
     input: {
       endpoint: body.input.endpoint,
       agentId: body.input.agentId,
-      ...(endpointSessionId === undefined ? {} : { endpointSessionId }),
+      ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId }),
     },
   };
-}
-
-function deriveEndpointSessionId(
-  endpoint: RuntimeEndpoint,
-  agentId: string,
-  sessionKey: string | undefined,
-): string | undefined {
-  if (sessionKey === undefined) return undefined;
-  if (endpoint.runtimeAdapterId === 'matcha-agent') return sessionKey;
-  const prefix = `agent:${agentId}:`;
-  if (!sessionKey.startsWith(prefix)) return undefined;
-  const endpointSessionId = sessionKey.slice(prefix.length);
-  return isValidEndpointSessionId(endpointSessionId) ? endpointSessionId : undefined;
-}
-
-function isValidEndpointSessionId(value: string): boolean {
-  return isIdentifier(value)
-    && value.trim() === value
-    && !value.toLowerCase().startsWith('agent:')
-    && value.split(':').every((segment) => segment.length > 0);
 }
 
 function adaptSessionTimelineRequest(
   body: Record<string, unknown>,
   operationId: 'sessions.load' | 'sessions.window',
+  traceId?: string | null,
 ): Record<string, unknown> {
   const allowedIds = operationId === 'sessions.load'
     ? ['session.prompt', 'session.management']
@@ -825,6 +803,11 @@ function adaptSessionTimelineRequest(
     || !isSessionIdentity(body.target.identity)
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)) {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'envelope',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
 
@@ -837,13 +820,23 @@ function adaptSessionTimelineRequest(
     || body.input.sessionKey !== body.scope.identity.sessionKey
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
     || (body.input.limit !== undefined && !isTimelineLimit(body.input.limit))) {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'input',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
   if (operationId === 'sessions.load') {
     if (body.input.mode !== undefined || body.input.offset !== undefined || body.input.includeCanonical !== undefined) {
+      logSessionTrace('electron.timeline.route.invalid', traceId, {
+        operationId,
+        reason: 'load-window-fields',
+        envelope: summarizeTimelineBody(body),
+      });
       throw new Error('Session timeline request is invalid');
     }
-    return {
+    const request = {
       id: 'session.management',
       operationId,
       scope: { kind: 'session', identity: body.scope.identity },
@@ -855,21 +848,50 @@ function adaptSessionTimelineRequest(
         ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
       },
     };
+    logSessionTrace('electron.timeline.route.adapted', traceId, {
+      operationId,
+      adapter: body.scope.identity.endpoint.runtimeAdapterId,
+      instance: body.scope.identity.endpoint.runtimeInstanceId,
+      sessionKey: summarizeIdentifier(body.input.sessionKey as string),
+      endpointSessionId: summarizeIdentifier(body.input.endpointSessionId as string | undefined),
+      limit: body.input.limit ?? null,
+    });
+    return request;
   }
 
   if (body.input.includeCanonical !== undefined && typeof body.input.includeCanonical !== 'boolean') {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'include-canonical',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.mode !== 'latest' && body.input.mode !== 'older' && body.input.mode !== 'newer') {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'mode',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.mode === 'latest' && body.input.offset !== undefined) {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'latest-offset',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.offset !== undefined && !isSafeNonNegativeInteger(body.input.offset)) {
+    logSessionTrace('electron.timeline.route.invalid', traceId, {
+      operationId,
+      reason: 'offset',
+      envelope: summarizeTimelineBody(body),
+    });
     throw new Error('Session timeline request is invalid');
   }
-  return {
+  const request = {
     id: 'session.management',
     operationId,
     scope: { kind: 'session', identity: body.scope.identity },
@@ -883,6 +905,41 @@ function adaptSessionTimelineRequest(
       ...(body.input.offset === undefined ? {} : { offset: body.input.offset }),
       ...(body.input.includeCanonical === undefined ? {} : { includeCanonical: body.input.includeCanonical }),
     },
+  };
+  logSessionTrace('electron.timeline.route.adapted', traceId, {
+    operationId,
+    adapter: body.scope.identity.endpoint.runtimeAdapterId,
+    instance: body.scope.identity.endpoint.runtimeInstanceId,
+    sessionKey: summarizeIdentifier(body.input.sessionKey as string),
+    endpointSessionId: summarizeIdentifier(body.input.endpointSessionId as string | undefined),
+    mode: body.input.mode,
+    limit: body.input.limit ?? null,
+    offset: body.input.offset ?? null,
+    includeCanonical: body.input.includeCanonical ?? null,
+  });
+  return request;
+}
+
+function summarizeTimelineBody(body: Record<string, unknown>) {
+  const scope = isRecord(body.scope) ? body.scope : null;
+  const target = isRecord(body.target) ? body.target : null;
+  const input = isRecord(body.input) ? body.input : null;
+  return {
+    bodyKeys: Object.keys(body).sort(),
+    id: typeof body.id === 'string' ? body.id : null,
+    operationId: typeof body.operationId === 'string' ? body.operationId : null,
+    scopeKind: typeof scope?.kind === 'string' ? scope.kind : null,
+    scopeIdentity: summarizeIdentityShape(scope?.identity),
+    targetKind: typeof target?.kind === 'string' ? target.kind : null,
+    targetIdentity: summarizeIdentityShape(target?.identity),
+    inputKeys: input ? Object.keys(input).sort() : null,
+    inputSessionKey: summarizeString(input?.sessionKey),
+    inputSessionIdentity: summarizeIdentityShape(input?.sessionIdentity),
+    endpointSessionId: summarizeString(input?.endpointSessionId),
+    mode: typeof input?.mode === 'string' ? input.mode : null,
+    limitType: input?.limit === undefined ? null : typeof input.limit,
+    offsetType: input?.offset === undefined ? null : typeof input.offset,
+    includeCanonicalType: input?.includeCanonical === undefined ? null : typeof input.includeCanonical,
   };
 }
 
@@ -1016,7 +1073,18 @@ function adaptSessionAbortRequest(body: Record<string, unknown>): SessionAbortRe
   };
 }
 
-function adaptSessionApprovalListRequest(body: Record<string, unknown>): SessionApprovalListRequest {
+type SessionApprovalListRouteRequest = Readonly<{
+  native: SessionApprovalListRequest;
+  identity: SessionIdentity & Readonly<{
+    endpoint: Readonly<{
+      kind: 'native-runtime';
+      runtimeAdapterId: 'matcha-agent';
+      runtimeInstanceId: 'local';
+    }>;
+  }>;
+}>;
+
+function adaptSessionApprovalListRequest(body: Record<string, unknown>): SessionApprovalListRouteRequest {
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     || body.id !== 'session.approval'
     || body.operationId !== 'approvals.list'
@@ -1032,21 +1100,103 @@ function adaptSessionApprovalListRequest(body: Record<string, unknown>): Session
     || !isMatchaAgentIdentity(body.target.identity)
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)
-    || !hasExactKeys(body.input, ['sessionIdentity'])
+    || !hasExactKeys(body.input, ['endpointSessionId', 'sessionIdentity'])
+    || !isIdentifier(body.input.endpointSessionId)
     || !isSessionIdentity(body.input.sessionIdentity)
     || !isMatchaAgentIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)) {
     throw new Error('Session approval request is invalid');
   }
-  const endpoint = body.scope.identity.endpoint;
-  const sessionId = body.scope.identity.sessionKey;
+  const identity = body.scope.identity;
+  const endpoint = identity.endpoint;
+  const sessionId = body.input.endpointSessionId as string;
   return {
-    id: 'session.approval',
-    operationId: 'sessions.approvals.list',
-    scope: { kind: 'session', endpoint, sessionId },
-    target: { kind: 'session' },
-    input: { endpoint, sessionId },
+    identity,
+    native: {
+      id: 'session.approval',
+      operationId: 'sessions.approvals.list',
+      scope: { kind: 'session', endpoint, sessionId },
+      target: { kind: 'session' },
+      input: { endpoint, sessionId },
+    },
   };
+}
+
+function projectSessionApprovalListResponse(
+  response: SessionApprovalListTransportResponse,
+  request: SessionApprovalListRouteRequest,
+): PublicTransportResponse {
+  if (response.status === 200 && isNativeApprovalListResponse(response.body)) {
+    return {
+      status: 200,
+      body: {
+        approvals: response.body.approvals.map((approval) => ({
+          id: approval.approvalId,
+          sessionKey: request.identity.sessionKey,
+          sessionIdentity: request.identity,
+          title: 'Approval required',
+          allowedDecisions: approval.optionIds.map(nativeApprovalOptionIdToDecision).filter(isPublicApprovalDecision),
+          request: { optionIds: approval.optionIds },
+          createdAtMs: 0,
+        })),
+      },
+    };
+  }
+  return response;
+}
+
+function isNativeApprovalListResponse(value: unknown): value is Readonly<{
+  approvals: ReadonlyArray<Readonly<{ approvalId: string; optionIds: readonly string[] }>>;
+}> {
+  return isRecord(value)
+    && hasExactKeys(value, ['approvals'])
+    && Array.isArray(value.approvals)
+    && value.approvals.every((approval) => isRecord(approval)
+      && hasExactKeys(approval, ['approvalId', 'optionIds'])
+      && isIdentifier(approval.approvalId)
+      && Array.isArray(approval.optionIds)
+      && approval.optionIds.every((optionId) => isIdentifier(optionId)));
+}
+
+function isPublicApprovalDecision(value: unknown): value is 'allow-once' | 'allow-always' | 'deny' {
+  return value === 'allow-once' || value === 'allow-always' || value === 'deny';
+}
+
+function nativeApprovalOptionIdToDecision(optionId: string): 'allow-once' | 'allow-always' | 'deny' | null {
+  switch (optionId) {
+    case 'allow':
+    case 'allow-once':
+    case 'allow_once':
+      return 'allow-once';
+    case 'allow-always':
+    case 'allow_always':
+      return 'allow-always';
+    case 'deny':
+    case 'deny-once':
+    case 'reject-once':
+    case 'reject_once':
+      return 'deny';
+    default:
+      return null;
+  }
+}
+
+function approvalDecisionToOptionId(decision: 'allow-once' | 'allow-always' | 'deny', approval?: { request?: Record<string, unknown> }): string {
+  const optionIds = approval?.request?.optionIds;
+  if (Array.isArray(optionIds)) {
+    const nativeOptionId = optionIds.find((optionId): optionId is string => (
+      isIdentifier(optionId) && nativeApprovalOptionIdToDecision(optionId) === decision
+    ));
+    if (nativeOptionId) return nativeOptionId;
+  }
+  switch (decision) {
+    case 'allow-once':
+      return 'allow-once';
+    case 'allow-always':
+      return 'allow-always';
+    case 'deny':
+      return 'deny-once';
+  }
 }
 
 function adaptSessionApprovalRespondRequest(body: Record<string, unknown>): SessionApprovalRespondRequest {
@@ -1066,12 +1216,13 @@ function adaptSessionApprovalRespondRequest(body: Record<string, unknown>): Sess
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isIdentifier(body.target.approvalId)
     || !isRecord(body.input)
-    || !hasAllowedKeys(body.input, ['id', 'sessionKey', 'sessionIdentity', 'decision'], ['endpointSessionId'])
+    || !hasAllowedKeys(body.input, ['id', 'sessionKey', 'endpointSessionId', 'sessionIdentity', 'decision'], ['request'])
     || !isIdentifier(body.input.id)
     || !isIdentifier(body.input.sessionKey)
+    || !isIdentifier(body.input.endpointSessionId)
     || body.input.id !== body.target.approvalId
     || body.input.sessionKey !== body.scope.identity.sessionKey
-    || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
+    || (body.input.request !== undefined && !isRecord(body.input.request))
     || !isSessionIdentity(body.input.sessionIdentity)
     || !isMatchaAgentIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
@@ -1079,7 +1230,8 @@ function adaptSessionApprovalRespondRequest(body: Record<string, unknown>): Sess
     throw new Error('Session approval request is invalid');
   }
   const endpoint = body.scope.identity.endpoint;
-  const sessionId = body.scope.identity.sessionKey;
+  const sessionId = body.input.endpointSessionId as string;
+  const approval = body.input as { request?: Record<string, unknown> };
   return {
     id: 'session.approval',
     operationId: 'sessions.approvals.respond',
@@ -1089,7 +1241,7 @@ function adaptSessionApprovalRespondRequest(body: Record<string, unknown>): Sess
       endpoint,
       sessionId,
       approvalId: body.target.approvalId,
-      optionId: approvalDecisionToOptionId(body.input.decision),
+      optionId: approvalDecisionToOptionId(body.input.decision, approval),
     },
   };
 }
@@ -1110,18 +1262,7 @@ function isApprovalDecision(value: unknown): value is 'allow-once' | 'allow-alwa
   return value === 'allow-once' || value === 'allow-always' || value === 'deny';
 }
 
-function approvalDecisionToOptionId(decision: 'allow-once' | 'allow-always' | 'deny'): string {
-  switch (decision) {
-    case 'allow-once':
-      return 'allow_once';
-    case 'allow-always':
-      return 'allow_always';
-    case 'deny':
-      return 'reject_once';
-  }
-}
-
-function adaptSessionModelSelectionRequest(body: Record<string, unknown>): SessionModelSelectionRequest {
+function adaptSessionModelSelectionRequest(body: Record<string, unknown>, traceId?: string | null): SessionModelSelectionRequest {
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     || body.id !== 'session.modelSelection'
     || body.operationId !== 'sessions.patchModel'
@@ -1141,25 +1282,109 @@ function adaptSessionModelSelectionRequest(body: Record<string, unknown>): Sessi
       : ['sessionKey', 'endpointSessionId', 'sessionIdentity', 'modelSelectionId'])
     || !isSessionIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
+    || !isIdentifier(body.input.sessionKey)
     || body.input.sessionKey !== body.scope.identity.sessionKey
-    || body.input.sessionKey !== body.input.sessionIdentity.sessionKey
     || !isIdentifier(body.input.modelSelectionId)
     || body.input.modelSelectionId !== body.target.modelSelectionId
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))) {
+    logSessionTrace('electron.model-selection.route.invalid', traceId, {
+      reason: explainSessionModelSelectionInvalid(body),
+      envelope: summarizeSessionModelSelectionBody(body),
+    });
     throw new Error('Session model selection request is invalid');
   }
   const endpoint = body.scope.identity.endpoint;
+  const sessionKey = body.scope.identity.sessionKey;
+  logSessionTrace('electron.model-selection.route.adapted', traceId, {
+    adapter: endpoint.runtimeAdapterId,
+    instance: endpoint.runtimeInstanceId,
+    sessionKey: summarizeIdentifier(sessionKey),
+    endpointSessionId: summarizeIdentifier(body.input.endpointSessionId as string | undefined),
+    modelSelectionId: summarizeIdentifier(body.input.modelSelectionId as string),
+  });
   return {
     id: 'session.modelSelection',
     operationId: 'sessions.patchModel',
-    scope: { kind: 'session', endpoint, sessionKey: body.input.sessionKey as string },
+    scope: { kind: 'session', endpoint, sessionKey },
     target: { kind: 'model-selection' },
     input: {
       endpoint,
-      sessionKey: body.input.sessionKey as string,
+      sessionKey,
+      ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId as string }),
       modelSelectionId: (body.input.modelSelectionId as string).trim(),
     },
   };
+}
+
+function explainSessionModelSelectionInvalid(body: Record<string, unknown>): string {
+  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])) return 'body-keys';
+  if (body.id !== 'session.modelSelection') return 'capability-id';
+  if (body.operationId !== 'sessions.patchModel') return 'operation-id';
+  if (!isRecord(body.scope)) return 'scope-shape';
+  if (!hasExactKeys(body.scope, ['kind', 'identity'])) return 'scope-keys';
+  if (body.scope.kind !== 'session') return 'scope-kind';
+  if (!isSessionIdentity(body.scope.identity)) return 'scope-identity';
+  if (!isRecord(body.target)) return 'target-shape';
+  if (!hasExactKeys(body.target, ['kind', 'identity', 'modelSelectionId'])) return 'target-keys';
+  if (body.target.kind !== 'model-selection') return 'target-kind';
+  if (!isSessionIdentity(body.target.identity)) return 'target-identity';
+  if (!sameIdentity(body.scope.identity, body.target.identity)) return 'target-identity-mismatch';
+  if (!isIdentifier(body.target.modelSelectionId)) return 'target-model-selection-id';
+  if (!isRecord(body.input)) return 'input-shape';
+  if (!hasExactKeys(body.input, body.input.endpointSessionId === undefined
+    ? ['sessionKey', 'sessionIdentity', 'modelSelectionId']
+    : ['sessionKey', 'endpointSessionId', 'sessionIdentity', 'modelSelectionId'])) return 'input-keys';
+  if (!isSessionIdentity(body.input.sessionIdentity)) return 'input-session-identity';
+  if (!sameIdentity(body.scope.identity, body.input.sessionIdentity)) return 'input-identity-mismatch';
+  if (!isIdentifier(body.input.sessionKey)) return 'input-session-key';
+  if (body.input.sessionKey !== body.scope.identity.sessionKey) return 'input-session-key-mismatch';
+  if (!isIdentifier(body.input.modelSelectionId)) return 'input-model-selection-id';
+  if (body.input.modelSelectionId !== body.target.modelSelectionId) return 'model-selection-id-mismatch';
+  if (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId)) return 'endpoint-session-id';
+  return 'unknown';
+}
+
+function summarizeSessionModelSelectionBody(body: Record<string, unknown>) {
+  const scope = isRecord(body.scope) ? body.scope : null;
+  const target = isRecord(body.target) ? body.target : null;
+  const input = isRecord(body.input) ? body.input : null;
+  return {
+    bodyKeys: Object.keys(body).sort(),
+    scopeKeys: scope ? Object.keys(scope).sort() : null,
+    targetKeys: target ? Object.keys(target).sort() : null,
+    inputKeys: input ? Object.keys(input).sort() : null,
+    scopeIdentity: summarizeIdentityShape(scope?.identity),
+    targetIdentity: summarizeIdentityShape(target?.identity),
+    inputIdentity: summarizeIdentityShape(input?.sessionIdentity),
+    inputSessionKey: summarizeString(input?.sessionKey),
+    endpointSessionId: summarizeString(input?.endpointSessionId),
+    targetModelSelectionId: summarizeString(target?.modelSelectionId),
+    inputModelSelectionId: summarizeString(input?.modelSelectionId),
+  };
+}
+
+function summarizeIdentityShape(value: unknown) {
+  if (!isRecord(value)) return null;
+  return {
+    keys: Object.keys(value).sort(),
+    endpoint: summarizeEndpointShape(value.endpoint),
+    agentId: summarizeString(value.agentId),
+    sessionKey: summarizeString(value.sessionKey),
+  };
+}
+
+function summarizeEndpointShape(value: unknown) {
+  if (!isRecord(value)) return null;
+  return {
+    keys: Object.keys(value).sort(),
+    kind: typeof value.kind === 'string' ? value.kind : null,
+    runtimeAdapterId: typeof value.runtimeAdapterId === 'string' ? value.runtimeAdapterId : null,
+    runtimeInstanceId: typeof value.runtimeInstanceId === 'string' ? value.runtimeInstanceId : null,
+  };
+}
+
+function summarizeString(value: unknown): { present: boolean; length: number } {
+  return summarizeIdentifier(typeof value === 'string' ? value : null);
 }
 
 async function adaptSessionSendRequest(

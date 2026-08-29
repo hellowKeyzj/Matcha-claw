@@ -1,6 +1,7 @@
-import { app, BrowserWindow, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, nativeImage, nativeTheme, shell } from 'electron';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import { getWindowThemeBackgroundColor } from './window';
 import { registerZoomShortcuts } from './zoom-shortcuts';
 
 function getIconsDir(): string {
@@ -55,10 +56,11 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
   const useCustomTitleBar = isWindows;
 
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: 1600,
+    height: 974,
     minWidth: 960,
     minHeight: 600,
+    backgroundColor: getWindowThemeBackgroundColor(nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     icon: getAppIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -79,6 +81,7 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
   if (options.showOnReady ?? true) {
     win.once('ready-to-show', () => {
       win.show();
+      win.focus();
     });
   }
 
@@ -106,7 +109,7 @@ export function loadMainWindowContent(win: BrowserWindow): void {
 
   if (process.env.VITE_DEV_SERVER_URL) {
     void win.loadURL(process.env.VITE_DEV_SERVER_URL);
-    win.webContents.openDevTools();
+    win.webContents.openDevTools({ mode: 'detach' });
     return;
   }
 

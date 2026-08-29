@@ -24,7 +24,7 @@ import type {
 import type {
   SessionWindowStateSnapshot,
 } from '../../types/session/snapshot';
-import { isGatewayOperational, isGatewayPreparing as resolveGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   createEmptySessionRecord,
   getPendingApprovals,
@@ -32,7 +32,7 @@ import {
   patchSessionMeta,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
-import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
+import { resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import {
   TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS,
   shouldShowRuntimeErrorBannerImmediately,
@@ -48,6 +48,7 @@ import { SessionTodoPanel } from './components/SessionTodoPanel';
 import { WelcomeScreen } from './components/ChatStates';
 import { useChatInit } from './useChatInit';
 import { useChatSidePanelController } from './useChatSidePanelController';
+import { useChatWindowDockController } from './useChatWindowDockController';
 import { useAgentSkillConfig } from './useAgentSkillConfig';
 import { useChatView } from './useChatView';
 import {
@@ -65,6 +66,13 @@ import {
 } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeError,
+  summarizeIdentifier,
+  summarizeSessionIdentity,
+} from '@/lib/session-trace';
 import { collectChatArtifactGroups } from './artifacts';
 import { buildChatSessionMarkdownExport, downloadMarkdownFile } from './session-markdown-export';
 import {
@@ -118,16 +126,12 @@ const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 
-type ChatGatewayBranch = 'not-running' | 'preparing' | 'operational';
+type ChatRuntimeBranch = 'starting' | 'unavailable' | 'ready';
 
-function chatStartupTraceSummary(source: string, phase: ChatGatewayBranch, status: ReturnType<typeof useGatewayStore.getState>['status']) {
+function chatStartupTraceSummary(source: string, phase: ChatRuntimeBranch) {
   return {
     source,
     phase,
-    processState: status.processState,
-    gatewayReady: status.gatewayReady,
-    healthSummary: status.healthSummary,
-    transportState: status.transportState,
   };
 }
 
@@ -276,6 +280,7 @@ function selectChatPageState(state: ChatStoreState) {
     loadHistory: state.loadHistory,
     loadSessions: state.loadSessions,
     cleanupEmptySession: state.cleanupEmptySession,
+    sessionRuntimeCatalog: state.sessionRuntimeCatalog,
   };
 }
 
@@ -335,14 +340,14 @@ function buildRuntimeAssistantPlaceholder(input: {
 }
 
 async function fetchChatMarkdownExportWindow(input: {
-  sessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   mode: 'latest' | 'older';
   offset?: number;
 }): Promise<{ view: ReturnType<typeof decodeHistorySessionView>; items: SessionRenderItem[] }> {
   try {
     const view = decodeHistorySessionView(await hostSessionWindowFetch({
-      sessionKey: input.sessionKey,
+      ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
       sessionIdentity: input.sessionIdentity,
       mode: input.mode,
       limit: CHAT_MARKDOWN_EXPORT_WINDOW_LIMIT,
@@ -366,7 +371,7 @@ function collectSessionWindowItems(input: {
 }
 
 async function fetchChatMarkdownExportItems(input: {
-  sessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   currentItems: ReadonlyArray<SessionRenderItem>;
   currentWindow: SessionWindowStateSnapshot;
@@ -383,7 +388,7 @@ async function fetchChatMarkdownExportItems(input: {
 
   const itemsByOffset = new Map<number, SessionRenderItem>();
   const latestWindow = await fetchChatMarkdownExportWindow({
-    sessionKey: input.sessionKey,
+    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
     sessionIdentity: input.sessionIdentity,
     mode: 'latest',
   });
@@ -399,7 +404,7 @@ async function fetchChatMarkdownExportItems(input: {
   while (nextOffset > 0) {
     const previousOffset = nextOffset;
     const olderWindow = await fetchChatMarkdownExportWindow({
-      sessionKey: input.sessionKey,
+      ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
       sessionIdentity: input.sessionIdentity,
       mode: 'older',
       offset: nextOffset,
@@ -429,26 +434,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const isGatewayPreparing = resolveGatewayPreparing(gatewayStatus, gatewayInitialized);
-  const hasGatewayBeenOperationalRef = useRef(false);
-  if (isGatewayRunning) {
-    hasGatewayBeenOperationalRef.current = true;
-  }
-  const preserveChatDuringGatewayRecovery = hasGatewayBeenOperationalRef.current
-    && !isGatewayRunning
-    && isGatewayPreparing;
-  const chatGatewayBranch: ChatGatewayBranch = !isGatewayRunning && isGatewayPreparing && !preserveChatDuringGatewayRecovery
-    ? 'preparing'
-    : (!isGatewayRunning && !preserveChatDuringGatewayRecovery ? 'not-running' : 'operational');
-  useEffect(() => {
-    console.info(JSON.stringify({
-      prefix: STARTUP_TRACE_PREFIX,
-      traceScope: 'renderer-boundary',
-      ...chatStartupTraceSummary('chat-page', chatGatewayBranch, gatewayStatus),
-    }));
-  }, [chatGatewayBranch, gatewayStatus]);
   const localizedGatewayIssue = useMemo(() => {
     return localizeGatewayIssue(gatewayStatus.lastIssue, t)
       ?? gatewayStatus.lastError
@@ -477,6 +463,7 @@ export function Chat({ isActive = true }: ChatProps) {
     loadHistory,
     loadSessions,
     cleanupEmptySession,
+    sessionRuntimeCatalog,
   } = useChatStore(useShallow(selectChatPageState));
   const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.sessionIdentity?.agentId ?? '';
   const submitTeamRoleMessageFromChat = useTeamsStore((state) => state.submitTeamRoleMessageFromChat);
@@ -485,7 +472,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const currentTeamRoleSessionProbe = {
     sessionIdentity: currentSession.meta.sessionIdentity,
     sessionKey: currentSessionKey,
-    backendSessionKey: currentSession.meta.backendSessionKey,
     endpointSessionId: currentSession.meta.endpointSessionId,
   };
   const currentTeamChatTarget = resolveTeamRoleChatTargetBySession(currentTeamRoleSessionProbe);
@@ -517,15 +503,36 @@ export function Chat({ isActive = true }: ChatProps) {
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const artifactAutoOpenedSessionKeyRef = useRef<string | null>(null);
-  const autoDefaultModelPatchRef = useRef<string | null>(null);
-
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
   const workspaceActive = isActive;
-  const sideEffectsActive = workspaceActive && isGatewayRunning;
+  const chatRuntimeEndpoints = sessionRuntimeCatalog.status === 'ready'
+    ? sessionRuntimeCatalog.endpoints
+    : [];
+  const currentSessionEndpoint = currentSession.meta.sessionIdentity?.endpoint ?? null;
+  const currentSessionEndpointAvailable = Boolean(
+    currentSessionEndpoint
+    && chatRuntimeEndpoints.some((target) => sameRuntimeEndpointScope(target.endpoint, currentSessionEndpoint)),
+  );
+  const chatRuntimeAvailable = sessionRuntimeCatalog.status === 'ready'
+    && chatRuntimeEndpoints.length > 0;
+  const currentChatRuntimeAvailable = chatRuntimeAvailable
+    && (!currentSessionEndpoint || currentSessionEndpointAvailable);
+  const sessionRuntimeInitializing = sessionRuntimeCatalog.status === 'idle'
+    || sessionRuntimeCatalog.status === 'loading';
+  const chatRuntimeBranch: ChatRuntimeBranch = chatRuntimeAvailable
+    ? 'ready'
+    : (sessionRuntimeInitializing ? 'starting' : 'unavailable');
+  const chatSideEffectsActive = workspaceActive && chatRuntimeAvailable;
+  useEffect(() => {
+    console.info(JSON.stringify({
+      prefix: STARTUP_TRACE_PREFIX,
+      traceScope: 'renderer-boundary',
+      ...chatStartupTraceSummary('chat-page', chatRuntimeBranch),
+    }));
+  }, [chatRuntimeBranch]);
   useChatInit({
-    isActive: sideEffectsActive,
-    isGatewayRunning,
+    isActive: workspaceActive,
     locationSearch: location.search,
     navigate,
     switchSession,
@@ -540,9 +547,10 @@ export function Chat({ isActive = true }: ChatProps) {
 
 
   const {
-    sidePanelOpen,
-    sidePanelMode,
-    sidePanelWidth,
+    sidePanelOpen: sidePanelIntentOpen,
+    sidePanelWidth: sidePanelRenderWidth,
+    sidePanelPreferredWidth,
+    sidePanelWidthPolicy,
     activeSidePanelTab,
     artifactWorkbenchFullscreen,
     unfinishedTaskCount,
@@ -552,12 +560,26 @@ export function Chat({ isActive = true }: ChatProps) {
     refreshTaskInbox,
     clearTaskInboxError,
     derivedPlanStatus,
-    toggleSidePanel,
+    openSidePanel: openSidePanelDomain,
     setActiveSidePanelTab,
-    closeSidePanel,
+    closeSidePanel: closeSidePanelDomain,
     setSidePanelWidth,
     toggleArtifactWorkbenchFullscreen,
-  } = useChatSidePanelController(sideEffectsActive, chatLayoutRef);
+  } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef);
+  const chatWindowDock = useChatWindowDockController({
+    enabled: workspaceActive && chatRuntimeAvailable,
+    panelOpen: sidePanelIntentOpen,
+    preferredWidth: sidePanelPreferredWidth,
+    renderWidth: sidePanelRenderWidth,
+    widthPolicy: sidePanelWidthPolicy,
+    artifactWorkbenchFullscreen,
+    chatLayoutRef,
+    openPanel: openSidePanelDomain,
+    closePanel: closeSidePanelDomain,
+    setPanelWidth: setSidePanelWidth,
+  });
+  const sidePanelMode = chatWindowDock.sidePanelMode;
+  const sidePanelWidth = chatWindowDock.sidePanelWidth;
 
   const {
     selectedSkillIds,
@@ -578,11 +600,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
-    if (!isGatewayRunning) {
+    if (!chatRuntimeAvailable) {
       return;
     }
     void loadAvailableModels();
-  }, [isGatewayRunning, loadAvailableModels]);
+  }, [chatRuntimeAvailable, loadAvailableModels]);
 
   useEffect(() => {
     if (!isGatewayRunning) {
@@ -613,11 +635,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [isGatewayRunning, t]);
 
   useEffect(() => {
-    if (!sideEffectsActive) {
+    if (!chatSideEffectsActive) {
       return;
     }
     prepareSkillConfig();
-  }, [prepareSkillConfig, sideEffectsActive]);
+  }, [prepareSkillConfig, chatSideEffectsActive]);
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
   const viewportItems = currentSession.items;
   const liveView = useChatView({
@@ -840,8 +862,12 @@ export function Chat({ isActive = true }: ChatProps) {
     const runtimeMessage = hasRuntimeError
       ? (localizedRuntimeIssue ?? currentSession.runtime.lastError)
       : null;
+    const currentRuntimeAdapterId = currentSession.meta.sessionIdentity?.endpoint.kind === 'native-runtime'
+      ? currentSession.meta.sessionIdentity.endpoint.runtimeAdapterId
+      : null;
     const fallbackGatewayRuntimeError = (
       localizedGatewayIssue
+      && currentRuntimeAdapterId === 'openclaw'
       && (
         isRunActive(currentSession.runtime)
         || currentSession.runtime.runPhase === 'error'
@@ -860,7 +886,7 @@ export function Chat({ isActive = true }: ChatProps) {
       return t('errors.abortStoppingTimeout');
     }
     return effectiveRuntimeError;
-  }, [currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);
+  }, [currentSession.meta.sessionIdentity, currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);
   useEffect(() => {
     if (!localizedRuntimeError) {
       setVisibleRuntimeError(null);
@@ -882,11 +908,11 @@ export function Chat({ isActive = true }: ChatProps) {
     return () => window.clearTimeout(timeout);
   }, [currentSession.runtime, gatewayStatus.lastIssue, localizedRuntimeError]);
   useEffect(() => {
-    if (!sideEffectsActive || routingReady || routingLoading) {
+    if (!chatSideEffectsActive || routingReady || routingLoading) {
       return;
     }
     void refreshCapabilityRouting();
-  }, [refreshCapabilityRouting, routingLoading, routingReady, sideEffectsActive]);
+  }, [refreshCapabilityRouting, routingLoading, routingReady, chatSideEffectsActive]);
 
   const fallbackModelId = useMemo(() => {
     if (!routingReady) {
@@ -971,7 +997,7 @@ export function Chat({ isActive = true }: ChatProps) {
           : null;
         const protocolItems = target
           ? await fetchChatMarkdownExportItems({
-            sessionKey: target.sessionKey,
+            ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
             sessionIdentity: target.sessionIdentity,
             currentItems: viewportItems,
             currentWindow: currentSession.window,
@@ -989,7 +1015,7 @@ export function Chat({ isActive = true }: ChatProps) {
         });
         const exportedSession = buildChatSessionMarkdownExport({
           title: currentSession.meta.displayName || currentSession.meta.label || currentAgent?.name || currentSessionKey,
-          sessionKey: currentSession.meta.backendSessionKey || currentSessionKey,
+          sessionKey: currentSession.meta.sessionIdentity?.sessionKey || currentSessionKey,
           agentName: currentAgent?.name || currentAgentId,
           items,
           exportedAt: new Date(),
@@ -1001,33 +1027,51 @@ export function Chat({ isActive = true }: ChatProps) {
         setExportingMarkdown(false);
       }
     })();
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.backendSessionKey, currentSession.meta.displayName, currentSession.meta.label, currentSession.meta.sessionIdentity, currentSession.window, currentSessionKey, exportingMarkdown, t, viewportItems]);
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.meta.sessionIdentity, currentSession.window, currentSessionKey, exportingMarkdown, t, viewportItems]);
   const handleComposerWheel = useCallback((deltaY: number) => {
     viewportPaneRef.current?.scrollByWheelDelta(deltaY);
   }, []);
   const handleComposerGeometryChange = useCallback(() => {
     viewportPaneRef.current?.notifyComposerGeometryChanged();
   }, []);
-  const handleSelectModel = useCallback(async (modelSelectionId: string, options?: { forcePatch?: boolean }) => {
+  const handleSelectModel = useCallback(async (modelSelectionId: string) => {
+    const traceId = createSessionTraceId('model-selection');
     const normalizedModelSelectionId = modelSelectionId.trim();
     const currentModelSelectionId = effectiveCurrentModelId;
+    logSessionTrace('model-selection.enter', traceId, {
+      currentSessionKey: summarizeIdentifier(currentSessionKey),
+      requestedModelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
+      currentModelSelectionId: summarizeIdentifier(currentModelSelectionId),
+      activeRun: Boolean(activeRun),
+    });
     if (!currentSessionKey) {
+      logSessionTrace('model-selection.skipped', traceId, { reason: 'missing-current-session' });
       return;
     }
-    if (!normalizedModelSelectionId || (!options?.forcePatch && normalizedModelSelectionId === currentModelSelectionId)) {
+    if (!normalizedModelSelectionId || normalizedModelSelectionId === currentModelSelectionId) {
+      logSessionTrace('model-selection.skipped', traceId, {
+        reason: !normalizedModelSelectionId ? 'missing-model-selection' : 'unchanged-model-selection',
+      });
       return;
     }
     if (activeRun) {
+      logSessionTrace('model-selection.skipped', traceId, { reason: 'active-run' });
       return;
     }
     try {
       const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
+      logSessionTrace('model-selection.target', traceId, {
+        recordKey: summarizeIdentifier(currentSessionKey),
+        endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+        sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+        modelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
+      });
       const result = await hostSessionPatch({
-        sessionKey: target.sessionKey,
         ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
         sessionIdentity: target.sessionIdentity,
         modelSelectionId: normalizedModelSelectionId,
-      });
+      }, { traceId });
+      logSessionTrace('model-selection.result', traceId, { outcome: result.outcome });
       if (result.outcome !== 'succeeded') {
         throw new Error(result.outcome);
       }
@@ -1038,10 +1082,11 @@ export function Chat({ isActive = true }: ChatProps) {
       }));
       void loadSessions();
     } catch (error) {
+      logSessionTrace('model-selection.error', traceId, summarizeError(error));
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
-  }, [activeRun, currentSession.meta.model, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
+  }, [activeRun, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
 
   const handleSelectToolPermissionMode = useCallback(async (nextMode: OpenClawToolPermissionMode) => {
     if (nextMode === toolPermissionMode || toolPermissionModeSwitching || activeRun) {
@@ -1060,32 +1105,6 @@ export function Chat({ isActive = true }: ChatProps) {
       setToolPermissionModeSwitching(false);
     }
   }, [activeRun, t, toolPermissionMode, toolPermissionModeSwitching]);
-
-  useEffect(() => {
-    const normalizedSessionModel = currentSession.meta.model?.trim() || '';
-    const normalizedAgentModel = currentAgent?.model?.trim() || '';
-    const normalizedEffectiveModel = effectiveCurrentModelId.trim();
-    const hasAvailableModels = availableModelIds.size > 0;
-    const sessionModelAvailable = normalizedSessionModel && availableModelIds.has(normalizedSessionModel);
-    const agentModelAvailable = normalizedAgentModel && availableModelIds.has(normalizedAgentModel);
-    if (
-      !normalizedEffectiveModel
-      || !currentSessionKey
-      || currentSession.meta.historyStatus !== 'ready'
-      || isRunActive(currentSession.runtime)
-      || currentSession.runtime.activeRunId != null
-      || (hasAvailableModels && (sessionModelAvailable || (!normalizedSessionModel && agentModelAvailable)))
-      || (!hasAvailableModels && (normalizedSessionModel || normalizedAgentModel))
-    ) {
-      return;
-    }
-    const patchKey = `${currentSessionKey}:${normalizedEffectiveModel}`;
-    if (autoDefaultModelPatchRef.current === patchKey) {
-      return;
-    }
-    autoDefaultModelPatchRef.current = patchKey;
-    void handleSelectModel(normalizedEffectiveModel, { forcePatch: true });
-  }, [availableModelIds, currentAgent?.model, currentSession.meta.historyStatus, currentSession.meta.model, currentSession.runtime, currentSessionKey, effectiveCurrentModelId, handleSelectModel]);
 
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
@@ -1167,8 +1186,8 @@ export function Chat({ isActive = true }: ChatProps) {
         },
       }}
       contextUsage={contextUsage}
-      disabled={!isGatewayRunning}
-      reconnecting={preserveChatDuringGatewayRecovery}
+      disabled={!currentChatRuntimeAvailable}
+      reconnecting={sessionRuntimeInitializing}
       sending={isRunActive(currentSession.runtime)}
       stopping={currentSession.runtime.runPhase === 'stopping'}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
@@ -1177,21 +1196,21 @@ export function Chat({ isActive = true }: ChatProps) {
     />
   );
 
-  if (!isGatewayRunning && isGatewayPreparing && !preserveChatDuringGatewayRecovery) {
+  if (sessionRuntimeInitializing) {
     return (
       <ChatOffline
-        title={t('gatewayPreparing.title')}
-        description={t('gatewayPreparing.description')}
+        title={t('runtimePreparing.title')}
+        description={t('runtimePreparing.description')}
         tone="loading"
       />
     );
   }
 
-  if (!isGatewayRunning && !preserveChatDuringGatewayRecovery) {
+  if (!chatRuntimeAvailable) {
     return (
       <ChatOffline
-        title={t('gatewayNotRunning')}
-        description={localizedGatewayIssue || t('gatewayRequired')}
+        title={t('runtimeUnavailable.title')}
+        description={sessionRuntimeCatalog.error || t('runtimeUnavailable.description')}
       />
     );
   }
@@ -1200,23 +1219,26 @@ export function Chat({ isActive = true }: ChatProps) {
     <>
       <ChatShell
         chatLayoutRef={chatLayoutRef}
-        sidePanelOpen={sidePanelOpen}
+        sidePanelPhase={chatWindowDock.phase}
         sidePanelMode={sidePanelMode}
         sidePanelWidth={sidePanelWidth}
+        sidePanelMainWidth={chatWindowDock.sidePanelMainWidth}
+        sidePanelVisible={chatWindowDock.sidePanelVisible}
         artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
-        onSidePanelResize={setSidePanelWidth}
+        onSidePanelResize={chatWindowDock.resizeSidePanelWidth}
+        onSidePanelResizeCommit={chatWindowDock.commitSidePanelWidth}
         onComposerWheel={handleComposerWheel}
         onComposerGeometryChange={handleComposerGeometryChange}
         isEmptyState={liveView.isEmptyState}
         emptyState={<WelcomeScreen input={inputNode} />}
         sidePanel={(
           <ChatSidePanel
-            mode={sidePanelMode === 'hidden' ? 'docked' : sidePanelMode}
+            mode={sidePanelMode}
             width={sidePanelWidth}
             activeTab={activeSidePanelTab}
             artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
             onTabChange={setActiveSidePanelTab}
-            onClose={closeSidePanel}
+            onClose={chatWindowDock.closeSidePanel}
             onToggleArtifactWorkbenchFullscreen={toggleArtifactWorkbenchFullscreen}
             unfinishedTaskCount={unfinishedTaskCount}
             taskInboxTasks={taskInboxTasks}
@@ -1268,9 +1290,9 @@ export function Chat({ isActive = true }: ChatProps) {
             onToggleThinking={toggleThinking}
             exportDisabled={exportingMarkdown}
             onExportMarkdown={handleExportMarkdown}
-            sidePanelOpen={sidePanelOpen}
+            sidePanelOpen={chatWindowDock.sidePanelExpanded}
             unfinishedTaskCount={unfinishedTaskCount}
-            onToggleSidePanel={toggleSidePanel}
+            onToggleSidePanel={chatWindowDock.toggleSidePanel}
           />
         )}
         viewportPane={(

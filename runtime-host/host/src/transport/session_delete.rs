@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_delete::{SessionDeleteCommand, SessionDeleteOutcome},
+    sessions::delete::{SessionDeleteCommand, SessionDeleteOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -172,7 +172,7 @@ mod tests {
                 "runtimeInstanceId": "local",
             },
             "agentId": "main",
-            "sessionKey": "session-1",
+            "sessionKey": "agent:main:session-1",
         })
     }
 
@@ -194,7 +194,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(command.agent_id, "main");
-        assert_eq!(command.session_key, "session-1");
+        assert_eq!(command.session_key, "agent:main:session-1");
     }
 
     #[test]
@@ -202,7 +202,7 @@ mod tests {
         for value in [
             {
                 let mut value = request();
-                value["input"] = json!({ "sessionKey": "session-1" });
+                value["input"] = json!({ "sessionKey": "agent:main:session-1" });
                 value
             },
             {

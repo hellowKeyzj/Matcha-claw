@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | Host actor boundary | `host/src/owner.rs`、`host/src/owner/actor.rs` | transport/control 通过 Handle 串行进入 actor-owned Host；这是 Host mutable state serialization，不是业务事实 owner | CANDIDATE |
 | Host admission/read projection | `host/src/composition/admission.rs`、`host/src/control/lifecycle.rs`、`diagnostics.rs` | `HostState.ok` 只来自 Host phase Ready；Gateway health/control readiness 与 peer lifecycle 分字段读取 | CANDIDATE |
-| Foundation execution mechanism | `foundation/src/execution/*` | `OwnedTask`、`OperationHandle`、`ServiceHandle` 提供 cancellation/join/owned task 生命周期；不拥有业务事实或 RuntimeJob | CONFIRMED |
+| Foundation execution mechanism | `foundation/src/execution/*` | `OwnedTask`、`OperationHandle`、`ServiceHandle` 提供 cancellation/join/owned task 生命周期；不拥有业务事实或 Host-wide generic operation | CONFIRMED |
 | Matcha protocol client | `integrations/matcha-agent/src/session/client/*` | session/load/transcript/snapshot/replay/subscribe client | CANDIDATE |
 | Matcha hydration | `integrations/matcha-agent/src/session/hydration/*` | strict decode、bounded projection、unknown/incomplete | CANDIDATE |
 | Event cursor/projector | `integrations/matcha-agent/src/session/events.rs` | session/run binding、gap/duplicate/stale rejection | CANDIDATE |
@@ -35,15 +35,15 @@
 ## 3. 已确认的 Rust/TS 接缝缺口
 
 1. Electron 当前通过 `DirectRuntimeHost` 启动 Rust executable，使用 stdin/stdout bootstrap/private control readiness；这证明 delivery active path，不证明全部 legacy `/dispatch`/product route cutover。
-2. Rust Host 到 Electron parent callback 的 base URL/token/client/receiver 已接入；session/job/event payload 与 owner-specific recovery wiring 尚未完整闭合。
+2. Rust Host 到 Electron parent callback 的 base URL/token/client/receiver 已接入；session/owner-event payload 与 owner-specific recovery wiring 尚未完整闭合。
 3. Rust provider-models/external-connector transport 会在 Rust control loop 中启动，但 full Electron public route/unchanged-client cutover 尚未证明。
 4. Rust fixed capability descriptors 有两套 construction，内容不一致；TS `bootstrap` scope 也未对齐。
 5. TypeScript connector schema version 1 与 Rust version 3 的双向兼容未证明。
 6. TypeScript secret references 与 Rust strict connector schema 不一致，private projection/resolver 未闭合。
 7. Rust Matcha public timeline 当前 `run_id` / `sequence` 为空，尚无正式 seq crosswalk。
 8. canonical state 没有独立 durable snapshot；当前是由 transcript/live events rebuild 的内存 projection。
-9. generic RuntimeJob 仍存在于 TS composition；文档决定删除 Host-wide generic owner，但具体 owner-local completion projection 尚未落地。
-10. Foundation `execution` 已提供 `OwnedTask`、`TaskHandle`、`OperationHandle`、`ServiceHandle`；它是业务后台 operation 的生命周期机制，不是遗漏的 RuntimeJob owner。
+9. 已删除项：generic RuntimeJob public contract 已从 TS composition 删除；各具体 owner 的 accepted-only completion projection 仍需分别完成 owner/facade typed operation query/event 与 recovery/readback 证明。Toolchain install 不走该 projection，而由 Electron adapter 等待 Rust private native result。
+10. Foundation `execution` 已提供 `OwnedTask`、`TaskHandle`、`OperationHandle`、`ServiceHandle`；它是业务后台 operation 的生命周期机制，不是 Host-wide generic operation owner。
 
 ## 4. 资产处理规则
 

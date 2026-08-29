@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
-    session_rename::{SessionRenameCommand, SessionRenameOutcome},
+    sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -150,7 +150,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let Some(authorization) = headers
         .iter()
@@ -174,7 +174,7 @@ pub(crate) async fn handle(
         Err(_) => return Response::bad_request(),
     };
     drop(verifier);
-    match owner.rename_open_claw_session(command).await {
+    match session.rename_session(command).await {
         Ok(outcome) => Response::outcome(outcome),
         Err(_) => Response::unavailable(),
     }

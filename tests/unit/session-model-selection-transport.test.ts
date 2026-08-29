@@ -16,7 +16,7 @@ const request = {
       runtimeAdapterId: 'openclaw' as const,
       runtimeInstanceId: 'local' as const,
     },
-    sessionKey: 'session-1',
+    sessionKey: 'agent:main:session-1',
   },
   target: { kind: 'model-selection' as const },
   input: {
@@ -25,7 +25,8 @@ const request = {
       runtimeAdapterId: 'openclaw' as const,
       runtimeInstanceId: 'local' as const,
     },
-    sessionKey: 'session-1',
+    sessionKey: 'agent:main:session-1',
+    endpointSessionId: 'session-1',
     modelSelectionId: 'anthropic/claude-opus-4-6',
   },
 };
@@ -57,6 +58,20 @@ describe('session model selection delivery transport', () => {
       scope: 'sessions:write',
       capability: 'sessions.patchModel',
       subject: 'session-model-selection',
+    });
+  });
+
+  it('projects transport timeout as unavailable instead of invalid request', async () => {
+    const timeoutError = new DOMException('The operation timed out.', 'TimeoutError');
+    const transport = createSessionModelSelectionTransport(
+      createRuntimeHostDeliveryIssuer(),
+      3220,
+      vi.fn().mockRejectedValue(timeoutError),
+    );
+
+    await expect(transport.select(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Session model selection is unavailable' },
     });
   });
 

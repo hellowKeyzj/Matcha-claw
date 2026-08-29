@@ -11,6 +11,7 @@ const MAX_RENDERER_ROUTE_KEY_BYTES = 128;
 
 export type SessionView = Readonly<{
   sessionKey: string;
+  endpointSessionId: string | null;
   identity: Readonly<{
     sessionKey: string;
     endpoint: Readonly<{
@@ -88,11 +89,12 @@ export function isSessionView(value: unknown): value is SessionView {
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasExactKeys(value, [
-      'sessionKey', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
+      'sessionKey', 'endpointSessionId', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
     ])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
+    || !isNullableSessionKey(value.endpointSessionId)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
     || !isEpoch(value.epoch)
@@ -390,6 +392,10 @@ function isMissingFact(value: unknown): boolean {
 
 function isSessionKey(value: unknown): value is string {
   return typeof value === 'string' && isBoundedString(value, MAX_SESSION_KEY_BYTES, true);
+}
+
+function isNullableSessionKey(value: unknown): boolean {
+  return value === null || isSessionKey(value);
 }
 
 function isId(value: unknown): value is string {

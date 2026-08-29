@@ -43,6 +43,12 @@ pub(crate) enum Outcome {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Settlement {
+    pub(crate) revision: u64,
+    pub(crate) outcome: Outcome,
+}
+
 impl Outcome {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {

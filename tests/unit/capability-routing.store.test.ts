@@ -27,6 +27,7 @@ describe('capability routing store', () => {
       loading: false,
       saving: false,
       error: null,
+      warning: null,
     });
   });
 
@@ -100,8 +101,7 @@ describe('capability routing store', () => {
       success: true,
       revision: 4,
       routing: { ...currentRouting },
-      configuration: { status: 'unavailable' },
-      error: 'Provider routing configuration is unavailable',
+      warning: 'Provider routing configuration is unavailable',
     });
 
     await useCapabilityRoutingStore.getState().setRoute('chat', currentRouting.chat);
@@ -110,7 +110,8 @@ describe('capability routing store', () => {
       routing: currentRouting,
       revision: 4,
       saving: false,
-      error: 'Provider routing configuration is unavailable',
+      error: null,
+      warning: 'Provider routing configuration is unavailable',
     });
   });
 

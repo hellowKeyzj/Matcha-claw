@@ -531,6 +531,48 @@ impl fmt::Debug for SessionEventCursor {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SdkAssistantTextState {
+    AwaitingText,
+    StreamTextProjected,
+    FallbackTextProjected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SdkFullTextPolicy {
+    ProjectFallback,
+    Suppress,
+}
+
+impl SdkAssistantTextState {
+    fn full_text_policy(self) -> SdkFullTextPolicy {
+        match self {
+            Self::AwaitingText => SdkFullTextPolicy::ProjectFallback,
+            Self::StreamTextProjected | Self::FallbackTextProjected => SdkFullTextPolicy::Suppress,
+        }
+    }
+
+    fn observe_projected_message(&mut self, message: &ProjectedMessageEvent) {
+        if !matches!(message.message_text(), Some(text) if !text.is_empty()) {
+            return;
+        }
+        if *self != Self::AwaitingText {
+            return;
+        }
+        *self = if message.text_delta().is_some() {
+            Self::StreamTextProjected
+        } else {
+            Self::FallbackTextProjected
+        };
+    }
+}
+
+impl SdkFullTextPolicy {
+    fn projects_fallback(self) -> bool {
+        self == Self::ProjectFallback
+    }
+}
+
 pub struct SessionEventProjector {
     session_id: SessionId,
     run_id: RunId,
@@ -538,7 +580,7 @@ pub struct SessionEventProjector {
     terminal: bool,
     message_text: HashMap<MessageId, String>,
     current_sdk_assistant_message_id: Option<MessageId>,
-    projected_sdk_visible_message: bool,
+    sdk_text_state: SdkAssistantTextState,
 }
 
 impl SessionEventProjector {
@@ -558,7 +600,7 @@ impl SessionEventProjector {
             terminal: false,
             message_text: HashMap::new(),
             current_sdk_assistant_message_id: None,
-            projected_sdk_visible_message: false,
+            sdk_text_state: SdkAssistantTextState::AwaitingText,
         }
     }
 
@@ -610,7 +652,7 @@ impl SessionEventProjector {
             project_sdk_message(
                 envelope.event.as_value(),
                 &mut self.current_sdk_assistant_message_id,
-                !self.projected_sdk_visible_message,
+                self.sdk_text_state.full_text_policy(),
             )
         } else {
             project_activity(
@@ -670,10 +712,8 @@ impl SessionEventProjector {
                         }
                     };
                     message.message_text = message_text;
-                    if is_sdk_message
-                        && matches!(message.message_text(), Some(text) if !text.is_empty())
-                    {
-                        self.projected_sdk_visible_message = true;
+                    if is_sdk_message {
+                        self.sdk_text_state.observe_projected_message(message);
                     }
                 }
                 let terminal = matches!(
@@ -924,7 +964,7 @@ fn project_tool_activity(value: &Value) -> Result<EventActivity, EventRejection>
 fn project_sdk_message(
     value: &Value,
     current_assistant_id: &mut Option<MessageId>,
-    project_result_message: bool,
+    full_text_policy: SdkFullTextPolicy,
 ) -> Result<EventActivity, EventRejection> {
     if value.get("sdkMessageVersion").and_then(Value::as_str) != Some("claude-code-sdk-message-v1")
     {
@@ -1073,9 +1113,11 @@ fn project_sdk_message(
                 .collect::<Vec<_>>();
 
             if !message_text.is_empty() {
+                if !full_text_policy.projects_fallback() {
+                    return Ok(EventActivity::Ignored);
+                }
                 let id = uuid.ok_or(EventRejection::Malformed)?;
                 let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
-                *current_assistant_id = Some(message_id.clone());
                 return Ok(EventActivity::Message(ProjectedMessageEvent {
                     message_id,
                     lifecycle: MessageLifecycle::Completed,
@@ -1120,7 +1162,7 @@ fn project_sdk_message(
         }
         Some("result") => {
             *current_assistant_id = None;
-            if !project_result_message {
+            if !full_text_policy.projects_fallback() {
                 return Ok(EventActivity::Ignored);
             }
             let Some(message_text) = sdk_message
@@ -1378,6 +1420,51 @@ mod tests {
         )
     }
 
+    fn sdk_stream_start(seq: u64, message_id: &str) -> EventEnvelope {
+        sdk_message(
+            seq,
+            json!({
+                "uuid": message_id,
+                "event": {"type": "message_start", "message": {"id": message_id}}
+            }),
+        )
+    }
+
+    fn sdk_stream_delta(seq: u64, text: &str) -> EventEnvelope {
+        sdk_message(
+            seq,
+            json!({
+                "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+            }),
+        )
+    }
+
+    fn sdk_stream_stop(seq: u64) -> EventEnvelope {
+        sdk_message(seq, json!({"event": {"type": "message_stop"}}))
+    }
+
+    fn sdk_assistant_text(seq: u64, message_id: &str, text: &str) -> EventEnvelope {
+        sdk_message(
+            seq,
+            json!({
+                "type": "assistant",
+                "uuid": message_id,
+                "message": {"content": [{"type": "text", "text": text}]}
+            }),
+        )
+    }
+
+    fn sdk_result_text(seq: u64, message_id: &str, text: &str) -> EventEnvelope {
+        sdk_message(
+            seq,
+            json!({
+                "type": "result",
+                "uuid": message_id,
+                "result": text
+            }),
+        )
+    }
+
     fn approval_requested(seq: u64) -> EventEnvelope {
         approval_requested_with(seq, "session-1", "worker-1", Some("worker-1"))
     }
@@ -1477,6 +1564,92 @@ mod tests {
                 if matches!(event.activity(), EventActivity::Message(message)
                     if message.text_delta().is_none()
                         && message.message_text() == Some("hello world"))
+        ));
+    }
+
+    #[test]
+    fn sdk_stream_completion_suppresses_later_result_summary() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_stream_start(1, "assistant-message-1")),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Started
+                        && message.message_id().as_str() == "assistant-message-1"
+                        && message.message_text() == Some(""))
+        ));
+        assert!(matches!(
+            projector.project(sdk_stream_delta(2, "hello")),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Delta
+                        && message.message_id().as_str() == "assistant-message-1"
+                        && message.text_delta() == Some("hello")
+                        && message.message_text() == Some("hello"))
+        ));
+        assert!(matches!(
+            projector.project(sdk_stream_stop(3)),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Completed
+                        && message.message_id().as_str() == "assistant-message-1"
+                        && message.message_text() == Some("hello"))
+        ));
+        assert!(matches!(
+            projector.project(sdk_result_text(4, "result-message-1", "hello")),
+            EventProjectionResult::Projected(ref event)
+                if event.sequence() == sequence(4)
+                    && matches!(event.activity(), EventActivity::Ignored)
+        ));
+    }
+
+    #[test]
+    fn sdk_stream_completion_suppresses_later_full_assistant_text() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_stream_start(1, "assistant-message-1")),
+            EventProjectionResult::Projected(_)
+        ));
+        assert!(matches!(
+            projector.project(sdk_stream_delta(2, "hello")),
+            EventProjectionResult::Projected(_)
+        ));
+        assert!(matches!(
+            projector.project(sdk_stream_stop(3)),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Completed
+                        && message.message_text() == Some("hello"))
+        ));
+        assert!(matches!(
+            projector.project(sdk_assistant_text(4, "assistant-message-2", "hello")),
+            EventProjectionResult::Projected(ref event)
+                if event.sequence() == sequence(4)
+                    && matches!(event.activity(), EventActivity::Ignored)
+        ));
+    }
+
+    #[test]
+    fn sdk_empty_stream_keeps_result_fallback_available() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_stream_start(1, "assistant-message-1")),
+            EventProjectionResult::Projected(_)
+        ));
+        assert!(matches!(
+            projector.project(sdk_stream_stop(2)),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Completed
+                        && message.message_text() == Some(""))
+        ));
+        assert!(matches!(
+            projector.project(sdk_result_text(3, "result-message-1", "fallback result")),
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Completed
+                        && message.message_id().as_str() == "result-message-1"
+                        && message.message_text() == Some("fallback result"))
         ));
     }
 

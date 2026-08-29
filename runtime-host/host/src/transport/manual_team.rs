@@ -3,8 +3,8 @@ pub(crate) mod server;
 use serde_json::{Value, json};
 
 use crate::{
-    composition::ManualTeamCreateOutcome, owner, runtime_driver::RuntimeDriverIdentity,
-    transport::authorization::CapabilityDecisionVerifier,
+    composition::ManualTeamCreateOutcome, organization::OrganizationHandle,
+    runtime_driver::RuntimeDriverIdentity, transport::authorization::CapabilityDecisionVerifier,
 };
 
 const OPERATION_ID: &str = "team.manual.materialize-and-create";
@@ -95,7 +95,7 @@ pub(crate) fn decode(
     })
 }
 
-pub(crate) async fn dispatch(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> Delivery {
     let run = match graph_run(&request.team_id, request.idempotency_key.as_str()) {
         Ok(run) => run,
         Err(_) => return Delivery::Rejected,
@@ -105,16 +105,14 @@ pub(crate) async fn dispatch(owner: &owner::Handle, request: Request) -> Deliver
     )
     .expect("fixed OpenClaw endpoint must be valid");
     match owner
-        .materialize_manual_team_and_create_run(
-            crate::composition::ManualTeamMaterializationInput {
-                team_id: request.team_id,
-                team_name: request.team_name,
-                endpoint,
-                roles: request.roles,
-                materialization_idempotency_key: request.idempotency_key.clone(),
-                run,
-                run_idempotency_key: request.idempotency_key.as_str().to_owned(),
-            },
+        .manual_team_create(
+            request.team_id,
+            request.team_name,
+            endpoint,
+            request.roles,
+            request.idempotency_key.clone(),
+            run,
+            request.idempotency_key.as_str().to_owned(),
         )
         .await
     {

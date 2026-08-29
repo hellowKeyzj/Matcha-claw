@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, BTreeSet}, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use environment::{ProviderAccount, ProviderModelCatalog, ProviderRouting};
 use serde_json::{Map, Value};
@@ -88,6 +92,26 @@ impl ProviderNativeConfigurationEvidence {
     pub const fn diagnostic(&self) -> Option<&ProviderNativeConfigurationDiagnostic> {
         self.diagnostic.as_ref()
     }
+
+    pub fn merge(self, other: Self) -> Self {
+        let changed = self.changed || other.changed;
+        let applied = match (self.applied, other.applied) {
+            (AppliedStatus::Confirmed, AppliedStatus::Confirmed) => AppliedStatus::Confirmed,
+            _ => AppliedStatus::Unknown,
+        };
+        let observed = match (self.observed, other.observed) {
+            (ObservedStatus::Matches, ObservedStatus::Matches) => ObservedStatus::Matches,
+            (ObservedStatus::Unavailable, o) | (o, ObservedStatus::Unavailable) => o,
+            _ => ObservedStatus::Mismatch,
+        };
+        let diagnostic = self.diagnostic.or(other.diagnostic);
+        Self {
+            changed,
+            applied,
+            observed,
+            diagnostic,
+        }
+    }
 }
 
 impl ProviderNativeConfigurationDiagnostic {
@@ -162,7 +186,14 @@ impl ProviderNativeConfigurationOperation {
         );
         let provider_keys = match canonical_provider_keys(accounts, retired) {
             Ok(keys) => keys,
-            Err(_) => return self.unavailable_evidence(false, "provider-keys", "invalid-provider-key", None),
+            Err(_) => {
+                return self.unavailable_evidence(
+                    false,
+                    "provider-keys",
+                    "invalid-provider-key",
+                    None,
+                );
+            }
         };
         let (mut document, base_hash) = match self
             .read_snapshot("config-get", "config-snapshot-unavailable")
@@ -182,10 +213,15 @@ impl ProviderNativeConfigurationOperation {
             Ok(document) => document,
             Err(_) => {
                 zeroize_value(&mut document);
-                return self.unavailable_evidence(false, "config-decode", "invalid-config-document", None);
+                return self.unavailable_evidence(
+                    false,
+                    "config-decode",
+                    "invalid-config-document",
+                    None,
+                );
             }
         };
-        if let Err(error) = apply_provider_projection(
+        if let Err(_) = apply_provider_projection(
             &self.state_dir,
             &mut expected,
             accounts,
@@ -200,7 +236,7 @@ impl ProviderNativeConfigurationOperation {
                 false,
                 "build-projection",
                 "projection-build-failed",
-                Some(error),
+                Some("projection-build-failed".to_owned()),
             );
         }
         let mut expected_document = expected.as_value();
@@ -223,11 +259,25 @@ impl ProviderNativeConfigurationOperation {
             zeroize_value(&mut patch);
             let raw = match serialized {
                 Ok(raw) if !raw.is_empty() => raw,
-                _ => return self.unavailable_evidence(true, "serialize", "projection-serialize-failed", None),
+                _ => {
+                    return self.unavailable_evidence(
+                        true,
+                        "serialize",
+                        "projection-serialize-failed",
+                        None,
+                    );
+                }
             };
             let document = match wire::team::ConfigDocument::new(raw) {
                 Ok(document) => document,
-                Err(_) => return self.unavailable_evidence(true, "encode-document", "config-document-invalid", None),
+                Err(_) => {
+                    return self.unavailable_evidence(
+                        true,
+                        "encode-document",
+                        "config-document-invalid",
+                        None,
+                    );
+                }
             };
             let (selected_method, status, outcome) = if apply_required {
                 let request = match wire::team::config_apply_request(
@@ -236,7 +286,14 @@ impl ProviderNativeConfigurationOperation {
                     base_hash,
                 ) {
                     Ok(request) => request,
-                    Err(_) => return self.unavailable_evidence(true, "config.apply", "request-build-failed", None),
+                    Err(_) => {
+                        return self.unavailable_evidence(
+                            true,
+                            "config.apply",
+                            "request-build-failed",
+                            None,
+                        );
+                    }
                 };
                 eprintln!(
                     "[startup-trace] source=openclaw-provider-config phase=config.apply detail=write-request config_path={}",
@@ -251,7 +308,14 @@ impl ProviderNativeConfigurationOperation {
                     base_hash,
                 ) {
                     Ok(request) => request,
-                    Err(_) => return self.unavailable_evidence(true, "config.patch", "request-build-failed", None),
+                    Err(_) => {
+                        return self.unavailable_evidence(
+                            true,
+                            "config.patch",
+                            "request-build-failed",
+                            None,
+                        );
+                    }
                 };
                 eprintln!(
                     "[startup-trace] source=openclaw-provider-config phase=config.patch detail=write-request config_path={}",
@@ -261,8 +325,10 @@ impl ProviderNativeConfigurationOperation {
                 ("config.patch", status, outcome)
             };
             eprintln!(
-                "[startup-trace] source=openclaw-provider-config phase={} detail=write-outcome applied={:?} outcome={:?}",
-                selected_method, status, outcome
+                "[startup-trace] source=openclaw-provider-config phase={} detail=write-outcome applied={:?} outcome={}",
+                selected_method,
+                status,
+                outcome.reason()
             );
             applied = status;
             write_outcome = outcome;
@@ -281,18 +347,21 @@ impl ProviderNativeConfigurationOperation {
                 .await
             {
                 Ok(readback) => {
-                    let mut view = canonical_provider_configuration(&readback.document, &provider_keys);
+                    let mut view =
+                        canonical_provider_configuration(&readback.document, &provider_keys);
                     remove_unowned_model_metadata(&mut view, &expected_view);
                     let status = if view == expected_view {
                         eprintln!(
                             "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-matches config_path={} method={}",
-                            self.config_path(), method
+                            self.config_path(),
+                            method
                         );
                         ObservedStatus::Matches
                     } else {
                         eprintln!(
                             "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-mismatch config_path={} method={}",
-                            self.config_path(), method
+                            self.config_path(),
+                            method
                         );
                         diagnostic = Some(ProviderNativeConfigurationDiagnostic::new(
                             "readback",
@@ -311,7 +380,8 @@ impl ProviderNativeConfigurationOperation {
                 Err(readback_diagnostic) => {
                     eprintln!(
                         "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-unavailable config_path={} method={}",
-                        self.config_path(), method
+                        self.config_path(),
+                        method
                     );
                     diagnostic = Some(readback_diagnostic);
                     ObservedStatus::Unavailable
@@ -374,12 +444,20 @@ impl ProviderNativeConfigurationOperation {
             self.config_path()
         );
         let request = wire::team::config_get_request(next_request_id("provider-config-get"))
-            .map_err(|_| self.config_get_diagnostic(phase, reason, Some("request-build-failed".to_owned())))?;
-        let response = self.gateway.rpc_query(request).await.map_err(|error| {
-            self.config_get_diagnostic(phase, reason, Some(error.to_string()))
-        })?;
+            .map_err(|_| {
+                self.config_get_diagnostic(phase, reason, Some("request-build-failed".to_owned()))
+            })?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(|_| self.config_get_diagnostic(phase, reason, None))?;
         let snapshot = wire::team::decode_config_get(response).map_err(|_| {
-            self.config_get_diagnostic(phase, reason, Some("invalid config.get response".to_owned()))
+            self.config_get_diagnostic(
+                phase,
+                reason,
+                Some("invalid config.get response".to_owned()),
+            )
         })?;
         let (document, base_hash) = snapshot.into_config_parts();
         if !document.is_object() {
@@ -436,23 +514,37 @@ impl ProviderNativeConfigurationOperation {
                 request.request_id().to_owned(),
                 match request.encode() {
                     Ok(encoded) => encoded,
-                    Err(_) => return (AppliedStatus::Unknown, WriteOutcome::Rejected(Some("request-encode-failed".to_owned()))),
+                    Err(_) => {
+                        return (
+                            AppliedStatus::Unknown,
+                            WriteOutcome::Rejected(Some("request-encode-failed".to_owned())),
+                        );
+                    }
                 },
             )
             .await
         {
             MutationDelivery::Response(response) => match response {
-                GatewayResponse::Failure { error, .. } => (
+                GatewayResponse::Failure { .. } => (
                     AppliedStatus::Unknown,
-                    WriteOutcome::Rejected(Some(format!("{}: {}", error.code(), error.message()))),
+                    WriteOutcome::Rejected(Some("gateway-rejected".to_owned())),
                 ),
                 response => match wire::team::decode_config_patch(response) {
                     Ok(_) => (AppliedStatus::Confirmed, WriteOutcome::Confirmed),
-                    Err(_) => (AppliedStatus::Unknown, WriteOutcome::Unknown(Some("invalid config.patch response".to_owned()))),
+                    Err(_) => (
+                        AppliedStatus::Unknown,
+                        WriteOutcome::Unknown(Some("invalid config.patch response".to_owned())),
+                    ),
                 },
             },
-            MutationDelivery::NotWritten(error) => (AppliedStatus::Unknown, WriteOutcome::Rejected(Some(error.to_string()))),
-            MutationDelivery::MayHaveReached(error) => (AppliedStatus::Unknown, WriteOutcome::Unknown(Some(error.to_string()))),
+            MutationDelivery::NotWritten(_) => (
+                AppliedStatus::Unknown,
+                WriteOutcome::Rejected(Some("gateway-not-written".to_owned())),
+            ),
+            MutationDelivery::MayHaveReached(_) => (
+                AppliedStatus::Unknown,
+                WriteOutcome::Unknown(Some("gateway-may-have-reached".to_owned())),
+            ),
         }
     }
 
@@ -466,23 +558,37 @@ impl ProviderNativeConfigurationOperation {
                 request.request_id().to_owned(),
                 match request.encode() {
                     Ok(encoded) => encoded,
-                    Err(_) => return (AppliedStatus::Unknown, WriteOutcome::Rejected(Some("request-encode-failed".to_owned()))),
+                    Err(_) => {
+                        return (
+                            AppliedStatus::Unknown,
+                            WriteOutcome::Rejected(Some("request-encode-failed".to_owned())),
+                        );
+                    }
                 },
             )
             .await
         {
             MutationDelivery::Response(response) => match response {
-                GatewayResponse::Failure { error, .. } => (
+                GatewayResponse::Failure { .. } => (
                     AppliedStatus::Unknown,
-                    WriteOutcome::Rejected(Some(format!("{}: {}", error.code(), error.message()))),
+                    WriteOutcome::Rejected(Some("gateway-rejected".to_owned())),
                 ),
                 response => match wire::team::decode_config_apply(response) {
                     Ok(_) => (AppliedStatus::Confirmed, WriteOutcome::Confirmed),
-                    Err(_) => (AppliedStatus::Unknown, WriteOutcome::Unknown(Some("invalid config.apply response".to_owned()))),
+                    Err(_) => (
+                        AppliedStatus::Unknown,
+                        WriteOutcome::Unknown(Some("invalid config.apply response".to_owned())),
+                    ),
                 },
             },
-            MutationDelivery::NotWritten(error) => (AppliedStatus::Unknown, WriteOutcome::Rejected(Some(error.to_string()))),
-            MutationDelivery::MayHaveReached(error) => (AppliedStatus::Unknown, WriteOutcome::Unknown(Some(error.to_string()))),
+            MutationDelivery::NotWritten(_) => (
+                AppliedStatus::Unknown,
+                WriteOutcome::Rejected(Some("gateway-not-written".to_owned())),
+            ),
+            MutationDelivery::MayHaveReached(_) => (
+                AppliedStatus::Unknown,
+                WriteOutcome::Unknown(Some("gateway-may-have-reached".to_owned())),
+            ),
         }
     }
 }
@@ -500,6 +606,14 @@ enum WriteOutcome {
 }
 
 impl WriteOutcome {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected(_) => "rejected",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+
     fn diagnostic(
         &self,
         config_path: String,
@@ -540,15 +654,21 @@ fn apply_provider_projection(
     now_millis: u64,
 ) -> Result<bool, String> {
     let models_changed = ProviderModelProjection::apply_to_document(
-        state_dir, document, accounts, models, retired, required_auth_accounts, now_millis,
+        state_dir,
+        document,
+        accounts,
+        models,
+        retired,
+        required_auth_accounts,
+        now_millis,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| "projection-build-failed".to_owned())?;
     let routing_changed = routing
         .map(|routing| {
             ProviderRoutingProjection::apply_to_document(
                 state_dir, document, accounts, models, routing, now_millis,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|_| "projection-build-failed".to_owned())
         })
         .transpose()?
         .unwrap_or(false);
@@ -702,9 +822,7 @@ fn canonical_provider_entry(value: &Value) -> Value {
 }
 
 fn remove_unowned_model_metadata(observed: &mut Value, expected: &Value) {
-    let Some(observed_providers) = observed
-        .get_mut("providers")
-        .and_then(Value::as_object_mut)
+    let Some(observed_providers) = observed.get_mut("providers").and_then(Value::as_object_mut)
     else {
         return;
     };
@@ -738,9 +856,8 @@ fn remove_unowned_model_metadata(observed: &mut Value, expected: &Value) {
                 .get("id")
                 .and_then(Value::as_str)
                 .and_then(|id| expected_models_by_id.get(id));
-            observed_model.retain(|key, _| {
-                expected_model.is_some_and(|model| model.contains_key(key))
-            });
+            observed_model
+                .retain(|key, _| expected_model.is_some_and(|model| model.contains_key(key)));
         }
     }
 }
@@ -818,7 +935,11 @@ fn zeroize_value(value: &mut Value) {
 }
 
 fn unavailable_evidence(changed: bool) -> ProviderNativeConfigurationEvidence {
-    ProviderNativeConfigurationEvidence::new(changed, AppliedStatus::Unknown, ObservedStatus::Unavailable)
+    ProviderNativeConfigurationEvidence::new(
+        changed,
+        AppliedStatus::Unknown,
+        ObservedStatus::Unavailable,
+    )
 }
 
 fn next_request_id(operation: &str) -> String {

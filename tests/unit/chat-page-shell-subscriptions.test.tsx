@@ -14,6 +14,8 @@ import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from '
 
 const chatViewportPaneRenderSpy = vi.fn();
 const chatInputSendResultSpy = vi.fn();
+const useChatInitSpy = vi.fn();
+const useChatSidePanelControllerSpy = vi.fn();
 const useChatStore = realUseChatStore;
 
 vi.mock('react-i18next', async (importOriginal) => {
@@ -33,32 +35,64 @@ vi.mock('sonner', () => ({
 }));
 
 vi.mock('@/pages/Chat/useChatInit', () => ({
-  useChatInit: () => {},
+  useChatInit: (input: unknown) => {
+    useChatInitSpy(input);
+  },
 }));
 
 vi.mock('@/pages/Chat/useChatSidePanelController', () => ({
-  useChatSidePanelController: () => ({
-    sidePanelOpen: false,
-    sidePanelMode: 'hidden',
-    sidePanelWidth: 0,
-    activeSidePanelTab: 'tasks',
-    unfinishedTaskCount: 0,
+  useChatSidePanelController: (enabled: boolean) => {
+    useChatSidePanelControllerSpy(enabled);
+    return {
+      sidePanelOpen: false,
+      sidePanelMode: 'docked',
+      sidePanelWidth: 360,
+      sidePanelPreferredWidth: 360,
+      sidePanelWidthPolicy: 'light',
+      activeSidePanelTab: 'tasks',
+      artifactWorkbenchFullscreen: false,
+      unfinishedTaskCount: 0,
+      taskInboxTasks: [],
+      taskInboxLoading: false,
+      taskInboxError: null,
+      refreshTaskInbox: vi.fn(),
+      clearTaskInboxError: vi.fn(),
+      derivedPlanStatus: null,
+      openSidePanel: vi.fn(),
+      setActiveSidePanelTab: vi.fn(),
+      closeSidePanel: vi.fn(),
+      setSidePanelWidth: vi.fn(),
+      toggleArtifactWorkbenchFullscreen: vi.fn(),
+    };
+  },
+}));
+
+vi.mock('@/pages/Chat/useChatWindowDockController', () => ({
+  useChatWindowDockController: () => ({
+    phase: 'closed',
+    sidePanelMounted: false,
+    sidePanelExpanded: false,
+    sidePanelMode: 'docked',
+    sidePanelWidth: 360,
+    sidePanelMainWidth: null,
+    sidePanelVisible: true,
     toggleSidePanel: vi.fn(),
-    setActiveSidePanelTab: vi.fn(),
+    openSidePanel: vi.fn(),
     closeSidePanel: vi.fn(),
+    resizeSidePanelWidth: vi.fn(),
+    commitSidePanelWidth: vi.fn(),
   }),
 }));
 
-vi.mock('@/pages/Chat/useSkillConfig', () => ({
-  useSkillConfig: () => ({
-    saving: false,
+vi.mock('@/pages/Chat/useAgentSkillConfig', () => ({
+  useAgentSkillConfig: () => ({
     selectedSkillIds: [],
+    allowedSkillIdsForChat: [],
     availableSkillOptions: [],
     skillsLoading: false,
     prepare: vi.fn(),
     resetSession: vi.fn(),
     toggleSkill: vi.fn(),
-    save: vi.fn().mockResolvedValue(undefined),
   }),
 }));
 
@@ -210,7 +244,6 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
   return {
     meta: {
       ...base.meta,
-      backendSessionKey: sessionKey,
       agentId: sessionKey.split(':')[1] ?? null,
       sessionIdentity,
       ...overrides?.meta,
@@ -233,6 +266,8 @@ describe('chat 顶层订阅收口', () => {
     vi.clearAllMocks();
     chatViewportPaneRenderSpy.mockClear();
     chatInputSendResultSpy.mockClear();
+    useChatInitSpy.mockClear();
+    useChatSidePanelControllerSpy.mockClear();
 
     useRuntimeHostStore.setState({
       status: {
@@ -305,6 +340,23 @@ describe('chat 顶层订阅收口', () => {
       },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [{
+          endpointId: 'openclaw-default',
+          protocolId: 'openclaw',
+          endpoint: openClawTestRuntimeEndpoint,
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'default',
+          displayName: 'OpenClaw',
+          agentIds: ['main'],
+          acceptsDynamicAgents: true,
+          sessionPromptScopes: [{ kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' }],
+          defaultSessionPromptScope: { kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
+        }],
+        defaultSessionPromptScope: { kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
+      },
       sessionCatalogStatus: {
         status: 'ready',
         error: null,
@@ -328,6 +380,79 @@ describe('chat 顶层订阅收口', () => {
       refresh: vi.fn().mockResolvedValue(undefined),
       toggleThinking: vi.fn(),
     } as never);
+  });
+
+  it('Matcha endpoint 可用时，OpenClaw gateway degraded 与 Runtime Host degraded 不阻断 Chat shell', () => {
+    const bootstrapSessionRuntime = vi.fn().mockResolvedValue(undefined);
+    const matchaEndpoint = {
+      kind: 'native-runtime' as const,
+      runtimeAdapterId: 'matcha-agent' as const,
+      runtimeInstanceId: 'local',
+    };
+    const matchaAgentScope = { kind: 'agent' as const, endpoint: matchaEndpoint, agentId: 'matcha' };
+
+    useRuntimeHostStore.setState((state) => ({
+      ...state,
+      status: {
+        processState: 'control_connecting',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'degraded',
+        transportState: 'reconnecting',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+      runtimeHost: { lifecycle: 'degraded' },
+      isInitialized: true,
+    } as never));
+    useChatStore.setState((state) => ({
+      ...state,
+      currentSessionKey: 'matcha-agent:matcha:main',
+      loadedSessions: {
+        'matcha-agent:matcha:main': buildSessionRecord({
+          sessionKey: 'matcha-agent:matcha:main',
+          meta: {
+            agentId: 'matcha',
+            sessionIdentity: {
+              endpoint: matchaEndpoint,
+              agentId: 'matcha',
+              sessionKey: 'matcha-agent:matcha:main',
+            },
+          },
+        }),
+      },
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [{
+          endpointId: 'matcha-agent-local',
+          protocolId: 'matcha-agent',
+          endpoint: matchaEndpoint,
+          runtimeAdapterId: 'matcha-agent',
+          runtimeInstanceId: 'local',
+          displayName: 'Matcha Agent',
+          agentIds: ['matcha'],
+          acceptsDynamicAgents: false,
+          sessionPromptScopes: [matchaAgentScope],
+          defaultSessionPromptScope: matchaAgentScope,
+        }],
+        defaultSessionPromptScope: matchaAgentScope,
+      },
+      bootstrapSessionRuntime,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'false');
   });
 
   it('Team role 会话发送时提交当前 session identity 对应 run 的 Team role chat message，不走普通 Agent chat send', async () => {
@@ -426,7 +551,7 @@ describe('chat 顶层订阅收口', () => {
         ...state.loadedSessions,
         [sessionKey]: buildSessionRecord({
           sessionKey,
-          meta: { backendSessionKey: sessionKey, sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+          meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
         }),
       },
       sendMessage,
@@ -817,7 +942,7 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
   });
 
-  it('Runtime Host 停止时离线页只显示通用 host 状态', () => {
+  it('Runtime Host 停止且没有 ready catalog 时离线页只显示通用 runtime unavailable 状态', () => {
     useRuntimeHostStore.setState({
       status: {
         processState: 'stopped',
@@ -835,6 +960,15 @@ describe('chat 顶层订阅收口', () => {
       isInitialized: true,
       runtimeHost: { lifecycle: 'stopped' },
     } as never);
+    useChatStore.setState((state) => ({
+      ...state,
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [],
+        defaultSessionPromptScope: null,
+      },
+    } as never));
 
     render(
       <MemoryRouter>
@@ -844,13 +978,54 @@ describe('chat 顶层订阅收口', () => {
 
     expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'error');
-    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayRequired');
+    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('runtimeUnavailable.title');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('runtimeUnavailable.description');
   });
 
-  it('应用刚启动、gateway 状态尚未初始化时，应显示准备中而不是断连错误', () => {
+  it('Runtime Host 错误且没有 ready catalog 时离线页只显示通用 runtime unavailable 状态', () => {
     useRuntimeHostStore.setState({
       status: {
-        processState: 'stopped',
+        processState: 'error',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+      isInitialized: true,
+      runtimeHost: { lifecycle: 'error' },
+    } as never);
+    useChatStore.setState((state) => ({
+      ...state,
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [],
+        defaultSessionPromptScope: null,
+      },
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'error');
+    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('runtimeUnavailable.title');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('runtimeUnavailable.description');
+  });
+
+  it('session runtime catalog 仍在加载时，应显示准备中而不是断连错误', () => {
+    useRuntimeHostStore.setState({
+      status: {
+        processState: 'control_connecting',
         port: 18789,
         gatewayReady: false,
         healthSummary: 'unresponsive',
@@ -863,8 +1038,17 @@ describe('chat 顶层订阅收口', () => {
         updatedAt: 2,
       },
       isInitialized: false,
-      runtimeHost: { lifecycle: 'stopped' },
+      runtimeHost: { lifecycle: 'starting' },
     } as never);
+    useChatStore.setState((state) => ({
+      ...state,
+      sessionRuntimeCatalog: {
+        status: 'loading',
+        error: null,
+        endpoints: [],
+        defaultSessionPromptScope: null,
+      },
+    } as never));
 
     render(
       <MemoryRouter>
@@ -873,8 +1057,8 @@ describe('chat 顶层订阅收口', () => {
     );
 
     expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'loading');
-    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('gatewayPreparing.title');
-    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
+    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('runtimePreparing.title');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('runtimePreparing.description');
   });
 
   it('当前会话仍在发送但没有会话错误时，不从 Host lifecycle 推导 transport 错误 banner', () => {

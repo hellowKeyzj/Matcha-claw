@@ -23,7 +23,7 @@ const identity = {
     runtimeAdapterId: 'openclaw' as const,
     runtimeInstanceId: 'local' as const,
   },
-  agentId: 'agent:test',
+  agentId: 'test',
   sessionKey,
 };
 

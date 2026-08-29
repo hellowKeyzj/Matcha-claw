@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_abort::{NativeEndpoint, SessionAbortCommand, SessionAbortOutcome},
+    sessions::abort::{NativeEndpoint, SessionAbortCommand, SessionAbortOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 

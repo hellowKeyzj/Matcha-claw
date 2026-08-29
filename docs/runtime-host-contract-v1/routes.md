@@ -23,7 +23,7 @@ Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/c
 | `GET` | `/api/runtime-host/host-bootstrap-settings` | Renderer allowlisted | sanitized projection. |
 | `GET` | `/api/runtime-host/gateway-launch-plan` | Renderer allowlisted | sanitized projection. |
 | `GET` | `/api/runtime-host/team-webhook-auth` | Renderer allowlisted | public auth projection. |
-| `GET` | `/api/runtime-host/jobs?type=` | Renderer allowlisted | generic job query **compatibility projection**, not final Rust owner. |
+| `GET` | `/api/runtime-host/operations?owner=` | retired | generic operation query projection removed; async completion is exposed only through an owner/facade typed operation query/event. |
 | `GET` | `/api/runtime-host/usage/recent` | Renderer allowlisted | current code registers via cron route module. |
 | `GET` | `/api/workbench/bootstrap` | Renderer allowlisted | workbench bootstrap. |
 | `GET` | `/api/plugins/runtime` / `/api/plugins/catalog` | Renderer allowlisted | plugin projections. |
@@ -36,7 +36,7 @@ Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.t
 | --- | --- | --- | --- |
 | `GET` | `/api/capabilities/list` | Renderer allowlisted | capability discovery. |
 | `POST` | `/api/capabilities/describe` | Renderer allowlisted | `{ id, scope }`. |
-| `POST` | `/api/capabilities/execute` | Renderer allowlisted | main business mutation/operation protocol；Rust private control backs runtime.host、team.runtime、skills/plugins and selected OpenClaw operations, but the private command vocabulary is not exposed to Renderer；Toolchain `hostUvInstallAll` 仍以 `RuntimeJobSubmission`/`jobGet` compatibility projection 表达。 |
+| `POST` | `/api/capabilities/execute` | Renderer allowlisted | main business mutation/operation protocol；Rust private control backs team.runtime、skills/plugins and selected OpenClaw operations, but the private command vocabulary is not exposed to Renderer；`hostUvInstallAll` 直接走 `platform.runtime`/`toolchain.installUv`、target=`platform-runtime`，Electron adapter 调 Rust `openclaw.toolchain.install-uv` 并等待真实结果；Remote Fleet start/stop/sync 不走 capability execute，直接走 `/api/remote-fleet/*` → signed Rust `/api/fleet`；其他 accepted-only async operation 使用 owner/facade typed operation query/event。 |
 | `GET` | `/api/runtime-adapters/list` | Renderer allowlisted | Runtime Endpoint Directory projection; current Rust surface is fixed local OpenClaw/Matcha peers, not dynamic registry. |
 | `GET` | `/api/runtime-adapters/instances/list` | Renderer allowlisted | Runtime Endpoint Directory projection. |
 | `GET` | `/api/runtime-connectors/list` | Renderer allowlisted | Runtime Endpoint Directory projection. |
@@ -76,8 +76,9 @@ Evidence: [session-routes.ts](../../runtime-host/api/routes/session-routes.ts#L3
 | `GET` | `/api/channels/snapshot`, `/api/channels/pairing/:channelType` | Renderer allowlisted |
 | `POST` | `/api/channels/config/validate`, `/api/channels/credentials/validate` | Renderer allowlisted |
 | `GET` | `/api/skills/status`, `/api/skills/effective` | Renderer allowlisted |
+| `POST` | `/api/skills/clawhub/install` | Renderer allowlisted; Rust Skills runtime ops executes legacy ClawHub CLI |
 | `POST` | `/api/skills/readme` | child direct; not present in current Electron public allowlist |
-| `POST` | `/api/clawhub/search` | Renderer allowlisted |
+| `POST` | `/api/clawhub/search` | Renderer allowlisted; Rust external ClawHub registry search |
 | `GET` | `/api/subagents/*` | `LEGACY-REJECTED` (registered as POST routes) |
 
 Legacy rejections within this family:
@@ -120,11 +121,13 @@ Evidence: [external-connector-routes.ts](../../runtime-host/api/routes/external-
 | Method | Paths | Classification |
 | --- | --- | --- |
 | `GET` | `/api/remote-fleet/snapshot`, `/metrics`, `/terminal/sessions`, `/list-commands`, `/list-audit-events` | Renderer allowlisted |
-| `POST` | register/delete connection/environment; register; write credential; remove node; probe; install/revoke agent; drain/retire endpoint; terminal open/reconnect/close | Renderer allowlisted |
-| `WS` | Electron public `/api/remote-fleet/terminal/stream` → child `/api/remote-fleet/terminal/*` | Renderer allowlisted WebSocket |
-| `POST` | `/api/remote-fleet/runtime-agent/ingress` | external agent ingress, not Renderer IPC |
+| `POST` | register-connection/delete-connection/register-environment/delete-environment; write credential; remove node; probe/probe-connection; install/revoke agent; deploy/delete environment; drain/retire endpoint; start/stop runtime; sync capabilities; terminal open/reconnect/close | Renderer allowlisted; legacy node registration `/api/remote-fleet/register` 已关闭，不是 public active route；node dispatch receipts (`accepted/completed/rejected/outcomeUnknown`) 与 owner-local begin/terminal receipts 已投影为现有 renderer `command` payload |
+| `WS` | Electron public `/api/remote-fleet/terminal/stream` → Rust Fleet terminal prefix | Renderer allowlisted WebSocket |
+| `POST` | `/api/remote-fleet/runtime-agent/ingress` | external RemoteAgent ingress, not Renderer IPC；Electron API server ingress proxy → Rust Fleet transport → Rust handler → FleetHandle core path 已接入 |
 
-Exact operation map: [remote-fleet-routes.ts](../../runtime-host/api/routes/remote-fleet-routes.ts#L10-L46)。
+Current route/transport evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[Electron API server](../../electron/api/server.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)。
+
+FleetOwner 当前仍保留单 Fleet durable authority；owner-local keyed lanes 已通过 Rust 侧证据，覆盖 terminal provider open、dispatch、connection/environment/resource lifecycle；Remote Fleet mutation payload projection、live recovery、startup Pending replay scanner、query refresh、terminal provider failure owner-local settlement 与 focused tests 已通过；不拆 per-target/per-resource owner。focused fault/backpressure、process restart/terminal replay、package/Windows、SSH bootstrap gates 未全闭合。
 
 ## G. gateway routes: distinguish same-name main ownership
 

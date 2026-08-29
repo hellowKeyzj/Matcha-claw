@@ -266,7 +266,37 @@ describe('Electron Main agents transport', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it('delivers only strict typed tool configuration views and rejects catalog leaks', async () => {
+  it('delivers bare typed skill configuration views and rejects wrapped read receipts', async () => {
+    const request = {
+      id: 'subagent.skills',
+      operationId: 'subagentSkills.get',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { agentId: 'writer' },
+    } as const;
+    const view = {
+      agentId: 'writer', support: { supportType: 'supported' }, selectionMode: 'inheritsDefaultSkills',
+      explicitSkillKeys: [], inheritedDefaultSkillKeys: [], effectiveSkillKeys: [], options: [], revision: 'revision-1', updatedAt: null,
+    };
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => view }),
+    );
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body: view });
+
+    const wrapped = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ success: true, resultType: 'view', view }) }),
+    );
+    await expect(wrapped.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+  });
+
+  it('delivers only bare typed tool configuration views and rejects catalog leaks', async () => {
     const request = {
       id: 'subagent.tools',
       operationId: 'subagentTools.get',
@@ -278,20 +308,29 @@ describe('Electron Main agents transport', () => {
       agentId: 'writer', support: { supportType: 'supported' }, selectionMode: 'inheritsDefaultTools', toolPolicy: null,
       toolProfiles: [], toolGroups: [], toolOptions: [], revision: 'revision-1', updatedAt: null,
     };
-    const body = { success: true, resultType: 'view', view };
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
-      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+      vi.fn().mockResolvedValue({ status: 200, json: async () => view }),
     );
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body: view });
 
     const leaking = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
-      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ ...body, view: { ...view, raw: 'private-config' } }) }),
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ ...view, raw: 'private-config' }) }),
     );
     await expect(leaking.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+
+    const wrapped = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ success: true, resultType: 'view', view }) }),
+    );
+    await expect(wrapped.execute(request)).resolves.toEqual({
       status: 503,
       body: { success: false, error: 'Subagent management is unavailable' },
     });

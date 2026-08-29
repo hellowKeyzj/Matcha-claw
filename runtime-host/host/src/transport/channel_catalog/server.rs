@@ -1,15 +1,19 @@
 use super::{DecodeError, Delivery, Request, decode};
-use crate::transport::{
-    authorization::CapabilityDecisionVerifier,
-    channel_config_read::{
-        DecodeError as ConfigReadDecodeError, Delivery as ConfigReadDelivery,
-        Request as ConfigReadRequest, decode as decode_config_read,
-    },
-    channel_credentials::{
-        DecodeError as CredentialsDecodeError, Delivery as CredentialsDelivery,
-        Request as CredentialsRequest, decode as decode_credentials,
+use crate::{
+    channel::{ChannelHandle, ChannelKey},
+    transport::{
+        authorization::CapabilityDecisionVerifier,
+        channel_config_read::{
+            DecodeError as ConfigReadDecodeError, Delivery as ConfigReadDelivery,
+            Request as ConfigReadRequest, decode as decode_config_read,
+        },
+        channel_credentials::{
+            DecodeError as CredentialsDecodeError, Delivery as CredentialsDelivery,
+            Request as CredentialsRequest, decode as decode_credentials,
+        },
     },
 };
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde_json::Value;
 use std::{
     io,
@@ -36,19 +40,22 @@ const CREDENTIALS_VALIDATE_PATH: &str = "/api/channels/credentials/validate";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        channel: ChannelHandle,
+        endpoint: RuntimeEndpoint,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            channel,
+            endpoint,
         })
     }
 
@@ -56,9 +63,10 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let channel = self.channel.clone();
+            let endpoint = self.endpoint.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, channel, endpoint).await;
             });
         }
     }
@@ -67,12 +75,13 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, channel, endpoint).await,
             Err(response) => response,
         })
     })
@@ -88,7 +97,8 @@ async fn serve(
 async fn handle(
     request: RequestBody,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
 ) -> Response {
     let expected_path = match request.path.as_str() {
         "/api/channels/catalog"
@@ -128,13 +138,11 @@ async fn handle(
                 }
             };
             let ConfigReadRequest {
-                channel,
+                channel: channel_id,
                 account_id,
             } = decoded;
-            let delivery = match owner.read_channel_config(channel, account_id).await {
-                Ok(outcome) => ConfigReadDelivery::Outcome(outcome),
-                Err(_) => ConfigReadDelivery::Unavailable,
-            };
+            let delivery =
+                ConfigReadDelivery::Outcome(channel.config(channel_id, account_id).await);
             Response::config_read_delivery(delivery)
         }
         CREDENTIALS_VALIDATE_PATH => {
@@ -150,8 +158,15 @@ async fn handle(
                     }
                 }
             };
-            let CredentialsRequest { channel, config } = decoded;
-            let delivery = match owner.validate_channel_credentials(channel, config).await {
+            let CredentialsRequest {
+                channel: channel_id,
+                config,
+            } = decoded;
+            let key = match ChannelKey::try_new(endpoint.clone(), channel_id, None) {
+                Ok(key) => key,
+                Err(_) => return Response::fixed(400, "Channel request is invalid"),
+            };
+            let delivery = match channel.validate_credentials(key, config).await {
                 Ok(outcome) => CredentialsDelivery::Outcome(outcome),
                 Err(_) => CredentialsDelivery::Unavailable,
             };
@@ -171,28 +186,32 @@ async fn handle(
             drop(verifier);
             let delivery = match (expected_path, decoded) {
                 ("/api/channels/catalog", Request::Catalog) => {
-                    match owner.channel_catalog().await {
-                        Ok(outcome) => Delivery::Catalog(outcome),
-                        Err(_) => Delivery::Unavailable,
-                    }
-                }
-                ("/api/channels/configure", Request::ConfigureForm { channel }) => {
-                    match owner.channel_configure_form(channel).await {
-                        Ok(outcome) => Delivery::ConfigureForm(outcome),
-                        Err(_) => Delivery::Unavailable,
-                    }
+                    Delivery::Catalog(channel.catalog().await)
                 }
                 (
                     "/api/channels/configure",
+                    Request::ConfigureForm {
+                        channel: channel_id,
+                    },
+                ) => Delivery::ConfigureForm(channel.configure_form(channel_id).await),
+                (
+                    "/api/channels/configure",
                     Request::ConfigureApply {
-                        channel,
+                        channel: channel_id,
                         account_id,
                         values,
                     },
-                ) => match owner.channel_configure(channel, account_id, values).await {
-                    Ok(outcome) => Delivery::Configure(outcome),
-                    Err(_) => Delivery::Unavailable,
-                },
+                ) => {
+                    let key =
+                        match ChannelKey::try_new(endpoint.clone(), channel_id, Some(account_id)) {
+                            Ok(key) => key,
+                            Err(_) => return Response::fixed(400, "Channel request is invalid"),
+                        };
+                    match channel.configure(key, values).await {
+                        Ok(outcome) => Delivery::Configure(outcome),
+                        Err(_) => Delivery::Unavailable,
+                    }
+                }
                 _ => return Response::fixed(400, "Channel request is invalid"),
             };
             Response::delivery(delivery)

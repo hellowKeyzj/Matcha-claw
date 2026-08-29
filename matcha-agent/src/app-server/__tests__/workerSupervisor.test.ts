@@ -226,6 +226,7 @@ describe('WorkerSupervisor', () => {
 
     const shutdownPromise = supervisor.shutdownSession('session-1')
     children[0]?.emitFrame({ id: 'request-2', ok: true })
+    children[0]?.emitExit(0, null)
     await shutdownPromise
     await sleep(35)
 
@@ -312,6 +313,7 @@ describe('WorkerSupervisor', () => {
 
     const shutdownPromise = supervisor.shutdownSession('session-1')
     children[0]?.emitFrame({ id: 'request-2', ok: true })
+    children[0]?.emitExit(0, null)
     await shutdownPromise
 
     children[0]?.emitFrame({

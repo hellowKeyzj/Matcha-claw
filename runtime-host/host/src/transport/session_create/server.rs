@@ -22,7 +22,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let trace_id = session_trace::trace_id(headers);
     session_trace::log("runtime.create.request", trace_id, serde_json::json!({}));
@@ -45,33 +45,37 @@ pub(crate) async fn handle(
             return Response::bad_request();
         }
     };
+    let now = now_millis();
     let mut verifier = verifier.lock().await;
-    let request =
-        match SessionCreateRequest::decode(value, authorization, &mut verifier, now_millis()) {
-            Ok(request) => request,
-            Err(DecodeError::Unauthorized) => {
-                session_trace::log(
-                    "runtime.create.decode-unauthorized",
-                    trace_id,
-                    serde_json::json!({}),
-                );
-                return Response::unauthorized();
-            }
-            Err(DecodeError::Invalid) => {
-                session_trace::log(
-                    "runtime.create.decode-invalid",
-                    trace_id,
-                    serde_json::json!({}),
-                );
-                return Response::bad_request();
-            }
-        };
-    let command = match request.into_command() {
+    let request = match SessionCreateRequest::decode(value, authorization, &mut verifier, now) {
+        Ok(request) => request,
+        Err(DecodeError::Unauthorized) => {
+            session_trace::log(
+                "runtime.create.decode-unauthorized",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::unauthorized();
+        }
+        Err(DecodeError::Invalid) => {
+            session_trace::log(
+                "runtime.create.decode-invalid",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::bad_request();
+        }
+    };
+    let admission_input = match request.into_admission_input() {
+        Ok(input) => input,
+        Err(_) => return Response::bad_request(),
+    };
+    let command = match session.prepare_create(admission_input, now) {
         Ok(command) => command,
         Err(_) => return Response::bad_request(),
     };
     drop(verifier);
-    let outcome = match owner.create_open_claw_session(command).await {
+    let outcome = match session.create_session(command).await {
         Ok(outcome) => outcome,
         Err(_) => {
             session_trace::log(

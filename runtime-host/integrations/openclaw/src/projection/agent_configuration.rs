@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -18,13 +23,72 @@ const CONFIG_WRITE_METHODS: [&str; 1] = [CONFIG_SET_METHOD];
 const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];
 const TOOL_CATALOG_METHODS: [&str; 1] = [TOOLS_CATALOG_METHOD];
 
+fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: Value) {
+    if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    let mut event = Map::new();
+    event.insert("prefix".into(), Value::String("session-trace".into()));
+    event.insert("source".into(), Value::String("runtime-host".into()));
+    event.insert(
+        "traceId".into(),
+        Value::String(trace_id.unwrap_or_default().into()),
+    );
+    event.insert("stage".into(), Value::String(stage.into()));
+    event.insert("at".into(), Value::Number(now_millis().into()));
+    if let Value::Object(fields) = payload {
+        event.extend(fields);
+    }
+    eprintln!("{}", Value::Object(event));
+}
+
+fn id_shape(value: Option<&str>) -> Value {
+    match value {
+        Some(value) => serde_json::json!({ "present": true, "length": value.len() }),
+        None => serde_json::json!({ "present": false, "length": 0 }),
+    }
+}
+
+fn read_failure_reason(error: ReadFailure) -> &'static str {
+    match error {
+        ReadFailure::Unavailable => "unavailable",
+        ReadFailure::Rejected => "rejected",
+        ReadFailure::Protocol => "protocol",
+    }
+}
+
+fn mutation_outcome_reason(outcome: MutationOutcome) -> &'static str {
+    match outcome {
+        MutationOutcome::Applied => "applied",
+        MutationOutcome::Rejected => "rejected",
+        MutationOutcome::OutcomeUnknown => "outcomeUnknown",
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 pub struct AgentConfiguration {
     gateway: Arc<GatewayClient>,
+    trace_id: Option<String>,
 }
 
 impl AgentConfiguration {
     pub fn new(gateway: Arc<GatewayClient>) -> Self {
-        Self { gateway }
+        Self {
+            gateway,
+            trace_id: None,
+        }
+    }
+
+    pub fn with_trace_id(gateway: Arc<GatewayClient>, trace_id: Option<String>) -> Self {
+        Self { gateway, trace_id }
     }
 
     pub async fn display(&self) -> Result<Display, ReadFailure> {
@@ -60,11 +124,21 @@ impl AgentConfiguration {
     }
 
     pub async fn skill_configuration(&self, agent_id: String) -> SkillConfigurationOutcome {
+        log_session_trace(
+            "runtime.openclaw.agent-config.skill.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
+        );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
         };
         if !snapshot.has_agent(&agent_id) {
+            log_session_trace(
+                "runtime.openclaw.agent-config.skill.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "agentNotConfigured" }),
+            );
             return SkillConfigurationOutcome::View(snapshot.skill_view_without_catalog(agent_id));
         }
         let catalog = match self.skill_catalog().await {
@@ -72,8 +146,26 @@ impl AgentConfiguration {
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
         };
         match snapshot.skill_view(agent_id, catalog) {
-            Ok(view) => SkillConfigurationOutcome::View(view),
-            Err(()) => SkillConfigurationOutcome::Unavailable(ReadFailure::Protocol),
+            Ok(view) => {
+                log_session_trace(
+                    "runtime.openclaw.agent-config.skill.outcome",
+                    self.trace_id.as_deref(),
+                    serde_json::json!({
+                        "result": "view",
+                        "optionCount": view.options.len(),
+                        "effectiveSkillCount": view.effective_skill_keys.len(),
+                    }),
+                );
+                SkillConfigurationOutcome::View(view)
+            }
+            Err(()) => {
+                log_session_trace(
+                    "runtime.openclaw.agent-config.skill.outcome",
+                    self.trace_id.as_deref(),
+                    serde_json::json!({ "result": "protocol" }),
+                );
+                SkillConfigurationOutcome::Unavailable(ReadFailure::Protocol)
+            }
         }
     }
 
@@ -83,11 +175,24 @@ impl AgentConfiguration {
         revision: String,
         selection: SkillSelection,
     ) -> SkillConfigurationOutcome {
+        log_session_trace(
+            "runtime.openclaw.agent-config.skill.set-request",
+            self.trace_id.as_deref(),
+            serde_json::json!({
+                "agentId": id_shape(Some(&agent_id)),
+                "revision": id_shape(Some(&revision)),
+            }),
+        );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
         };
         if snapshot.revision() != revision {
+            log_session_trace(
+                "runtime.openclaw.agent-config.skill.set-outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "staleRevision" }),
+            );
             return match self.skill_configuration(agent_id).await {
                 SkillConfigurationOutcome::View(view) => SkillConfigurationOutcome::Stale(view),
                 SkillConfigurationOutcome::Unavailable(error) => {
@@ -97,6 +202,11 @@ impl AgentConfiguration {
             };
         }
         if !snapshot.has_agent(&agent_id) {
+            log_session_trace(
+                "runtime.openclaw.agent-config.skill.set-outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "agentNotConfigured" }),
+            );
             return SkillConfigurationOutcome::Unsupported;
         }
         let catalog = match self.skill_catalog().await {
@@ -108,6 +218,15 @@ impl AgentConfiguration {
             SkillSelection::ExplicitSkillAllowlist(skills) => match catalog.canonicalize(skills) {
                 Ok(skills) => Some(skills),
                 Err((unknown_skill_keys, non_canonical_skill_keys)) => {
+                    log_session_trace(
+                        "runtime.openclaw.agent-config.skill.set-outcome",
+                        self.trace_id.as_deref(),
+                        serde_json::json!({
+                            "result": "invalidSkillKeys",
+                            "unknownCount": unknown_skill_keys.len(),
+                            "nonCanonicalCount": non_canonical_skill_keys.len(),
+                        }),
+                    );
                     return SkillConfigurationOutcome::InvalidSkillKeys {
                         unknown_skill_keys,
                         non_canonical_skill_keys,
@@ -118,7 +237,14 @@ impl AgentConfiguration {
         let request =
             match snapshot.patch_existing(agent_id.clone(), Patch::SkillConfiguration(skills)) {
                 Ok(request) => request,
-                Err(()) => return SkillConfigurationOutcome::Unsupported,
+                Err(()) => {
+                    log_session_trace(
+                        "runtime.openclaw.agent-config.skill.set-outcome",
+                        self.trace_id.as_deref(),
+                        serde_json::json!({ "result": "unsupported" }),
+                    );
+                    return SkillConfigurationOutcome::Unsupported;
+                }
             };
         match self.write(request).await {
             MutationOutcome::Rejected => SkillConfigurationOutcome::Rejected,
@@ -131,11 +257,21 @@ impl AgentConfiguration {
     }
 
     pub async fn tool_configuration(&self, agent_id: String) -> ToolConfigurationOutcome {
+        log_session_trace(
+            "runtime.openclaw.agent-config.tool.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
+        );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return ToolConfigurationOutcome::Unavailable(error),
         };
         if !snapshot.has_agent(&agent_id) {
+            log_session_trace(
+                "runtime.openclaw.agent-config.tool.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "agentNotConfigured" }),
+            );
             return ToolConfigurationOutcome::View(snapshot.tool_view_without_catalog(agent_id));
         }
         let catalog = match self.tool_catalog(&agent_id).await {
@@ -143,8 +279,27 @@ impl AgentConfiguration {
             Err(error) => return ToolConfigurationOutcome::Unavailable(error),
         };
         match snapshot.tool_view(agent_id, catalog) {
-            Ok(view) => ToolConfigurationOutcome::View(view),
-            Err(()) => ToolConfigurationOutcome::Unavailable(ReadFailure::Protocol),
+            Ok(view) => {
+                log_session_trace(
+                    "runtime.openclaw.agent-config.tool.outcome",
+                    self.trace_id.as_deref(),
+                    serde_json::json!({
+                        "result": "view",
+                        "toolProfileCount": view.catalog().profiles().len(),
+                        "toolGroupCount": view.catalog().groups().len(),
+                        "toolOptionCount": view.catalog().options().len(),
+                    }),
+                );
+                ToolConfigurationOutcome::View(view)
+            }
+            Err(()) => {
+                log_session_trace(
+                    "runtime.openclaw.agent-config.tool.outcome",
+                    self.trace_id.as_deref(),
+                    serde_json::json!({ "result": "protocol" }),
+                );
+                ToolConfigurationOutcome::Unavailable(ReadFailure::Protocol)
+            }
         }
     }
 
@@ -158,11 +313,24 @@ impl AgentConfiguration {
         revision: String,
         selection: ToolSelection,
     ) -> ToolConfigurationOutcome {
+        log_session_trace(
+            "runtime.openclaw.agent-config.tool.set-request",
+            self.trace_id.as_deref(),
+            serde_json::json!({
+                "agentId": id_shape(Some(&agent_id)),
+                "revision": id_shape(Some(&revision)),
+            }),
+        );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return ToolConfigurationOutcome::Unavailable(error),
         };
         if snapshot.revision() != revision {
+            log_session_trace(
+                "runtime.openclaw.agent-config.tool.set-outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "staleRevision" }),
+            );
             return match self.tool_configuration(agent_id).await {
                 ToolConfigurationOutcome::View(view) => ToolConfigurationOutcome::Stale(view),
                 ToolConfigurationOutcome::Unavailable(error) => {
@@ -172,6 +340,11 @@ impl AgentConfiguration {
             };
         }
         if !snapshot.has_agent(&agent_id) {
+            log_session_trace(
+                "runtime.openclaw.agent-config.tool.set-outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "agentNotConfigured" }),
+            );
             return ToolConfigurationOutcome::Unsupported;
         }
         let catalog = match self.tool_catalog(&agent_id).await {
@@ -181,13 +354,28 @@ impl AgentConfiguration {
         if let ToolSelection::Policy { allow, deny, .. } = &selection {
             let unknown = unknown_tool_keys(allow, deny, catalog.policy_keys());
             if !unknown.is_empty() {
+                log_session_trace(
+                    "runtime.openclaw.agent-config.tool.set-outcome",
+                    self.trace_id.as_deref(),
+                    serde_json::json!({
+                        "result": "invalidToolKeys",
+                        "unknownCount": unknown.len(),
+                    }),
+                );
                 return ToolConfigurationOutcome::InvalidToolKeys(unknown);
             }
         }
         let request =
             match snapshot.patch_existing(agent_id.clone(), Patch::ToolConfiguration(selection)) {
                 Ok(request) => request,
-                Err(()) => return ToolConfigurationOutcome::Unsupported,
+                Err(()) => {
+                    log_session_trace(
+                        "runtime.openclaw.agent-config.tool.set-outcome",
+                        self.trace_id.as_deref(),
+                        serde_json::json!({ "result": "unsupported" }),
+                    );
+                    return ToolConfigurationOutcome::Unsupported;
+                }
             };
         match self.write(request).await {
             MutationOutcome::Rejected => ToolConfigurationOutcome::Rejected,
@@ -200,6 +388,11 @@ impl AgentConfiguration {
     }
 
     async fn tool_catalog(&self, agent_id: &str) -> Result<ToolCatalog, ReadFailure> {
+        log_session_trace(
+            "runtime.openclaw.agent-config.tools-catalog.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
+        );
         let request = wire::operations_request(
             next_request_id("tools-catalog"),
             TOOLS_CATALOG_METHOD,
@@ -207,14 +400,37 @@ impl AgentConfiguration {
         )
         .map_err(|_| ReadFailure::Protocol)?;
         let _ = TOOL_CATALOG_METHODS;
-        match self.gateway.rpc_query(request).await {
+        let outcome = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
             Ok(response) => ToolCatalog::decode(response).map_err(|_| ReadFailure::Protocol),
             Err(error) => Err(map_read_failure(error)),
+        };
+        match &outcome {
+            Ok(catalog) => log_session_trace(
+                "runtime.openclaw.agent-config.tools-catalog.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({
+                    "result": "catalog",
+                    "toolProfileCount": catalog.profiles().len(),
+                    "toolGroupCount": catalog.groups().len(),
+                    "toolOptionCount": catalog.options().len(),
+                }),
+            ),
+            Err(error) => log_session_trace(
+                "runtime.openclaw.agent-config.tools-catalog.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": read_failure_reason(*error) }),
+            ),
         }
+        outcome
     }
 
     async fn skill_catalog(&self) -> Result<SkillCatalog, ReadFailure> {
+        log_session_trace(
+            "runtime.openclaw.agent-config.skills-status.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({}),
+        );
         let request = wire::operations_request(
             next_request_id("skills-status"),
             SKILLS_STATUS_METHOD,
@@ -222,11 +438,24 @@ impl AgentConfiguration {
         )
         .map_err(|_| ReadFailure::Protocol)?;
         let _ = SKILL_STATUS_METHODS;
-        match self.gateway.rpc_query(request).await {
+        let outcome = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
             Ok(response) => SkillCatalog::decode(response).map_err(|_| ReadFailure::Protocol),
             Err(error) => Err(map_read_failure(error)),
+        };
+        match &outcome {
+            Ok(catalog) => log_session_trace(
+                "runtime.openclaw.agent-config.skills-status.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": "catalog", "optionCount": catalog.options().len() }),
+            ),
+            Err(error) => log_session_trace(
+                "runtime.openclaw.agent-config.skills-status.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": read_failure_reason(*error) }),
+            ),
         }
+        outcome
     }
 
     async fn mutate(&self, agent_id: String, patch: Patch) -> MutationOutcome {
@@ -248,6 +477,11 @@ impl AgentConfiguration {
     }
 
     async fn read_snapshot(&self) -> Result<Snapshot, ReadFailure> {
+        log_session_trace(
+            "runtime.openclaw.agent-config.config-get.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({}),
+        );
         let request = wire::operations_request(
             next_request_id("configuration-get"),
             CONFIG_GET_METHOD,
@@ -255,11 +489,28 @@ impl AgentConfiguration {
         )
         .map_err(|_| ReadFailure::Protocol)?;
         let _ = CONFIG_READ_METHODS;
-        match self.gateway.rpc_query(request).await {
+        let outcome = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
             Ok(response) => Snapshot::decode(response).map_err(|_| ReadFailure::Protocol),
             Err(error) => Err(map_read_failure(error)),
+        };
+        match &outcome {
+            Ok(snapshot) => log_session_trace(
+                "runtime.openclaw.agent-config.config-get.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({
+                    "result": "snapshot",
+                    "configBytes": snapshot.document.len(),
+                    "hasBaseHash": snapshot.base_hash.is_some(),
+                }),
+            ),
+            Err(error) => log_session_trace(
+                "runtime.openclaw.agent-config.config-get.outcome",
+                self.trace_id.as_deref(),
+                serde_json::json!({ "result": read_failure_reason(*error) }),
+            ),
         }
+        outcome
     }
 
     async fn write(&self, request: ConfigSetRequest) -> MutationOutcome {
@@ -268,8 +519,13 @@ impl AgentConfiguration {
             Ok(encoded) => encoded,
             Err(()) => return MutationOutcome::Rejected,
         };
+        log_session_trace(
+            "runtime.openclaw.agent-config.config-set.request",
+            self.trace_id.as_deref(),
+            serde_json::json!({ "requestBytes": encoded.len() }),
+        );
         let _ = CONFIG_WRITE_METHODS;
-        match self.gateway.rpc_encoded_mutation(request_id, encoded).await {
+        let outcome = match self.gateway.rpc_encoded_mutation(request_id, encoded).await {
             MutationDelivery::Response(GatewayResponse::Failure { .. })
             | MutationDelivery::NotWritten(_) => MutationOutcome::Rejected,
             MutationDelivery::Response(response) => {
@@ -280,7 +536,13 @@ impl AgentConfiguration {
                 }
             }
             MutationDelivery::MayHaveReached(_) => MutationOutcome::OutcomeUnknown,
-        }
+        };
+        log_session_trace(
+            "runtime.openclaw.agent-config.config-set.outcome",
+            self.trace_id.as_deref(),
+            serde_json::json!({ "result": mutation_outcome_reason(outcome) }),
+        );
+        outcome
     }
 }
 
@@ -886,6 +1148,10 @@ pub struct ToolOption {
     description: Option<String>,
     source: String,
     plugin_id: Option<String>,
+    optional: Option<bool>,
+    risk: Option<String>,
+    tags: Vec<String>,
+    default_profiles: Vec<String>,
     group_key: Option<String>,
     group_display_name: Option<String>,
 }
@@ -897,6 +1163,10 @@ impl ToolOption {
             description: None,
             source,
             plugin_id,
+            optional: None,
+            risk: None,
+            tags: Vec::new(),
+            default_profiles: Vec::new(),
             group_key: None,
             group_display_name: None,
         }
@@ -915,6 +1185,18 @@ impl ToolOption {
     }
     pub fn plugin_id(&self) -> Option<&str> {
         self.plugin_id.as_deref()
+    }
+    pub fn optional(&self) -> Option<bool> {
+        self.optional
+    }
+    pub fn risk(&self) -> Option<&str> {
+        self.risk.as_deref()
+    }
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    pub fn default_profiles(&self) -> &[String] {
+        &self.default_profiles
     }
     pub fn group_key(&self) -> Option<&str> {
         self.group_key.as_deref()
@@ -972,6 +1254,10 @@ fn tool_group(value: &Value) -> Option<ToolGroup> {
                     .get("pluginId")
                     .and_then(value_text)
                     .or_else(|| plugin_id.clone()),
+                optional: tool.get("optional").and_then(Value::as_bool),
+                risk: tool.get("risk").and_then(catalog_risk),
+                tags: value_texts(tool.get("tags")),
+                default_profiles: value_texts(tool.get("defaultProfiles")),
                 group_key: Some(key.clone()),
                 group_display_name: Some(display_name.clone()),
                 key: tool_key,
@@ -1098,7 +1384,7 @@ impl Model {
 }
 
 struct Snapshot {
-    raw: Vec<u8>,
+    document: Vec<u8>,
     base_hash: Option<Vec<u8>>,
 }
 
@@ -1111,14 +1397,21 @@ impl Snapshot {
         else {
             return Err(());
         };
-        let raw = payload.get("raw").and_then(Value::as_str).ok_or(())?;
+        if payload.get("valid") != Some(&Value::Bool(true)) {
+            return Err(());
+        }
+        let config = payload
+            .get("config")
+            .filter(|value| value.is_object())
+            .ok_or(())?;
+        let document = serde_json::to_vec(config).map_err(|_| ())?;
         let base_hash = match payload.get("hash") {
             None | Some(Value::Null) => None,
             Some(Value::String(value)) if !value.is_empty() => Some(value.as_bytes().to_vec()),
             _ => return Err(()),
         };
         Ok(Self {
-            raw: raw.as_bytes().to_vec(),
+            document,
             base_hash,
         })
     }
@@ -1146,7 +1439,7 @@ impl Snapshot {
 
     fn revision(&self) -> String {
         let mut digest = Sha256::new();
-        digest.update(&self.raw);
+        digest.update(&self.document);
         if let Some(base_hash) = &self.base_hash {
             digest.update(base_hash);
         }
@@ -1335,13 +1628,13 @@ impl Snapshot {
     }
 
     fn document(&self) -> Result<Value, ()> {
-        serde_json::from_slice(&self.raw).map_err(|_| ())
+        serde_json::from_slice(&self.document).map_err(|_| ())
     }
 }
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        self.raw.fill(0);
+        self.document.fill(0);
         if let Some(base_hash) = &mut self.base_hash {
             base_hash.fill(0);
         }
@@ -1454,6 +1747,22 @@ fn value_text(value: &Value) -> Option<String> {
     value.as_str().and_then(normalize_text)
 }
 
+fn value_texts(value: Option<&Value>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(value_text)
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn catalog_risk(value: &Value) -> Option<String> {
+    let risk = value_text(value)?;
+    matches!(risk.as_str(), "low" | "medium" | "high").then_some(risk)
+}
+
 fn canonical_skill(value: &str) -> Option<String> {
     let value = value.trim().to_ascii_lowercase();
     valid_text(&value).then_some(value)
@@ -1521,9 +1830,24 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_invalid_openclaw_config_payloads() {
+        assert!(
+            Snapshot::decode(response(json!({
+                "valid": false,
+                "raw": null,
+                "config": {},
+                "hash": "base"
+            })))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn display_omits_malformed_entries_and_never_carries_snapshot_secrets() {
         let snapshot = Snapshot::decode(response(json!({
-            "raw": r#"{"agents":{"defaults":{"model":{"primary":"one","fallbacks":["two"]}},"list":[null,{"id":"writer","description":"Docs","skills":[" First ","first"]},{"description":"missing"}]}}"#,
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"defaults":{"model":{"primary":"one","fallbacks":["two"]}},"list":[null,{"id":"writer","description":"Docs","skills":[" First ","first"]},{"description":"missing"}]}},
             "hash": "private-hash"
         })))
         .unwrap();
@@ -1540,7 +1864,9 @@ mod tests {
     #[test]
     fn patch_uses_base_hash_preserves_other_config_and_redacts_request() {
         let snapshot = Snapshot::decode(response(json!({
-            "raw": r#"{"private":"canary","agents":{"list":[{"id":"writer","other":"keep"}]}}"#,
+            "valid": true,
+            "raw": null,
+            "config": {"private":"canary","agents":{"list":[{"id":"writer","other":"keep"}]}},
             "hash": "base-hash-canary"
         })))
         .unwrap();
@@ -1610,7 +1936,9 @@ mod tests {
     #[test]
     fn skill_snapshot_distinguishes_explicit_empty_allowlist_from_inheritance() {
         let snapshot = Snapshot::decode(response(json!({
-            "raw": r#"{"agents":{"defaults":{"skills":["research"]},"list":[{"id":"inherits"},{"id":"empty","skills":[]}]}}"#,
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"defaults":{"skills":["research"]},"list":[{"id":"inherits"},{"id":"empty","skills":[]}]}},
             "hash": "base"
         })))
         .unwrap();
@@ -1648,6 +1976,45 @@ mod tests {
                 catalog.policy_keys(),
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn tool_catalog_preserves_openclaw_tool_metadata() {
+        let catalog = ToolCatalog::decode(response(json!({
+            "groups": [{
+                "id": "plugin-tools",
+                "label": "Plugin Tools",
+                "source": "plugin",
+                "pluginId": "plugin:demo",
+                "tools": [{
+                    "id": "demo__send",
+                    "label": "Send",
+                    "description": "Send messages",
+                    "source": "plugin",
+                    "optional": true,
+                    "risk": "medium",
+                    "tags": ["chat", "chat", "write"],
+                    "defaultProfiles": ["coding", "messaging"]
+                }]
+            }]
+        })))
+        .unwrap();
+        let option = catalog
+            .options()
+            .iter()
+            .find(|option| option.key() == "demo__send")
+            .unwrap();
+
+        assert_eq!(option.optional(), Some(true));
+        assert_eq!(option.risk(), Some("medium"));
+        assert_eq!(
+            option.tags(),
+            ["chat".to_owned(), "write".to_owned()].as_slice()
+        );
+        assert_eq!(
+            option.default_profiles(),
+            ["coding".to_owned(), "messaging".to_owned()].as_slice()
         );
     }
 

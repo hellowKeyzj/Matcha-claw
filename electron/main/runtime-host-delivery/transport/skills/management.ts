@@ -4,7 +4,6 @@ const DECISION_TTL_MS = 30_000;
 
 export const SKILLS_ENDPOINTS = Object.freeze({
   status: '/api/skills/status',
-  search: '/api/skills/search',
   detail: '/api/skills/detail',
   config: '/api/skills/config',
   clawHubInstall: '/api/skills/clawhub/install',
@@ -94,17 +93,6 @@ export type SkillsStatusResult = Readonly<{
   refreshing?: boolean;
   updatedAt?: number | null;
   error?: string | null;
-}>;
-export type SkillsSearchRequest = Readonly<{ query?: string; limit?: number }>;
-export type SkillsSearchResult = Readonly<{
-  results: Array<Readonly<{
-    score: number;
-    slug: string;
-    displayName: string;
-    summary?: string;
-    version?: string;
-    updatedAt?: number;
-  }>>;
 }>;
 export type SkillsDetailRequest = Readonly<{ slug: string }>;
 export type SkillsDetailResult = Readonly<{
@@ -199,7 +187,6 @@ export type SkillsTransportResponse<T> = Readonly<{
   body: T | SkillsTransportFailure;
 }>;
 export type SkillsStatusTransportResponse = SkillsTransportResponse<SkillsStatusResult>;
-export type SkillsSearchTransportResponse = SkillsTransportResponse<SkillsSearchResult>;
 export type SkillsDetailTransportResponse = SkillsTransportResponse<SkillsDetailResult>;
 export type SkillsConfigMutationTransportResponse = SkillsTransportResponse<SkillsMutationResult>;
 export type ClawHubSkillInstallTransportResponse = SkillsTransportResponse<SkillsMutationResult>;
@@ -211,7 +198,6 @@ export type SkillsReadmeTransportResponse = SkillsTransportResponse<SkillsReadme
 
 export interface SkillsManagementTransport {
   readStatus(): Promise<SkillsStatusTransportResponse>;
-  search(request: unknown): Promise<SkillsSearchTransportResponse>;
   detail(request: unknown): Promise<SkillsDetailTransportResponse>;
   mutateConfig(request: unknown): Promise<SkillsConfigMutationTransportResponse>;
   installClawHub(request: unknown): Promise<ClawHubSkillInstallTransportResponse>;
@@ -232,7 +218,6 @@ export function createSkillsManagementTransport(
 ): SkillsManagementTransport {
   return {
     readStatus: () => readStatus(issuer, port, fetcher),
-    search: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.search, request, 'skills:search', 'skills.search', 'skills-search', isSkillsSearchRequest, isSkillsSearchResult),
     detail: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
     mutateConfig: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
     installClawHub: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.clawHubInstall, request, 'skills:install', 'skills.install', 'skills-clawhub-install', isClawHubSkillInstallRequest, isSkillsMutationResult),
@@ -429,27 +414,6 @@ function rejectedResponse<T>(): SkillsTransportResponse<T> {
 
 function unknownResponse<T>(): SkillsTransportResponse<T> {
   return { status: 503, body: { outcome: 'unknown' } };
-}
-
-function isSkillsSearchRequest(value: unknown): value is SkillsSearchRequest {
-  return hasOnlyKeys(value, ['query', 'limit'])
-    && (value.query === undefined || isText(value.query, 256))
-    && (value.limit === undefined || isBoundedInteger(value.limit, 1, 100));
-}
-
-function isSkillsSearchResult(value: unknown): value is SkillsSearchResult {
-  return hasExactKeys(value, ['results']) && Array.isArray(value.results) && value.results.every(isSkillsSearchResultEntry);
-}
-
-function isSkillsSearchResultEntry(value: unknown): boolean {
-  return hasOnlyKeys(value, ['score', 'slug', 'displayName', 'summary', 'version', 'updatedAt'])
-    && typeof value.score === 'number'
-    && Number.isFinite(value.score)
-    && isSlug(value.slug)
-    && isText(value.displayName, 256)
-    && (value.summary === undefined || isText(value.summary, 8_192))
-    && (value.version === undefined || isText(value.version, 128))
-    && (value.updatedAt === undefined || isTimestamp(value.updatedAt));
 }
 
 function isSkillsDetailRequest(value: unknown): value is SkillsDetailRequest {

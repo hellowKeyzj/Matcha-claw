@@ -23,6 +23,7 @@ import {
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
+let runtimeHostObservationRevision = 0;
 
 interface GatewayHealth {
   ok: boolean;
@@ -95,14 +96,14 @@ function applyRuntimeHostSnapshot(
   };
 }
 
-function unavailableRuntimeHostSnapshot(): RuntimeHostStatusSnapshot {
+function preparingRuntimeHostSnapshot(): RuntimeHostStatusSnapshot {
   return {
-    status: 'error',
-    error: 'Runtime Host status is unavailable.',
+    status: 'starting',
     updatedAt: Date.now(),
   };
 }
 
+const GATEWAY_STATUS_UNAVAILABLE = 'Gateway status is unavailable.';
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 const STARTUP_TRACE_MESSAGE_LIMIT = 200;
 
@@ -168,7 +169,19 @@ async function fetchRuntimeHostStatusSnapshot(): Promise<RuntimeHostStatusSnapsh
   return await hostApiFetch<RuntimeHostStatusSnapshot>('/api/runtime-host/status');
 }
 
+function isGatewayStatusObservationUnavailable(status: GatewayStatus): boolean {
+  return status.processState === 'error'
+    && status.gatewayReady === false
+    && status.healthSummary === 'unresponsive'
+    && status.transportState === 'disconnected'
+    && status.portReachable === false
+    && status.error === GATEWAY_STATUS_UNAVAILABLE;
+}
+
 function isCurrentGatewayStatus(current: GatewayStatus, incoming: GatewayStatus): boolean {
+  if (isGatewayStatusObservationUnavailable(incoming)) {
+    return false;
+  }
   if (incoming.updatedAt > current.updatedAt) {
     return true;
   }
@@ -190,7 +203,7 @@ function syncPendingApprovalsFromChatStore(): void {
 
 export const useGatewayStore = create<GatewayState>((set, get) => ({
   status: {
-    processState: 'stopped',
+    processState: 'control_connecting',
     port: 18789,
     gatewayReady: false,
     healthSummary: 'unresponsive',
@@ -218,6 +231,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
     }
 
     gatewayInitPromise = (async () => {
+      const runtimeHostSnapshotRevision = runtimeHostObservationRevision;
       try {
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
@@ -321,6 +335,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             error?: string;
             updatedAt?: number;
           }>('runtime-host:status', (payload) => {
+            runtimeHostObservationRevision += 1;
             set((state) => ({
               runtimeHost: {
                 ...state.runtimeHost,
@@ -342,6 +357,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             message?: string;
             updatedAt?: number;
           }>('runtime-host:error', (payload) => {
+            runtimeHostObservationRevision += 1;
             set((state) => ({
               runtimeHost: {
                 ...state.runtimeHost,
@@ -357,6 +373,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             status?: RuntimeHostObservedStatus;
             recoveredAt?: number;
           }>('runtime-host:restart', (payload) => {
+            runtimeHostObservationRevision += 1;
             set((state) => ({
               runtimeHost: {
                 ...state.runtimeHost,
@@ -378,10 +395,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         const status = statusResult.status === 'fulfilled' ? statusResult.value : null;
         const runtimeHost = runtimeHostResult.status === 'fulfilled'
           ? runtimeHostResult.value
-          : unavailableRuntimeHostSnapshot();
+          : preparingRuntimeHostSnapshot();
         set((state) => ({
           ...(status && isCurrentGatewayStatus(state.status, status) ? { status } : {}),
-          runtimeHost: applyRuntimeHostSnapshot(runtimeHost, state.runtimeHost),
+          ...(runtimeHostSnapshotRevision === runtimeHostObservationRevision
+            ? { runtimeHost: applyRuntimeHostSnapshot(runtimeHost, state.runtimeHost) }
+            : {}),
           isInitialized: true,
           lastError: statusResult.status === 'rejected' ? String(statusResult.reason) : null,
         }));
@@ -392,7 +411,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       } catch (error) {
         set((state) => ({
           lastError: String(error),
-          runtimeHost: applyRuntimeHostSnapshot(unavailableRuntimeHostSnapshot(), state.runtimeHost),
+          runtimeHost: applyRuntimeHostSnapshot(preparingRuntimeHostSnapshot(), state.runtimeHost),
           isInitialized: true,
         }));
       } finally {
@@ -414,7 +433,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         return;
       }
       const status = await fetchGatewayStatusSnapshot();
-      set({ status });
+      set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
       set({ lastError: String(error) });
     }
@@ -425,7 +444,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       set({ lastError: null });
       await hostApiFetch('/api/gateway/stop', { method: 'POST' });
       const status = await fetchGatewayStatusSnapshot();
-      set({ status });
+      set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
       set({ lastError: String(error) });
     }
@@ -442,7 +461,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         return;
       }
       const status = await fetchGatewayStatusSnapshot();
-      set({ status });
+      set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
       set({ lastError: String(error) });
     }

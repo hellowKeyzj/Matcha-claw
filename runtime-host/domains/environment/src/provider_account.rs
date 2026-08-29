@@ -6,7 +6,7 @@ const MAX_ACCOUNT_ID_BYTES: usize = 128;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderAccountId(String);
 
 impl ProviderAccountId {

@@ -57,22 +57,16 @@ function addNonEmptyAgentId(agentIds: Set<string>, agentId: string | null | unde
   }
 }
 
-function shouldUseSidebarAgentCatalog(endpoint: ChatSessionRuntimeEndpointTarget): boolean {
-  return endpoint.runtimeAdapterId === 'openclaw' || endpoint.protocolId === 'openclaw';
-}
-
 function buildRuntimeEndpointAgentIds(
-  endpoint: ChatSessionRuntimeEndpointTarget,
+  seedAgentIds: readonly string[],
   agents: SidebarAgentSummary[],
 ): string[] {
   const agentIds = new Set<string>();
-  for (const agentId of endpoint.agentIds) {
+  for (const agentId of seedAgentIds) {
     addNonEmptyAgentId(agentIds, agentId);
   }
-  if (endpoint.acceptsDynamicAgents && shouldUseSidebarAgentCatalog(endpoint)) {
-    for (const agent of agents) {
-      addNonEmptyAgentId(agentIds, agent.id);
-    }
+  for (const agent of agents) {
+    addNonEmptyAgentId(agentIds, agent.id);
   }
   return Array.from(agentIds);
 }
@@ -81,12 +75,22 @@ function buildRuntimeEndpointAgentSummaries(
   endpoint: ChatSessionRuntimeEndpointTarget,
   agents: SidebarAgentSummary[],
 ): SidebarAgentSummary[] {
+  if (endpoint.agentCatalog.source === 'runtime-endpoint') {
+    return endpoint.agentCatalog.agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name?.trim() || agent.id,
+    }));
+  }
+
   const agentMetadataById = new Map(agents.map((agent) => [agent.id, agent] as const));
-  return buildRuntimeEndpointAgentIds(endpoint, agents).map((agentId) => {
+  const seedAgentById = new Map(endpoint.agentCatalog.seedAgents.map((agent) => [agent.id, agent] as const));
+  const seedAgentIds = endpoint.agentCatalog.seedAgents.map((agent) => agent.id);
+  return buildRuntimeEndpointAgentIds(seedAgentIds, agents).map((agentId) => {
     const metadata = agentMetadataById.get(agentId);
+    const seedAgent = seedAgentById.get(agentId);
     return {
       id: agentId,
-      name: metadata?.name?.trim() || agentId,
+      name: metadata?.name?.trim() || seedAgent?.name?.trim() || agentId,
       avatarSeed: metadata?.avatarSeed,
       avatarStyle: metadata?.avatarStyle,
     };
@@ -205,8 +209,8 @@ const SESSION_BUCKET_SPECS: SessionBucketSpec[] = [
   },
 ];
 
-export function readSessionSuffix(session: Pick<ChatSession, 'key' | 'backendSessionKey'> | string): string {
-  const sessionKey = typeof session === 'string' ? session : session.backendSessionKey;
+export function readSessionSuffix(session: Pick<ChatSession, 'key' | 'sessionIdentity'> | string): string {
+  const sessionKey = typeof session === 'string' ? session : session.sessionIdentity.sessionKey;
   const suffix = sessionKey.split(':').slice(2).join(':');
   return suffix || sessionKey;
 }
@@ -237,7 +241,7 @@ function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
+  return parseSessionCreatedAtMs(session.sessionIdentity.sessionKey) ?? 0;
 }
 
 function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEntry): number {
@@ -426,8 +430,8 @@ export function inferUntitledSessionLabel(
 }
 
 interface UseAgentSessionsPaneViewModelInput {
-  agents: SidebarAgentSummary[];
-  agentsResource: ResourceStateMeta;
+  subagentManagementAgents: SidebarAgentSummary[];
+  subagentManagementAgentsResource: ResourceStateMeta;
   sessionEntries: AgentSessionsPaneSessionEntry[];
   sessionsLoading: boolean;
   sessionsLoadedOnce: boolean;
@@ -444,9 +448,9 @@ export function useAgentSessionsPaneViewModel(
 ): AgentSessionsPaneViewModel {
   const runtimeAgentSummaries = useMemo(
     () => input.selectedRuntimeEndpoint
-      ? buildRuntimeEndpointAgentSummaries(input.selectedRuntimeEndpoint, input.agents)
-      : input.agents,
-    [input.agents, input.selectedRuntimeEndpoint],
+      ? buildRuntimeEndpointAgentSummaries(input.selectedRuntimeEndpoint, input.subagentManagementAgents)
+      : [],
+    [input.subagentManagementAgents, input.selectedRuntimeEndpoint],
   );
   const runtimeSessionEntries = useMemo(
     () => filterSessionEntriesByRuntimeEndpoint(input.sessionEntries, input.selectedRuntimeEndpoint),
@@ -572,10 +576,12 @@ export function useAgentSessionsPaneViewModel(
     return map;
   }, [globalSessionEntries, globalSessionOwnerByKey, input.locale, input.t, resolveSessionTitle]);
 
-  const agentListState = !input.agentsResource.hasLoadedOnce
-    && (input.agentsResource.status === 'idle' || input.agentsResource.status === 'loading')
+  const requiresSubagentManagementCatalog = input.selectedRuntimeEndpoint?.agentCatalog.source === 'subagent-management';
+  const agentListState = requiresSubagentManagementCatalog
+    && !input.subagentManagementAgentsResource.hasLoadedOnce
+    && (input.subagentManagementAgentsResource.status === 'idle' || input.subagentManagementAgentsResource.status === 'loading')
     ? 'loading'
-    : (!input.agentsResource.hasLoadedOnce && input.agentsResource.status === 'error' ? 'error' : 'ready');
+    : (requiresSubagentManagementCatalog && !input.subagentManagementAgentsResource.hasLoadedOnce && input.subagentManagementAgentsResource.status === 'error' ? 'error' : 'ready');
 
   const sessionListState = !input.sessionsLoadedOnce && input.sessionEntries.length === 0
     ? (input.sessionsError ? 'error' : 'loading')
@@ -587,7 +593,7 @@ export function useAgentSessionsPaneViewModel(
     sessionBuckets,
     sessionViewModelByKey,
     agentListState,
-    agentErrorMessage: input.agentsResource.error,
+    agentErrorMessage: requiresSubagentManagementCatalog ? input.subagentManagementAgentsResource.error : null,
     sessionListState,
     sessionErrorMessage: input.sessionEntries.length === 0 ? input.sessionsError : null,
   };

@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
+import { logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
 
 const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = { success: false, error: 'Subagent management is unavailable' } as const;
@@ -44,7 +45,7 @@ export type AgentsTransportResponse = Readonly<{
 }>;
 
 export interface AgentsTransport {
-  execute(request: unknown): Promise<AgentsTransportResponse>;
+  execute(request: unknown, traceId?: string | null): Promise<AgentsTransportResponse>;
 }
 
 export function createAgentsTransport(
@@ -54,8 +55,13 @@ export function createAgentsTransport(
 ): AgentsTransport {
   return { execute };
 
-  async function execute(request: unknown): Promise<AgentsTransportResponse> {
-    if (!isAgentsRequest(request)) return { status: 503, body: UNAVAILABLE };
+  async function execute(request: unknown, traceId?: string | null): Promise<AgentsTransportResponse> {
+    if (!isAgentsRequest(request)) {
+      logSessionTrace('electron.agents.rejected', traceId, summarizeUnknownAgentsRequest(request));
+      return { status: 503, body: UNAVAILABLE };
+    }
+    const startedAt = Date.now();
+    logSessionTrace('electron.agents.request', traceId, summarizeAgentsRequest(request));
     try {
       const response = await fetcher(`http://127.0.0.1:${port}/api/subagents/agents`, {
         method: 'POST',
@@ -70,19 +76,67 @@ export function createAgentsTransport(
             revision: '1',
           })}`,
           'Content-Type': 'application/json',
+          ...traceHeader(traceId),
         },
         body: JSON.stringify(request),
       });
       const body: unknown = await response.json();
-      if (response.status === 200 && isSuccess(body, request.operationId)) return { status: 200, body };
-      if ((response.status === 409 || response.status === 422 || response.status === 503) && isFailure(body)) {
+      const validSuccess = response.status === 200 && isSuccess(body, request.operationId);
+      const validFailure = (response.status === 409 || response.status === 422 || response.status === 503) && isFailure(body);
+      logSessionTrace('electron.agents.response', traceId, {
+        operationId: request.operationId,
+        status: response.status,
+        contract: validSuccess ? summarizeSuccessfulAgentsBody(body, request.operationId) : validFailure ? 'failure' : 'invalid',
+        elapsedMs: Date.now() - startedAt,
+      });
+      if (validSuccess) return { status: 200, body };
+      if (validFailure) {
         return { status: response.status, body };
       }
     } catch {
+      logSessionTrace('electron.agents.failure', traceId, {
+        operationId: request.operationId,
+        elapsedMs: Date.now() - startedAt,
+      });
       // Loopback failures intentionally remain public-unavailable.
     }
     return { status: 503, body: UNAVAILABLE };
   }
+}
+
+function summarizeUnknownAgentsRequest(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return { contract: 'non-record' };
+  return {
+    contract: 'invalid',
+    id: typeof value.id === 'string' ? value.id : null,
+    operationId: typeof value.operationId === 'string' ? value.operationId : null,
+    keys: Object.keys(value).sort(),
+  };
+}
+
+function summarizeAgentsRequest(request: AgentsRequest): Record<string, unknown> {
+  const inputAgentId = typeof request.input.agentId === 'string' ? request.input.agentId : null;
+  return {
+    id: request.id,
+    operationId: request.operationId,
+    adapter: request.scope.endpoint.runtimeAdapterId,
+    instance: request.scope.endpoint.runtimeInstanceId,
+    scopeAgentId: summarizeIdentifier(request.scope.agentId),
+    targetKind: request.target.kind,
+    targetAgentId: summarizeIdentifier(request.target.kind === 'agent' ? request.target.agentId : null),
+    targetSubagentId: summarizeIdentifier(request.target.kind === 'subagent' ? request.target.subagentId ?? null : null),
+    inputAgentId: summarizeIdentifier(inputAgentId),
+  };
+}
+
+function summarizeSuccessfulAgentsBody(body: unknown, operation: Operation): string {
+  if (operation === 'subagentSkills.get') return 'skill-view';
+  if (operation === 'subagentTools.get') return 'tool-view';
+  if (operation === 'subagentSkills.set' || operation === 'subagentTools.set') {
+    return isRecord(body) && typeof body.resultType === 'string' ? `mutation:${body.resultType}` : 'mutation';
+  }
+  if (isRecord(body) && typeof body.kind === 'string') return `mutation:${body.kind}`;
+  return 'success';
 }
 
 function isAgentsRequest(value: unknown): value is AgentsRequest {
@@ -287,6 +341,8 @@ function isRootedFileName(value: unknown): boolean {
 }
 
 function isSuccess(value: unknown, operation: Operation): boolean {
+  if (operation === 'subagentSkills.get') return isConfigurationView(value, true);
+  if (operation === 'subagentTools.get') return isConfigurationView(value, false);
   if (!isRecord(value) || value.success !== true) return false;
   if (operation === 'subagents.draft.wait') {
     return hasExactKeys(value, ['success', 'status', 'startedAt', 'endedAt'])
@@ -306,10 +362,8 @@ function isSuccess(value: unknown, operation: Operation): boolean {
   if (operation === 'subagents.description.set'
     || operation === 'subagents.model.set'
     || operation === 'subagents.skills.set') return hasExactKeys(value, ['success']);
-  if (operation === 'subagentSkills.get' || operation === 'subagentTools.get'
-    || operation === 'subagentSkills.set' || operation === 'subagentTools.set') {
-    return isConfigurationResult(value, operation);
-  }
+  if (operation === 'subagentSkills.set') return isConfigurationMutationResult(value, true);
+  if (operation === 'subagentTools.set') return isConfigurationMutationResult(value, false);
   if (operation === 'subagents.files.get' || operation === 'subagents.files.set') {
     return hasExactKeys(value, ['success', 'file']) && isFile(value.file);
   }
@@ -364,18 +418,17 @@ function isToolSelection(value: unknown): boolean {
         && Array.isArray(value.deny) && value.deny.every((key) => isText(key, 4096))));
 }
 
-function isConfigurationResult(value: Record<string, unknown>, operation: Operation): boolean {
-  const isSkill = operation === 'subagentSkills.get' || operation === 'subagentSkills.set';
-  if (hasExactKeys(value, ['success', 'resultType', 'view']) && (value.resultType === 'view' || value.resultType === 'updated')) {
-    return isConfigurationView(value.view, isSkill);
+function isConfigurationMutationResult(value: Record<string, unknown>, skill: boolean): boolean {
+  if (hasExactKeys(value, ['success', 'resultType', 'view']) && value.resultType === 'updated') {
+    return isConfigurationView(value.view, skill);
   }
   if (hasExactKeys(value, ['success', 'resultType', 'latestView']) && value.resultType === 'staleRevision') {
-    return isConfigurationView(value.latestView, isSkill);
+    return isConfigurationView(value.latestView, skill);
   }
   if (hasExactKeys(value, ['success', 'resultType', 'reason']) && value.resultType === 'unsupported') {
     return value.reason === 'agentNotConfigured';
   }
-  if (!isSkill) return hasExactKeys(value, ['success', 'resultType', 'unknownToolKeys'])
+  if (!skill) return hasExactKeys(value, ['success', 'resultType', 'unknownToolKeys'])
     && value.resultType === 'invalidToolKeys'
     && Array.isArray(value.unknownToolKeys)
     && value.unknownToolKeys.every((key) => isText(key, 4096));

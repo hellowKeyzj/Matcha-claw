@@ -496,7 +496,6 @@ export function Sidebar({
       }
       const taskSession = {
         recordKey: currentSession.key,
-        backendSessionKey: currentSession.backendSessionKey,
         sessionIdentity: currentSession.sessionIdentity,
       };
       if (!taskCenterInitialized) {
@@ -504,7 +503,6 @@ export function Sidebar({
       }
       void refreshTaskCenter({
         sessionKey: taskSession.recordKey,
-        backendSessionKey: taskSession.backendSessionKey,
         sessionIdentity: taskSession.sessionIdentity,
         silent: true,
       });

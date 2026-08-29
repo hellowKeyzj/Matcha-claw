@@ -11,16 +11,11 @@ let ALLOWED_ROUTE_FILES = new Set();
 const FORBIDDEN_ROUTE_IMPORT_MODULES = [
   'chat',
   'runtime-host',
-  'plugins',
-  'settings',
-  'security',
   'providers',
   'channels',
-  'skills',
   'sessions',
   'task-plugin',
   'team-runtime',
-  'toolchain',
 ];
 
 function fail(message, details = []) {

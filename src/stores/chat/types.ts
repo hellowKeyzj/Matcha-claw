@@ -54,7 +54,6 @@ export interface ContentBlock {
 /** Session from session catalog */
 export interface ChatSession {
   key: string;
-  backendSessionKey: string;
   endpointSessionId?: string;
   agentId: string;
   protocolId?: string;
@@ -118,7 +117,6 @@ export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 export interface ApprovalItem {
   id: string;
   sessionKey: string;
-  backendSessionKey: string;
   endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   runId?: string;
@@ -156,7 +154,6 @@ export interface ChatRuntimeErrorDismissMarker {
 }
 
 export interface ChatSessionMetaState {
-  backendSessionKey: string;
   endpointSessionId: string | null;
   runtimeScopeKey: string | null;
   agentId: string | null;
@@ -175,6 +172,21 @@ export interface ChatSessionMetaState {
   thinkingLevel: string | null;
 }
 
+export interface ChatSessionRuntimeAgentCatalogEntry {
+  id: string;
+  name?: string;
+}
+
+export type ChatSessionRuntimeAgentCatalog =
+  | {
+    source: 'runtime-endpoint';
+    agents: ChatSessionRuntimeAgentCatalogEntry[];
+  }
+  | {
+    source: 'subagent-management';
+    seedAgents: ChatSessionRuntimeAgentCatalogEntry[];
+  };
+
 export interface ChatSessionRuntimeEndpointTarget {
   endpointId: string;
   protocolId: string;
@@ -185,6 +197,7 @@ export interface ChatSessionRuntimeEndpointTarget {
   displayName: string;
   agentIds: string[];
   acceptsDynamicAgents: boolean;
+  agentCatalog: ChatSessionRuntimeAgentCatalog;
   sessionPromptScopes: AgentScope[];
   defaultSessionPromptScope: AgentScope;
 }

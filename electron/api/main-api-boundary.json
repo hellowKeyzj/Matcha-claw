@@ -21,6 +21,7 @@
     "settings-desired.ts",
     "security-policy.ts",
     "security.ts",
+    "sessions.ts",
     "settings.ts",
     "skill-bundle.ts",
     "skills.ts",
@@ -48,6 +49,7 @@
     "toolchain.ts",
     "team-role-chat.ts",
     "team-role-sessions.ts",
+    "team-runtime-capability.ts",
     "team-skill.ts",
     "team-trigger.ts",
     "team-webhook-auth.ts",
@@ -145,7 +147,6 @@
     "/api/plugins/configuration",
     "/api/plugins/operation",
     "/api/skills/status",
-    "/api/skills/search",
     "/api/skills/detail",
     "/api/skills/config",
     "/api/skills/clawhub/install",
@@ -187,16 +188,19 @@
     "/api/remote-fleet/metrics",
     "/api/remote-fleet/snapshot",
     "/api/remote-fleet/terminal/sessions",
+    "/api/remote-fleet/runtime-agent/ingress",
     "/api/remote-fleet/drain-endpoint",
     "/api/remote-fleet/install-agent",
     "/api/remote-fleet/probe",
     "/api/remote-fleet/probe-connection",
+    "/api/remote-fleet/start-runtime",
+    "/api/remote-fleet/stop-runtime",
+    "/api/remote-fleet/sync-capabilities",
     "/api/remote-fleet/register-connection",
     "/api/remote-fleet/delete-connection",
     "/api/remote-fleet/register-environment",
     "/api/remote-fleet/deploy-environment",
     "/api/remote-fleet/delete-environment",
-    "/api/remote-fleet/register",
     "/api/remote-fleet/write-credential",
     "/api/remote-fleet/terminal/open",
     "/api/remote-fleet/terminal/reconnect",
@@ -584,10 +588,6 @@
     ],
     [
       "POST",
-      "/api/skills/search"
-    ],
-    [
-      "POST",
       "/api/skills/detail"
     ],
     [
@@ -760,6 +760,10 @@
     ],
     [
       "POST",
+      "/api/remote-fleet/runtime-agent/ingress"
+    ],
+    [
+      "POST",
       "/api/remote-fleet/drain-endpoint"
     ],
     [
@@ -773,6 +777,18 @@
     [
       "POST",
       "/api/remote-fleet/probe-connection"
+    ],
+    [
+      "POST",
+      "/api/remote-fleet/start-runtime"
+    ],
+    [
+      "POST",
+      "/api/remote-fleet/stop-runtime"
+    ],
+    [
+      "POST",
+      "/api/remote-fleet/sync-capabilities"
     ],
     [
       "POST",
@@ -793,10 +809,6 @@
     [
       "POST",
       "/api/remote-fleet/delete-environment"
-    ],
-    [
-      "POST",
-      "/api/remote-fleet/register"
     ],
     [
       "POST",

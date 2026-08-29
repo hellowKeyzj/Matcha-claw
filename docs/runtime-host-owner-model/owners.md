@@ -10,7 +10,7 @@
 | Electron parent manager | `RuntimeHostManager` | manager lifecycle、child state、gateway bridge、errors | child 编排、parent callback、host event bridge | 不复制；Rust 只提供 parent 所需 child wire 行为 |
 | TS child runtime health | `RuntimeHostStateService` | child lifecycle、uptime、plugin count、transport stats | `/health`、`/api/runtime-host/health` | 提供同一 child health/application projection，不能混入 parent lifecycle |
 | `/dispatch` transport | Electron `RuntimeHostClient` + child dispatch handler | request/response envelope、timeout、body limit、validation | HTTP dispatch、错误映射 | 实现 v1 wire contract；默认 30s、超大 body 413 |
-| Parent callback | Electron internal routes + TS `ParentTransportClient` | token、callback acceptance、best-effort event result | shell action、gateway event、runtime-job event | 提供同一 loopback callback contract；Rust wiring尚未闭合 |
+| Parent callback | Electron internal routes + TS `ParentTransportClient` | token、callback acceptance、best-effort event result | shell action、gateway event、owner operation event | 提供同一 loopback callback contract；generic operation callback 已删除，typed operation event 由具体 facade 定义 |
 
 ## 2. Peer runtime 与 session
 
@@ -42,16 +42,16 @@
 | --- | --- | --- | --- | --- |
 | TS capability contract | `CapabilityRegistry` / capability modules / `CapabilityRouter` | descriptor、scope、target、operation、availability | `/api/capabilities/*`、execute | 若替换该入口，必须保持完整输入校验和结果语义；不能用 Rust fixed directory 自动替代 |
 | Authorization | 当前 TS request/target validation；Rust fixed transports 有 signed decision verifier | scope、target binding、principal、correlation、expiry | allow/deny、safe transport | 明确在切换点的 authorization adapter；TS metadata 不能凭空等同 signed decision |
-| Diagnostics | 当前 TS `DiagnosticsService` + global queue；Rust archive 是独立候选 | archive job/receipt、HostState snapshot、bundle | filesystem archive、redaction、download | 兼容 diagnostics API；保留 parent snapshot、jobGet 和 receipt 语义 |
+| Diagnostics | 当前 TS `DiagnosticsService` + Rust archive candidate | archive operation/receipt、HostState snapshot、bundle | filesystem archive、redaction、download | 兼容 diagnostics API；终态使用 diagnostics-owned operation query/event，不走已删除的 Host-wide generic lookup |
 | External connectors | TS `connectors.json` + OpenClaw `mcp.servers` + probes | desired、persisted、applied、global/session observed | file mutation、projection、network probe、Gateway status | 候选 `ConnectorStore`/`ExternalConnectorOwner`；先解决 schema、secret、status parity 和 cutover |
 | License | TS `NodeLicenseRuntime` | encrypted key、hash cache、device identity、gate snapshot | gate event、revalidation | 只有完成行为与 secret boundary 证明后才接管 |
 | Security policy | durable policy JSON + security-core/Gateway apply | desired/persisted/applied/observed audit/enforcement | policy write、plugin/Gateway apply | 适配 native policy owner；不以 Rust rule catalog 代替完整 policy owner |
 | Settings | TS `SettingsStoreWorkflow` | desired/persisted/applied/ready | settings write、Gateway apply/restart | 先闭合 runtime data path 和 token private projection，再决定接管 |
 | Platform runtime health | `OpenClawRuntimeDriver` / Gateway bridge | port reachable、connection state、lastError | health check、runtime control | 与 Rust Host admission、OpenClaw control readiness、Gateway live status 分字段映射；不能用 Gateway probe 决定 Host ok |
-| uv/toolchain | Rust OpenClaw Toolchain owner-local operation/projection；Electron `/api/capabilities/execute` public adapter；`/api/toolchain/uv/check` status projection | uv available、Python ready、install result/terminal receipt | Foundation-contained `uv python install 3.12` 与 `uv python find 3.12` readiness readback | 恢复 `hostUvInstallAll` 异步 `RuntimeJobSubmission`；`runtimeHost.jobGet` + `runtime-job:done/progress` 只作兼容投影。private control command 不暴露给 Renderer；adapter、terminal/native、Windows/package 与 cutover 证据未闭合，保持 `IMPLEMENTED` |
-| Remote Fleet/Team | Rust Host `organization` / `fleet` domains under `runtime-host` state root；native/remote runtime remains external | endpoint、node、terminal、team run、audit、webhook token、fleet credentials | remote API、WebSocket、webhook、agent ingress | 独立 owner；durable facts/credentials 落在 `%APPDATA%/MatchaClaw/runtime-host`，不能塞入 generic RuntimeJob、OpenClaw state 或 Matcha app-server state |
+| `uv/toolchain` | Rust OpenClaw Toolchain owner-local operation/projection；Electron `/api/capabilities/execute` public adapter；`/api/toolchain/uv/check` status projection | uv available、Python ready、install operation result/terminal receipt | `hostUvInstallAll` → `platform.runtime`/`toolchain.installUv`，target=`platform-runtime`；Electron adapter → Rust private `openclaw.toolchain.install-uv`，等待真实结果 | `hostUvInstallAll` 终态直接返回 toolchain-owned native result；accepted-only async operation 才使用 owner/facade typed operation query/event；private control command 不暴露给 Renderer；adapter、terminal/native、Windows/package 与 cutover 证据未闭合，保持 `IMPLEMENTED` |
+| Remote Fleet/Team | Rust Host `organization` / `fleet` domains under `runtime-host` state root；native/remote runtime remains external | endpoint、node、terminal、team run、audit、webhook token、fleet credentials | remote API、WebSocket、webhook、agent ingress | 独立 owner；durable facts/credentials 落在 `%APPDATA%/MatchaClaw/runtime-host`，不能塞入 Host-wide generic operation state、OpenClaw state 或 Matcha app-server state |
 
-## 5. Foundation 后台执行机制与兼容异步投影
+## 5. Foundation 后台执行机制与 owner-local 异步 operation
 
 Foundation 已有 `execution` 机制，供具体业务 owner 持有后台 operation：
 
@@ -62,14 +62,14 @@ OwnedTask<T>
   -> ServiceHandle<T>（长生命周期 service）
 ```
 
-它提供 task 生命周期、取消和 join，不提供业务状态、优先级、通用重试、持久化、结果 retention 或全局 job registry。
+它提供 task 生命周期、取消和 join，不提供业务状态、优先级、通用重试、持久化、结果 retention 或全局 generic operation registry。
 
 ```text
 具体领域 owner operation/task/run
   -> foundation execution handle
   -> owner-local/native state
-  -> old job id compatibility projection
-  -> runtimeHost.jobGet + runtime-job:done/progress
+  -> owner/facade typed query
+  -> owner/facade typed event hint
 ```
 
-`runtime-job:done` 是低延迟通知；`runtimeHost.jobGet` 是丢事件、竞态和恢复的可查询路径。它不是 cron、session、connector、diagnostics 或 usage 的事实源。
+typed operation event 是低延迟通知；owner/facade query 是丢事件、竞态和恢复的可查询路径。Host-wide generic operation 不是 cron、session、connector、diagnostics 或 usage 的事实源。

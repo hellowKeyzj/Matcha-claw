@@ -20,6 +20,7 @@ export function MainLayout() {
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth);
   const setSidebarWidth = useLayoutStore((state) => state.setSidebarWidth);
   const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
+  const chatWindowRightDockLayout = useLayoutStore((state) => state.chatWindowRightDockLayout);
   const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
   const [agentSessionsUserCollapsed, setAgentSessionsUserCollapsed] = useState<boolean>(() => {
     try {
@@ -33,18 +34,44 @@ export function MainLayout() {
   const resizeRafRef = useRef<number | null>(null);
   const isChatRoute = location.pathname === '/';
   const chatTakeoverActive = isChatRoute && chatTakeoverMode !== 'none';
+  const activeRightDockLayout = isChatRoute ? chatWindowRightDockLayout : null;
+
+  const layoutContainerWidth = useMemo(() => {
+    const dockLayout = activeRightDockLayout;
+    if (!dockLayout || dockLayout.dockWidth <= 0) {
+      return containerWidth;
+    }
+    if (dockLayout.phase === 'open' && containerWidth > dockLayout.baseWidth + 1) {
+      return Math.max(1, containerWidth - dockLayout.dockWidth);
+    }
+    return dockLayout.baseWidth;
+  }, [activeRightDockLayout, containerWidth]);
 
   const workspaceLayout = useMemo(() => resolveChatWorkspaceLayout({
-    containerWidth,
+    containerWidth: layoutContainerWidth,
     sidebarVisible,
     sidebarWidth,
     agentSessionsUserCollapsed,
   }), [
     agentSessionsUserCollapsed,
-    containerWidth,
+    layoutContainerWidth,
     sidebarVisible,
     sidebarWidth,
   ]);
+
+  const chatMainFlexWidth = useMemo(() => {
+    if (!activeRightDockLayout || activeRightDockLayout.dockWidth <= 0) {
+      return null;
+    }
+    const dockWidth = activeRightDockLayout.phase === 'opening' || activeRightDockLayout.phase === 'open' || activeRightDockLayout.phase === 'closing'
+      ? activeRightDockLayout.dockWidth
+      : 0;
+    const leftOccupiedWidth = chatTakeoverActive ? 0 : workspaceLayout.sidebarOccupiedWidth;
+    return Math.max(1, layoutContainerWidth - leftOccupiedWidth + dockWidth);
+  }, [activeRightDockLayout, chatTakeoverActive, layoutContainerWidth, workspaceLayout.sidebarOccupiedWidth]);
+  const mainStyle = chatMainFlexWidth == null
+    ? undefined
+    : { flex: `0 0 ${chatMainFlexWidth}px` };
 
   useEffect(() => {
     try {
@@ -106,7 +133,7 @@ export function MainLayout() {
       if (!rect) {
         return;
       }
-      setSidebarWidth(moveEvent.clientX - rect.left, rect.width);
+      setSidebarWidth(moveEvent.clientX - rect.left, layoutContainerWidth);
     };
 
     const onMouseUp = () => {
@@ -128,13 +155,13 @@ export function MainLayout() {
 
       <div
         ref={layoutRef}
-        className="flex flex-1 overflow-hidden bg-card"
+        className="relative flex flex-1 overflow-hidden bg-card"
       >
         {!chatTakeoverActive ? (
           <Sidebar
             width={workspaceLayout.sidebarWidth}
             railWidth={CHAT_WORKSPACE_LAYOUT.sidebarRailWidth}
-            containerWidth={containerWidth}
+            containerWidth={layoutContainerWidth}
             showRightDivider={!sidebarVisible}
           />
         ) : null}
@@ -146,7 +173,7 @@ export function MainLayout() {
             variant="subtle-border"
           />
         ) : null}
-        <main className="min-w-0 flex-1 overflow-hidden bg-card">
+        <main className="min-w-0 flex-1 overflow-hidden bg-card" style={mainStyle}>
           {isChatRoute ? (
             <ChatWorkspaceHost
               agentSessionsWidth={workspaceLayout.agentSessionsWidth}

@@ -3,13 +3,19 @@ use std::{
     fmt,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
 use foundation::process::InvalidGuardianExecutable;
-use foundation::process::{ProcessContainment, supervise};
+use foundation::process::{
+    ProcessContainment, supervise,
+    supervision::{
+        CommandReceipt, CompletionError, RestartOutcome, StartOutcome, SupervisorHandle,
+        SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
+    },
+};
 use openclaw::{
     gateway::{
         auth::GatewaySecret,
@@ -24,7 +30,7 @@ use openclaw::{
         state_dir::CanonicalStateDir,
         stdio::OpenClawStdioActivation,
     },
-    port::{OpenClawControlReadiness, OpenClawGateway},
+    port::{OpenClawControlReadiness, OpenClawGateway, OpenClawSessionGateway},
 };
 use organization::TeamNativeEffectsPort;
 use platform::{exchange::InvocationOutcome, listener_identity::ListenerIdentity};
@@ -33,32 +39,33 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use super::owner::SupervisorOwner;
+use super::owner::{SupervisorLifecycleHandle, SupervisorOwner};
 use crate::{
     runtime_driver::{
-        ChannelOps, CronOps, LifecycleOps, OwnedRuntimeFuture, ProviderConfigOps,
+        ChannelOps, ConnectorOps, CronOps, LifecycleOps, OwnedRuntimeFuture, ProviderConfigOps,
         ProviderNativeConfigurationCommand, RuntimeCapabilitySurface, RuntimeDriver,
-        RuntimeDriverIdentity, SessionFuture, SessionOps, SkillOps, SubagentOps, TaskOps, TeamOps,
-        WorkspaceOps,
+        RuntimeDriverIdentity, RuntimeLifecycleFailure, RuntimeStartFailure, SecurityOps,
+        SessionFuture, SessionOps, SettingsOps, SettingsProjectionEffect, SkillOps, SubagentOps,
+        TaskOps, TeamOps, WorkspaceOps,
     },
-    session_abort::{SessionAbortCommand, SessionAbortOutcome},
-    session_create::{
-        SessionCreateCommand, SessionCreateOutcome,
+    sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
+    sessions::create::{
+        SessionAdmission, SessionCreateCommand, SessionCreateOutcome,
         project_openclaw_client_error as project_create_client_error, project_openclaw_create,
     },
-    session_delete::{
+    sessions::delete::{
         SessionDeleteCommand, SessionDeleteOutcome,
         project_openclaw_client_error as project_delete_client_error, project_openclaw_delete,
     },
-    session_model_selection::{
+    sessions::model_selection::{
         OpenClawPatchRejection, ResolvedSessionModelSelection, SessionModelSelectionBinding,
         SessionModelSelectionOutcome, SessionModelSelectionRejection,
     },
-    session_rename::{
+    sessions::rename::{
         SessionRenameCommand, SessionRenameOutcome,
         project_openclaw_client_error as project_rename_client_error, project_openclaw_rename,
     },
-    session_send::{Attachment, SessionSendCommand, SessionSendOutcome},
+    sessions::send::{Attachment, SessionSendCommand, SessionSendOutcome},
 };
 
 fn now_millis() -> u64 {
@@ -98,14 +105,18 @@ pub(crate) struct OpenClawLogSnapshot {
     pub(crate) lifecycle_tail_evicted: bool,
 }
 
-pub(super) struct OpenClawInstance {
-    owner: Option<SupervisorOwner>,
+pub(crate) struct OpenClawInstance {
+    owner: StdMutex<Option<SupervisorOwner>>,
+    diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
     gateway: Arc<Mutex<OpenClawGateway>>,
+    session_gateway: OpenClawSessionGateway,
     control_readiness: watch::Receiver<u64>,
     lifecycle_logs: LifecycleLogBuffer,
     workspace: openclaw::workspace::OpenClawWorkspaceAccess,
     usage: openclaw::usage::UsageHistory,
     toolchain: openclaw::toolchain::OpenClawToolchain,
+    electron_image: PathBuf,
+    working_directory: PathBuf,
     state_dir: CanonicalStateDir,
     gateway_port: u16,
     control_ui_url: PublicControlUiUrl,
@@ -137,11 +148,11 @@ pub(super) struct PreparedOpenClaw {
 }
 
 impl OpenClawInstance {
-    pub(super) fn installation_status(&self) -> Option<openclaw::projection::installation::Status> {
+    pub(crate) fn installation_status(&self) -> Option<openclaw::projection::installation::Status> {
         openclaw::projection::installation::Status::inspect(&self.openclaw_dir)
     }
 
-    pub(super) fn runtime_paths(
+    pub(crate) fn runtime_paths(
         &self,
     ) -> Result<
         openclaw::projection::runtime_paths::RuntimePaths,
@@ -154,7 +165,7 @@ impl OpenClawInstance {
         )
     }
 
-    pub(super) fn cli_command(
+    pub(crate) fn cli_command(
         &self,
     ) -> Result<
         openclaw::projection::runtime_paths::CliCommand,
@@ -163,7 +174,7 @@ impl OpenClawInstance {
         openclaw::projection::runtime_paths::CliCommand::inspect(&self.openclaw_dir)
     }
 
-    pub(super) fn tool_permission_mode(
+    pub(crate) fn tool_permission_mode(
         &self,
     ) -> Result<
         openclaw::projection::tool_permission::Mode,
@@ -172,7 +183,7 @@ impl OpenClawInstance {
         openclaw::projection::tool_permission::Mode::read(self.state_dir.clone())
     }
 
-    pub(super) fn set_tool_permission_mode(
+    pub(crate) fn set_tool_permission_mode(
         &self,
         mode: openclaw::projection::tool_permission::Mode,
     ) -> Result<
@@ -182,50 +193,60 @@ impl OpenClawInstance {
         mode.apply(self.state_dir.clone())
     }
 
-    pub(super) async fn toolchain_status(&self) -> openclaw::toolchain::ToolchainStatus {
+    pub(crate) async fn toolchain_status(&self) -> openclaw::toolchain::ToolchainStatus {
         self.toolchain.status().await
     }
 
-    pub(super) async fn install_toolchain_uv(&self) -> openclaw::toolchain::UvInstallOutcome {
+    pub(crate) async fn install_toolchain_uv(&self) -> openclaw::toolchain::UvInstallOutcome {
         self.toolchain.install_uv().await
     }
 
-    pub(super) async fn submit_toolchain_install(
-        &self,
-    ) -> openclaw::toolchain::ToolchainJobSubmission {
-        self.toolchain.submit_install().await
-    }
-
-    pub(super) async fn toolchain_event_state(
-        &self,
-    ) -> Option<openclaw::toolchain::ToolchainOperationEventState> {
-        self.toolchain.event_state().await
-    }
-
-    pub(super) async fn settle_toolchain_install(
-        &self,
-        job_id: &str,
-    ) -> openclaw::toolchain::ToolchainJobLookup {
-        self.toolchain.settle_install(job_id).await
-    }
-
-    pub(super) async fn cancel_toolchain_install(&self) -> openclaw::toolchain::ToolchainJobLookup {
-        self.toolchain.cancel_install().await
-    }
-
-    pub(super) async fn toolchain_job_get(
-        &self,
-        job_id: &str,
-    ) -> openclaw::toolchain::ToolchainJobLookup {
-        self.toolchain.job_get(job_id).await
-    }
-
-    pub(super) fn plugins(&self) -> openclaw::projection::plugins::PluginProjection {
+    pub(crate) fn plugins(&self) -> openclaw::projection::plugins::PluginProjection {
         openclaw::projection::plugins::PluginProjection::new(
             self.state_dir.clone(),
             self.companion_skill_source_root.clone(),
             self.managed_plugin_root.clone(),
         )
+    }
+
+    pub(crate) fn plugin_catalog(
+        &self,
+    ) -> Result<crate::plugin::Catalog, crate::plugin::PluginError> {
+        crate::composition::openclaw_plugin::OpenClawPluginProvider::new(self.plugins()).catalog()
+    }
+
+    pub(crate) fn plugin_runtime(
+        &self,
+        running: bool,
+    ) -> Result<crate::plugin::Runtime, crate::plugin::PluginError> {
+        crate::composition::openclaw_plugin::OpenClawPluginProvider::new(self.plugins())
+            .runtime(running)
+    }
+
+    pub(crate) fn plugin_set_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> crate::plugin::ConfigurationOutcome {
+        crate::composition::openclaw_plugin::OpenClawPluginProvider::new(self.plugins())
+            .set_enabled(plugin_id, enabled)
+    }
+
+    pub(crate) fn plugin_operation(
+        &self,
+        operation: crate::plugin::Operation,
+        plugin_id: &str,
+    ) -> crate::plugin::OperationOutcome {
+        crate::composition::openclaw_plugin::OpenClawPluginProvider::new(self.plugins())
+            .operation(operation, plugin_id)
+    }
+
+    pub(crate) fn plugin_finalize_uninstall(
+        &self,
+        plugin_id: &str,
+    ) -> crate::plugin::OperationOutcome {
+        crate::composition::openclaw_plugin::OpenClawPluginProvider::new(self.plugins())
+            .finalize_uninstall(plugin_id)
     }
 
     pub(super) fn state_dir(&self) -> &CanonicalStateDir {
@@ -234,6 +255,23 @@ impl OpenClawInstance {
 
     pub(super) fn gateway_port(&self) -> u16 {
         self.gateway_port
+    }
+
+    fn clawhub_cli_entries(&self) -> Vec<PathBuf> {
+        let mut entries = Vec::with_capacity(2);
+        if let Some(entry) = std::env::var_os("MATCHACLAW_CLAWHUB_CLI_ENTRY") {
+            if !entry.is_empty() {
+                entries.push(PathBuf::from(entry));
+            }
+        }
+        entries.push(
+            self.working_directory
+                .join("node_modules")
+                .join("clawhub")
+                .join("bin")
+                .join("clawdhub.js"),
+        );
+        entries
     }
 
     pub(super) async fn logs(&self, cursor: Option<u64>) -> Result<OpenClawLogSnapshot, ()> {
@@ -275,7 +313,7 @@ impl OpenClawInstance {
         })
     }
 
-    pub(super) fn subagent_template_catalog(
+    pub(crate) fn subagent_template_catalog(
         &self,
     ) -> Result<
         openclaw::projection::subagent_templates::Catalog,
@@ -286,7 +324,7 @@ impl OpenClawInstance {
         )
     }
 
-    pub(super) fn subagent_template(
+    pub(crate) fn subagent_template(
         &self,
         id: &str,
     ) -> Result<
@@ -296,21 +334,6 @@ impl OpenClawInstance {
         openclaw::projection::subagent_templates::SubagentTemplateCatalog::detail(
             &self.subagent_templates,
             id,
-        )
-    }
-
-    pub(super) fn prepare_private_projection(
-        &self,
-        accounts: &[environment::ProviderAccount],
-        models: &environment::ProviderModelCatalog,
-        routing: Option<&environment::ProviderRouting>,
-    ) -> openclaw::bootstrap::PrivateProjectionEffect {
-        openclaw::bootstrap::PrivateProjectionEffect::apply(
-            self.state_dir.clone(),
-            accounts,
-            models,
-            routing,
-            now_millis(),
         )
     }
 
@@ -427,18 +450,27 @@ impl OpenClawInstance {
         })
     }
 
-    pub(super) fn owner(&self) -> &SupervisorOwner {
+    pub(super) fn owner(&self) -> SupervisorLifecycleHandle {
         self.owner
+            .lock()
+            .expect("OpenClaw supervisor owner lock must not be poisoned")
             .as_ref()
             .expect("OpenClaw supervisor owner must be present")
+            .lifecycle_handle()
     }
 
-    pub(super) fn owner_if_present(&self) -> Option<&SupervisorOwner> {
-        self.owner.as_ref()
-    }
-
-    pub(super) fn take_owner(&mut self) -> SupervisorOwner {
+    pub(super) fn owner_if_present(&self) -> Option<SupervisorLifecycleHandle> {
         self.owner
+            .lock()
+            .expect("OpenClaw supervisor owner lock must not be poisoned")
+            .as_ref()
+            .map(SupervisorOwner::lifecycle_handle)
+    }
+
+    pub(super) fn take_owner(&self) -> SupervisorOwner {
+        self.owner
+            .lock()
+            .expect("OpenClaw supervisor owner lock must not be poisoned")
             .take()
             .expect("OpenClaw supervisor owner must be present")
     }
@@ -448,7 +480,7 @@ impl OpenClawInstance {
         params: openclaw::session::protocol::SessionsListParams,
     ) -> Result<openclaw::session::protocol::SessionsListResult, openclaw::port::OpenClawSessionError>
     {
-        self.gateway.lock().await.list_sessions(params).await
+        self.session_gateway.list_sessions(params).await
     }
 
     pub(super) async fn history(
@@ -456,7 +488,7 @@ impl OpenClawInstance {
         params: openclaw::session::protocol::ChatHistoryParams,
     ) -> Result<openclaw::session::protocol::ChatHistoryResult, openclaw::port::OpenClawSessionError>
     {
-        self.gateway.lock().await.history(params).await
+        self.session_gateway.history(params).await
     }
 
     pub(super) async fn history_window(
@@ -464,11 +496,7 @@ impl OpenClawInstance {
         params: openclaw::session::protocol::ChatHistoryParams,
         request: openclaw::session_window::PageRequest,
     ) -> Result<openclaw::session_window::SessionWindow, openclaw::port::OpenClawSessionError> {
-        self.gateway
-            .lock()
-            .await
-            .history_window(params, request)
-            .await
+        self.session_gateway.history_window(params, request).await
     }
 
     pub(super) async fn send_chat(
@@ -481,7 +509,7 @@ impl OpenClawInstance {
         >,
         openclaw::port::OpenClawSessionError,
     > {
-        self.gateway.lock().await.send_chat(params).await
+        self.session_gateway.send_chat(params).await
     }
 
     pub(super) async fn abort_chat(
@@ -494,7 +522,7 @@ impl OpenClawInstance {
         >,
         openclaw::port::OpenClawSessionError,
     > {
-        self.gateway.lock().await.abort_chat(params).await
+        self.session_gateway.abort_chat(params).await
     }
 
     pub(super) async fn patch_session_label(
@@ -507,7 +535,7 @@ impl OpenClawInstance {
         >,
         openclaw::port::OpenClawSessionError,
     > {
-        self.gateway.lock().await.patch_session_label(params).await
+        self.session_gateway.patch_session_label(params).await
     }
 
     pub(super) async fn delete_session(
@@ -520,7 +548,7 @@ impl OpenClawInstance {
         >,
         openclaw::port::OpenClawSessionError,
     > {
-        self.gateway.lock().await.delete_session(params).await
+        self.session_gateway.delete_session(params).await
     }
 
     pub(super) async fn reconcile_provider_native_configuration(
@@ -543,21 +571,6 @@ impl OpenClawInstance {
                 required_auth_accounts,
                 now_millis,
             )
-            .await
-    }
-
-    pub(super) async fn observe_mcp_server_status(
-        &self,
-        session_key: String,
-        endpoint_session_id: Option<String>,
-    ) -> Result<
-        openclaw::gateway::wire::McpServerStatusList,
-        openclaw::gateway::client::GatewayClientError,
-    > {
-        self.gateway
-            .lock()
-            .await
-            .observe_mcp_server_status(session_key, endpoint_session_id)
             .await
     }
 
@@ -742,26 +755,24 @@ impl OpenClawInstance {
 
     pub(super) async fn install_clawhub_skill(
         &self,
-        request: openclaw::skill::ClawHubSkillInstall,
-    ) -> openclaw::skill::ClawHubSkillInstallOutcome {
-        self.gateway
-            .lock()
-            .await
-            .install_clawhub_skill(request)
-            .await
+        request: clawhub::ClawHubInstallRequest,
+    ) -> Result<(), ()> {
+        let registries = clawhub::ClawHubRegistryClient::new(self.state_dir.as_path().to_owned())
+            .registry_bases()
+            .to_vec();
+        let installer = clawhub::ClawHubCliInstaller::new(
+            self.electron_image.clone(),
+            self.state_dir.as_path().to_owned(),
+            self.clawhub_cli_entries(),
+            registries,
+        );
+        installer.install(request).await
     }
 
     pub(super) async fn skill_status_catalog(
         &self,
     ) -> Result<openclaw::skill::SkillStatusCatalog, openclaw::skill::SkillStatusCatalogError> {
         self.gateway.lock().await.skill_status_catalog().await
-    }
-
-    pub(super) async fn search_skills(
-        &self,
-        request: openclaw::port::SkillSearchRequest,
-    ) -> Result<Vec<openclaw::port::SkillSearchResult>, openclaw::port::SkillReadError> {
-        self.gateway.lock().await.search_skills(request).await
     }
 
     pub(super) async fn detail_skill(
@@ -776,13 +787,6 @@ impl OpenClawInstance {
         request: openclaw::port::SkillUpdateRequest,
     ) -> openclaw::port::SkillMutationOutcome {
         self.gateway.lock().await.update_skill(request).await
-    }
-
-    pub(super) async fn install_skill(
-        &self,
-        request: openclaw::port::SkillInstallRequest,
-    ) -> openclaw::port::SkillMutationOutcome {
-        self.gateway.lock().await.install_skill(request).await
     }
 
     pub(super) async fn begin_skill_upload(
@@ -818,7 +822,7 @@ impl OpenClawInstance {
         openclaw::skill::readme::SkillReadmeStore::new(self.state_dir.clone())
     }
 
-    pub(super) fn usage_recent(
+    pub(crate) fn usage_recent(
         &self,
         limit: usize,
     ) -> Result<Vec<openclaw::usage::UsageEntry>, openclaw::usage::UsageHistoryError> {
@@ -909,48 +913,54 @@ impl OpenClawInstance {
                     .set_agent_skills(agent_id, skills)
                     .await,
             ),
-            Command::SkillConfiguration { agent_id, .. } => crate::agents::skill_configuration(
+            Command::SkillConfiguration {
+                agent_id, trace_id, ..
+            } => crate::agents::skill_configuration(
                 self.gateway
                     .lock()
                     .await
-                    .agent_skill_configuration(agent_id)
+                    .agent_skill_configuration(agent_id, trace_id)
                     .await,
             ),
             Command::SetSkillConfiguration {
                 agent_id,
                 revision,
                 selection,
+                trace_id,
                 ..
             } => crate::agents::skill_configuration(
                 self.gateway
                     .lock()
                     .await
-                    .set_agent_skill_configuration(agent_id, revision, selection)
+                    .set_agent_skill_configuration(agent_id, revision, selection, trace_id)
                     .await,
             ),
-            Command::ToolConfiguration { agent_id, .. } => crate::agents::tool_configuration(
+            Command::ToolConfiguration {
+                agent_id, trace_id, ..
+            } => crate::agents::tool_configuration(
                 self.gateway
                     .lock()
                     .await
-                    .agent_tool_configuration(agent_id)
+                    .agent_tool_configuration(agent_id, trace_id)
                     .await,
             ),
             Command::SetToolConfiguration {
                 agent_id,
                 revision,
                 selection,
+                trace_id,
                 ..
             } => crate::agents::tool_configuration(
                 self.gateway
                     .lock()
                     .await
-                    .set_agent_tool_configuration(agent_id, revision, selection)
+                    .set_agent_tool_configuration(agent_id, revision, selection, trace_id)
                     .await,
             ),
         }
     }
 
-    pub(super) async fn platform_tools(&self) -> crate::platform_tools::Outcome {
+    pub(crate) async fn platform_tools(&self) -> crate::platform_tools::Outcome {
         crate::platform_tools::catalog(self.gateway.lock().await.platform_tools_catalog().await)
     }
 
@@ -1046,84 +1056,6 @@ impl OpenClawInstance {
         self.control_ui_url.to_string()
     }
 
-    pub(super) async fn run_security_emergency(
-        &self,
-    ) -> crate::security_emergency::SecurityEmergencyOutcome {
-        match self.gateway.lock().await.run_security_emergency().await {
-            openclaw::operations::SecurityEmergencyEffect::Applied(_) => {
-                crate::security_emergency::SecurityEmergencyOutcome::Applied
-            }
-            openclaw::operations::SecurityEmergencyEffect::RuntimeRejected => {
-                crate::security_emergency::SecurityEmergencyOutcome::Rejected
-            }
-            openclaw::operations::SecurityEmergencyEffect::OutcomeUnknown => {
-                crate::security_emergency::SecurityEmergencyOutcome::OutcomeUnknown
-            }
-        }
-    }
-
-    pub(super) async fn query_security_audit(
-        &self,
-        query: crate::security_audit::Query,
-    ) -> crate::security_audit::Outcome {
-        let query = match openclaw::operations::security_audit::SecurityAuditQuery::new(
-            query.page,
-            query.page_size,
-        ) {
-            Some(query) => query,
-            None => return crate::security_audit::Outcome::Unknown,
-        };
-        match self.gateway.lock().await.query_security_audit(query).await {
-            openclaw::operations::security_audit::SecurityAuditEffect::Observed(receipt) => {
-                crate::security_audit::Outcome::Observed(crate::security_audit::Receipt {
-                    page: receipt.page(),
-                    page_size: receipt.page_size(),
-                    total: receipt.total(),
-                    items: receipt
-                        .items()
-                        .iter()
-                        .map(|item| crate::security_audit::Item {
-                            ts: item.ts(),
-                            tool_name: item.tool_name().to_owned(),
-                            risk: item.risk().to_owned(),
-                            action: item.action().to_owned(),
-                            decision: item.decision().to_owned(),
-                            rule_id: item.rule_id().map(str::to_owned),
-                        })
-                        .collect(),
-                })
-            }
-            openclaw::operations::security_audit::SecurityAuditEffect::RuntimeRejected => {
-                crate::security_audit::Outcome::Rejected
-            }
-            openclaw::operations::security_audit::SecurityAuditEffect::Unavailable => {
-                crate::security_audit::Outcome::Unavailable
-            }
-            openclaw::operations::security_audit::SecurityAuditEffect::OutcomeUnknown => {
-                crate::security_audit::Outcome::Unknown
-            }
-        }
-    }
-
-    pub(super) async fn sync_security_policy(
-        &self,
-        policy: Value,
-    ) -> openclaw::operations::SecurityPolicyEffect {
-        self.gateway.lock().await.sync_security_policy(policy).await
-    }
-
-    pub(super) async fn security_operation(
-        &self,
-        operation_id: &str,
-        input: Value,
-    ) -> openclaw::operations::SecurityActionEffect {
-        self.gateway
-            .lock()
-            .await
-            .security_operation(operation_id, input)
-            .await
-    }
-
     pub(super) async fn abort_session(&self, command: SessionAbortCommand) -> SessionAbortOutcome {
         let session_key =
             match openclaw::session::protocol::SessionKey::try_new(command.session_key) {
@@ -1139,7 +1071,7 @@ impl OpenClawInstance {
             },
             None => openclaw::session::protocol::ChatAbortParams::new(session_key),
         };
-        match self.gateway.lock().await.abort_chat(params).await {
+        match self.session_gateway.abort_chat(params).await {
             Ok(InvocationOutcome::Succeeded(_)) => SessionAbortOutcome::Succeeded,
             Ok(InvocationOutcome::TargetRejected(_)) => SessionAbortOutcome::Rejected,
             Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) | Err(_) => {
@@ -1172,9 +1104,7 @@ impl OpenClawInstance {
         let params =
             openclaw::session::protocol::SessionModelPatchParams::new(session_key, Some(model));
         match self
-            .gateway
-            .lock()
-            .await
+            .session_gateway
             .patch_session_model_diagnostic(params)
             .await
         {
@@ -1201,12 +1131,7 @@ impl OpenClawInstance {
     }
 
     pub(super) async fn send_session(&self, command: SessionSendCommand) -> SessionSendOutcome {
-        let idempotency_key = match command
-            .idempotency_key
-            .as_deref()
-            .or(command.run_id.as_deref())
-            .map(str::to_owned)
-        {
+        let idempotency_key = match command.request_run_identity().map(str::to_owned) {
             Some(idempotency_key) => idempotency_key,
             None => return SessionSendOutcome::Rejected,
         };
@@ -1238,9 +1163,7 @@ impl OpenClawInstance {
             };
         }
         match self
-            .gateway
-            .lock()
-            .await
+            .session_gateway
             .enqueue_chat(params, command.route_key)
             .await
         {
@@ -1300,9 +1223,29 @@ impl RuntimeDriver for OpenClawInstance {
     fn provider_config_ops(&self) -> Option<&dyn ProviderConfigOps> {
         Some(self)
     }
+
+    fn connector_ops(&self) -> Option<&dyn ConnectorOps> {
+        Some(self)
+    }
+
+    fn security_ops(&self) -> Option<&dyn SecurityOps> {
+        Some(self)
+    }
+
+    fn settings_ops(&self) -> Option<&dyn SettingsOps> {
+        Some(self)
+    }
 }
 
 impl SessionOps for OpenClawInstance {
+    fn admission(&self) -> SessionAdmission {
+        SessionAdmission::agent_scoped(
+            RuntimeDriverIdentity::open_claw().endpoint(),
+            crate::sessions::state::SessionProvider::OpenClaw,
+            "agent",
+        )
+    }
+
     fn abort_session<'a>(
         &'a self,
         command: SessionAbortCommand,
@@ -1320,7 +1263,7 @@ impl SessionOps for OpenClawInstance {
                 Ok(params) => params,
                 Err(_) => return SessionCreateOutcome::TargetRejected,
             };
-            match self.gateway.lock().await.create_session(params).await {
+            match self.session_gateway.create_session(params).await {
                 Ok(outcome) => project_openclaw_create(&command, outcome, epoch),
                 Err(error) => project_create_client_error(error),
             }
@@ -1409,6 +1352,16 @@ impl SessionOps for OpenClawInstance {
                 Err(error) => project_delete_client_error(error),
             }
         })
+    }
+
+    fn load_session_timeline<'a>(
+        &'a self,
+        command: crate::sessions::timeline::Command,
+        epoch: u64,
+    ) -> crate::runtime_driver::SessionFuture<'a, crate::sessions::timeline::Outcome> {
+        Box::pin(crate::sessions::timeline::load_openclaw(
+            self, command, epoch,
+        ))
     }
 
     fn send_open_claw_chat<'a>(
@@ -2019,10 +1972,10 @@ impl SkillOps for OpenClawInstance {
 impl ChannelOps for OpenClawInstance {
     fn control_channel_account<'a>(
         &'a self,
-        action: crate::channel_control::ChannelControlAction,
+        action: crate::channel::control::ChannelControlAction,
         channel: String,
         account: String,
-    ) -> SessionFuture<'a, crate::channel_control::ChannelControlOutcome> {
+    ) -> SessionFuture<'a, crate::channel::control::ChannelControlOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .control(action, channel, account)
@@ -2036,7 +1989,7 @@ impl ChannelOps for OpenClawInstance {
         force: bool,
         timeout_ms: Option<u64>,
         account_id: Option<String>,
-    ) -> SessionFuture<'a, crate::channel_login::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::login::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .login_start(channel, force, timeout_ms, account_id)
@@ -2052,7 +2005,7 @@ impl ChannelOps for OpenClawInstance {
         session_key: Option<String>,
         current_qr_data_url: Option<String>,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> OwnedRuntimeFuture<crate::channel_login::Outcome> {
+    ) -> OwnedRuntimeFuture<crate::channel::login::Outcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::login_wait(
@@ -2072,7 +2025,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         account_id: Option<String>,
-    ) -> SessionFuture<'a, crate::channel_login::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::login::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .stop_login(channel, account_id)
@@ -2084,7 +2037,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         account_id: Option<String>,
-    ) -> SessionFuture<'a, crate::channel_login::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::login::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .logout(channel, account_id)
@@ -2096,7 +2049,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         account: Option<String>,
-    ) -> SessionFuture<'a, crate::channel_status::ChannelPairingOutcome> {
+    ) -> SessionFuture<'a, crate::channel::status::ChannelPairingOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .pairing_list(channel, account)
@@ -2109,7 +2062,7 @@ impl ChannelOps for OpenClawInstance {
         channel: String,
         account: Option<String>,
         code: zeroize::Zeroizing<Vec<u8>>,
-    ) -> SessionFuture<'a, crate::channel_status::ChannelPairingApprovalOutcome> {
+    ) -> SessionFuture<'a, crate::channel::status::ChannelPairingApprovalOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .pairing_approve(channel, account, code)
@@ -2122,8 +2075,8 @@ impl ChannelOps for OpenClawInstance {
     ) -> SessionFuture<
         'a,
         Result<
-            crate::channel_status::ChannelStatusOutcome,
-            crate::channel_status::ChannelStatusFailure,
+            crate::channel::status::ChannelStatusOutcome,
+            crate::channel::status::ChannelStatusFailure,
         >,
     > {
         Box::pin(async move {
@@ -2138,8 +2091,8 @@ impl ChannelOps for OpenClawInstance {
     ) -> SessionFuture<
         'a,
         Result<
-            crate::channel_status::ChannelSnapshotOutcome,
-            crate::channel_status::ChannelStatusFailure,
+            crate::channel::status::ChannelSnapshotOutcome,
+            crate::channel::status::ChannelStatusFailure,
         >,
     > {
         Box::pin(async move {
@@ -2153,7 +2106,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         account_id: Option<String>,
-    ) -> SessionFuture<'a, crate::channel_config_read::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::config_read::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .read_channel_config(channel, account_id)
@@ -2165,7 +2118,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         config: zeroize::Zeroizing<Vec<u8>>,
-    ) -> SessionFuture<'a, crate::channel_credentials::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::credentials::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .validate_channel_credentials(channel, config)
@@ -2175,7 +2128,7 @@ impl ChannelOps for OpenClawInstance {
 
     fn channel_catalog<'a>(
         &'a self,
-    ) -> SessionFuture<'a, crate::channel_catalog::ChannelCatalogOutcome> {
+    ) -> SessionFuture<'a, crate::channel::catalog::ChannelCatalogOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .catalog()
@@ -2186,7 +2139,7 @@ impl ChannelOps for OpenClawInstance {
     fn channel_configure_form<'a>(
         &'a self,
         channel: String,
-    ) -> SessionFuture<'a, crate::channel_catalog::ChannelConfigureFormOutcome> {
+    ) -> SessionFuture<'a, crate::channel::catalog::ChannelConfigureFormOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .configure_form(channel)
@@ -2199,7 +2152,7 @@ impl ChannelOps for OpenClawInstance {
         channel: String,
         account_id: String,
         values: zeroize::Zeroizing<Vec<u8>>,
-    ) -> SessionFuture<'a, crate::channel_catalog::ChannelConfigureOutcome> {
+    ) -> SessionFuture<'a, crate::channel::catalog::ChannelConfigureOutcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .configure(channel, account_id, values)
@@ -2211,7 +2164,7 @@ impl ChannelOps for OpenClawInstance {
         &'a self,
         channel: String,
         account_id: String,
-    ) -> SessionFuture<'a, crate::channel_delete::Outcome> {
+    ) -> SessionFuture<'a, crate::channel::delete::Outcome> {
         Box::pin(async move {
             super::openclaw_channel::OpenClawChannelProvider::openclaw(self)
                 .delete_config(channel, account_id)
@@ -2242,9 +2195,302 @@ impl ProviderConfigOps for OpenClawInstance {
     }
 }
 
+impl ConnectorOps for OpenClawInstance {
+    fn apply_external_connector_projection<'a>(
+        &'a self,
+        catalog: environment::ConnectorCatalog,
+        secrets: &'a dyn environment::ConnectorSecretResolverPort,
+    ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorProjectionEffect>
+    {
+        Box::pin(async move {
+            openclaw::projection::connector::external::project_external_connectors(
+                self.state_dir.clone(),
+                &catalog,
+                secrets,
+            )
+            .map(|(effect, _)| effect)
+            .unwrap_or(
+                openclaw::projection::connector::external::ConnectorProjectionEffect::Unavailable,
+            )
+        })
+    }
+
+    fn probe_external_connector<'a>(
+        &'a self,
+        connector: environment::Connector,
+    ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorObservation> {
+        Box::pin(async move {
+            openclaw::projection::connector::external::probe_external_connector(&connector).await
+        })
+    }
+
+    fn observe_mcp_server_status<'a>(
+        &'a self,
+        session_key: String,
+        endpoint_session_id: Option<String>,
+    ) -> SessionFuture<
+        'a,
+        Result<
+            openclaw::gateway::wire::McpServerStatusList,
+            crate::runtime_driver::RuntimeOperationFailure,
+        >,
+    > {
+        Box::pin(async move {
+            self.gateway
+                .lock()
+                .await
+                .observe_mcp_server_status(session_key, endpoint_session_id)
+                .await
+                .map_err(|_| crate::runtime_driver::RuntimeOperationFailure::Unknown)
+        })
+    }
+}
+
+impl SecurityOps for OpenClawInstance {
+    fn apply_security_policy_projection<'a>(
+        &'a self,
+        policy: Value,
+    ) -> SessionFuture<'a, Result<(), crate::runtime_driver::RuntimeOperationFailure>> {
+        Box::pin(async move {
+            let runtime = policy
+                .get("runtime")
+                .and_then(Value::as_object)
+                .ok_or(crate::runtime_driver::RuntimeOperationFailure::TargetRejected)?;
+            openclaw::projection::security::apply_normalized(self.state_dir.clone(), runtime)
+                .map(|_| ())
+                .map_err(|_| crate::runtime_driver::RuntimeOperationFailure::Unknown)
+        })
+    }
+
+    fn sync_security_policy<'a>(
+        &'a self,
+        policy: Value,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityPolicyEffect> {
+        Box::pin(async move { self.gateway.lock().await.sync_security_policy(policy).await })
+    }
+
+    fn run_security_emergency<'a>(
+        &'a self,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityEmergencyEffect> {
+        Box::pin(async move { self.gateway.lock().await.run_security_emergency().await })
+    }
+
+    fn query_security_audit<'a>(
+        &'a self,
+        query: openclaw::operations::security_audit::SecurityAuditQuery,
+    ) -> SessionFuture<'a, openclaw::operations::security_audit::SecurityAuditEffect> {
+        Box::pin(async move { self.gateway.lock().await.query_security_audit(query).await })
+    }
+
+    fn security_operation<'a>(
+        &'a self,
+        operation_id: String,
+        input: Value,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityActionEffect> {
+        Box::pin(async move {
+            self.gateway
+                .lock()
+                .await
+                .security_operation(&operation_id, input)
+                .await
+        })
+    }
+}
+
+impl SettingsOps for OpenClawInstance {
+    fn apply_settings_projection(
+        &self,
+        browser_mode: openclaw::projection::settings::BrowserMode,
+        proxy_endpoint: Option<String>,
+    ) -> OwnedRuntimeFuture<
+        Result<SettingsProjectionEffect, crate::runtime_driver::RuntimeOperationFailure>,
+    > {
+        let state_dir = self.state_dir.clone();
+        Box::pin(async move {
+            openclaw::projection::settings::apply(
+                state_dir,
+                browser_mode,
+                proxy_endpoint.as_deref(),
+            )
+            .map(|changed| {
+                if changed {
+                    SettingsProjectionEffect::Changed
+                } else {
+                    SettingsProjectionEffect::Unchanged
+                }
+            })
+            .map_err(|error| match error {
+                openclaw::projection::settings::SettingsProjectionError::InvalidProxy => {
+                    crate::runtime_driver::RuntimeOperationFailure::TargetRejected
+                }
+                openclaw::projection::settings::SettingsProjectionError::ConfigStore => {
+                    crate::runtime_driver::RuntimeOperationFailure::Unknown
+                }
+            })
+        })
+    }
+}
+
 impl LifecycleOps for OpenClawInstance {
-    fn snapshot(&self) -> foundation::process::supervision::SupervisorSnapshot {
+    fn snapshot(&self) -> SupervisorSnapshot {
         self.owner().snapshot()
+    }
+
+    fn subscribe(&self) -> watch::Receiver<SupervisorSnapshot> {
+        self.owner().subscribe()
+    }
+
+    fn start(&self) -> OwnedRuntimeFuture<Result<StartOutcome, RuntimeStartFailure>> {
+        let supervisor = self.supervisor_handle();
+        let gateway_port = self.gateway_port;
+        let plugins = self.plugins();
+        let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
+        Box::pin(async move {
+            prepare_openclaw_lifecycle(&supervisor, gateway_port, plugins, diagnostic_reporter)
+                .await
+                .map_err(|_| RuntimeStartFailure::CompletionFailed)?;
+            start_supervisor(supervisor).await
+        })
+    }
+
+    fn stop(&self) -> OwnedRuntimeFuture<Result<TerminationCompletion, RuntimeLifecycleFailure>> {
+        let supervisor = self.supervisor_handle();
+        Box::pin(stop_supervisor(supervisor))
+    }
+
+    fn restart(&self) -> OwnedRuntimeFuture<Result<RestartOutcome, RuntimeLifecycleFailure>> {
+        let supervisor = self.supervisor_handle();
+        let gateway_port = self.gateway_port;
+        let plugins = self.plugins();
+        let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
+        Box::pin(async move {
+            prepare_openclaw_lifecycle(&supervisor, gateway_port, plugins, diagnostic_reporter)
+                .await
+                .map_err(|_| RuntimeLifecycleFailure::CompletionFailed)?;
+            restart_supervisor(supervisor).await
+        })
+    }
+}
+
+impl OpenClawInstance {
+    fn supervisor_handle(&self) -> SupervisorHandle {
+        self.owner
+            .lock()
+            .expect("OpenClaw supervisor owner lock must not be poisoned")
+            .as_ref()
+            .expect("OpenClaw supervisor owner must be present")
+            .handle()
+    }
+}
+
+async fn prepare_openclaw_lifecycle(
+    supervisor: &SupervisorHandle,
+    gateway_port: u16,
+    plugins: openclaw::projection::plugins::PluginProjection,
+    diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+) -> Result<(), ()> {
+    if supervisor.snapshot().phase() != SupervisorPhase::Running {
+        openclaw::lifecycle::port_guard::ensure_gateway_port_available(gateway_port)
+            .await
+            .map_err(|_| ())?;
+    }
+    prepare_openclaw_plugin_readiness(plugins, &diagnostic_reporter);
+    Ok(())
+}
+
+fn prepare_openclaw_plugin_readiness(
+    plugins: openclaw::projection::plugins::PluginProjection,
+    diagnostic_reporter: &Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+) {
+    let enabled_ids = match plugins.catalog() {
+        Ok(catalog) => catalog.execution.enabled_plugin_ids,
+        Err(_) => {
+            report_openclaw_configuration_rejected(diagnostic_reporter);
+            return;
+        }
+    };
+    match plugins.configured_channel_plugin_ids() {
+        Ok(ids) if plugins.reconcile_configured_channel_plugins(&ids).is_err() => {
+            report_openclaw_configuration_rejected(diagnostic_reporter);
+        }
+        Err(_) => report_openclaw_configuration_rejected(diagnostic_reporter),
+        Ok(_) => {}
+    }
+    if plugins
+        .reconcile_enabled_managed_plugins(&enabled_ids)
+        .is_err()
+    {
+        report_openclaw_configuration_rejected(diagnostic_reporter);
+    }
+    if plugins.apply_startup_lifecycle(&enabled_ids).is_err() {
+        report_openclaw_configuration_rejected(diagnostic_reporter);
+    }
+}
+
+fn report_openclaw_configuration_rejected(
+    diagnostic_reporter: &Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+) {
+    diagnostic_reporter(LifecycleDiagnostic::new(
+        openclaw::lifecycle::logs::LogStream::Stderr,
+        openclaw::lifecycle::logs::LifecycleDiagnosticCategory::ConfigurationRejected,
+    ));
+}
+
+async fn start_supervisor(
+    supervisor: SupervisorHandle,
+) -> Result<StartOutcome, RuntimeStartFailure> {
+    match supervisor.start().await {
+        CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => {
+            completion.wait().await.map_err(map_start_completion_error)
+        }
+        CommandReceipt::AlreadySatisfied => Ok(StartOutcome::Started),
+        CommandReceipt::Busy => Err(RuntimeStartFailure::Busy),
+        CommandReceipt::Rejected(rejection) => Err(RuntimeStartFailure::Rejected(rejection)),
+        CommandReceipt::ShuttingDown => Err(RuntimeStartFailure::ShuttingDown),
+    }
+}
+
+async fn stop_supervisor(
+    supervisor: SupervisorHandle,
+) -> Result<TerminationCompletion, RuntimeLifecycleFailure> {
+    match supervisor.stop().await {
+        CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
+            .wait()
+            .await
+            .map_err(map_lifecycle_completion_error),
+        CommandReceipt::AlreadySatisfied => Err(RuntimeLifecycleFailure::AlreadySatisfied),
+        CommandReceipt::Busy => Err(RuntimeLifecycleFailure::Busy),
+        CommandReceipt::Rejected(rejection) => Err(RuntimeLifecycleFailure::Rejected(rejection)),
+        CommandReceipt::ShuttingDown => Err(RuntimeLifecycleFailure::ShuttingDown),
+    }
+}
+
+async fn restart_supervisor(
+    supervisor: SupervisorHandle,
+) -> Result<RestartOutcome, RuntimeLifecycleFailure> {
+    match supervisor.restart().await {
+        CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
+            .wait()
+            .await
+            .map_err(map_lifecycle_completion_error),
+        CommandReceipt::AlreadySatisfied => Err(RuntimeLifecycleFailure::AlreadySatisfied),
+        CommandReceipt::Busy => Err(RuntimeLifecycleFailure::Busy),
+        CommandReceipt::Rejected(rejection) => Err(RuntimeLifecycleFailure::Rejected(rejection)),
+        CommandReceipt::ShuttingDown => Err(RuntimeLifecycleFailure::ShuttingDown),
+    }
+}
+
+fn map_start_completion_error(error: CompletionError) -> RuntimeStartFailure {
+    match error {
+        CompletionError::Failed(_) => RuntimeStartFailure::CompletionFailed,
+        CompletionError::SupervisorStopped => RuntimeStartFailure::SupervisorStopped,
+    }
+}
+
+fn map_lifecycle_completion_error(error: CompletionError) -> RuntimeLifecycleFailure {
+    match error {
+        CompletionError::Failed(_) => RuntimeLifecycleFailure::CompletionFailed,
+        CompletionError::SupervisorStopped => RuntimeLifecycleFailure::SupervisorStopped,
     }
 }
 
@@ -2433,6 +2679,7 @@ impl PreparedOpenClaw {
         let control_readiness = gateway.control_readiness();
         let readiness = gateway.readiness_policy();
         let graceful_stop = gateway.graceful_stop_policy();
+        let session_gateway = gateway.session_gateway();
         let gateway = Arc::new(Mutex::new(gateway));
         let lifecycle_logs = LifecycleLogBuffer::new();
         let diagnostic_state = openclaw::lifecycle::logs::LifecycleDiagnosticState::new();
@@ -2444,8 +2691,10 @@ impl PreparedOpenClaw {
                 report_diagnostic(diagnostic);
             })
         };
-        let stdio_activation =
-            OpenClawStdioActivation::with_log_buffer(diagnostic_reporter, lifecycle_logs.clone());
+        let stdio_activation = OpenClawStdioActivation::with_log_buffer(
+            diagnostic_reporter.clone(),
+            lifecycle_logs.clone(),
+        );
 
         #[cfg(windows)]
         let containment = ProcessContainment::job();
@@ -2489,13 +2738,17 @@ impl PreparedOpenClaw {
             openclaw::toolchain::OpenClawToolchain::new(self.state_dir.clone(), toolchain_runtime);
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawInstance {
-            owner: Some(SupervisorOwner::new(supervisor)),
+            owner: StdMutex::new(Some(SupervisorOwner::new(supervisor))),
+            diagnostic_reporter,
             gateway,
+            session_gateway,
             control_readiness,
             lifecycle_logs,
             workspace,
             usage,
             toolchain,
+            electron_image: self.electron_image,
+            working_directory: self.working_directory,
             state_dir: self.state_dir,
             gateway_port: self.endpoint.address().port(),
             control_ui_url,

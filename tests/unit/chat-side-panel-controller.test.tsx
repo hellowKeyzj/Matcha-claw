@@ -38,7 +38,6 @@ describe('chat side panel controller', () => {
           ...mainSession,
           meta: {
             ...mainSession.meta,
-            backendSessionKey: 'agent:main:main',
             runtimeScopeKey: 'native:openclaw:openclaw:default',
             agentId: 'main',
             sessionIdentity: mainSessionIdentity,
@@ -181,7 +180,6 @@ describe('chat side panel controller', () => {
           ...state.loadedSessions['agent:main:main'],
           meta: {
             ...state.loadedSessions['agent:main:main'].meta,
-            backendSessionKey: 'agent:worker:session-1',
             runtimeScopeKey: 'native:openclaw:openclaw:default',
             agentId: 'worker',
             sessionIdentity: createOpenClawTestSessionIdentity('agent:worker:session-1', 'worker'),

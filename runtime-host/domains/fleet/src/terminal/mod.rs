@@ -272,6 +272,35 @@ impl TerminalSessionOwner {
         self.finish_close(session, expected_generation, now)
     }
 
+    pub fn fail(
+        &mut self,
+        session: &SessionId,
+        expected_generation: Generation,
+        now: SystemTime,
+    ) -> Result<SessionSummary, TerminalSessionError> {
+        let entry = self
+            .sessions
+            .get_mut(session)
+            .ok_or(TerminalSessionError::NotFound)?;
+        if entry.summary.generation() != expected_generation {
+            return Err(TerminalSessionError::InvalidState);
+        }
+        match entry.summary.status() {
+            SessionStatus::Opening | SessionStatus::Connected | SessionStatus::Closing => {
+                entry.ticket = None;
+                entry.summary.set_status(SessionStatus::Failed, now);
+                Ok(entry.summary.clone())
+            }
+            SessionStatus::Failed => {
+                entry.ticket = None;
+                Ok(entry.summary.clone())
+            }
+            SessionStatus::Closed | SessionStatus::Expired => {
+                Err(TerminalSessionError::InvalidState)
+            }
+        }
+    }
+
     pub fn expire(
         &mut self,
         session: &SessionId,

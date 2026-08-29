@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const OPERATION_ID: &str = "team.approvals.list";
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/approvals";
@@ -83,9 +85,9 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn read(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn read(owner: &OrganizationHandle, request: Request) -> Delivery {
     match owner
-        .query_team_pending_approvals(request.team_id, request.run_id)
+        .pending_approvals(request.team_id, request.run_id)
         .await
     {
         Ok(organization::run::TeamPendingApprovalsQueryOutcome::Available(approvals)) => {

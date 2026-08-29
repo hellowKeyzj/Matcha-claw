@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::{
     composition::{ArmedTrigger, TeamTrigger},
-    owner,
+    organization::OrganizationHandle,
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -239,13 +239,13 @@ pub(crate) fn decode(
 }
 
 pub(crate) async fn handle(
-    owner: &owner::Handle,
+    owner: &OrganizationHandle,
     _webhook_token: &WebhookToken,
     request: Request,
     fired_at: u64,
 ) -> Delivery {
     match request {
-        Request::List { team_id } => match owner.armed_team_triggers(Some(team_id)).await {
+        Request::List { team_id } => match owner.trigger_list(Some(team_id)).await {
             Ok(triggers) => Delivery::Triggers(triggers),
             Err(_) => Delivery::Unavailable,
         },
@@ -254,51 +254,34 @@ pub(crate) async fn handle(
             path,
             idempotency_key,
         } => match owner
-            .team_runtime(crate::owner::TeamRuntimeCommand::WebhookTriggerFire {
-                webhook_path: path,
-                idempotency_key,
-                fired_at,
-            })
+            .webhook_trigger_fire(path, idempotency_key, fired_at)
             .await
         {
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Ok(
+            Ok(Ok(
                 organization::TeamTriggerFireOutcome::Recorded(request)
                 | organization::TeamTriggerFireOutcome::Replayed(request),
-            ))) => Delivery::Fired {
+            )) => Delivery::Fired {
                 run_id: request.trigger.run_id,
             },
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Ok(
-                organization::TeamTriggerFireOutcome::NotFound,
-            ))) => Delivery::NotFound,
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Ok(
+            Ok(Ok(organization::TeamTriggerFireOutcome::NotFound)) => Delivery::NotFound,
+            Ok(Ok(
                 organization::TeamTriggerFireOutcome::Rejected
                 | organization::TeamTriggerFireOutcome::Conflicting { .. },
-            ))) => Delivery::Rejected,
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Ok(
-                organization::TeamTriggerFireOutcome::Unknown,
-            )))
-            | Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Err(
-                crate::owner::TeamRuntimeStatus::OutcomeUnknown,
-            ))) => Delivery::Unavailable,
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Err(
-                crate::owner::TeamRuntimeStatus::Rejected,
-            ))) => Delivery::Rejected,
-            Ok(crate::owner::TeamRuntimeCommandOutcome::WebhookTriggerFire(Err(
-                crate::owner::TeamRuntimeStatus::Unavailable,
-            )))
-            | Err(_) => Delivery::Unavailable,
-            Ok(_) => Delivery::Unavailable,
+            )) => Delivery::Rejected,
+            Ok(Ok(organization::TeamTriggerFireOutcome::Unknown)) | Ok(Err(_)) | Err(_) => {
+                Delivery::Unavailable
+            }
         },
     }
 }
 
 async fn fire(
-    owner: &owner::Handle,
+    owner: &OrganizationHandle,
     request: organization::TriggerFireRequest,
     fired_at: u64,
 ) -> Delivery {
     let run_id = request.run_id.clone();
-    match owner.fire_team_run_trigger(request, fired_at).await {
+    match owner.trigger_fire(request, fired_at).await {
         Ok(Ok(_)) => Delivery::Fired { run_id },
         Ok(Err(_)) => Delivery::Rejected,
         Err(_) => Delivery::Unavailable,

@@ -1,6 +1,5 @@
 use std::{
     io,
-    path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,7 +17,7 @@ use super::{
     decode_operation,
     wire::{bearer_token, read_request, write_response},
 };
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{security::SecurityHandle, transport::authorization::CapabilityDecisionVerifier};
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const PUBLIC_AUDIT_ENDPOINT: &str = "/api/security/audit";
@@ -26,61 +25,32 @@ const PUBLIC_AUDIT_ENDPOINT: &str = "/api/security/audit";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Arc<crate::security_delivery::Owner>,
-    operation_owner: Arc<crate::security_operation::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    host: crate::owner::Handle,
+    security: SecurityHandle,
 }
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: Arc<crate::security_delivery::Owner>,
-        state_dir: &Path,
-        host: crate::owner::Handle,
+        security: SecurityHandle,
     ) -> io::Result<Self> {
-        let canonical_state_dir =
-            openclaw::lifecycle::state_dir::CanonicalStateDir::provision(state_dir)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        let operation_owner = Arc::new(
-            crate::security_operation::Owner::open(state_dir)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
-        );
-        let server = Self {
+        security
+            .recover_pending()
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
-            operation_owner,
-            state_dir: canonical_state_dir,
-            host,
-        };
-        server.recover_pending().await;
-        Ok(server)
-    }
-    async fn recover_pending(&self) {
-        self.owner
-            .serialize_effect(async {
-                let Ok(Some((revision, desired))) = self.owner.pending() else {
-                    return;
-                };
-                let outcome =
-                    apply_policy_effect(self.state_dir.clone(), &self.host, desired).await;
-                let _ = self.owner.settle(revision, outcome);
-            })
-            .await;
-        let _ = self.operation_owner.recover_pending();
+            security,
+        })
     }
 
     pub(crate) async fn run(self) -> io::Result<()> {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = Arc::clone(&self.owner);
-            let operation_owner = Arc::clone(&self.operation_owner);
-            let state_dir = self.state_dir.clone();
-            let host = self.host.clone();
+            let security = self.security.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner, operation_owner, state_dir, host).await;
+                let _ = serve(stream, verifier, security).await;
             });
         }
     }
@@ -88,24 +58,9 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Arc<crate::security_delivery::Owner>,
-    operation_owner: Arc<crate::security_operation::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    host: crate::owner::Handle,
+    security: SecurityHandle,
 ) -> io::Result<()> {
-    let response = match timeout(
-        REQUEST_DEADLINE,
-        handle(
-            &mut stream,
-            verifier,
-            owner,
-            operation_owner,
-            state_dir,
-            host,
-        ),
-    )
-    .await
-    {
+    let response = match timeout(REQUEST_DEADLINE, handle(&mut stream, verifier, security)).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(error),
         Err(_) => Response::bad_request(),
@@ -115,10 +70,7 @@ async fn serve(
 async fn handle(
     stream: &mut TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Arc<crate::security_delivery::Owner>,
-    operation_owner: Arc<crate::security_operation::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    host: crate::owner::Handle,
+    security: SecurityHandle,
 ) -> io::Result<Response> {
     let request = read_request(stream).await?;
     if request.method == "GET" {
@@ -133,8 +85,9 @@ async fn handle(
             {
                 return Ok(Response::unauthorized());
             }
-            let policy = owner
-                .policy()
+            let policy = security
+                .current_policy()
+                .await
                 .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
             return Ok(Response::ok(policy));
         }
@@ -156,8 +109,8 @@ async fn handle(
         {
             return Ok(Response::unauthorized());
         }
-        let outcome = host
-            .query_security_audit(query)
+        let outcome = security
+            .audit(query)
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
         return Ok(Response::from_audit(outcome));
@@ -178,25 +131,11 @@ async fn handle(
                 Err(DecodeError::Invalid) => return Ok(Response::operation_bad_request()),
             };
         drop(verifier);
-        return operation_owner
-            .serialize_effect(async {
-                if let Some(outcome) = operation_owner
-                    .begin(&correlation)
-                    .map_err(|_| io::Error::from(io::ErrorKind::Other))?
-                {
-                    return Ok(Response::from_security_operation(outcome));
-                }
-                let outcome = host
-                    .security_operation(operation_id, input)
-                    .await
-                    .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
-                let outcome = crate::security_operation::Outcome::from_native(outcome);
-                operation_owner
-                    .settle(&correlation, outcome.clone())
-                    .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
-                Ok(Response::from_security_operation(outcome))
-            })
-            .await;
+        return security
+            .operation(correlation, operation_id, input)
+            .await
+            .map(|outcome| Response::from_security_operation(outcome))
+            .map_err(|_| io::Error::from(io::ErrorKind::Other));
     }
     if request.method != "POST" || request.path != ENDPOINT {
         return Ok(Response::not_found());
@@ -215,55 +154,11 @@ async fn handle(
         Err(DecodeError::Invalid) => return Ok(Response::bad_request()),
     };
     drop(verifier);
-    let desired = match crate::security_delivery::Desired::try_from_wire(&decision) {
-        Ok(desired) => desired,
-        Err(()) => return Ok(Response::bad_request()),
-    };
-    owner
-        .serialize_effect(async {
-            let (revision, prior_outcome) = owner
-                .replace(&correlation, desired)
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
-            if let Some(prior_outcome) = prior_outcome {
-                return Ok(Response::settled(revision, prior_outcome));
-            }
-            let outcome = match owner
-                .pending()
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))?
-            {
-                Some((pending_revision, pending)) if pending_revision == revision => {
-                    let outcome = apply_policy_effect(state_dir.clone(), &host, pending).await;
-                    owner
-                        .settle(revision, outcome)
-                        .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
-                    outcome
-                }
-                _ => crate::security_delivery::Outcome::Unknown,
-            };
-            Ok(Response::settled(revision, outcome))
-        })
+    let settlement = security
+        .replace_policy(correlation, decision)
         .await
-}
-async fn apply_policy_effect(
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    host: &crate::owner::Handle,
-    desired: crate::security_delivery::Desired,
-) -> crate::security_delivery::Outcome {
-    let policy = desired.into_policy();
-    let runtime = match policy.get("runtime").and_then(Value::as_object) {
-        Some(runtime) => runtime,
-        None => return crate::security_delivery::Outcome::Rejected,
-    };
-    if openclaw::projection::security::apply_normalized(state_dir, runtime).is_err() {
-        return crate::security_delivery::Outcome::Unknown;
-    }
-    match host.restart_open_claw().await {
-        Ok(Ok(_)) => host
-            .sync_security_policy(policy)
-            .await
-            .unwrap_or(crate::security_delivery::Outcome::Unknown),
-        Ok(Err(_)) | Err(_) => crate::security_delivery::Outcome::Unknown,
-    }
+        .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
+    Ok(Response::settled(settlement))
 }
 
 async fn verify_read(
@@ -341,15 +236,18 @@ impl Response {
             }
         }
     }
-    fn settled(revision: u64, outcome: crate::security_delivery::Outcome) -> Self {
-        match outcome {
+    fn settled(settlement: crate::security_delivery::Settlement) -> Self {
+        match settlement.outcome {
             crate::security_delivery::Outcome::Rejected => {
                 Self::fixed(422, "Security policy effect was rejected")
             }
             crate::security_delivery::Outcome::Confirmed
-            | crate::security_delivery::Outcome::Unknown => Self::ok(
-                json!({ "desired": { "revision": revision, "outcome": outcome.as_str() } }),
-            ),
+            | crate::security_delivery::Outcome::Unknown => Self::ok(json!({
+                "desired": {
+                    "revision": settlement.revision,
+                    "outcome": settlement.outcome.as_str()
+                }
+            })),
         }
     }
     fn fixed(status: u16, error: &'static str) -> Self {

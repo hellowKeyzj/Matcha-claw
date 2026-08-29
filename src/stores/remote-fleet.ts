@@ -63,19 +63,6 @@ export interface RemoteFleetEnvironmentRegistration {
   readonly secretRefs?: Record<string, RemoteFleetSecretRef>;
 }
 
-export interface RemoteFleetNodeRegistration {
-  readonly id?: string;
-  readonly connectionId?: string;
-  readonly displayName?: string;
-  readonly description?: string;
-  readonly targetKind?: RemoteFleetNodeTargetKind;
-  readonly endpointUrl?: string;
-  readonly labels?: readonly string[];
-  readonly enabled?: boolean;
-  readonly publicConfig?: Record<string, unknown>;
-  readonly secretRefs?: Record<string, RemoteFleetSecretRef>;
-}
-
 export interface RemoteFleetConnectionSummary {
   readonly id: string;
   readonly displayName?: string;
@@ -401,7 +388,6 @@ export type RemoteFleetState = {
   readonly registerEnvironment: (environment: RemoteFleetEnvironmentRegistration) => Promise<RemoteFleetActionPayload>;
   readonly deployEnvironment: (environmentId: string) => Promise<RemoteFleetActionPayload>;
   readonly deleteEnvironment: (environmentId: string) => Promise<RemoteFleetActionPayload>;
-  readonly register: (node: RemoteFleetNodeRegistration) => Promise<RemoteFleetActionPayload>;
   readonly probe: (nodeId: string) => Promise<RemoteFleetActionPayload>;
   readonly install: (nodeId: string) => Promise<RemoteFleetActionPayload>;
   readonly start: (runtime: RemoteFleetRuntimeSummary) => Promise<RemoteFleetActionPayload>;
@@ -525,42 +511,6 @@ function normalizeMetricCounts(value: unknown): RemoteFleetMetricCounts {
   return Object.fromEntries(
     Object.entries(readRecord(value)).filter(([, count]) => typeof count === 'number' && Number.isFinite(count)),
   ) as RemoteFleetMetricCounts;
-}
-
-function createRemoteFleetRuntimeEndpoint(runtime: RemoteFleetRuntimeSummary) {
-  if (!runtime.id) {
-    throw new Error('Remote Fleet runtime id is required');
-  }
-  return {
-    kind: 'native-runtime' as const,
-    runtimeAdapterId: 'remote-fleet',
-    runtimeInstanceId: runtime.id,
-  };
-}
-
-function createRemoteFleetCapabilityExecutePayload(
-  operationId: 'remoteFleet.runtime.start' | 'remoteFleet.runtime.stop' | 'remoteFleet.capabilities.sync',
-  runtime: RemoteFleetRuntimeSummary,
-): Record<string, unknown> {
-  const endpoint = createRemoteFleetRuntimeEndpoint(runtime);
-  return {
-    id: 'remote-fleet.runtime-control',
-    operationId,
-    scope: { kind: 'runtime-instance', endpoint },
-    target: { kind: 'runtime-endpoint' },
-    input: {},
-  };
-}
-
-function runtimeForEndpoint(endpoint: RemoteFleetEndpointSummary): RemoteFleetRuntimeSummary {
-  if (!endpoint.runtimeId) {
-    throw new Error('Remote Fleet endpoint runtimeId is required');
-  }
-  return {
-    id: endpoint.runtimeId,
-    nodeId: endpoint.nodeId,
-    endpointId: endpoint.id,
-  };
 }
 
 function normalizeConnectionSummary(value: unknown): RemoteFleetConnectionSummary | null {
@@ -766,7 +716,7 @@ function normalizeLeaseSummary(value: unknown): RemoteFleetLeaseSummary | null {
 function normalizeTerminalSessionSummary(value: unknown): RemoteFleetTerminalSessionSummary | null {
   const record = readRecord(value);
   const id = readString(record.id);
-  const nodeId = readString(record.nodeId);
+  const nodeId = readString(record.nodeId ?? record.targetId);
   if (!id || !nodeId) return null;
   return compactRemoteFleetSummary({
     id,
@@ -1129,11 +1079,6 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       return await runMutation(`delete-environment:${environmentId}`, '/api/remote-fleet/delete-environment', { environmentId }, '删除 Remote Fleet environment 失败');
     },
 
-    register: async (node) => {
-      const actionKey = `register:${node.id ?? 'new-node'}`;
-      return await runMutation(actionKey, '/api/remote-fleet/register', { node }, '注册远端节点失败');
-    },
-
     remove: async (nodeId) => {
       return await runMutation(`remove-node:${nodeId}`, '/api/remote-fleet/remove-node', { nodeId }, '移除远端节点失败');
     },
@@ -1233,8 +1178,8 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     start: async (runtime) => {
       return await runMutation(
         `start:${runtime.id}`,
-        '/api/capabilities/execute',
-        createRemoteFleetCapabilityExecutePayload('remoteFleet.runtime.start', runtime),
+        '/api/remote-fleet/start-runtime',
+        { runtimeId: runtime.id },
         '启动远端 runtime 失败',
       );
     },
@@ -1242,8 +1187,8 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     stop: async (runtime) => {
       return await runMutation(
         `stop:${runtime.id}`,
-        '/api/capabilities/execute',
-        createRemoteFleetCapabilityExecutePayload('remoteFleet.runtime.stop', runtime),
+        '/api/remote-fleet/stop-runtime',
+        { runtimeId: runtime.id },
         '停止远端 runtime 失败',
       );
     },
@@ -1257,11 +1202,10 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     },
 
     sync: async (endpoint) => {
-      const runtime = runtimeForEndpoint(endpoint);
       return await runMutation(
         `sync-capabilities:${endpoint.id}`,
-        '/api/capabilities/execute',
-        createRemoteFleetCapabilityExecutePayload('remoteFleet.capabilities.sync', runtime),
+        '/api/remote-fleet/sync-capabilities',
+        { endpointId: endpoint.id },
         '同步远端 capabilities 失败',
       );
     },

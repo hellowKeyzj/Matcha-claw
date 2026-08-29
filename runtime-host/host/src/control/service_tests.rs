@@ -21,7 +21,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{MatchaAgentInput, OpenClawInput};
+use crate::{MatchaAgentInput, OpenClawInput, RuntimeObservationConfig};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -93,29 +93,23 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     let descriptors = capabilities["outcome"]["result"]["capabilities"]
         .as_array()
         .expect("capability list must be an array");
-    assert_eq!(descriptors.len(), 2);
-    assert_eq!(descriptors[0]["id"], "subagent.management");
-    assert_eq!(descriptors[0]["kind"], "subagent-management");
-    assert_eq!(descriptors[0]["scopeKind"], "agent");
-    assert_eq!(descriptors[0]["targetKinds"], json!(["subagent"]));
-    assert_eq!(descriptors[0]["targetAgentIds"], json!(["main"]));
-    assert_eq!(descriptors[0]["operations"].as_array().unwrap().len(), 16);
+    assert_eq!(descriptors.len(), 10);
+    assert_eq!(descriptors[6]["id"], "subagent.management");
+    assert_eq!(descriptors[6]["kind"], "subagent-management");
+    assert_eq!(descriptors[6]["scopeKind"], "agent");
+    assert_eq!(descriptors[6]["targetKinds"], json!(["agent", "subagent"]));
+    assert_eq!(descriptors[6]["targetAgentIds"], json!(["main"]));
+    assert_eq!(descriptors[6]["operations"].as_array().unwrap().len(), 12);
+    assert_eq!(descriptors[6]["operations"][0]["targetKind"], "agent");
+    assert_eq!(descriptors[6]["operations"][1]["targetKind"], "agent");
+    assert_eq!(descriptors[6]["operations"][11]["targetKind"], "subagent");
+    assert_eq!(descriptors[4]["id"], "scheduler.cron");
+    assert_eq!(descriptors[4]["kind"], "scheduler-cron");
+    assert_eq!(descriptors[4]["scopeKind"], "runtime-instance");
+    assert_eq!(descriptors[4]["targetKinds"], json!(["cron-job"]));
+    assert_eq!(descriptors[4]["operations"].as_array().unwrap().len(), 5);
     assert!(
-        descriptors[0]["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|operation| {
-                operation["targetKind"] == "subagent" && operation["targetRequired"] == true
-            })
-    );
-    assert_eq!(descriptors[1]["id"], "scheduler.cron");
-    assert_eq!(descriptors[1]["kind"], "scheduler-cron");
-    assert_eq!(descriptors[1]["scopeKind"], "runtime-instance");
-    assert_eq!(descriptors[1]["targetKinds"], json!(["cron-job"]));
-    assert_eq!(descriptors[1]["operations"].as_array().unwrap().len(), 5);
-    assert!(
-        descriptors[1]["operations"]
+        descriptors[4]["operations"]
             .as_array()
             .unwrap()
             .iter()
@@ -146,7 +140,7 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     .await;
     let described = read_outcome(&mut parent_output, "capability-describe-1").await;
     assert_eq!(described["outcome"]["kind"], "succeeded");
-    assert_eq!(described["outcome"]["result"]["capability"], descriptors[1]);
+    assert_eq!(described["outcome"]["result"]["capability"], descriptors[4]);
     assert_public_capability_details(&described);
 
     write_command(
@@ -699,6 +693,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
         cron_transport_port: 18_791,
+        runtime_observation: RuntimeObservationConfig::off(),
     }
 }
 

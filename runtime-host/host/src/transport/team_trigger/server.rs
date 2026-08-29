@@ -36,7 +36,7 @@ pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: WebhookToken,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 }
 
 impl Server {
@@ -44,7 +44,7 @@ impl Server {
         port: u16,
         verifier: CapabilityDecisionVerifier,
         webhook_token: WebhookToken,
-        owner: crate::owner::Handle,
+        owner: crate::organization::OrganizationHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
@@ -79,7 +79,7 @@ async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: WebhookToken,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
@@ -101,7 +101,7 @@ async fn handle_request(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: WebhookToken,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> Response {
     if request.path == MANAGEMENT_ROUTE {
         return handle_management_request(request, verifier, &webhook_token, owner).await;
@@ -142,7 +142,7 @@ async fn handle_management_request(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     webhook_token: &WebhookToken,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> Response {
     if request.method != "POST" {
         return Response::not_found();
@@ -167,7 +167,7 @@ async fn handle_management_request(
 async fn handle_webhook_request(
     request: Request,
     webhook_token: &WebhookToken,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> Response {
     if request.method != "POST" {
         return Response::method_not_allowed();

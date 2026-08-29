@@ -77,6 +77,31 @@ vi.mock('@/stores/task-center-store', () => ({
 }));
 
 vi.mock('@/stores/gateway', () => ({
+  useGatewayStore: (selector: (state: {
+    status: {
+      processState: 'running';
+      port: number;
+      gatewayReady: true;
+      healthSummary: 'healthy';
+      transportState: 'connected';
+      portReachable: true;
+      diagnostics: { consecutiveHeartbeatMisses: number; consecutiveRpcFailures: number };
+      updatedAt: number;
+    };
+    isInitialized: boolean;
+  }) => unknown) => selector({
+    status: {
+      processState: 'running',
+      port: 17621,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 0,
+    },
+    isInitialized: true,
+  }),
   useRuntimeHostStore: (selector: (state: {
     runtimeHost: { lifecycle: string };
     isInitialized: boolean;
@@ -185,13 +210,13 @@ describe('chat shell task panel layout', () => {
     onArtifactRevealInFileManager: vi.fn(),
   };
 
-  it('uses a single-column stage when the chat side panel is closed', () => {
+  it('uses a single-column stage when the chat side panel is collapsed', () => {
     const { container } = render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen={false}
-        sidePanelMode="hidden"
-        sidePanelWidth={0}
+        sidePanelPhase="closed"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
         isEmptyState={false}
         emptyState={null}
@@ -205,9 +230,10 @@ describe('chat shell task panel layout', () => {
     );
 
     const shell = container.firstElementChild as HTMLElement | null;
-    expect(shell?.className).toContain('[grid-template-columns:minmax(0,1fr)]');
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 1fr)');
     expect(shell?.className).not.toContain('_52px]');
     expect(screen.queryByTestId('chat-side-panel')).toBeNull();
+    expect(screen.queryByTestId('chat-side-panel-resizer')).toBeNull();
     expect(screen.getByTestId('chat-stage-header-overlay').firstElementChild?.className).toContain('pointer-events-none');
     expect(screen.getByTestId('chat-header').parentElement?.className).toContain('pointer-events-auto');
   });
@@ -216,9 +242,37 @@ describe('chat shell task panel layout', () => {
     const { container } = render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen
+        sidePanelPhase="open"
         sidePanelMode="docked"
         sidePanelWidth={360}
+        artifactWorkbenchFullscreen={false}
+        onSidePanelResize={vi.fn()}
+        isEmptyState={false}
+        emptyState={null}
+        sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
+        header={<div data-testid="chat-header" />}
+        viewportPane={<div data-testid="thread-panel" />}
+        errorBanner={null}
+        approvalDock={null}
+        input={<div data-testid="chat-input" />}
+      />,
+    );
+
+    const shell = container.firstElementChild as HTMLElement | null;
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 1fr) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
+    expect(shell?.style.getPropertyValue('--chat-side-panel-resizer-width')).toBe('6px');
+    expect(screen.getByTestId('chat-side-panel')).toHaveAttribute('data-mode', 'docked');
+    expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
+  });
+
+  it('keeps the dock track mounted without side panel content while opening', () => {
+    const { container } = render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        sidePanelPhase="opening"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
+        sidePanelMainWidth={900}
         artifactWorkbenchFullscreen={false}
         isEmptyState={false}
         emptyState={null}
@@ -232,20 +286,47 @@ describe('chat shell task panel layout', () => {
     );
 
     const shell = container.firstElementChild as HTMLElement | null;
-    expect(shell?.className).toContain('[grid-template-columns:minmax(0,1fr)_var(--chat-side-panel-resizer-width)_var(--chat-side-panel-width)]');
-    expect(shell?.style.getPropertyValue('--chat-side-panel-resizer-width')).toBe('6px');
-    expect(screen.getByTestId('chat-side-panel')).toHaveAttribute('data-mode', 'docked');
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 900px) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
     expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-side-panel')).toBeNull();
+  });
+
+  it('keeps the dock track mounted without side panel content while closing', () => {
+    const { container } = render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        sidePanelPhase="closing"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
+        sidePanelMainWidth={900}
+        sidePanelVisible={false}
+        artifactWorkbenchFullscreen={false}
+        isEmptyState={false}
+        emptyState={null}
+        sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
+        header={<div data-testid="chat-header" />}
+        viewportPane={<div data-testid="thread-panel" />}
+        errorBanner={null}
+        approvalDock={null}
+        input={<div data-testid="chat-input" />}
+      />,
+    );
+
+    const shell = container.firstElementChild as HTMLElement | null;
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 900px) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
+    expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-side-panel')).toBeNull();
   });
 
   it('keeps the macOS drag strip inside the chat stage and below docked side panel chrome', () => {
     render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen
+        sidePanelPhase="open"
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
+        onSidePanelResize={vi.fn()}
         isEmptyState={false}
         emptyState={null}
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
@@ -270,9 +351,9 @@ describe('chat shell task panel layout', () => {
     render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen={false}
-        sidePanelMode="hidden"
-        sidePanelWidth={0}
+        sidePanelPhase="closed"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
         isEmptyState={false}
         emptyState={null}
@@ -292,7 +373,7 @@ describe('chat shell task panel layout', () => {
     render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen
+        sidePanelPhase="open"
         sidePanelMode="overlay"
         sidePanelWidth={320}
         artifactWorkbenchFullscreen={false}
@@ -563,7 +644,7 @@ describe('chat shell task panel layout', () => {
     render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen
+        sidePanelPhase="open"
         sidePanelMode="docked"
         sidePanelWidth={960}
         artifactWorkbenchFullscreen
@@ -1155,9 +1236,9 @@ describe('chat shell task panel layout', () => {
     render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen={false}
-        sidePanelMode="hidden"
-        sidePanelWidth={0}
+        sidePanelPhase="closed"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
         isEmptyState
         emptyState={<div data-testid="chat-empty-state"><div data-testid="chat-input" /></div>}
@@ -1208,9 +1289,9 @@ describe('chat shell task panel layout', () => {
       const { container, rerender } = render(
         <ChatShell
           chatLayoutRef={{ current: null }}
-          sidePanelOpen={false}
-          sidePanelMode="hidden"
-          sidePanelWidth={0}
+          sidePanelPhase="closed"
+          sidePanelMode="docked"
+          sidePanelWidth={360}
           artifactWorkbenchFullscreen={false}
           isEmptyState
           emptyState={<div data-testid="chat-empty-state"><div data-testid="chat-input" /></div>}
@@ -1232,9 +1313,9 @@ describe('chat shell task panel layout', () => {
       rerender(
         <ChatShell
           chatLayoutRef={{ current: null }}
-          sidePanelOpen={false}
-          sidePanelMode="hidden"
-          sidePanelWidth={0}
+          sidePanelPhase="closed"
+          sidePanelMode="docked"
+          sidePanelWidth={360}
           artifactWorkbenchFullscreen={false}
           isEmptyState={false}
           emptyState={null}

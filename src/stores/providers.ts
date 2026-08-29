@@ -330,7 +330,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     const reason = resolveRefreshReason(trigger, options.reason);
     const refreshEvent = resolveRefreshEventName(trigger);
 
-    if (inflightProviderSnapshotTask) {
+    if (inflightProviderSnapshotTask && trigger !== 'reconcile') {
       const endJoinTiming = startUiTiming(refreshEvent, {
         reason,
         phase: 'join',

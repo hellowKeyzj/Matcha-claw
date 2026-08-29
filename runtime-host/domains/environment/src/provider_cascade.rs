@@ -6,8 +6,9 @@ use std::{
 
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderAccountRevision, ProviderAccountStore,
-    ProviderModelCatalog, ProviderModelStore, ProviderRoute, ProviderRouting,
-    ProviderRoutingRevision, ProviderRoutingStore,
+    ProviderAccountStoreFault, ProviderModel, ProviderModelCatalog, ProviderModelStore,
+    ProviderModelStoreFault, ProviderRoute, ProviderRouting, ProviderRoutingRevision,
+    ProviderRoutingStore, ProviderRoutingStoreFault,
 };
 
 /// Coordinates the durable desired facts affected by an account removal.
@@ -78,7 +79,26 @@ impl ProviderCascade {
     ) -> Result<&ProviderAccount, ProviderCascadeFault> {
         self.accounts
             .persist(account)
-            .map_err(|_| ProviderCascadeFault::Open)
+            .map_err(ProviderCascadeFault::Accounts)
+    }
+
+    pub fn replace_models(
+        &mut self,
+        account_id: &ProviderAccountId,
+        models: Vec<ProviderModel>,
+    ) -> Result<&ProviderModelCatalog, ProviderCascadeFault> {
+        self.models
+            .replace(account_id, models)
+            .map_err(ProviderCascadeFault::Models)
+    }
+
+    pub fn replace_routing(
+        &mut self,
+        routing: ProviderRouting,
+    ) -> Result<&ProviderRouting, ProviderCascadeFault> {
+        self.routing
+            .replace(routing)
+            .map_err(ProviderCascadeFault::Routing)
     }
 
     pub fn delete_account_only(
@@ -183,20 +203,26 @@ impl ProviderCascade {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderCascadeFault {
+    Accounts(ProviderAccountStoreFault),
     Apply,
     Journal(io::ErrorKind),
+    Models(ProviderModelStoreFault),
     Open,
     Recovery,
+    Routing(ProviderRoutingStoreFault),
     Unknown,
 }
 
 impl std::fmt::Display for ProviderCascadeFault {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Accounts(error) => return error.fmt(formatter),
             Self::Apply => "provider cascade could not be applied",
             Self::Journal(_) => "provider cascade journal could not be committed",
+            Self::Models(error) => return error.fmt(formatter),
             Self::Open => "provider cascade facts could not be opened",
             Self::Recovery => "provider cascade requires manual recovery",
+            Self::Routing(error) => return error.fmt(formatter),
             Self::Unknown => "provider cascade outcome is unknown; reopen before retrying",
         })
     }

@@ -22,7 +22,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let Some(authorization) = headers
         .iter()
@@ -47,7 +47,7 @@ pub(crate) async fn handle(
         Err(_) => return Response::bad_request(),
     };
     drop(verifier);
-    let outcome = match owner.delete_open_claw_session(command).await {
+    let outcome = match session.delete_session(command).await {
         Ok(outcome) => outcome,
         Err(_) => return Response::unavailable(),
     };

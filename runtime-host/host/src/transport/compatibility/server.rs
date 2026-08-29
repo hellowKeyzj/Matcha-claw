@@ -14,7 +14,12 @@ use tokio::{
     time::timeout,
 };
 
-use crate::owner;
+use crate::{
+    composition::PeerHandle,
+    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    owner,
+    sessions::SessionHandle,
+};
 
 use super::{
     dispatch,
@@ -50,15 +55,33 @@ impl Lifecycle {
 pub(crate) struct Server {
     listener: TcpListener,
     owner: owner::Handle,
+    peer: PeerHandle,
+    platform_runtime: PlatformRuntimeHandle,
+    plugins: PluginsHandle,
+    skills: SkillsHandle,
+    session: SessionHandle,
     lifecycle: Arc<AtomicU8>,
     started_at: SystemTime,
 }
 
 impl Server {
-    pub(crate) async fn bind(port: u16, owner: owner::Handle) -> io::Result<Self> {
+    pub(crate) async fn bind(
+        port: u16,
+        owner: owner::Handle,
+        peer: PeerHandle,
+        platform_runtime: PlatformRuntimeHandle,
+        plugins: PluginsHandle,
+        skills: SkillsHandle,
+        session: SessionHandle,
+    ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             owner,
+            peer,
+            platform_runtime,
+            plugins,
+            skills,
+            session,
             lifecycle: Arc::new(AtomicU8::new(LIFECYCLE_RUNNING)),
             started_at: SystemTime::now(),
         })
@@ -76,10 +99,26 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let owner = self.owner.clone();
+            let peer = self.peer.clone();
+            let platform_runtime = self.platform_runtime.clone();
+            let plugins = self.plugins.clone();
+            let skills = self.skills.clone();
+            let session = self.session.clone();
             let lifecycle = Arc::clone(&self.lifecycle);
             let started_at = self.started_at;
             tokio::spawn(async move {
-                let _ = serve(stream, owner, lifecycle, started_at).await;
+                let _ = serve(
+                    stream,
+                    owner,
+                    peer,
+                    platform_runtime,
+                    plugins,
+                    skills,
+                    session,
+                    lifecycle,
+                    started_at,
+                )
+                .await;
             });
         }
     }
@@ -88,11 +127,29 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     owner: owner::Handle,
+    peer: PeerHandle,
+    platform_runtime: PlatformRuntimeHandle,
+    plugins: PluginsHandle,
+    skills: SkillsHandle,
+    session: SessionHandle,
     lifecycle: Arc<AtomicU8>,
     started_at: SystemTime,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, read_request(&mut stream)).await {
-        Ok(Ok(Ok(request))) => handle(request, owner, lifecycle, started_at).await,
+        Ok(Ok(Ok(request))) => {
+            handle(
+                request,
+                owner,
+                peer,
+                platform_runtime,
+                plugins,
+                skills,
+                session,
+                lifecycle,
+                started_at,
+            )
+            .await
+        }
         Ok(Ok(Err(response))) => CompatibilityResponse::Dispatch(response),
         Ok(Err(_)) => CompatibilityResponse::Dispatch(DispatchResponse::bad_request(
             "Request could not be read",
@@ -107,6 +164,11 @@ async fn serve(
 async fn handle(
     request: Request,
     owner: owner::Handle,
+    peer: PeerHandle,
+    platform_runtime: PlatformRuntimeHandle,
+    plugins: PluginsHandle,
+    skills: SkillsHandle,
+    session: SessionHandle,
     lifecycle: Arc<AtomicU8>,
     started_at: SystemTime,
 ) -> CompatibilityResponse {
@@ -126,10 +188,21 @@ async fn handle(
                     ));
                 }
             };
-            CompatibilityResponse::Dispatch(dispatch::execute(&owner, request).await)
+            CompatibilityResponse::Dispatch(
+                dispatch::execute(
+                    &owner,
+                    &peer,
+                    &platform_runtime,
+                    &plugins,
+                    &skills,
+                    &session,
+                    request,
+                )
+                .await,
+            )
         }
         ("POST", "/lifecycle/restart") => {
-            CompatibilityResponse::Dispatch(restart_lifecycle(owner, lifecycle).await)
+            CompatibilityResponse::Dispatch(restart_lifecycle(peer, lifecycle).await)
         }
         ("POST", "/lifecycle/stop") => {
             let accepted = lifecycle
@@ -190,11 +263,11 @@ fn stopped_dispatch_response() -> DispatchResponse {
     })
 }
 
-async fn restart_lifecycle(owner: owner::Handle, lifecycle: Arc<AtomicU8>) -> DispatchResponse {
+async fn restart_lifecycle(peer: PeerHandle, lifecycle: Arc<AtomicU8>) -> DispatchResponse {
     if lifecycle_from_atomic(lifecycle.load(Ordering::Acquire)) != Lifecycle::Running {
         return DispatchResponse::lifecycle_restart_unavailable();
     }
-    if !owner_restart_succeeded(owner).await {
+    if !peer_restart_succeeded(peer).await {
         lifecycle.store(u8::MAX, Ordering::Release);
         return DispatchResponse::lifecycle_restart_unavailable();
     }
@@ -207,9 +280,9 @@ async fn restart_lifecycle(owner: owner::Handle, lifecycle: Arc<AtomicU8>) -> Di
     })
 }
 
-async fn owner_restart_succeeded(owner: owner::Handle) -> bool {
-    matches!(owner.restart_open_claw().await, Ok(Ok(_)))
-        && matches!(owner.restart_matcha().await, Ok(Ok(_)))
+async fn peer_restart_succeeded(peer: PeerHandle) -> bool {
+    matches!(peer.restart_open_claw().await, Ok(Ok(_)))
+        && matches!(peer.restart_matcha().await, Ok(Ok(_)))
 }
 
 enum CompatibilityResponse {

@@ -24,7 +24,7 @@
 **类型：**
 - interface、type、class 使用 PascalCase：`AppError`、`AppErrorCode` 位于 `src/lib/error-model.ts`，`SettingsState` 位于 `src/stores/settings.ts`，`BrowserActionResult` 位于 `packages/openclaw-browser-relay-plugin/src/service/browser-control-service.ts`。
 - 单文件内部组件状态可使用 `Props` 和 `State`：`src/components/common/ErrorBoundary.tsx`。
-- API 或跨层 DTO 在拥有该 API 的模块导出：`RuntimeJobSnapshot`、`RuntimeJobSubmission` 位于 `src/lib/host-api.ts`，`BrowserActionParams` 位于 `packages/openclaw-browser-relay-plugin/src/browser-action-contract.ts`。
+- API 或跨层 DTO 在拥有该 API 的模块导出：会话 snapshot 类型位于 `src/types/session/snapshot.ts`，`BrowserActionParams` 位于 `packages/openclaw-browser-relay-plugin/src/browser-action-contract.ts`。
 
 ## 代码风格
 

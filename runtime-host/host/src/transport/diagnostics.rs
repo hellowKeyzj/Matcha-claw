@@ -5,6 +5,7 @@ use crate::{
     diagnostics::{
         DiagnosticsArchiveCancellation, DiagnosticsArchiveError, DiagnosticsArchiveReceipt,
     },
+    facade::DiagnosticsHandle,
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -164,28 +165,26 @@ impl DiagnosticsArchiveDelivery {
 }
 
 pub(crate) async fn collect(
-    owner: &crate::owner::Handle,
+    diagnostics: &DiagnosticsHandle,
     cancellation: DiagnosticsArchiveCancellation,
 ) -> DiagnosticsArchiveDelivery {
-    match owner.collect_diagnostics(cancellation).await {
-        Ok(Ok(receipt)) => receipt_delivery(receipt),
-        Ok(Err(_)) | Err(_) => DiagnosticsArchiveDelivery::Unavailable,
+    match diagnostics.collect_archive(cancellation).await {
+        Ok(receipt) => receipt_delivery(receipt),
+        Err(_) => DiagnosticsArchiveDelivery::Unavailable,
     }
 }
 
 pub(crate) async fn download(
-    owner: &crate::owner::Handle,
+    diagnostics: &DiagnosticsHandle,
     archive_id: String,
 ) -> DiagnosticsArchiveDownload {
-    match owner.download_diagnostics(archive_id.clone()).await {
-        Ok(Ok(Ok(bytes))) => DiagnosticsArchiveDownload::Ok {
+    match diagnostics.download_archive(archive_id.clone()).await {
+        Ok(bytes) => DiagnosticsArchiveDownload::Ok {
             archive_id,
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
         },
-        Ok(Ok(Err(DiagnosticsArchiveError::ArchiveNotFound))) => {
-            DiagnosticsArchiveDownload::NotFound
-        }
-        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => DiagnosticsArchiveDownload::Unavailable,
+        Err(DiagnosticsArchiveError::ArchiveNotFound) => DiagnosticsArchiveDownload::NotFound,
+        Err(_) => DiagnosticsArchiveDownload::Unavailable,
     }
 }
 

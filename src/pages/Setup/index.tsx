@@ -27,7 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { invokeIpc } from '@/lib/api-client';
 import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
-import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll, resolveSingleCapabilityScope, waitForRuntimeJobResult } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll, resolveSingleCapabilityScope } from '@/lib/host-api';
 import { hostLicenseValidate } from '@/lib/license-runtime';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
@@ -847,11 +847,7 @@ function InstallingContent({ skills, endpoint, onComplete, onSkip }: InstallingC
         setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'installing' })));
         setOverallProgress(10);
 
-        const submission = await hostUvInstallAll(endpoint);
-        await waitForRuntimeJobResult(submission.job.id, {
-          timeoutMs: 120000,
-          intervalMs: 500,
-        });
+        await hostUvInstallAll(endpoint);
         setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'completed' })));
         setOverallProgress(100);
         await new Promise((resolve) => setTimeout(resolve, 800));

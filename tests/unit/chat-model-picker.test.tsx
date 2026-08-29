@@ -255,6 +255,7 @@ describe('chat model picker', () => {
       resolveApproval: vi.fn().mockResolvedValue(undefined),
       switchSession: vi.fn(),
       openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime: vi.fn().mockResolvedValue(undefined),
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn().mockResolvedValue(undefined),
@@ -276,6 +277,7 @@ describe('chat model picker', () => {
           displayName: 'OpenClaw Local',
           agentIds: ['test'],
           acceptsDynamicAgents: true,
+          agentCatalog: { source: 'runtime-endpoint', agents: [{ id: 'test', name: 'Test Agent' }] },
           sessionPromptScopes: [TEST_AGENT_SCOPE],
           defaultSessionPromptScope: TEST_AGENT_SCOPE,
         }],
@@ -296,7 +298,7 @@ describe('chat model picker', () => {
           }),
           meta: {
             ...createEmptySessionRecord().meta,
-            backendSessionKey: TEST_SESSION_KEY,
+            endpointSessionId: 'main',
             runtimeScopeKey: buildRuntimeScopeKey(TEST_SESSION_IDENTITY.endpoint),
             agentId: 'test',
             protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
@@ -327,10 +329,10 @@ describe('chat model picker', () => {
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: TEST_SESSION_KEY,
+        endpointSessionId: 'main',
         sessionIdentity: TEST_SESSION_IDENTITY,
         modelSelectionId: 'anthropic/claude-opus-4-6',
-      });
+      }, { traceId: null });
     });
 
     await waitFor(() => {
@@ -357,10 +359,10 @@ describe('chat model picker', () => {
 
       await waitFor(() => {
         expect(hostSessionPatchMock).toHaveBeenCalledWith({
-          sessionKey: TEST_SESSION_KEY,
+          endpointSessionId: 'main',
           sessionIdentity: TEST_SESSION_IDENTITY,
           modelSelectionId: 'anthropic/claude-opus-4-6',
-        });
+        }, { traceId: null });
       });
     },
   );
@@ -376,15 +378,15 @@ describe('chat model picker', () => {
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: TEST_SESSION_KEY,
+        endpointSessionId: 'main',
         sessionIdentity: TEST_SESSION_IDENTITY,
         modelSelectionId: 'anthropic/claude-opus-4-6',
-      });
+      }, { traceId: null });
     });
     expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
   });
 
-  it('uses the first available model for sessions without a session or agent default model', async () => {
+  it('shows the first available model for sessions without a session or agent default model without patching', async () => {
     const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
@@ -432,16 +434,10 @@ describe('chat model picker', () => {
     renderChat();
 
     expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
-    await waitFor(() => {
-      expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: TEST_SESSION_KEY,
-        sessionIdentity: TEST_SESSION_IDENTITY,
-        modelSelectionId: 'openai/gpt-5.4',
-      });
-    });
+    expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 
-  it('replaces a stale session model with the current available model', async () => {
+  it('shows the current available model for stale session model metadata without patching', async () => {
     const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
@@ -489,13 +485,7 @@ describe('chat model picker', () => {
     renderChat();
 
     expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
-    await waitFor(() => {
-      expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: TEST_SESSION_KEY,
-        sessionIdentity: TEST_SESSION_IDENTITY,
-        modelSelectionId: 'openai/gpt-5.4',
-      });
-    });
+    expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 
   it('loads chat model options from the shared subagent model catalog instead of models.list', async () => {

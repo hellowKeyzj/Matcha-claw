@@ -129,7 +129,7 @@ impl DispatchResponse {
             status: 400,
             error: ErrorBody {
                 code: "TARGET_REJECTED",
-                message: "Runtime job target is invalid".to_owned(),
+                message: "Capability target is invalid".to_owned(),
             },
         })
     }

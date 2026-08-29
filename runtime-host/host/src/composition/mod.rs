@@ -7,32 +7,37 @@ mod openclaw_channel;
 mod openclaw_plugin;
 mod openclaw_skill;
 mod owner;
+mod peer;
 mod review;
 mod session;
-mod team;
+pub(crate) mod team;
 mod team_decision;
-mod team_run;
+pub(crate) mod team_run;
 pub mod team_run_mcp;
 mod team_trigger;
 pub(crate) mod team_trigger_cron;
 
+pub(crate) use admission::HostAdmission;
 pub use admission::{
     HostPhase, HostState as AdmissionState, HostTransitionError, RequestAdmission,
     RequestAdmissionClosed,
 };
 pub use events::{HostEvent, HostEvents};
-pub(crate) use host::ChannelLoginWaitOperation;
 pub use host::{
-    ConstructionError, Host, HostInput, HostShutdownError, OwnerShutdownFailure,
-    RuntimeStartFailure, ShutdownFailures, ShutdownReport, WorkspaceBinaryError,
-    WorkspaceListError, WorkspaceMediaError, WorkspaceReadError, WorkspaceStatError,
-    WorkspaceWriteError,
+    ConstructionError, Host, HostHandles, HostInput, HostShutdownError, OwnerShutdownFailure,
+    RuntimeLifecycleFailure, RuntimeStartFailure, ShutdownFailures, ShutdownReport,
+    WorkspaceBinaryError, WorkspaceListError, WorkspaceMediaError, WorkspaceReadError,
+    WorkspaceStatError, WorkspaceWriteError,
 };
 pub use matcha::{ConstructionError as MatchaConstructionError, MatchaAgentInput};
 pub use openclaw::{ConstructionError as OpenClawConstructionError, OpenClawInput};
 pub(crate) use openclaw::{
     ControlLease, OpenClawGatewayHealthObservation, OpenClawGatewayStatusObservation,
-    OpenClawLogSnapshot,
+    OpenClawInstance, OpenClawLogSnapshot,
+};
+pub(crate) use peer::{
+    PeerHandle, PeerOwner, RestartMatchaError, RestartOpenClawError, StartMatchaError,
+    StartOpenClawError, StopMatchaError, StopOpenClawError,
 };
 pub use session::{RuntimeSessionError, SessionShutdownFailure};
 pub(crate) use team::{
@@ -90,7 +95,8 @@ fn compose_team_run_mcp(
 pub struct TeamRunMcpConstructionError;
 
 pub(crate) use team_run::{
-    MatchaDeliveryError, MatchaDeliveryOutcome, MatchaDeliveryStartOutcome, OpenClawDeliveryError,
+    MatchaDeliveryError, MatchaDeliveryOutcome, MatchaDeliveryStartOutcome,
+    MatchaTerminalObservationError, MatchaTerminalObservationOutcome, OpenClawDeliveryError,
     OpenClawDeliveryOutcome, OpenClawDeliveryStart, TeamNodePromptSettledResult,
     TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunDeliveryTarget, TeamRunTriggerOutcome,
 };

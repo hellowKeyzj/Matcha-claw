@@ -1,8 +1,12 @@
+import { createServer, request as httpRequest } from 'node:http';
+import { connect, createServer as createTcpServer, type AddressInfo, type Server as NetServer, type Socket } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   createFleetTransport,
   isFleetMutationRequest,
+  proxyFleetRuntimeAgentIngress,
+  proxyFleetTerminalStreamUpgrade,
 } from '../../electron/main/runtime-host-delivery/transport/fleet';
 
 const snapshot = {
@@ -129,6 +133,193 @@ function issuer() {
   };
 }
 
+function listen(server: ReturnType<typeof createServer>): Promise<number> {
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve((server.address() as AddressInfo).port);
+    });
+  });
+}
+
+function close(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
+
+function listenTcp(server: NetServer): Promise<number> {
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve((server.address() as AddressInfo).port);
+    });
+  });
+}
+
+function closeTcp(server: NetServer): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
+
+type CapturedIngress = Readonly<{
+  path: string | undefined;
+  body: string;
+  authorization: string | string[] | undefined;
+  enrollment: string | string[] | undefined;
+  contentType: string | string[] | undefined;
+}>;
+
+describe('Electron Main Fleet runtime agent ingress proxy', () => {
+  it('forwards runtime-agent credentials and body unchanged', async () => {
+    const body = JSON.stringify({ kind: 'heartbeat', agentId: 'agent-1' });
+    let resolveCaptured!: (value: CapturedIngress) => void;
+    const captured = new Promise<CapturedIngress>((resolve) => {
+      resolveCaptured = resolve;
+    });
+    const upstream = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      resolveCaptured({
+        path: req.url,
+        body: Buffer.concat(chunks).toString('utf8'),
+        authorization: req.headers.authorization,
+        enrollment: req.headers['x-matchaclaw-runtime-agent-ingress-credential'],
+        contentType: req.headers['content-type'],
+      });
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end('{"accepted":true}');
+    });
+    const upstreamPort = await listen(upstream);
+    const proxy = createServer((req, res) => proxyFleetRuntimeAgentIngress(upstreamPort, req, res));
+
+    try {
+      const proxyPort = await listen(proxy);
+      const response = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+        const request = httpRequest({
+          hostname: '127.0.0.1',
+          port: proxyPort,
+          method: 'POST',
+          path: '/api/remote-fleet/runtime-agent/ingress?client=query',
+          headers: {
+            Authorization: 'Bearer runtime-agent-token',
+            'Content-Type': 'application/json',
+            'X-MatchaClaw-Runtime-Agent-Ingress-Credential': 'enroll-secret',
+          },
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+        });
+        request.on('error', reject);
+        request.end(body);
+      });
+
+      await expect(captured).resolves.toEqual({
+        path: '/api/remote-fleet/runtime-agent/ingress',
+        body,
+        authorization: 'Bearer runtime-agent-token',
+        enrollment: 'enroll-secret',
+        contentType: 'application/json',
+      });
+      expect(response).toEqual({ status: 202, body: '{"accepted":true}' });
+    } finally {
+      await close(proxy);
+      await close(upstream);
+    }
+  });
+});
+
+describe('Electron Main Fleet terminal stream proxy', () => {
+  it('rewrites the public upgrade path and pipes upgrade head plus post-upgrade bytes both ways', async () => {
+    let upstreamSocket: Socket | undefined;
+    let resolveUpgrade!: (value: { requestHead: string; head: string }) => void;
+    let resolveClientPayload!: (value: string) => void;
+    const capturedUpgrade = new Promise<{ requestHead: string; head: string }>((resolve) => {
+      resolveUpgrade = resolve;
+    });
+    const capturedClientPayload = new Promise<string>((resolve) => {
+      resolveClientPayload = resolve;
+    });
+    const upstream = createTcpServer((socket) => {
+      upstreamSocket = socket;
+      let requestBuffer = Buffer.alloc(0);
+      let postUpgradeBuffer = '';
+      let headersRead = false;
+      socket.on('data', (chunk) => {
+        if (headersRead) {
+          postUpgradeBuffer += chunk.toString('utf8');
+          if (postUpgradeBuffer.includes('client-post-upgrade')) {
+            resolveClientPayload(postUpgradeBuffer);
+          }
+          return;
+        }
+        requestBuffer = Buffer.concat([requestBuffer, chunk]);
+        const marker = requestBuffer.indexOf('\r\n\r\n');
+        if (marker === -1) return;
+        const bodyStart = marker + 4;
+        headersRead = true;
+        resolveUpgrade({
+          requestHead: requestBuffer.subarray(0, bodyStart).toString('utf8'),
+          head: requestBuffer.subarray(bodyStart).toString('utf8'),
+        });
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+        setImmediate(() => socket.write('server-post-upgrade'));
+      });
+    });
+    const upstreamPort = await listenTcp(upstream);
+    const proxy = createServer();
+    proxy.on('upgrade', (req, socket, head) => {
+      proxyFleetTerminalStreamUpgrade(upstreamPort, req, socket, head);
+    });
+
+    try {
+      const proxyPort = await listen(proxy);
+      const client = connect(proxyPort, '127.0.0.1');
+      try {
+        await new Promise<void>((resolve) => client.once('connect', () => resolve()));
+        const capturedServerPayload = new Promise<string>((resolve) => {
+          let responseBuffer = '';
+          client.on('data', (chunk) => {
+            responseBuffer += chunk.toString('utf8');
+            if (responseBuffer.includes('server-post-upgrade')) {
+              resolve(responseBuffer);
+            }
+          });
+        });
+        client.write(
+          'GET /api/remote-fleet/terminal/stream HTTP/1.1\r\n'
+            + 'Host: 127.0.0.1\r\n'
+            + 'Upgrade: websocket\r\n'
+            + 'Connection: Upgrade\r\n'
+            + 'Sec-WebSocket-Version: 13\r\n'
+            + 'Sec-WebSocket-Key: test-key\r\n'
+            + '\r\n'
+            + 'client-upgrade-head',
+        );
+
+        const upgrade = await capturedUpgrade;
+        expect(upgrade.requestHead).toContain('GET /api/fleet/terminal HTTP/1.1\r\n');
+        expect(upgrade.requestHead).not.toContain('/api/remote-fleet/terminal/stream');
+        expect(upgrade.head).toBe('client-upgrade-head');
+
+        await expect(capturedServerPayload).resolves.toContain('server-post-upgrade');
+        client.write('client-post-upgrade');
+        await expect(capturedClientPayload).resolves.toContain('client-post-upgrade');
+      } finally {
+        client.destroy();
+      }
+    } finally {
+      upstreamSocket?.destroy();
+      await close(proxy);
+      await closeTcp(upstream);
+    }
+  });
+});
+
 describe('Electron Main Fleet snapshot transport', () => {
   it('signs and sends the fixed snapshot read request', async () => {
     const delivery = issuer();
@@ -234,6 +425,46 @@ describe('Electron Main Fleet snapshot transport', () => {
     });
   });
 
+  it('accepts terminal list transport DTO and rejects private tickets', async () => {
+    const request = {
+      operation: 'fleet.terminals.list',
+      input: { kind: 'terminalList' },
+    } as const;
+    const body = {
+      sessions: [{
+        id: 'session-1',
+        targetId: 'target-1',
+        provider: 'ssh',
+        generation: 1,
+        status: 'Connected',
+        expiresAt: 'unix:3',
+      }],
+    } as const;
+    const accepted = createFleetTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_125,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(accepted.read(request)).resolves.toEqual({ status: 200, body });
+
+    const rejected = createFleetTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_125,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        json: async () => ({
+          sessions: [{ ...body.sessions[0], ticket: 'private-ticket' }],
+        }),
+      }),
+    );
+
+    await expect(rejected.read(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Fleet data is unavailable' },
+    });
+  });
+
   it('maps sealed unavailable and transport failures without leaking details', async () => {
     const unavailable = createFleetTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
@@ -275,10 +506,12 @@ describe('Electron Main Fleet mutation contracts', () => {
     ['fleet.runtimes.start.complete', 'runtimeStartComplete'],
     ['fleet.runtimes.stop.begin', 'runtimeStopBegin'],
     ['fleet.runtimes.stop.complete', 'runtimeStopComplete'],
+    ['fleet.capabilities.sync.begin', 'capabilitySyncBegin'],
     ['fleet.endpoints.probe.begin', 'endpointProbeBegin'],
   ])('accepts Rust serde kind %s/%s', (operation, kind) => {
     const payload = operation === 'fleet.connections.probe.begin'
       || operation === 'fleet.endpoints.probe.begin'
+      || operation === 'fleet.capabilities.sync.begin'
       || operation.startsWith('fleet.runtimes.')
       ? { id: 'resource-1', commandId: 'command-1' }
       : { id: 'resource-1', commandId: 'command-1', phase: 'phase-1' };
@@ -317,6 +550,59 @@ describe('Electron Main Fleet mutation contracts', () => {
       },
     })).resolves.toEqual({ status: 200, body: { outcome: 'probeCompleted' } });
     expect(delivery.signDecision).toHaveBeenCalledWith(expect.objectContaining({ scope: 'fleet:write' }));
+  });
+
+  it.each([
+    { outcome: 'probeCompleted', state: 'ready' },
+    { outcome: 'probeCompleted', state: 'unhealthy' },
+    { outcome: 'probeUnknown', message: 'ssh timeout' },
+    { outcome: 'probeRejected', message: 'auth rejected' },
+  ] as const)('accepts connection probe begin receipts with typed state/message', async (body) => {
+    const transport = createFleetTransport(
+      issuer(),
+      34_125,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.mutate({
+      operation: 'fleet.connections.probe.begin',
+      input: {
+        kind: 'connectionProbeBegin',
+        payload: { id: 'connection-1', commandId: 'command-1' },
+      },
+    })).resolves.toEqual({ status: 200, body });
+  });
+
+  it.each([
+    ['fleet.runtimes.start.begin', 'runtimeStartBegin', 'runtimeLifecycleUpdated'],
+    ['fleet.runtimes.stop.begin', 'runtimeStopBegin', 'runtimeLifecycleUpdated'],
+    ['fleet.capabilities.sync.begin', 'capabilitySyncBegin', 'capabilitySyncStarted'],
+  ] as const)('signs %s as a fleet write operation', async (operation, kind, outcome) => {
+    const delivery = issuer();
+    const request = {
+      operation,
+      input: { kind, payload: { id: 'runtime-1', commandId: 'command-1' } },
+    } as const;
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => ({ outcome }) });
+    const transport = createFleetTransport(delivery, 34_125, fetcher);
+
+    await expect(transport.mutate(request)).resolves.toEqual({ status: 200, body: { outcome } });
+    expect(delivery.signDecision).toHaveBeenCalledWith(expect.objectContaining({
+      principal: 'electron-main-local',
+      endpoint: '/api/fleet',
+      scope: 'fleet:write',
+      capability: operation,
+      subject: 'fleet',
+      revision: '1',
+    }));
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34125/api/fleet', expect.objectContaining({
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer signed-decision',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    }));
   });
 
   it.each([

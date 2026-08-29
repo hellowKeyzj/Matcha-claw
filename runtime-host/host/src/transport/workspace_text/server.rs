@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::WorkspaceHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{WorkspaceTextDelivery, WorkspaceTextRequest, map_outcome};
 
@@ -26,19 +26,19 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        workspace: WorkspaceHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            workspace,
         })
     }
 
@@ -46,9 +46,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let workspace = self.workspace.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, workspace).await;
             });
         }
     }
@@ -65,12 +65,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, workspace).await,
             Err(response) => response,
         })
     })
@@ -86,7 +86,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/workspace/files/read-text" {
         return Response::not_found();
@@ -110,17 +110,13 @@ async fn handle(
             Err(_) => return Response::unauthorized(),
         };
     drop(verifier);
-    let result = match owner
-        .read_open_claw_workspace_text(
-            request.session_key().to_owned(),
-            request.relative_path().to_owned(),
+    let result = workspace
+        .read_text(
+            request.session_key(),
+            request.relative_path(),
             request.max_bytes(),
         )
-        .await
-    {
-        Ok(result) => result,
-        Err(_) => return Response::unavailable(),
-    };
+        .map_err(crate::WorkspaceReadError::from);
     Response::from_delivery(map_outcome(result))
 }
 
@@ -147,10 +143,6 @@ impl Response {
 
     fn not_found() -> Self {
         Self::fixed(404, "Workspace text route is not available")
-    }
-
-    fn unavailable() -> Self {
-        Self::from_delivery(WorkspaceTextDelivery::Unavailable)
     }
 
     fn fixed(status: u16, error: &'static str) -> Self {

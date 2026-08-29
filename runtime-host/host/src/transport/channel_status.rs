@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    channel_status::{ChannelSnapshotOutcome, ChannelStatusOutcome},
+    channel::status::{ChannelSnapshotOutcome, ChannelStatusOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -145,7 +145,7 @@ mod tests {
             vec!["discord".into()],
             std::collections::BTreeMap::from([(
                 "discord".into(),
-                crate::channel_status::ChannelSummarySnapshot::new(
+                crate::channel::status::ChannelSummarySnapshot::new(
                     Some(true),
                     Some(true),
                     None,
@@ -154,7 +154,7 @@ mod tests {
             )]),
             std::collections::BTreeMap::from([(
                 "discord".into(),
-                vec![crate::channel_status::ChannelAccountSnapshot::new(
+                vec![crate::channel::status::ChannelAccountSnapshot::new(
                     "primary".into(),
                     Some(true),
                     Some(true),
@@ -166,7 +166,7 @@ mod tests {
                     None,
                     None,
                     None,
-                    Some(crate::channel_status::ChannelProbeSnapshot::new(true)),
+                    Some(crate::channel::status::ChannelProbeSnapshot::new(true)),
                 )],
             )]),
             std::collections::BTreeMap::from([("discord".into(), "primary".into())]),

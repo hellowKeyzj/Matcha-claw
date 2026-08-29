@@ -81,7 +81,6 @@ fn descriptors() -> Vec<Value> {
         platform_runtime(),
         plugin_runtime(),
         provider_routing(),
-        runtime_host(),
         scheduler_cron(),
         skill_management(),
         integration_channel(),
@@ -279,41 +278,17 @@ fn platform_runtime() -> Value {
         "kind": "platform-runtime",
         "scopeKind": "runtime-instance",
         "scope": native_runtime_instance_scope(),
-        "targetKinds": ["runtime-job"],
+        "targetKinds": ["platform-runtime"],
         "runtimeAdapterId": "openclaw",
         "runtimeInstanceId": "local",
         "supportLevel": "native",
         "availability": "available",
         "operations": [
-            operation("toolchain.installUv", "Install uv toolchain", "runtime-job"),
+            operation("toolchain.installUv", "Install uv toolchain", "platform-runtime"),
         ],
         "policyScope": "platform.runtime",
         "ownerModuleId": "platform",
         "routeOwnerId": "operations",
-    })
-}
-
-fn runtime_host() -> Value {
-    json!({
-        "id": "runtime.host",
-        "kind": "runtime-host",
-        "scopeKind": "runtime-instance",
-        "scope": native_runtime_instance_scope(),
-        "targetKinds": ["gateway-control", "runtime-job"],
-        "runtimeAdapterId": "openclaw",
-        "runtimeInstanceId": "local",
-        "supportLevel": "native",
-        "availability": "available",
-        "operations": [
-            operation("runtimeHost.prepareGatewayLaunch", "Prepare gateway launch", "gateway-control"),
-            operation("runtimeHost.gatewayLifecycle", "Handle gateway lifecycle", "gateway-control"),
-            operation("runtimeHost.gatewayReady", "Probe gateway control readiness", "gateway-control"),
-            operation("runtimeHost.gatewayControlUiAutoApprove", "Approve gateway control UI pairing", "gateway-control"),
-            operation("runtimeHost.jobGet", "Read runtime job detail", "runtime-job"),
-        ],
-        "policyScope": "runtime.host",
-        "ownerModuleId": "runtime",
-        "routeOwnerId": "runtime",
     })
 }
 
@@ -474,7 +449,7 @@ fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Val
         "kind": "team-runtime",
         "scopeKind": "runtime-instance",
         "scope": scope,
-        "targetKinds": ["team", "team-run", "team-approval", "none"],
+        "targetKinds": ["team", "team-run", "team-approval"],
         "runtimeAdapterId": identity.runtime_adapter_id(),
         "runtimeInstanceId": identity.runtime_instance_id(),
         "supportLevel": "native",
@@ -497,7 +472,7 @@ fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Val
             operation("team.triggerFire", "Fire TeamRun StartNode trigger", "team-run"),
             operation("team.roleMessageSubmit", "Submit Team role chat message", "team-run"),
             operation("team.nodePromptRetryDue", "Wake due TeamRun node prompt retries", "team-run"),
-            operation("team.nodePromptSettled", "Wake TeamRun after a node prompt session turn settles", "none"),
+            operation("team.nodePromptSettled", "Wake TeamRun after a node prompt session turn settles", "team-run"),
             operation("team.nodeEvent", "Submit TeamRun node event command", "team-run"),
             operation("team.runDiagnostics", "Read TeamRun diagnostics", "team-run"),
             operation("team.runDecisionSubmit", "Submit TeamRun decision", "team-run"),
@@ -779,7 +754,6 @@ mod tests {
                 "platform.runtime",
                 "plugin.runtime",
                 "provider.routing",
-                "runtime.host",
                 "scheduler.cron",
                 "skill.management",
                 "subagent.management",
@@ -788,7 +762,7 @@ mod tests {
                 "team.runtime",
             ]
         );
-        let skill_config = &outcome["result"]["capabilities"][8];
+        let skill_config = &outcome["result"]["capabilities"][7];
         assert_eq!(skill_config["kind"], "subagent-skills");
         assert_eq!(skill_config["scopeKind"], "agent");
         assert_eq!(skill_config["scope"]["agentId"], "main");
@@ -796,7 +770,7 @@ mod tests {
         assert_eq!(skill_config["operations"].as_array().unwrap().len(), 2);
         assert_eq!(skill_config["operations"][0]["id"], "subagentSkills.get");
         assert_eq!(skill_config["operations"][1]["id"], "subagentSkills.set");
-        let tool_config = &outcome["result"]["capabilities"][9];
+        let tool_config = &outcome["result"]["capabilities"][8];
         assert_eq!(tool_config["kind"], "subagent-tools");
         assert_eq!(tool_config["scopeKind"], "agent");
         assert_eq!(tool_config["scope"]["agentId"], "main");
@@ -812,51 +786,24 @@ mod tests {
         let platform = &outcome["result"]["capabilities"][1];
         assert_eq!(platform["kind"], "platform-runtime");
         assert_eq!(platform["scopeKind"], "runtime-instance");
-        assert_eq!(platform["targetKinds"], json!(["runtime-job"]));
+        assert_eq!(platform["targetKinds"], json!(["platform-runtime"]));
         assert_eq!(platform["supportLevel"], "native");
         assert_eq!(
             platform["operations"][0],
             json!({
                 "id": "toolchain.installUv",
                 "title": "Install uv toolchain",
-                "targetKind": "runtime-job",
+                "targetKind": "platform-runtime",
                 "targetRequired": true,
             })
         );
-        let runtime_host = &outcome["result"]["capabilities"][4];
-        assert_eq!(runtime_host["kind"], "runtime-host");
-        assert_eq!(runtime_host["scopeKind"], "runtime-instance");
-        assert_eq!(
-            runtime_host["targetKinds"],
-            json!(["gateway-control", "runtime-job"])
-        );
-        assert_eq!(runtime_host["supportLevel"], "native");
-        assert_eq!(runtime_host["operations"].as_array().unwrap().len(), 5);
-        assert_eq!(
-            runtime_host["operations"][0],
-            json!({
-                "id": "runtimeHost.prepareGatewayLaunch",
-                "title": "Prepare gateway launch",
-                "targetKind": "gateway-control",
-                "targetRequired": true,
-            })
-        );
-        assert_eq!(
-            runtime_host["operations"][4],
-            json!({
-                "id": "runtimeHost.jobGet",
-                "title": "Read runtime job detail",
-                "targetKind": "runtime-job",
-                "targetRequired": true,
-            })
-        );
-        let scheduler_cron = &outcome["result"]["capabilities"][5];
+        let scheduler_cron = &outcome["result"]["capabilities"][4];
         assert_eq!(scheduler_cron["kind"], "scheduler-cron");
         assert_eq!(scheduler_cron["supportLevel"], "native");
         assert_eq!(scheduler_cron["operations"].as_array().unwrap().len(), 5);
         assert_eq!(scheduler_cron["operations"][0]["id"], "cron.trigger");
         assert_eq!(scheduler_cron["operations"][4]["id"], "cron.toggle");
-        let subagent = &outcome["result"]["capabilities"][7];
+        let subagent = &outcome["result"]["capabilities"][6];
         assert_eq!(subagent["kind"], "subagent-management");
         assert_eq!(subagent["scopeKind"], "agent");
         assert_eq!(subagent["scope"]["agentId"], "main");
@@ -881,7 +828,7 @@ mod tests {
                 "targetRequired": true,
             })
         );
-        let team = &outcome["result"]["capabilities"][10];
+        let team = &outcome["result"]["capabilities"][9];
         assert_eq!(team["kind"], "team-runtime");
         assert_eq!(team["supportLevel"], "native");
         for private in [
@@ -943,14 +890,7 @@ mod tests {
                 "platform.runtime",
                 "toolchain.installUv",
                 "Install uv toolchain",
-                "runtime-job",
-                native_runtime_instance_scope(),
-            ),
-            (
-                "runtime.host",
-                "runtimeHost.prepareGatewayLaunch",
-                "Prepare gateway launch",
-                "gateway-control",
+                "platform-runtime",
                 native_runtime_instance_scope(),
             ),
         ] {

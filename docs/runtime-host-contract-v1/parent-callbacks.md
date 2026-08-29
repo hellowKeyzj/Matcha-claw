@@ -17,7 +17,6 @@ The bootstrap fields are process-private and must not become Renderer API. Sourc
 | --- | --- | --- | --- | --- |
 | `/internal/runtime-host/shell-actions` | `POST` | `{ version, action, payload? }` | `15s` in Rust client | Rust client enum exists; current Electron `ParentCallbackReceiver` does not expose this path, so active wiring remains pending. |
 | `/internal/runtime-host/gateway-events` | `POST` | `{ version, eventName, payload }` | `3s` | receiver validates token/content/event name, emits HostEventBus, returns accepted. |
-| `/internal/runtime-host/runtime-jobs` | `POST` | `{ version, eventName, payload }` | `3s` | receiver validates token/content/event name, emits HostEventBus, returns accepted. |
 
 Sources: [parent-callback.ts](../../electron/main/runtime-host-delivery/parent-callback.ts)、[parent_callback.rs](../../runtime-host/host/src/parent_callback.rs)。
 
@@ -47,7 +46,7 @@ Electron validates callback token; wrong token is `403`. Non-POST is `405`; bad 
 
 ## Shell action allowlist
 
-Rust `ParentCallbackClient` still defines these shell actions, but current Electron `ParentCallbackReceiver` only handles gateway/job event paths. Treat shell action callback as `IMPLEMENTED` client-side and `BLOCKED` for active parent wiring until a receiver/contract test exists.
+Rust `ParentCallbackClient` still defines these shell actions, but current Electron `ParentCallbackReceiver` does not expose the shell-actions path. Treat shell action callback as `IMPLEMENTED` client-side and `BLOCKED` for active parent wiring until a receiver/contract test exists.
 
 | action | known payload | parent meaning |
 | --- | --- | --- |
@@ -68,14 +67,9 @@ void parentTransport.emitParentGatewayEvent(...).catch(() => undefined)
 
 Therefore failure to deliver must not change the underlying business result; it is a notification failure. Rust must not turn this into a new durable event system without separately changing the client/event contract.
 
-## Runtime-job callback
+## Owner operation notification
 
-```text
-runtime-job:done
-runtime-job:progress
-```
-
-These events maintain old async client completion behavior. They are **not** a mandate to reproduce TS global queue internals. See [async-projection.md](async-projection.md)。
+Async owners do not publish completion through a generic parent callback. When notification is useful, the concrete owner/facade defines a typed operation event; its query path remains the recovery path.
 
 ## Security boundary
 
@@ -95,4 +89,4 @@ version, action/eventName, payload, timeout,
 parent success/failure mapping, call count
 ```
 
-Current receiver tests cover only the wired callback families they exercise; shell-actions and owner-specific job/event recovery remain cutover blockers. Existing harness also has a known blind spot for production runtime-job recording; see [verification.md](verification.md)。
+Current receiver tests cover only the wired callback families they exercise; shell-actions and owner-specific typed operation event/query recovery remain cutover blockers. See [verification.md](verification.md)。

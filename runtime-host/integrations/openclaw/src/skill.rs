@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 
 use crate::gateway::{
     client::GatewayClient,
-    delivery::MutationDelivery,
     wire::{self, GatewayResponse},
 };
 
@@ -22,105 +21,13 @@ pub use operations::{
     OpenClawSkillOperations, PrivateSkillValue, SkillDetail, SkillDetailLatestVersion,
     SkillDetailMetadata, SkillDetailOwner, SkillDetailRequest, SkillDetailSkill,
     SkillInstallRequest, SkillInstallSource, SkillMutationOutcome, SkillReadError,
-    SkillRequestError, SkillSearchRequest, SkillSearchResult, SkillUpdateRequest, SkillUploadBegin,
-    SkillUploadChunk, SkillUploadCommit,
+    SkillRequestError, SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk, SkillUploadCommit,
 };
 
-const SKILLS_INSTALL_METHOD: &str = "skills.install";
 const SKILLS_STATUS_METHOD: &str = "skills.status";
-const SKILL_METHODS: [&str; 1] = [SKILLS_INSTALL_METHOD];
 const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
-/// A repository-owned request for a ClawHub skill install.
-///
-/// The request deliberately has no workspace, target-directory, registry, or
-/// raw payload fields. OpenClaw owns its configured workspace and its native
-/// contained-install boundary.
-#[derive(Clone, Eq, PartialEq)]
-pub struct ClawHubSkillInstall {
-    slug: String,
-    version: Option<String>,
-    force: bool,
-}
-
-impl ClawHubSkillInstall {
-    pub fn try_new(
-        slug: String,
-        version: Option<String>,
-        force: bool,
-    ) -> Result<Self, SkillInputError> {
-        let slug = slug.trim().to_owned();
-        if !is_clawhub_slug(&slug) {
-            return Err(SkillInputError::InvalidSlug);
-        }
-        let version = version.map(|version| version.trim().to_owned());
-        if version.as_deref().is_some_and(str::is_empty) {
-            return Err(SkillInputError::InvalidVersion);
-        }
-        Ok(Self {
-            slug,
-            version,
-            force,
-        })
-    }
-
-    pub fn slug(&self) -> &str {
-        &self.slug
-    }
-
-    pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
-    }
-
-    fn into_install_params(self) -> Value {
-        let mut params = serde_json::Map::new();
-        params.insert("source".into(), Value::String("clawhub".into()));
-        params.insert("slug".into(), Value::String(self.slug));
-        if let Some(version) = self.version {
-            params.insert("version".into(), Value::String(version));
-        }
-        if self.force {
-            params.insert("force".into(), Value::Bool(true));
-        }
-        Value::Object(params)
-    }
-}
-
-impl fmt::Debug for ClawHubSkillInstall {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ClawHubSkillInstall([REDACTED])")
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SkillInputError {
-    InvalidSlug,
-    InvalidVersion,
-}
-
-impl fmt::Display for SkillInputError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidSlug => "ClawHub skill slug is invalid",
-            Self::InvalidVersion => "ClawHub skill version is invalid",
-        })
-    }
-}
-
-impl std::error::Error for SkillInputError {}
-
-/// Immediate native outcome of a ClawHub install request.
-///
-/// `Accepted` means only that the pinned Gateway accepted this request with
-/// `{ ok: true }`; it does not claim durable installation or runtime health.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClawHubSkillInstallOutcome {
-    Accepted,
-    Rejected,
-    Unknown,
-}
 
 /// Safe selectable-name projection for TeamSkill dependency planning.
 ///
@@ -135,6 +42,35 @@ pub struct InstalledSkillCatalog {
 impl InstalledSkillCatalog {
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+}
+
+pub struct OpenClawInstalledSkillCatalog {
+    gateway: Arc<GatewayClient>,
+}
+
+impl OpenClawInstalledSkillCatalog {
+    pub fn new(gateway: Arc<GatewayClient>) -> Self {
+        Self { gateway }
+    }
+
+    pub async fn read(&self) -> Option<InstalledSkillCatalog> {
+        let request = wire::operations_request(
+            next_request_id("skill-status"),
+            SKILLS_STATUS_METHOD,
+            json!({}),
+        )
+        .ok()?;
+        let _ = SKILL_STATUS_METHODS;
+        decode_installed_catalog(self.gateway.rpc_query(request).await.ok()?).ok()
+    }
+}
+
+impl fmt::Debug for OpenClawInstalledSkillCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenClawInstalledSkillCatalog")
+            .finish_non_exhaustive()
     }
 }
 
@@ -275,81 +211,6 @@ impl fmt::Debug for OpenClawSkillStatusCatalog {
             .debug_struct("OpenClawSkillStatusCatalog")
             .finish_non_exhaustive()
     }
-}
-
-/// Dedicated owner for the native ClawHub installation edge.
-///
-/// It performs one `skills.install` RPC through the pinned Gateway. A native
-/// `{ ok: true }` acknowledgement produces `Accepted`; it is not a durable
-/// install receipt and this owner never retries or reads back status.
-pub struct ClawHubSkillInstaller {
-    gateway: Arc<GatewayClient>,
-}
-
-impl ClawHubSkillInstaller {
-    pub fn new(gateway: Arc<GatewayClient>) -> Self {
-        Self { gateway }
-    }
-
-    pub async fn installed_catalog(&self) -> Option<InstalledSkillCatalog> {
-        let request = wire::operations_request(
-            next_request_id("skill-status"),
-            SKILLS_STATUS_METHOD,
-            json!({}),
-        )
-        .ok()?;
-        let _ = SKILL_STATUS_METHODS;
-        decode_installed_catalog(self.gateway.rpc_query(request).await.ok()?).ok()
-    }
-
-    pub async fn install(&self, request: ClawHubSkillInstall) -> ClawHubSkillInstallOutcome {
-        let install = match wire::operations_request(
-            next_request_id("clawhub-install"),
-            SKILLS_INSTALL_METHOD,
-            request.into_install_params(),
-        ) {
-            Ok(request) => request,
-            Err(_) => return ClawHubSkillInstallOutcome::Rejected,
-        };
-
-        match self.write(install).await {
-            MutationExchange::Response(response @ GatewayResponse::Success { .. }) => {
-                match decode_install_acknowledgement(response) {
-                    Ok(()) => ClawHubSkillInstallOutcome::Accepted,
-                    Err(()) => ClawHubSkillInstallOutcome::Unknown,
-                }
-            }
-            MutationExchange::Response(GatewayResponse::Failure { .. }) => {
-                ClawHubSkillInstallOutcome::Rejected
-            }
-            MutationExchange::NotWritten | MutationExchange::MayHaveReached => {
-                ClawHubSkillInstallOutcome::Unknown
-            }
-        }
-    }
-
-    async fn write(&self, request: wire::RpcRequest) -> MutationExchange {
-        let _ = SKILL_METHODS;
-        match self.gateway.rpc_mutation(request).await {
-            MutationDelivery::Response(response) => MutationExchange::Response(response),
-            MutationDelivery::NotWritten(_) => MutationExchange::NotWritten,
-            MutationDelivery::MayHaveReached(_) => MutationExchange::MayHaveReached,
-        }
-    }
-}
-
-impl fmt::Debug for ClawHubSkillInstaller {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClawHubSkillInstaller")
-            .finish_non_exhaustive()
-    }
-}
-
-enum MutationExchange {
-    Response(GatewayResponse),
-    NotWritten,
-    MayHaveReached,
 }
 
 fn decode_skill_status_catalog(response: GatewayResponse) -> Result<SkillStatusCatalog, ()> {
@@ -521,38 +382,6 @@ fn missing_requirements(value: Option<&Value>) -> bool {
     ["bins", "anyBins", "env", "config", "os"].iter().any(
         |field| matches!(missing.get(*field), Some(Value::Array(values)) if !values.is_empty()),
     )
-}
-
-fn decode_install_acknowledgement(response: GatewayResponse) -> Result<(), ()> {
-    let GatewayResponse::Success {
-        payload: Some(Value::Object(payload)),
-        ..
-    } = response
-    else {
-        return Err(());
-    };
-    matches!(payload.get("ok"), Some(Value::Bool(true)))
-        .then_some(())
-        .ok_or(())
-}
-
-fn is_clawhub_slug(slug: &str) -> bool {
-    let bytes = slug.as_bytes();
-    let Some((&first, rest)) = bytes.split_first() else {
-        return false;
-    };
-    if !(first.is_ascii_alphanumeric()) {
-        return false;
-    }
-    let Some(&last) = rest.last() else {
-        return true;
-    };
-    if !(last.is_ascii_alphanumeric()) {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
 fn next_request_id(operation: &str) -> String {

@@ -2,13 +2,14 @@ use std::{
     fmt, fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::{gateway::client::GatewayClientMetadata, lifecycle::state_dir::CanonicalStateDir};
 use runtime_host::{
-    HostInput, MatchaAgentInput, OpenClawInput, open_organization_store,
+    HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,
     transport::{authorization::CapabilityDecisionVerifier, team_trigger::WebhookToken},
 };
 use serde::Deserialize;
@@ -24,6 +25,7 @@ pub(crate) struct Bootstrap {
     parent_callback_dispatch_token: String,
     provider_credential_resolver:
         Option<runtime_host::transport::provider_accounts::private_auth::Resolver>,
+    runtime_observation: RuntimeObservationConfig,
     matcha: MatchaConfig,
     open_claw: OpenClawConfig,
     delivery_verification_key: String,
@@ -218,6 +220,7 @@ impl Bootstrap {
                 parent_callback_base_url: self.parent_callback_base_url,
                 parent_callback_dispatch_token: self.parent_callback_dispatch_token,
                 cron_transport_port,
+                runtime_observation: self.runtime_observation,
             },
             verifier,
             cron_broker_verifier,
@@ -290,6 +293,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         })
         .transpose()
         .map_err(|_| BootstrapError)?;
+    let runtime_observation = runtime_observation(wire.runtime_observation)?;
     let compatibility_transport_port = compatibility_port();
     let session_transport_port = port(wire.session_transport_port)?;
     let task_manager_transport_port = port(wire.task_manager_transport_port)?;
@@ -411,6 +415,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         parent_callback_base_url,
         parent_callback_dispatch_token,
         provider_credential_resolver,
+        runtime_observation,
         compatibility_transport_port,
         matcha,
         open_claw,
@@ -493,6 +498,8 @@ struct Wire {
     parent_callback_dispatch_token: String,
     #[serde(default)]
     provider_credential_resolver: Option<ProviderCredentialResolverWire>,
+    #[serde(default)]
+    runtime_observation: RuntimeObservationWire,
     delivery_verification_key: String,
     cron_broker_verification_key: String,
     session_transport_port: u16,
@@ -542,6 +549,41 @@ struct Wire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeObservationWire {
+    #[serde(default)]
+    mode: RuntimeObservationModeWire,
+    #[serde(default)]
+    archive: bool,
+    #[serde(default)]
+    diagnostic_ttl_ms: Option<u64>,
+}
+
+impl Default for RuntimeObservationWire {
+    fn default() -> Self {
+        Self {
+            mode: RuntimeObservationModeWire::Off,
+            archive: false,
+            diagnostic_ttl_ms: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RuntimeObservationModeWire {
+    Off,
+    Normal,
+    Diagnostic,
+}
+
+impl Default for RuntimeObservationModeWire {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProviderCredentialResolverWire {
     endpoint: String,
     authorization: String,
@@ -572,6 +614,25 @@ struct OpenClawWire {
     entry: String,
     state_dir: String,
     port: u16,
+}
+
+fn runtime_observation(
+    wire: RuntimeObservationWire,
+) -> Result<RuntimeObservationConfig, BootstrapError> {
+    match wire.mode {
+        RuntimeObservationModeWire::Off => Ok(RuntimeObservationConfig::off()),
+        RuntimeObservationModeWire::Normal => Ok(RuntimeObservationConfig::normal(wire.archive)),
+        RuntimeObservationModeWire::Diagnostic => {
+            let ttl = wire
+                .diagnostic_ttl_ms
+                .filter(|value| *value != 0)
+                .ok_or(BootstrapError)?;
+            Ok(RuntimeObservationConfig::diagnostic(
+                wire.archive,
+                Duration::from_millis(ttl),
+            ))
+        }
+    }
 }
 
 fn port(value: u16) -> Result<u16, BootstrapError> {

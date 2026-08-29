@@ -15,15 +15,11 @@ use environment::{
     ProviderModelStore, ProviderRoute, ProviderRouting, ProviderRoutingCapability,
     ProviderRoutingRevision,
 };
-use foundation::{
-    process::supervision::{SupervisorOperation, SupervisorPhase},
-    process::{ShutdownOutcome, TerminationOutcome},
-};
+use foundation::process::{ShutdownOutcome, TerminationOutcome};
 use matcha_agent::lifecycle::{output::StartupDiagnosticCategory, secret::Secret};
 use openclaw::{
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
     lifecycle::state_dir::CanonicalStateDir,
-    session::protocol::{ChatHistoryParams, RunId, SessionKey},
 };
 use organization::{
     DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
@@ -37,46 +33,13 @@ use crate::{
     composition::admission::HostPhase,
     diagnostics::{HostLifecycle, RuntimeLifecycle},
     owner::Owner,
-    session_model_selection::{
+    sessions::model_selection::{
         NativeEndpoint as SessionModelSelectionNativeEndpoint, SessionModelSelectionCommand,
         SessionModelSelectionOutcome,
     },
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
-
-#[test]
-fn provider_native_fanout_without_available_owner_is_unavailable() {
-    let fanout = ProviderNativeConfigurationFanout::default();
-    assert!(fanout.finish().is_none());
-}
-
-#[test]
-fn provider_native_fanout_aggregates_runtime_owner_outcomes() {
-    let mut fanout = ProviderNativeConfigurationFanout::default();
-    fanout.push(ProviderNativeConfigurationEffect::Evidence(
-        ProviderNativeConfigurationEvidence::new(
-            true,
-            AppliedStatus::Confirmed,
-            ObservedStatus::Matches,
-        ),
-    ));
-    fanout.push(ProviderNativeConfigurationEffect::Evidence(
-        ProviderNativeConfigurationEvidence::new(
-            false,
-            AppliedStatus::Confirmed,
-            ObservedStatus::Mismatch,
-        ),
-    ));
-    fanout.push(ProviderNativeConfigurationEffect::Unavailable);
-
-    let Some(ProviderNativeConfigurationEffect::Evidence(evidence)) = fanout.finish() else {
-        panic!("fanout with evidence must return aggregate evidence");
-    };
-    assert!(evidence.changed());
-    assert_eq!(evidence.applied(), AppliedStatus::Unknown);
-    assert_eq!(evidence.observed(), ObservedStatus::Mismatch);
-}
 
 struct TestRoot {
     base: PathBuf,
@@ -193,16 +156,16 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     .expect("open provider account store");
     accounts.persist(account).expect("persist local account");
     drop(accounts);
-    let (mut host, _events) = Host::new(host_input).expect("construct host");
+    let (mut host, _events, handles) = Host::new(host_input).expect("construct host");
     host.start().await.expect("start host");
     assert!(matches!(
-        host.list_provider_accounts(),
+        handles.provider.list_provider_accounts().await.unwrap(),
         crate::transport::provider_accounts::ProviderAccountsDelivery::List(ref accounts)
             if accounts.len() == 1
                 && accounts[0].get("id").and_then(serde_json::Value::as_str) == Some("local-ollama")
     ));
 
-    let model = crate::provider_models::ProviderModelDraft {
+    let model = crate::provider::models::ProviderModelDraft {
         model_id: "llama-3.3".into(),
         capabilities: vec![ProviderModelCapability::Chat],
         context_window: Some(128_000),
@@ -213,23 +176,32 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
         quality: None,
     };
     assert!(matches!(
-        host.replace_provider_models(account_id.as_str().to_owned(), vec![model])
-            .await,
-        crate::provider_models::ProviderModelReplaceOutcome::DesiredStored { .. }
+        handles
+            .provider
+            .replace_provider_models(account_id.as_str().to_owned(), vec![model])
+            .await
+            .unwrap(),
+        crate::provider::models::ProviderModelReplaceOutcome::DesiredStored { .. }
     ));
     let durable_models = ProviderModelStore::open(
         root.state_parent
             .join("openclaw/matchaclaw-provider-models.json"),
     )
     .expect("open provider model store");
-    assert!(durable_models.catalog().models().iter().any(|model| {
-        model.account_id().as_str() == "local-ollama" && model.model_id() == "llama-3.3"
-    }));
-    let models = host.list_provider_models();
+    let expected_selection_id = durable_models
+        .catalog()
+        .models()
+        .iter()
+        .find(|model| {
+            model.account_id().as_str() == "local-ollama" && model.model_id() == "llama-3.3"
+        })
+        .expect("provider model must be durable")
+        .selection_id();
+    let models = handles.provider.list_provider_models().await.unwrap();
     assert!(
         matches!(
             models,
-            crate::provider_models::ProviderModelListOutcome::Available(ref models)
+            crate::provider::models::ProviderModelListOutcome::Available(ref models)
                 if models.len() == 1
                     && models[0].account_id == "local-ollama"
                     && models[0].model_id == "llama-3.3"
@@ -237,18 +209,22 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
         "unexpected provider models: {models:?}"
     );
     assert!(matches!(
-        host.selectable_provider_models(ProviderModelCapability::Chat),
-        crate::provider_models::ProviderModelSelectableOutcome::Available(ref models)
+        handles
+            .provider
+            .selectable_provider_models(ProviderModelCapability::Chat)
+            .await
+            .unwrap(),
+        crate::provider::models::ProviderModelSelectableOutcome::Available(ref models)
             if models.len() == 1
-                && models[0].selection_id == "ollama-local-ollama/llama-3.3"
+                && models[0].selection_id == expected_selection_id
     ));
 
-    let routing_revision = match host.list_provider_routing() {
-        crate::provider_routing::ProviderRoutingListOutcome::Desired(Some(routing)) => {
+    let routing_revision = match handles.provider.list_provider_routing().await.unwrap() {
+        crate::provider::routing::ProviderRoutingListOutcome::Desired(Some(routing)) => {
             routing.revision().get() + 1
         }
-        crate::provider_routing::ProviderRoutingListOutcome::Desired(None) => 1,
-        crate::provider_routing::ProviderRoutingListOutcome::Unavailable => {
+        crate::provider::routing::ProviderRoutingListOutcome::Desired(None) => 1,
+        crate::provider::routing::ProviderRoutingListOutcome::Unavailable => {
             panic!("provider routing should be available")
         }
     };
@@ -265,11 +241,15 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
         )],
     )
     .expect("routing");
-    let routing_outcome = host.replace_provider_routing(routing).await;
+    let routing_outcome = handles
+        .provider
+        .replace_provider_routing(routing)
+        .await
+        .unwrap();
     assert!(
         matches!(
             routing_outcome,
-            crate::provider_routing::ProviderRoutingReplaceOutcome::DesiredStored { .. }
+            crate::provider::routing::ProviderRoutingReplaceOutcome::DesiredStored { .. }
         ),
         "unexpected provider routing outcome: {routing_outcome:?}"
     );
@@ -314,7 +294,7 @@ fn open_claw_client_custody_stays_behind_the_concrete_port() {
 #[tokio::test]
 async fn created_host_shuts_down_both_idle_owners_and_retains_terminal_state() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
 
     let report = host.shutdown().await.unwrap();
 
@@ -348,14 +328,12 @@ async fn created_host_shuts_down_both_idle_owners_and_retains_terminal_state() {
 #[tokio::test]
 async fn ready_host_admits_peer_lifecycle_requests() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
 
     host.start().await.unwrap();
 
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert!(host.state().ok());
-    assert!(host.matcha_start_failure().is_none());
-    assert_eq!(host.open_claw_start_failure(), None);
 
     host.shutdown().await.unwrap();
 }
@@ -363,7 +341,7 @@ async fn ready_host_admits_peer_lifecycle_requests() {
 #[tokio::test]
 async fn openclaw_prelaunch_projection_failure_does_not_block_host_startup() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
     fs::write(
         root.state_parent.join("openclaw/openclaw.json"),
         b"not-json",
@@ -373,8 +351,6 @@ async fn openclaw_prelaunch_projection_failure_does_not_block_host_startup() {
     host.start().await.unwrap();
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
-    assert!(host.matcha_start_failure().is_none());
-    assert_eq!(host.open_claw_start_failure(), None);
 
     host.shutdown().await.unwrap();
 }
@@ -384,32 +360,48 @@ async fn auto_openclaw_port_guard_failure_records_start_failure_without_blocking
     let root = TestRoot::new();
     let port_guard = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, root.openclaw_port))
         .expect("occupy OpenClaw gateway port");
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
 
     host.start().await.unwrap();
 
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
-    assert!(host.matcha_start_failure().is_none());
-    assert_eq!(
-        host.open_claw_start_failure(),
-        Some(RuntimeStartFailure::CompletionFailed)
-    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if host.open_claw_start_failure() == Some(RuntimeStartFailure::CompletionFailed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("OpenClaw autostart failure must be recorded");
+    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
 
     drop(port_guard);
     host.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn diagnostics_admission_requires_a_ready_host_and_closes_after_shutdown() {
+async fn diagnostics_facade_requires_a_ready_host_and_closes_after_shutdown() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
+    let cancellation = crate::diagnostics::DiagnosticsArchiveCancellation::new();
 
-    assert!(host.admit_diagnostics().is_err());
+    assert!(
+        handles
+            .diagnostics
+            .collect_archive(cancellation.clone())
+            .await
+            .is_err()
+    );
 
     host.start().await.unwrap();
-    let cancellation = crate::diagnostics::DiagnosticsArchiveCancellation::new();
-    let receipt = host.admit_diagnostics().unwrap().collect(&cancellation);
+    let receipt = handles
+        .diagnostics
+        .collect_archive(cancellation)
+        .await
+        .unwrap();
     assert_eq!(
         receipt.terminal(),
         crate::diagnostics::DiagnosticsArchiveTerminal::Completed
@@ -419,13 +411,19 @@ async fn diagnostics_admission_requires_a_ready_host_and_closes_after_shutdown()
 
     host.shutdown().await.unwrap();
 
-    assert!(host.admit_diagnostics().is_err());
+    assert!(
+        handles
+            .diagnostics
+            .collect_archive(crate::diagnostics::DiagnosticsArchiveCancellation::new())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn matcha_startup_diagnostic_is_projected_once_without_private_details() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
 
     host.matcha_startup_diagnostics
         .report(StartupDiagnosticCategory::AppServerReportedError);
@@ -446,72 +444,200 @@ async fn matcha_startup_diagnostic_is_projected_once_without_private_details() {
 }
 
 #[tokio::test]
-async fn peer_stop_and_restart_do_not_shut_down_the_host() {
+async fn peer_lifecycle_failures_do_not_shut_down_the_host() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
 
-    host.start().await.unwrap();
+    host.start_admission_only().await.unwrap();
 
-    let stop = host.stop_open_claw().await.unwrap().unwrap();
-    assert_eq!(stop.lifecycle(), RuntimeLifecycle::Idle);
-    assert_eq!(host.admission_state().phase(), HostPhase::Ready);
-    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
-    assert_eq!(host.state().open_claw().lifecycle(), RuntimeLifecycle::Idle);
-
-    let restart = host.restart_open_claw().await.unwrap().unwrap_err();
-    assert_eq!(restart, RuntimeLifecycleFailure::CompletionFailed);
-    assert_eq!(host.admission_state().phase(), HostPhase::Ready);
-    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
     assert_eq!(
-        host.state().open_claw().lifecycle(),
-        RuntimeLifecycle::Failed
+        handles.peer.stop_open_claw().await.unwrap().unwrap_err(),
+        super::super::peer::StopOpenClawError::RuntimeStop
     );
+    assert_eq!(host.admission_state().phase(), HostPhase::Ready);
+    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
+
+    assert_eq!(
+        handles.peer.restart_open_claw().await.unwrap().unwrap_err(),
+        super::super::peer::RestartOpenClawError::RuntimeRestart
+    );
+    assert_eq!(host.admission_state().phase(), HostPhase::Ready);
+    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
 
     host.shutdown().await.unwrap();
 }
 
 #[test]
 fn successful_openclaw_lifecycle_transitions_recover_only_durable_receipts() {
-    let host = include_str!("../host.rs");
-    let recovery = host
-        .split_once("async fn recover_team_materialization_receipts(&mut self) {")
-        .expect("Host must define receipt-only materialization recovery")
-        .1
-        .split_once("    pub(crate) fn list_team_runs(")
-        .expect("receipt recovery must remain distinct from its private command")
-        .0;
+    let organization_actor = include_str!("../../organization/actor.rs");
+    let peer_actor = include_str!("../peer/actor.rs");
 
     assert_eq!(
-        host.matches("self.recover_team_materialization_receipts().await;")
+        peer_actor
+            .matches("recover_materialization_receipts().await")
             .count(),
         3
     );
-    assert_eq!(
-        recovery
-            .matches("team::recover_team_materialization(")
-            .count(),
-        1
-    );
-    assert!(recovery.contains("materialization_receipt_recovery_teams()"));
-    assert!(!recovery.contains("materialize_team("));
+    assert!(organization_actor.contains("async fn recover_materialization_receipts"));
+    assert!(organization_actor.contains("materialization_receipt_recovery_teams()"));
+    assert!(organization_actor.contains("ops.recover_team_materialization(request).await"));
+    assert!(organization_actor.contains("confirm_team_materialization(receipt)"));
+    assert!(!organization_actor.contains("team::recover_team_materialization("));
 }
 
 #[test]
-fn peer_lifecycle_commands_are_owned_by_bounded_operation_lanes() {
+fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
     let host = include_str!("../host.rs");
-    let command = include_str!("../../owner/command.rs");
-    let actor = include_str!("../../owner/actor.rs");
+    let peer_actor = include_str!("../peer/actor.rs");
+    let peer_command = include_str!("../peer/command.rs");
+    let peer_query = include_str!("../peer/query.rs");
+    let peer_handle = include_str!("../peer/handle.rs");
+    let runtime_directory = include_str!("../../runtime_directory.rs");
+    let runtime_driver = include_str!("../../runtime_driver.rs");
+    let owner_actor = include_str!("../../owner/actor.rs");
     let shutdown = include_str!("shutdown.rs");
 
-    assert!(host.contains("PEER_LIFECYCLE_OPERATION_CAPACITY"));
-    assert!(host.contains("peer_lifecycle_operations"));
-    assert!(host.contains("start_matcha_operation"));
-    assert!(host.contains("restart_open_claw_operation"));
-    assert!(host.contains("reap_peer_lifecycle_operations"));
-    assert!(command.contains("host.start_matcha_operation(reply)"));
-    assert!(command.contains("host.restart_open_claw_operation(reply)"));
-    assert!(actor.contains("host.reap_peer_lifecycle_operations().await"));
-    assert!(shutdown.contains("cancel_peer_lifecycle_operations"));
+    assert!(host.contains(
+        "let mut runtime_directory = crate::runtime_directory::RuntimeDriverDirectory::new();"
+    ));
+    assert!(host.contains("runtime_directory.register_openclaw"));
+    assert!(host.contains("runtime_directory.register(matcha.runtime_driver())"));
+    assert!(host.contains("let peer_owner = super::peer::PeerOwner::new("));
+    assert!(
+        host.contains("let (peer_owner_handle, peer_task) = owner_runtime_system.spawn_owner(")
+    );
+    assert!(host.contains(
+        "foundation::execution::OwnerRuntimeConfig::new(\n                64,\n                super::peer::PeerOwner::lane_retention(),"
+    ));
+
+    assert!(host.contains("peer_handle: PeerHandle"));
+    assert!(host.contains("peer: peer_task"));
+    assert!(peer_handle.contains("OwnerRuntimeHandle<PeerCommand, PeerQuery>"));
+    assert!(peer_handle.contains("send_command(command(reply))"));
+    assert!(peer_handle.contains("send_query(query(reply))"));
+
+    assert!(peer_actor.contains("impl OwnerSpec for PeerOwner"));
+    assert!(peer_actor.contains("RuntimeDriverDirectory"));
+    assert!(peer_actor.contains("runtime_directory"));
+    assert!(peer_actor.contains(
+        "async fn handle_keyed_command(\n        shared: Self::Shared,\n        key: Self::Key,"
+    ));
+    assert!(peer_actor.contains(".lookup(&key)"));
+    assert!(peer_actor.contains("driver.lifecycle_ops()"));
+    for lifecycle_operation in [
+        "lifecycle.start().await",
+        "lifecycle.stop().await",
+        "lifecycle.restart().await",
+    ] {
+        assert!(
+            peer_actor.contains(lifecycle_operation),
+            "PeerOwner lifecycle command must use {lifecycle_operation}"
+        );
+    }
+    for lifecycle_command in [
+        "PeerCommand::StartMatcha",
+        "PeerCommand::StopMatcha",
+        "PeerCommand::RestartMatcha",
+        "PeerCommand::StartOpenClaw",
+        "PeerCommand::StopOpenClaw",
+        "PeerCommand::RestartOpenClaw",
+    ] {
+        assert!(peer_actor.contains(lifecycle_command));
+    }
+    assert!(runtime_directory.contains("pub(crate) fn lookup("));
+    assert!(runtime_driver.contains("pub(crate) trait LifecycleOps"));
+    assert!(runtime_driver.contains("fn start(&self)"));
+    assert!(runtime_driver.contains("fn stop(&self)"));
+    assert!(runtime_driver.contains("fn restart(&self)"));
+    assert!(
+        peer_command.contains("Self::AutostartMatcha")
+            && peer_command.contains("Self::AutostartOpenClaw")
+    );
+    assert!(peer_handle.contains("PeerCommand::AutostartMatcha"));
+    assert!(peer_handle.contains("PeerCommand::AutostartOpenClaw"));
+    assert!(!peer_command.contains("CommandRoute::Global"));
+    assert!(!peer_actor.contains("request_peer_autostart(&shared"));
+    assert!(!peer_actor.contains("async fn request_peer_autostart("));
+    assert!(
+        peer_command
+            .contains("CommandRoute::Keyed(RuntimeDriverIdentity::matcha_agent().endpoint())")
+    );
+    assert!(
+        peer_command.contains("CommandRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())")
+    );
+    assert!(
+        peer_query.contains(
+            "Self::State { .. } | Self::MatchaStatus { .. } | Self::OpenClawStatus { .. }"
+        )
+    );
+    assert!(peer_query.contains("QueryRoute::Direct"));
+    assert!(
+        peer_query.contains("QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())")
+    );
+    assert!(peer_handle.contains("Directory::from_host_state(&state)"));
+    assert!(!peer_handle.contains("snapshot_control().await"));
+
+    for removed in [
+        "shared.matcha.request_start().await",
+        "shared.matcha.start().await",
+        "shared.matcha.stop().await",
+        "shared.matcha.restart().await",
+        "shared.matcha.advance_source_epoch()",
+        "shared.open_claw.owner().start().await",
+        "shared.open_claw.owner().stop().await",
+        "shared.open_claw.owner().restart().await",
+        "openclaw::lifecycle::port_guard::ensure_gateway_port_available",
+        "prepare_openclaw_plugin_readiness",
+        "reconcile_configured_channel_plugins",
+        "reconcile_enabled_managed_plugins",
+        "apply_startup_lifecycle",
+    ] {
+        assert!(
+            !peer_actor.contains(removed),
+            "unexpected PeerOwner lifecycle or preparation path: {removed}"
+        );
+    }
+
+    for source in [peer_actor, host, owner_actor, shutdown] {
+        for removed in [
+            "fallback",
+            "bridge",
+            "dual path",
+            "dual_path",
+            "dual lifecycle",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "unexpected lifecycle migration residue: {removed}"
+            );
+        }
+    }
+
+    for source in [host, owner_actor, shutdown] {
+        for removed in [
+            "PEER_LIFECYCLE_OPERATION_CAPACITY",
+            "peer_lifecycle_operations",
+            "start_matcha_operation",
+            "restart_open_claw_operation",
+            "reap_peer_lifecycle_operations",
+            "cancel_peer_lifecycle_operations",
+            "PeerAutostart",
+            "MatchaCommand",
+            "RuntimeCommand::Start",
+            "RuntimeCommand::Stop",
+            "RuntimeCommand::Restart",
+            "RuntimeCommand::Logs",
+            "RuntimeCommand::GatewayHealth",
+            "RuntimeCommand::GatewayStatus",
+            "RuntimeCommand::ControlUiUrl",
+            "RuntimeCommand::ControlLease",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "unexpected legacy symbol: {removed}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -529,13 +655,13 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
         .organization_store
         .replace_facts(facts_with_armed_webhook_run())
         .unwrap();
-    let (host, events) = Host::new(input).unwrap();
+    let (host, events, handles) = Host::new(input).unwrap();
     let mut owner = crate::owner::Owner::spawn(host, events);
-    let handle = owner.handle();
+    let handle = handles.organization.clone();
     let request = trigger_fire_request("start", "request:one");
 
     let recorded = handle
-        .fire_team_run_trigger(request.clone(), 2)
+        .trigger_fire(request.clone(), 2)
         .await
         .unwrap()
         .unwrap();
@@ -548,18 +674,14 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
         super::super::team_run::TeamRunCommandOutcome::Unavailable
     ));
 
-    let replayed = handle
-        .fire_team_run_trigger(request, 3)
-        .await
-        .unwrap()
-        .unwrap();
+    let replayed = handle.trigger_fire(request, 3).await.unwrap().unwrap();
     assert_eq!(
         replayed.registration,
         TriggerRegistration::Replayed(trigger_fire_request("start", "request:one"))
     );
 
     let conflicted = handle
-        .fire_team_run_trigger(trigger_fire_request("alternate", "request:one"), 4)
+        .trigger_fire(trigger_fire_request("alternate", "request:one"), 4)
         .await
         .unwrap()
         .unwrap();
@@ -579,49 +701,18 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
 }
 
 #[test]
-fn control_lease_probes_during_starting_or_running() {
-    for operation in [
-        Some(SupervisorOperation::Start),
-        Some(SupervisorOperation::Restart),
-        None,
-    ] {
-        assert_eq!(
-            control_lease_projection(SupervisorPhase::Starting, operation),
-            ControlLeaseProjection::ProbeGateway,
-        );
-    }
-    for (phase, operation) in [
-        (
-            SupervisorPhase::WaitingToRestart,
-            Some(SupervisorOperation::Restart),
-        ),
-        (SupervisorPhase::Idle, None),
-        (SupervisorPhase::Stopping, Some(SupervisorOperation::Stop)),
-        (SupervisorPhase::OperationFailed, None),
-        (SupervisorPhase::ShutDown, None),
-    ] {
-        assert_eq!(
-            control_lease_projection(phase, operation),
-            ControlLeaseProjection::Unavailable,
-        );
-    }
-    assert_eq!(
-        control_lease_projection(SupervisorPhase::Running, None),
-        ControlLeaseProjection::ProbeGateway,
-    );
-}
-
-#[test]
-fn matcha_terminal_readback_stays_in_teamrun_native_watches() {
+fn matcha_terminal_readback_stays_in_teamrun_coordinator_native_watches() {
     let host = include_str!("../host.rs");
-    let actor = include_str!("../../owner/actor.rs");
+    let coordinator = include_str!("../../organization/coordinator.rs");
+    let matcha = include_str!("../matcha.rs");
     let crate_root = include_str!("../../lib.rs");
     let control_wire = include_str!("../../control/wire.rs");
 
     assert!(!host.contains("read_matcha_terminal_receipt"));
-    assert!(host.contains("RoleTerminalWatch"));
-    assert!(actor.contains("TerminalWatches"));
-    assert!(actor.contains("terminal_watches.start(host, delivery_id"));
+    assert!(coordinator.contains("struct TerminalWatches"));
+    assert!(coordinator.contains("fn watch_matcha_terminal("));
+    assert!(matcha.contains("impl TeamTerminalOps for MatchaRuntimeDriver"));
+    assert!(matcha.contains("watch_role_terminal"));
     assert!(!crate_root.contains("read_matcha_terminal_receipt"));
     assert!(!crate_root.contains("TerminalRunReceipt"));
     for matcha_terminal_receipt in [
@@ -635,47 +726,219 @@ fn matcha_terminal_readback_stays_in_teamrun_native_watches() {
 }
 
 #[test]
-fn team_scheduler_is_driven_by_durable_facts_and_delivery_admission() {
+fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     let host = include_str!("../host.rs");
-    let actor = include_str!("../../owner/actor.rs");
-    assert!(host.contains("schedule_team_run_ready_nodes"));
-    assert!(host.contains("active_team_run_local_sessions"));
-    assert!(host.contains("schedule_ready_nodes"));
-    assert!(host.contains("RoleChatAdmission::new"));
-    assert!(host.contains("MAX_ACTIVE_ROLE_PROMPTS: usize = 2"));
-    assert!(host.contains("DeliveryPhase::Delivered"));
-    assert!(actor.contains("schedule_team_run_ready_nodes"));
-    assert!(actor.contains("active_team_run_ids"));
+    let root_actor = include_str!("../../owner/actor.rs");
+    let organization_actor = include_str!("../../organization/actor.rs");
+    let organization_handle = include_str!("../../organization/handle.rs");
+    let coordinator = include_str!("../../organization/coordinator.rs");
+
+    assert!(!host.contains("schedule_team_run_ready_nodes"));
+    assert!(!root_actor.contains("schedule_team_run_ready_nodes"));
+    assert!(organization_actor.contains("impl OwnerSpec for OrganizationOwner"));
+    assert!(organization_actor.contains("OrganizationCommand::ScheduleReadyNodes"));
+    assert!(organization_actor.contains("fn schedule_ready_nodes("));
+    assert!(organization_actor.contains("MAX_ACTIVE_ROLE_PROMPTS: usize = 2"));
+    assert!(organization_actor.contains("DeliveryPhase::Delivered"));
+    assert!(organization_handle.contains("pub async fn schedule_ready_nodes("));
+    assert!(
+        organization_handle.contains(
+            ".send_command(OrganizationCommand::ScheduleReadyNodes { run_id, now, reply })"
+        )
+    );
+    assert!(host.contains("TeamRunCoordinator::spawn"));
+    assert!(host.contains("admission_changes: admission.subscribe()"));
+    assert!(!host.contains("team_run_coordinator: crate::organization::TeamRunCoordinatorHandle"));
+    assert!(!host.contains("self.team_run_coordinator.wake()"));
+    assert!(!host.contains("PeerMaintenanceHandle"));
+    assert!(!host.contains("peer_maintenance"));
+    assert!(coordinator.contains("struct DeliveryReconciliationState"));
+    assert!(coordinator.contains("async fn reconcile_team_run_deliveries("));
+    assert!(coordinator.contains(".schedule_ready_nodes(run_id.clone(), now)"));
+    assert!(coordinator.contains(".active_run_ids()"));
+    for removed in [
+        concat!("Terminal", "Watches"),
+        concat!("Delivery", "Reconciliation", "State"),
+        concat!("Team", "Trigger", "Cron"),
+        concat!("reconcile", "_team", "_run", "_deliveries"),
+        concat!("reconcile", "_team", "_trigger", "_cron"),
+        concat!("Peer", "Maintenance", "Request"),
+    ] {
+        assert!(
+            !root_actor.contains(removed),
+            "root actor retains TeamRun coordinator residue: {removed}"
+        );
+    }
 }
 
 #[test]
-fn fleet_lifecycle_is_owned_by_bounded_host_operation_lanes() {
+fn fleet_owner_is_spawned_by_host_owner_runtime_system() {
     let host = include_str!("../host.rs");
-    let owner = include_str!("../../fleet/owner.rs");
-    let command = include_str!("../../owner/command.rs");
+    let owner = include_str!("../../owner.rs");
+    let owner_actor = include_str!("../../owner/actor.rs");
     let shutdown = include_str!("shutdown.rs");
 
-    assert!(host.contains("FLEET_OPERATION_CAPACITY"));
-    assert!(host.contains("fleet_connection_operations"));
-    assert!(host.contains("fleet_lifecycle_operations"));
-    assert!(host.contains("start_fleet_lifecycle_operation"));
-    assert!(host.contains("reap_fleet_operations"));
-    assert!(owner.contains("operation_owner"));
-    assert!(command.contains("fleet_start_environment_deployment_operation"));
-    assert!(shutdown.contains("cancel_fleet_operations"));
+    assert!(host.contains(
+        "owner_runtime_system.spawn_owner(
+            fleet,"
+    ));
+    assert!(host.contains("pub fleet: FleetHandle"));
+    assert!(host.contains("fleet: fleet_task"));
+    assert!(!host.contains("FLEET_OPERATION_CAPACITY"));
+    assert!(!host.contains("fleet_connection_operations"));
+    assert!(!host.contains("fleet_lifecycle_operations"));
+    assert!(!host.contains("start_fleet_lifecycle_operation"));
+    assert!(!host.contains("reap_fleet_operations"));
+    assert!(!owner.contains("Fleet(FleetCommand)"));
+    assert!(!owner_actor.contains("Fleet(FleetCommand)"));
+    assert!(!owner_actor.contains("impl FleetCommand"));
+    assert!(!shutdown.contains("cancel_fleet_operations"));
+}
+
+#[tokio::test]
+async fn host_startup_resubmits_pending_fleet_dispatches_without_replaying_unknown() {
+    let root = TestRoot::new();
+    let facts_path = root.state_parent.join("runtime-host/fleet-facts.log");
+    let at = SystemTime::UNIX_EPOCH;
+    let pending_command = fleet::command::CommandId::try_new("command-pending").unwrap();
+    let unknown_command = fleet::command::CommandId::try_new("command-unknown").unwrap();
+
+    {
+        let mut owner = fleet::FleetDeliveryOwner::open(&facts_path).unwrap();
+        owner
+            .put_target(
+                fleet::TargetId::try_new("docker-a").unwrap(),
+                fleet::FleetTargetConfig::Docker(
+                    fleet::DockerTargetConfig::try_new(
+                        "https://docker.example.test",
+                        "runtime-agent-a",
+                        "registry.example.test/runtime-agent:stable",
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        owner
+            .submit(
+                fleet_delivery_request("command-pending", "key-pending", "dispatch-pending", at),
+                at,
+            )
+            .unwrap();
+        owner
+            .submit(
+                fleet_delivery_request("command-unknown", "key-unknown", "dispatch-unknown", at),
+                at,
+            )
+            .unwrap();
+        owner
+            .begin_dispatch(
+                &fleet::outbox::DispatchId::try_new("dispatch-unknown").unwrap(),
+                at,
+            )
+            .unwrap();
+    }
+
+    let baseline = fleet::FleetDeliveryOwner::open_live(&facts_path).unwrap();
+    let pending_begun_before =
+        fleet_audit_count(&baseline, &pending_command, "fleet.delivery.begun");
+    let unknown_begun_before =
+        fleet_audit_count(&baseline, &unknown_command, "fleet.delivery.begun");
+    let unknown_replay_before =
+        fleet_audit_count(&baseline, &unknown_command, "fleet.delivery.replay");
+
+    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    host.start_admission_only().await.unwrap();
+
+    let restored = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let owner = match fleet::FleetDeliveryOwner::open_live(&facts_path) {
+                Ok(owner) => owner,
+                Err(fleet::store::StoreFault::WriterBusy) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                Err(error) => panic!("failed to poll Fleet facts: {error:?}"),
+            };
+            if owner
+                .record_for_command(&pending_command)
+                .is_some_and(|record| record.phase() == fleet::outbox::DispatchPhase::Delivered)
+            {
+                break owner;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        restored
+            .record_for_command(&unknown_command)
+            .unwrap()
+            .phase(),
+        fleet::outbox::DispatchPhase::OutcomeUnknown
+    );
+    assert_eq!(
+        restored
+            .record_for_command(&unknown_command)
+            .unwrap()
+            .attempt()
+            .unwrap()
+            .sequence(),
+        1
+    );
+    assert_eq!(
+        fleet_audit_count(&restored, &pending_command, "fleet.delivery.begun")
+            - pending_begun_before,
+        1
+    );
+    assert_eq!(
+        fleet_audit_count(&restored, &unknown_command, "fleet.delivery.begun")
+            - unknown_begun_before,
+        0
+    );
+    assert_eq!(
+        fleet_audit_count(&restored, &unknown_command, "fleet.delivery.replay")
+            - unknown_replay_before,
+        0
+    );
+    assert!(restored.pending_dispatches().next().is_none());
+
+    host.shutdown().await.unwrap();
+}
+
+fn fleet_audit_count(
+    owner: &fleet::FleetDeliveryOwner,
+    command_id: &fleet::command::CommandId,
+    event_name: &str,
+) -> usize {
+    owner
+        .facts()
+        .audit_entries()
+        .iter()
+        .filter(|entry| {
+            let event = entry.event();
+            event.event_name() == event_name
+                && event.relations().command_id() == Some(command_id.as_str())
+        })
+        .count()
 }
 
 #[test]
-fn cron_execution_is_owned_by_host_operation_handles() {
+fn cron_execution_is_owned_by_cron_facade_operation_handles() {
     let host = include_str!("../host.rs");
+    let facade = include_str!("../../facade/cron.rs");
     let instance = include_str!("../openclaw.rs");
     let control = include_str!("../../control/dispatch.rs");
     let foundation = include_str!("../../../../foundation/src/execution/operation.rs");
     let manual = include_str!("../../../../integrations/openclaw/src/cron/manual.rs");
 
-    assert!(host.contains("OperationHandle"));
-    assert!(host.contains("cron_operations"));
-    assert!(host.contains("reap_cron_operations"));
+    assert!(!host.contains("cron_operations"));
+    assert!(!host.contains("reap_cron_operations"));
+    assert!(facade.contains("OperationHandle"));
+    assert!(facade.contains("operations"));
+    assert!(facade.contains("cancel_operations"));
     assert!(instance.contains("admit_cron_execution"));
     assert!(control.contains("CronTriggerOutcome::Accepted"));
     assert!(manual.contains("CancellationToken"));
@@ -683,26 +946,115 @@ fn cron_execution_is_owned_by_host_operation_handles() {
 }
 
 #[test]
-fn parent_callback_events_use_bounded_host_operations() {
+fn parent_callback_events_stay_out_of_host_owner_operations() {
     let host = include_str!("../host.rs");
-    let command = include_str!("../../owner/command.rs");
+    let owner = include_str!("../../owner.rs");
     let actor = include_str!("../../owner/actor.rs");
 
-    assert!(host.contains("PARENT_EVENT_OPERATION_CAPACITY"));
-    assert!(host.contains("parent_event_operations"));
-    assert!(host.contains("spawn_parent_event"));
-    assert!(host.contains("emit_parent_team_event"));
-    assert!(host.contains("emit_parent_runtime_job_event"));
-    assert!(command.contains("publish_new_team_events(host, &run_id, cursor);"));
-    assert!(!command.contains("publish_new_team_events(host, &run_id, cursor).await"));
-    assert!(actor.contains("emit_toolchain_event("));
-    assert!(!actor.contains(".emit_parent_runtime_job_event(event_name, payload)\n        .await"));
+    assert!(!host.contains("PARENT_EVENT_OPERATION_CAPACITY"));
+    assert!(!host.contains("parent_event_operations"));
+    assert!(!host.contains("spawn_parent_event"));
+    assert!(!host.contains("emit_parent_team_event"));
+    assert!(!owner.contains("publish_new_team_events"));
+    assert!(!actor.contains("publish_new_team_events"));
+}
+
+#[test]
+fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
+    let host = include_str!("../host.rs");
+    let shutdown = include_str!("shutdown.rs");
+    let owner = include_str!("../../owner.rs");
+    let actor = include_str!("../../owner/actor.rs");
+
+    for (name, source) in [
+        ("Host", host),
+        ("Host shutdown", shutdown),
+        ("root owner", owner),
+        ("root actor", actor),
+    ] {
+        for removed in [
+            "CRON_OPERATION_CAPACITY",
+            "PARENT_EVENT_OPERATION_CAPACITY",
+            "CronOperation",
+            "ParentEventOperation",
+            "cron_operations",
+            "parent_event_operations",
+            "reap_cron_operations",
+            "cancel_cron_operations",
+            "reap_parent_event_operations",
+            "cancel_parent_event_operations",
+            "trigger_open_claw_cron(",
+            "list_cron_jobs(",
+            "execute_cron_broker(",
+            "load_cron_history(",
+            "add_cron_job(",
+            "update_cron_job(",
+            "delete_cron_job(",
+            "emit_parent_team_event(",
+            "emit_parent_runtime_job_event(",
+            "spawn_parent_event(",
+            "team_run_operations",
+            "team_runtime_operations",
+            "TeamRunOperation",
+            "TeamRuntimeOperation",
+            "poll_team_run_operations",
+            "poll_team_runtime_operations",
+            "cancel_team_run_operations",
+            "cancel_team_runtime_operations",
+            "session_states:",
+            "session_epoch:",
+            "SessionOperation",
+            "running_session_ops(",
+            "list_matcha_sessions(",
+            "list_open_claw_sessions(",
+            "abort_session(",
+            "create_session(",
+            "rename_open_claw_session(",
+            "delete_open_claw_session(",
+            "pending_session_approvals(",
+            "respond_to_session_approval(",
+            "send_session(",
+            "select_session_model(",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "{name} retains Host-wide business operation residue: {removed}"
+            );
+        }
+    }
+
+    for handle in [
+        "pub peer: PeerHandle",
+        "pub session: SessionHandle",
+        "pub provider: ProviderHandle",
+        "pub settings: crate::settings::SettingsHandle",
+        "pub connector: ConnectorHandle",
+        "pub security: crate::security::SecurityHandle",
+        "pub channel: ChannelHandle",
+        "pub fleet: FleetHandle",
+        "pub organization: crate::organization::OrganizationHandle",
+        "pub platform_runtime: crate::facade::PlatformRuntimeHandle",
+        "pub platform_tools: crate::facade::PlatformToolsHandle",
+        "pub plugins: crate::facade::PluginsHandle",
+        "pub skills: crate::facade::SkillsHandle",
+        "pub cron: crate::facade::CronHandle",
+        "pub agents: crate::facade::AgentsHandle",
+        "pub task_manager: crate::facade::TaskManagerHandle",
+        "pub workspace: crate::facade::WorkspaceHandle",
+        "pub usage: crate::facade::UsageHandle",
+        "pub diagnostics: crate::facade::DiagnosticsHandle",
+    ] {
+        assert!(
+            host.contains(handle),
+            "HostHandles must expose typed business entry: {handle}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn ready_host_reads_usage_history_when_openclaw_is_not_running() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
     let sessions = root.state_parent.join("openclaw/agents/main/sessions");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
@@ -713,7 +1065,7 @@ async fn ready_host_reads_usage_history_when_openclaw_is_not_running() {
 
     host.start().await.unwrap();
 
-    let entries = host.usage_open_claw_recent(10).unwrap();
+    let entries = handles.usage.recent(10).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].total_tokens(), 7);
 
@@ -723,14 +1075,15 @@ async fn ready_host_reads_usage_history_when_openclaw_is_not_running() {
 #[tokio::test]
 async fn gateway_health_observation_does_not_block_state_reads() {
     let root = TestRoot::new();
-    let (host, events) = Host::new(host_input(&root)).unwrap();
+    let (host, events, handles) = Host::new(host_input(&root)).unwrap();
     let _gateway = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, root.openclaw_port))
         .expect("hold OpenClaw gateway probe");
     host.admission.begin_start().unwrap();
     host.admission.publish_ready().unwrap();
     let mut owner = Owner::spawn(host, events);
     let handle = owner.handle();
-    let observation = handle
+    let observation = handles
+        .peer
         .open_claw_gateway_health_observation(false)
         .await
         .unwrap()
@@ -756,74 +1109,81 @@ async fn gateway_health_observation_does_not_block_state_reads() {
 #[tokio::test]
 async fn ready_host_rejects_runtime_operations_when_runtimes_are_not_running() {
     let root = TestRoot::new();
-    let (mut host, _events) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
 
     host.start().await.unwrap();
 
     assert!(matches!(
-        host.read_open_claw_workspace_text(
-            "agent:main:test-session",
-            "notes.txt",
-            2 * 1024 * 1024,
-        ),
-        Err(WorkspaceReadError::Unavailable)
+        handles
+            .workspace
+            .read_text("agent:main:test-session", "notes.txt", 2 * 1024 * 1024,),
+        Err(openclaw::workspace::WorkspaceReadFailure::Unavailable)
     ));
     assert!(matches!(
-        host.list_open_claw_sessions(SessionsListParams::default())
+        handles
+            .task_manager
+            .task_manager(
+                crate::task_manager::Command::list(
+                    "main".into(),
+                    "agent:main:test-session".into(),
+                    None,
+                )
+                .unwrap(),
+            )
             .await,
-        Err(RuntimeSessionError::RuntimeUnavailable)
-    ));
-    assert!(matches!(
-        host.history_open_claw_chat(ChatHistoryParams::new(
-            SessionKey::try_new("agent:main:test-session").unwrap(),
+        Ok(crate::task_manager::Outcome::List(
+            crate::task_manager::ReadOutcome::Unavailable
         ))
-        .await,
-        Err(RuntimeSessionError::RuntimeUnavailable)
-    ));
-    assert!(matches!(
-        host.send_open_claw_chat(
-            ChatSendParams::try_new(
-                SessionKey::try_new("agent:main:test-session").unwrap(),
-                "test message",
-                RunId::try_new("test-run").unwrap(),
-            )
-            .unwrap(),
-        )
-        .await,
-        Err(RuntimeSessionError::RuntimeUnavailable)
-    ));
-    assert!(matches!(
-        host.abort_open_claw_chat(ChatAbortParams::new(
-            SessionKey::try_new("agent:main:test-session").unwrap(),
-        ))
-        .await,
-        Err(RuntimeSessionError::RuntimeUnavailable)
-    ));
-    assert!(matches!(
-        host.task_manager(
-            crate::task_manager::Command::list(
-                "main".into(),
-                "agent:main:test-session".into(),
-                None,
-            )
-            .unwrap(),
-        )
-        .await,
-        crate::task_manager::Outcome::List(crate::task_manager::ReadOutcome::Unavailable)
     ));
     assert_eq!(
-        host.select_session_model(
-            SessionModelSelectionCommand::try_new(
-                SessionModelSelectionNativeEndpoint::OpenClawLocal,
-                "agent:main:test-session".into(),
-                "anthropic/claude-opus-4-7".into(),
+        handles
+            .session
+            .select_model(
+                SessionModelSelectionCommand::try_new(
+                    SessionModelSelectionNativeEndpoint::OpenClawLocal,
+                    "agent:main:test-session".into(),
+                    None,
+                    "anthropic/claude-opus-4-7".into(),
+                )
+                .unwrap()
             )
-            .unwrap()
-        )
-        .await,
+            .await
+            .unwrap(),
         SessionModelSelectionOutcome::Unavailable
     );
     host.shutdown().await.unwrap();
+}
+
+fn fleet_delivery_request(
+    command: &str,
+    key: &str,
+    dispatch: &str,
+    at: SystemTime,
+) -> fleet::FleetDeliveryRequest {
+    let command_id = fleet::command::CommandId::try_new(command).unwrap();
+    let selector = fleet::FleetTargetSelector::new(
+        fleet::TargetId::try_new("docker-a").unwrap(),
+        1,
+        fleet::TargetKind::Docker,
+    );
+    fleet::FleetDeliveryRequest::try_new(
+        fleet::command::CommandIntent::new(
+            command_id.clone(),
+            fleet::command::IdempotencyKey::try_new(key).unwrap(),
+            fleet::command::CommandTarget::Node(
+                fleet::topology::NodeId::try_new("node-1").unwrap(),
+            ),
+            fleet::command::CommandKind::ProbeNode,
+            at,
+        ),
+        fleet::outbox::DispatchIntent::for_target(
+            fleet::outbox::DispatchId::try_new(dispatch).unwrap(),
+            command_id,
+            platform::endpoint::NativeAgentId::try_new("agent-1").unwrap(),
+            selector,
+        ),
+    )
+    .unwrap()
 }
 
 fn host_input(root: &TestRoot) -> HostInput {
@@ -875,6 +1235,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
         cron_transport_port: root.cron_transport_port,
+        runtime_observation: RuntimeObservationConfig::off(),
     }
 }
 

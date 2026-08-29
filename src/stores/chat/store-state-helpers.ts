@@ -549,7 +549,6 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
-    backendSessionKey: '',
     endpointSessionId: null,
     runtimeScopeKey: null,
     agentId: null,
@@ -587,8 +586,7 @@ export function createEmptySessionViewportState(): ChatSessionViewportState {
 }
 
 function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSessionMetaState): boolean {
-  return left.backendSessionKey === right.backendSessionKey
-    && left.endpointSessionId === right.endpointSessionId
+  return left.endpointSessionId === right.endpointSessionId
     && left.runtimeScopeKey === right.runtimeScopeKey
     && left.agentId === right.agentId
     && (left.protocolId ?? null) === (right.protocolId ?? null)
@@ -663,7 +661,6 @@ type ApprovalComparable = Omit<ApprovalItem, 'allowedDecisions'> & {
 function areApprovalItemsEquivalent(left: ApprovalComparable, right: ApprovalComparable): boolean {
   return left.id === right.id
     && left.sessionKey === right.sessionKey
-    && left.backendSessionKey === right.backendSessionKey
     && left.runId === right.runId
     && left.title === right.title
     && left.command === right.command
@@ -924,7 +921,6 @@ export function patchSessionSnapshot(
   const nextTitleSource = hasManualLabel ? current.meta.titleSource : catalog.titleSource ?? 'none';
   const nextMeta = {
     ...current.meta,
-    backendSessionKey: snapshot.sessionKey,
     endpointSessionId: catalog.endpointSessionId ?? current.meta.endpointSessionId,
     runtimeScopeKey: buildRuntimeScopeKey(catalog.sessionIdentity.endpoint),
     agentId: catalog.agentId,
@@ -990,7 +986,6 @@ export function patchPendingApprovalsFromSnapshot(
   const nextApprovals = snapshot.approvals.map((approval) => ({
     ...approval,
     sessionKey,
-    backendSessionKey: approval.sessionKey,
     endpointSessionId: state.pendingApprovalsBySession[sessionKey]?.find((currentApproval) => currentApproval.id === approval.id)?.endpointSessionId ?? sessionEndpointId ?? undefined,
     allowedDecisions: [...approval.allowedDecisions],
   }));
@@ -1040,40 +1035,29 @@ function sessionIdentityForProjection(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   view: SessionView,
 ): SessionIdentity | null {
-  const existing = state.loadedSessions[view.sessionKey]?.meta.sessionIdentity
-    ?? Object.values(state.loadedSessions).find((record) => (
-      record.meta.backendSessionKey === view.sessionKey
-      || record.meta.sessionIdentity?.sessionKey === view.sessionKey
-    ))?.meta.sessionIdentity;
-  if (existing) return existing;
   if (!view.identity.agentId || view.identity.endpoint.kind !== 'native-runtime') return null;
-  return {
+  const identity = {
     endpoint: {
-      kind: 'native-runtime',
+      kind: 'native-runtime' as const,
       runtimeAdapterId: view.identity.endpoint.runtimeAdapterId,
       runtimeInstanceId: view.identity.endpoint.runtimeInstanceId,
     },
     agentId: view.identity.agentId,
     sessionKey: view.identity.sessionKey,
   };
+  const identityKey = buildSessionIdentityKey(identity);
+  return Object.values(state.loadedSessions).find((record) => (
+    record.meta.sessionIdentity && buildSessionIdentityKey(record.meta.sessionIdentity) === identityKey
+  ))?.meta.sessionIdentity ?? identity;
 }
 
 function projectionRecordKey(
-  state: Pick<ChatStoreState, 'loadedSessions' | 'sessionRecordKeyByIdentityKey'>,
-  view: SessionView,
+  state: Pick<ChatStoreState, 'sessionRecordKeyByIdentityKey'>,
   identity: SessionIdentity | null,
 ): string | null {
-  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, view.sessionKey)) {
-    return view.sessionKey;
-  }
-  const byBackendKey = Object.entries(state.loadedSessions).find(([, record]) => (
-    record.meta.backendSessionKey === view.sessionKey
-    || record.meta.sessionIdentity?.sessionKey === view.sessionKey
-  ));
-  if (byBackendKey) return byBackendKey[0];
   if (!identity) return null;
-  return state.sessionRecordKeyByIdentityKey[buildSessionIdentityKey(identity)]
-    ?? buildSessionIdentityKey(identity);
+  const identityKey = buildSessionIdentityKey(identity);
+  return state.sessionRecordKeyByIdentityKey[identityKey] ?? identityKey;
 }
 
 function projectionRuntimePhase(phase: SessionWireRuntime['phase']): ChatSessionRuntimeState['runPhase'] {
@@ -1265,6 +1249,31 @@ function projectionWindow(current: ChatSessionViewportState, fact: SessionFact<S
   });
 }
 
+function nativeApprovalOptionIdToDecision(optionId: string): ApprovalItem['allowedDecisions'][number] | null {
+  switch (optionId) {
+    case 'allow':
+    case 'allow-once':
+    case 'allow_once':
+      return 'allow-once';
+    case 'allow-always':
+    case 'allow_always':
+      return 'allow-always';
+    case 'deny':
+    case 'deny-once':
+    case 'reject-once':
+    case 'reject_once':
+      return 'deny';
+    default:
+      return null;
+  }
+}
+
+function approvalOptionIdsToDecisions(optionIds: string[]): ApprovalItem['allowedDecisions'] {
+  return optionIds
+    .map(nativeApprovalOptionIdToDecision)
+    .filter((decision): decision is ApprovalItem['allowedDecisions'][number] => decision != null);
+}
+
 function projectionApprovals(
   state: ChatStoreState,
   recordKey: string,
@@ -1278,20 +1287,18 @@ function projectionApprovals(
   if (!identity) {
     return { ...state.pendingApprovalsBySession, [recordKey]: [] };
   }
-  const endpointSessionId = state.loadedSessions[recordKey]?.meta.endpointSessionId;
+  const endpointSessionId = view.endpointSessionId ?? state.loadedSessions[recordKey]?.meta.endpointSessionId;
   const approvals = fact
     .filter((approval) => approval.phase === 'requested')
     .map((approval) => ({
       id: approval.approvalId,
       sessionKey: recordKey,
-      backendSessionKey: view.sessionKey,
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity: identity,
       ...(approval.runId ? { runId: approval.runId } : {}),
       title: 'Approval required',
-      allowedDecisions: approval.optionIds.filter((option): option is ApprovalItem['allowedDecisions'][number] => (
-        option === 'allow-once' || option === 'allow-always' || option === 'deny'
-      )),
+      allowedDecisions: approvalOptionIdsToDecisions(approval.optionIds),
+      request: { optionIds: approval.optionIds },
       createdAtMs: Date.now(),
     }));
   return { ...state.pendingApprovalsBySession, [recordKey]: approvals };
@@ -1304,7 +1311,7 @@ function applyDecodedSessionView(
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
-  const recordKey = projectionRecordKey(state, view, identity);
+  const recordKey = projectionRecordKey(state, identity);
   if (!recordKey) return false;
   if (epochChanged) {
     useTaskSnapshotStore.getState().reset(recordKey);
@@ -1314,11 +1321,11 @@ function applyDecodedSessionView(
     const nextIdentity = identity ?? current.meta.sessionIdentity;
     const nextMeta = nextIdentity ? {
       ...current.meta,
-      backendSessionKey: view.sessionKey,
       runtimeScopeKey: buildRuntimeScopeKey(nextIdentity.endpoint),
       agentId: nextIdentity.agentId,
       protocolId: null,
       runtimeEndpointId: nextIdentity.endpoint.runtimeInstanceId,
+      endpointSessionId: view.endpointSessionId,
       sessionIdentity: nextIdentity,
     } : current.meta;
     const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));
@@ -1382,6 +1389,13 @@ function updateProjectionFact<T>(
   return { incomplete: { facts: update(fact.incomplete.facts), gaps: fact.incomplete.gaps } };
 }
 
+function isTerminalRunPhase(phase: SessionWireRuntime['phase']): boolean {
+  return phase === 'completed'
+    || phase === 'failed'
+    || phase === 'cancelled'
+    || phase === 'interrupted';
+}
+
 function applyProjectionChange(view: SessionView, change: SessionDelta['changes'][number]): SessionView {
   switch (change.kind) {
     case 'messageDelta':
@@ -1439,10 +1453,10 @@ function applyProjectionChange(view: SessionView, change: SessionDelta['changes'
     case 'windowChanged':
       return { ...view, window: { incomplete: { facts: change.window, gaps: ['bounded_history'] } } };
     case 'runPhaseChanged':
-      return { ...view, runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null }), (runtime) => ({
+      return { ...view, runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null }), (runtime) => ({
         ...runtime,
         phase: change.phase,
-        activeRunId: ['cancelled', 'completed', 'failed', 'interrupted'].includes(change.phase) ? null : change.runId,
+        activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
       })) };
     case 'recoveryRequired':
       return { ...view, completeness: change.reason === 'native_unavailable' ? 'unavailable' : change.reason === 'native_unknown' ? 'unknown' : { incomplete: { missing: ['replay_cursor'] } } };

@@ -6,7 +6,7 @@ import { TeamChat } from '@/pages/Teams/TeamChat';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useTeamsStore, type TeamMeta } from '@/stores/teams';
 import { useSubagentsStore } from '@/stores/subagents';
-import { hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 import i18n from '@/i18n';
 
 const TEAM_SKILL_PACKAGE_PATH = '.tmp/ascendc-operator-dev-optimize-team_1.0.0';
@@ -28,7 +28,6 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
   return {
     ...actual,
     hostApiFetchDecoded: (...args: unknown[]) => hostApiFetchDecodedMock(...args),
-    waitForRuntimeJobResult: vi.fn(async () => ({ execution: { enabledPluginIds: ['team-runtime'] } })),
   };
 });
 
@@ -54,18 +53,20 @@ function teamMeta(input: Partial<TeamMeta> = {}): TeamMeta {
   };
 }
 
-const TEAM_SKILL_SELECTION_ID = `teamskill:v1:${'a'.repeat(64)}`;
-
 function validationResult(input: { version?: string } = {}) {
+  const version = input.version ?? '1.0.0';
   return {
-    status: 'valid',
+    valid: true,
     package: {
-      selectionId: TEAM_SKILL_SELECTION_ID,
       name: 'ascendc-team',
-      version: input.version ?? '1.0.0',
+      version,
       kind: 'team-skill',
-      description: `AscendC team ${input.version ?? '1.0.0'}`,
+      description: `AscendC team ${version}`,
+      dependencies: { skills: [], tools: [] },
+      sourcePath: `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
     },
+    errors: [],
+    warnings: [],
   };
 }
 
@@ -74,28 +75,41 @@ function dependencyPlan(input: {
   canProceed?: boolean;
   items?: unknown[];
 } = {}) {
+  const version = input.version ?? '1.0.0';
   return {
-    status: 'available',
-    plan: {
-      selectionId: TEAM_SKILL_SELECTION_ID,
-      packageName: 'ascendc-team',
-      packageVersion: input.version ?? '1.0.0',
-      items: input.items ?? [],
-      canProceed: input.canProceed ?? true,
-    },
+    packageName: 'ascendc-team',
+    packageVersion: version,
+    sourcePath: `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
+    items: input.items ?? [],
+    missingRequiredSkills: [],
+    missingOptionalSkills: [],
+    missingRequiredTools: [],
+    missingOptionalTools: [],
+    canProceed: input.canProceed ?? true,
   };
 }
 
-function mockTeamSkillResponses(responses: unknown[]) {
-  hostApiFetchDecodedMock.mockImplementation(async (path: string) => {
-    if (path !== '/api/team/skill') {
-      throw new Error(`Unexpected decoded host API request: ${path}`);
+function mockTeamRuntimeResponses(input: {
+  validation?: unknown;
+  dependencyPlan?: unknown;
+} = {}) {
+  const validation = input.validation ?? validationResult();
+  const plan = input.dependencyPlan ?? dependencyPlan();
+  capabilityExecuteMock.mockImplementation(async (payload: { id?: string; operationId?: string; input?: unknown }) => {
+    if (payload.id !== 'team.runtime') {
+      throw new Error(`Unexpected capability request: ${payload.id ?? 'unknown'}`);
     }
-    const response = responses.shift();
-    if (!response) {
-      throw new Error('Unexpected TeamSkill request');
+    const body = payload.input && typeof payload.input === 'object' ? payload.input as Record<string, unknown> : {};
+    switch (payload.operationId) {
+      case 'team.packageValidate':
+        return validation;
+      case 'team.dependencyPlan':
+        return plan;
+      case 'team.delete':
+        return { teamId: body.teamId, deleted: true, deletedRunIds: [], deletedAgentIds: [] };
+      default:
+        throw new Error(`Unexpected team runtime operation: ${payload.operationId ?? 'unknown'}`);
     }
-    return response;
   });
 }
 
@@ -121,6 +135,19 @@ async function openCreateDialog() {
 function setGatewayRunning() {
   act(() => {
     useRuntimeHostStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
       runtimeHost: { lifecycle: 'running' },
     });
   });
@@ -135,7 +162,7 @@ async function checkTeamSkill(path = TEAM_SKILL_PACKAGE_PATH) {
 describe('teams page', () => {
   const provisionTeamAgentsMock = vi.fn().mockResolvedValue(undefined);
   const createRunMock = vi.fn().mockResolvedValue(undefined);
-  const refreshActiveRunViewsMock = vi.fn().mockResolvedValue(undefined);
+  const refreshSnapshotMock = vi.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
     i18n.changeLanguage('en');
@@ -150,10 +177,23 @@ describe('teams page', () => {
     provisionTeamAgentsMock.mockResolvedValue(undefined);
     createRunMock.mockReset();
     createRunMock.mockResolvedValue(undefined);
-    refreshActiveRunViewsMock.mockReset();
-    refreshActiveRunViewsMock.mockResolvedValue(undefined);
+    refreshSnapshotMock.mockReset();
+    refreshSnapshotMock.mockResolvedValue(undefined);
 
     useRuntimeHostStore.setState({
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 0,
+      },
       runtimeHost: { lifecycle: 'stopped' },
       health: null,
       isInitialized: true,
@@ -171,7 +211,7 @@ describe('teams page', () => {
       provisionTeamAgents: provisionTeamAgentsMock,
       createRun: createRunMock,
       deleteRun: vi.fn().mockResolvedValue(undefined),
-      refreshActiveRunViews: refreshActiveRunViewsMock,
+      refreshSnapshot: refreshSnapshotMock,
     } as never);
 
 
@@ -238,9 +278,9 @@ describe('teams page', () => {
     expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeDisabled();
   });
 
-  it('materializes a new TeamSkill with its fixed selection request and never calls legacy provision or run', async () => {
+  it('creates a new TeamSkill team through the store runtime delivery path', async () => {
     setGatewayRunning();
-    mockTeamSkillResponses([{ selectionId: TEAM_SKILL_SELECTION_ID }, validationResult(), dependencyPlan(), { status: 'materialized' }]);
+    mockTeamRuntimeResponses();
 
     renderTeamsPage();
 
@@ -257,17 +297,9 @@ describe('teams page', () => {
       expect(state.activeTeamId).toBe(state.teams[0]?.id);
       expect(state.teams[0]?.name).toBe('Growth Team');
       expect(state.teams[0]?.teamSkillName).toBe('ascendc-team');
-      expect(hostApiFetchDecodedMock).toHaveBeenLastCalledWith('/api/team/skill', expect.any(Function), expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          operation: 'team.skill.materialize',
-          selectionId: TEAM_SKILL_SELECTION_ID,
-          teamId: state.teams[0]?.id,
-          idempotencyKey: `${state.teams[0]?.id}:team-skill-materialize`,
-        }),
-      }));
-      expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
-      expect(createRunMock).not.toHaveBeenCalled();
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(createRunMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(hostApiFetchDecodedMock).not.toHaveBeenCalled();
       expect(screen.getByTestId('location-echo')).toHaveTextContent(`/teams/${state.teams[0]?.id}`);
     });
   });
@@ -286,7 +318,7 @@ describe('teams page', () => {
         lastLoadedAt: 2,
       },
     } as never);
-    hostApiFetchDecodedMock.mockResolvedValue({ status: 'materialized' });
+    mockTeamRuntimeResponses();
 
     renderTeamsPage();
 
@@ -340,23 +372,15 @@ describe('teams page', () => {
       expect(team?.manualTeam?.members[0]).not.toHaveProperty('roleMarkdown');
       expect(team?.manualTeam?.members[1]).not.toHaveProperty('purpose');
       expect(team?.manualTeam?.members[1]).not.toHaveProperty('roleMarkdown');
-      expect(hostApiFetchDecodedMock).toHaveBeenCalledWith(
-        '/api/team/manual-materialize-and-create',
-        expect.any(Function),
-        expect.objectContaining({
-          method: 'POST',
-          body: expect.not.stringContaining('"workspaceBinding"'),
-        }),
-      );
-      expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
-      expect(createRunMock).not.toHaveBeenCalled();
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith(team?.id);
+      expect(createRunMock).toHaveBeenCalledWith(team?.id);
       expect(screen.getByTestId('location-echo')).toHaveTextContent(`/teams/${team?.id}`);
     });
   });
 
   it.each(['rejected', 'outcome_unknown'] as const)(
     'keeps Manual Team creation failed for %s without local projection or worker fallback',
-    async (status) => {
+    async (_status) => {
       setGatewayRunning();
       useSubagentsStore.setState({
         agentsResource: {
@@ -367,7 +391,8 @@ describe('teams page', () => {
           lastLoadedAt: 2,
         },
       } as never);
-      hostApiFetchDecodedMock.mockResolvedValue({ status });
+      provisionTeamAgentsMock.mockRejectedValueOnce(new Error('Manual Team materialization failed.'));
+      mockTeamRuntimeResponses();
 
       renderTeamsPage();
 
@@ -379,7 +404,7 @@ describe('teams page', () => {
 
       await waitFor(() => {
         expect(useTeamsStore.getState().teams).toHaveLength(0);
-        expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
+        expect(provisionTeamAgentsMock).toHaveBeenCalledTimes(1);
         expect(createRunMock).not.toHaveBeenCalled();
         expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams');
         expect(screen.getByText('Manual Team materialization failed.')).toBeInTheDocument();
@@ -389,9 +414,10 @@ describe('teams page', () => {
 
   it.each(['rejected', 'outcome_unknown'] as const)(
     'keeps TeamSkill creation failed for %s without legacy fallback',
-    async (status) => {
+    async (_status) => {
       setGatewayRunning();
-      mockTeamSkillResponses([{ selectionId: TEAM_SKILL_SELECTION_ID }, validationResult(), dependencyPlan(), { status }]);
+      provisionTeamAgentsMock.mockRejectedValueOnce(new Error('TeamSkill materialization failed.'));
+      mockTeamRuntimeResponses();
 
       renderTeamsPage();
 
@@ -401,7 +427,8 @@ describe('teams page', () => {
       fireEvent.click(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)!);
 
       await waitFor(() => {
-        expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
+        expect(useTeamsStore.getState().teams).toHaveLength(0);
+        expect(provisionTeamAgentsMock).toHaveBeenCalledTimes(1);
         expect(createRunMock).not.toHaveBeenCalled();
         expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams');
         expect(screen.getByText('TeamSkill materialization failed.')).toBeInTheDocument();
@@ -411,7 +438,7 @@ describe('teams page', () => {
 
   it('opens an existing TeamSkill team with the same name and version without creating duplicate role agents', async () => {
     setGatewayRunning();
-    mockTeamSkillResponses([{ selectionId: TEAM_SKILL_SELECTION_ID }, validationResult(), dependencyPlan()]);
+    mockTeamRuntimeResponses();
     useTeamsStore.setState({
       teams: [teamMeta()],
       activeTeamId: null,
@@ -429,17 +456,15 @@ describe('teams page', () => {
       expect(useTeamsStore.getState().activeTeamId).toBe('team-1');
       expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
       expect(createRunMock).not.toHaveBeenCalled();
-      expect(refreshActiveRunViewsMock).toHaveBeenCalledWith('team-1');
+      expect(refreshSnapshotMock).toHaveBeenCalledWith('team-1');
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
     });
   });
 
   it('blocks creation when a required tool is missing', async () => {
     setGatewayRunning();
-    mockTeamSkillResponses([
-      { selectionId: TEAM_SKILL_SELECTION_ID },
-      validationResult(),
-      dependencyPlan({
+    mockTeamRuntimeResponses({
+      dependencyPlan: dependencyPlan({
         canProceed: false,
         items: [{
           name: 'browser-mcp',
@@ -451,7 +476,7 @@ describe('teams page', () => {
           installable: false,
         }],
       }),
-    ]);
+    });
 
     renderTeamsPage();
 
@@ -465,7 +490,10 @@ describe('teams page', () => {
 
   it('requires explicit confirmation before replacing an existing TeamSkill version', async () => {
     setGatewayRunning();
-    mockTeamSkillResponses([{ selectionId: TEAM_SKILL_SELECTION_ID }, validationResult({ version: '1.1.0' }), dependencyPlan({ version: '1.1.0' }), { status: 'materialized' }]);
+    mockTeamRuntimeResponses({
+      validation: validationResult({ version: '1.1.0' }),
+      dependencyPlan: dependencyPlan({ version: '1.1.0' }),
+    });
     useTeamsStore.setState({
       teams: [teamMeta()],
       activeTeamId: null,
@@ -489,17 +517,8 @@ describe('teams page', () => {
       expect(state.teams).toHaveLength(1);
       expect(state.teams[0]?.id).toBe('team-1');
       expect(state.teams[0]?.teamSkillVersion).toBe('1.1.0');
-      expect(hostApiFetchDecodedMock).toHaveBeenLastCalledWith('/api/team/skill', expect.any(Function), expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          operation: 'team.skill.materialize',
-          selectionId: TEAM_SKILL_SELECTION_ID,
-          teamId: 'team-1',
-          idempotencyKey: 'team-1:team-skill-materialize',
-        }),
-      }));
-      expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
-      expect(createRunMock).not.toHaveBeenCalled();
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith('team-1');
+      expect(createRunMock).toHaveBeenCalledWith('team-1');
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
     });
   });
@@ -507,8 +526,8 @@ describe('teams page', () => {
   it('shows Resume Run for a newly pending TeamRun without coupling New Run to resume', async () => {
     const createdRun = {
       runId: 'teamrun-created',
-      graphStatus: 'pending' as const,
-      teamRevision: 1,
+      status: 'created' as const,
+      revision: 1,
       packageName: 'ascendc-team',
       packageVersion: '1.0.0',
       sourcePath: TEAM_SKILL_PACKAGE_PATH,
@@ -526,7 +545,7 @@ describe('teams page', () => {
       runByTeamId: { 'team-1': createdRun },
       resumeRun: resumeRunMock,
       syncRunList: syncRunListMock,
-      refreshPublicProjection: vi.fn().mockResolvedValue(undefined),
+      refreshSnapshot: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     render(
@@ -535,7 +554,7 @@ describe('teams page', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTitle('Run status: pending')).toBeInTheDocument();
+    expect(await screen.findByTitle('Run status: Created')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Resume Run' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Run' }));
@@ -549,7 +568,7 @@ describe('teams page', () => {
 
   it('deletes an existing team', async () => {
     setGatewayRunning();
-    hostApiFetchDecodedMock.mockResolvedValueOnce({ teamId: 'team-1', outcome: 'deleted' });
+    mockTeamRuntimeResponses();
     useTeamsStore.setState({
       teams: [teamMeta()],
       activeTeamId: 'team-1',
@@ -560,14 +579,12 @@ describe('teams page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
-      expect(hostApiFetchDecodedMock).toHaveBeenCalledWith(
-        '/api/team/lifecycle',
-        expect.any(Function),
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ action: 'deleteTeam', teamId: 'team-1', idempotencyKey: 'team-1:delete' }),
-        }),
-      );
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.delete',
+        target: { kind: 'team', teamId: 'team-1' },
+        input: { kind: 'team', teamId: 'team-1' },
+      }), { timeoutMs: 60_000 });
       expect(useTeamsStore.getState().teams).toHaveLength(0);
       expect(useTeamsStore.getState().activeTeamId).toBeNull();
     });

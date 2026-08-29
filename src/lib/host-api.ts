@@ -6,7 +6,6 @@ import {
   type HostApiProxyEnvelope,
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
-import { subscribeHostEvent } from './host-events';
 import {
   buildCapabilityScopeKey,
   agentScope,
@@ -19,7 +18,14 @@ import {
 import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 import type { CapabilityDescriptor } from '../../electron/desktop-contract/capability-descriptor';
 import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../types/runtime-topology';
+import {
+  logSessionTrace,
+  summarizeError,
+  summarizeIdentifier,
+  summarizeSessionIdentity,
+} from './session-trace';
 import type {
+  SessionApprovalDecision,
   SessionApprovalRequestItem,
   SessionCatalogItem,
   SessionListResult,
@@ -28,18 +34,12 @@ import type {
 
 const DEFAULT_HOST_API_PORT = 13210;
 const DEFAULT_HOST_API_BASE = `http://127.0.0.1:${DEFAULT_HOST_API_PORT}`;
-const SESSION_ABORT_TIMEOUT_MS = 5_000;
-const SESSION_PROMPT_TIMEOUT_MS = 10_000;
-const SESSION_PATCH_TIMEOUT_MS = 15_000;
+const SESSION_PEER_RPC_TIMEOUT_MS = 30_000;
 const WORKSPACE_FILE_CAPABILITY_ID = 'workspace.file';
-const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
 const SESSION_MANAGEMENT_CAPABILITY_ID = 'session.management';
 const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
 const SESSION_APPROVAL_CAPABILITY_ID = 'session.approval';
 const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
-const RUNTIME_JOB_INITIAL_POLL_MS = 500;
-const RUNTIME_JOB_MAX_POLL_MS = 5_000;
-const RUNTIME_JOB_NOT_FOUND_GRACE_MS = 2_000;
 const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
 const capabilityScopeCache = new Map<string, { scope: RuntimeScope; expiresAt: number }>();
 const capabilityScopeInflight = new Map<string, Promise<RuntimeScope>>();
@@ -55,34 +55,6 @@ type SessionCapabilityOptions = {
 };
 
 const SESSION_TRACE_HEADER = 'X-MatchaClaw-Session-Trace';
-
-export interface RuntimeJobSnapshot<TResult = unknown> {
-  id: string;
-  type: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed';
-  queuedAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  attempts: number;
-  maxAttempts: number;
-  progress?: {
-    updatedAt: number;
-    percent?: number;
-    message?: string;
-  };
-  result?: TResult;
-  error?: string;
-}
-
-export interface RuntimeJobSubmission<TResult = unknown> {
-  success: true;
-  job: RuntimeJobSnapshot<TResult>;
-}
-
-export interface RuntimeJobLookupResult<TResult = unknown> {
-  success: true;
-  job: RuntimeJobSnapshot<TResult> | null;
-}
 
 export interface OpenClawStatusPayload {
   packageExists: boolean;
@@ -184,7 +156,7 @@ export type HostSessionAbortResult = Readonly<{ outcome?: string; projection?: u
 
 export type HostSessionPromptResult = Readonly<{
   success?: boolean;
-  outcome?: 'queued' | 'succeeded' | 'target_rejected' | 'unknown';
+  outcome?: 'queued' | 'succeeded' | 'target_rejected' | 'unavailable' | 'unknown';
   routeKey?: string;
   runId?: string;
   status?: 'started' | 'in_flight' | 'ok';
@@ -431,13 +403,13 @@ export async function hostUvCheck(): Promise<boolean> {
   return hostApiFetch('/api/toolchain/uv/check');
 }
 
-export async function hostUvInstallAll(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
-  return hostCapabilityExecute(buildCapabilityExecutePayload({
+export async function hostUvInstallAll(endpoint: RuntimeEndpointRef): Promise<void> {
+  await hostCapabilityExecute(buildCapabilityExecutePayload({
     id: 'platform.runtime',
     operationId: 'toolchain.installUv',
     scope: runtimeInstanceScope(endpoint),
-    target: { kind: 'runtime-job' },
-  }));
+    target: { kind: 'platform-runtime' },
+  }), { timeoutMs: 120000 });
 }
 
 type WorkspaceFileRequest = {
@@ -934,7 +906,7 @@ function sessionCapabilityExecute<TResult>(input: {
     scope: input.scope,
     target: input.target,
     body: input.payload,
-  }), options);
+  }), { ...options, timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS });
 }
 
 function sessionIdentityCapabilityExecute<TResult>(input: {
@@ -1052,145 +1024,18 @@ async function hostCapabilityExecute<TResult = unknown>(
   });
 }
 
-async function runtimeHostCapabilityExecute<TResult>(operationId: string, endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
-    id: RUNTIME_HOST_CAPABILITY_ID,
-    operationId,
-    scope: runtimeInstanceScope(endpoint),
-    target: { kind: 'gateway-control' },
-    body: input,
-  }));
-}
 
-async function resolveRuntimeHostJobEndpoint(): Promise<RuntimeEndpointRef> {
-  const scope = await resolveSingleCapabilityScope(RUNTIME_HOST_CAPABILITY_ID);
-  if (scope.kind !== 'runtime-instance') {
-    throw new Error(`runtime.host job lookup requires runtime-instance scope, got ${scope.kind}`);
-  }
-  return scope.endpoint;
-}
-
-export async function hostRuntimeJobGet<TResult = unknown>(jobId: string, endpoint: RuntimeEndpointRef): Promise<RuntimeJobLookupResult<TResult>> {
-  return await hostCapabilityExecute<RuntimeJobLookupResult<TResult>>(buildCapabilityExecutePayload({
-    id: RUNTIME_HOST_CAPABILITY_ID,
-    operationId: 'runtimeHost.jobGet',
-    scope: runtimeInstanceScope(endpoint),
-    target: { kind: 'runtime-job', jobId },
-    body: { jobId },
-  }));
-}
-
-export async function waitForRuntimeJobResult<TResult = void>(
-  jobId: string,
-  options: {
-    timeoutMs?: number;
-    intervalMs?: number;
-    endpoint?: RuntimeEndpointRef;
-  } = {},
-): Promise<TResult> {
-  const timeoutMs = options.timeoutMs ?? 120000;
-  const intervalMs = options.intervalMs ?? RUNTIME_JOB_INITIAL_POLL_MS;
-
-  return await new Promise<TResult>((resolve, reject) => {
-    let settled = false;
-    const startedAt = Date.now();
-    let timeoutHandle: number | null = null;
-    let pollHandle: number | null = null;
-    let unsubscribe: (() => void) | null = null;
-    let pollIntervalMs = intervalMs;
-
-    const clearHandles = () => {
-      if (timeoutHandle !== null) {
-        window.clearTimeout(timeoutHandle);
-        timeoutHandle = null;
-      }
-      if (pollHandle !== null) {
-        window.clearTimeout(pollHandle);
-        pollHandle = null;
-      }
-      unsubscribe?.();
-      unsubscribe = null;
-    };
-
-    const finalize = (action: () => void) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearHandles();
-      action();
-    };
-
-    const handleSnapshot = (snapshot: RuntimeJobSnapshot<TResult> | null | undefined): boolean => {
-      if (!snapshot) {
-        if (Date.now() - startedAt >= RUNTIME_JOB_NOT_FOUND_GRACE_MS) {
-          finalize(() => reject(new Error(`runtime job not found: ${jobId}`)));
-          return true;
-        }
-        return false;
-      }
-      if (snapshot.id !== jobId) {
-        return false;
-      }
-      if (snapshot.status === 'succeeded') {
-        finalize(() => resolve(snapshot.result as TResult));
-        return true;
-      }
-      if (snapshot.status === 'failed') {
-        finalize(() => reject(new Error(snapshot.error || `runtime job failed: ${snapshot.type}`)));
-        return true;
-      }
-      return false;
-    };
-
-    const poll = () => {
-      if (settled) {
-        return;
-      }
-      void (async () => hostRuntimeJobGet<TResult>(jobId, options.endpoint ?? await resolveRuntimeHostJobEndpoint()))()
-        .then((response) => {
-          if (settled || handleSnapshot(response.job)) {
-            return;
-          }
-          pollHandle = window.setTimeout(poll, pollIntervalMs);
-          pollIntervalMs = Math.min(Math.max(pollIntervalMs * 2, intervalMs), RUNTIME_JOB_MAX_POLL_MS);
-        })
-        .catch((error) => {
-          finalize(() => reject(error));
-        });
-    };
-
-    unsubscribe = subscribeHostEvent<RuntimeJobSnapshot<TResult>>('runtime-job:done', (snapshot) => {
-      handleSnapshot(snapshot);
-    });
-
-    timeoutHandle = window.setTimeout(() => {
-      finalize(() => reject(new Error(`runtime job timed out: ${jobId}`)));
-    }, timeoutMs);
-
-    poll();
-  });
-}
-
-export async function hostRuntimePrepareGatewayLaunch(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.prepareGatewayLaunch', endpoint, input);
-}
-
-export async function hostRuntimeGatewayLifecycle(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayLifecycle', endpoint, input);
-}
-
-export async function hostRuntimeGatewayReady(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayReady', endpoint, input);
-}
-
-export async function hostRuntimeGatewayControlUiAutoApprove(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
-  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayControlUiAutoApprove', endpoint, input);
+function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }>(
+  payload: T,
+): T & { sessionKey: string } {
+  return {
+    ...payload,
+    sessionKey: payload.sessionIdentity.sessionKey,
+  };
 }
 
 export async function hostSessionWindowFetch(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     mode?: 'latest' | 'older' | 'newer';
@@ -1202,13 +1047,12 @@ export async function hostSessionWindowFetch(
   return sessionIdentityCapabilityExecute<HostSessionWindowResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.window',
-    payload,
+    payload: bindSessionIdentityInput(payload),
   });
 }
 
 export async function hostSessionNew(
   payload: {
-    sessionKey?: string;
     endpointSessionId?: string;
     endpoint: RuntimeEndpointRef;
     agentId: string;
@@ -1226,7 +1070,6 @@ export async function hostSessionNew(
 
 export async function hostSessionDelete(
   payload: {
-    sessionKey: string;
     sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; error?: string }> {
@@ -1239,7 +1082,6 @@ export async function hostSessionDelete(
 
 export async function hostSessionRename(
   payload: {
-    sessionKey: string;
     sessionIdentity: SessionIdentity;
     label: string;
   },
@@ -1253,7 +1095,6 @@ export async function hostSessionRename(
 
 export async function hostSessionArchive(
   payload: {
-    sessionKey: string;
     sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
@@ -1266,7 +1107,6 @@ export async function hostSessionArchive(
 
 export async function hostSessionUnarchive(
   payload: {
-    sessionKey: string;
     sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
@@ -1279,7 +1119,6 @@ export async function hostSessionUnarchive(
 
 export async function hostSessionUpdateStatus(
   payload: {
-    sessionKey: string;
     sessionIdentity: SessionIdentity;
     status: 'active' | 'completed' | 'archived' | 'deleted';
   },
@@ -1293,23 +1132,38 @@ export async function hostSessionUpdateStatus(
 
 export async function hostSessionLoad(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     limit?: number;
   },
   options?: SessionCapabilityOptions,
 ): Promise<HostSessionLoadResult> {
-  return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
-    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
-    operationId: 'sessions.load',
-    payload,
-  }, options);
+  const input = bindSessionIdentityInput(payload);
+  logSessionTrace('history.host-api.request', options?.traceId, {
+    sessionKey: summarizeIdentifier(input.sessionKey),
+    endpointSessionId: summarizeIdentifier(input.endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(input.sessionIdentity),
+    limit: input.limit ?? null,
+    timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
+  });
+  try {
+    const result = await sessionIdentityCapabilityExecute<HostSessionLoadResult>({
+      capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+      operationId: 'sessions.load',
+      payload: input,
+    }, options);
+    logSessionTrace('history.host-api.response', options?.traceId, {
+      rawType: result && typeof result === 'object' ? 'object' : typeof result,
+    });
+    return result;
+  } catch (error) {
+    logSessionTrace('history.host-api.error', options?.traceId, summarizeError(error));
+    throw error;
+  }
 }
 
 export async function hostSessionSwitch(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     limit?: number;
@@ -1318,13 +1172,12 @@ export async function hostSessionSwitch(
   return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.switch',
-    payload,
+    payload: bindSessionIdentityInput(payload),
   });
 }
 
 export async function hostSessionResume(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
   },
@@ -1332,13 +1185,12 @@ export async function hostSessionResume(
   return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.resume',
-    payload,
+    payload: bindSessionIdentityInput(payload),
   });
 }
 
 export async function hostSessionState(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
   },
@@ -1346,13 +1198,12 @@ export async function hostSessionState(
   return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.state',
-    payload,
+    payload: bindSessionIdentityInput(payload),
   });
 }
 
 export async function hostSessionAbort(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     approvalIds?: string[];
@@ -1361,12 +1212,12 @@ export async function hostSessionAbort(
   return sessionIdentityCapabilityExecute<HostSessionAbortResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: 'sessions.abort',
-    payload,
-  }, { timeoutMs: SESSION_ABORT_TIMEOUT_MS });
+    payload: bindSessionIdentityInput(payload),
+  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS });
 }
 
 export async function hostSessionApprovals(
-  payload: { sessionIdentity: SessionIdentity },
+  payload: { sessionIdentity: SessionIdentity; endpointSessionId: string },
 ): Promise<{ approvals: SessionApprovalRequestItem[] }> {
   return sessionIdentityCapabilityExecute<{ approvals: SessionApprovalRequestItem[] }>({
     capabilityId: SESSION_APPROVAL_CAPABILITY_ID,
@@ -1378,17 +1229,17 @@ export async function hostSessionApprovals(
 export async function hostSessionResolveApproval(
   payload: {
     id: string;
-    sessionKey: string;
-    endpointSessionId?: string;
+    endpointSessionId: string;
     sessionIdentity: SessionIdentity;
-    decision: string;
+    decision: SessionApprovalDecision;
+    request?: Record<string, unknown>;
   },
 ): Promise<unknown> {
   return sessionIdentityCapabilityExecute<unknown>({
     capabilityId: SESSION_APPROVAL_CAPABILITY_ID,
     operationId: 'approvals.resolve',
     target: { kind: 'approval', identity: payload.sessionIdentity, approvalId: payload.id },
-    payload,
+    payload: bindSessionIdentityInput(payload),
   });
 }
 
@@ -1398,23 +1249,36 @@ export type HostSessionModelSelectionResult = Readonly<{
 
 export async function hostSessionPatch(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     modelSelectionId: string;
   },
+  options?: Pick<SessionCapabilityOptions, 'traceId'>,
 ): Promise<HostSessionModelSelectionResult> {
-  return sessionIdentityCapabilityExecute<HostSessionModelSelectionResult>({
-    capabilityId: SESSION_MODEL_SELECTION_CAPABILITY_ID,
-    operationId: 'sessions.patchModel',
-    target: { kind: 'model-selection', identity: payload.sessionIdentity, modelSelectionId: payload.modelSelectionId },
-    payload,
-  }, { timeoutMs: SESSION_PATCH_TIMEOUT_MS });
+  const input = bindSessionIdentityInput(payload);
+  logSessionTrace('model-selection.host-api.request', options?.traceId, {
+    endpointSessionId: summarizeIdentifier(input.endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(input.sessionIdentity),
+    sessionKey: summarizeIdentifier(input.sessionKey),
+    modelSelectionId: summarizeIdentifier(input.modelSelectionId),
+  });
+  try {
+    const result = await sessionIdentityCapabilityExecute<HostSessionModelSelectionResult>({
+      capabilityId: SESSION_MODEL_SELECTION_CAPABILITY_ID,
+      operationId: 'sessions.patchModel',
+      target: { kind: 'model-selection', identity: payload.sessionIdentity, modelSelectionId: payload.modelSelectionId },
+      payload: input,
+    }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS, traceId: options?.traceId });
+    logSessionTrace('model-selection.host-api.response', options?.traceId, { outcome: result.outcome });
+    return result;
+  } catch (error) {
+    logSessionTrace('model-selection.host-api.error', options?.traceId, summarizeError(error));
+    throw error;
+  }
 }
 
 export async function hostSessionPrompt(
   payload: {
-    sessionKey: string;
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     message: string;
@@ -1432,6 +1296,6 @@ export async function hostSessionPrompt(
   return sessionIdentityCapabilityExecute<HostSessionPromptResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: payload.attachments?.length ? 'sessions.sendWithMedia' : 'sessions.prompt',
-    payload,
-  }, { timeoutMs: SESSION_PROMPT_TIMEOUT_MS, traceId: options?.traceId });
+    payload: bindSessionIdentityInput(payload),
+  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS, traceId: options?.traceId });
 }

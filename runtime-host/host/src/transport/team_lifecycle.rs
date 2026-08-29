@@ -2,7 +2,9 @@ pub(crate) mod server;
 
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/lifecycle";
 const AUTHORIZATION_SCOPE: &str = "team:write";
@@ -262,10 +264,14 @@ pub(crate) fn decode(
     }
 }
 
-pub(crate) async fn handle(owner: &owner::Handle, request: Request, observed_at: u64) -> Delivery {
+pub(crate) async fn handle(
+    owner: &OrganizationHandle,
+    request: Request,
+    observed_at: u64,
+) -> Delivery {
     match request {
         Request::List { team_id } => owner
-            .list_team_runs(team_id)
+            .run_list(team_id)
             .await
             .map_or(Delivery::Unavailable, Delivery::Listed),
         Request::Create {
@@ -278,7 +284,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, observed_at:
         } => {
             let response_run_id = run_id.as_str().to_owned();
             match owner
-                .create_team_run_for_team(
+                .run_create(
                     team_id,
                     run_id,
                     idempotency_key,
@@ -310,8 +316,12 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, observed_at:
             idempotency_key,
         } => {
             let response_team_id = team_id.as_str().to_owned();
+            let idempotency_key = match organization::IdempotencyKey::try_new(idempotency_key) {
+                Ok(idempotency_key) => idempotency_key,
+                Err(_) => return Delivery::Rejected,
+            };
             match owner
-                .delete_team_and_remove(team_id, idempotency_key, observed_at)
+                .team_delete(team_id, idempotency_key, observed_at)
                 .await
             {
                 Ok(Ok(crate::composition::TeamDeleteOutcome::Deleted)) => Delivery::TeamDeleted {
@@ -339,10 +349,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, observed_at:
             idempotency_key,
         } => {
             let response_run_id = run_id.as_str().to_owned();
-            match owner
-                .begin_team_run_cancellation(run_id, idempotency_key, observed_at)
-                .await
-            {
+            match owner.run_cancel(run_id, idempotency_key, observed_at).await {
                 Ok(Ok(outcome)) => Delivery::Cancellation {
                     run_id: response_run_id,
                     state: cancellation_state(outcome),
@@ -357,7 +364,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, observed_at:
         } => {
             let response_run_id = run_id.as_str().to_owned();
             match owner
-                .delete_team_run_and_purge(run_id, idempotency_key, observed_at)
+                .run_delete_and_purge(run_id, idempotency_key, observed_at)
                 .await
             {
                 Ok(Ok(outcome)) => Delivery::RunDeleted {

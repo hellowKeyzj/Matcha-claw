@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
+import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
@@ -57,7 +58,6 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
   return {
     meta: {
       ...base.meta,
-      backendSessionKey: sessionKey,
       runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
       agentId,
       protocolId: 'openclaw-v4',
@@ -132,6 +132,7 @@ function buildOpenClawEndpointSummary(overrides: Record<string, unknown> = {}) {
     capabilityFamilies: [
       { family: 'session' as const, availability: 'supported' as const },
       { family: 'task' as const, availability: 'supported' as const },
+      { family: 'subagent' as const, availability: 'supported' as const },
       { family: 'team' as const, availability: 'supported' as const },
       { family: 'cron' as const, availability: 'supported' as const },
       { family: 'workspace' as const, availability: 'supported' as const },
@@ -174,6 +175,12 @@ describe('chat store newSession agent targeting', () => {
       return buildCreateView(`agent:${agentId}:session-${Date.now()}`, agentId);
     });
     loadHistory.mockClear();
+    useRuntimeEndpointsStore.setState({
+      status: 'idle',
+      error: null,
+      endpoints: [],
+      hasLoadedOnce: false,
+    });
     useChatStore.setState({
       foregroundHistorySessionKey: null,
       mutating: false,
@@ -197,6 +204,10 @@ describe('chat store newSession agent targeting', () => {
           endpoint: openClawTestRuntimeEndpoint,
           agentIds: ['main', 'test'],
           acceptsDynamicAgents: true,
+          agentCatalog: {
+            source: 'subagent-management',
+            seedAgents: [{ id: 'main', name: 'main' }, { id: 'test', name: 'test' }],
+          },
           sessionPromptScopes: [mainAgentScope, testAgentScope],
           defaultSessionPromptScope: mainAgentScope,
         }],
@@ -536,7 +547,7 @@ describe('chat store newSession agent targeting', () => {
     }), expect.objectContaining({ traceId: null }));
   });
 
-  it('requires endpoint lifecycle and session capability readiness before exposing session targets', async () => {
+  it('keeps startup-only session endpoints in preparing state instead of showing no runtime', async () => {
     hostRuntimeEndpointsListMock.mockResolvedValue({
       endpoints: [buildOpenClawEndpointSummary({
         lifecycle: { phase: 'connecting', connected: true, ready: false, updatedAt: null },
@@ -546,13 +557,31 @@ describe('chat store newSession agent targeting', () => {
     await useChatStore.getState().bootstrapSessionRuntime();
 
     expect(useChatStore.getState().sessionRuntimeCatalog).toEqual(expect.objectContaining({
-      status: 'error',
+      status: 'loading',
+      error: null,
       endpoints: [],
       defaultSessionPromptScope: null,
     }));
+    expect(useChatStore.getState().error).toBeNull();
   });
 
-  it('初始化固定公开的 OpenClaw local session target，不请求泛化 endpoint catalog', async () => {
+  it('keeps Host API proxy startup failures in preparing state instead of showing no runtime', async () => {
+    hostRuntimeEndpointsListMock.mockRejectedValueOnce(
+      Object.assign(new Error('Host API request is unavailable.'), { code: 'UNAVAILABLE' }),
+    );
+
+    await useChatStore.getState().bootstrapSessionRuntime();
+
+    expect(useChatStore.getState().sessionRuntimeCatalog).toEqual(expect.objectContaining({
+      status: 'loading',
+      error: null,
+      endpoints: [],
+      defaultSessionPromptScope: null,
+    }));
+    expect(useChatStore.getState().error).toBeNull();
+  });
+
+  it('bootstrapSessionRuntime loads ready runtime endpoint catalog', async () => {
     await useChatStore.getState().bootstrapSessionRuntime();
 
     expect(useChatStore.getState().sessionRuntimeCatalog).toEqual(expect.objectContaining({

@@ -1,5 +1,12 @@
 import { create } from 'zustand';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeEndpoint,
+  summarizeError,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
 import type {
   AgentScope,
 } from '../../electron/desktop-contract/runtime-address';
@@ -325,11 +332,37 @@ async function resolveAgentToolConfigScope(): Promise<AgentScope> {
   return scope;
 }
 
-function buildAgentToolConfigTarget(scope: AgentScope, agentId: string): CapabilityTarget {
+function buildAgentToolConfigTarget(agentId: string): CapabilityTarget {
   return {
     kind: 'subagent',
-    agentId: scope.agentId,
     subagentId: agentId,
+  };
+}
+
+function summarizeToolConfigPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { contract: 'invalid' };
+  }
+  const record = payload as Record<string, unknown>;
+  const view = record.resultType === 'updated' && record.view && typeof record.view === 'object' && !Array.isArray(record.view)
+    ? record.view as Record<string, unknown>
+    : record.resultType === 'staleRevision' && record.latestView && typeof record.latestView === 'object' && !Array.isArray(record.latestView)
+      ? record.latestView as Record<string, unknown>
+      : record;
+  return {
+    contract: typeof record.resultType === 'string' ? 'mutation' : 'view',
+    resultType: typeof record.resultType === 'string' ? record.resultType : null,
+    supportType: view.support && typeof view.support === 'object' && !Array.isArray(view.support)
+      ? (view.support as Record<string, unknown>).supportType ?? null
+      : null,
+    supportReason: view.support && typeof view.support === 'object' && !Array.isArray(view.support)
+      ? (view.support as Record<string, unknown>).reason ?? null
+      : null,
+    agentId: summarizeIdentifier(typeof view.agentId === 'string' ? view.agentId : null),
+    revision: summarizeIdentifier(typeof view.revision === 'string' ? view.revision : null),
+    toolProfileCount: Array.isArray(view.toolProfiles) ? view.toolProfiles.length : null,
+    toolGroupCount: Array.isArray(view.toolGroups) ? view.toolGroups.length : null,
+    toolOptionCount: Array.isArray(view.toolOptions) ? view.toolOptions.length : null,
   };
 }
 
@@ -338,17 +371,49 @@ async function agentToolConfigCapabilityExecute<TResult>(
   input: Record<string, unknown>,
   targetAgentId: string,
 ): Promise<TResult> {
-  const scope = await resolveAgentToolConfigScope();
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: SUBAGENT_TOOLS_CAPABILITY_ID,
+  const traceId = createSessionTraceId(`subagent-tools:${operationId}`);
+  let scope: AgentScope;
+  try {
+    scope = await resolveAgentToolConfigScope();
+  } catch (error) {
+    logSessionTrace('renderer.subagent.tools.scope-error', traceId, {
       operationId,
-      scope,
-      target: buildAgentToolConfigTarget(scope, targetAgentId),
-      input,
-    }),
+      targetAgentId: summarizeIdentifier(targetAgentId),
+      error: summarizeError(error),
+    });
+    throw error;
+  }
+  const target = buildAgentToolConfigTarget(targetAgentId);
+  logSessionTrace('renderer.subagent.tools.request', traceId, {
+    operationId,
+    endpoint: summarizeEndpoint(scope.endpoint),
+    scopeAgentId: summarizeIdentifier(scope.agentId),
+    targetAgentId: summarizeIdentifier(targetAgentId),
   });
+  try {
+    const result = await hostApiFetch<TResult>('/api/capabilities/execute', {
+      method: 'POST',
+      traceId,
+      body: JSON.stringify({
+        id: SUBAGENT_TOOLS_CAPABILITY_ID,
+        operationId,
+        scope,
+        target,
+        input,
+      }),
+    });
+    logSessionTrace('renderer.subagent.tools.response', traceId, {
+      operationId,
+      ...summarizeToolConfigPayload(result),
+    });
+    return result;
+  } catch (error) {
+    logSessionTrace('renderer.subagent.tools.error', traceId, {
+      operationId,
+      error: summarizeError(error),
+    });
+    throw error;
+  }
 }
 
 async function fetchAgentToolConfigView(agentId: string): Promise<AgentToolConfigView> {

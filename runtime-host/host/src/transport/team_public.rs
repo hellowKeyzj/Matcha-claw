@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const OPERATION_ID: &str = "team.public.read";
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/public";
@@ -83,9 +85,9 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn read(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn read(owner: &OrganizationHandle, request: Request) -> Delivery {
     match owner
-        .query_team_public_projection(request.team_id, request.run_id)
+        .team_run_public_projection(request.team_id, request.run_id)
         .await
     {
         Ok(organization::run::public_projection::TeamPublicQueryOutcome::Available(projection)) => {

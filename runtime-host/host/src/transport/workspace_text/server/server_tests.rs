@@ -24,7 +24,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, owner};
+use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -76,11 +76,11 @@ struct RunningServer {
 impl RunningServer {
     async fn start() -> Self {
         let root = TestRoot::new();
-        let (mut host, events) = Host::new(host_input(&root)).expect("construct host");
+        let (mut host, events, handles) = Host::new(host_input(&root)).expect("construct host");
         host.start().await.expect("start host");
         let owner = owner::Owner::spawn(host, events);
         let verifier = CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
-        let server = Server::bind(0, verifier, owner.handle())
+        let server = Server::bind(0, verifier, handles.workspace.clone())
             .await
             .expect("bind server");
         let port = server.port();
@@ -427,6 +427,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
         cron_transport_port: 18_791,
+        runtime_observation: RuntimeObservationConfig::off(),
     }
 }
 

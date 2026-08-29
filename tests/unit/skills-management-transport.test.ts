@@ -15,41 +15,31 @@ function nativeResponse(body: unknown, status = 200) {
 describe('skills management fixed delivery transport', () => {
   it('uses concrete endpoints and short-lived signed decisions', async () => {
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(nativeResponse({ results: [] }))
       .mockResolvedValueOnce(nativeResponse({ skill: null }));
     const transport = createSkillsManagementTransport(issuer(), 3227, fetcher);
 
-    await expect(transport.search({ query: 'calendar', limit: 10 })).resolves.toEqual({
-      status: 200,
-      body: { results: [] },
-    });
     await expect(transport.detail({ slug: 'calendar' })).resolves.toEqual({
       status: 200,
       body: { skill: null },
     });
 
-    expect(fetcher).toHaveBeenNthCalledWith(1, `http://127.0.0.1:3227${SKILLS_ENDPOINTS.search}`, expect.objectContaining({
+    expect(fetcher).toHaveBeenNthCalledWith(1, `http://127.0.0.1:3227${SKILLS_ENDPOINTS.detail}`, expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ query: 'calendar', limit: 10 }),
+      body: JSON.stringify({ slug: 'calendar' }),
     }));
     const authorization = fetcher.mock.calls[0]?.[1]?.headers?.Authorization as string;
     const encoded = authorization.slice('Bearer capability-decision.v1.'.length).split('.')[0];
     expect(JSON.parse(Buffer.from(encoded, 'base64url').toString())).toMatchObject({
-      endpoint: SKILLS_ENDPOINTS.search,
-      scope: 'skills:search',
-      capability: 'skills.search',
-      subject: 'skills-search',
+      endpoint: SKILLS_ENDPOINTS.detail,
+      scope: 'skills:read',
+      capability: 'skills.detail',
+      subject: 'skills-detail',
     });
   });
 
   it('rejects unknown request fields before loopback delivery', async () => {
     const fetcher = vi.fn();
     const transport = createSkillsManagementTransport(issuer(), 3227, fetcher);
-
-    await expect(transport.search({ query: 'calendar', extra: true })).resolves.toEqual({
-      status: 400,
-      body: { outcome: 'rejected' },
-    });
     await expect(transport.beginUpload({
       kind: 'skill-archive', slug: 'calendar', sizeBytes: 10, path: 'C:/private',
     })).resolves.toEqual({ status: 400, body: { outcome: 'rejected' } });
@@ -111,8 +101,8 @@ describe('skills management fixed delivery transport', () => {
       status: 404,
       body: { outcome: 'notFound' },
     });
-    await expect(transport.search({})).resolves.toEqual({ status: 503, body: { outcome: 'unknown' } });
-    await expect(transport.search({})).resolves.toEqual({ status: 400, body: { outcome: 'rejected' } });
+    await expect(transport.detail({ slug: 'calendar' })).resolves.toEqual({ status: 503, body: { outcome: 'unknown' } });
+    await expect(transport.detail({ slug: 'calendar' })).resolves.toEqual({ status: 400, body: { outcome: 'rejected' } });
   });
 
   it('delivers local import and readme through fixed signed endpoints', async () => {
@@ -185,7 +175,7 @@ describe('skills management fixed delivery transport', () => {
       vi.fn().mockRejectedValue(new Error('secret at C:/private/skills')),
     );
 
-    await expect(malformed.search({})).resolves.toEqual({ status: 503, body: { outcome: 'unknown' } });
+    await expect(malformed.detail({ slug: 'calendar' })).resolves.toEqual({ status: 503, body: { outcome: 'unknown' } });
     await expect(malformedReadme.readme({ skillKey: 'calendar' })).resolves.toEqual({
       status: 503,
       body: { outcome: 'unknown' },

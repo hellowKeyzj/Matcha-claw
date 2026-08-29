@@ -89,7 +89,7 @@ impl AgentsRequest {
         &self.id
     }
 
-    pub(crate) fn command(self) -> Result<agents::Command, RequestError> {
+    pub(crate) fn command(self, trace_id: Option<&str>) -> Result<agents::Command, RequestError> {
         let endpoint = self.scope.endpoint.native_endpoint();
         let operation = Operation::parse(&self.operation_id).ok_or(RequestError::Invalid)?;
         let input = Input::decode(operation, self.input)?;
@@ -209,7 +209,11 @@ impl AgentsRequest {
                 skills,
             }),
             (Operation::SkillConfiguration, Input::SkillConfiguration { agent_id, .. }) => {
-                Ok(agents::Command::SkillConfiguration { endpoint, agent_id })
+                Ok(agents::Command::SkillConfiguration {
+                    endpoint,
+                    agent_id,
+                    trace_id: trace_id.map(str::to_owned),
+                })
             }
             (
                 Operation::SetSkillConfiguration,
@@ -227,9 +231,14 @@ impl AgentsRequest {
                     SkillSelectionInput::InheritDefaultSkills => openclaw::projection::agent_configuration::SkillSelection::InheritDefaultSkills,
                     SkillSelectionInput::SetExplicitSkillAllowlist { skill_keys } => openclaw::projection::agent_configuration::SkillSelection::ExplicitSkillAllowlist(skill_keys),
                 },
+                trace_id: trace_id.map(str::to_owned),
             }),
             (Operation::ToolConfiguration, Input::ToolConfiguration { agent_id, .. }) => {
-                Ok(agents::Command::ToolConfiguration { endpoint, agent_id })
+                Ok(agents::Command::ToolConfiguration {
+                    endpoint,
+                    agent_id,
+                    trace_id: trace_id.map(str::to_owned),
+                })
             }
             (
                 Operation::SetToolConfiguration,
@@ -247,6 +256,7 @@ impl AgentsRequest {
                     ToolSelectionInput::InheritDefaultTools => openclaw::projection::agent_configuration::ToolSelection::InheritDefaultTools,
                     ToolSelectionInput::SetAgentToolPolicy { profile, allow, deny } => openclaw::projection::agent_configuration::ToolSelection::Policy { profile, allow, deny },
                 },
+                trace_id: trace_id.map(str::to_owned),
             }),
             _ => Err(RequestError::Invalid),
         }
@@ -953,10 +963,10 @@ fn skill_configuration_delivery(
     use openclaw::projection::agent_configuration::SkillConfigurationOutcome;
     match outcome {
         SkillConfigurationOutcome::View(view) => {
-            Delivery::SkillConfiguration(skill_view_response("view", view))
+            Delivery::SkillConfiguration(skill_view_value(view))
         }
         SkillConfigurationOutcome::Updated(view) => {
-            Delivery::SkillConfiguration(skill_view_response("updated", view))
+            Delivery::SkillConfiguration(skill_updated_response(view))
         }
         SkillConfigurationOutcome::Stale(view) => Delivery::SkillConfiguration(serde_json::json!({
             "success": true,
@@ -986,11 +996,9 @@ fn tool_configuration_delivery(
 ) -> Delivery {
     use openclaw::projection::agent_configuration::ToolConfigurationOutcome;
     match outcome {
-        ToolConfigurationOutcome::View(view) => {
-            Delivery::ToolConfiguration(tool_view_response("view", view))
-        }
+        ToolConfigurationOutcome::View(view) => Delivery::ToolConfiguration(tool_view_value(view)),
         ToolConfigurationOutcome::Updated(view) => {
-            Delivery::ToolConfiguration(tool_view_response("updated", view))
+            Delivery::ToolConfiguration(tool_updated_response(view))
         }
         ToolConfigurationOutcome::Stale(view) => Delivery::ToolConfiguration(serde_json::json!({
             "success": true,
@@ -1029,11 +1037,10 @@ fn unsupported_tool_response() -> Value {
     })
 }
 
-fn skill_view_response(
-    result_type: &'static str,
+fn skill_updated_response(
     view: openclaw::projection::agent_configuration::SkillConfigurationView,
 ) -> Value {
-    serde_json::json!({ "success": true, "resultType": result_type, "view": skill_view_value(view) })
+    serde_json::json!({ "success": true, "resultType": "updated", "view": skill_view_value(view) })
 }
 
 fn skill_view_value(
@@ -1080,11 +1087,10 @@ fn skill_option_value(option: &openclaw::projection::agent_configuration::SkillO
     })
 }
 
-fn tool_view_response(
-    result_type: &'static str,
+fn tool_updated_response(
     view: openclaw::projection::agent_configuration::ToolConfigurationView,
 ) -> Value {
-    serde_json::json!({ "success": true, "resultType": result_type, "view": tool_view_value(view) })
+    serde_json::json!({ "success": true, "resultType": "updated", "view": tool_view_value(view) })
 }
 
 fn tool_view_value(
@@ -1117,6 +1123,7 @@ fn tool_option_value(option: &openclaw::projection::agent_configuration::ToolOpt
         "toolKey": option.key(), "displayName": option.display_name(),
         "optionType": if option.group_key().is_some() { "tool" } else { "group" },
         "description": option.description(), "source": option.source(), "pluginId": option.plugin_id(),
+        "optional": option.optional(), "risk": option.risk(), "tags": option.tags(), "defaultProfiles": option.default_profiles(),
         "groupKey": option.group_key(), "groupDisplayName": option.group_display_name(),
     })
 }

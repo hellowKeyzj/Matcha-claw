@@ -149,22 +149,38 @@ impl SessionListDelivery {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum PublicSessionKind {
+    Main,
+    Session,
+}
+
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Session {
     key: String,
     agent_id: String,
     session_identity: SessionIdentity,
-    kind: openclaw::session::protocol::SessionKind,
+    kind: PublicSessionKind,
     endpoint_session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<u64>,
+}
+
+fn public_session_kind(endpoint_session_id: &str) -> PublicSessionKind {
+    if endpoint_session_id == "main" {
+        PublicSessionKind::Main
+    } else {
+        PublicSessionKind::Session
+    }
 }
 
 fn project_session(session: openclaw::session::protocol::SessionSummary) -> Option<Session> {
     let entry = session.agent_scoped_catalog_entry()?;
     let key = entry.session_key.as_str().to_owned();
     let agent_id = entry.agent_id.as_str().to_owned();
+    let kind = public_session_kind(&entry.endpoint_session_id);
     Some(Session {
         session_identity: SessionIdentity::try_new(
             openclaw_local_endpoint(),
@@ -174,7 +190,7 @@ fn project_session(session: openclaw::session::protocol::SessionSummary) -> Opti
         .ok()?,
         key,
         agent_id,
-        kind: session.kind,
+        kind,
         endpoint_session_id: entry.endpoint_session_id,
         updated_at: session.updated_at,
     })
@@ -356,7 +372,7 @@ mod tests {
                         "agentId": "main",
                         "sessionKey": "agent:main:direct-session",
                     },
-                    "kind": "direct",
+                    "kind": "session",
                     "endpointSessionId": "direct-session",
                     "updatedAt": 42,
                 }],
@@ -389,7 +405,7 @@ mod tests {
                             "agentId": "main",
                             "sessionKey": "agent:main:main",
                         },
-                        "kind": "direct",
+                        "kind": "main",
                         "endpointSessionId": "main",
                         "updatedAt": 42,
                     },
@@ -405,7 +421,7 @@ mod tests {
                             "agentId": "worker",
                             "sessionKey": "agent:worker:direct-session",
                         },
-                        "kind": "direct",
+                        "kind": "session",
                         "endpointSessionId": "direct-session",
                         "updatedAt": 42,
                     }

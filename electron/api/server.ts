@@ -57,7 +57,7 @@ import { handleTeamWebhookAuthRoutes } from './routes/team-webhook-auth';
 import { handleToolchainRoutes } from './routes/toolchain';
 import { handleUsageRoutes } from './routes/usage';
 import { createFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
-import { proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
+import { proxyFleetRuntimeAgentIngress, proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
 import {
   isHostApiProxyWebSocketRoute,
   isHostApiQueryTokenAllowedRoute,
@@ -168,7 +168,7 @@ export function getHostApiBaseUrl(): string {
   return hostApiBaseUrl;
 }
 
-export function createHostApiRequestHandler(deps: HostApiContext, port: number) {
+export function createHostApiRequestHandler(deps: HostApiContext, port: number, fleetTransportPort?: number) {
   return async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
@@ -178,6 +178,15 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number) 
       if (req.method === 'OPTIONS') {
         res.statusCode = 204;
         res.end();
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/remote-fleet/runtime-agent/ingress') {
+        if (Number.isFinite(fleetTransportPort)) {
+          proxyFleetRuntimeAgentIngress(Number(fleetTransportPort), req, res);
+        } else {
+          sendJson(res, 503, { success: false, error: 'Fleet data is unavailable' });
+        }
         return;
       }
 
@@ -238,7 +247,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number) 
 export function startHostApiServer(
   ctx: HostApiContext,
   port?: number,
-  fleetTerminalStreamPort?: number,
+  fleetTransportPort?: number,
 ): Server {
   const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
     ? Number(port)
@@ -246,15 +255,15 @@ export function startHostApiServer(
   hostApiToken = randomBytes(32).toString('hex');
   hostApiBaseUrl = `http://127.0.0.1:${resolvedPort}`;
 
-  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort));
+  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort, fleetTransportPort));
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
-    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(fleetTerminalStreamPort)) {
+    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(fleetTransportPort)) {
       socket.destroy();
       return;
     }
-    proxyFleetTerminalStreamUpgrade(Number(fleetTerminalStreamPort), req, socket, head);
+    proxyFleetTerminalStreamUpgrade(Number(fleetTransportPort), req, socket, head);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {

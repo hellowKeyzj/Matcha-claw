@@ -1,3 +1,4 @@
+use foundation::process::supervision::SupervisorSnapshot;
 use matcha_agent::peer::SessionSubscriptionItem;
 use openclaw::{
     port::{CanonicalIngressResult, CronExecutionStatus},
@@ -5,7 +6,7 @@ use openclaw::{
 };
 use tokio::sync::mpsc;
 
-use crate::session_state::SessionDelta;
+use crate::sessions::state::SessionDelta;
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -21,6 +22,7 @@ pub enum HostEvent {
     OpenClawRuntime,
     SessionDelta(SessionDelta),
     Matcha(SessionSubscriptionItem),
+    MatchaLifecycle(SupervisorSnapshot),
 }
 
 pub struct HostEvents {
@@ -30,12 +32,14 @@ pub struct HostEvents {
     open_claw_runtime: mpsc::Receiver<()>,
     session_delta: mpsc::Receiver<SessionDelta>,
     matcha: mpsc::Receiver<SessionSubscriptionItem>,
+    matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     open_claw_open: bool,
     open_claw_canonical_open: bool,
     open_claw_cron_open: bool,
     open_claw_runtime_open: bool,
     session_delta_open: bool,
     matcha_open: bool,
+    matcha_lifecycle_open: bool,
 }
 
 impl HostEvents {
@@ -47,6 +51,7 @@ impl HostEvents {
                 && !self.open_claw_runtime_open
                 && !self.session_delta_open
                 && !self.matcha_open
+                && !self.matcha_lifecycle_open
             {
                 return None;
             }
@@ -79,6 +84,10 @@ impl HostEvents {
                     Some(event) => return Some(HostEvent::Matcha(event)),
                     None => self.matcha_open = false,
                 },
+                lifecycle = self.matcha_lifecycle.recv(), if self.matcha_lifecycle_open => match lifecycle {
+                    Some(snapshot) => return Some(HostEvent::MatchaLifecycle(snapshot)),
+                    None => self.matcha_lifecycle_open = false,
+                },
             }
         }
     }
@@ -91,6 +100,7 @@ pub(super) struct EventSinks {
     open_claw_runtime: Option<mpsc::Sender<()>>,
     session_delta: Option<mpsc::Sender<SessionDelta>>,
     matcha: Option<mpsc::Sender<SessionSubscriptionItem>>,
+    matcha_lifecycle: Option<mpsc::Sender<SupervisorSnapshot>>,
 }
 
 impl EventSinks {
@@ -120,6 +130,10 @@ impl EventSinks {
         self.matcha.clone()
     }
 
+    pub(super) fn matcha_lifecycle(&self) -> Option<mpsc::Sender<SupervisorSnapshot>> {
+        self.matcha_lifecycle.clone()
+    }
+
     pub(super) fn close_open_claw(&mut self) {
         self.open_claw = None;
         self.open_claw_canonical = None;
@@ -133,6 +147,7 @@ impl EventSinks {
 
     pub(super) fn close_matcha(&mut self) {
         self.matcha = None;
+        self.matcha_lifecycle = None;
     }
 }
 
@@ -143,6 +158,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
     let (open_claw_runtime, open_claw_runtime_events) = mpsc::channel(1);
     let (session_delta, session_delta_events) = mpsc::channel(EVENT_CAPACITY);
     let (matcha, matcha_events) = mpsc::channel(EVENT_CAPACITY);
+    let (matcha_lifecycle, matcha_lifecycle_events) = mpsc::channel(1);
     (
         EventSinks {
             open_claw: Some(open_claw),
@@ -151,6 +167,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_runtime: Some(open_claw_runtime),
             session_delta: Some(session_delta),
             matcha: Some(matcha),
+            matcha_lifecycle: Some(matcha_lifecycle),
         },
         HostEvents {
             open_claw: open_claw_events,
@@ -159,12 +176,14 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_runtime: open_claw_runtime_events,
             session_delta: session_delta_events,
             matcha: matcha_events,
+            matcha_lifecycle: matcha_lifecycle_events,
             open_claw_open: true,
             open_claw_canonical_open: true,
             open_claw_cron_open: true,
             open_claw_runtime_open: true,
             session_delta_open: true,
             matcha_open: true,
+            matcha_lifecycle_open: true,
         },
     )
 }

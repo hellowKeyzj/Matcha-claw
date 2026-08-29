@@ -1,35 +1,40 @@
 use std::{future::Future, pin::Pin};
 
-use foundation::process::supervision::SupervisorSnapshot;
+use foundation::process::supervision::{
+    RestartOutcome, StartOutcome, SupervisorRejection, SupervisorSnapshot, TerminationCompletion,
+};
 use platform::{endpoint::runtime_address::RuntimeEndpoint, exchange::InvocationOutcome};
+use tokio::sync::watch;
 
 use crate::{
     RuntimeSessionError,
-    channel_catalog::{
-        ChannelCatalogOutcome, ChannelConfigureFormOutcome, ChannelConfigureOutcome,
-    },
-    channel_config_read,
-    channel_control::{ChannelControlAction, ChannelControlOutcome},
-    channel_credentials, channel_delete,
-    channel_login::Outcome as ChannelLoginOutcome,
-    channel_status::{
-        ChannelPairingApprovalOutcome, ChannelPairingOutcome, ChannelSnapshotOutcome,
-        ChannelStatusFailure, ChannelStatusOutcome,
+    channel::{
+        catalog::{ChannelCatalogOutcome, ChannelConfigureFormOutcome, ChannelConfigureOutcome},
+        config_read as channel_config_read,
+        control::{ChannelControlAction, ChannelControlOutcome},
+        credentials as channel_credentials, delete as channel_delete,
+        login::Outcome as ChannelLoginOutcome,
+        status::{
+            ChannelPairingApprovalOutcome, ChannelPairingOutcome, ChannelSnapshotOutcome,
+            ChannelStatusFailure, ChannelStatusOutcome,
+        },
     },
     cron::{
         CronCreateCommand, CronDeleteCommand, CronDeleteOutcome, CronJobMutationOutcome,
         CronListOutcome, CronUpdateCommand,
     },
-    session_abort::{SessionAbortCommand, SessionAbortOutcome},
-    session_approval::{
+    matcha_history, matcha_session_catalog,
+    sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
+    sessions::approval::{
         PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
         SessionApprovalOutcome,
     },
-    session_create::{SessionCreateCommand, SessionCreateOutcome},
-    session_delete::{SessionDeleteCommand, SessionDeleteOutcome},
-    session_model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
-    session_rename::{SessionRenameCommand, SessionRenameOutcome},
-    session_send::{SessionSendCommand, SessionSendOutcome},
+    sessions::create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome},
+    sessions::delete::{SessionDeleteCommand, SessionDeleteOutcome},
+    sessions::model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
+    sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
+    sessions::send::{SessionSendCommand, SessionSendOutcome},
+    sessions::timeline,
     skill_bundle,
     skill_install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
     skill_management::{Command as SkillManagementCommand, Outcome as SkillManagementOutcome},
@@ -56,7 +61,7 @@ const LOCAL_RUNTIME_INSTANCE_ID: &str = "local";
 const OPENCLAW_AGENT_ID: &str = "main";
 const MATCHA_AGENT_ID: &str = "matcha";
 
-pub(crate) trait RuntimeDriver {
+pub(crate) trait RuntimeDriver: Send + Sync {
     fn identity(&self) -> RuntimeDriverIdentity;
 
     fn endpoint(&self) -> RuntimeEndpoint {
@@ -78,6 +83,10 @@ pub(crate) trait RuntimeDriver {
     }
 
     fn team_ops(&self) -> Option<&dyn TeamOps> {
+        None
+    }
+
+    fn team_terminal_ops(&self) -> Option<&dyn TeamTerminalOps> {
         None
     }
 
@@ -104,12 +113,26 @@ pub(crate) trait RuntimeDriver {
     fn provider_config_ops(&self) -> Option<&dyn ProviderConfigOps> {
         None
     }
+
+    fn connector_ops(&self) -> Option<&dyn ConnectorOps> {
+        None
+    }
+
+    fn security_ops(&self) -> Option<&dyn SecurityOps> {
+        None
+    }
+
+    fn settings_ops(&self) -> Option<&dyn SettingsOps> {
+        None
+    }
 }
 
 pub(crate) type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) type OwnedRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
-pub(crate) trait SessionOps {
+pub(crate) trait SessionOps: Send + Sync {
+    fn admission(&self) -> SessionAdmission;
+
     fn abort_session<'a>(
         &'a self,
         command: SessionAbortCommand,
@@ -160,6 +183,27 @@ pub(crate) trait SessionOps {
         _command: SessionDeleteCommand,
     ) -> SessionFuture<'a, SessionDeleteOutcome> {
         Box::pin(async { SessionDeleteOutcome::Unknown })
+    }
+
+    fn list_matcha_sessions<'a>(&'a self) -> SessionFuture<'a, matcha_session_catalog::Outcome> {
+        Box::pin(async { matcha_session_catalog::Outcome::Unavailable })
+    }
+
+    fn load_matcha_history<'a>(
+        &'a self,
+        _command: matcha_history::Command,
+    ) -> SessionFuture<'a, matcha_history::Outcome> {
+        Box::pin(async { matcha_history::Outcome::Unavailable })
+    }
+
+    fn load_session_timeline<'a>(
+        &'a self,
+        _command: timeline::Command,
+        _epoch: u64,
+    ) -> SessionFuture<'a, timeline::Outcome> {
+        Box::pin(async {
+            timeline::Outcome::unavailable(timeline::UnavailableReason::RuntimeUnavailable)
+        })
     }
 
     fn pending_approvals<'a>(
@@ -213,19 +257,19 @@ pub(crate) trait SessionOps {
     ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
 }
 
-pub(crate) trait TaskOps {
+pub(crate) trait TaskOps: Send + Sync {
     fn task_manager<'a>(
         &'a self,
         command: TaskManagerCommand,
     ) -> SessionFuture<'a, TaskManagerOutcome>;
 }
-pub(crate) trait SubagentOps {
+pub(crate) trait SubagentOps: Send + Sync {
     fn agents<'a>(
         &'a self,
         command: crate::agents::Command,
     ) -> SessionFuture<'a, crate::agents::Outcome>;
 }
-pub(crate) trait TeamOps {
+pub(crate) trait TeamOps: Send + Sync {
     fn materialize_team(
         &self,
         request: TeamMaterializationRequest,
@@ -263,7 +307,13 @@ pub(crate) trait TeamOps {
         abort_first: bool,
     ) -> OwnedRuntimeFuture<NativeDeletionEvidence>;
 }
-pub(crate) trait CronOps {
+pub(crate) trait TeamTerminalOps: Send + Sync {
+    fn watch_terminal(
+        &self,
+        target: organization::MatchaTerminalReceiptTarget,
+    ) -> OwnedRuntimeFuture<Option<matcha_agent::session::receipt::TerminalRunStatus>>;
+}
+pub(crate) trait CronOps: Send + Sync {
     fn list_cron_jobs<'a>(&'a self) -> SessionFuture<'a, CronListOutcome>;
 
     fn cron_run_history<'a>(
@@ -304,7 +354,7 @@ pub(crate) trait CronOps {
         command: CronDeleteCommand,
     ) -> SessionFuture<'a, CronDeleteOutcome>;
 }
-pub(crate) trait WorkspaceOps {
+pub(crate) trait WorkspaceOps: Send + Sync {
     fn trusted_workspace_directory(
         &self,
         session_key: &str,
@@ -422,7 +472,7 @@ pub(crate) trait WorkspaceOps {
         openclaw::workspace::media::WorkspaceMediaFailure,
     >;
 }
-pub(crate) trait SkillOps {
+pub(crate) trait SkillOps: Send + Sync {
     fn installed_skill_catalog(
         &self,
     ) -> OwnedRuntimeFuture<Option<openclaw::skill::InstalledSkillCatalog>>;
@@ -444,7 +494,7 @@ pub(crate) trait SkillOps {
         command: skill_bundle::Command,
     ) -> SessionFuture<'a, skill_bundle::Outcome>;
 }
-pub(crate) trait ChannelOps {
+pub(crate) trait ChannelOps: Send + Sync {
     fn control_channel_account<'a>(
         &'a self,
         action: ChannelControlAction,
@@ -495,45 +545,117 @@ pub(crate) trait ChannelOps {
         code: zeroize::Zeroizing<Vec<u8>>,
     ) -> SessionFuture<'a, ChannelPairingApprovalOutcome>;
 
+    fn status<'a>(
+        &'a self,
+    ) -> SessionFuture<'a, Result<ChannelStatusOutcome, ChannelStatusFailure>> {
+        Box::pin(async { Err(ChannelStatusFailure::Unavailable) })
+    }
+
+    fn snapshot<'a>(
+        &'a self,
+    ) -> SessionFuture<'a, Result<ChannelSnapshotOutcome, ChannelStatusFailure>> {
+        Box::pin(async { Err(ChannelStatusFailure::Unavailable) })
+    }
+
     fn observe_channel_accounts<'a>(
         &'a self,
-    ) -> SessionFuture<'a, Result<ChannelStatusOutcome, ChannelStatusFailure>>;
+    ) -> SessionFuture<'a, Result<ChannelStatusOutcome, ChannelStatusFailure>> {
+        self.status()
+    }
 
     fn observe_channel_snapshot<'a>(
         &'a self,
-    ) -> SessionFuture<'a, Result<ChannelSnapshotOutcome, ChannelStatusFailure>>;
+    ) -> SessionFuture<'a, Result<ChannelSnapshotOutcome, ChannelStatusFailure>> {
+        self.snapshot()
+    }
+
+    fn config_read<'a>(
+        &'a self,
+        _channel: String,
+        _account_id: Option<String>,
+    ) -> SessionFuture<'a, channel_config_read::Outcome> {
+        Box::pin(async { channel_config_read::Outcome::Unknown })
+    }
 
     fn read_channel_config<'a>(
         &'a self,
         channel: String,
         account_id: Option<String>,
-    ) -> SessionFuture<'a, channel_config_read::Outcome>;
+    ) -> SessionFuture<'a, channel_config_read::Outcome> {
+        self.config_read(channel, account_id)
+    }
+
+    fn validate_credentials<'a>(
+        &'a self,
+        _channel: String,
+        _config: zeroize::Zeroizing<Vec<u8>>,
+    ) -> SessionFuture<'a, channel_credentials::Outcome> {
+        Box::pin(async { channel_credentials::Outcome::Unknown })
+    }
 
     fn validate_channel_credentials<'a>(
         &'a self,
         channel: String,
         config: zeroize::Zeroizing<Vec<u8>>,
-    ) -> SessionFuture<'a, channel_credentials::Outcome>;
+    ) -> SessionFuture<'a, channel_credentials::Outcome> {
+        self.validate_credentials(channel, config)
+    }
 
-    fn channel_catalog<'a>(&'a self) -> SessionFuture<'a, ChannelCatalogOutcome>;
+    fn catalog<'a>(&'a self) -> SessionFuture<'a, ChannelCatalogOutcome> {
+        Box::pin(async { ChannelCatalogOutcome::Unknown })
+    }
+
+    fn channel_catalog<'a>(&'a self) -> SessionFuture<'a, ChannelCatalogOutcome> {
+        self.catalog()
+    }
+
+    fn configure_form<'a>(
+        &'a self,
+        _channel: String,
+    ) -> SessionFuture<'a, ChannelConfigureFormOutcome> {
+        Box::pin(async { ChannelConfigureFormOutcome::Unknown })
+    }
 
     fn channel_configure_form<'a>(
         &'a self,
         channel: String,
-    ) -> SessionFuture<'a, ChannelConfigureFormOutcome>;
+    ) -> SessionFuture<'a, ChannelConfigureFormOutcome> {
+        self.configure_form(channel)
+    }
+
+    fn configure<'a>(
+        &'a self,
+        _channel: String,
+        _account_id: String,
+        _values: zeroize::Zeroizing<Vec<u8>>,
+    ) -> SessionFuture<'a, ChannelConfigureOutcome> {
+        Box::pin(async { ChannelConfigureOutcome::Unknown })
+    }
 
     fn channel_configure<'a>(
         &'a self,
         channel: String,
         account_id: String,
         values: zeroize::Zeroizing<Vec<u8>>,
-    ) -> SessionFuture<'a, ChannelConfigureOutcome>;
+    ) -> SessionFuture<'a, ChannelConfigureOutcome> {
+        self.configure(channel, account_id, values)
+    }
+
+    fn delete_config<'a>(
+        &'a self,
+        _channel: String,
+        _account_id: String,
+    ) -> SessionFuture<'a, channel_delete::Outcome> {
+        Box::pin(async { channel_delete::Outcome::Unknown })
+    }
 
     fn channel_delete_config<'a>(
         &'a self,
         channel: String,
         account_id: String,
-    ) -> SessionFuture<'a, channel_delete::Outcome>;
+    ) -> SessionFuture<'a, channel_delete::Outcome> {
+        self.delete_config(channel, account_id)
+    }
 }
 pub(crate) trait ProviderConfigOps {
     fn reconcile_provider_native_configuration<'a>(
@@ -542,21 +664,114 @@ pub(crate) trait ProviderConfigOps {
     ) -> SessionFuture<'a, ProviderNativeConfigurationEffect>;
 }
 
+pub(crate) trait ConnectorOps: Send + Sync {
+    fn apply_external_connector_projection<'a>(
+        &'a self,
+        catalog: environment::ConnectorCatalog,
+        secrets: &'a dyn environment::ConnectorSecretResolverPort,
+    ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorProjectionEffect>;
+
+    fn probe_external_connector<'a>(
+        &'a self,
+        connector: environment::Connector,
+    ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorObservation>;
+
+    fn observe_mcp_server_status<'a>(
+        &'a self,
+        session_key: String,
+        endpoint_session_id: Option<String>,
+    ) -> SessionFuture<
+        'a,
+        Result<openclaw::gateway::wire::McpServerStatusList, RuntimeOperationFailure>,
+    >;
+}
+
+pub(crate) trait SecurityOps {
+    fn apply_security_policy_projection<'a>(
+        &'a self,
+        policy: serde_json::Value,
+    ) -> SessionFuture<'a, Result<(), RuntimeOperationFailure>>;
+
+    fn sync_security_policy<'a>(
+        &'a self,
+        policy: serde_json::Value,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityPolicyEffect>;
+
+    fn run_security_emergency<'a>(
+        &'a self,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityEmergencyEffect>;
+
+    fn query_security_audit<'a>(
+        &'a self,
+        query: openclaw::operations::security_audit::SecurityAuditQuery,
+    ) -> SessionFuture<'a, openclaw::operations::security_audit::SecurityAuditEffect>;
+
+    fn security_operation<'a>(
+        &'a self,
+        operation_id: String,
+        input: serde_json::Value,
+    ) -> SessionFuture<'a, openclaw::operations::SecurityActionEffect>;
+}
+
+pub(crate) trait SettingsOps: Send + Sync {
+    fn apply_settings_projection(
+        &self,
+        browser_mode: openclaw::projection::settings::BrowserMode,
+        proxy_endpoint: Option<String>,
+    ) -> OwnedRuntimeFuture<Result<SettingsProjectionEffect, RuntimeOperationFailure>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SettingsProjectionEffect {
+    Changed,
+    Unchanged,
+}
+
 pub(crate) struct ProviderNativeConfigurationCommand<'a> {
     pub(crate) accounts: &'a [environment::ProviderAccount],
     pub(crate) models: &'a environment::ProviderModelCatalog,
     pub(crate) routing: Option<&'a environment::ProviderRouting>,
     pub(crate) retired: &'a [environment::ProviderAccount],
-    pub(crate) required_auth_accounts: &'a std::collections::BTreeSet<environment::ProviderAccountId>,
+    pub(crate) required_auth_accounts:
+        &'a std::collections::BTreeSet<environment::ProviderAccountId>,
     pub(crate) now_millis: u64,
 }
 
-pub(crate) trait LifecycleOps {
+pub(crate) trait LifecycleOps: Send + Sync {
     fn snapshot(&self) -> SupervisorSnapshot;
+
+    fn subscribe(&self) -> watch::Receiver<SupervisorSnapshot>;
 
     fn readiness(&self) -> bool {
         self.snapshot().phase() == foundation::process::supervision::SupervisorPhase::Running
     }
+
+    fn start(&self) -> OwnedRuntimeFuture<Result<StartOutcome, RuntimeStartFailure>>;
+
+    fn stop(&self) -> OwnedRuntimeFuture<Result<TerminationCompletion, RuntimeLifecycleFailure>>;
+
+    fn restart(&self) -> OwnedRuntimeFuture<Result<RestartOutcome, RuntimeLifecycleFailure>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeStartFailure {
+    CompletionFailed,
+    SupervisorStopped,
+    Busy,
+    Rejected(SupervisorRejection),
+    ShuttingDown,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeLifecycleFailure {
+    CompletionFailed,
+    SupervisorStopped,
+    AlreadySatisfied,
+    Busy,
+    Rejected(SupervisorRejection),
+    ShuttingDown,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

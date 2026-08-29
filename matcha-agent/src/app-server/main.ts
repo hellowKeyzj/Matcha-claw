@@ -42,6 +42,7 @@ import {
   workerError,
   WorkerSupervisor,
 } from './workers/workerSupervisor.js'
+import { logProcessSessionTrace } from '../query/runTrace.js'
 import {
   listSessionHistorySummaries,
   loadSessionHistorySummary,
@@ -52,6 +53,17 @@ import {
 const SESSION_HISTORY_LIST_LIMIT = 200
 const SESSION_TRANSCRIPT_MAX_LINES = 10_000
 const WORKER_SHUTDOWN_TIMEOUT_MS = 2_000
+
+function providerRuntimeTraceDetails(
+  providerRuntime: ProviderRuntimeConfig | undefined,
+): Record<string, string | number | boolean | null> {
+  return {
+    hasProviderRuntime: providerRuntime !== undefined,
+    providerRuntimeKind: providerRuntime?.kind ?? null,
+    hasBaseUrl: Boolean(providerRuntime?.baseUrl),
+    hasApiKey: Boolean(providerRuntime?.apiKey),
+  }
+}
 
 export type AppServerPortContext = {
   clientHub: ClientHub
@@ -442,14 +454,34 @@ export function createDefaultAppServerServices(options: {
     if (!loaded || !hasQueuedSessionRun(sessionId)) return
 
     let worker: Awaited<ReturnType<WorkerSupervisor['ensureWorker']>>
+    const providerRuntime = providerRuntimeBySessionId.get(loaded.sessionId)
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.worker.ensure.start',
+      {
+        sessionIdLength: loaded.sessionId.length,
+        model: loaded.model ?? null,
+        permissionMode: loaded.permissionMode,
+        ...providerRuntimeTraceDetails(providerRuntime),
+      },
+    )
     try {
       worker = await workerSupervisor.ensureWorker({
         sessionId: loaded.sessionId,
         cwd: loaded.workspaceRoot,
         model: loaded.model,
         permissionMode: loaded.permissionMode,
-        providerRuntime: providerRuntimeBySessionId.get(loaded.sessionId),
+        providerRuntime,
       })
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'app-server.worker.ensure.ready',
+        {
+          sessionIdLength: loaded.sessionId.length,
+          workerId: worker.workerId,
+          model: loaded.model ?? null,
+        },
+      )
     } catch (error) {
       await failNextQueuedRunStart(sessionId, error)
       scheduleDrain(sessionId)
@@ -943,11 +975,43 @@ export function createDefaultAppServerServices(options: {
   async function updateSessionModel(
     params: SessionSetModelParams,
   ): Promise<SessionRecord> {
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.session.setModel.received',
+      {
+        sessionIdLength: params.sessionId.length,
+        model: params.model,
+        providerFingerprintLength: params.providerFingerprint?.length ?? 0,
+        ...providerRuntimeTraceDetails(params.providerRuntime),
+      },
+    )
     const loaded = await ensureSessionRuntimeState(params.sessionId)
-    if (!loaded) throw new Error(`Session not found: ${params.sessionId}`)
+    if (!loaded) {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'app-server.session.setModel.rejected',
+        {
+          sessionIdLength: params.sessionId.length,
+          model: params.model,
+          reason: 'session-not-found',
+        },
+      )
+      throw new Error(`Session not found: ${params.sessionId}`)
+    }
 
     const activeRun = activeSessionRun(params.sessionId)
     if (activeRun) {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'app-server.session.setModel.rejected',
+        {
+          sessionIdLength: params.sessionId.length,
+          model: params.model,
+          reason: 'active-run',
+          runId: activeRun.runId,
+          runStatus: activeRun.status.type,
+        },
+      )
       throw new Error(
         `Cannot update session settings while run ${activeRun.runId} is ${activeRun.status.type}`,
       )
@@ -959,6 +1023,22 @@ export function createDefaultAppServerServices(options: {
     const sameProviderRuntime = providerRuntimeEquals(
       providerRuntimeBySessionId.get(params.sessionId),
       providerRuntime,
+    )
+    const action =
+      sameProvider && sameProviderRuntime ? 'warm-worker' : 'restart-worker'
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.session.setModel.resolved',
+      {
+        sessionIdLength: params.sessionId.length,
+        previousModel: loaded.model ?? null,
+        model: params.model,
+        sameProvider,
+        sameProviderRuntime,
+        action,
+        providerFingerprintLength: providerFingerprint?.length ?? 0,
+        ...providerRuntimeTraceDetails(providerRuntime),
+      },
     )
     const updated = sessionRegistry.update(params.sessionId, session => ({
       ...session,
@@ -979,11 +1059,29 @@ export function createDefaultAppServerServices(options: {
       await setWarmWorkerModel(params.sessionId, params.model)
     } else {
       await workerSupervisor.shutdownSession(params.sessionId, 'restart')
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'app-server.session.setModel.worker-action',
+        {
+          sessionIdLength: params.sessionId.length,
+          model: params.model,
+          action: 'restart-worker',
+        },
+      )
     }
     await appendEvent(params.sessionId, {
       type: 'session.loaded',
       session: updated.session,
     })
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.session.setModel.updated',
+      {
+        sessionIdLength: params.sessionId.length,
+        model: updated.session.model ?? null,
+        action,
+      },
+    )
     return updated.session
   }
 
@@ -1003,18 +1101,49 @@ export function createDefaultAppServerServices(options: {
     sessionId: string,
     model: string,
   ): Promise<void> {
-    if (!workerSupervisor.getWorker(sessionId)) return
+    if (!workerSupervisor.getWorker(sessionId)) {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'app-server.session.setModel.worker-action',
+        {
+          sessionIdLength: sessionId.length,
+          model,
+          action: 'warm-worker-missing',
+        },
+      )
+      return
+    }
     try {
       const response = await workerSupervisor.send(sessionId, {
         id: crypto.randomUUID(),
         type: 'worker.setModel',
         model,
       })
-      if (response.ok) return
+      if (response.ok) {
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'app-server.session.setModel.worker-action',
+          {
+            sessionIdLength: sessionId.length,
+            model,
+            action: 'warm-worker-updated',
+          },
+        )
+        return
+      }
     } catch {
       // Fall through to restart the warm worker for the next prompt.
     }
     await workerSupervisor.shutdownSession(sessionId, 'restart')
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.session.setModel.worker-action',
+      {
+        sessionIdLength: sessionId.length,
+        model,
+        action: 'warm-worker-restarted',
+      },
+    )
   }
 
   async function updateSessionSettings(

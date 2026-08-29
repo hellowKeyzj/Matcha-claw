@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::UsageHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{DecodeError, UsageDelivery, decode_limit};
 
@@ -26,19 +26,19 @@ const PATH: &str = "/api/usage/recent";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    usage: UsageHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        usage: UsageHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            usage,
         })
     }
 
@@ -46,9 +46,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let usage = self.usage.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, usage).await;
             });
         }
     }
@@ -57,12 +57,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    usage: UsageHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, usage).await,
             Err(response) => response,
         })
     })
@@ -78,7 +78,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    usage: UsageHandle,
 ) -> Response {
     if request.method != "GET" || request.pathname != PATH {
         return Response::not_found();
@@ -103,10 +103,7 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    let result = match owner.usage_open_claw_recent(limit).await {
-        Ok(result) => result,
-        Err(_) => return Response::unavailable(),
-    };
+    let result = usage.recent(limit);
     Response::from_delivery(UsageDelivery::from_native(result))
 }
 
@@ -134,10 +131,6 @@ impl Response {
 
     fn not_found() -> Self {
         Self::fixed(404, "OpenClaw usage history route is not available")
-    }
-
-    fn unavailable() -> Self {
-        Self::from_delivery(UsageDelivery::Unavailable)
     }
 
     fn fixed(status: u16, error: &'static str) -> Self {
@@ -299,7 +292,6 @@ mod tests {
             Response::bad_request(),
             Response::unauthorized(),
             Response::not_found(),
-            Response::unavailable(),
         ] {
             let body = response.body.to_string();
             assert!(!body.contains("private"));

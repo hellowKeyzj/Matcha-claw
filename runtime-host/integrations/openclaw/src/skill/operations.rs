@@ -19,7 +19,6 @@ use crate::{
     port::SkillUploadOutcome,
 };
 
-const SEARCH: &str = "skills.search";
 const DETAIL: &str = "skills.detail";
 const INSTALL: &str = "skills.install";
 const UPDATE: &str = "skills.update";
@@ -28,69 +27,6 @@ const UPLOAD_CHUNK: &str = "skills.upload.chunk";
 const UPLOAD_COMMIT: &str = "skills.upload.commit";
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SkillSearchRequest {
-    query: Option<String>,
-    limit: Option<u16>,
-}
-
-impl SkillSearchRequest {
-    pub fn try_new(query: Option<String>, limit: Option<u16>) -> Result<Self, SkillRequestError> {
-        let query = query.map(|value| value.trim().to_owned());
-        if query
-            .as_deref()
-            .is_some_and(|value| value.is_empty() || value.len() > 256)
-        {
-            return Err(SkillRequestError::InvalidQuery);
-        }
-        if limit.is_some_and(|value| value == 0 || value > 100) {
-            return Err(SkillRequestError::InvalidQuery);
-        }
-        Ok(Self { query, limit })
-    }
-    fn params(self) -> Value {
-        let mut value = json!({});
-        if let Some(query) = self.query {
-            value["query"] = json!(query);
-        }
-        if let Some(limit) = self.limit {
-            value["limit"] = json!(limit);
-        }
-        value
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SkillSearchResult {
-    slug: String,
-    score: f64,
-    display_name: String,
-    summary: Option<String>,
-    version: Option<String>,
-    updated_at: Option<u64>,
-}
-
-impl SkillSearchResult {
-    pub fn slug(&self) -> &str {
-        &self.slug
-    }
-    pub fn score(&self) -> f64 {
-        self.score
-    }
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
-    }
-    pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
-    }
-    pub fn updated_at(&self) -> Option<u64> {
-        self.updated_at
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillDetailRequest {
@@ -216,7 +152,6 @@ impl SkillDetailOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillRequestError {
-    InvalidQuery,
     InvalidSlug,
     InvalidUpload,
     InvalidChunk,
@@ -226,7 +161,6 @@ pub enum SkillRequestError {
 impl fmt::Display for SkillRequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidQuery => "skill search query is invalid",
             Self::InvalidSlug => "skill slug is invalid",
             Self::InvalidUpload => "skill upload request is invalid",
             Self::InvalidChunk => "skill upload chunk is invalid",
@@ -238,11 +172,6 @@ impl std::error::Error for SkillRequestError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SkillInstallSource {
-    ClawHub {
-        slug: String,
-        version: Option<String>,
-        force: bool,
-    },
     Upload {
         upload_id: String,
         slug: String,
@@ -260,20 +189,6 @@ pub struct SkillInstallRequest {
 }
 
 impl SkillInstallRequest {
-    pub fn clawhub(
-        slug: String,
-        version: Option<String>,
-        force: bool,
-    ) -> Result<Self, SkillRequestError> {
-        let slug = canonical_slug(&slug).ok_or(SkillRequestError::InvalidSlug)?;
-        Ok(Self {
-            source: SkillInstallSource::ClawHub {
-                slug,
-                version: clean_optional(version),
-                force,
-            },
-        })
-    }
     pub fn upload(
         upload_id: String,
         slug: String,
@@ -302,20 +217,6 @@ impl SkillInstallRequest {
     }
     fn params(self) -> Value {
         match self.source {
-            SkillInstallSource::ClawHub {
-                slug,
-                version,
-                force,
-            } => {
-                let mut value = json!({ "source": "clawhub", "slug": slug });
-                if let Some(version) = version {
-                    value["version"] = json!(version);
-                }
-                if force {
-                    value["force"] = json!(true);
-                }
-                value
-            }
             SkillInstallSource::Upload {
                 upload_id,
                 slug,
@@ -570,12 +471,6 @@ impl OpenClawSkillOperations {
     pub fn new(gateway: Arc<GatewayClient>) -> Self {
         Self { gateway }
     }
-    pub async fn search(
-        &self,
-        request: SkillSearchRequest,
-    ) -> Result<Vec<SkillSearchResult>, SkillReadError> {
-        self.read(SEARCH, request.params(), decode_search).await
-    }
     pub async fn detail(&self, request: SkillDetailRequest) -> Result<SkillDetail, SkillReadError> {
         self.read(DETAIL, request.params(), decode_detail).await
     }
@@ -732,25 +627,6 @@ fn required_sha256(value: Option<&Value>) -> Result<String, ()> {
         .ok_or(())
 }
 
-fn decode_search(payload: Value) -> Result<Vec<SkillSearchResult>, ()> {
-    payload
-        .get("results")
-        .and_then(Value::as_array)
-        .ok_or(())?
-        .iter()
-        .map(|value| {
-            let object = value.as_object().ok_or(())?;
-            Ok(SkillSearchResult {
-                slug: required_name(object.get("slug"))?,
-                score: object.get("score").and_then(Value::as_f64).ok_or(())?,
-                display_name: required_text(object.get("displayName"))?,
-                summary: optional_text(object.get("summary"))?,
-                version: optional_text(object.get("version"))?,
-                updated_at: optional_u64(object.get("updatedAt"))?,
-            })
-        })
-        .collect()
-}
 pub(crate) fn decode_detail(payload: Value) -> Result<SkillDetail, ()> {
     let object = payload.as_object().ok_or(())?;
     let skill = match object.get("skill") {
@@ -852,13 +728,6 @@ fn required_identifier(value: &Value) -> Result<String, ()> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
     .then_some(value.to_owned())
     .ok_or(())
-}
-fn optional_u64(value: Option<&Value>) -> Result<Option<u64>, ()> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value.as_u64().map(Some).ok_or(()),
-        _ => Err(()),
-    }
 }
 fn required_u64(value: Option<&Value>) -> Result<u64, ()> {
     value.and_then(Value::as_u64).ok_or(())

@@ -14,7 +14,6 @@ const CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT = 'Process the attached file(s).';
 const CHAT_SEND_DEFAULT_ERROR = 'Failed to send message';
 
 export interface SendChatTransportParams {
-  sessionKey: string;
   endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   message: string;
@@ -25,7 +24,7 @@ export interface SendChatTransportParams {
 }
 
 export type SendChatTransportResult =
-  | { ok: true; runId: string | null; projection: SessionProjectionEvent | null }
+  | { ok: true; runId: string; projection: SessionProjectionEvent | null }
   | { ok: false; error: string };
 
 export async function sendChatTransport(
@@ -33,7 +32,7 @@ export async function sendChatTransport(
 ): Promise<SendChatTransportResult> {
   const attachments = params.attachments ?? [];
   logSessionTrace('send.transport.request', params.traceId, {
-    backendSessionKey: summarizeIdentifier(params.sessionKey),
+    sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(params.endpointSessionId),
     sessionIdentity: {
       endpoint: {
@@ -50,7 +49,6 @@ export async function sendChatTransport(
     timeoutMs: params.timeoutMs ?? null,
   });
   const payload = {
-    sessionKey: params.sessionKey,
     ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
     message: params.message || (attachments.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
@@ -78,9 +76,14 @@ export async function sendChatTransport(
     routeKey: summarizeIdentifier(response.routeKey),
     errorPresent: typeof response.error === 'string' && response.error.trim().length > 0,
   });
-  const accepted = response.success === true
+  const normalizedRunId = typeof response.runId === 'string'
+    ? response.runId.trim()
+    : '';
+  const accepted = normalizedRunId.length > 0 && (
+    response.success === true
     || response.outcome === 'queued'
-    || response.outcome === 'succeeded';
+    || response.outcome === 'succeeded'
+  );
   if (!accepted) {
     const failureMessage = typeof response.error === 'string'
       ? response.error.trim()
@@ -92,12 +95,9 @@ export async function sendChatTransport(
         : CHAT_SEND_DEFAULT_ERROR,
     };
   }
-  const normalizedRunId = typeof response.runId === 'string'
-    ? response.runId.trim()
-    : '';
   return {
     ok: true,
-    runId: normalizedRunId || null,
+    runId: normalizedRunId,
     projection: decodeSessionProjectionEvent(response.projection ?? response.snapshot),
   };
 }

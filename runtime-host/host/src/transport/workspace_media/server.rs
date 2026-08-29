@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::WorkspaceHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{
     WorkspaceMediaDelivery, WorkspaceMediaRequest, map_prepare, map_resolve, map_stage_buffer,
@@ -30,19 +30,19 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        workspace: WorkspaceHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            workspace,
         })
     }
 
@@ -58,9 +58,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let workspace = self.workspace.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, workspace).await;
             });
         }
     }
@@ -69,12 +69,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, workspace).await,
             Err(response) => response,
         })
     })
@@ -90,7 +90,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/workspace/media" {
         return Response::not_found();
@@ -115,51 +115,39 @@ async fn handle(
         };
     drop(verifier);
     let delivery = if request.is_prepare() {
-        match owner
-            .prepare_open_claw_workspace_media(
-                request.session_key().to_owned(),
-                request.relative_path().to_owned(),
-                request.mime_type().to_owned(),
+        let result = workspace
+            .prepare_media(
+                request.session_key(),
+                request.relative_path(),
+                request.mime_type(),
             )
-            .await
-        {
-            Ok(result) => map_prepare(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+            .map_err(crate::WorkspaceMediaError::from);
+        map_prepare(result)
     } else if request.is_resolve() {
-        match owner
-            .resolve_open_claw_workspace_media(
-                request.session_key().to_owned(),
-                request.reference().to_owned(),
-            )
-            .await
-        {
-            Ok(result) => map_resolve(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+        let result = workspace
+            .resolve_media(request.session_key(), request.reference())
+            .map_err(crate::WorkspaceMediaError::from);
+        map_resolve(result)
     } else if request.is_thumbnail() {
         let result = if request.gateway_url().is_empty() {
-            owner
-                .thumbnail_open_claw_workspace_media(
-                    request.session_key().to_owned(),
-                    request.relative_path().to_owned(),
-                    request.mime_type().to_owned(),
+            workspace
+                .thumbnail_media(
+                    request.session_key(),
+                    request.relative_path(),
+                    request.mime_type(),
                 )
-                .await
+                .map_err(crate::WorkspaceMediaError::from)
         } else {
-            owner
-                .thumbnail_open_claw_workspace_media_gateway(
-                    request.session_key().to_owned(),
-                    request.gateway_url().to_owned(),
-                    request.mime_type().to_owned(),
-                    request.agent_id().to_owned(),
+            workspace
+                .thumbnail_media_gateway(
+                    request.session_key(),
+                    request.gateway_url(),
+                    request.mime_type(),
+                    request.agent_id(),
                 )
-                .await
+                .map_err(crate::WorkspaceMediaError::from)
         };
-        match result {
-            Ok(result) => map_thumbnail(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+        map_thumbnail(result)
     } else if request.is_thumbnails() {
         let paths = request
             .paths()
@@ -181,13 +169,11 @@ async fn handle(
                 }
             })
             .collect::<Vec<_>>();
-        match owner
-            .thumbnails_open_claw_workspace_media(request.session_key().to_owned(), paths)
-            .await
-        {
-            Ok(result) => map_thumbnails(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+        map_thumbnails(
+            workspace
+                .thumbnails_media(request.session_key(), &paths)
+                .map_err(crate::WorkspaceMediaError::from),
+        )
     } else if request.is_stage_paths() {
         let paths = request
             .paths()
@@ -199,27 +185,23 @@ async fn handle(
                     path.mime_type().to_owned(),
                 )
             })
-            .collect();
-        match owner
-            .stage_paths_open_claw_workspace_media(request.session_key().to_owned(), paths)
-            .await
-        {
-            Ok(result) => map_stage_paths(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+            .collect::<Vec<_>>();
+        map_stage_paths(
+            workspace
+                .stage_paths_media(request.session_key(), &paths)
+                .map_err(crate::WorkspaceMediaError::from),
+        )
     } else if request.is_stage_buffer() {
-        match owner
-            .stage_buffer_open_claw_workspace_media(
-                request.session_key().to_owned(),
-                request.base64().to_owned(),
-                request.file_name().to_owned(),
-                request.mime_type().to_owned(),
-            )
-            .await
-        {
-            Ok(result) => map_stage_buffer(result),
-            Err(_) => WorkspaceMediaDelivery::Unavailable,
-        }
+        map_stage_buffer(
+            workspace
+                .stage_buffer_media(
+                    request.session_key(),
+                    request.base64(),
+                    request.file_name(),
+                    request.mime_type(),
+                )
+                .map_err(crate::WorkspaceMediaError::from),
+        )
     } else {
         WorkspaceMediaDelivery::Unavailable
     };

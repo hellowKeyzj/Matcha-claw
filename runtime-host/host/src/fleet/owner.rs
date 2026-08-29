@@ -8,8 +8,11 @@ use fleet::topology::{
     AgentObservation, CapabilitySync, EndpointHealth, EndpointObservation, NodeId, NodeObservation,
     ObservationFreshness, RuntimeId, RuntimeObservation,
 };
+use foundation::execution::{CommandRoute, OwnerSpec, QueryRoute};
 
 use crate::fleet::reachability_owner::DurableReachabilityMutation;
+
+use super::command::{FleetCommand, FleetQuery};
 
 use fleet::{
     FleetDeliveryError, FleetDeliveryOutcome, FleetDeliveryOwner, FleetDeliveryRequest,
@@ -74,6 +77,35 @@ pub(crate) struct FleetSnapshot {
     pub(crate) updated_at: SystemTime,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum FleetLaneKey {
+    Connection(ConnectionId),
+    Dispatch(DispatchId),
+    Environment(EnvironmentId),
+    Resource(ManagedResourceId),
+    Target(TargetId),
+}
+
+#[derive(Clone)]
+pub(crate) struct FleetShared {
+    facts_path: PathBuf,
+    private_root: PathBuf,
+    docker_ownership: BTreeMap<String, String>,
+    ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
+}
+
+impl FleetShared {
+    fn open_operation_owner(&self) -> Result<FleetOwner, FleetDeliveryError> {
+        FleetOwner::open_live(
+            &self.facts_path,
+            &self.private_root,
+            self.docker_ownership.clone(),
+            self.ssh_host_keys.clone(),
+        )
+        .map_err(|_| FleetDeliveryError::InvalidTransition)
+    }
+}
+
 pub(crate) struct FleetOwner {
     facts_path: PathBuf,
     private_root: PathBuf,
@@ -85,11 +117,30 @@ pub(crate) struct FleetOwner {
     pub(crate) docker_ownership: BTreeMap<String, String>,
 }
 
+pub(crate) struct FleetLaneState;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FleetDispatchResult {
     pub(crate) dispatch_id: DispatchId,
     pub(crate) attempt: DispatchAttempt,
     pub(crate) outcome: crate::fleet::executor::FleetExecutionOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingDispatch {
+    pub(crate) dispatch_id: DispatchId,
+    pub(crate) target_id: TargetId,
+}
+
+pub(crate) struct ManagedResourceRegistrationRequest {
+    pub(crate) requested_id: String,
+    pub(crate) connection_id: ConnectionId,
+    pub(crate) environment_id: EnvironmentId,
+    pub(crate) provider: ManagedResourceProvider,
+    pub(crate) kind: ManagedResourceKind,
+    pub(crate) remote_resource_id: String,
+    pub(crate) ownership: Ownership,
+    pub(crate) cleanup_policy: CleanupPolicy,
 }
 
 pub(crate) struct FleetNodeCommandRequest {
@@ -130,9 +181,40 @@ impl FleetOwner {
         docker_ownership: BTreeMap<String, String>,
         ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
     ) -> Result<Self, ()> {
+        Self::open_with_delivery(
+            facts_path,
+            private_root,
+            docker_ownership,
+            ssh_host_keys,
+            FleetDeliveryOwner::open,
+        )
+    }
+
+    pub(crate) fn open_live(
+        facts_path: impl AsRef<Path>,
+        private_root: impl AsRef<Path>,
+        docker_ownership: BTreeMap<String, String>,
+        ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
+    ) -> Result<Self, ()> {
+        Self::open_with_delivery(
+            facts_path,
+            private_root,
+            docker_ownership,
+            ssh_host_keys,
+            FleetDeliveryOwner::open_live,
+        )
+    }
+
+    fn open_with_delivery(
+        facts_path: impl AsRef<Path>,
+        private_root: impl AsRef<Path>,
+        docker_ownership: BTreeMap<String, String>,
+        ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
+        open_delivery: impl FnOnce(PathBuf) -> Result<FleetDeliveryOwner, fleet::store::StoreFault>,
+    ) -> Result<Self, ()> {
         let facts_path = facts_path.as_ref().to_path_buf();
         let private_root = private_root.as_ref().to_path_buf();
-        let delivery = FleetDeliveryOwner::open(&facts_path).map_err(|_| ())?;
+        let delivery = open_delivery(facts_path.clone()).map_err(|_| ())?;
         let executor = crate::fleet::executor::FleetCommandExecutor::try_new(
             docker_ownership.clone(),
             ssh_host_keys.clone(),
@@ -153,7 +235,7 @@ impl FleetOwner {
     }
 
     pub(crate) fn operation_owner(&self) -> Result<Self, ()> {
-        Self::open(
+        Self::open_live(
             &self.facts_path,
             &self.private_root,
             self.docker_ownership.clone(),
@@ -161,8 +243,9 @@ impl FleetOwner {
         )
     }
 
-    pub(crate) fn refresh_from_store(&mut self) -> Result<(), ()> {
-        self.delivery = FleetDeliveryOwner::open(&self.facts_path).map_err(|_| ())?;
+    pub(crate) fn refresh_from_store(&mut self) -> Result<(), FleetDeliveryError> {
+        self.delivery =
+            FleetDeliveryOwner::open_live(&self.facts_path).map_err(FleetDeliveryError::Store)?;
         Ok(())
     }
 
@@ -252,6 +335,15 @@ impl FleetOwner {
         self.terminal.close(session, generation, now)
     }
 
+    pub(crate) fn terminal_fail(
+        &mut self,
+        session: &TerminalSessionId,
+        generation: Generation,
+        now: SystemTime,
+    ) -> Result<SessionSummary, TerminalSessionError> {
+        self.terminal.fail(session, generation, now)
+    }
+
     pub(crate) fn write_credential(
         &self,
         request: crate::fleet::credentials::FleetCredentialWriteRequest,
@@ -264,6 +356,63 @@ impl FleetOwner {
 
     pub(crate) fn target_config(&self, id: &TargetId) -> Option<FleetTargetConfig> {
         self.delivery.facts().target_configuration(id).cloned()
+    }
+
+    pub(crate) fn dispatch_target_id(
+        &self,
+        dispatch_id: &DispatchId,
+    ) -> Result<TargetId, FleetDeliveryError> {
+        let record = self
+            .delivery
+            .facts()
+            .outbox()
+            .record(dispatch_id)
+            .ok_or(FleetDeliveryError::DispatchNotFound)?;
+        record
+            .intent()
+            .target()
+            .map(|target| target.id().clone())
+            .ok_or(FleetDeliveryError::InvalidTransition)
+    }
+
+    pub(crate) fn pending_dispatches(&self) -> Vec<PendingDispatch> {
+        self.delivery
+            .pending_dispatches()
+            .filter_map(|record| {
+                let target_id = record.intent().target()?.id().clone();
+                Some(PendingDispatch {
+                    dispatch_id: record.intent().dispatch_id().clone(),
+                    target_id,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn connection_target_id(
+        &self,
+        id: &ConnectionId,
+    ) -> Result<TargetId, FleetDeliveryError> {
+        self.connection_target_resolution(id)
+            .map(|target| target.selector.id().clone())
+            .ok_or(FleetDeliveryError::InvalidTransition)
+    }
+
+    pub(crate) fn environment_target_id(
+        &self,
+        id: &EnvironmentId,
+    ) -> Result<TargetId, FleetDeliveryError> {
+        self.environment_target_resolution(id)
+            .map(|target| target.selector.id().clone())
+            .ok_or(FleetDeliveryError::InvalidTransition)
+    }
+
+    pub(crate) fn resource_target_id(
+        &self,
+        id: &ManagedResourceId,
+    ) -> Result<TargetId, FleetDeliveryError> {
+        self.resource_target_resolution(id)
+            .map(|target| target.selector.id().clone())
+            .ok_or(FleetDeliveryError::InvalidTransition)
     }
 
     pub(crate) fn environment_target_resolution(
@@ -1070,7 +1219,7 @@ impl FleetOwner {
 
     pub(crate) async fn register_source_backed_resource(
         &mut self,
-        request: crate::owner::ManagedResourceRegistrationRequest,
+        request: ManagedResourceRegistrationRequest,
     ) -> Result<ManagedResourceMutation, FleetDeliveryError> {
         let environment = self
             .delivery
@@ -1617,6 +1766,1076 @@ impl FleetOwner {
             .complete_capability_sync(id, command, sync, at);
         result
     }
+}
+
+impl OwnerSpec for FleetOwner {
+    type Command = FleetCommand;
+    type Query = FleetQuery;
+    type Key = FleetLaneKey;
+    type Shared = FleetShared;
+    type GlobalState = FleetOwner;
+    type LaneState = FleetLaneState;
+
+    fn split(self) -> (Self::Shared, Self::GlobalState) {
+        let shared = FleetShared {
+            facts_path: self.facts_path.clone(),
+            private_root: self.private_root.clone(),
+            docker_ownership: self.docker_ownership.clone(),
+            ssh_host_keys: self.ssh_host_keys.clone(),
+        };
+        (shared, self)
+    }
+
+    fn route_command(command: &Self::Command) -> CommandRoute<Self::Key> {
+        command.route_command()
+    }
+
+    fn route_query(query: &Self::Query) -> QueryRoute<Self::Key> {
+        query.route_query()
+    }
+
+    fn open_lane(_shared: &Self::Shared, _key: &Self::Key) -> Self::LaneState {
+        FleetLaneState
+    }
+
+    async fn handle_keyed_command(
+        shared: Self::Shared,
+        _key: Self::Key,
+        _lane: &mut Self::LaneState,
+        command: Self::Command,
+    ) {
+        let now = SystemTime::now();
+        let mut owner = match shared.open_operation_owner() {
+            Ok(owner) => owner,
+            Err(error) => {
+                send_keyed_delivery_error(command, error);
+                return;
+            }
+        };
+        match command {
+            FleetCommand::TerminalProviderOpen {
+                target_id,
+                context,
+                reply,
+            } => {
+                let result = match TargetId::try_from(context.target.as_str()) {
+                    Ok(context_target_id) if context_target_id == target_id => {
+                        owner.terminal_provider_open(context).await
+                    }
+                    _ => Err(()),
+                };
+                let _ = reply.send(result);
+            }
+            FleetCommand::Begin {
+                target_id,
+                dispatch_id,
+                reply,
+            } => {
+                let result = match owner.dispatch_target_id(&dispatch_id) {
+                    Ok(resolved) if resolved == target_id => {
+                        owner.dispatch(&dispatch_id, now).await
+                    }
+                    Ok(_) => Err(FleetDeliveryError::InvalidTransition),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
+            FleetCommand::Accept {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(owner.accept(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Reject {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(owner.reject(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Unknown {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(owner.mark_unknown(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Replay {
+                command_id,
+                dispatch_id,
+                reply,
+            } => {
+                let _ = reply.send(owner.authorize_replay(&command_id, &dispatch_id, now));
+            }
+            FleetCommand::BeginConnectionProbe {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(owner.begin_connection_probe(&id, command_id, now));
+            }
+            FleetCommand::RunConnectionProbe {
+                target_id,
+                id,
+                command_id,
+                reply,
+            } => {
+                let result = match owner.connection_target_id(&id) {
+                    Ok(resolved) if resolved == target_id => {
+                        crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(&mut owner)
+                            .probe_connection(id, command_id, now)
+                            .await
+                    }
+                    Ok(_) => Err(FleetDeliveryError::InvalidTransition),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
+            FleetCommand::CompleteConnectionProbe {
+                id,
+                command_id,
+                outcome,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(owner.complete_connection_probe(
+                    &id,
+                    &command_id,
+                    outcome,
+                    now,
+                    message,
+                ));
+            }
+            FleetCommand::RunEnvironmentDeployment {
+                target_id,
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let result = async {
+                    let target = owner
+                        .environment_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    if target.selector.id() != &target_id {
+                        return Err(FleetDeliveryError::InvalidTransition);
+                    }
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(&mut owner)
+                        .deploy_environment(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunEnvironmentDeletion {
+                target_id,
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let result = async {
+                    let target = owner
+                        .environment_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    if target.selector.id() != &target_id {
+                        return Err(FleetDeliveryError::InvalidTransition);
+                    }
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(&mut owner)
+                        .delete_environment(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunResourceProvisioning {
+                target_id,
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let result = async {
+                    let target = owner
+                        .resource_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    if target.selector.id() != &target_id {
+                        return Err(FleetDeliveryError::InvalidTransition);
+                    }
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(&mut owner)
+                        .provision_resource(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunResourceDeletion {
+                target_id,
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let result = async {
+                    let target = owner
+                        .resource_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    if target.selector.id() != &target_id {
+                        return Err(FleetDeliveryError::InvalidTransition);
+                    }
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(&mut owner)
+                        .delete_resource(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::BeginEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.start_environment_deployment(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.complete_environment_deployment(
+                    &id,
+                    &command_id,
+                    &phase,
+                    now,
+                ));
+            }
+            FleetCommand::FailEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(owner.fail_environment_deployment(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::BeginEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.start_environment_deletion(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ =
+                    reply.send(owner.complete_environment_deletion(&id, &command_id, &phase, now));
+            }
+            FleetCommand::FailEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(owner.fail_environment_deletion(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::StartResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.start_resource_provisioning(&id, command_id, phase, now));
+            }
+            FleetCommand::FailResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(owner.fail_resource_provisioning(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::CompleteResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ =
+                    reply.send(owner.complete_resource_provisioning(&id, &command_id, &phase, now));
+            }
+            FleetCommand::StartResourceDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.start_resource_deletion(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteResourceDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(owner.complete_resource_deletion(&id, &command_id, &phase, now));
+            }
+            FleetCommand::FailResourceDeletion {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(owner.fail_resource_deletion(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            _ => unreachable!("Fleet command was routed to an incompatible keyed lane"),
+        }
+    }
+
+    async fn handle_global_command(
+        _shared: Self::Shared,
+        global: &mut Self::GlobalState,
+        command: Self::Command,
+    ) {
+        let now = SystemTime::now();
+        match command {
+            FleetCommand::TerminalOpenAllocated {
+                selector,
+                dimensions,
+                reply,
+            } => {
+                let _ = reply.send(global.terminal_open_allocated(&selector, dimensions, now));
+            }
+            FleetCommand::TerminalConsumeTicket { ticket, reply } => {
+                let _ = reply.send(global.terminal_consume_ticket(&ticket, now));
+            }
+            FleetCommand::TerminalProviderOpen { context, reply, .. } => {
+                let _ = reply.send(global.terminal_provider_open(context).await);
+            }
+            FleetCommand::TerminalClose {
+                session,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(global.terminal_close(&session, generation, now));
+            }
+            FleetCommand::TerminalFail {
+                session,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(global.terminal_fail(&session, generation, now));
+            }
+            FleetCommand::TerminalCloseCurrent { session, reply } => {
+                let result = current_terminal_generation(global, &session)
+                    .and_then(|generation| global.terminal_close(&session, generation, now));
+                let _ = reply.send(result);
+            }
+            FleetCommand::TerminalBeginCloseCurrent { session, reply } => {
+                let result = current_terminal_generation(global, &session)
+                    .and_then(|generation| global.terminal_begin_close(&session, generation, now));
+                let _ = reply.send(result);
+            }
+            FleetCommand::TerminalFinishCloseCurrent { session, reply } => {
+                let result = current_terminal_generation(global, &session)
+                    .and_then(|generation| global.terminal_finish_close(&session, generation, now));
+                let _ = reply.send(result);
+            }
+            FleetCommand::TerminalReconnect { session, reply } => {
+                let _ = reply.send(global.terminal_reconnect(session, now));
+            }
+            FleetCommand::TerminalBeginClose {
+                session,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(global.terminal_begin_close(&session, generation, now));
+            }
+            FleetCommand::TerminalFinishClose {
+                session,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(global.terminal_finish_close(&session, generation, now));
+            }
+            FleetCommand::PutTarget { id, config, reply } => {
+                let _ = reply.send(global.put_target(id, config));
+            }
+            FleetCommand::RemoveTarget { id, reply } => {
+                let _ = reply.send(global.remove_target(&id));
+            }
+            FleetCommand::Submit { request, reply } => {
+                let _ = reply.send(global.submit(request, now));
+            }
+            FleetCommand::Begin {
+                dispatch_id, reply, ..
+            } => {
+                let _ = reply.send(global.dispatch(&dispatch_id, now).await);
+            }
+            FleetCommand::Accept {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.accept(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Reject {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.reject(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Unknown {
+                dispatch_id,
+                attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.mark_unknown(&dispatch_id, &attempt, now));
+            }
+            FleetCommand::Replay {
+                command_id,
+                dispatch_id,
+                reply,
+            } => {
+                let _ = reply.send(global.authorize_replay(&command_id, &dispatch_id, now));
+            }
+            FleetCommand::UpsertConnection { record, reply } => {
+                let _ = reply.send(global.upsert_connection(record, now));
+            }
+            FleetCommand::DeleteConnection { id, reply } => {
+                let _ = reply.send(global.delete_connection(&id, now));
+            }
+            FleetCommand::BeginConnectionProbe {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.begin_connection_probe(&id, command_id, now));
+            }
+            FleetCommand::RunConnectionProbe {
+                id,
+                command_id,
+                reply,
+                ..
+            } => {
+                let result = crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(global)
+                    .probe_connection(id, command_id, now)
+                    .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                reply,
+                ..
+            } => {
+                let result = async {
+                    let target = global
+                        .environment_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(global)
+                        .deploy_environment(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+                ..
+            } => {
+                let result = async {
+                    let target = global
+                        .environment_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(global)
+                        .delete_environment(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                reply,
+                ..
+            } => {
+                let result = async {
+                    let target = global
+                        .resource_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(global)
+                        .provision_resource(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::RunResourceDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+                ..
+            } => {
+                let result = async {
+                    let target = global
+                        .resource_target_resolution(&id)
+                        .ok_or(FleetDeliveryError::InvalidTransition)?;
+                    crate::fleet::lifecycle::FleetLifecycleOrchestrator::new(global)
+                        .delete_resource(id, command_id, phase, target, now)
+                        .await
+                        .map(|(_, outcome)| outcome)
+                }
+                .await;
+                let _ = reply.send(result);
+            }
+            FleetCommand::CompleteConnectionProbe {
+                id,
+                command_id,
+                outcome,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_connection_probe(
+                    &id,
+                    &command_id,
+                    outcome,
+                    now,
+                    message,
+                ));
+            }
+            FleetCommand::RegisterEnvironment { record, reply } => {
+                let _ = reply.send(global.register_environment(record, now));
+            }
+            FleetCommand::RegisterResource { request, reply } => {
+                let _ = reply.send(global.register_source_backed_resource(request).await);
+            }
+            FleetCommand::UpsertNode { observation, reply } => {
+                let _ = reply.send(global.upsert_node(observation, now));
+            }
+            FleetCommand::UpsertAgent { observation, reply } => {
+                let _ = reply.send(global.upsert_agent(observation, now));
+            }
+            FleetCommand::WriteCredential { request, reply } => {
+                let _ = reply.send(global.write_credential(request));
+            }
+            FleetCommand::RevokeAgent { id, reply } => {
+                let _ = reply.send(global.revoke_agent(&id, now));
+            }
+            FleetCommand::UpsertRuntime { observation, reply } => {
+                let _ = reply.send(global.upsert_runtime(observation, now));
+            }
+            FleetCommand::UpsertEndpoint { observation, reply } => {
+                let _ = reply.send(global.upsert_endpoint(observation, now));
+            }
+            FleetCommand::RetireNode { id, reply } => {
+                let _ = reply.send(global.retire_node(&id, now));
+            }
+            FleetCommand::BeginRuntimeStart {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.begin_runtime_start(&id, command_id, now));
+            }
+            FleetCommand::CompleteRuntimeStart {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_runtime_start(&id, &command_id, now));
+            }
+            FleetCommand::BeginRuntimeStop {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.begin_runtime_stop(&id, command_id, now));
+            }
+            FleetCommand::CompleteRuntimeStop {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_runtime_stop(&id, &command_id, now));
+            }
+            FleetCommand::RetireRuntime { id, reply } => {
+                let _ = reply.send(global.retire_runtime(&id, now));
+            }
+            FleetCommand::DrainEndpoint { id, reply } => {
+                let _ = reply.send(global.drain_endpoint(&id, now));
+            }
+            FleetCommand::RetireEndpoint { id, reply } => {
+                let _ = reply.send(global.retire_endpoint(&id, now));
+            }
+            FleetCommand::BeginEndpointProbe {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.begin_endpoint_probe(&id, command_id, now));
+            }
+            FleetCommand::CompleteEndpointProbe {
+                id,
+                command_id,
+                health,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_endpoint_probe(&id, &command_id, health, now));
+            }
+            FleetCommand::BeginCapabilitySync {
+                id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(global.begin_capability_sync(&id, command_id, now));
+            }
+            FleetCommand::CompleteCapabilitySync {
+                id,
+                command_id,
+                sync,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_capability_sync(&id, &command_id, sync, now));
+            }
+            FleetCommand::BeginEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ =
+                    reply.send(global.start_environment_deployment(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_environment_deployment(
+                    &id,
+                    &command_id,
+                    &phase,
+                    now,
+                ));
+            }
+            FleetCommand::FailEnvironmentDeployment {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(global.fail_environment_deployment(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::BeginEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(global.start_environment_deletion(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ =
+                    reply.send(global.complete_environment_deletion(&id, &command_id, &phase, now));
+            }
+            FleetCommand::FailEnvironmentDeletion {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(global.fail_environment_deletion(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::StartResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(global.start_resource_provisioning(&id, command_id, phase, now));
+            }
+            FleetCommand::FailResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(global.fail_resource_provisioning(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::CompleteResourceProvisioning {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(global.complete_resource_provisioning(
+                    &id,
+                    &command_id,
+                    &phase,
+                    now,
+                ));
+            }
+            FleetCommand::StartResourceDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ = reply.send(global.start_resource_deletion(&id, command_id, phase, now));
+            }
+            FleetCommand::CompleteResourceDeletion {
+                id,
+                command_id,
+                phase,
+                reply,
+            } => {
+                let _ =
+                    reply.send(global.complete_resource_deletion(&id, &command_id, &phase, now));
+            }
+            FleetCommand::FailResourceDeletion {
+                id,
+                command_id,
+                phase,
+                message,
+                reply,
+            } => {
+                let _ = reply.send(global.fail_resource_deletion(
+                    &id,
+                    &command_id,
+                    &phase,
+                    message,
+                    now,
+                ));
+            }
+            FleetCommand::AuthenticateRuntimeAgentIngress { identity, reply } => {
+                let _ = reply.send(global.authenticate_runtime_agent_ingress(identity));
+            }
+            FleetCommand::RegisterRuntimeAgent { agent, reply } => {
+                let _ = reply.send(global.register_runtime_agent(agent));
+            }
+            FleetCommand::RegisterRuntimeAgentCommand {
+                agent_id,
+                correlation,
+                queued_at,
+                command_attempt,
+                dispatch_attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.register_runtime_agent_command(
+                    &agent_id,
+                    correlation,
+                    queued_at,
+                    command_attempt,
+                    dispatch_attempt,
+                ));
+            }
+            FleetCommand::RecordRuntimeAgentHeartbeat {
+                agent_id,
+                heartbeat,
+                reply,
+            } => {
+                let _ = reply.send(global.record_runtime_agent_heartbeat(&agent_id, heartbeat));
+            }
+            FleetCommand::RecordRuntimeAgentProgress {
+                agent_id,
+                correlation,
+                progress,
+                reported_at,
+                command_attempt,
+                dispatch_attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.record_runtime_agent_progress(
+                    &agent_id,
+                    &correlation,
+                    progress,
+                    reported_at,
+                    &command_attempt,
+                    &dispatch_attempt,
+                ));
+            }
+            FleetCommand::RecordRuntimeAgentResult {
+                agent_id,
+                correlation,
+                result,
+                command_attempt,
+                dispatch_attempt,
+                reply,
+            } => {
+                let _ = reply.send(global.record_runtime_agent_result(
+                    &agent_id,
+                    &correlation,
+                    result,
+                    &command_attempt,
+                    &dispatch_attempt,
+                ));
+            }
+        }
+    }
+
+    async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
+
+    async fn handle_keyed_query(
+        _shared: Self::Shared,
+        _key: Self::Key,
+        _lane: &mut Self::LaneState,
+        _query: Self::Query,
+    ) {
+    }
+
+    async fn handle_global_query(
+        _shared: Self::Shared,
+        global: &mut Self::GlobalState,
+        query: Self::Query,
+    ) {
+        let now = SystemTime::now();
+        match query {
+            FleetQuery::TerminalContext { summary, reply } => {
+                let _ = reply.send(Ok(global.terminal_context(&summary)));
+            }
+            FleetQuery::TerminalResolveContext {
+                selector,
+                summary,
+                reply,
+            } => {
+                let _ = reply.send(Ok(global.resolve_terminal_context(&selector, &summary)));
+            }
+            FleetQuery::TerminalList { reply } => {
+                let _ = reply.send(global.terminal_list());
+            }
+            FleetQuery::QuerySnapshot { now, reply } => {
+                let _ = reply.send(Ok(global.query_snapshot(now)));
+            }
+            FleetQuery::Snapshot { now, reply } => {
+                let _ = reply.send(Ok(global.snapshot(now)));
+            }
+            FleetQuery::SelectorPreview {
+                constraints,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(Ok(global.selector_preview(constraints, now)));
+            }
+            FleetQuery::TargetSummaries { reply } => {
+                let _ = reply.send(Ok(global.target_summaries()));
+            }
+            FleetQuery::TargetSelector {
+                id,
+                revision,
+                kind,
+                reply,
+            } => {
+                let _ = reply.send(Ok(global.target_selector(&id, revision, kind)));
+            }
+            FleetQuery::TopologySummary { reply } => {
+                let _ = reply.send(Ok(global.topology_summary()));
+            }
+            FleetQuery::NodeCommandRequest { request, reply } => {
+                let _ = reply.send(global.node_command_request(request, now));
+            }
+            FleetQuery::DispatchTarget { dispatch_id, reply } => {
+                let _ = reply.send(global.dispatch_target_id(&dispatch_id));
+            }
+            FleetQuery::ConnectionTarget { id, reply } => {
+                let _ = reply.send(global.connection_target_id(&id));
+            }
+            FleetQuery::EnvironmentTarget { id, reply } => {
+                let _ = reply.send(global.environment_target_id(&id));
+            }
+            FleetQuery::ResourceTarget { id, reply } => {
+                let _ = reply.send(global.resource_target_id(&id));
+            }
+        }
+    }
+
+    async fn handle_exclusive_query(
+        shared: Self::Shared,
+        global: &mut Self::GlobalState,
+        query: Self::Query,
+    ) {
+        if let Err(error) = global.refresh_from_store() {
+            send_query_delivery_error(query, error);
+            return;
+        }
+        Self::handle_global_query(shared, global, query).await;
+    }
+}
+
+fn send_query_delivery_error(query: FleetQuery, error: FleetDeliveryError) {
+    match query {
+        FleetQuery::TerminalContext { reply, .. }
+        | FleetQuery::TerminalResolveContext { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::QuerySnapshot { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::Snapshot { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::SelectorPreview { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::TargetSummaries { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::TargetSelector { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::TopologySummary { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::NodeCommandRequest { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::DispatchTarget { reply, .. }
+        | FleetQuery::ConnectionTarget { reply, .. }
+        | FleetQuery::EnvironmentTarget { reply, .. }
+        | FleetQuery::ResourceTarget { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetQuery::TerminalList { reply } => {
+            let _ = reply.send(Vec::new());
+        }
+    }
+}
+
+fn send_keyed_delivery_error(command: FleetCommand, error: FleetDeliveryError) {
+    match command {
+        FleetCommand::TerminalProviderOpen { reply, .. } => {
+            let _ = reply.send(Err(()));
+        }
+        FleetCommand::Begin { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::Accept { reply, .. }
+        | FleetCommand::Reject { reply, .. }
+        | FleetCommand::Unknown { reply, .. }
+        | FleetCommand::Replay { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::BeginConnectionProbe { reply, .. }
+        | FleetCommand::CompleteConnectionProbe { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::RunConnectionProbe { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::RunEnvironmentDeployment { reply, .. }
+        | FleetCommand::RunEnvironmentDeletion { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::BeginEnvironmentDeployment { reply, .. }
+        | FleetCommand::CompleteEnvironmentDeployment { reply, .. }
+        | FleetCommand::FailEnvironmentDeployment { reply, .. }
+        | FleetCommand::BeginEnvironmentDeletion { reply, .. }
+        | FleetCommand::CompleteEnvironmentDeletion { reply, .. }
+        | FleetCommand::FailEnvironmentDeletion { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::RunResourceProvisioning { reply, .. }
+        | FleetCommand::RunResourceDeletion { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::StartResourceProvisioning { reply, .. }
+        | FleetCommand::FailResourceProvisioning { reply, .. }
+        | FleetCommand::CompleteResourceProvisioning { reply, .. }
+        | FleetCommand::StartResourceDeletion { reply, .. }
+        | FleetCommand::CompleteResourceDeletion { reply, .. }
+        | FleetCommand::FailResourceDeletion { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        _ => unreachable!("Fleet non-keyed command cannot be rejected as keyed"),
+    }
+}
+
+fn current_terminal_generation(
+    owner: &FleetOwner,
+    session: &TerminalSessionId,
+) -> Result<Generation, TerminalSessionError> {
+    owner
+        .terminal_list()
+        .into_iter()
+        .find(|summary| summary.id() == session)
+        .map(|summary| summary.generation())
+        .ok_or(TerminalSessionError::NotFound)
 }
 
 fn connection_kind_matches_target(

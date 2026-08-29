@@ -186,6 +186,7 @@ export function sessionView(
   sessionKey: string,
   options: {
     identity?: SessionIdentity | SessionWireIdentity;
+    endpointSessionId?: string | null;
     epoch?: number;
     seq?: number;
     cursor?: number;
@@ -206,6 +207,7 @@ export function sessionView(
   const window = options.window ?? completeFact(windowView(itemFacts.length));
   return {
     sessionKey,
+    endpointSessionId: options.endpointSessionId ?? null,
     identity: wireIdentity(options.identity ?? sessionFixtureIdentity(sessionKey)),
     epoch: options.epoch ?? 1,
     seq: options.seq ?? 0,

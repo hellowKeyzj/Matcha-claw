@@ -110,6 +110,10 @@ identity!(
     EndpointSessionId,
     "endpoint session id must be a non-empty string"
 );
+identity!(
+    NativeSessionId,
+    "native session id must be a non-empty string"
+);
 identity!(ModelRef, "model reference must be a non-empty string");
 identity!(RunId, "run id must be a non-empty string");
 identity!(MessageId, "message id must be a non-empty string");
@@ -219,7 +223,7 @@ impl ChatSendParams {
     pub fn try_new(
         session_key: SessionKey,
         message: impl Into<String>,
-        run_id: RunId,
+        idempotency_key: RunId,
     ) -> Result<Self, ValidationError> {
         if session_key.as_str().encode_utf16().count() > MAX_CHAT_SESSION_KEY_UTF16 {
             return Err(ValidationError("chat send session key is too long"));
@@ -228,7 +232,7 @@ impl ChatSendParams {
             session_key,
             message: message.into(),
             deliver: None,
-            idempotency_key: run_id,
+            idempotency_key,
             attachments: Vec::new(),
         })
     }
@@ -236,7 +240,7 @@ impl ChatSendParams {
         &self.session_key
     }
 
-    pub fn run_id(&self) -> &RunId {
+    pub fn idempotency_key(&self) -> &RunId {
         &self.idempotency_key
     }
 
@@ -300,6 +304,11 @@ impl ChatAbortParams {
             run_id: None,
         }
     }
+
+    pub fn session_key(&self) -> &SessionKey {
+        &self.session_key
+    }
+
     pub fn for_run(mut self, run_id: RunId) -> Self {
         self.run_id = Some(run_id);
         self
@@ -333,6 +342,10 @@ impl ChatHistoryParams {
             limit: None,
             max_chars: None,
         }
+    }
+
+    pub fn session_key(&self) -> &SessionKey {
+        &self.session_key
     }
 
     pub fn try_with_limit(mut self, limit: u64) -> Result<Self, ValidationError> {
@@ -658,11 +671,11 @@ impl fmt::Debug for SessionDeleteParams {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionCreateResult {
-    native_session_id: EndpointSessionId,
+    native_session_id: NativeSessionId,
 }
 
 impl SessionCreateResult {
-    pub fn native_session_id(&self) -> &EndpointSessionId {
+    pub fn native_session_id(&self) -> &NativeSessionId {
         &self.native_session_id
     }
 }
@@ -678,7 +691,7 @@ impl fmt::Debug for SessionCreateResult {
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionIdentityReadback {
     key: SessionKey,
-    native_session_id: EndpointSessionId,
+    native_session_id: NativeSessionId,
 }
 
 impl SessionIdentityReadback {
@@ -686,7 +699,7 @@ impl SessionIdentityReadback {
         &self.key
     }
 
-    pub fn native_session_id(&self) -> &EndpointSessionId {
+    pub fn native_session_id(&self) -> &NativeSessionId {
         &self.native_session_id
     }
 }
@@ -784,6 +797,10 @@ impl fmt::Debug for SessionModelPatchParams {
 impl SessionModelPatchParams {
     pub fn new(key: SessionKey, model: Option<ModelRef>) -> Self {
         Self { key, model }
+    }
+
+    pub fn key(&self) -> &SessionKey {
+        &self.key
     }
 }
 #[derive(Clone, Default, Eq, PartialEq, Serialize)]
@@ -1245,8 +1262,13 @@ pub fn decode_sessions_list_result(
 pub fn decode_session_model_patch_result(
     id: &str,
     response: GatewayResponse,
+    expected_key: &SessionKey,
 ) -> Result<SessionModelPatchResult, ProtocolError> {
-    decode_result(id, response, ProtocolError::InvalidSessionModelPatchResult)
+    let result: SessionModelPatchResult =
+        decode_result(id, response, ProtocolError::InvalidSessionModelPatchResult)?;
+    (result.key == *expected_key)
+        .then_some(result)
+        .ok_or(ProtocolError::InvalidSessionModelPatchResult)
 }
 
 pub fn decode_session_label_patch_result(
@@ -1305,7 +1327,7 @@ struct PeerSessionCreateResult {
     ok: bool,
     key: String,
     #[serde(rename = "sessionId")]
-    session_id: EndpointSessionId,
+    session_id: NativeSessionId,
     #[serde(default, rename = "entry")]
     _entry: Option<IgnoredAny>,
     #[serde(default, rename = "runStarted")]
@@ -1527,6 +1549,22 @@ fn activity_text(value: Option<&Value>) -> Result<Option<String>, ProtocolError>
         .transpose()
 }
 
+fn activity_name(value: Option<&Value>) -> Result<Option<String>, ProtocolError> {
+    value
+        .map(|value| {
+            let text = value.as_str().ok_or(ProtocolError::InvalidSessionEvent)?;
+            if text.is_empty()
+                || text.len() > MAX_SESSION_ACTIVITY_ID_BYTES
+                || text.trim() != text
+                || text.chars().any(char::is_control)
+            {
+                return Err(ProtocolError::InvalidSessionEvent);
+            }
+            Ok(text.to_owned())
+        })
+        .transpose()
+}
+
 fn project_message_activity(
     object: &Map<String, Value>,
     message_id: Option<&MessageId>,
@@ -1581,6 +1619,7 @@ fn project_tool_activity(
         "failed" => ToolActivityPhase::Failed,
         _ => return Err(ProtocolError::InvalidSessionEvent),
     };
+    let tool_name = activity_name(object.get("name").or_else(|| object.get("toolName")))?;
     let summary = activity_text(
         object
             .get("summary")
@@ -1589,6 +1628,7 @@ fn project_tool_activity(
     )?;
     Ok(Some(SessionActivityKind::Tool {
         tool_id,
+        tool_name,
         phase,
         summary,
     }))
@@ -1640,6 +1680,7 @@ pub enum SessionActivityKind {
     },
     Tool {
         tool_id: ToolId,
+        tool_name: Option<String>,
         phase: ToolActivityPhase,
         summary: Option<String>,
     },
@@ -1721,9 +1762,15 @@ impl fmt::Debug for SessionActivityKind {
                 .field("lifecycle", lifecycle)
                 .field("has_text", &text.is_some())
                 .finish(),
-            Self::Tool { phase, summary, .. } => formatter
+            Self::Tool {
+                phase,
+                tool_name,
+                summary,
+                ..
+            } => formatter
                 .debug_struct("Tool")
                 .field("phase", phase)
+                .field("has_tool_name", &tool_name.is_some())
                 .field("has_summary", &summary.is_some())
                 .finish(),
         }
@@ -2287,13 +2334,18 @@ mod tests {
 
         let tool = decode_session_event(event(
             "session.tool",
-            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"failed","toolCallId":"tool-9","summary":"bounded summary","input":{"secret":"omit"},"output":{"secret":"omit"}}"#,
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"failed","toolCallId":"tool-9","name":"read","summary":"bounded summary","input":{"secret":"omit"},"output":{"secret":"omit"}}"#,
         ))
         .unwrap()
         .unwrap();
         assert!(matches!(
             tool.activity.as_ref().unwrap().kind(),
-            SessionActivityKind::Tool { phase: ToolActivityPhase::Failed, summary: Some(summary), .. } if summary == "bounded summary"
+            SessionActivityKind::Tool {
+                phase: ToolActivityPhase::Failed,
+                tool_name: Some(name),
+                summary: Some(summary),
+                ..
+            } if name == "read" && summary == "bounded summary"
         ));
         assert!(decode_session_event(event(
             "session.tool",
@@ -2332,6 +2384,7 @@ mod tests {
                 "p",
                 r#"{"ok":true,"path":"not-projected","key":"agent:main:session-1","entry":{"not":"projected"},"resolved":{"modelProvider":"anthropic","model":"anthropic/claude-opus-4-7","agentRuntime":{"id":"acpx","source":"session-key"}}}"#,
             ),
+            &key(),
         )
         .unwrap();
         assert_eq!(patch.key, key());
@@ -2346,6 +2399,7 @@ mod tests {
                 "p",
                 r#"{"ok":true,"key":"agent:main:session-1","resolved":{"modelProvider":"anthropic","model":"anthropic/claude-opus-4-7","agentRuntime":{"id":"acpx","source":"future"}}}"#,
             ),
+            &key(),
         )
         .is_err());
         let projection = decode_session_event(event("session.message", r#"{"sessionKey":"agent:main:session-1","runId":"run-7","messageId":"message-3","message":{},"future":true}"#)).unwrap().unwrap();
@@ -2605,6 +2659,7 @@ mod tests {
                     r#"{{"ok":true,"path":"{PAYLOAD}","key":"{SESSION}","entry":{{"prompt":"{PROMPT}"}},"resolved":{{"modelProvider":"{TEXT}","model":"{PAYLOAD}","agentRuntime":{{"id":"{MESSAGE}","source":"implicit"}}}}}}"#
                 ),
             ),
+            &session_key,
         )
         .unwrap();
         assert_debug_redacts(&patch, CANARIES);
@@ -2652,6 +2707,7 @@ mod tests {
                     "canary",
                     r#"{"ok":true,"key":"agent:main:session-1","resolved":{"modelProvider":"anthropic","model":"anthropic/claude-opus-4-7","agentRuntime":{"id":"acpx","source":"implicit"}}}"#,
                 ),
+                &key(),
             )
             .unwrap_err(),
             ProtocolError::MismatchedResponse

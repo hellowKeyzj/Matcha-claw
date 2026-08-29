@@ -19,7 +19,6 @@ import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fix
 
 function createChatSession(input: Partial<ChatSession> & Pick<ChatSession, 'key' | 'agentId'>): ChatSession {
   return {
-    backendSessionKey: input.key,
     sessionIdentity: createOpenClawTestSessionIdentity(input.key, input.agentId),
     ...input,
   };
@@ -41,7 +40,6 @@ function createSessionRecord(input?: {
   const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey, agentId);
   return {
     meta: {
-      backendSessionKey: sessionKey,
       runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
       agentId,
       protocolId: null,

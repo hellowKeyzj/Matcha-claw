@@ -551,8 +551,7 @@ export function RemoteFleetPage() {
       onRegisterEnvironment={registerEnvironment}
       onDeployEnvironment={deployEnvironmentAction}
       onWriteCredential={writeCredential}
-      mutating={mutatingAction?.startsWith('register:')
-        || mutatingAction?.startsWith('register-connection:')
+      mutating={mutatingAction?.startsWith('register-connection:')
         || mutatingAction?.startsWith('register-environment:')
         || mutatingAction?.startsWith('deploy-environment:')
         || mutatingAction?.startsWith('write-credential:')

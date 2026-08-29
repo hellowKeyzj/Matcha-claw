@@ -8,8 +8,8 @@ const matchaApprovalIdentity = {
     runtimeAdapterId: 'matcha-agent',
     runtimeInstanceId: 'local',
   },
-  agentId: 'main',
-  sessionKey: 'matcha-session-1',
+  agentId: 'matcha',
+  sessionKey: 'matcha-agent:matcha:native-session-1',
 } as const;
 
 const endpoint = {
@@ -61,7 +61,7 @@ function approvalRequest(operationId: 'approvals.list' | 'approvals.resolve') {
       operationId,
       scope: { kind: 'session', identity: matchaApprovalIdentity },
       target: { kind: 'session', identity: matchaApprovalIdentity },
-      input: { sessionIdentity: matchaApprovalIdentity },
+      input: { sessionIdentity: matchaApprovalIdentity, endpointSessionId: 'native-session-1' },
     }
     : {
       id: 'session.approval',
@@ -70,9 +70,11 @@ function approvalRequest(operationId: 'approvals.list' | 'approvals.resolve') {
       target: { kind: 'approval', identity: matchaApprovalIdentity, approvalId: 'approval-1' },
       input: {
         sessionKey: matchaApprovalIdentity.sessionKey,
+        endpointSessionId: 'native-session-1',
         sessionIdentity: matchaApprovalIdentity,
         id: 'approval-1',
         decision: 'allow-once',
+        request: { optionIds: ['allow_once'] },
       },
     };
 }
@@ -129,18 +131,28 @@ describe('session abort Host API route', () => {
       scope: {
         kind: 'session',
         endpoint: matchaApprovalIdentity.endpoint,
-        sessionId: matchaApprovalIdentity.sessionKey,
+        sessionId: 'native-session-1',
       },
       target: { kind: 'session' },
       input: {
         endpoint: matchaApprovalIdentity.endpoint,
-        sessionId: matchaApprovalIdentity.sessionKey,
+        sessionId: 'native-session-1',
       },
     });
     expect(respond).not.toHaveBeenCalled();
     expect(result.state).toEqual({
       statusCode: 200,
-      body: { approvals: [{ approvalId: 'approval-1', optionIds: ['allow_once'] }] },
+      body: {
+        approvals: [{
+          id: 'approval-1',
+          sessionKey: matchaApprovalIdentity.sessionKey,
+          sessionIdentity: matchaApprovalIdentity,
+          title: 'Approval required',
+          allowedDecisions: ['allow-once'],
+          request: { optionIds: ['allow_once'] },
+          createdAtMs: 0,
+        }],
+      },
     });
   });
 
@@ -166,12 +178,12 @@ describe('session abort Host API route', () => {
       scope: {
         kind: 'session',
         endpoint: matchaApprovalIdentity.endpoint,
-        sessionId: matchaApprovalIdentity.sessionKey,
+        sessionId: 'native-session-1',
       },
       target: { kind: 'approval' },
       input: {
         endpoint: matchaApprovalIdentity.endpoint,
-        sessionId: matchaApprovalIdentity.sessionKey,
+        sessionId: 'native-session-1',
         approvalId: 'approval-1',
         optionId: 'allow_once',
       },

@@ -6,7 +6,6 @@ function session(key: string, updatedAt: number, overrides: Partial<ChatSession>
   const agentId = overrides.agentId ?? key.split(':')[1] ?? 'main';
   return {
     key,
-    backendSessionKey: key,
     agentId,
     protocolId: 'openclaw-v4',
     runtimeEndpointId: 'local',
@@ -50,7 +49,15 @@ describe('pickStartupSessionFallback', () => {
     const current = session('custom-current', 3_000, { agentId: 'researcher' });
     const sameAgentMain = session('custom-main', 1_000, {
       agentId: 'researcher',
-      backendSessionKey: 'agent:researcher:main',
+      sessionIdentity: {
+        endpoint: {
+          kind: 'native-runtime',
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
+        },
+        agentId: 'researcher',
+        sessionKey: 'agent:researcher:main',
+      },
     });
     const otherAgentNewer = session('agent:main:session-new', 9_000, { agentId: 'main' });
 

@@ -1,13 +1,17 @@
 /**
  * Chat State Store
  * Manages chat messages, sessions, streaming, and thinking state.
- * Communicates with OpenClaw Gateway via renderer WebSocket RPC.
+ * Communicates with runtime-host session APIs.
  */
 import { create } from 'zustand';
-import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostRuntimeEndpointsList, hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
-import { useGatewayStore } from '../gateway';
+import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
+import {
+  isRuntimeEndpointDirectoryPending,
+  isSessionRuntimeEndpointReady,
+  isSessionRuntimeEndpointStarting,
+  useRuntimeEndpointsStore,
+} from '../runtime-endpoints';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
   buildApprovalResolvedPatch,
@@ -53,6 +57,16 @@ function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
 }
 
+function readApprovalResolveOutcome(value: unknown): 'responded' | 'target_rejected' | 'unknown' | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const outcome = (value as { outcome?: unknown }).outcome;
+  return outcome === 'responded' || outcome === 'target_rejected' || outcome === 'unknown'
+    ? outcome
+    : null;
+}
+
 function buildAgentScope(endpoint: RuntimeEndpointSummary, agentId: string): AgentScope | null {
   const normalizedAgentId = agentId.trim();
   if (!normalizedAgentId) {
@@ -76,23 +90,36 @@ function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[]
     .filter((scope): scope is AgentScope => scope != null);
 }
 
+function readEndpointCatalogAgents(endpoint: RuntimeEndpointSummary) {
+  const agentIds = new Set([
+    endpoint.defaultAgentId,
+    ...endpoint.agentIds,
+    ...endpoint.agents.map((agent) => agent.agentId),
+  ]);
+  return [...agentIds]
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+    .map((id) => {
+      const endpointAgent = endpoint.agents.find((agent) => agent.agentId === id);
+      return {
+        id,
+        name: endpointAgent?.displayName?.trim() || id,
+      };
+    });
+}
+
+function buildAgentCatalog(endpoint: RuntimeEndpointSummary): ChatSessionRuntimeEndpointTarget['agentCatalog'] {
+  const agents = readEndpointCatalogAgents(endpoint);
+  return endpoint.capabilityFamilies.some((family) => (
+    family.family === 'subagent'
+    && family.availability === 'supported'
+  ))
+    ? { source: 'subagent-management', seedAgents: agents }
+    : { source: 'runtime-endpoint', agents };
+}
+
 function buildDefaultSessionPromptScope(endpoint: RuntimeEndpointSummary): AgentScope | null {
   return buildAgentScope(endpoint, endpoint.defaultAgentId);
-}
-
-function supportsSessionFamily(endpoint: RuntimeEndpointSummary): boolean {
-  return endpoint.capabilityFamilies.some((capabilityFamily) => (
-    capabilityFamily.family === 'session'
-    && capabilityFamily.availability === 'supported'
-  ));
-}
-
-function isReadySessionEndpoint(endpoint: RuntimeEndpointSummary): boolean {
-  return endpoint.capabilities.chat
-    && endpoint.lifecycle.ready
-    && endpoint.controlState.readiness?.ready === true
-    && supportsSessionFamily(endpoint)
-    && buildDefaultSessionPromptScope(endpoint) != null;
 }
 
 function sessionEndpointMeta(endpoint: RuntimeEndpointRef): { protocolId: string | null; runtimeEndpointId: string } {
@@ -117,7 +144,7 @@ function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, ri
 
 function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[]): ChatSessionRuntimeEndpointTarget[] {
   return endpoints
-    .filter(isReadySessionEndpoint)
+    .filter(isSessionRuntimeEndpointReady)
     .map((endpoint) => {
       const sessionPromptScopes = readSessionPromptScopes(endpoint)
         .sort((left, right) => left.agentId.localeCompare(right.agentId) || JSON.stringify(left).localeCompare(JSON.stringify(right)));
@@ -131,6 +158,7 @@ function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[])
         displayName: endpoint.displayName,
         agentIds: [...endpoint.agentIds],
         acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
+        agentCatalog: buildAgentCatalog(endpoint),
         sessionPromptScopes,
         defaultSessionPromptScope: buildDefaultSessionPromptScope(endpoint)!,
       };
@@ -198,23 +226,31 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         },
       }));
       try {
-        const { endpoints } = await hostRuntimeEndpointsList();
+        useRuntimeEndpointsStore.getState().init();
+        await useRuntimeEndpointsStore.getState().refresh();
+        const { status, error, endpoints } = useRuntimeEndpointsStore.getState();
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
           return;
         }
-        const targets = buildSessionRuntimeEndpointTargets(endpoints);
+        const endpointSource = status === 'ready' ? endpoints : [];
+        const targets = buildSessionRuntimeEndpointTargets(endpointSource);
         const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, get());
         if (!defaultSessionPromptScope) {
-          const message = 'No session runtime endpoint is available';
+          const starting = status === 'loading' || endpoints.some(isSessionRuntimeEndpointStarting);
+          const message = status === 'error' && error
+            ? error
+            : starting
+              ? 'Session runtime endpoint is starting'
+              : 'No session runtime endpoint is available';
           set({
             sessionRuntimeCatalog: {
-              status: 'error',
-              error: message,
+              status: starting ? 'loading' : 'error',
+              error: starting ? null : message,
               endpoints: targets,
               defaultSessionPromptScope: null,
             },
             sessionCatalogStatus: createIdleResourceStatusState(),
-            error: message,
+            error: starting ? null : message,
           });
           return;
         }
@@ -234,14 +270,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
+        const pending = isRuntimeEndpointDirectoryPending(error);
         set((state) => ({
           sessionRuntimeCatalog: {
             ...state.sessionRuntimeCatalog,
-            status: 'error',
-            error: message,
+            status: pending ? 'loading' : 'error',
+            error: pending ? null : message,
           },
           sessionCatalogStatus: createIdleResourceStatusState(),
-          error: message,
+          error: pending ? null : message,
         }));
       }
     },
@@ -279,7 +316,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         get,
         historyRuntime,
         loadingTimeoutMs: CHAT_HISTORY_LOADING_TIMEOUT_MS,
-        getGatewayStatus: (): GatewayStatus => useGatewayStore.getState().status,
       }, {
         ...request,
         sessionKey: normalizedSessionKey,
@@ -330,11 +366,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       try {
         const targetSessionKey = normalizeTaskSessionKey(sessionKeyHint, get().currentSessionKey);
         const target = resolveSessionOperationTarget(get(), targetSessionKey);
-        const payload = await hostSessionApprovals({ sessionIdentity: target.sessionIdentity });
+        if (!target.endpointSessionId) {
+          return;
+        }
+        const payload = await hostSessionApprovals({
+          sessionIdentity: target.sessionIdentity,
+          endpointSessionId: target.endpointSessionId,
+        });
         const stateAfterFetch = get();
-        const endpointSessionKeys = Object.entries(stateAfterFetch.loadedSessions)
-          .filter(([, record]) => record.meta.sessionIdentity && sameRuntimeEndpointScope(record.meta.sessionIdentity.endpoint, target.sessionIdentity.endpoint))
-          .map(([recordKey]) => recordKey);
+        const targetRecordKey = findSessionRecordKey(stateAfterFetch, target.sessionIdentity) ?? targetSessionKey;
         const grouped = groupApprovalsBySession(payload.approvals.flatMap((approval) => {
           const recordKey = findSessionRecordKey(stateAfterFetch, approval.sessionIdentity);
           if (!recordKey) {
@@ -344,7 +384,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           return [{
             ...approval,
             sessionKey: recordKey,
-            backendSessionKey: approval.sessionKey,
             endpointSessionId: meta.endpointSessionId ?? undefined,
             allowedDecisions: [...approval.allowedDecisions],
           }];
@@ -352,7 +391,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         set((state) => buildSyncPendingApprovalsPatch({
           state,
           grouped,
-          sessionKeys: endpointSessionKeys,
+          sessionKeys: [targetRecordKey],
         }));
       } catch {
         // ignore
@@ -367,15 +406,25 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           .find((item) => item.id === approvalId
             && buildSessionIdentityKey(item.sessionIdentity) === buildSessionIdentityKey(approval.sessionIdentity));
         if (!pendingApproval) {
-          throw new Error('approval not found');
+          return;
         }
-        await hostSessionResolveApproval({
+        const endpointSessionId = pendingApproval.endpointSessionId;
+        if (!endpointSessionId) {
+          return;
+        }
+        const outcome = readApprovalResolveOutcome(await hostSessionResolveApproval({
           id: approvalId,
-          sessionKey: pendingApproval.backendSessionKey,
-          ...(pendingApproval.endpointSessionId ? { endpointSessionId: pendingApproval.endpointSessionId } : {}),
+          endpointSessionId,
           sessionIdentity: pendingApproval.sessionIdentity,
           decision,
-        });
+          ...(pendingApproval.request ? { request: pendingApproval.request } : {}),
+        }));
+        if (outcome !== 'responded') {
+          if (outcome === 'target_rejected') {
+            set({ error: 'approval target rejected' });
+          }
+          return;
+        }
         set((state) => buildApprovalResolvedPatch({
           state,
           id: approvalId,
@@ -411,7 +460,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         const endpoint = sessionIdentity.endpoint as RuntimeEndpointRef;
         const endpointMeta = sessionEndpointMeta(endpoint);
         const loadedSessions = patchSessionMeta(state, normalizedSessionKey, {
-          backendSessionKey: sessionIdentity.sessionKey,
           runtimeScopeKey: buildRuntimeScopeKey(endpoint),
           agentId: sessionIdentity.agentId,
           ...endpointMeta,

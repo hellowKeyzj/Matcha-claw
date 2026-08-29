@@ -3,6 +3,8 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+use tokio::sync::watch;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum HostPhase {
@@ -63,12 +65,15 @@ impl HostState {
 
 pub struct HostAdmission {
     phase: AtomicU8,
+    changes: watch::Sender<HostState>,
 }
 
 impl HostAdmission {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        let (changes, _) = watch::channel(HostState::from_phase(HostPhase::Created));
         Self {
             phase: AtomicU8::new(HostPhase::Created as u8),
+            changes,
         }
     }
 
@@ -154,10 +159,16 @@ impl HostAdmission {
         }
     }
 
+    pub(crate) fn subscribe(&self) -> watch::Receiver<HostState> {
+        self.changes.subscribe()
+    }
+
     fn transition(&self, from: HostPhase, to: HostPhase) -> Result<(), HostPhase> {
         self.phase
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ())
+            .map(|_| {
+                let _ = self.changes.send(HostState::from_phase(to));
+            })
             .map_err(decode_phase)
     }
 }
@@ -208,6 +219,10 @@ pub struct RequestAdmissionClosed {
 }
 
 impl RequestAdmissionClosed {
+    pub(crate) const fn new(phase: HostPhase) -> Self {
+        Self { phase }
+    }
+
     pub const fn phase(self) -> HostPhase {
         self.phase
     }

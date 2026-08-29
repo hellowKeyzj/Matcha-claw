@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::WorkspaceHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{
     WorkspaceBinaryDelivery, WorkspaceBinaryRequest, map_binary_outcome, map_stat_outcome,
@@ -28,19 +28,19 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        workspace: WorkspaceHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            workspace,
         })
     }
 
@@ -48,9 +48,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let workspace = self.workspace.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, workspace).await;
             });
         }
     }
@@ -67,12 +67,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, workspace).await,
             Err(response) => response,
         })
     })
@@ -88,7 +88,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    workspace: WorkspaceHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/workspace/files/binary" {
         return Response::not_found();
@@ -113,28 +113,21 @@ async fn handle(
         };
     drop(verifier);
     let delivery = if request.is_stat() {
-        match owner
-            .stat_open_claw_workspace_file(
-                request.session_key().to_owned(),
-                request.relative_path().to_owned(),
-            )
-            .await
-        {
-            Ok(result) => map_stat_outcome(result),
-            Err(_) => WorkspaceBinaryDelivery::Unavailable,
-        }
+        map_stat_outcome(
+            workspace
+                .stat_file(request.session_key(), request.relative_path())
+                .map_err(crate::WorkspaceStatError::from),
+        )
     } else {
-        match owner
-            .read_open_claw_workspace_binary(
-                request.session_key().to_owned(),
-                request.relative_path().to_owned(),
-                request.max_bytes(),
-            )
-            .await
-        {
-            Ok(result) => map_binary_outcome(result),
-            Err(_) => WorkspaceBinaryDelivery::Unavailable,
-        }
+        map_binary_outcome(
+            workspace
+                .read_binary(
+                    request.session_key(),
+                    request.relative_path(),
+                    request.max_bytes(),
+                )
+                .map_err(crate::WorkspaceBinaryError::from),
+        )
     };
     Response::from_delivery(delivery)
 }

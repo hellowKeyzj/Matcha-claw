@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::session_state::{RecoveryReason, SessionChange, SessionDelta};
+use crate::sessions::state::{RecoveryReason, SessionChange, SessionDelta};
 
 use super::*;
 
@@ -252,6 +252,13 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
                 "name": "host.capabilities.describe",
                 "input": [],
             },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "host.runtime.execute", "input": {} },
         }),
         json!({
             "version": 1,
@@ -950,5 +957,92 @@ fn rejects_unknown_fields_and_safe_event_secret_channels() {
         "token",
     ] {
         assert!(!output.contains(legacy));
+    }
+}
+
+#[test]
+fn private_control_wire_keeps_owner_dtos_and_runtime_seams_private() {
+    let wire = include_str!("wire.rs");
+
+    for private in [
+        "PeerOwner",
+        "PeerHandle",
+        "SessionOwner",
+        "SessionHandle",
+        "SessionCommand",
+        "SessionQuery",
+        "SessionSendRequest",
+        "SessionAbortRequest",
+        "SessionView",
+        "OwnerRoute",
+        "spawn_owner_runtime",
+        "rawPayload",
+        "native-session-identity",
+        "token",
+    ] {
+        assert!(
+            !wire.contains(private),
+            "private control wire leaked {private}"
+        );
+    }
+}
+
+#[test]
+fn session_handle_separates_query_and_mutation_mailboxes() {
+    let handle = include_str!("../sessions/handle.rs");
+    let command = include_str!("../sessions/command.rs");
+    let query = include_str!("../sessions/query.rs");
+
+    assert!(handle.contains("self.owner.send_query(query(reply))"));
+    assert!(handle.contains("self.owner\n            .send_command(command(reply))"));
+    assert!(!query.contains("SessionCommand"));
+    assert!(!command.contains("SessionQuery"));
+
+    for method in [
+        "pub(crate) async fn list_sessions",
+        "pub(crate) async fn get_session",
+        "pub(crate) async fn pending_approvals",
+        "pub(crate) async fn load_timeline",
+        "pub(crate) async fn list_openclaw_sessions",
+        "pub(crate) async fn openclaw_history",
+        "pub(crate) async fn list_matcha_sessions",
+        "pub(crate) async fn load_matcha_history",
+    ] {
+        assert!(
+            method_body(handle, method).contains("request_query"),
+            "{method}"
+        );
+    }
+
+    for method in [
+        "pub(crate) async fn ensure_session",
+        "pub(crate) async fn ingest_event",
+        "pub(crate) async fn touch_session",
+        "pub(crate) async fn evict_session",
+        "pub(crate) async fn create_session",
+        "pub(crate) async fn send_session",
+        "pub(crate) async fn abort_session",
+        "pub(crate) async fn delete_session",
+        "pub(crate) async fn rename_session",
+        "pub(crate) async fn respond_to_approval",
+        "pub(crate) async fn select_model",
+        "pub(crate) async fn send_openclaw_chat",
+        "pub(crate) async fn abort_openclaw_chat",
+    ] {
+        assert!(
+            method_body(handle, method).contains("request_command"),
+            "{method}"
+        );
+    }
+}
+
+fn method_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing SessionHandle method {signature}"));
+    let body = &source[start..];
+    match body.find("\n    pub(crate) async fn ") {
+        Some(end) => &body[..end],
+        None => body,
     }
 }

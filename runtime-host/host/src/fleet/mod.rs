@@ -1,9 +1,11 @@
+pub(crate) mod command;
 pub(crate) mod connection_probe;
 pub(crate) mod credentials;
 pub(crate) mod custom;
 pub(crate) mod custom_lifecycle;
 pub(crate) mod docker;
 pub(crate) mod executor;
+pub(crate) mod handle;
 pub(crate) mod kubernetes;
 pub(crate) mod lifecycle;
 pub(crate) mod managed_resource_identity;

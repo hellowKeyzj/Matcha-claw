@@ -10,12 +10,10 @@ import {
 } from '../../../electron/desktop-contract/runtime-address';
 import type { ChatStoreState } from './types';
 import { getSessionMeta } from './store-state-helpers';
-
-export interface SessionOperationTarget {
-  sessionKey: string;
-  endpointSessionId?: string;
-  sessionIdentity: SessionIdentity;
-}
+import {
+  buildSessionOperationTarget,
+  type SessionOperationTarget,
+} from '@/services/runtime/session-operation-target';
 
 export function buildRuntimeScopeKey(endpoint: RuntimeEndpointRef): string {
   return buildRuntimeEndpointKey(endpoint);
@@ -82,17 +80,10 @@ export function findSessionRecordKey(
 
 export function resolveSessionOperationTarget(state: ChatStoreState, recordKey: string): SessionOperationTarget {
   const meta = getSessionMeta(state, recordKey);
-  if (!meta.backendSessionKey) {
-    throw new Error(`Backend session key is required: ${recordKey}`);
-  }
   if (!meta.sessionIdentity) {
     throw new Error(`SessionIdentity is required: ${recordKey}`);
   }
-  return {
-    sessionKey: meta.backendSessionKey,
-    ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
-    sessionIdentity: meta.sessionIdentity,
-  };
+  return buildSessionOperationTarget(meta.sessionIdentity, meta.endpointSessionId);
 }
 
 export function sessionOperationScope(target: SessionOperationTarget) {

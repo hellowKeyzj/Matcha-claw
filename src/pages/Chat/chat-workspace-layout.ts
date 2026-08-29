@@ -31,8 +31,9 @@ export interface ChatWorkspaceLayoutResult {
   agentSessionsWidth: number;
 }
 
-export type ChatSidePanelMode = 'hidden' | 'docked' | 'overlay';
+export type ChatSidePanelMode = 'docked' | 'overlay';
 export type ChatSidePanelWidthPolicy = 'light' | 'artifacts';
+export type ChatWindowDockPhase = 'closed' | 'opening' | 'open' | 'closing';
 
 export interface ChatSidePanelLayoutResult {
   sidePanelOpen: boolean;
@@ -178,16 +179,8 @@ export function resolveChatSidePanelLayout(
   width: number = getDefaultChatSidePanelWidth('light'),
   policy: ChatSidePanelWidthPolicy = 'light',
 ): ChatSidePanelLayoutResult {
-  if (!open) {
-    return {
-      sidePanelOpen: false,
-      sidePanelMode: 'hidden',
-      sidePanelWidth: 0,
-    };
-  }
-
   return {
-    sidePanelOpen: true,
+    sidePanelOpen: open,
     sidePanelMode: canDockSidePanel(containerWidth, policy) ? 'docked' : 'overlay',
     sidePanelWidth: clampChatSidePanelWidth(width, containerWidth, policy),
   };

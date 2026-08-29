@@ -1,9 +1,11 @@
 {
-    "gatewayNotRunning": "Gateway Not Running",
-    "gatewayRequired": "The OpenClaw Gateway needs to be running to use chat. It will start automatically, or you can start it from Settings.",
-    "gatewayPreparing": {
-        "title": "Preparing workspace",
-        "description": "Starting and connecting OpenClaw. You can start chatting in a moment."
+    "runtimePreparing": {
+        "title": "Starting runtime",
+        "description": "Runtime Host is preparing chat runtimes. You can start chatting in a moment."
+    },
+    "runtimeUnavailable": {
+        "title": "No runtime available",
+        "description": "No chat runtime endpoint is available. Try again shortly or check Runtime Host in Settings."
     },
     "welcome": {
         "title": "MatchaClaw Chat",
@@ -14,8 +16,8 @@
         "creativeTasksDesc": "Writing, brainstorming, ideas"
     },
     "input": {
-        "gatewayDisconnectedPlaceholder": "Gateway not connected...",
-        "gatewayRecoveringNotice": "Connection interrupted, recovering…",
+        "gatewayDisconnectedPlaceholder": "Runtime unavailable...",
+        "gatewayRecoveringNotice": "Runtime is preparing…",
         "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
         "approvalWaitingPlaceholder": "Waiting for approval...",
         "pickModel": "Choose model",

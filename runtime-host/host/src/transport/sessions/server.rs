@@ -12,7 +12,10 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{
+    composition::PeerHandle, facade::PlatformToolsHandle,
+    transport::authorization::CapabilityDecisionVerifier,
+};
 
 use super::{DecodeError, SessionListDelivery, SessionListRequest, map_native_outcome, timeline};
 use crate::transport::{
@@ -26,26 +29,32 @@ mod server_tests;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    platform_tools: PlatformToolsHandle,
+    peer: PeerHandle,
+    session: crate::sessions::SessionHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        platform_tools: PlatformToolsHandle,
+        peer: PeerHandle,
+        session: crate::sessions::SessionHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            platform_tools,
+            peer,
+            session,
         })
     }
 
@@ -53,9 +62,11 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let platform_tools = self.platform_tools.clone();
+            let peer = self.peer.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, platform_tools, peer, session).await;
             });
         }
     }
@@ -72,7 +83,9 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    platform_tools: PlatformToolsHandle,
+    peer: PeerHandle,
+    session: crate::sessions::SessionHandle,
 ) -> io::Result<()> {
     let mut request_path = None;
     let response = match timeout(REQUEST_DEADLINE, async {
@@ -80,7 +93,7 @@ async fn serve(
         Ok::<_, io::Error>(match request {
             Ok(request) => {
                 request_path = Some(request.path.clone());
-                handle(request, verifier, owner).await
+                handle(request, verifier, platform_tools, peer, session).await
             }
             Err(response) => response,
         })
@@ -97,35 +110,47 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    platform_tools: PlatformToolsHandle,
+    peer: PeerHandle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     if request.method == "GET" && request.path == "/api/runtime-endpoints/list" {
         let response =
-            crate::transport::peer_directory::server::handle(&request.headers, verifier, owner)
+            crate::transport::peer_directory::server::handle(&request.headers, verifier, peer)
                 .await;
         return Response::from_peer_directory(response);
     }
     if request.method == "GET" && request.path == "/api/platform/tools" {
         return Response::from_platform_tools(
-            platform_tools::server::handle(&request.headers, verifier, owner).await,
+            platform_tools::server::handle(&request.headers, verifier, platform_tools).await,
         );
     }
     if request.method != "POST" {
         return Response::not_found();
     }
     if request.path == "/api/sessions/create" {
-        let response =
-            session_create::server::handle(&request.headers, &request.body, verifier, owner).await;
+        let response = session_create::server::handle(
+            &request.headers,
+            &request.body,
+            verifier,
+            session.clone(),
+        )
+        .await;
         return Response::from_create(response);
     }
     if request.path == "/api/sessions/delete" {
-        let response =
-            session_delete::server::handle(&request.headers, &request.body, verifier, owner).await;
+        let response = session_delete::server::handle(
+            &request.headers,
+            &request.body,
+            verifier,
+            session.clone(),
+        )
+        .await;
         return Response::from_delete(response);
     }
     if request.path == "/api/sessions/rename" {
         return Response::from_rename(
-            rename::handle(&request.headers, &request.body, verifier, owner).await,
+            rename::handle(&request.headers, &request.body, verifier, session.clone()).await,
         );
     }
     if request.path == "/api/matcha/sessions" {
@@ -133,7 +158,7 @@ async fn handle(
             &request.headers,
             &request.body,
             verifier,
-            owner,
+            session.clone(),
         )
         .await;
         return Response::from_matcha_catalog(response);
@@ -142,7 +167,7 @@ async fn handle(
         request.path.as_str(),
         "/api/sessions/load" | "/api/sessions/window"
     ) {
-        return handle_timeline(request, verifier, owner).await;
+        return handle_timeline(request, verifier, session).await;
     }
     if request.path != "/api/sessions" {
         return Response::not_found();
@@ -167,7 +192,7 @@ async fn handle(
             Err(DecodeError::Invalid) => return Response::bad_request(),
         };
     drop(verifier);
-    let delivery = match owner.list_open_claw_sessions(Default::default()).await {
+    let delivery = match session.list_openclaw_sessions().await {
         Ok(result) => map_native_outcome(result),
         Err(_) => SessionListDelivery::Unavailable,
     };
@@ -177,7 +202,7 @@ async fn handle(
 async fn handle_timeline(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let trace_id = session_trace::trace_id(&request.headers);
     session_trace::log(
@@ -236,7 +261,22 @@ async fn handle_timeline(
         return Response::timeline_bad_request();
     };
     drop(verifier);
-    let outcome = match owner.load_session_timeline(command).await {
+    session_trace::log(
+        "runtime.timeline.command",
+        trace_id,
+        serde_json::json!({
+            "operation": expected_operation,
+            "provider": command.provider().as_str(),
+            "sessionKey": session_trace::id_shape(Some(command.session_key())),
+            "endpointSessionId": session_trace::id_shape(command.endpoint_session_id()),
+            "agentId": session_trace::id_shape(command.agent_id()),
+            "direction": command.direction().as_str(),
+            "limit": command.limit(),
+            "offset": command.offset(),
+            "includeCanonical": command.include_canonical(),
+        }),
+    );
+    let outcome = match session.load_timeline(command).await {
         Ok(outcome) => outcome,
         Err(_) => {
             session_trace::log(
@@ -247,13 +287,28 @@ async fn handle_timeline(
             return Response::timeline_unavailable();
         }
     };
+    let unavailable_reason = outcome.unavailable_reason().map(|reason| reason.as_str());
+    let unavailable_diagnostic = outcome.unavailable_diagnostic().map(|diagnostic| {
+        serde_json::json!({
+            "source": diagnostic.source(),
+            "messageIndex": diagnostic.message_index(),
+            "blockIndex": diagnostic.block_index(),
+            "field": diagnostic.field(),
+            "reason": diagnostic.reason(),
+            "actualType": diagnostic.actual(),
+        })
+    });
     let delivery = timeline::Delivery::from_outcome(&identity, outcome);
+    let delivery_reason = unavailable_reason
+        .or_else(|| (delivery.status_code() == 503).then_some("delivery.identity_mismatch"));
     session_trace::log(
         "runtime.timeline.outcome",
         trace_id,
         serde_json::json!({
             "operation": expected_operation,
             "status": delivery.status_code(),
+            "reason": delivery_reason,
+            "diagnostic": unavailable_diagnostic,
         }),
     );
     Response::from_timeline(delivery)
@@ -291,6 +346,11 @@ impl Response {
     fn deadline(path: Option<&str>) -> Self {
         match path {
             Some("/api/sessions/create") => Self::fixed(503, "Session create is unavailable"),
+            Some("/api/sessions/delete") => Self::fixed(503, "Session delete is unavailable"),
+            Some("/api/sessions/rename") => Self::fixed(503, "Session rename is unavailable"),
+            Some("/api/matcha/sessions") => {
+                Self::fixed(503, "Matcha session catalog is unavailable")
+            }
             Some("/api/sessions") => Self::unavailable(),
             Some("/api/sessions/load") | Some("/api/sessions/window") => {
                 Self::timeline_unavailable()

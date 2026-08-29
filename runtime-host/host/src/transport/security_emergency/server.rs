@@ -12,10 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{
-    security_emergency::SecurityEmergencyOutcome,
-    transport::authorization::CapabilityDecisionVerifier,
-};
+use crate::{security::SecurityHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{DecodeError, SecurityEmergencyDelivery, decode};
 
@@ -28,26 +25,24 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    policy: Arc<crate::security_delivery::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    owner: crate::owner::Handle,
+    security: SecurityHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        policy: Arc<crate::security_delivery::Owner>,
-        state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-        owner: crate::owner::Handle,
+        security: SecurityHandle,
     ) -> io::Result<Self> {
+        security
+            .recover_pending()
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         Ok(Self {
             listener,
             verifier: Arc::new(Mutex::new(verifier)),
-            policy,
-            state_dir,
-            owner,
+            security,
         })
     }
 
@@ -55,11 +50,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let policy = Arc::clone(&self.policy);
-            let state_dir = self.state_dir.clone();
-            let owner = self.owner.clone();
+            let security = self.security.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, policy, state_dir, owner).await;
+                let _ = serve(stream, verifier, security).await;
             });
         }
     }
@@ -68,14 +61,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    policy: Arc<crate::security_delivery::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    owner: crate::owner::Handle,
+    security: SecurityHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, policy, state_dir, owner).await,
+            Ok(request) => handle(request, verifier, security).await,
             Err(response) => response,
         })
     })
@@ -91,9 +82,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    policy: Arc<crate::security_delivery::Owner>,
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    owner: crate::owner::Handle,
+    security: SecurityHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/security/emergency" {
         return Response::not_found();
@@ -117,85 +106,10 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    policy
-        .serialize_effect(async {
-            let desired = match policy
-                .policy()
-                .and_then(crate::security_delivery::emergency_lockdown)
-            {
-                Ok(desired) => desired,
-                Err(()) => return Response::unavailable(),
-            };
-            let (revision, prior_outcome) = match policy.replace(&correlation, desired) {
-                Ok(result) => result,
-                Err(()) => return Response::unavailable(),
-            };
-            if prior_outcome
-                .is_some_and(|outcome| outcome != crate::security_delivery::Outcome::Confirmed)
-            {
-                return Response::from_delivery(SecurityEmergencyOutcome::OutcomeUnknown.into());
-            }
-            let outcome = match policy.pending() {
-                Ok(Some((pending_revision, pending))) if pending_revision == revision => {
-                    let outcome = match apply_policy(state_dir, pending) {
-                        Ok(()) => match owner.restart_open_claw().await {
-                            Ok(Ok(_)) => crate::security_delivery::Outcome::Confirmed,
-                            Ok(Err(_)) | Err(_) => crate::security_delivery::Outcome::Unknown,
-                        },
-                        Err(EffectError::Rejected) => crate::security_delivery::Outcome::Rejected,
-                        Err(EffectError::Unknown) => crate::security_delivery::Outcome::Unknown,
-                    };
-                    if policy.settle(revision, outcome).is_err() {
-                        return Response::from_delivery(
-                            SecurityEmergencyOutcome::OutcomeUnknown.into(),
-                        );
-                    }
-                    outcome
-                }
-                Ok(None) if prior_outcome == Some(crate::security_delivery::Outcome::Confirmed) => {
-                    crate::security_delivery::Outcome::Confirmed
-                }
-                _ => crate::security_delivery::Outcome::Unknown,
-            };
-            if outcome != crate::security_delivery::Outcome::Confirmed {
-                return Response::from_delivery(SecurityEmergencyOutcome::OutcomeUnknown.into());
-            }
-            match owner.run_security_emergency().await {
-                Ok(SecurityEmergencyOutcome::Applied) => {
-                    Response::from_delivery(SecurityEmergencyOutcome::Applied.into())
-                }
-                Ok(SecurityEmergencyOutcome::Rejected) => {
-                    Response::from_delivery(SecurityEmergencyOutcome::Rejected.into())
-                }
-                Ok(
-                    SecurityEmergencyOutcome::OutcomeUnknown
-                    | SecurityEmergencyOutcome::Unavailable,
-                )
-                | Err(_) => {
-                    Response::from_delivery(SecurityEmergencyOutcome::OutcomeUnknown.into())
-                }
-            }
-        })
-        .await
-}
-
-enum EffectError {
-    Rejected,
-    Unknown,
-}
-
-fn apply_policy(
-    state_dir: openclaw::lifecycle::state_dir::CanonicalStateDir,
-    desired: crate::security_delivery::Desired,
-) -> Result<(), EffectError> {
-    let policy = desired.into_policy();
-    let runtime = policy
-        .get("runtime")
-        .and_then(Value::as_object)
-        .ok_or(EffectError::Rejected)?;
-    openclaw::projection::security::apply_normalized(state_dir, runtime)
-        .map(|_| ())
-        .map_err(|_| EffectError::Unknown)
+    match security.emergency(correlation).await {
+        Ok(outcome) => Response::from_delivery(outcome.into()),
+        Err(_) => Response::unavailable(),
+    }
 }
 
 struct Request {

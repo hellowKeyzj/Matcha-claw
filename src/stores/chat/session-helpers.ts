@@ -121,7 +121,6 @@ export function readSessionsFromState(
     const agentId = meta.agentId ?? meta.sessionIdentity.agentId;
     const nextSession = {
       key: sessionKey,
-      backendSessionKey: meta.backendSessionKey,
       ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
       agentId,
       protocolId: meta.protocolId ?? undefined,
@@ -263,7 +262,7 @@ export function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
+  return parseSessionCreatedAtMs(session.sessionIdentity.sessionKey) ?? 0;
 }
 
 export function resolvePreferredSessionKeyForAgent(

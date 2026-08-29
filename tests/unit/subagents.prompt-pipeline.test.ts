@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   gatewayClientRpcMock,
+  hostSessionNewMock,
   hostSessionSendMock,
   hostSessionWindowFetchMock,
   resetGatewayClientMocks,
@@ -34,28 +35,78 @@ function buildDraftOutput(
   });
 }
 
-function buildHistoryWindow(output: string) {
+function buildSessionView(sessionKey = 'agent:writer:subagent-draft') {
   return {
-    outcome: 'complete' as const,
-    sessionIdentity: {
+    sessionKey,
+    endpointSessionId: 'subagent-draft',
+    identity: {
       endpoint: openClawEndpoint,
       agentId: 'writer',
-      sessionKey: 'agent:writer:subagent-draft',
+      sessionKey,
     },
-    messages: [{
-      role: 'assistant' as const,
-      text: output,
+    epoch: 1,
+    seq: 0,
+    cursor: 0,
+    items: { complete: [] },
+    tools: { complete: [] },
+    approvals: { complete: [] },
+    runtime: { complete: { phase: 'completed', activeRunId: null, issue: null } },
+    window: { complete: {
+      totalItemCount: 0,
+      windowStartOffset: 0,
+      windowEndOffset: 0,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    } },
+    completeness: 'complete',
+  };
+}
+
+function buildHistoryWindow(output: string) {
+  return {
+    ...buildSessionView(),
+    cursor: 1,
+    items: { complete: [{
+      kind: 'assistantTurn' as const,
+      itemId: 'entry-1',
+      runId: null,
       messageId: 'entry-1',
-      createdAt: 1,
-    }],
-    window: {
+      status: 'final' as const,
+      segments: [{ kind: 'text' as const, text: output }],
+      text: output,
+    }] },
+    window: { complete: {
       totalItemCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
-    },
+    } },
+  };
+}
+
+function buildUserPromptHistoryWindow(text: string) {
+  return {
+    ...buildSessionView(),
+    cursor: 1,
+    items: { complete: [{
+      kind: 'userMessage' as const,
+      itemId: 'user-entry-1',
+      messageId: 'user-entry-1',
+      text,
+      content: [{ kind: 'text' as const, text }],
+      status: 'final' as const,
+    }] },
+    window: { complete: {
+      totalItemCount: 1,
+      windowStartOffset: 0,
+      windowEndOffset: 1,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    } },
   };
 }
 
@@ -87,13 +138,14 @@ describe('subagents prompt pipeline', () => {
       draftGeneratingByAgent: {},
       draftApplyingByAgent: {},
       draftApplySuccessByAgent: {},
-      draftSessionKeyByAgent: {},
+      draftSessionTargetByAgent: {},
       draftRawOutputByAgent: {},
       persistedFilesByAgent: { writer: {} },
       selectedAgentId: 'writer',
       loadAgents: vi.fn().mockResolvedValue(undefined),
       selectAgent: vi.fn(),
     });
+    hostSessionNewMock.mockResolvedValue(buildSessionView());
   });
 
   it('builds structured prompt, calls session.prompt once, and parses draftByFile', async () => {
@@ -118,15 +170,16 @@ describe('subagents prompt pipeline', () => {
     expect(hostSessionSendMock).toHaveBeenCalledTimes(1);
     expect(hostSessionSendMock).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey: expect.stringContaining('subagent-draft'),
+      endpointSessionId: 'subagent-draft',
       sessionIdentity: {
         endpoint: openClawEndpoint,
         agentId: 'writer',
         sessionKey: 'agent:writer:subagent-draft',
       },
       message: expect.stringContaining('AGENTS.md'),
-      runId: expect.any(String),
-      attachments: [],
-    }));
+      idempotencyKey: expect.any(String),
+      deliver: false,
+    }), undefined);
     const sentMessage = String((hostSessionSendMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
     expect(sentMessage).toContain('"files":[{"name","content","reason","confidence"}]');
@@ -139,7 +192,7 @@ describe('subagents prompt pipeline', () => {
     expect(draft['AGENTS.md']?.needsReview).toBe(false);
     expect(draft['USER.md']?.needsReview).toBe(true);
     expect(Object.keys(draft)).toHaveLength(5);
-    expect(useSubagentsStore.getState().draftSessionKeyByAgent.writer).toContain('subagent-draft');
+    expect(useSubagentsStore.getState().draftSessionTargetByAgent.writer?.sessionKey).toContain('subagent-draft');
   });
 
   it('returns explicit error when model output is invalid JSON', async () => {
@@ -232,23 +285,7 @@ describe('subagents prompt pipeline', () => {
       status: 'started',
     });
     hostSessionWindowFetchMock
-      .mockResolvedValueOnce({
-        outcome: 'complete' as const,
-        sessionIdentity: {
-          endpoint: openClawEndpoint,
-          agentId: 'writer',
-          sessionKey: 'agent:writer:subagent-draft',
-        },
-        messages: [],
-        window: {
-          totalItemCount: 0,
-          windowStartOffset: 0,
-          windowEndOffset: 0,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      })
+      .mockResolvedValueOnce(buildSessionView())
       .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
         {
           name: 'AGENTS.md',
@@ -279,6 +316,7 @@ describe('subagents prompt pipeline', () => {
     expect(hostSessionWindowFetchMock).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionKey: expect.stringContaining('subagent-draft'),
+        endpointSessionId: 'subagent-draft',
         limit: 20,
         mode: 'latest',
       }),
@@ -290,28 +328,7 @@ describe('subagents prompt pipeline', () => {
   it('keeps waiting when draft history only contains the user prompt', async () => {
     hostSessionSendMock.mockResolvedValueOnce({ outcome: 'succeeded' });
     hostSessionWindowFetchMock
-      .mockResolvedValueOnce({
-        outcome: 'complete' as const,
-        sessionIdentity: {
-          endpoint: openClawEndpoint,
-          agentId: 'writer',
-          sessionKey: 'agent:writer:subagent-draft',
-        },
-        messages: [{
-          role: 'user' as const,
-          text: '{"files":{"AGENTS.md":"not an assistant draft"}}',
-          messageId: 'user-entry-1',
-          createdAt: 1,
-        }],
-        window: {
-          totalItemCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      })
+      .mockResolvedValueOnce(buildUserPromptHistoryWindow('{"files":{"AGENTS.md":"not an assistant draft"}}'))
       .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
         {
           name: 'AGENTS.md',
@@ -377,10 +394,10 @@ describe('subagents prompt pipeline', () => {
       ])));
 
     await generateDraft('writer', 'first prompt');
-    const firstSessionKey = useSubagentsStore.getState().draftSessionKeyByAgent.writer;
+    const firstSessionKey = useSubagentsStore.getState().draftSessionTargetByAgent.writer?.sessionKey;
 
     await generateDraft('writer', 'second prompt');
-    const secondSessionKey = useSubagentsStore.getState().draftSessionKeyByAgent.writer;
+    const secondSessionKey = useSubagentsStore.getState().draftSessionTargetByAgent.writer?.sessionKey;
 
     expect(firstSessionKey).toBe('agent:writer:subagent-draft');
     expect(secondSessionKey).toBe(firstSessionKey);
@@ -449,8 +466,16 @@ describe('subagents prompt pipeline', () => {
           'SOUL.md': 'saved soul baseline',
         },
       },
-      draftSessionKeyByAgent: {
-        writer: 'agent:writer:subagent-draft',
+      draftSessionTargetByAgent: {
+        writer: {
+          sessionKey: 'agent:writer:subagent-draft',
+          endpointSessionId: 'subagent-draft',
+          sessionIdentity: {
+            endpoint: openClawEndpoint,
+            agentId: 'writer',
+            sessionKey: 'agent:writer:subagent-draft',
+          },
+        },
       },
     });
     hostSessionSendMock.mockResolvedValueOnce({ outcome: 'succeeded' });

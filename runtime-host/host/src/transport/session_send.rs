@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_send::{Attachment, NativeEndpoint, SessionSendCommand, SessionSendOutcome},
+    sessions::send::{Attachment, NativeEndpoint, SessionSendCommand, SessionSendOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -178,7 +178,6 @@ impl From<SessionSendOutcome> for SessionSendDelivery {
     fn from(outcome: SessionSendOutcome) -> Self {
         match outcome {
             SessionSendOutcome::Unsupported => Self::Unsupported,
-            SessionSendOutcome::Unavailable => Self::Unavailable,
             outcome => Self::Outcome(outcome),
         }
     }
@@ -332,7 +331,7 @@ mod tests {
         assert_eq!(command.run_id, None);
         assert_eq!(command.idempotency_key.as_deref(), Some("idem-1"));
         assert_eq!(command.requested_run_id(), None);
-        assert_eq!(command.canonical_run_id(), Some("idem-1"));
+        assert_eq!(command.request_run_identity(), Some("idem-1"));
     }
 
     #[test]

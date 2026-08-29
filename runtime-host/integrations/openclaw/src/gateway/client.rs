@@ -1326,15 +1326,12 @@ async fn close_with_deadline(close: impl Future) {
 
 fn resolve_mcp_status_session_key(
     session_key: String,
-    endpoint_session_id: Option<String>,
+    _endpoint_session_id: Option<String>,
 ) -> Result<String, GatewayClientError> {
-    let candidate = endpoint_session_id
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(session_key);
-    if candidate.trim().is_empty() {
+    if session_key.trim().is_empty() {
         return Err(GatewayClientError::Protocol);
     }
-    Ok(candidate)
+    Ok(session_key)
 }
 
 fn next_request_id(operation: &str) -> String {
@@ -1667,6 +1664,18 @@ mod tests {
         assert_eq!(status.servers[0].available, Some(true));
         client.close_control_connection().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn mcp_server_status_key_ignores_endpoint_session_metadata() {
+        assert_eq!(
+            resolve_mcp_status_session_key(
+                "agent:main:session-1".into(),
+                Some("session-1".into()),
+            )
+            .unwrap(),
+            "agent:main:session-1"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

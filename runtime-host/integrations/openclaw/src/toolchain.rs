@@ -1,28 +1,20 @@
 use std::{
-    collections::VecDeque,
     ffi::{OsStr, OsString},
     fmt, fs,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::Duration,
 };
 
 #[cfg(windows)]
 use foundation::process::windows_system_root;
-use foundation::{
-    execution::OperationHandle,
-    process::{
-        LaunchSpec, OneShotCompletion, OneShotContainment, OneShotRun, OneShotRunner, StdioMode,
-        StdioSpec,
-    },
+use foundation::process::{
+    LaunchSpec, OneShotCompletion, OneShotContainment, OneShotRun, OneShotRunner, StdioMode,
+    StdioSpec,
 };
 use serde::Serialize;
-use tokio::sync::{Mutex, watch};
 
 use crate::{lifecycle::state_dir::CanonicalStateDir, projection::tool_permission};
 
@@ -32,11 +24,6 @@ const PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
 const UV_TOOL_ID: &str = "uv";
 const PYTHON_TOOL_ID: &str = "python-3.12";
-const TOOLCHAIN_JOB_TYPE: &str = "toolchain.uvInstall";
-const TOOLCHAIN_JOB_ID_PREFIX: &str = "runtime-host:openclaw:toolchain:";
-const TOOLCHAIN_JOB_RETENTION: usize = 8;
-const TOOLCHAIN_UNAVAILABLE_ERROR: &str = "Toolchain installation is unavailable.";
-const TOOLCHAIN_CANCELLED_ERROR: &str = "Toolchain installation was cancelled.";
 
 /// The platform distinction that changes the bundled executable and PATH probe names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -612,242 +599,6 @@ pub enum UvInstallOutcome {
     Unsupported,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolchainJobStatus {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolchainJobProgress {
-    pub updated_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub percent: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolchainJobSnapshot {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub job_type: String,
-    pub status: ToolchainJobStatus,
-    pub queued_at: u64,
-    pub started_at: Option<u64>,
-    pub finished_at: Option<u64>,
-    pub attempts: u32,
-    pub max_attempts: u32,
-    pub progress: Option<ToolchainJobProgress>,
-    pub result: Option<ToolchainJobResult>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolchainJobResult {
-    Installed,
-    Rejected,
-    Unknown,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ToolchainJobSubmission {
-    pub job: ToolchainJobSnapshot,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ToolchainJobLookup {
-    Known(ToolchainJobSnapshot),
-    Unknown,
-}
-
-pub struct ToolchainOperationEventState {
-    pub job_id: String,
-    pub changes: watch::Receiver<ToolchainJobSnapshot>,
-}
-
-pub struct ToolchainInstallOperation {
-    job_id: String,
-    snapshot: Arc<Mutex<ToolchainJobSnapshot>>,
-    operation: Option<OperationHandle<UvInstallOutcome>>,
-    cancellation_selected: Arc<AtomicBool>,
-    changes: watch::Sender<ToolchainJobSnapshot>,
-}
-
-fn complete_install_snapshot(snapshot: &mut ToolchainJobSnapshot, outcome: UvInstallOutcome) {
-    snapshot.status = match outcome {
-        UvInstallOutcome::Installed => ToolchainJobStatus::Succeeded,
-        UvInstallOutcome::Rejected
-        | UvInstallOutcome::Unknown
-        | UvInstallOutcome::Unavailable
-        | UvInstallOutcome::Unsupported => ToolchainJobStatus::Failed,
-    };
-    snapshot.finished_at = Some(now_millis());
-    snapshot.progress = Some(ToolchainJobProgress {
-        updated_at: now_millis(),
-        percent: Some(100),
-        message: None,
-    });
-    snapshot.result = Some(match outcome {
-        UvInstallOutcome::Installed => ToolchainJobResult::Installed,
-        UvInstallOutcome::Rejected => ToolchainJobResult::Rejected,
-        UvInstallOutcome::Unknown => ToolchainJobResult::Unknown,
-        UvInstallOutcome::Unavailable | UvInstallOutcome::Unsupported => {
-            ToolchainJobResult::Unavailable
-        }
-    });
-    snapshot.error = match outcome {
-        UvInstallOutcome::Unavailable | UvInstallOutcome::Unsupported => {
-            Some(TOOLCHAIN_UNAVAILABLE_ERROR.to_owned())
-        }
-        UvInstallOutcome::Installed | UvInstallOutcome::Rejected | UvInstallOutcome::Unknown => {
-            None
-        }
-    };
-}
-
-fn complete_cancelled_snapshot(snapshot: &mut ToolchainJobSnapshot) {
-    snapshot.status = ToolchainJobStatus::Failed;
-    snapshot.finished_at = Some(now_millis());
-    snapshot.progress = Some(ToolchainJobProgress {
-        updated_at: now_millis(),
-        percent: Some(100),
-        message: None,
-    });
-    snapshot.result = Some(ToolchainJobResult::Unknown);
-    snapshot.error = Some(TOOLCHAIN_CANCELLED_ERROR.to_owned());
-}
-
-impl ToolchainInstallOperation {
-    fn submit(runtime: Arc<NativeToolchainRuntime>, sequence: u64) -> Self {
-        let job_id = format!("{TOOLCHAIN_JOB_ID_PREFIX}{sequence}");
-        let snapshot = ToolchainJobSnapshot {
-            id: job_id.clone(),
-            job_type: TOOLCHAIN_JOB_TYPE.to_owned(),
-            status: ToolchainJobStatus::Queued,
-            queued_at: now_millis(),
-            started_at: None,
-            finished_at: None,
-            attempts: 0,
-            max_attempts: 1,
-            progress: None,
-            result: None,
-            error: None,
-        };
-        let snapshot_state = Arc::new(Mutex::new(snapshot.clone()));
-        let (changes, _) = watch::channel(snapshot);
-        let cancellation_selected = Arc::new(AtomicBool::new(false));
-        let task_snapshot = Arc::clone(&snapshot_state);
-        let task_changes = changes.clone();
-        let task_cancellation_selected = Arc::clone(&cancellation_selected);
-        let (operation, _) = OperationHandle::spawn(move |cancellation| async move {
-            let running_snapshot = {
-                let mut snapshot = task_snapshot.lock().await;
-                snapshot.status = ToolchainJobStatus::Running;
-                snapshot.attempts = 1;
-                snapshot.started_at = Some(now_millis());
-                snapshot.progress = Some(ToolchainJobProgress {
-                    updated_at: now_millis(),
-                    percent: Some(10),
-                    message: Some("Installing uv Python runtime".to_owned()),
-                });
-                snapshot.clone()
-            };
-            let _ = task_changes.send(running_snapshot);
-
-            let outcome = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    task_cancellation_selected.store(true, Ordering::Release);
-                    UvInstallOutcome::Unknown
-                }
-                outcome = runtime.install_uv() => outcome,
-            };
-            let terminal_snapshot = {
-                let mut snapshot = task_snapshot.lock().await;
-                if !task_cancellation_selected.load(Ordering::Acquire) {
-                    complete_install_snapshot(&mut snapshot, outcome);
-                }
-                snapshot.clone()
-            };
-            let _ = task_changes.send(terminal_snapshot);
-            outcome
-        });
-        Self {
-            job_id,
-            snapshot: snapshot_state,
-            operation: Some(operation),
-            cancellation_selected,
-            changes,
-        }
-    }
-
-    pub fn job_id(&self) -> &str {
-        &self.job_id
-    }
-
-    pub async fn snapshot(&self) -> ToolchainJobSnapshot {
-        self.snapshot.lock().await.clone()
-    }
-
-    pub fn changes(&self) -> watch::Receiver<ToolchainJobSnapshot> {
-        self.changes.subscribe()
-    }
-
-    pub async fn settle(&mut self) -> ToolchainJobSnapshot {
-        let outcome = self.operation.take().map(|mut operation| async move {
-            operation
-                .join()
-                .await
-                .ok()
-                .unwrap_or(UvInstallOutcome::Unknown)
-        });
-        if let Some(outcome) = outcome {
-            let outcome = outcome.await;
-            let terminal_snapshot = {
-                let mut snapshot = self.snapshot.lock().await;
-                if snapshot.finished_at.is_none() {
-                    complete_install_snapshot(&mut snapshot, outcome);
-                }
-                snapshot.clone()
-            };
-            let _ = self.changes.send(terminal_snapshot);
-        }
-        self.snapshot().await
-    }
-
-    pub async fn cancel_and_join(&mut self) -> ToolchainJobSnapshot {
-        if let Some(mut operation) = self.operation.take() {
-            let _ = operation.cancel_and_join().await;
-            let terminal_snapshot = {
-                let mut snapshot = self.snapshot.lock().await;
-                if snapshot.finished_at.is_none()
-                    || self.cancellation_selected.load(Ordering::Acquire)
-                {
-                    complete_cancelled_snapshot(&mut snapshot);
-                }
-                snapshot.clone()
-            };
-            let _ = self.changes.send(terminal_snapshot);
-        }
-        self.snapshot().await
-    }
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-        .unwrap_or(u64::MAX)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PermissionReadOutcome {
     Observed(tool_permission::Mode),
@@ -881,9 +632,6 @@ pub enum ToolchainWriteOutcome {
 pub struct OpenClawToolchain {
     state_dir: CanonicalStateDir,
     runtime: Arc<NativeToolchainRuntime>,
-    install_operation: Arc<Mutex<Option<ToolchainInstallOperation>>>,
-    completed_jobs: Arc<Mutex<VecDeque<ToolchainJobSnapshot>>>,
-    next_job_sequence: AtomicU64,
 }
 
 impl OpenClawToolchain {
@@ -891,9 +639,6 @@ impl OpenClawToolchain {
         Self {
             state_dir,
             runtime: Arc::new(runtime),
-            install_operation: Arc::new(Mutex::new(None)),
-            completed_jobs: Arc::new(Mutex::new(VecDeque::new())),
-            next_job_sequence: AtomicU64::new(1),
         }
     }
 
@@ -946,84 +691,6 @@ impl OpenClawToolchain {
 
     pub async fn install_uv(&self) -> UvInstallOutcome {
         self.runtime.install_uv().await
-    }
-
-    pub async fn submit_install(&self) -> ToolchainJobSubmission {
-        let mut operation = self.install_operation.lock().await;
-        if let Some(existing) = operation.as_ref() {
-            let snapshot = existing.snapshot().await;
-            if matches!(
-                snapshot.status,
-                ToolchainJobStatus::Queued | ToolchainJobStatus::Running
-            ) {
-                return ToolchainJobSubmission { job: snapshot };
-            }
-        }
-        let sequence = self.next_job_sequence.fetch_add(1, Ordering::Relaxed);
-        let new_operation = ToolchainInstallOperation::submit(Arc::clone(&self.runtime), sequence);
-        let snapshot = new_operation.snapshot().await;
-        *operation = Some(new_operation);
-        ToolchainJobSubmission { job: snapshot }
-    }
-
-    pub async fn event_state(&self) -> Option<ToolchainOperationEventState> {
-        let operation = self.install_operation.lock().await;
-        operation
-            .as_ref()
-            .map(|operation| ToolchainOperationEventState {
-                job_id: operation.job_id().to_owned(),
-                changes: operation.changes(),
-            })
-    }
-
-    pub async fn settle_install(&self, job_id: &str) -> ToolchainJobLookup {
-        let mut operation = self.install_operation.lock().await;
-        let Some(active) = operation.as_mut() else {
-            return ToolchainJobLookup::Unknown;
-        };
-        if active.job_id() != job_id {
-            return ToolchainJobLookup::Unknown;
-        }
-        let snapshot = active.settle().await;
-        let mut completed = self.completed_jobs.lock().await;
-        completed.push_back(snapshot.clone());
-        while completed.len() > TOOLCHAIN_JOB_RETENTION {
-            completed.pop_front();
-        }
-        *operation = None;
-        ToolchainJobLookup::Known(snapshot)
-    }
-
-    pub async fn cancel_install(&self) -> ToolchainJobLookup {
-        let mut operation = self.install_operation.lock().await;
-        let Some(active) = operation.as_mut() else {
-            return ToolchainJobLookup::Unknown;
-        };
-        let snapshot = active.cancel_and_join().await;
-        let mut completed = self.completed_jobs.lock().await;
-        completed.push_back(snapshot.clone());
-        while completed.len() > TOOLCHAIN_JOB_RETENTION {
-            completed.pop_front();
-        }
-        *operation = None;
-        ToolchainJobLookup::Known(snapshot)
-    }
-
-    pub async fn job_get(&self, job_id: &str) -> ToolchainJobLookup {
-        let operation = self.install_operation.lock().await;
-        if let Some(operation) = operation.as_ref()
-            && operation.job_id() == job_id
-        {
-            return ToolchainJobLookup::Known(operation.snapshot().await);
-        }
-        drop(operation);
-        self.completed_jobs
-            .lock()
-            .await
-            .iter()
-            .find(|snapshot| snapshot.id == job_id)
-            .cloned()
-            .map_or(ToolchainJobLookup::Unknown, ToolchainJobLookup::Known)
     }
 
     pub async fn write(&self, request: ToolchainWriteRequest) -> ToolchainWriteOutcome {

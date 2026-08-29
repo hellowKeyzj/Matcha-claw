@@ -401,6 +401,44 @@ impl From<TeamSkillPackageError> for TeamSkillSelectionError {
     }
 }
 
+pub fn validate_team_skill_package(root: impl AsRef<Path>) -> TeamSkillPackageValidation {
+    let root = match TeamSkillPackageRoot::open(root) {
+        Ok(root) => root,
+        Err(TeamSkillPackageError::Invalid) => return TeamSkillPackageValidation::Invalid,
+        Err(TeamSkillPackageError::Unavailable) => return TeamSkillPackageValidation::Unavailable,
+    };
+    let selection_id = selection_id(&root);
+    match TeamSkillPackageReader::new(root).read() {
+        Ok(package) => TeamSkillPackageValidation::Valid {
+            package: TeamSkillPackageView::from_package(selection_id, &package),
+        },
+        Err(TeamSkillPackageError::Invalid) => TeamSkillPackageValidation::Invalid,
+        Err(TeamSkillPackageError::Unavailable) => TeamSkillPackageValidation::Unavailable,
+    }
+}
+
+pub fn plan_team_skill_dependencies(root: impl AsRef<Path>) -> TeamSkillDependencyPlanResult {
+    let root = match TeamSkillPackageRoot::open(root) {
+        Ok(root) => root,
+        Err(TeamSkillPackageError::Invalid) => return TeamSkillDependencyPlanResult::Invalid,
+        Err(TeamSkillPackageError::Unavailable) => {
+            return TeamSkillDependencyPlanResult::Unavailable;
+        }
+    };
+    let selection_id = selection_id(&root);
+    match TeamSkillPackageReader::new(root).read() {
+        Ok(package) => TeamSkillDependencyPlanResult::Available {
+            plan: TeamSkillDependencyPlan::from_package(
+                selection_id,
+                &package,
+                &TeamSkillDependencyCatalog::from_installed_names(std::iter::empty()),
+            ),
+        },
+        Err(TeamSkillPackageError::Invalid) => TeamSkillDependencyPlanResult::Invalid,
+        Err(TeamSkillPackageError::Unavailable) => TeamSkillDependencyPlanResult::Unavailable,
+    }
+}
+
 impl fmt::Display for TeamSkillSelectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {

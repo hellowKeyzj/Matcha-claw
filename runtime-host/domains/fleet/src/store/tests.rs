@@ -582,6 +582,61 @@ fn recovery_marks_interrupted_delivery_unknown_until_replay_is_explicitly_author
 }
 
 #[test]
+fn live_open_preserves_in_flight_deliveries_for_active_owners() {
+    let root = TestRoot::new();
+    let path = root.facts_path();
+    let command = command();
+    let command_id = command.command_id().clone();
+    let dispatch_id = dispatch_id();
+    let mut store = FleetStore::open(&path).unwrap();
+
+    store
+        .transact(|facts| -> Result<(), StoreFault> {
+            assert!(matches!(
+                facts.command_ledger_mut().submit(command),
+                SubmitOutcome::Submitted(_)
+            ));
+            assert_eq!(
+                facts.outbox_mut().insert(DispatchIntent::new(
+                    dispatch_id.clone(),
+                    command_id,
+                    agent_id()
+                )),
+                InsertOutcome::Inserted
+            );
+            Ok(())
+        })
+        .unwrap();
+    store
+        .transact(|facts| -> Result<(), StoreFault> {
+            assert!(matches!(
+                facts.outbox_mut().begin_delivery(&dispatch_id),
+                BeginDeliveryOutcome::Begun(_)
+            ));
+            Ok(())
+        })
+        .unwrap();
+    let committed_len_before_live_open = fs::metadata(&path).unwrap().len();
+    drop(store);
+
+    let live = FleetStore::open_live(&path).unwrap();
+    assert_eq!(
+        live.facts()
+            .outbox()
+            .record(&dispatch_id)
+            .expect("persisted dispatch must be present")
+            .phase(),
+        DispatchPhase::InFlight
+    );
+    drop(live);
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        committed_len_before_live_open
+    );
+}
+
+#[test]
 fn failed_mutation_does_not_commit_partial_facts() {
     let root = TestRoot::new();
     let path = root.facts_path();

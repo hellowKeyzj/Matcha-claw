@@ -7,9 +7,9 @@ describe('chat shell stage layout', () => {
     const { container } = render(
       <ChatShell
         chatLayoutRef={{ current: null }}
-        sidePanelOpen={false}
-        sidePanelMode="hidden"
-        sidePanelWidth={0}
+        sidePanelPhase="closed"
+        sidePanelMode="docked"
+        sidePanelWidth={360}
         isEmptyState={false}
         emptyState={null}
         sidePanel={null}

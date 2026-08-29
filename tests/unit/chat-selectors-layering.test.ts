@@ -28,7 +28,6 @@ function createSessionRecord(input?: {
     : 'Main';
   return {
     meta: {
-      backendSessionKey: sessionKey,
       runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
       agentId: sessionIdentity.agentId,
       protocolId: null,

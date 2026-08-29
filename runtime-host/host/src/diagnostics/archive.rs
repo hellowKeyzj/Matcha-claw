@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) use output::DiagnosticsArchiveRoot;
 
-use super::HostState;
+use super::{HostState, RuntimeFlightRecorder, RuntimeObservationSnapshot};
 
 pub(crate) const ARCHIVE_BYTE_LIMIT: u64 = 2 * 1024 * 1024;
 const ARCHIVE_ID_BYTES: usize = 16;
@@ -57,6 +57,8 @@ struct ArchiveHostState {
     lifecycle: super::HostLifecycle,
     matcha: ArchiveRuntimeState,
     open_claw: ArchiveRuntimeState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observations: Option<RuntimeObservationSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -69,13 +71,14 @@ struct ArchiveRuntimeState {
     startup_diagnostic: Option<super::RuntimeStartupDiagnostic>,
 }
 
-impl From<&HostState> for ArchiveHostState {
-    fn from(state: &HostState) -> Self {
+impl ArchiveHostState {
+    fn new(state: &HostState, observations: Option<RuntimeObservationSnapshot>) -> Self {
         Self {
             ok: state.ok(),
             lifecycle: state.lifecycle(),
             matcha: ArchiveRuntimeState::from(state.matcha()),
             open_claw: ArchiveRuntimeState::from(state.open_claw()),
+            observations,
         }
     }
 }
@@ -202,6 +205,7 @@ impl Drop for DiagnosticsArchiveCancellationGuard {
 #[derive(Clone)]
 pub(crate) struct DiagnosticsArchiveProducer {
     root: DiagnosticsArchiveRoot,
+    recorder: RuntimeFlightRecorder,
 }
 
 /// A single admitted archive request bound to the Host state observed at admission time.
@@ -212,8 +216,15 @@ pub(crate) struct DiagnosticsArchiveAdmission {
 
 impl DiagnosticsArchiveProducer {
     pub(crate) fn new(root: DiagnosticsArchiveRoot) -> Result<Self, DiagnosticsArchiveError> {
+        Self::new_with_recorder(root, RuntimeFlightRecorder::disabled())
+    }
+
+    pub(crate) fn new_with_recorder(
+        root: DiagnosticsArchiveRoot,
+        recorder: RuntimeFlightRecorder,
+    ) -> Result<Self, DiagnosticsArchiveError> {
         root.is_available()
-            .then_some(Self { root })
+            .then_some(Self { root, recorder })
             .ok_or(DiagnosticsArchiveError::InvalidRoot)
     }
 
@@ -264,8 +275,11 @@ impl DiagnosticsArchiveProducer {
 
     /// Encodes the bundle in memory so a request that exceeds the archive bound never reaches disk.
     fn encode(&self, state: &HostState) -> Result<(usize, Vec<u8>), DiagnosticsArchiveError> {
-        let host_state = serde_json::to_vec_pretty(&ArchiveHostState::from(state))
-            .map_err(|_| DiagnosticsArchiveError::OutputUnavailable)?;
+        let host_state = serde_json::to_vec_pretty(&ArchiveHostState::new(
+            state,
+            self.recorder.archive_snapshot(),
+        ))
+        .map_err(|_| DiagnosticsArchiveError::OutputUnavailable)?;
         let app_log_root = self.root.app_log_root();
         let entries = bundle::collect(self.root.state_root(), app_log_root.as_deref(), host_state);
         let image = zip::encode(&entries)?;
@@ -318,10 +332,17 @@ pub(super) mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use foundation::execution::{
+        ObservationRecord, OwnerRuntimeItem, OwnerRuntimeObservation, OwnerRuntimeReason,
+        OwnerRuntimeRoute, OwnerRuntimeStage, TraceContext,
+    };
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::diagnostics::{HostLifecycle, RuntimeFailure, RuntimeLifecycle, RuntimeState};
+    use crate::diagnostics::{
+        HostLifecycle, RuntimeFailure, RuntimeFlightRecorder, RuntimeLifecycle,
+        RuntimeObservationConfig, RuntimeState,
+    };
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -439,7 +460,7 @@ pub(super) mod tests {
         };
 
         assert_eq!(
-            serde_json::to_value(ArchiveHostState::from(&state)).unwrap(),
+            serde_json::to_value(ArchiveHostState::new(&state, None)).unwrap(),
             json!({
                 "ok": true,
                 "lifecycle": "ready",
@@ -451,6 +472,70 @@ pub(super) mod tests {
                 "openClaw": { "lifecycle": "unavailable" },
             })
         );
+    }
+
+    #[test]
+    fn observations_are_archived_only_when_explicitly_enabled_and_safe() {
+        let state = safe_state(HostLifecycle::Ready, true);
+        let record = || {
+            ObservationRecord::OwnerRuntime(OwnerRuntimeObservation {
+                trace: TraceContext::root(7),
+                owner_id: 42,
+                owner_kind: "runtimeOwner",
+                stage: OwnerRuntimeStage::Enqueue,
+                item: OwnerRuntimeItem::Command,
+                route: OwnerRuntimeRoute::Keyed,
+                key_hash: Some(99),
+                queue_depth: Some(3),
+                reason: Some(OwnerRuntimeReason::Accepted),
+            })
+        };
+
+        let off = RuntimeFlightRecorder::new(RuntimeObservationConfig::off());
+        off.sink().observe(record());
+        let off_archive =
+            serde_json::to_value(ArchiveHostState::new(&state, off.archive_snapshot())).unwrap();
+        assert!(off_archive.get("observations").is_none());
+
+        let archive_disabled = RuntimeFlightRecorder::new(RuntimeObservationConfig::normal(false));
+        archive_disabled.sink().observe(record());
+        let without_archive = serde_json::to_value(ArchiveHostState::new(
+            &state,
+            archive_disabled.archive_snapshot(),
+        ))
+        .unwrap();
+        assert!(without_archive.get("observations").is_none());
+
+        let enabled = RuntimeFlightRecorder::new(RuntimeObservationConfig::normal(true));
+        enabled.sink().observe(record());
+        let with_archive =
+            serde_json::to_value(ArchiveHostState::new(&state, enabled.archive_snapshot()))
+                .unwrap();
+
+        assert_eq!(with_archive["observations"]["counters"]["accepted"], 1);
+        assert_eq!(with_archive["observations"]["counters"]["lockDropped"], 0);
+        assert_eq!(with_archive["observations"]["counters"]["expired"], 0);
+        assert_eq!(with_archive["observations"]["counters"]["overwritten"], 0);
+        assert_eq!(
+            with_archive["observations"]["records"][0],
+            json!({
+                "observedAtMs": with_archive["observations"]["records"][0]["observedAtMs"].clone(),
+                "plane": "ownerRuntime",
+                "traceId": 7,
+                "ownerId": 42,
+                "ownerKind": "runtimeOwner",
+                "stage": "enqueue",
+                "item": "command",
+                "route": "keyed",
+                "keyHash": 99,
+                "queueDepth": 3,
+                "reason": "accepted",
+            })
+        );
+        let rendered = serde_json::to_string(&with_archive).unwrap();
+        for forbidden in ["payload", "headers", "env", "argv", "stderr", "workspace"] {
+            assert!(!rendered.contains(forbidden));
+        }
     }
 
     #[test]

@@ -357,8 +357,14 @@ fn trace_auth_profile_check(
 }
 
 fn summarize_reference(reference: &str) -> String {
-    let suffix = reference.strip_prefix(CREDENTIAL_REFERENCE_PREFIX).unwrap_or(reference);
-    format!("len:{} tail:{}", suffix.len(), suffix.rsplit(':').next().unwrap_or(suffix))
+    let suffix = reference
+        .strip_prefix(CREDENTIAL_REFERENCE_PREFIX)
+        .unwrap_or(reference);
+    format!(
+        "len:{} tail:{}",
+        suffix.len(),
+        suffix.rsplit(':').next().unwrap_or(suffix)
+    )
 }
 
 fn credential_is_usable(credential: &PrivateAuthCredential, now_millis: u64) -> bool {
@@ -538,10 +544,26 @@ impl<'de> Visitor<'de> for PersistedAuthProfileVisitor {
             match field.as_str() {
                 "type" if kind.is_none() => kind = Some(map.next_value::<String>()?),
                 "provider" if provider.is_none() => provider = Some(map.next_value::<String>()?),
-                "key" if key.is_none() => key = Some(PrivateAuthSecret::Inline(map.next_value::<PrivateCredential>()?)),
-                "keyRef" if key.is_none() => key = Some(PrivateAuthSecret::Reference(map.next_value::<SecretReference>()?)),
-                "token" if token.is_none() => token = Some(PrivateAuthSecret::Inline(map.next_value::<PrivateCredential>()?)),
-                "tokenRef" if token.is_none() => token = Some(PrivateAuthSecret::Reference(map.next_value::<SecretReference>()?)),
+                "key" if key.is_none() => {
+                    key = Some(PrivateAuthSecret::Inline(
+                        map.next_value::<PrivateCredential>()?,
+                    ))
+                }
+                "keyRef" if key.is_none() => {
+                    key = Some(PrivateAuthSecret::Reference(
+                        map.next_value::<SecretReference>()?,
+                    ))
+                }
+                "token" if token.is_none() => {
+                    token = Some(PrivateAuthSecret::Inline(
+                        map.next_value::<PrivateCredential>()?,
+                    ))
+                }
+                "tokenRef" if token.is_none() => {
+                    token = Some(PrivateAuthSecret::Reference(
+                        map.next_value::<SecretReference>()?,
+                    ))
+                }
                 "access" if access.is_none() => {
                     access = Some(map.next_value::<PrivateCredential>()?)
                 }
@@ -550,8 +572,7 @@ impl<'de> Visitor<'de> for PersistedAuthProfileVisitor {
                 }
                 "expires" if expires.is_none() => expires = Some(map.next_value::<u64>()?),
                 "copyToAgents" | "email" | "displayName" | "metadata" | "clientId"
-                | "enterpriseUrl" | "projectId" | "accountId" | "chatgptPlanType"
-                | "idToken" => {
+                | "enterpriseUrl" | "projectId" | "accountId" | "chatgptPlanType" | "idToken" => {
                     let _ = map.next_value::<IgnoredAny>()?;
                 }
                 _ => return Err(de::Error::custom("invalid auth profile field")),

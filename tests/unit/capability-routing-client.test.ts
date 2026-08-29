@@ -91,18 +91,26 @@ describe('capability routing client', () => {
       },
     };
     hostApiFetchMock.mockResolvedValue({
+      success: true,
       desired: { status: 'stored', revision: 5 },
-      configuration: { status: 'unavailable' },
+      persisted: { status: 'confirmed' },
+      native: {
+        changed: false,
+        applied: { status: 'confirmed' },
+        observed: { status: 'unavailable' },
+      },
+      commit: 'committed',
     });
 
     const { persistCapabilityRouting } = await import('@/lib/capability-routing');
-    await expect(persistCapabilityRouting(routing, 5)).resolves.toEqual({
+    const result = await persistCapabilityRouting(routing, 5);
+    expect(result).toMatchObject({
       success: true,
       revision: 5,
       routing,
-      configuration: { status: 'unavailable' },
-      error: 'Provider routing configuration is unavailable',
+      warning: expect.stringContaining('OpenClaw config'),
     });
+    expect(result).not.toHaveProperty('error');
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-routing', {
       method: 'POST',

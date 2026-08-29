@@ -57,7 +57,8 @@ config write != runtime ready != connected != operation succeeded
 1. Renderer、Electron、preload、page/store 调用代码不因 Rust 设计而修改。
 2. Rust 必须提供既有 API 的相同输入、输出、错误和可观察行为。
 3. Rust Host 不复制 peer-native session、run、approval、transcript、tool、model 或 lifecycle 事实。
-4. Rust 不重建 Host-wide 通用 `RuntimeJobQueue` / `RuntimeJobRegistry`；只保留旧客户端需要的完成投影。
-5. Runtime address 的身份边界固定为 `RuntimeEndpoint`、`SessionIdentity(endpoint + agentId + sessionKey)` 与 `RuntimeScope`；`endpointSessionId` 是 peer-local 元数据，不是 Host identity。
-6. 不能从现有 `runtime-host-rust/` 目录反推最终架构。
-7. 任何 `OPEN` 项在 owner cutover 前必须由源码、测试或运行时 trace 显式裁决。
+4. 旧 generic RuntimeJob public contract 已删除：不存在 `RuntimeJobQueue` / `RuntimeJobRegistry`、`runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；异步完成归属具体 owner/facade 的 typed operation，不得重新引入这些已删除面。
+5. ClawHub marketplace search 是 third-party external registry lookup，不是 durable Domain owner，也不是 OpenClaw Gateway native skill RPC；安装请求仍归 Skills runtime ops，但执行方是 legacy ClawHub CLI + registry fallback。
+6. Runtime address 的身份边界固定为 `RuntimeEndpoint`、`SessionIdentity(endpoint + agentId + sessionKey)` 与 `RuntimeScope`；`endpointSessionId` 是 peer-local 元数据，不是 Host identity。
+7. 不能从现有 `runtime-host-rust/` 目录反推最终架构。
+8. 任何 `OPEN` 项在 owner cutover 前必须由源码、测试或运行时 trace 显式裁决。

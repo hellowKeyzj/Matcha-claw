@@ -29,14 +29,14 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        owner: crate::provider::ProviderHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
@@ -60,7 +60,7 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
@@ -81,7 +81,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     if request.method == "GET" {
         let (path, query) = request
@@ -137,7 +137,7 @@ async fn handle(
 async fn handle_get_list(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     if !request.body.is_empty() {
         return Response::bad_request();
@@ -162,7 +162,7 @@ async fn handle_get_list(
 async fn handle_get_account(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     if !request.body.is_empty() {
         return Response::bad_request();

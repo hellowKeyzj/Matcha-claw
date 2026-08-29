@@ -268,18 +268,41 @@ fn runner_status(
 pub fn reclaim_expired(board: &mut TaskBoardFacts, now: u64) -> usize {
     let mut count = 0;
     for task in board.tasks_mut() {
-        if task.lease_until().is_some_and(|x| x <= now)
-            && matches!(task.status(), TaskStatus::Claimed | TaskStatus::Running)
-        {
-            let (o, s, c, l) = task.owner_mut();
-            *o = None;
-            *s = None;
-            *c = None;
-            *l = None;
-            *task.status_mut() = TaskStatus::Todo;
-            *task.updated_mut() = now;
-            count += 1
+        if reclaim_expired_task(task, now) {
+            count += 1;
         }
     }
     count
+}
+
+pub fn reclaim_expired_for_run(
+    board: &mut TaskBoardFacts,
+    team: &TeamId,
+    run: &GraphRunId,
+    now: u64,
+) -> usize {
+    let mut count = 0;
+    for task in board.tasks_mut() {
+        if task.team_id() == team && task.run_id() == run && reclaim_expired_task(task, now) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn reclaim_expired_task(task: &mut TaskRecord, now: u64) -> bool {
+    if task.lease_until().is_some_and(|x| x <= now)
+        && matches!(task.status(), TaskStatus::Claimed | TaskStatus::Running)
+    {
+        let (o, s, c, l) = task.owner_mut();
+        *o = None;
+        *s = None;
+        *c = None;
+        *l = None;
+        *task.status_mut() = TaskStatus::Todo;
+        *task.updated_mut() = now;
+        true
+    } else {
+        false
+    }
 }

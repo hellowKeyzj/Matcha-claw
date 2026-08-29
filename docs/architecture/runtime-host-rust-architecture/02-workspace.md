@@ -13,6 +13,8 @@ runtime-host/
 │   ├── environment/
 │   ├── fleet/
 │   └── organization/
+├── external/
+│   └── clawhub/
 ├── integrations/
 │   ├── matcha-agent/
 │   └── openclaw/
@@ -48,9 +50,9 @@ Foundation 有两类互补机制：
 - `execution` 提供业务可以持有的 in-process 后台 operation/service 生命周期，包括 cancellation、join 和 owned task；
 - `process` 提供与具体 Runtime 无关的 process identity、provenance、authority observation、termination、supervision 和 platform adapter。
 
-`execution` 不拥有业务状态，也不是通用 RuntimeJobQueue：不提供跨业务 priority、retry、retention、持久化 job registry 或结果事实。具体 owner 使用 `OperationHandle<T>` / `ServiceHandle<T>` 后，仍须自己定义 operation 状态、错误、终态和恢复。
+`execution` 不拥有业务状态，也不承担已删除的 Host-wide generic operation queue：不提供跨业务 priority、retry、retention、持久化 operation registry 或结果事实。具体 owner 使用 `OperationHandle<T>` / `ServiceHandle<T>` 后，仍须自己定义 operation 状态、错误、终态和恢复。
 
-不放：产品配置、peer protocol、Domain facts、generic job/task queue、全局 storage/secrets、Host composition。具体 Windows/POSIX custody mechanism 是实现候选，不反向决定 child API。
+不放：产品配置、peer protocol、Domain facts、已删除的 Host-wide generic operation queue、全局 storage/secrets、Host composition。具体 Windows/POSIX custody mechanism 是实现候选，不反向决定 child API。
 
 ## 3. Platform
 
@@ -81,7 +83,7 @@ platform/src/
     └── pinned_tls.rs
 ```
 
-Platform 是中性语言和校验工具，不是状态数据库。它不拥有 Session transcript、Approval、Lease、Reconciliation、RuntimeJob 或 Domain state；也不定义 TS capability operation catalog。
+Platform 是中性语言和校验工具，不是状态数据库。它不拥有 Session transcript、Approval、Lease、Reconciliation、generic operation 或 Domain state；也不定义 TS capability operation catalog。
 
 只有被两个以上真实 consumer 使用的 contract 才上升为 Platform。单一 Integration 的 wire model 留在 Integration。
 
@@ -145,7 +147,20 @@ domains/organization/src/
 
 Organization 拥有 Team/TeamRun graph、attempt、delivery、approval、evidence、trigger、materialization ledger。它不依赖 OpenClaw 或 Matcha；具体 effect 通过 typed port 在 Host composition 注入。没有证据时，不让 `organization -> matcha-agent` 成为编译依赖。
 
-## 5. Integration crates
+## 5. External crates
+
+### clawhub
+
+```text
+external/clawhub/src/
+├── lib.rs
+├── registry.rs
+└── installer.rs
+```
+
+`clawhub` 只封装第三方 ClawHub registry 和 legacy CLI：registry base/token、HTTP catalog/search、CLI install registry fallback。它不拥有 durable product facts，不是 peer runtime，也不放进 Domain/Integration。
+
+## 6. Integration crates
 
 ### matcha-agent
 
@@ -193,7 +208,7 @@ integrations/openclaw/src/
 
 拥有 OpenClaw/Gateway native protocol、channel/cron/pairing/session facts、private config projection 和 native readback。Environment/Organization port 只能描述 effect；OpenClaw 不成为它们的 durable fact owner。
 
-## 6. Host crate
+## 7. Host crate
 
 ```text
 host/src/
@@ -216,23 +231,19 @@ host/src/
 │   ├── external_ingress/
 │   ├── websocket.rs
 │   └── authorization.rs
-├── projection/
-│   ├── session.rs
-│   ├── events.rs
-│   └── job_compatibility.rs
 └── diagnostics/
 ```
 
 Host 只做 composition、admission、command serialization、delivery adapter、safe projection、diagnostics 和 shutdown order。业务 owner 不再以 `host/src/session_*.rs`、`host/src/cron.rs`、`host/src/provider_*.rs` 形式散落在 Host；它们应归 Integration/Domain，Host 仅保留 typed transport adapter。
 
-`projection/session.rs` 是可重建的 client projection，不是 transcript/native event authority；`job_compatibility.rs` 只路由旧 job id 到 owner-local query，不保存 generic job facts。
+`projection/session.rs` 是可重建的 client projection，不是 transcript/native event authority；异步 operation projection 属于具体 owner/facade，不存在已删除的 Host-wide generic operation compatibility module。
 
-## 7. 依赖 DAG
+## 8. 依赖 DAG
 
 ```text
-foundation       platform
-    ▲               ▲
-    │               │
+foundation       platform       external/clawhub
+    ▲               ▲                 ▲
+    │               │                 │
 environment       fleet       organization
     ▲               ▲              ▲
     │               │              │
@@ -248,13 +259,14 @@ environment       fleet       organization
 
 - Foundation 不依赖上层；Platform 不依赖 Domain/Integration/Host；
 - Domain 不依赖 Host 或具体 peer；
+- External 不依赖 Domain、Integration 或 Host；第三方 HTTP/CLI client 只在 Host composition 注入；
 - Integration 可依赖 Platform、Foundation，以及它实际实现的 Domain public port；
 - Integration 之间不互相依赖；
 - Host 可以依赖所有已落地 crate；
 - `organization -> matcha-agent` 不因 TeamRun 概念存在而自动允许；没有真实 port consumer 就由 Host 注入 adapter；
 - 不建立 alias crate、shared crate、generic runtime registry。
 
-## 8. Foundation execution 的使用边界
+## 9. Foundation execution 的使用边界
 
 业务 owner 可以直接使用 `foundation::execution::{OwnedTask, TaskHandle, OperationHandle, ServiceHandle}` 管理后台 operation：
 
@@ -265,8 +277,8 @@ owner command
   -> explicit cancel/join during shutdown
 ```
 
-这些类型只管理 task 的 cancellation、join 和资源生命周期，不生成全局 job id、不保存业务结果、不调度跨领域队列，也不替代 Domain/native owner 的 terminal oracle。需要对旧 Renderer 提供 `runtimeHost.jobGet` 时，由具体 owner 另行建立兼容 projection。
+这些类型只管理 task 的 cancellation、join 和资源生命周期，不生成全局 generic operation id、不保存业务结果、不调度跨领域队列，也不替代 Domain/native owner 的 terminal oracle。需要对外暴露异步完成时，由具体 owner/facade 定义 typed operation query/event。
 
-## 9. 文件与模块规范
+## 10. 文件与模块规范
 
 目录名必须表示 owner；模块内聚表达一组共同生命周期/协议/状态转换。禁止 `common`、`utils`、`helpers`、`types` 垃圾桶和机械“一种 type 一个文件”。文件规模按职责判断，不用固定数字强制拆分；大文件应检查责任是否漂移，但内聚且单一责任的文件可以保留。

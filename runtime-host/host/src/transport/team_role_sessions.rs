@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const OPERATION_ID: &str = "team.role-sessions.list";
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/role-sessions";
@@ -78,8 +80,8 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn list(owner: &owner::Handle, request: Request) -> Delivery {
-    match owner.query_team_role_sessions(request.team_id).await {
+pub(crate) async fn list(owner: &OrganizationHandle, request: Request) -> Delivery {
+    match owner.role_sessions(request.team_id).await {
         Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => {
             Delivery::Available(sessions)
         }

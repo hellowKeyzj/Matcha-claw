@@ -1,5 +1,5 @@
 import { memo, useMemo, type CSSProperties } from 'react';
-import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, RefreshCw, Settings2, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, PanelRightClose, RefreshCw, Settings2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -26,7 +26,7 @@ import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 import type { TaskInboxTask } from '../useChatSidePanelController';
 
 interface ChatSidePanelProps {
-  mode: Exclude<ChatSidePanelMode, 'hidden'>;
+  mode: ChatSidePanelMode;
   width: number;
   activeTab: ChatSidePanelTab;
   artifactWorkbenchFullscreen: boolean;
@@ -521,7 +521,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               onClick={onClose}
               title={t('taskInbox.collapse')}
             >
-              <X className="h-4 w-4" />
+              <PanelRightClose className="h-4 w-4" />
             </Button>
           </div>
         </div>

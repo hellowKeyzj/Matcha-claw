@@ -34,7 +34,10 @@ pub(crate) struct ResolverFailure {
 
 impl ResolverFailure {
     fn new(reason: impl Into<String>, status: Option<u16>) -> Self {
-        Self { reason: reason.into(), status }
+        Self {
+            reason: reason.into(),
+            status,
+        }
     }
 
     pub(crate) fn reason(&self) -> &str {
@@ -227,7 +230,10 @@ impl Resolver {
         let body = serde_json::to_vec(&body)
             .map_err(|_| ResolverFailure::new("private-resolver-request-encode-failed", None))?;
         if body.len() > MAX_REQUEST_BYTES {
-            return Err(ResolverFailure::new("private-resolver-request-too-large", None));
+            return Err(ResolverFailure::new(
+                "private-resolver-request-too-large",
+                None,
+            ));
         }
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(2))

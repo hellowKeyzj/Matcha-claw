@@ -362,7 +362,6 @@ describe('chat agent skill configuration', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            backendSessionKey: testSessionKey,
             runtimeScopeKey: buildRuntimeScopeKey(testSessionIdentity.endpoint),
             agentId: 'test',
             protocolId: 'openclaw-v4',

@@ -21,10 +21,10 @@ use super::session::RuntimeSessionError;
 /// and deliberately has no materialization or recovery provider attached.
 pub(crate) struct TeamRunOwner;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamRunDeliveryTarget {
-    OpenClaw,
-    Matcha,
+    OpenClaw { run_id: GraphRunId },
+    Matcha { run_id: GraphRunId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -683,9 +683,8 @@ impl TeamRunOwner {
         matcha_endpoint: &RuntimeEndpointReference,
     ) -> Option<TeamRunDeliveryTarget> {
         let delivery = store.facts().deliveries().delivery(delivery_id)?;
-        let run = store
-            .facts()
-            .run(&GraphRunId::new(delivery.facts().run_id.clone()))?;
+        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
+        let run = store.facts().run(&run_id)?;
         let role = RoleId::try_new(delivery.facts().role_id.clone()).ok()?;
         let binding = run
             .runtime()?
@@ -693,9 +692,9 @@ impl TeamRunOwner {
             .iter()
             .find(|binding| binding.role() == &role)?;
         if binding.endpoint() == open_claw_endpoint {
-            Some(TeamRunDeliveryTarget::OpenClaw)
+            Some(TeamRunDeliveryTarget::OpenClaw { run_id })
         } else if binding.endpoint() == matcha_endpoint {
-            Some(TeamRunDeliveryTarget::Matcha)
+            Some(TeamRunDeliveryTarget::Matcha { run_id })
         } else {
             None
         }
@@ -712,6 +711,7 @@ impl TeamRunOwner {
     pub(crate) fn settle_node_prompt(
         &self,
         store: &mut OrganizationStore,
+        run_id: &GraphRunId,
         session_key: &str,
         prompt_run_id: &str,
         phase: NativeTerminalStatus,
@@ -722,6 +722,9 @@ impl TeamRunOwner {
             .deliveries()
             .deliveries()
             .filter_map(|delivery| {
+                if delivery.facts().run_id != run_id.as_str() {
+                    return None;
+                }
                 let correlation = match delivery.phase() {
                     DeliveryPhase::Delivered {
                         matcha_correlation: Some(correlation),
@@ -730,9 +733,7 @@ impl TeamRunOwner {
                     DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
                     _ => return None,
                 };
-                let run = store
-                    .facts()
-                    .run(&GraphRunId::new(delivery.facts().run_id.clone()))?;
+                let run = store.facts().run(run_id)?;
                 let binding = run
                     .runtime()?
                     .bindings()
@@ -749,12 +750,11 @@ impl TeamRunOwner {
         let Some(delivery) = matches.pop() else {
             return Ok(TeamNodePromptSettledResult::NotFound);
         };
-        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
         if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {
             if observation.native_terminal() != phase {
                 return Err(StoreFault::InvalidFacts);
             }
-            return Ok(TeamNodePromptSettledResult::Replayed(run_id));
+            return Ok(TeamNodePromptSettledResult::Replayed(run_id.clone()));
         }
         let delivery_id = DeliveryId::new(delivery.facts().delivery_id.as_str().to_owned())
             .map_err(|_| StoreFault::InvalidFacts)?;
@@ -763,10 +763,12 @@ impl TeamRunOwner {
             .ok_or(StoreFault::InvalidFacts)?;
         let outcome = store.observe_matcha_terminal(target, phase, settled_at)?;
         Ok(match outcome {
-            TerminalObservationOutcome::Replayed => TeamNodePromptSettledResult::Replayed(run_id),
+            TerminalObservationOutcome::Replayed => {
+                TeamNodePromptSettledResult::Replayed(run_id.clone())
+            }
             TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution
             | TerminalObservationOutcome::RecordedNodeCancelled => {
-                TeamNodePromptSettledResult::Recorded(run_id)
+                TeamNodePromptSettledResult::Recorded(run_id.clone())
             }
         })
     }

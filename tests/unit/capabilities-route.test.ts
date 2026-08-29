@@ -80,28 +80,9 @@ const toolchainInstallRequest = {
   id: 'platform.runtime',
   operationId: 'toolchain.installUv',
   scope: toolchainScope,
-  target: { kind: 'runtime-job' },
+  target: { kind: 'platform-runtime' },
   input: {},
 } as const;
-
-const toolchainJobId = 'runtime-host:openclaw:toolchain:1';
-
-function toolchainSnapshot(overrides: Record<string, unknown> = {}) {
-  return {
-    id: toolchainJobId,
-    type: 'toolchain.uvInstall',
-    status: 'queued',
-    queuedAt: 1,
-    startedAt: null,
-    finishedAt: null,
-    attempts: 0,
-    maxAttempts: 1,
-    progress: null,
-    result: null,
-    error: null,
-    ...overrides,
-  };
-}
 
 const cronTriggerRequest = {
   id: 'scheduler.cron',
@@ -387,8 +368,8 @@ describe('capability route sealed projection', () => {
     expect(failed.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
   });
 
-  it('projects a Toolchain install submission and omits native null optionals', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ job: toolchainSnapshot() }));
+  it('installs the Toolchain through the native control command', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({ result: { outcome: 'installed' } }));
     const result = response();
 
     await handleCapabilityRoutes(
@@ -398,201 +379,51 @@ describe('capability route sealed projection', () => {
       { runtimeHost: { command } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'openclaw.toolchain.install-submit' });
-    expect(result.state).toEqual({
-      statusCode: 202,
-      body: {
-        success: true,
-        job: {
-          id: toolchainJobId,
-          type: 'toolchain.uvInstall',
-          status: 'queued',
-          queuedAt: 1,
-          attempts: 0,
-          maxAttempts: 1,
-        },
-      },
-    });
-  });
-
-  it('projects a known Toolchain job lookup', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({
-      job: toolchainSnapshot({
-        status: 'running',
-        startedAt: 2,
-        progress: { updatedAt: 3, percent: 10, message: 'Installing uv Python runtime' },
-      }),
-      outcome: 'known',
-    }));
-    const result = response();
-    const request = {
-      id: 'runtime.host',
-      operationId: 'runtimeHost.jobGet',
-      scope: toolchainScope,
-      target: { kind: 'runtime-job', jobId: toolchainJobId },
-      input: { jobId: toolchainJobId },
-    };
-
-    await handleCapabilityRoutes(
-      incoming(request) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+    expect(command).toHaveBeenCalledWith(
+      { name: 'openclaw.toolchain.install-uv' },
+      { timeoutMs: 120000 },
     );
-
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId: toolchainJobId },
-    });
-    expect(result.state).toEqual({
-      statusCode: 200,
-      body: {
-        success: true,
-        job: {
-          id: toolchainJobId,
-          type: 'toolchain.uvInstall',
-          status: 'running',
-          queuedAt: 1,
-          startedAt: 2,
-          attempts: 0,
-          maxAttempts: 1,
-          progress: { updatedAt: 3, percent: 10, message: 'Installing uv Python runtime' },
-        },
-      },
-    });
-  });
-
-  it.each(['unknown', 'notfound'] as const)('projects a %s runtime job lookup as null', async (outcome) => {
-    const command = vi.fn().mockResolvedValue(succeeded({ job: null, outcome }));
-    const result = response();
-    const request = {
-      id: 'runtime.host',
-      operationId: 'runtimeHost.jobGet',
-      scope: toolchainScope,
-      target: { kind: 'runtime-job', jobId: toolchainJobId },
-      input: { jobId: toolchainJobId },
-    };
-
-    await handleCapabilityRoutes(
-      incoming(request) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId: toolchainJobId },
-    });
-    expect(result.state).toEqual({ statusCode: 200, body: { success: true, job: null } });
-  });
-
-  it('forwards generic runtime job ids to the owner-local lookup', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ job: null, outcome: 'notfound' }));
-    const result = response();
-    const jobId = 'runtime-host:organization:run:1';
-    const request = {
-      id: 'runtime.host',
-      operationId: 'runtimeHost.jobGet',
-      scope: toolchainScope,
-      target: { kind: 'runtime-job', jobId },
-      input: { jobId },
-    };
-
-    await handleCapabilityRoutes(
-      incoming(request) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId },
-    });
-    expect(result.state).toEqual({ statusCode: 200, body: { success: true, job: null } });
+    expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
   });
 
   it.each([
-    ['snapshot private field', { privateDto: 'secret' }],
-    ['progress private field', { progress: { updatedAt: 1, privatePath: 'C:/private' } }],
-    ['result private object', { result: { stdout: 'private stdout', token: 'private-token' } }],
-    ['error private detail', { error: 'C:/private/tool.exe --token private-token' }],
-    ['invalid progress percent', { progress: { updatedAt: 1, percent: 101 } }],
-    ['invalid result', { result: 'private-result' }],
-    ['invalid timestamp', { startedAt: 'C:/private/path' }],
-  ])('fails closed and redacts %s from Toolchain snapshots', async (_name, overrides) => {
-    const result = response();
-    const privateCanaries = JSON.stringify(overrides);
-
-    await handleCapabilityRoutes(
-      incoming(toolchainInstallRequest) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ job: toolchainSnapshot(overrides) })) } } as never,
-    );
-
-    expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Toolchain is unavailable' } });
-    expect(JSON.stringify(result.state)).not.toContain(privateCanaries);
-  });
-
-  it('rejects malformed Toolchain job requests before dispatch', async () => {
-    const command = vi.fn();
-    const result = response();
-    const request = {
-      id: 'runtime.host',
-      operationId: 'runtimeHost.jobGet',
-      scope: toolchainScope,
-      target: { kind: 'runtime-job', jobId: ' ' },
-      input: { jobId: ' ' },
-    };
-
-    await handleCapabilityRoutes(
-      incoming(request) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(command).not.toHaveBeenCalled();
-    expect(result.state).toEqual({ statusCode: 400, body: { success: false, error: 'Toolchain request is invalid' } });
-  });
-
-  it('rejects a Toolchain job id over the UTF-8 byte limit', async () => {
-    const command = vi.fn();
-    const result = response();
-    const jobId = 'é'.repeat(65);
-    const request = {
-      id: 'runtime.host',
-      operationId: 'runtimeHost.jobGet',
-      scope: toolchainScope,
-      target: { kind: 'runtime-job', jobId },
-      input: { jobId },
-    };
-
-    await handleCapabilityRoutes(
-      incoming(request) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(command).not.toHaveBeenCalled();
-    expect(result.state.statusCode).toBe(400);
-  });
-
-  it('fails closed for extra Toolchain result envelope fields', async () => {
+    ['rejected', 500, { success: false, error: 'Toolchain installation was rejected' }],
+    ['unknown', 503, { success: false, error: 'Toolchain installation outcome is unknown' }],
+  ] as const)('projects a Toolchain %s outcome', async (outcome, statusCode, body) => {
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(toolchainInstallRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ job: toolchainSnapshot(), privateDto: 'secret' })) } } as never,
+      { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ result: { outcome } })) } } as never,
     );
 
-    expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Toolchain is unavailable' } });
-    expect(JSON.stringify(result.state)).not.toContain('secret');
+    expect(result.state).toEqual({ statusCode, body });
+  });
+
+  it('fails closed for legacy runtime.host execution without dispatching host.runtime.execute', async () => {
+    const command = vi.fn();
+    const result = response();
+
+    await handleCapabilityRoutes(
+      incoming({
+        id: 'runtime.host',
+        operationId: 'runtimeHost.gatewayReady',
+        scope: schedulerScope,
+        target: { kind: 'gateway-control' },
+        input: {},
+      }) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).not.toHaveBeenCalled();
+    expect(result.state).toEqual({
+      statusCode: 404,
+      body: { success: false, error: 'Capability is not available' },
+    });
   });
 
   it('does not publish a partial capability directory or descriptor', async () => {

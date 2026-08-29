@@ -71,6 +71,17 @@ pub struct FleetFactsRestoreInput {
 
 impl FleetFacts {
     pub fn restore(input: FleetFactsRestoreInput) -> Result<Self, FleetFactsError> {
+        Self::restore_with_interrupted_delivery_recovery(input, true)
+    }
+
+    pub(crate) fn restore_live(input: FleetFactsRestoreInput) -> Result<Self, FleetFactsError> {
+        Self::restore_with_interrupted_delivery_recovery(input, false)
+    }
+
+    fn restore_with_interrupted_delivery_recovery(
+        input: FleetFactsRestoreInput,
+        recover_interrupted_delivery: bool,
+    ) -> Result<Self, FleetFactsError> {
         let FleetFactsRestoreInput {
             commands,
             dispatches,
@@ -91,7 +102,12 @@ impl FleetFacts {
         } = input;
         let command_ledger =
             CommandLedger::restore(commands).map_err(FleetFactsError::CommandLedger)?;
-        let outbox = Outbox::restore(dispatches).map_err(FleetFactsError::Outbox)?;
+        let outbox = if recover_interrupted_delivery {
+            Outbox::restore(dispatches)
+        } else {
+            Outbox::restore_live(dispatches)
+        }
+        .map_err(FleetFactsError::Outbox)?;
         if outbox.records().any(|record| {
             command_ledger
                 .record(record.intent().command_id())
@@ -996,7 +1012,7 @@ impl FleetFacts {
         let interrupted = self
             .outbox
             .records()
-            .filter(|record| record.phase() == crate::outbox::DispatchPhase::OutcomeUnknown)
+            .filter(|record| record.phase() == crate::outbox::DispatchPhase::InFlight)
             .map(|record| {
                 (
                     record.intent().dispatch_id().clone(),

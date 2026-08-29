@@ -41,13 +41,12 @@ function scheduleAbortRetry(params: {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   sessionKey: string;
-  targetSessionKey: string;
   endpointSessionId?: string;
   sessionIdentity: ChatStoreState['loadedSessions'][string]['meta']['sessionIdentity'];
   approvalIds: string[];
   startedAtMs: number;
 }): void {
-  const { set, get, sessionKey, targetSessionKey, endpointSessionId, sessionIdentity, approvalIds, startedAtMs } = params;
+  const { set, get, sessionKey, endpointSessionId, sessionIdentity, approvalIds, startedAtMs } = params;
   if (!sessionIdentity) {
     return;
   }
@@ -61,7 +60,6 @@ function scheduleAbortRetry(params: {
       return;
     }
     void hostSessionAbort({
-      sessionKey: targetSessionKey,
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
       approvalIds,
@@ -93,7 +91,6 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     const target = resolveSessionOperationTarget(get(), sessionKey);
     const approvalIds = pendingApprovals.map((approval) => approval.id);
     await hostSessionAbort({
-      sessionKey: target.sessionKey,
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       approvalIds,
@@ -102,7 +99,6 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
       set,
       get,
       sessionKey,
-      targetSessionKey: target.sessionKey,
       endpointSessionId: target.endpointSessionId,
       sessionIdentity: target.sessionIdentity,
       approvalIds,

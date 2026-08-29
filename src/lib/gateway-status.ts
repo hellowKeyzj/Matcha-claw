@@ -41,6 +41,5 @@ export function isGatewayPreparing(status: GatewayStatus, initialized: boolean):
 
 export function isGatewayUnavailable(status: GatewayStatus): boolean {
   return status.processState === 'stopped'
-    || status.processState === 'error'
-    || status.healthSummary === 'unresponsive';
+    || status.processState === 'error';
 }

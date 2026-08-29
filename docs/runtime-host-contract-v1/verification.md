@@ -32,7 +32,7 @@ This document records static inspection of existing test/document sources. No bu
 
 ### Parent callbacks
 
-For shell actions, gateway events and runtime-job events, recorder must capture:
+For shell actions, gateway events and owner-specific typed operation events, recorder must capture:
 
 ```text
 method, pathname, content-type, dispatch token,
@@ -40,7 +40,7 @@ version, action/eventName, payload, timeout,
 HTTP response, child-side mapping, call count
 ```
 
-The existing API-chain harness has a material blind spot: it does not currently represent the production `/internal/runtime-host/runtime-jobs` endpoint while child forwarding errors can be swallowed. A passing API-chain test alone therefore does not prove job notification compatibility.
+owner-specific operation recorder 不再是产品门禁；每个异步 owner 需要自己的 typed operation event/query recovery proof。
 
 ### Renderer operations
 
@@ -57,7 +57,7 @@ request path/method/body
 Normalize dynamic values:
 
 ```text
-pid, port, token, requestId, runId, jobId, trace ID, timestamps
+pid, port, token, requestId, runId, ownerOperationId, trace ID, timestamps
 ```
 
 Compare shape and semantics, not literal dynamic values.
@@ -86,7 +86,7 @@ Then run the smallest affected Renderer/store tests for the migrated operation o
 - Fixtures must be named by capability/route and outcome.
 - Do not snapshot secrets, private tokens, random paths or raw user data.
 - Do not make generic queue internals fixtures for Rust architecture.
-- Capture only externally observable job/event projection fields needed by current consumers.
+- Capture only externally observable owner-operation/event projection fields needed by current consumers.
 - A test fixture using a removed legacy endpoint is evidence to classify, not permission to recreate that endpoint in Rust.
 
 ## Baseline completion criterion

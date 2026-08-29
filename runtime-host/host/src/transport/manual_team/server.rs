@@ -24,14 +24,14 @@ const ROUTE: &str = "/api/team/manual-materialize-and-create";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        owner: crate::organization::OrganizationHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
@@ -60,7 +60,7 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
@@ -81,7 +81,7 @@ async fn serve(
 async fn handle_request(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::organization::OrganizationHandle,
 ) -> Response {
     if request.method != "POST" || request.path != ROUTE {
         return Response::not_found();

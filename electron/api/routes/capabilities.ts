@@ -15,7 +15,11 @@ import {
 } from '../../main/runtime-host-delivery/transport/skills/management';
 import type { HostApiContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
-import { readTraceHeader } from '../../main/runtime-host-delivery/transport/sessions/trace';
+import {
+  logSessionTrace,
+  readTraceHeader,
+  summarizeIdentifier,
+} from '../../main/runtime-host-delivery/transport/sessions/trace';
 import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
 import { parseJsonBody, sendJson } from '../route-utils';
 import type {
@@ -83,22 +87,6 @@ const TOOLCHAIN_UNAVAILABLE = {
   success: false,
   error: 'Toolchain is unavailable',
 } as const;
-const RUNTIME_HOST_REQUEST_INVALID = {
-  success: false,
-  error: 'Runtime host request is invalid',
-} as const;
-const RUNTIME_HOST_UNAVAILABLE = {
-  success: false,
-  error: 'Runtime host is unavailable',
-} as const;
-const TOOLCHAIN_JOB_TYPE = 'toolchain.uvInstall';
-const TOOLCHAIN_JOB_ID_PREFIX = 'runtime-host:openclaw:toolchain:';
-const TOOLCHAIN_PROGRESS_MESSAGE = 'Installing uv Python runtime';
-const TOOLCHAIN_ERROR_MESSAGES = [
-  'Toolchain installation is unavailable.',
-  'Toolchain installation was cancelled.',
-] as const;
-const TOOLCHAIN_JOB_RESULTS = ['installed', 'rejected', 'unknown', 'unavailable'] as const;
 
 const LEGACY_TASK_METHODS = [
   'TaskList',
@@ -221,10 +209,17 @@ export async function handleCapabilityRoutes(
   }
 
   if (isRecord(body) && isSubagentConfigurationCapabilityId(body.id)) {
+    const traceId = readTraceHeader(req.headers);
+    logSessionTrace('capability.subagent.configuration.dispatch', traceId, summarizeSubagentConfigurationRequest(body));
     try {
-      const response = await deps.agentsTransport.execute(body);
+      const response = await deps.agentsTransport.execute(body, traceId);
+      logSessionTrace('capability.subagent.configuration.response', traceId, {
+        status: response.status,
+        contract: summarizeSubagentConfigurationResponse(response.body),
+      });
       sendJson(res, response.status, response.body);
     } catch {
+      logSessionTrace('capability.subagent.configuration.failure', traceId, {});
       sendJson(res, 503, SUBAGENT_CONFIGURATION_UNAVAILABLE);
     }
     return true;
@@ -296,14 +291,6 @@ export async function handleCapabilityRoutes(
 
   if (body.id === 'plugin.runtime') {
     const response = await executePluginRuntimeCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
-  }
-
-  if (body.id === 'runtime.host') {
-    const response = body.operationId === 'runtimeHost.jobGet'
-      ? await executeToolchainCapability(body, deps)
-      : await executeRuntimeHostCapability(body, deps);
     sendJson(res, response.status, response.body);
     return true;
   }
@@ -415,6 +402,31 @@ type SubagentConfigurationCapabilityId = 'subagent.skills' | 'subagent.tools';
 
 function isSubagentConfigurationCapabilityId(value: unknown): value is SubagentConfigurationCapabilityId {
   return value === 'subagent.skills' || value === 'subagent.tools';
+}
+
+function summarizeSubagentConfigurationRequest(body: Record<string, unknown>): Record<string, unknown> {
+  const scope = isRecord(body.scope) ? body.scope : null;
+  const endpoint = scope && isRecord(scope.endpoint) ? scope.endpoint : null;
+  const target = isRecord(body.target) ? body.target : null;
+  const input = isRecord(body.input) ? body.input : null;
+  return {
+    id: body.id,
+    operationId: typeof body.operationId === 'string' ? body.operationId : null,
+    adapter: endpoint && typeof endpoint.runtimeAdapterId === 'string' ? endpoint.runtimeAdapterId : null,
+    instance: endpoint && typeof endpoint.runtimeInstanceId === 'string' ? endpoint.runtimeInstanceId : null,
+    scopeAgentId: summarizeIdentifier(scope && typeof scope.agentId === 'string' ? scope.agentId : null),
+    targetKind: target && typeof target.kind === 'string' ? target.kind : null,
+    targetSubagentId: summarizeIdentifier(target && typeof target.subagentId === 'string' ? target.subagentId : null),
+    inputAgentId: summarizeIdentifier(input && typeof input.agentId === 'string' ? input.agentId : null),
+  };
+}
+
+function summarizeSubagentConfigurationResponse(body: unknown): string {
+  if (!isRecord(body)) return 'invalid';
+  if (body.success === false && typeof body.error === 'string') return 'failure';
+  if (typeof body.resultType === 'string') return `mutation:${body.resultType}`;
+  if (typeof body.agentId === 'string' && isRecord(body.support)) return 'view';
+  return 'invalid';
 }
 
 async function executeSkillManagementCapability(
@@ -582,47 +594,6 @@ function isNativeRuntimeScope(value: unknown): boolean {
     && value.endpoint.runtimeInstanceId === 'local';
 }
 
-async function executeRuntimeHostCapability(
-  body: Record<string, unknown>,
-  deps: CapabilityRouteContext,
-): Promise<{ status: number; body: unknown }> {
-  if (!isRuntimeHostGatewayControlRequest(body)) {
-    return { status: 400, body: RUNTIME_HOST_REQUEST_INVALID };
-  }
-  try {
-    const outcome = await deps.runtimeHost.command({ name: 'host.runtime.execute', input: body });
-    return projectRuntimeHostGatewayControlOutcome(outcome);
-  } catch {
-    return { status: 503, body: RUNTIME_HOST_UNAVAILABLE };
-  }
-}
-
-function isRuntimeHostGatewayControlRequest(body: Record<string, unknown>): boolean {
-  return hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    && body.id === 'runtime.host'
-    && isRuntimeHostGatewayControlOperation(body.operationId)
-    && isNativeRuntimeScope(body.scope)
-    && isRecord(body.target)
-    && hasExactKeys(body.target, ['kind'])
-    && body.target.kind === 'gateway-control'
-    && isRecord(body.input);
-}
-
-function isRuntimeHostGatewayControlOperation(value: unknown): boolean {
-  return value === 'runtimeHost.prepareGatewayLaunch'
-    || value === 'runtimeHost.gatewayLifecycle'
-    || value === 'runtimeHost.gatewayReady'
-    || value === 'runtimeHost.gatewayControlUiAutoApprove';
-}
-
-function projectRuntimeHostGatewayControlOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
-  if (outcome.kind === 'succeeded') return { status: 200, body: outcome.result };
-  if (outcome.kind === 'rejected' && outcome.error.code === 'INVALID_INPUT') {
-    return { status: 400, body: RUNTIME_HOST_REQUEST_INVALID };
-  }
-  return { status: 503, body: RUNTIME_HOST_UNAVAILABLE };
-}
-
 async function executeToolchainCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
@@ -630,154 +601,37 @@ async function executeToolchainCapability(
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input']) || !isNativeRuntimeScope(body.scope)) {
     return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
   }
-  if (body.id === 'platform.runtime' && body.operationId === 'toolchain.installUv') {
-    if (!isRecord(body.target) || !hasExactKeys(body.target, ['kind']) || body.target.kind !== 'runtime-job'
-      || !isRecord(body.input) || !hasExactKeys(body.input, [])) {
-      return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
-    }
-    try {
-      const outcome = await deps.runtimeHost.command({ name: 'openclaw.toolchain.install-submit' });
-      const snapshot = decodeToolchainSnapshot(outcome);
-      return snapshot ? { status: 202, body: { success: true, job: snapshot } } : { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-    } catch {
-      return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-    }
+  if (body.id !== 'platform.runtime' || body.operationId !== 'toolchain.installUv') {
+    return { status: 404, body: CAPABILITY_NOT_AVAILABLE };
   }
-  if (body.id === 'runtime.host' && body.operationId === 'runtimeHost.jobGet') {
-    const jobId = decodeRuntimeJobId(body);
-    if (!jobId) return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
-    try {
-      const outcome = await deps.runtimeHost.command({ name: 'openclaw.toolchain.job-get', input: { jobId } });
-      const lookup = decodeToolchainLookup(outcome);
-      return lookup
-        ? { status: 200, body: { success: true, job: lookup.job } }
-        : { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-    } catch {
-      return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-    }
+  if (!isRecord(body.target) || !hasExactKeys(body.target, ['kind']) || body.target.kind !== 'platform-runtime'
+    || !isRecord(body.input) || !hasExactKeys(body.input, [])) {
+    return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
   }
-  return { status: 404, body: CAPABILITY_NOT_AVAILABLE };
+  try {
+    const outcome = await deps.runtimeHost.command({ name: 'openclaw.toolchain.install-uv' }, { timeoutMs: 120000 });
+    return projectToolchainInstallOutcome(outcome);
+  } catch {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
 }
 
-function decodeRuntimeJobId(body: Record<string, unknown>): string | null {
-  if (!isRecord(body.target) || !hasExactKeys(body.target, ['kind', 'jobId']) || body.target.kind !== 'runtime-job'
-    || !isRuntimeJobId(body.target.jobId) || !isRecord(body.input)
-    || !hasExactKeys(body.input, ['jobId']) || body.input.jobId !== body.target.jobId) return null;
-  return body.target.jobId;
-}
-
-function decodeToolchainLookup(outcome: RuntimeHostControlOutcome): { job: Record<string, unknown> | null } | null {
+function projectToolchainInstallOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
   if (!isRecord(outcome) || !hasExactKeys(outcome, ['kind', 'result']) || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result) || !hasExactKeys(outcome.result, ['job', 'outcome'])
-    || (outcome.result.outcome !== 'known' && outcome.result.outcome !== 'unknown' && outcome.result.outcome !== 'notfound')) return null;
-  if (outcome.result.job === null && (outcome.result.outcome === 'unknown' || outcome.result.outcome === 'notfound')) return { job: null };
-  if (outcome.result.job === null || outcome.result.outcome !== 'known') return null;
-  const job = projectToolchainSnapshot(outcome.result.job);
-  return job ? { job } : null;
-}
-
-function decodeToolchainSnapshot(outcome: RuntimeHostControlOutcome): Record<string, unknown> | null {
-  if (!isRecord(outcome) || !hasExactKeys(outcome, ['kind', 'result']) || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result) || !hasExactKeys(outcome.result, ['job'])) return null;
-  return projectToolchainSnapshot(outcome.result.job);
-}
-
-function projectToolchainSnapshot(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)
-    || !hasOnlyKeys(value, ['id', 'type', 'status', 'queuedAt', 'startedAt', 'finishedAt', 'attempts', 'maxAttempts', 'progress', 'result', 'error'])
-    || !hasOwn(value, 'id')
-    || !hasOwn(value, 'type')
-    || !hasOwn(value, 'status')
-    || !hasOwn(value, 'queuedAt')
-    || !hasOwn(value, 'attempts')
-    || !hasOwn(value, 'maxAttempts')
-    || !isToolchainJobId(value.id)
-    || value.type !== TOOLCHAIN_JOB_TYPE
-    || !isToolchainJobStatus(value.status)
-    || !isNonNegativeSafeInteger(value.queuedAt)
-    || !isNonNegativeSafeInteger(value.attempts)
-    || !isSafePositiveInteger(value.maxAttempts)
-    || value.attempts > value.maxAttempts
-    || !isNullableToolchainTimestamp(value, 'startedAt')
-    || !isNullableToolchainTimestamp(value, 'finishedAt')) {
-    return null;
+    || !isRecord(outcome.result) || !hasExactKeys(outcome.result, ['result'])
+    || !isRecord(outcome.result.result) || !hasExactKeys(outcome.result.result, ['outcome'])) {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-
-  const progress = projectToolchainProgress(value.progress);
-  if (value.progress !== undefined && value.progress !== null && !progress) return null;
-  if (!isNullableToolchainResult(value.result) || !isNullableToolchainError(value.error)) return null;
-
-  return {
-    id: value.id,
-    type: value.type,
-    status: value.status,
-    queuedAt: value.queuedAt,
-    ...(value.startedAt === undefined || value.startedAt === null ? {} : { startedAt: value.startedAt }),
-    ...(value.finishedAt === undefined || value.finishedAt === null ? {} : { finishedAt: value.finishedAt }),
-    attempts: value.attempts,
-    maxAttempts: value.maxAttempts,
-    ...(progress ? { progress } : {}),
-    ...(value.result === undefined || value.result === null ? {} : { result: value.result }),
-    ...(value.error === undefined || value.error === null ? {} : { error: value.error }),
-  };
-}
-
-function projectToolchainProgress(value: unknown): Record<string, unknown> | null {
-  if (value === undefined || value === null) return null;
-  if (!isRecord(value) || !hasOnlyKeys(value, ['updatedAt', 'percent', 'message'])
-    || !hasOwn(value, 'updatedAt')
-    || !isNonNegativeSafeInteger(value.updatedAt)
-    || (hasOwn(value, 'percent') && !isToolchainProgressPercent(value.percent))
-    || (hasOwn(value, 'message') && value.message !== TOOLCHAIN_PROGRESS_MESSAGE)) {
-    return null;
+  switch (outcome.result.result.outcome) {
+    case 'installed':
+      return { status: 200, body: { success: true } };
+    case 'rejected':
+      return { status: 500, body: { success: false, error: 'Toolchain installation was rejected' } };
+    case 'unknown':
+      return { status: 503, body: { success: false, error: 'Toolchain installation outcome is unknown' } };
+    default:
+      return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-  return {
-    updatedAt: value.updatedAt,
-    ...(value.percent === undefined ? {} : { percent: value.percent }),
-    ...(value.message === undefined ? {} : { message: value.message }),
-  };
-}
-
-function isNullableToolchainTimestamp(value: Record<string, unknown>, key: string): boolean {
-  return !hasOwn(value, key) || value[key] === null || isNonNegativeSafeInteger(value[key]);
-}
-
-function isNullableToolchainResult(value: unknown): boolean {
-  return value === undefined || value === null || isToolchainJobResult(value);
-}
-
-function isNullableToolchainError(value: unknown): boolean {
-  return value === undefined || value === null || isToolchainError(value);
-}
-
-function isRuntimeJobId(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && Buffer.byteLength(value, 'utf8') <= 128
-    && !hasControlCharacter(value)
-    && !/\s/.test(value);
-}
-
-function isToolchainJobId(value: unknown): value is string {
-  return isRuntimeJobId(value)
-    && value.startsWith(TOOLCHAIN_JOB_ID_PREFIX)
-    && /^\d+$/.test(value.slice(TOOLCHAIN_JOB_ID_PREFIX.length));
-}
-
-function isToolchainJobStatus(value: unknown): boolean {
-  return value === 'queued' || value === 'running' || value === 'succeeded' || value === 'failed';
-}
-
-function isToolchainProgressPercent(value: unknown): value is number {
-  return isNonNegativeSafeInteger(value) && value <= 100;
-}
-
-function isToolchainJobResult(value: unknown): value is typeof TOOLCHAIN_JOB_RESULTS[number] {
-  return typeof value === 'string' && TOOLCHAIN_JOB_RESULTS.includes(value as typeof TOOLCHAIN_JOB_RESULTS[number]);
-}
-
-function isToolchainError(value: unknown): value is typeof TOOLCHAIN_ERROR_MESSAGES[number] {
-  return typeof value === 'string' && TOOLCHAIN_ERROR_MESSAGES.includes(value as typeof TOOLCHAIN_ERROR_MESSAGES[number]);
 }
 
 function isStringArray(value: unknown): value is string[] {

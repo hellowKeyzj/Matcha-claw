@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{facade::CronHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{
     CREATE_PATH, CronHistoryQuery, CronRequest, DELETE_PATH, DecodeError, LIST_PATH,
@@ -39,19 +39,19 @@ fn debug_cron_transport(stage: &'static str) {
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        cron: CronHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            cron,
         })
     }
 
@@ -59,9 +59,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let cron = self.cron.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, cron).await;
             });
         }
     }
@@ -70,7 +70,7 @@ impl Server {
 pub(crate) struct BrokerServer {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
     ledger: Arc<Mutex<super::broker::OperationLedger>>,
 }
 
@@ -78,12 +78,12 @@ impl BrokerServer {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        cron: CronHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            cron,
             ledger: super::broker::new_operation_ledger(),
         })
     }
@@ -92,10 +92,10 @@ impl BrokerServer {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let cron = self.cron.clone();
             let ledger = Arc::clone(&self.ledger);
             tokio::spawn(async move {
-                let _ = serve_broker(stream, verifier, owner, ledger).await;
+                let _ = serve_broker(stream, verifier, cron, ledger).await;
             });
         }
     }
@@ -104,12 +104,12 @@ impl BrokerServer {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, cron).await,
             Err(response) => response,
         })
     })
@@ -125,14 +125,14 @@ async fn serve(
 async fn serve_broker(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
     ledger: Arc<Mutex<super::broker::OperationLedger>>,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
             Ok(request) if request.path == super::broker::PATH => {
-                super::broker::handle(request, verifier, owner, ledger).await
+                super::broker::handle(request, verifier, cron, ledger).await
             }
             Ok(_) => Response::not_found(),
             Err(response) => response,
@@ -150,7 +150,7 @@ async fn serve_broker(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
 ) -> Response {
     debug_cron_transport("request_entered");
     let Some(authorization) = request
@@ -182,7 +182,7 @@ async fn handle(
             }
         };
         drop(verifier);
-        return handle_history(owner, query).await;
+        return handle_history(cron, query).await;
     }
 
     if request.method != "POST"
@@ -225,51 +225,29 @@ async fn handle(
     let (status, body) = match request {
         CronRequest::List => {
             debug_cron_transport("owner_request_entered");
-            match owner.list_cron_jobs().await {
-                Ok(outcome) => list_body(outcome),
-                Err(_) => {
+            match cron.list().await {
+                Ok(jobs) => list_body(crate::cron::CronListOutcome::Listed(jobs)),
+                Err(failure) => {
                     debug_cron_transport("owner_request_failed");
-                    unavailable()
+                    list_body(failure.into())
                 }
             }
         }
-        CronRequest::Create(command) => match owner.create_cron_job(command).await {
-            Ok(outcome) => job_body(outcome),
-            Err(_) => unavailable(),
-        },
-        CronRequest::Update(command) => match owner.update_cron_job(command).await {
-            Ok(outcome) => job_body(outcome),
-            Err(_) => unavailable(),
-        },
-        CronRequest::Delete(command) => match owner.delete_cron_job(command).await {
-            Ok(outcome) => delete_body(outcome),
-            Err(_) => unavailable(),
-        },
-        CronRequest::Trigger(job_id) => match owner.trigger_open_claw_cron(job_id).await {
-            Ok(outcome) => trigger_body(outcome),
-            Err(_) => unavailable(),
-        },
+        CronRequest::Create(command) => job_body(cron.create(command).await),
+        CronRequest::Update(command) => job_body(cron.update(command).await),
+        CronRequest::Delete(command) => delete_body(cron.delete(command).await),
+        CronRequest::Trigger(job_id) => trigger_body(cron.trigger(job_id).await),
     };
     Response { status, body }
 }
 
-async fn handle_history(owner: crate::owner::Handle, query: CronHistoryQuery) -> Response {
+async fn handle_history(cron: CronHandle, query: CronHistoryQuery) -> Response {
     let command = match query.into_command() {
         Ok(command) => command,
         Err(DecodeError::Invalid | DecodeError::Unauthorized) => return Response::bad_request(),
     };
-    let (status, body) = match owner.load_cron_history(command).await {
-        Ok(outcome) => history_body(outcome),
-        Err(_) => unavailable(),
-    };
+    let (status, body) = history_body(cron.load_history(command).await);
     Response { status, body }
-}
-
-fn unavailable() -> (u16, Value) {
-    (
-        503,
-        serde_json::json!({ "success": false, "error": "Cron service is unavailable" }),
-    )
 }
 
 pub(crate) struct Request {

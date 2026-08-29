@@ -14,8 +14,8 @@ use openclaw::port::{
 };
 
 use crate::{
-    provider_accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
-    provider_routing::{ProviderRoutingListOutcome, ProviderRoutingReplaceOutcome},
+    provider::accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
+    provider::routing::{ProviderRoutingListOutcome, ProviderRoutingReplaceOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -331,12 +331,17 @@ fn native_diagnostic_json(diagnostic: &ProviderNativeConfigurationDiagnostic) ->
         "reason": diagnostic.reason(),
         "configPath": diagnostic.config_path(),
     });
-    let object = value.as_object_mut().expect("provider native diagnostic JSON is an object");
+    let object = value
+        .as_object_mut()
+        .expect("provider native diagnostic JSON is an object");
     if let Some(method) = diagnostic.method() {
         object.insert("method".into(), Value::String(method.to_owned()));
     }
     if let Some(expected_path) = diagnostic.expected_path() {
-        object.insert("expectedPath".into(), Value::String(expected_path.to_owned()));
+        object.insert(
+            "expectedPath".into(),
+            Value::String(expected_path.to_owned()),
+        );
     }
     if let Some(detail) = diagnostic.detail() {
         object.insert("detail".into(), Value::String(detail.to_owned()));
@@ -425,7 +430,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
     now: u64,
 ) -> Result<ProviderRoutingDelivery, RequestError> {
     let authorization = headers

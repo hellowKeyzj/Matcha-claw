@@ -1,9 +1,10 @@
-import type { IncomingMessage } from 'node:http';
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import type { Duplex } from 'node:stream';
 import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
 
 const DECISION_TTL_MS = 30_000;
+const PUBLIC_FLEET_RUNTIME_AGENT_INGRESS_PATH = '/api/remote-fleet/runtime-agent/ingress';
 export const PUBLIC_FLEET_TERMINAL_STREAM_PATH = '/api/remote-fleet/terminal/stream';
 const PRIVATE_FLEET_TERMINAL_STREAM_PATH = '/api/fleet/terminal';
 const UNAVAILABLE = {
@@ -64,6 +65,8 @@ export type FleetMutationResult = Readonly<{
   dispatchId?: string;
   attempt?: number;
   target?: FleetTarget;
+  state?: 'ready' | 'unhealthy';
+  message?: string;
 }>;
 
 export type FleetTerminalCloseResult = Readonly<{
@@ -568,6 +571,31 @@ async function requestFleet<T extends FleetSuccessBody | FleetMutationResult | F
   return { status: 503, body: UNAVAILABLE };
 }
 
+export function proxyFleetRuntimeAgentIngress(
+  port: number,
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  const upstream = httpRequest({
+    hostname: '127.0.0.1',
+    port,
+    method: req.method,
+    path: PUBLIC_FLEET_RUNTIME_AGENT_INGRESS_PATH,
+    headers: req.headers,
+  }, (upstreamResponse) => {
+    res.writeHead(upstreamResponse.statusCode ?? 503, upstreamResponse.headers);
+    upstreamResponse.pipe(res);
+  });
+  upstream.once('error', () => {
+    if (!res.headersSent) {
+      res.statusCode = 503;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    }
+    res.end(JSON.stringify(UNAVAILABLE));
+  });
+  req.pipe(upstream);
+}
+
 export function proxyFleetTerminalStreamUpgrade(
   port: number,
   req: IncomingMessage,
@@ -837,11 +865,13 @@ function isBase64Url(value: unknown): value is string {
 
 function isMutationResponse(value: unknown): value is FleetMutationResult {
   if (!isRecord(value) || !['submitted', 'alreadySubmitted', 'completed', 'rejected', 'accepted', 'outcomeUnknown', 'alreadyRecorded', 'replayed', 'replayAuthorized', 'targetUpdated', 'targetRemoved', 'connectionUpdated', 'connectionRemoved', 'environmentRegistered', 'resourceRegistered', 'nodeUpdated', 'nodeRetired', 'agentUpdated', 'agentRevoked', 'runtimeUpdated', 'runtimeLifecycleUpdated', 'runtimeRetired', 'endpointUpdated', 'endpointDrained', 'endpointRetired', 'probeStarted', 'probeCompleted', 'probeUnknown', 'probeRejected', 'capabilitySyncStarted', 'capabilitySyncCompleted', 'deploymentCompleted', 'deploymentFailed', 'deploymentUnknown', 'deletionCompleted', 'deletionFailed', 'deletionUnknown', 'provisioningCompleted', 'provisioningFailed', 'provisioningUnknown', 'terminalOpened', 'terminalReconnected', 'terminalClosing', 'terminalClosed'].includes(String(value.outcome))) return false;
-  const allowed = ['outcome', 'commandId', 'dispatchId', 'attempt', 'target'] as const;
+  const allowed = ['outcome', 'commandId', 'dispatchId', 'attempt', 'target', 'state', 'message'] as const;
   if (!Object.keys(value).every((key) => allowed.includes(key as typeof allowed[number]))) return false;
   if (typeof value.commandId !== 'undefined' && !isIdentifier(value.commandId)) return false;
   if (typeof value.dispatchId !== 'undefined' && !isIdentifier(value.dispatchId)) return false;
   if (typeof value.attempt !== 'undefined' && !isPositiveCounter(value.attempt)) return false;
+  if (typeof value.state !== 'undefined' && !isOneOf(value.state, ['ready', 'unhealthy'])) return false;
+  if (typeof value.message !== 'undefined' && !isText(value.message)) return false;
   return typeof value.target === 'undefined' || isTarget(value.target);
 }
 

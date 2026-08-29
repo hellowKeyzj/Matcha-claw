@@ -46,6 +46,8 @@ Rust runtime-host Delivery Adapter
 Host composition + admission + command serialization
   - 只组装 owner
   - 只串行化 Host command
+  - Root owner 只保留 lifecycle/state/shutdown/safe event/host-level join
+  - product command 由 typed facades/owners 承接
   - 不拥有 Domain/native facts
         ├───────────────┬────────────────┬──────────────────┐
         ▼               ▼                ▼                  ▼
@@ -84,20 +86,21 @@ Rust child 必须提供现有 child 可观察 contract：
 - `POST /lifecycle/restart`、`POST /lifecycle/stop`；
 - `/dispatch` 的 1 MB body limit、413 `PAYLOAD_TOO_LARGE`、合法 v1 response envelope；
 - Electron → child `/dispatch` 默认 30s，health 最多 3s；
-- child → Electron parent 的 shell/gateway/runtime-job callback、token、version、15s/3s timeout 和 best-effort 语义；
+- child → Electron parent 的 shell/gateway callback、token、version、15s/3s timeout 和 best-effort 语义；owner operation typed event 由具体 facade 定义；
 - CLI、Team webhook、Remote Fleet agent ingress、terminal WebSocket 等非 Renderer 入口。
 
 `DirectRuntimeHost`、stdin/stdout framed control 和 signed loopback transports 可以作为 Rust 内部或 Electron Delivery 的实现 seam，但它们不是自动替代 `/dispatch` 的新 public contract。它们与旧 seam 的 active/替代关系必须在同一个 delivery owner block 中用 route matrix 和 unchanged-client trace 证明。
 
-### 3.2 Host actor 不是业务事实 owner
+### 3.2 Root owner 不是业务 command/fact owner
 
-Host actor 只负责：
+Root owner 只保留：
 
-- command admission；
-- Host-level serialization；
-- owner handle 调用；
-- safe projection；
-- shutdown/join order。
+- lifecycle/state；
+- safe event projection；
+- shutdown；
+- host-level join。
+
+Host composition 负责 command admission 与 Host-level serialization；product transport/control 不调用 Root owner product command，业务入口由 typed facades/owners 承接。
 
 以下写入仍由各自 owner 完成：
 
@@ -106,7 +109,7 @@ Host actor 只负责：
 - Environment、Fleet、Organization durable facts；
 - owner-local operation/task/receipt。
 
-不得建立 Host-wide ledger、global fact store 或 Host-wide RuntimeJob owner。
+不得建立 Host-wide ledger、global fact store 或 Host-wide generic operation owner。
 
 ### 3.3 Capability 是两套边界，不强行合并
 
@@ -122,9 +125,9 @@ Trusted Rust delivery plane
 
 Rust signed decision verifier 已是安全 transport 机制，但不能据此宣称已经替代 TypeScript dynamic capability contract。`policyScope`、`ownerModuleId`、`routeOwnerId`、`bootstrap` scope 和 target/input binding 必须逐 route 裁决。
 
-### 3.4 异步只保留兼容投影
+### 3.4 异步使用 owner-local operation
 
-内部删除：
+内部已删除（仅作审计清单，不是现行组件）：
 
 ```text
 RuntimeJobQueue / RuntimeJobRegistry
@@ -132,16 +135,20 @@ critical/default/low global queue
 generic retry/retention/result store
 ```
 
-外部保留：
+外部已删除（仅作审计清单，不是现行 contract）：
 
 ```text
 RuntimeJobSnapshot-shaped projection
+generic RuntimeJob* public DTO
 runtimeHost.jobGet
 runtime-job:done
 runtime-job:progress
+job_compatibility
 ```
 
-真实 operation/task/run 属于具体 owner；旧 job id 只是一层兼容查询键。事件是 hint，`jobGet` 是恢复路径。
+以上名称只用于说明本轮已经删除的旧 public/internal 面；它们不是当前 authority、route、DTO、事件或待办。
+
+真实 operation/task/run 属于具体 owner；提交后是否等待真实业务结果由 owner 语义决定。Toolchain install 属于必须等待真实结果的调用：`hostUvInstallAll` 直接走 `platform.runtime` / `toolchain.installUv`，target=`platform-runtime`，Electron public adapter 调用 Rust private `openclaw.toolchain.install-uv` 并等待 native result。其他只需要提交成功即可继续的慢操作返回 owner-local operationId，并通过该 owner/facade 的 typed query/event 观察完成、失败、进度和 unknown。
 
 ### 3.5 Foundation execution 机制保留
 
@@ -154,17 +161,17 @@ OwnedTask<T>
   -> ServiceHandle<T>（长生命周期 service）
 ```
 
-它负责 cancellation、join 和 owned task 生命周期；它不负责业务事实、队列调度、优先级、通用重试、结果 retention、持久化、全局 job id 或 `runtime-job:*` projection。业务 owner 可以使用它，但必须自己定义 operation 的状态、错误、terminal oracle 和恢复语义。
+它负责 cancellation、join 和 owned task 生命周期；它不负责业务事实、队列调度、优先级、通用重试、结果 retention、持久化、全局 generic operation id 或 owner operation projection。业务 owner 可以使用它，但必须自己定义 operation 的状态、错误、terminal oracle 和恢复语义。
 
 因此：
 
 ```text
-Foundation execution primitive != Host-wide RuntimeJobQueue
+Foundation execution primitive != deleted Host-wide generic operation queue
 Foundation operation handle  != Domain fact owner
 Foundation cancellation       != business terminal outcome
 ```
 
-不得因为删除通用 RuntimeJob 架构而删除或遗漏这套底层执行机制；也不得把它扩展成新的全局任务事实源。
+不得因为删除通用 operation model 而删除或遗漏这套底层执行机制；也不得把它扩展成新的全局任务事实源。
 
 ## 4. 不建立的东西
 
@@ -191,3 +198,5 @@ Foundation 的 Windows Job Object、POSIX guardian/sentinel 等是机制候选�
 最终 Rust workspace 的目标根目录是 `runtime-host/`；历史 staging 目录 `runtime-host-rust/`（若存在）不是第二个最终 workspace，也不是 owner 依据。目录迁移、旧 TS 删除和 Electron package 接入必须作为同一 delivery/cutover 证据组完成，本文不在设计阶段执行这些动作。
 
 目标 crate 地址只冻结语义地址，不要求现在预建空 crate。每个 crate 只有在真实 consumer、public contract、side effect、验证和 composition 能同一 owner block 闭合时才加入 workspace。
+
+第三方、非业务、非 peer runtime 的 capability 放在 `runtime-host/external/`；例如 ClawHub registry/CLI client 属于 `external/clawhub`，不归 `domains` 或 `integrations`。

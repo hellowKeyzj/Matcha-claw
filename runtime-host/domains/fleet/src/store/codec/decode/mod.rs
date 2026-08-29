@@ -89,7 +89,7 @@ pub(crate) fn decode_facts(content: &[u8], schema: u8) -> Result<DecodedFacts, S
         Vec::new()
     };
     reader.finish()?;
-    let facts = FleetFacts::restore(FleetFactsRestoreInput {
+    let facts = FleetFacts::restore_live(FleetFactsRestoreInput {
         commands,
         dispatches,
         secret_references: references,

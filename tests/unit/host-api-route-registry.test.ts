@@ -112,9 +112,12 @@ describe('Host API route handler registry', () => {
     expect(result.state).toEqual({ statusCode: 200, body: { outcome: 'nodeRetired' } });
   });
 
-  it('keeps deploy-environment sealed as unavailable without transport dispatch', async () => {
+  it('registers the Fleet deploy-environment wrapper through the real request handler', async () => {
     const read = vi.fn();
-    const mutate = vi.fn();
+    const mutate = vi.fn().mockResolvedValue({
+      status: 200,
+      body: { outcome: 'environmentDeployStarted' },
+    });
     const result = response();
     const handler = createHostApiRequestHandler(hostApiContext({ read, mutate }), 13210);
 
@@ -125,11 +128,21 @@ describe('Host API route handler registry', () => {
       result.raw as never,
     );
 
+    expect(mutate).toHaveBeenCalledWith({
+      operation: 'fleet.environments.deploy.begin',
+      input: {
+        kind: 'environmentDeployBegin',
+        payload: {
+          id: 'environment-1',
+          commandId: expect.stringMatching(/^deploy-environment:environment-1:\d+$/),
+          phase: 'deploy',
+        },
+      },
+    });
     expect(result.state).toEqual({
-      statusCode: 503,
-      body: { success: false, error: 'Fleet data is unavailable' },
+      statusCode: 200,
+      body: { outcome: 'environmentDeployStarted' },
     });
     expect(read).not.toHaveBeenCalled();
-    expect(mutate).not.toHaveBeenCalled();
   });
 });

@@ -50,11 +50,11 @@ pub trait TerminalProvider: Send + Sync + 'static {
 /// This snapshot must be rebuilt by composition after target mutations; a terminal
 /// session never falls back to public request configuration.
 pub struct NativeProvider {
-    owner: crate::owner::Handle,
+    owner: crate::fleet::handle::FleetHandle,
 }
 
 impl NativeProvider {
-    pub fn new(owner: crate::owner::Handle) -> Self {
+    pub fn new(owner: crate::fleet::handle::FleetHandle) -> Self {
         Self { owner }
     }
 }
@@ -62,7 +62,12 @@ impl NativeProvider {
 impl TerminalProvider for NativeProvider {
     fn open(&self, context: TerminalContext) -> ProviderFuture {
         let owner = self.owner.clone();
-        Box::pin(async move { owner.fleet_terminal_provider_open(context).await })
+        Box::pin(async move {
+            owner
+                .terminal_provider_open(context)
+                .await
+                .map_err(|_| ProviderError::message("fleet terminal provider unavailable"))
+        })
     }
 }
 

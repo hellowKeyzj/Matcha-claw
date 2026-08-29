@@ -260,7 +260,6 @@ export function timelineItems(
 
 interface FetchHistoryWindowInput {
   recordKey: string;
-  backendSessionKey: string;
   endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   sessions: ChatSession[];
@@ -274,7 +273,6 @@ export async function fetchHistoryWindow(
 ): Promise<HistoryWindowResult> {
   const {
     recordKey,
-    backendSessionKey,
     endpointSessionId,
     sessionIdentity,
     sessions,
@@ -285,7 +283,7 @@ export async function fetchHistoryWindow(
 
   logSessionTrace('history.transport.request', traceId, {
     recordKey: summarizeIdentifier(recordKey),
-    backendSessionKey: summarizeIdentifier(backendSessionKey),
+    sessionKey: summarizeIdentifier(sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(sessionIdentity),
     limit,
@@ -294,7 +292,6 @@ export async function fetchHistoryWindow(
   let rawView: unknown;
   try {
     rawView = await hostSessionLoad({
-      sessionKey: backendSessionKey,
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
       limit,

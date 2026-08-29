@@ -21,17 +21,15 @@ impl<'a> OpenClawSkillProvider<'a> {
         command: SkillInstallCommand,
     ) -> SkillInstallOutcome {
         let (slug, version, force) = command.into_parts();
-        let request = match openclaw::skill::ClawHubSkillInstall::try_new(slug, version, force) {
+        let request = match clawhub::ClawHubInstallRequest::try_new(slug, version, force) {
             Ok(request) => request,
             Err(_) => return SkillInstallOutcome::Rejected,
         };
-        match self.runtime.install_clawhub_skill(request.clone()).await {
-            openclaw::skill::ClawHubSkillInstallOutcome::Accepted => SkillInstallOutcome::accepted(
-                request.slug().to_owned(),
-                request.version().map(str::to_owned),
-            ),
-            openclaw::skill::ClawHubSkillInstallOutcome::Rejected => SkillInstallOutcome::Rejected,
-            openclaw::skill::ClawHubSkillInstallOutcome::Unknown => SkillInstallOutcome::Unknown,
+        let slug = request.slug().to_owned();
+        let version = request.version().map(str::to_owned);
+        match self.runtime.install_clawhub_skill(request).await {
+            Ok(()) => SkillInstallOutcome::accepted(slug, version),
+            Err(()) => SkillInstallOutcome::Unknown,
         }
     }
 
@@ -44,41 +42,6 @@ impl<'a> OpenClawSkillProvider<'a> {
 
     pub(crate) async fn manage(&self, command: SkillManagementCommand) -> SkillManagementOutcome {
         match command {
-            skill_management::Command::Search { query, limit } => {
-                let request = match openclaw::port::SkillSearchRequest::try_new(query, limit) {
-                    Ok(v) => v,
-                    Err(_) => return SkillManagementOutcome::Rejected,
-                };
-                SkillManagementOutcome::Search(
-                    self.runtime
-                        .search_skills(request)
-                        .await
-                        .map(|items| {
-                            items
-                                .into_iter()
-                                .map(|item| skill_management::SearchResult {
-                                    score: item.score(),
-                                    slug: item.slug().to_owned(),
-                                    display_name: item.display_name().to_owned(),
-                                    summary: item.summary().map(str::to_owned),
-                                    version: item.version().map(str::to_owned),
-                                    updated_at: item.updated_at(),
-                                })
-                                .collect()
-                        })
-                        .map_err(|error| match error {
-                            openclaw::port::SkillReadError::Unavailable => {
-                                skill_management::ReadError::Unavailable
-                            }
-                            openclaw::port::SkillReadError::Rejected => {
-                                skill_management::ReadError::Rejected
-                            }
-                            openclaw::port::SkillReadError::Protocol => {
-                                skill_management::ReadError::Protocol
-                            }
-                        }),
-                )
-            }
             skill_management::Command::Detail { slug } => {
                 let request = match openclaw::port::SkillDetailRequest::try_new(slug) {
                     Ok(v) => v,
@@ -123,14 +86,15 @@ impl<'a> OpenClawSkillProvider<'a> {
                 version,
                 force,
             } => {
-                let request =
-                    match openclaw::port::SkillInstallRequest::clawhub(slug, version, force) {
-                        Ok(v) => v,
-                        Err(_) => return SkillManagementOutcome::Rejected,
-                    };
-                SkillManagementOutcome::Mutation(map_mutation(
-                    self.runtime.install_skill(request).await,
-                ))
+                let request = match clawhub::ClawHubInstallRequest::try_new(slug, version, force) {
+                    Ok(request) => request,
+                    Err(_) => return SkillManagementOutcome::Rejected,
+                };
+                let outcome = match self.runtime.install_clawhub_skill(request).await {
+                    Ok(()) => skill_management::MutationOutcome::Accepted,
+                    Err(()) => skill_management::MutationOutcome::Unknown,
+                };
+                SkillManagementOutcome::Mutation(outcome)
             }
             skill_management::Command::ClawHubUpdate { slug, all } => {
                 let request = match openclaw::port::SkillUpdateRequest::clawhub(slug, all) {

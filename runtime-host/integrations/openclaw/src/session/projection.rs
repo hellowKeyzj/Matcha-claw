@@ -106,6 +106,7 @@ pub enum CanonicalSessionChange {
     ToolActivity {
         run_id: RunId,
         tool_id: ToolId,
+        tool_name: Option<String>,
         phase: ToolActivityPhase,
         summary: Option<String>,
     },
@@ -137,9 +138,15 @@ impl fmt::Debug for CanonicalSessionChange {
                 .field("lifecycle", lifecycle)
                 .field("has_text", &text.is_some())
                 .finish(),
-            Self::ToolActivity { phase, summary, .. } => formatter
+            Self::ToolActivity {
+                phase,
+                tool_name,
+                summary,
+                ..
+            } => formatter
                 .debug_struct("ToolActivity")
                 .field("phase", phase)
+                .field("has_tool_name", &tool_name.is_some())
                 .field("has_summary", &summary.is_some())
                 .finish(),
             Self::Terminal {
@@ -261,11 +268,13 @@ impl CanonicalSessionDeltaProducer {
                     },
                     SessionActivityKind::Tool {
                         tool_id,
+                        tool_name,
                         phase,
                         summary,
                     } => CanonicalSessionChange::ToolActivity {
                         run_id: activity.run_id.clone(),
                         tool_id: tool_id.clone(),
+                        tool_name: tool_name.clone(),
                         phase: *phase,
                         summary: summary.clone(),
                     },
@@ -941,6 +950,7 @@ mod tests {
                     "runId":"run-1",
                     "phase":"failed",
                     "toolCallId":"tool-1",
+                    "toolName":"read",
                     "summary":"tool summary"
                 }),
             ),
@@ -953,10 +963,12 @@ mod tests {
             [CanonicalSessionChange::ToolActivity {
                 run_id,
                 tool_id,
+                tool_name: Some(tool_name),
                 phase: ToolActivityPhase::Failed,
                 summary: Some(summary)
             }] if run_id.as_str() == "run-1"
                 && tool_id.as_str() == "tool-1"
+                && tool_name == "read"
                 && summary == "tool summary"
         ));
 

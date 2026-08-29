@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 pub struct OwnedTask<T> {
     cancellation: CancellationToken,
     join: JoinHandle<T>,
+    abort_on_drop: bool,
 }
 
 #[derive(Clone)]
@@ -18,6 +19,17 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
+    pub(crate) fn spawn_detached<F, U, T>(future: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> U + Send + 'static,
+        U: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let cancellation = CancellationToken::new();
+        tokio::spawn(future(cancellation.clone()));
+        Self { cancellation }
+    }
+
     pub fn cancel(&self) {
         self.cancellation.cancel();
     }
@@ -48,13 +60,24 @@ impl<T: Send + 'static> OwnedTask<T> {
         let handle = TaskHandle {
             cancellation: cancellation.clone(),
         };
-        (Self { cancellation, join }, handle)
+        (
+            Self {
+                cancellation,
+                join,
+                abort_on_drop: true,
+            },
+            handle,
+        )
     }
 
     pub fn handle(&self) -> TaskHandle {
         TaskHandle {
             cancellation: self.cancellation.clone(),
         }
+    }
+
+    pub fn detach(mut self) {
+        self.abort_on_drop = false;
     }
 
     pub async fn join(&mut self) -> Result<T, JoinError> {
@@ -78,7 +101,9 @@ impl<T: Send + 'static> Future for &mut OwnedTask<T> {
 impl<T> Drop for OwnedTask<T> {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        self.join.abort();
+        if self.abort_on_drop {
+            self.join.abort();
+        }
     }
 }
 

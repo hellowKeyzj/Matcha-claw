@@ -509,6 +509,11 @@ export class QueryEngine {
     }))
 
     const mainLoopModel = modelFromUserInput ?? initialMainLoopModel
+    runTrace?.('query_engine.model.resolved', {
+      configuredModel: userSpecifiedModel ?? null,
+      promptModelOverride: modelFromUserInput ?? null,
+      mainLoopModel,
+    })
 
     // Recreate after processing the prompt to pick up updated messages and
     // model (from slash commands).

@@ -1,5 +1,12 @@
 import { create } from 'zustand';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeEndpoint,
+  summarizeError,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
 import type {
   AgentScope,
 } from '../../electron/desktop-contract/runtime-address';
@@ -227,11 +234,36 @@ async function resolveAgentSkillConfigScope(): Promise<AgentScope> {
   return scope;
 }
 
-function buildAgentSkillConfigTarget(scope: AgentScope, agentId: string): CapabilityTarget {
+function buildAgentSkillConfigTarget(agentId: string): CapabilityTarget {
   return {
     kind: 'subagent',
-    agentId: scope.agentId,
     subagentId: agentId,
+  };
+}
+
+function summarizeSkillConfigPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { contract: 'invalid' };
+  }
+  const record = payload as Record<string, unknown>;
+  const view = record.resultType === 'updated' && record.view && typeof record.view === 'object' && !Array.isArray(record.view)
+    ? record.view as Record<string, unknown>
+    : record.resultType === 'staleRevision' && record.latestView && typeof record.latestView === 'object' && !Array.isArray(record.latestView)
+      ? record.latestView as Record<string, unknown>
+      : record;
+  return {
+    contract: typeof record.resultType === 'string' ? 'mutation' : 'view',
+    resultType: typeof record.resultType === 'string' ? record.resultType : null,
+    supportType: view.support && typeof view.support === 'object' && !Array.isArray(view.support)
+      ? (view.support as Record<string, unknown>).supportType ?? null
+      : null,
+    supportReason: view.support && typeof view.support === 'object' && !Array.isArray(view.support)
+      ? (view.support as Record<string, unknown>).reason ?? null
+      : null,
+    agentId: summarizeIdentifier(typeof view.agentId === 'string' ? view.agentId : null),
+    revision: summarizeIdentifier(typeof view.revision === 'string' ? view.revision : null),
+    optionCount: Array.isArray(view.options) ? view.options.length : null,
+    effectiveSkillCount: Array.isArray(view.effectiveSkillKeys) ? view.effectiveSkillKeys.length : null,
   };
 }
 
@@ -240,17 +272,49 @@ async function agentSkillConfigCapabilityExecute<TResult>(
   input: Record<string, unknown>,
   targetAgentId: string,
 ): Promise<TResult> {
-  const scope = await resolveAgentSkillConfigScope();
-  return await hostApiFetch<TResult>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: SUBAGENT_SKILLS_CAPABILITY_ID,
+  const traceId = createSessionTraceId(`subagent-skills:${operationId}`);
+  let scope: AgentScope;
+  try {
+    scope = await resolveAgentSkillConfigScope();
+  } catch (error) {
+    logSessionTrace('renderer.subagent.skills.scope-error', traceId, {
       operationId,
-      scope,
-      target: buildAgentSkillConfigTarget(scope, targetAgentId),
-      input,
-    }),
+      targetAgentId: summarizeIdentifier(targetAgentId),
+      error: summarizeError(error),
+    });
+    throw error;
+  }
+  const target = buildAgentSkillConfigTarget(targetAgentId);
+  logSessionTrace('renderer.subagent.skills.request', traceId, {
+    operationId,
+    endpoint: summarizeEndpoint(scope.endpoint),
+    scopeAgentId: summarizeIdentifier(scope.agentId),
+    targetAgentId: summarizeIdentifier(targetAgentId),
   });
+  try {
+    const result = await hostApiFetch<TResult>('/api/capabilities/execute', {
+      method: 'POST',
+      traceId,
+      body: JSON.stringify({
+        id: SUBAGENT_SKILLS_CAPABILITY_ID,
+        operationId,
+        scope,
+        target,
+        input,
+      }),
+    });
+    logSessionTrace('renderer.subagent.skills.response', traceId, {
+      operationId,
+      ...summarizeSkillConfigPayload(result),
+    });
+    return result;
+  } catch (error) {
+    logSessionTrace('renderer.subagent.skills.error', traceId, {
+      operationId,
+      error: summarizeError(error),
+    });
+    throw error;
+  }
 }
 
 async function fetchAgentSkillConfigView(agentId: string): Promise<AgentSkillConfigView> {

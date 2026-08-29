@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
 import {
-  createDefaultAppServerServices,
+  createDefaultAppServerServices as createDefaultAppServerServicesBase,
+  type AppServerServices,
   type AppServerSessionHistoryStore,
 } from '../main.js'
 import type { ClientHubSend } from '../transport/clientHub.js'
@@ -41,12 +42,22 @@ type FakeWorkerChild = WorkerChildProcess & {
   killCount: number
   emitFrame(frame: WorkerFrame): void
   emitExit(exitCode: number | null, signal: NodeJS.Signals | null): void
+  hasExited(): boolean
   writtenCommands(): WorkerCommand[]
 }
 
 const tempRoots: string[] = []
+const appServerServices: AppServerServices[] = []
+const fakeWorkerChildren: FakeWorkerChild[] = []
 
 afterEach(async () => {
+  const services = appServerServices.splice(0)
+  await shutdownAppServerServices(services)
+  await shutdownAppServerServices(services)
+  for (const child of fakeWorkerChildren.splice(0)) {
+    child.emitExit(0, null)
+  }
+
   for (const root of tempRoots.splice(0)) {
     await rm(root, { recursive: true, force: true })
   }
@@ -58,11 +69,73 @@ async function createTempRoot(): Promise<string> {
   return root
 }
 
+function createDefaultAppServerServices(
+  options: Parameters<typeof createDefaultAppServerServicesBase>[0],
+): AppServerServices {
+  const services = createDefaultAppServerServicesBase(options)
+  appServerServices.push(services)
+  return services
+}
+
+async function shutdownAppServerServices(
+  services: readonly AppServerServices[],
+): Promise<void> {
+  let complete = false
+  let completionError: unknown
+  const completed = Promise.all(
+    services.map(services => services.shutdown()),
+  ).then(
+    () => {
+      complete = true
+    },
+    error => {
+      complete = true
+      completionError = error
+    },
+  )
+  const answeredShutdownIds = new Set<string>()
+
+  for (let attempt = 0; attempt < 5 && !complete; attempt++) {
+    answerFakeWorkerShutdowns(answeredShutdownIds)
+    await Promise.resolve()
+  }
+  answerFakeWorkerShutdowns(answeredShutdownIds)
+  await completed
+  if (completionError) throw completionError
+}
+
+function answerFakeWorkerShutdowns(answeredShutdownIds: Set<string>): void {
+  for (const child of fakeWorkerChildren) {
+    if (child.hasExited()) continue
+    for (const command of child.writtenCommands()) {
+      if (
+        command.type !== 'worker.shutdown' ||
+        answeredShutdownIds.has(command.id)
+      ) {
+        continue
+      }
+      answeredShutdownIds.add(command.id)
+      child.emitFrame({ id: command.id, ok: true })
+      child.emitExit(0, null)
+    }
+  }
+}
+
 function createFakeWorkerChild(assignedWorkerId: string): FakeWorkerChild {
   const emitter = new EventEmitter()
   const stdout = new PassThrough()
   const stderr = new PassThrough()
   const stdin = new WritableSink()
+
+  let exited = false
+  const emitExit = (
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+  ): void => {
+    if (exited) return
+    exited = true
+    emitter.emit('exit', exitCode, signal)
+  }
 
   const child = Object.assign(emitter, {
     stdout,
@@ -75,9 +148,8 @@ function createFakeWorkerChild(assignedWorkerId: string): FakeWorkerChild {
     emitFrame: (frame: WorkerFrame) => {
       stdout.emit('data', Buffer.from(encodeWorkerFrame(frame), 'utf8'))
     },
-    emitExit: (exitCode: number | null, signal: NodeJS.Signals | null) => {
-      emitter.emit('exit', exitCode, signal)
-    },
+    emitExit,
+    hasExited: () => exited,
     writtenCommands: () =>
       stdin.chunks
         .join('')
@@ -87,8 +159,10 @@ function createFakeWorkerChild(assignedWorkerId: string): FakeWorkerChild {
   })
   child.kill = () => {
     child.killCount += 1
+    child.emitExit(null, 'SIGTERM')
     return true
   }
+  fakeWorkerChildren.push(child)
   return child
 }
 
@@ -617,11 +691,21 @@ describe('createDefaultAppServerServices', () => {
       runId: prompted.runId,
       prompt: 'continue history',
     })
+    worker.emitFrame({ id: promptCommand.id, ok: true })
+    worker.emitFrame({
+      type: 'run.completed',
+      runId: prompted.runId,
+      stopReason: 'end_turn',
+    })
     await waitFor(async () => {
       const snapshot = await services.ports.session.snapshot({
         sessionId: 'history-session-2',
       })
-      return snapshot.version > 0 ? snapshot : undefined
+      return snapshot.runs.some(
+        run => run.runId === prompted.runId && run.status.type === 'completed',
+      )
+        ? snapshot
+        : undefined
     })
   })
 
@@ -1501,15 +1585,34 @@ describe('createDefaultAppServerServices', () => {
       workerId: secondWorker.assignedWorkerId,
       pid: 12345,
     })
-    expect(
-      await waitForWorkerCommand(secondWorker, 'session.prompt'),
-    ).toMatchObject({
+    const secondPrompt = (await waitForWorkerCommand(
+      secondWorker,
+      'session.prompt',
+    )) as Extract<WorkerCommand, { type: 'session.prompt' }>
+    expect(secondPrompt).toMatchObject({
       type: 'session.prompt',
       prompt: 'after timeout',
     })
+    secondWorker.emitFrame({ id: secondPrompt.id, ok: true })
+    secondWorker.emitFrame({
+      type: 'run.completed',
+      runId: secondPrompt.runId,
+      stopReason: 'end_turn',
+    })
+    await waitFor(async () => {
+      const snapshot = await services.ports.session.snapshot({
+        sessionId: 'session-1',
+      })
+      return snapshot.runs.some(
+        run =>
+          run.runId === secondPrompt.runId && run.status.type === 'completed',
+      )
+        ? snapshot
+        : undefined
+    })
   })
 
-  test('cancels a worker-owned run when the cancel command times out', async () => {
+  test('cancels a worker-owned run when the cancel command fails', async () => {
     const storageRoot = await createTempRoot()
     const workerChildren: FakeWorkerChild[] = []
     const services = createDefaultAppServerServices({
@@ -1557,7 +1660,19 @@ describe('createDefaultAppServerServices', () => {
       runId: prompted.runId,
       reason: 'user stopped',
     })
-    await waitForWorkerCommand(firstWorker, 'session.cancel')
+    const cancelCommand = await waitForWorkerCommand(
+      firstWorker,
+      'session.cancel',
+    )
+    firstWorker.emitFrame({
+      id: cancelCommand.id,
+      ok: false,
+      error: {
+        type: 'worker',
+        message: 'worker cancel request failed',
+        retryable: true,
+      },
+    })
     await expect(cancelPromise).resolves.toMatchObject({
       cancelledRunIds: [prompted.runId],
       workerResponse: { ok: false },
@@ -1597,11 +1712,30 @@ describe('createDefaultAppServerServices', () => {
       workerId: secondWorker.assignedWorkerId,
       pid: 12345,
     })
-    expect(
-      await waitForWorkerCommand(secondWorker, 'session.prompt'),
-    ).toMatchObject({
+    const secondPrompt = (await waitForWorkerCommand(
+      secondWorker,
+      'session.prompt',
+    )) as Extract<WorkerCommand, { type: 'session.prompt' }>
+    expect(secondPrompt).toMatchObject({
       type: 'session.prompt',
       prompt: 'after cancel timeout',
+    })
+    secondWorker.emitFrame({ id: secondPrompt.id, ok: true })
+    secondWorker.emitFrame({
+      type: 'run.completed',
+      runId: secondPrompt.runId,
+      stopReason: 'end_turn',
+    })
+    await waitFor(async () => {
+      const snapshot = await services.ports.session.snapshot({
+        sessionId: 'session-1',
+      })
+      return snapshot.runs.some(
+        run =>
+          run.runId === secondPrompt.runId && run.status.type === 'completed',
+      )
+        ? snapshot
+        : undefined
     })
   })
 

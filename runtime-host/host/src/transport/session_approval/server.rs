@@ -22,26 +22,26 @@ use super::{
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        session: crate::sessions::SessionHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            session,
         })
     }
 
@@ -49,9 +49,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, session).await;
             });
         }
     }
@@ -60,12 +60,16 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> io::Result<()> {
+    let mut request_path = None;
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => {
+                request_path = Some(request.path.clone());
+                handle(request, verifier, session).await
+            }
             Err(response) => response,
         })
     })
@@ -73,7 +77,7 @@ async fn serve(
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+        Err(_) => Response::deadline(request_path.as_deref()),
     };
     write_response(&mut stream, response).await
 }
@@ -81,7 +85,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let Some(authorization) = request
         .headers
@@ -114,12 +118,12 @@ async fn handle(
             };
             if matches!(
                 command.endpoint,
-                crate::session_approval::NativeEndpoint::Unsupported
+                crate::sessions::approval::NativeEndpoint::Unsupported
             ) {
                 return Response::from_pending(PendingApprovalsDelivery::Unsupported);
             }
             drop(verifier);
-            let outcome = match owner.pending_session_approvals(command).await {
+            let outcome = match session.pending_approvals(command).await {
                 Ok(outcome) => outcome,
                 Err(_) => return Response::unavailable(),
             };
@@ -142,12 +146,12 @@ async fn handle(
             };
             if matches!(
                 command.endpoint,
-                crate::session_approval::NativeEndpoint::Unsupported
+                crate::sessions::approval::NativeEndpoint::Unsupported
             ) {
                 return Response::from_response(SessionApprovalDelivery::Unsupported);
             }
             drop(verifier);
-            let outcome = match owner.respond_to_session_approval(command).await {
+            let outcome = match session.respond_to_approval(command).await {
                 Ok(outcome) => outcome,
                 Err(_) => return Response::unavailable(),
             };
@@ -184,6 +188,18 @@ impl Response {
 
     fn unavailable() -> Self {
         Self::from_response(SessionApprovalDelivery::Unavailable)
+    }
+
+    fn deadline(path: Option<&str>) -> Self {
+        match path {
+            Some("/api/sessions/approvals/list") => {
+                Self::from_pending(PendingApprovalsDelivery::Unavailable)
+            }
+            Some("/api/sessions/approvals/respond") => {
+                Self::from_response(SessionApprovalDelivery::Unavailable)
+            }
+            _ => Self::bad_request(),
+        }
     }
 
     fn fixed(status: u16, error: &'static str) -> Self {

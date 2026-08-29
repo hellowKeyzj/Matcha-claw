@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { isGatewayPreparing } from '@/lib/gateway-status';
 import type { GatewayStatus } from '@/types/gateway';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
@@ -57,6 +58,40 @@ describe('gateway store host event wiring', () => {
       'session.delta',
       'task:snapshot',
     ]);
+  });
+
+  it('keeps initialization preparing when the first gateway status snapshot fails', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/gateway/status') {
+        return Promise.reject(new Error('gateway observation unavailable'));
+      }
+      return Promise.resolve({
+        status: 'running',
+        hostLifecycle: 'ready',
+        runtimeLifecycle: 'ready',
+        updatedAt: 4,
+      });
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    const state = useGatewayStore.getState();
+    expect(state.isInitialized).toBe(true);
+    expect(state.status).toMatchObject({
+      processState: 'control_connecting',
+      gatewayReady: false,
+      healthSummary: 'unresponsive',
+      transportState: 'disconnected',
+      updatedAt: 0,
+    });
+    expect(isGatewayPreparing(state.status, state.isInitialized)).toBe(true);
+    expect(state.status.processState).not.toBe('stopped');
   });
 
   it('projects gateway:status events as the complete gateway snapshot', async () => {
@@ -122,6 +157,41 @@ describe('gateway store host event wiring', () => {
     expect(useGatewayStore.getState().status).toMatchObject({
       processState: 'running',
       gatewayReady: true,
+      updatedAt: 3,
+    });
+  });
+
+  it('keeps the newer runtime-host event when the initial runtime snapshot resolves late', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    let resolveRuntimeHost: ((value: unknown) => void) | null = null;
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/gateway/status') {
+        return Promise.resolve(createGatewayStatus({ processState: 'running', updatedAt: 2 }));
+      }
+      return new Promise((resolve) => {
+        resolveRuntimeHost = resolve;
+      });
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    const init = useGatewayStore.getState().init();
+    handlers.get('runtime-host:status')!({
+      status: 'running',
+      hostLifecycle: 'ready',
+      runtimeLifecycle: 'ready',
+      updatedAt: 3,
+    });
+    resolveRuntimeHost?.({ status: 'starting', updatedAt: 2 });
+    await init;
+
+    expect(useGatewayStore.getState().runtimeHost).toMatchObject({
+      lifecycle: 'running',
+      hostLifecycle: 'ready',
+      runtimeLifecycle: 'ready',
       updatedAt: 3,
     });
   });

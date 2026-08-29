@@ -49,7 +49,9 @@ fn now_millis() -> u64 {
 
 pub(crate) mod server {
     use super::{AUTHORIZATION_HEADER, BEARER_PREFIX, Delivery};
-    use crate::transport::authorization::CapabilityDecisionVerifier;
+    use crate::{
+        facade::PlatformToolsHandle, transport::authorization::CapabilityDecisionVerifier,
+    };
     use serde_json::Value;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -62,7 +64,7 @@ pub(crate) mod server {
     pub(crate) async fn handle(
         headers: &[(String, String)],
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-        owner: crate::owner::Handle,
+        handle: PlatformToolsHandle,
     ) -> Response {
         let authorization_present = headers
             .iter()
@@ -77,7 +79,7 @@ pub(crate) mod server {
         }
         drop(verifier);
 
-        let outcome = match owner.platform_tools().await {
+        let outcome = match handle.platform_tools().await {
             Ok(outcome) => outcome,
             Err(_) => return Response::unavailable(),
         };

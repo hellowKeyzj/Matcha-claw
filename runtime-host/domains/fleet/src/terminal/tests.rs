@@ -153,6 +153,36 @@ fn expiry_and_close_are_idempotent() {
 }
 
 #[test]
+fn provider_failure_marks_connected_failed() {
+    let (id, target, provider) = ids();
+    let mut owner = TerminalSessionOwner::default();
+    let opened = owner
+        .open(
+            id.clone(),
+            target,
+            provider,
+            Dimensions::try_new(24, 80).unwrap(),
+            at(10),
+        )
+        .unwrap();
+    owner
+        .consume_ticket(
+            id.clone(),
+            opened.session.generation(),
+            opened.ticket.as_bytes(),
+            at(11),
+        )
+        .unwrap();
+
+    let failed = owner
+        .fail(&id, opened.session.generation(), at(12))
+        .unwrap();
+
+    assert_eq!(failed.status(), SessionStatus::Failed);
+    assert_eq!(owner.list()[0].status(), SessionStatus::Failed);
+}
+
+#[test]
 fn stale_generation_cannot_close_reconnected_session() {
     let (id, target, provider) = ids();
     let mut owner = TerminalSessionOwner::default();
@@ -177,6 +207,39 @@ fn stale_generation_cannot_close_reconnected_session() {
         reconnected.session.generation()
     );
     assert_eq!(owner.list()[0].status(), SessionStatus::Opening);
+}
+
+#[test]
+fn stale_generation_cannot_fail_reconnected_session() {
+    let (id, target, provider) = ids();
+    let mut owner = TerminalSessionOwner::default();
+    let opened = owner
+        .open(
+            id.clone(),
+            target,
+            provider,
+            Dimensions::try_new(24, 80).unwrap(),
+            at(10),
+        )
+        .unwrap();
+    let reconnected = owner.reconnect(id.clone(), at(11)).unwrap();
+
+    assert!(
+        owner
+            .fail(&id, opened.session.generation(), at(12))
+            .is_err()
+    );
+    let consumed = owner
+        .consume_ticket(
+            id.clone(),
+            reconnected.session.generation(),
+            reconnected.ticket.as_bytes(),
+            at(13),
+        )
+        .unwrap();
+
+    assert_eq!(consumed.generation(), reconnected.session.generation());
+    assert_eq!(consumed.status(), SessionStatus::Connected);
 }
 
 #[test]

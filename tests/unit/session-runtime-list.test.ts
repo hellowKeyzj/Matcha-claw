@@ -17,7 +17,8 @@ vi.mock('@/lib/host-api', () => ({
       key: 'agent:alpha:direct-session',
       agentId: 'alpha',
       sessionIdentity,
-      kind: 'direct',
+      kind: 'session',
+      endpointSessionId: 'direct-session',
       updatedAt: 42,
       model: 'provider/private-default-model',
     }],
@@ -30,10 +31,10 @@ describe('runtime session list', () => {
 
     await expect(listSessions({ endpoint: sessionIdentity.endpoint })).resolves.toEqual([{
       key: buildSessionIdentityKey(sessionIdentity),
-      backendSessionKey: 'agent:alpha:direct-session',
       agentId: 'alpha',
       sessionIdentity,
-      kind: 'named',
+      kind: 'session',
+      endpointSessionId: 'direct-session',
       preferred: false,
       updatedAt: 42,
     }]);

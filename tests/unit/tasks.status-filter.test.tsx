@@ -79,7 +79,6 @@ function setupStores() {
         ...mainSession,
         meta: {
           ...mainSession.meta,
-          backendSessionKey: 'agent:main:main',
           runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
           agentId: 'main',
           sessionIdentity,

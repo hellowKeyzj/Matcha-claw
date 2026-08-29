@@ -4,6 +4,35 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      (() => {
+        const lightSurface = '#ffffff';
+        const darkSurface = '#1e1e20';
+        const resolveTheme = () => {
+          try {
+            const stored = JSON.parse(window.localStorage.getItem('matchaclaw-settings') || '{}');
+            const theme = stored?.state?.theme;
+            if (theme === 'light' || theme === 'dark') return theme;
+          } catch {}
+          return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        };
+        const theme = resolveTheme();
+        const surface = theme === 'dark' ? darkSurface : lightSurface;
+        const root = document.documentElement;
+        root.classList.add(theme);
+        root.dataset.themeSurface = theme;
+        root.style.backgroundColor = surface;
+        root.style.setProperty('--matchaclaw-initial-surface', surface);
+      })();
+    </script>
+    <style>
+      html,
+      body,
+      #root {
+        background-color: var(--matchaclaw-initial-surface, #ffffff);
+      }
+    </style>
     <title>MatchaClaw</title>
   </head>
   <body>

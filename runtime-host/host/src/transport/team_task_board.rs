@@ -1,6 +1,8 @@
 pub(crate) mod server;
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "/api/team/task-board";
@@ -492,7 +494,7 @@ fn mutation_body(result: &MutationResult) -> Value {
     Value::Object(body)
 }
 
-pub(crate) async fn handle(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Delivery {
     match request {
         Request::Read { team_id, run_id } => owner
             .task_board_read(team_id.clone(), run_id.clone())

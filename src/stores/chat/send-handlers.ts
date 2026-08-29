@@ -34,6 +34,7 @@ import {
 import type { ChatSendAttachment, ChatSendResult, ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
 import type {
+  SessionAssistantTurnItem,
   SessionRenderUserMessageItem,
 } from '../../types/session/render-item';
 
@@ -48,9 +49,7 @@ export const NO_RESPONSE_RECEIVED_ERROR = 'No response received from the model. 
 
 function hasAssistantProgress(items: ReturnType<typeof getSessionItems>): boolean {
   return items.some((item) => item.kind === 'assistant-turn' && (
-    item.status === 'streaming'
-    || item.status === 'waiting_tool'
-    || item.segments.length > 0
+    item.segments.length > 0
     || item.tools.length > 0
     || item.thinking != null
     || item.text.trim().length > 0
@@ -248,9 +247,28 @@ function appendOptimisticSendItems(params: {
       images: cachedAttachmentReceiptImages(attachments ?? []),
       attachedFiles: cachedAttachmentReceiptFiles(attachments ?? []),
     };
+    const assistantItem: SessionAssistantTurnItem = {
+      key: `renderer-assistant:${clientId}`,
+      kind: 'assistant-turn',
+      role: 'assistant',
+      sessionKey,
+      identitySource: 'client',
+      identityMode: 'client',
+      identityConfidence: 'strong',
+      status: 'streaming',
+      segments: [],
+      thinking: null,
+      tools: [],
+      text: '',
+      images: [],
+      attachedFiles: [],
+      pendingState: 'typing',
+      createdAt,
+      updatedAt: createdAt,
+    };
     return {
       loadedSessions: patchSessionRecord(state, sessionKey, {
-        items: [...current.items, userItem],
+        items: [...current.items, userItem, assistantItem],
       }),
     };
   });
@@ -264,13 +282,28 @@ function confirmOptimisticSendItems(params: {
   retainReceipt: boolean;
 }): void {
   const { set, sessionKey, clientId, runId, retainReceipt } = params;
+  const clientAssistantKey = `renderer-assistant:${clientId}`;
+  const runAssistantKey = `renderer-assistant:${runId}`;
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
     let changed = false;
-    const items = current.items.map((item) => {
+    let lastUserMessageAt = current.runtime.lastUserMessageAt;
+    const hasRunAssistant = current.items.some((item) => (
+      item.kind === 'assistant-turn'
+      && item.runId === runId
+      && item.key !== clientAssistantKey
+    ));
+    const items = current.items.filter((item) => {
+      if (hasRunAssistant && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
+        changed = true;
+        return false;
+      }
+      return true;
+    }).map((item) => {
       if (item.kind === 'user-message' && item.clientId === clientId) {
         changed = true;
+        lastUserMessageAt = item.createdAt ?? lastUserMessageAt;
         return {
           ...item,
           key: retainReceipt ? `renderer-receipt:${runId}` : item.key,
@@ -278,11 +311,52 @@ function confirmOptimisticSendItems(params: {
           ...(retainReceipt ? { rendererReceiptRunId: runId } : {}),
         };
       }
+      if (item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
+        changed = true;
+        return {
+          ...item,
+          key: runAssistantKey,
+          runId,
+          identitySource: 'run' as const,
+          identityMode: 'run' as const,
+        };
+      }
       return item;
     });
     return changed ? {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+      loadedSessions: patchSessionRecord(state, sessionKey, {
+        items,
+        runtime: {
+          ...current.runtime,
+          activeRunId: runId,
+          runPhase: 'submitted',
+          activeTurnItemKey: null,
+          pendingTurnKey: runAssistantKey,
+          pendingTurnLaneKey: 'main',
+          lastUserMessageAt,
+          lastError: null,
+          lastIssue: null,
+          updatedAt: Date.now(),
+        },
+      }),
     } : state;
+  });
+}
+
+function removeOptimisticAssistantPlaceholder(params: {
+  set: ChatStoreSetFn;
+  sessionKey: string;
+  clientId: string;
+}): void {
+  const { set, sessionKey, clientId } = params;
+  set((state) => {
+    const current = state.loadedSessions[sessionKey];
+    if (!current) return state;
+    const key = `renderer-assistant:${clientId}`;
+    const items = current.items.filter((item) => !(item.kind === 'assistant-turn' && item.key === key));
+    return items.length === current.items.length ? state : {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+    };
   });
 }
 
@@ -297,7 +371,7 @@ function removeOptimisticSendItems(params: {
     if (!current) return state;
     const items = current.items.filter((item) => !(
       (item.kind === 'user-message' && item.clientId === clientId)
-      || (item.kind === 'assistant-turn' && item.runId === clientId)
+      || (item.kind === 'assistant-turn' && item.key === `renderer-assistant:${clientId}`)
     ));
     return items.length === current.items.length ? state : {
       loadedSessions: patchSessionRecord(state, sessionKey, { items }),
@@ -356,17 +430,15 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     target = resolveSessionOperationTarget(stateBeforeSend, currentSessionKey);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const targetErrorReason = errorMessage.startsWith('Backend session key is required:')
-      ? 'missing-backend-session-key'
-      : errorMessage.startsWith('SessionIdentity is required:')
-        ? 'missing-session-identity'
-        : 'unexpected';
+    const targetErrorReason = errorMessage.startsWith('SessionIdentity is required:')
+      ? 'missing-session-identity'
+      : 'unexpected';
     logSessionTrace('send.target.error', traceId, { reason: targetErrorReason });
     set({ error: errorMessage });
     return { accepted: false, reason: 'missing-session', error: errorMessage };
   }
   logSessionTrace('send.target.resolved', traceId, {
-    backendSessionKey: summarizeIdentifier(target.sessionKey),
+    sessionKey: summarizeIdentifier(target.sessionKey),
     endpointSessionId: summarizeIdentifier(target.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
     runPhase: runtimeBeforeSend.runPhase,
@@ -409,7 +481,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
 
     const sendResult = await sendChatTransport({
-      sessionKey: target.sessionKey,
       endpointSessionId: target.endpointSessionId,
       sessionIdentity: target.sessionIdentity,
       message: trimmed,
@@ -452,6 +523,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
             attachmentReselectionRequired: true,
           };
         }
+        removeOptimisticAssistantPlaceholder({
+          set,
+          sessionKey: currentSessionKey,
+          clientId: clientMessageId,
+        });
         if (await maybeEnterStoreWaitingApproval({
           get,
           sessionKey: currentSessionKey,
@@ -464,6 +540,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         get,
         sessionKey: currentSessionKey,
       })) {
+        removeOptimisticAssistantPlaceholder({
+          set,
+          sessionKey: currentSessionKey,
+          clientId: clientMessageId,
+        });
         return { accepted: true };
       }
       removeOptimisticSendItems({
@@ -484,14 +565,14 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
 
     logSessionTrace('send.result.accepted', traceId, {
-      runId: summarizeIdentifier(sendResult.runId ?? clientMessageId),
+      runId: summarizeIdentifier(sendResult.runId),
       hasProjection: Boolean(sendResult.projection),
     });
     confirmOptimisticSendItems({
       set,
       sessionKey: currentSessionKey,
       clientId: clientMessageId,
-      runId: sendResult.runId ?? clientMessageId,
+      runId: sendResult.runId,
       retainReceipt: (attachments?.length ?? 0) > 0,
     });
     if (sendResult.projection) {
@@ -534,6 +615,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
           attachmentReselectionRequired: true,
         };
       }
+      removeOptimisticAssistantPlaceholder({
+        set,
+        sessionKey: currentSessionKey,
+        clientId: clientMessageId,
+      });
       if (await maybeEnterStoreWaitingApproval({
         get,
         sessionKey: currentSessionKey,
@@ -548,6 +634,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
     const state = get();
     if (timeoutSignal && hasStoreApprovalEvidence(state, currentSessionKey)) {
+      removeOptimisticAssistantPlaceholder({
+        set,
+        sessionKey: currentSessionKey,
+        clientId: clientMessageId,
+      });
       return { accepted: true };
     }
     removeOptimisticSendItems({

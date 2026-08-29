@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    channel_config_read::{Outcome, valid_identity},
+    channel::config_read::{Outcome, valid_identity},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -103,7 +103,7 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use serde_json::json;
 
-    use crate::channel_config_read::Projection;
+    use crate::channel::config_read::Projection;
 
     use super::*;
 

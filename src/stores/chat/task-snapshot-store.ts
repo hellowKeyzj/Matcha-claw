@@ -144,18 +144,18 @@ function taskScopeKeyForSession(sessionKey: string): string {
   return normalizeString(sessionKey);
 }
 
-function fallbackTaskScopeForSession(recordKey: string, backendSessionKey = recordKey): TaskScopeSnapshot | undefined {
+function fallbackTaskScopeForSession(recordKey: string, sourceSessionKey = recordKey): TaskScopeSnapshot | undefined {
   const normalizedRecordKey = normalizeString(recordKey);
   if (!normalizedRecordKey) {
     return undefined;
   }
-  const normalizedBackendSessionKey = normalizeString(backendSessionKey) || normalizedRecordKey;
-  const agentId = /^agent:([^:]+):/.exec(normalizedBackendSessionKey)?.[1];
+  const normalizedSourceSessionKey = normalizeString(sourceSessionKey) || normalizedRecordKey;
+  const agentId = /^agent:([^:]+):/.exec(normalizedSourceSessionKey)?.[1];
   return {
     type: 'session',
     key: normalizedRecordKey,
-    label: agentId ? `${agentId} · ${normalizedBackendSessionKey.split(':').slice(2).join(':') || 'main'}` : normalizedBackendSessionKey,
-    sessionKey: normalizedBackendSessionKey,
+    label: agentId ? `${agentId} · ${normalizedSourceSessionKey.split(':').slice(2).join(':') || 'main'}` : normalizedSourceSessionKey,
+    sessionKey: normalizedSourceSessionKey,
     ...(agentId ? { agentId } : {}),
   };
 }
@@ -480,17 +480,17 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   },
 
   reportTaskCenterData: (sessionKey, tasks, options) => {
-    const backendSessionKey = normalizeString(sessionKey);
-    if (!backendSessionKey) return;
-    const recordKey = normalizeString(options?.recordKey) || backendSessionKey;
+    const sourceSessionKey = normalizeString(sessionKey);
+    if (!sourceSessionKey) return;
+    const recordKey = normalizeString(options?.recordKey) || sourceSessionKey;
     const rawScope = normalizeScope(options?.scope);
     const normalizedScope = rawScope
       ? {
           ...rawScope,
           key: rawScope.type === 'session' ? recordKey : rawScope.key,
-          ...(rawScope.type === 'session' ? { sessionKey: rawScope.sessionKey ?? backendSessionKey } : {}),
+          ...(rawScope.type === 'session' ? { sessionKey: rawScope.sessionKey ?? sourceSessionKey } : {}),
         }
-      : fallbackTaskScopeForSession(recordKey, backendSessionKey);
+      : fallbackTaskScopeForSession(recordKey, sourceSessionKey);
     const snapshotKey = normalizedScope?.key || taskScopeKeyForSession(recordKey);
     if (!snapshotKey) return;
     const normalizedTasks = sortTasks(
@@ -530,14 +530,14 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   },
 
   reportTaskCenterSnapshot: (event) => {
-    const backendSessionKey = normalizeString(event.sessionKey);
-    if (!backendSessionKey) return;
-    const recordKey = normalizeString(event.recordKey) || backendSessionKey;
+    const sourceSessionKey = normalizeString(event.sessionKey);
+    if (!sourceSessionKey) return;
+    const recordKey = normalizeString(event.recordKey) || sourceSessionKey;
     if (event.source === 'todo') {
       get().reportTodos(recordKey, event.todos ?? []);
       return;
     }
-    get().reportTaskCenterData(backendSessionKey, event.tasks, {
+    get().reportTaskCenterData(sourceSessionKey, event.tasks, {
       scope: event.scope,
       source: event.source,
       enableEdit: event.enableEdit,
@@ -550,11 +550,11 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   },
 
   reportSessionUpdate: (event) => {
-    const backendSessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
-    if (!backendSessionKey) return;
+    const sourceSessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
+    if (!sourceSessionKey) return;
     const recordKey = buildSessionRecordKey({
       ...event.snapshot.catalog.sessionIdentity,
-      sessionKey: event.snapshot.catalog.sessionIdentity.sessionKey || backendSessionKey,
+      sessionKey: event.snapshot.catalog.sessionIdentity.sessionKey || sourceSessionKey,
     });
     if (event.sessionUpdate === 'session_info_update') {
       if (event.phase === 'started') {

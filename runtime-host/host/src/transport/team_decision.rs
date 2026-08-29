@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/decision";
 const AUTHORIZATION_SCOPE: &str = "team:write";
@@ -95,7 +97,11 @@ pub(crate) fn decode(
     })
 }
 
-pub(crate) async fn handle(owner: &owner::Handle, request: Request, resolved_at: u64) -> Delivery {
+pub(crate) async fn handle(
+    owner: &OrganizationHandle,
+    request: Request,
+    resolved_at: u64,
+) -> Delivery {
     let approval_id = match organization::run::event::OpaqueId::try_new(request.approval_id) {
         Ok(approval_id) => approval_id,
         Err(_) => return Delivery::Rejected,
@@ -116,7 +122,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, resolved_at:
         Ok(command) => command,
         Err(_) => return Delivery::Rejected,
     };
-    match owner.resolve_team_human_decision(command).await {
+    match owner.approval_resolve(command).await {
         Ok(Ok(organization::run::approval::HumanDecisionOutcome::Recorded)) => Delivery::Recorded,
         Ok(Ok(organization::run::approval::HumanDecisionOutcome::Replayed)) => Delivery::Replayed,
         Ok(Err(_)) => Delivery::OutcomeUnknown,

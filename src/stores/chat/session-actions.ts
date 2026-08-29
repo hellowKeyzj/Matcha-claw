@@ -57,6 +57,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
+import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import type { StoreHistoryCache } from './history-cache';
 import type {
   AgentScope,
@@ -117,7 +118,7 @@ interface CreateStoreSessionActionsInput {
 }
 
 interface RenameStoreSessionInput extends CreateStoreSessionActionsInput {
-  renameSession: (payload: { sessionKey: string; sessionIdentity: SessionIdentity; label: string }) => Promise<{ success: boolean; error?: string }>;
+  renameSession: (payload: { sessionIdentity: SessionIdentity; label: string }) => Promise<{ success: boolean; error?: string }>;
 }
 
 function clearSessionHistoryFingerprints(
@@ -168,6 +169,17 @@ function readSessionRuntimeTargets(state: ChatStoreState): ChatSessionRuntimeEnd
     : [];
 }
 
+function isSessionEndpointStarting(state: ChatStoreState, recordKey: string): boolean {
+  const identity = state.loadedSessions[recordKey]?.meta.sessionIdentity;
+  if (!identity) {
+    return false;
+  }
+  return useRuntimeEndpointsStore.getState().endpoints.some((endpoint) => (
+    sameRuntimeEndpointScope(endpoint.endpointRef, identity.endpoint)
+    && isSessionRuntimeEndpointStarting(endpoint)
+  ));
+}
+
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
   concurrency: number,
@@ -194,7 +206,6 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
   return {
     ...session,
     key: recordKey,
-    backendSessionKey: session.key,
     endpointSessionId: normalizeCatalogString(session.endpointSessionId) ?? undefined,
   };
 }
@@ -217,7 +228,6 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
       target,
       sessions: rawSessions.map((session) => normalizeCatalogSession({
         key: session.key || '',
-        backendSessionKey: session.key || '',
         agentId: typeof session.agentId === 'string' ? session.agentId : '',
         protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
         runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
@@ -300,13 +310,12 @@ async function requestSessionLifecycleView(
   traceId?: string | null,
 ) {
   logSessionTrace('session.lifecycle.request', traceId, {
-    backendSessionKey: summarizeIdentifier(target.sessionKey),
+    sessionKey: summarizeIdentifier(target.sessionKey),
     endpointSessionId: summarizeIdentifier(target.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
   });
   try {
     const view = decodeHistorySessionView(await hostSessionLoad({
-      sessionKey: target.sessionKey,
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       limit: 200,
@@ -353,6 +362,16 @@ function shouldMarkSessionLoadingOnSwitch(
     return false;
   }
   return sessionRecord.meta.historyStatus !== 'ready' && getSessionItemCount(sessionRecord) === 0;
+}
+
+function summarizeSwitchSessionRecord(record: ReturnType<typeof resolveSessionRecord>) {
+  return {
+    historyStatus: record.meta.historyStatus,
+    itemCount: getSessionItemCount(record),
+    activeRun: isRunActive(record.runtime),
+    endpointSessionId: summarizeIdentifier(record.meta.endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(record.meta.sessionIdentity),
+  };
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
@@ -466,11 +485,11 @@ async function executeLoadSessionsNow(
     }
     const ownsCurrentSessionSelection = state.currentSessionKey === currentSessionKeyBeforeLoad;
     const ownedNextSessionKey = ownsCurrentSessionSelection ? nextSessionKey : state.currentSessionKey;
-    const backendSessionKeys = new Set(sessions.map((session) => session.key));
+    const sessionRecordKeys = new Set(sessions.map((session) => session.key));
     let loadedSessions = Object.fromEntries(
       Object.entries(state.loadedSessions).filter(([sessionKey, record]) => {
         const runtimeScope = record.meta.runtimeScopeKey;
-        if (backendSessionKeys.has(sessionKey)) {
+        if (sessionRecordKeys.has(sessionKey)) {
           return true;
         }
         if (runtimeScope && !successfulRuntimeScopes.has(runtimeScope)) {
@@ -489,7 +508,6 @@ async function executeLoadSessionsNow(
       const currentMeta = getSessionMeta({ loadedSessions }, session.key);
       const explicitLabel = normalizeCatalogString(session.label);
       loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
-        backendSessionKey: session.backendSessionKey,
         endpointSessionId: session.endpointSessionId ?? currentMeta.endpointSessionId,
         runtimeScopeKey: buildRuntimeScopeKey(session.sessionIdentity.endpoint),
         agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
@@ -498,7 +516,7 @@ async function executeLoadSessionsNow(
         sessionIdentity: session.sessionIdentity,
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
-        label: explicitLabel && explicitLabel !== session.backendSessionKey ? explicitLabel : currentMeta.label,
+        label: explicitLabel && explicitLabel !== session.key && explicitLabel !== session.sessionIdentity.sessionKey ? explicitLabel : currentMeta.label,
         titleSource: session.titleSource ?? currentMeta.titleSource,
         displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
         thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
@@ -577,7 +595,6 @@ export function executeOpenSessionIdentity(
     const loadedSessions = patchSessionMeta({
       loadedSessions: ensureSessionRecordMap(state.loadedSessions, recordKey),
     }, recordKey, {
-      backendSessionKey: identity.sessionKey,
       endpointSessionId: endpointSessionId ?? currentMeta.endpointSessionId,
       runtimeScopeKey: buildRuntimeScopeKey(identity.endpoint),
       agentId: identity.agentId,
@@ -610,15 +627,28 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const { set, get, historyRuntime } = input;
   const traceId = inheritedTraceId ?? createSessionTraceId('switch-session');
   const currentState = get();
+  const requestedRecord = currentState.loadedSessions[key];
   logSessionTrace('switch-session.request', traceId, {
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(currentState.currentSessionKey),
+    targetRecord: requestedRecord ? summarizeSwitchSessionRecord(resolveSessionRecord(requestedRecord)) : null,
   });
   if (key === currentState.currentSessionKey) {
+    logSessionTrace('switch-session.branch', traceId, { branch: 'same-current' });
     void (async () => {
       try {
-        const result = await requestSessionLifecycleView(resolveOperationTarget(get(), key), traceId);
+        const target = resolveOperationTarget(get(), key);
+        logSessionTrace('switch-session.lifecycle-target', traceId, {
+          sessionKey: summarizeIdentifier(target.sessionKey),
+          endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+          sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+        });
+        const result = await requestSessionLifecycleView(target, traceId);
         if (get().currentSessionKey !== key) {
+          logSessionTrace('switch-session.lifecycle-stale', traceId, {
+            requestedSessionKey: summarizeIdentifier(key),
+            currentSessionKey: summarizeIdentifier(get().currentSessionKey),
+          });
           return;
         }
         applyBackendSessionView({
@@ -627,10 +657,20 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           sessionKey: key,
           view: result,
         });
+        logSessionTrace('switch-session.lifecycle-applied', traceId, {
+          requestedSessionKey: summarizeIdentifier(key),
+          targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
+        });
       } catch (error) {
+        const starting = isSessionEndpointStarting(get(), key);
+        logSessionTrace('switch-session.lifecycle-error', traceId, {
+          requestedSessionKey: summarizeIdentifier(key),
+          starting,
+          ...summarizeError(error),
+        });
         set((state) => ({
-          error: resolveSessionViewError(error).message,
-          loadedSessions: patchSessionMeta(state, key, { historyStatus: 'ready' }),
+          error: starting ? null : resolveSessionViewError(error).message,
+          loadedSessions: patchSessionMeta(state, key, { historyStatus: starting ? 'loading' : 'ready' }),
         }));
       }
     })();
@@ -655,6 +695,12 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     targetRecord = resolveSessionRecord(nextloadedSessions[key]);
   }
   const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionItemCount(targetRecord) > 0;
+  logSessionTrace('switch-session.branch', traceId, {
+    branch: 'different-current',
+    leavingEmpty,
+    targetSessionReady,
+    targetRecord: summarizeSwitchSessionRecord(targetRecord),
+  });
 
   set((stateValue) => ({
     sessionCatalogStatus: stateValue.sessionCatalogStatus,
@@ -668,13 +714,28 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
       ),
     } : {}),
   }));
+  logSessionTrace('switch-session.state-applied', traceId, {
+    requestedSessionKey: summarizeIdentifier(key),
+    currentSessionKey: summarizeIdentifier(get().currentSessionKey),
+    targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
+  });
 
   resumeActiveStoreSend({ set, get, sessionKey: key });
 
   void (async () => {
     try {
-      const result = await requestSessionLifecycleView(resolveOperationTarget(get(), key));
+      const target = resolveOperationTarget(get(), key);
+      logSessionTrace('switch-session.lifecycle-target', traceId, {
+        sessionKey: summarizeIdentifier(target.sessionKey),
+        endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+        sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+      });
+      const result = await requestSessionLifecycleView(target, traceId);
       if (get().currentSessionKey !== key) {
+        logSessionTrace('switch-session.lifecycle-stale', traceId, {
+          requestedSessionKey: summarizeIdentifier(key),
+          currentSessionKey: summarizeIdentifier(get().currentSessionKey),
+        });
         return;
       }
       applyBackendSessionView({
@@ -683,14 +744,30 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         sessionKey: key,
         view: result,
       });
+      logSessionTrace('switch-session.lifecycle-applied', traceId, {
+        requestedSessionKey: summarizeIdentifier(key),
+        targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
+      });
     } catch (error) {
       if (get().currentSessionKey !== key) {
+        logSessionTrace('switch-session.lifecycle-error-stale', traceId, {
+          requestedSessionKey: summarizeIdentifier(key),
+          currentSessionKey: summarizeIdentifier(get().currentSessionKey),
+          ...summarizeError(error),
+        });
         return;
       }
+      const starting = isSessionEndpointStarting(get(), key);
+      logSessionTrace('switch-session.lifecycle-error', traceId, {
+        requestedSessionKey: summarizeIdentifier(key),
+        starting,
+        targetSessionReady,
+        ...summarizeError(error),
+      });
       set((state) => ({
-        error: resolveSessionViewError(error).message,
+        error: starting ? null : resolveSessionViewError(error).message,
         loadedSessions: patchSessionMeta(state, key, {
-          historyStatus: targetSessionReady ? 'ready' : 'error',
+          historyStatus: starting ? 'loading' : targetSessionReady ? 'ready' : 'error',
         }),
       }));
     }
@@ -749,7 +826,6 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     let receipt: SessionDeleteReceipt;
     try {
       receipt = await hostSessionDelete({
-        sessionKey: target.sessionKey,
         sessionIdentity: target.sessionIdentity,
       }) as unknown as SessionDeleteReceipt;
     } catch {
@@ -842,7 +918,6 @@ export async function executeRenameSession(
   try {
     const target = resolveOperationTarget(input.get(), key);
     const result = await input.renameSession({
-      sessionKey: target.sessionKey,
       sessionIdentity: target.sessionIdentity,
       label: normalizedLabel,
     });

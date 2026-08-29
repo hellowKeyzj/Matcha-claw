@@ -13,12 +13,15 @@ use serde::Serialize;
 use crate::composition::HostPhase;
 
 mod archive;
+mod flight_recorder;
 
 pub(crate) use archive::{
     DiagnosticsArchiveAdmission, DiagnosticsArchiveCancellation,
     DiagnosticsArchiveCancellationGuard, DiagnosticsArchiveError, DiagnosticsArchiveProducer,
     DiagnosticsArchiveReceipt, DiagnosticsArchiveRoot, DiagnosticsArchiveTerminal,
 };
+pub(crate) use flight_recorder::{RuntimeFlightRecorder, RuntimeObservationSnapshot};
+pub use flight_recorder::{RuntimeObservationConfig, RuntimeObservationMode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

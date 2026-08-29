@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{channel::ChannelHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{ChannelStatusDelivery, ChannelStatusRequest, DecodeError, decode};
 
@@ -26,19 +26,19 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        channel: ChannelHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            channel,
         })
     }
 
@@ -46,9 +46,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let channel = self.channel.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, channel).await;
             });
         }
     }
@@ -57,12 +57,12 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => handle(request, verifier, channel).await,
             Err(response) => response,
         })
     })
@@ -78,7 +78,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/channels/status" {
         return Response::not_found();
@@ -104,13 +104,13 @@ async fn handle(
         }
     };
     match request {
-        ChannelStatusRequest::Accounts => match owner.observe_open_claw_channel_accounts().await {
-            Ok(Ok(outcome)) => Response::from_delivery(ChannelStatusDelivery::Accounts(outcome)),
-            Ok(Err(_)) | Err(_) => Response::unavailable(),
+        ChannelStatusRequest::Accounts => match channel.status().await {
+            Ok(outcome) => Response::from_delivery(ChannelStatusDelivery::Accounts(outcome)),
+            Err(_) => Response::unavailable(),
         },
-        ChannelStatusRequest::Snapshot => match owner.observe_open_claw_channel_snapshot().await {
-            Ok(Ok(outcome)) => Response::from_delivery(ChannelStatusDelivery::Snapshot(outcome)),
-            Ok(Err(_)) | Err(_) => Response::unavailable(),
+        ChannelStatusRequest::Snapshot => match channel.snapshot().await {
+            Ok(outcome) => Response::from_delivery(ChannelStatusDelivery::Snapshot(outcome)),
+            Err(_) => Response::unavailable(),
         },
     }
 }

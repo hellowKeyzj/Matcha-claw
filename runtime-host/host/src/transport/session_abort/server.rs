@@ -19,26 +19,26 @@ use super::{SessionAbortDelivery, SessionAbortRequest};
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        session: crate::sessions::SessionHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            session,
         })
     }
 
@@ -46,9 +46,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, session).await;
             });
         }
     }
@@ -57,7 +57,7 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> io::Result<()> {
     let mut request_received = false;
     let response = match timeout(REQUEST_DEADLINE, async {
@@ -65,7 +65,7 @@ async fn serve(
         Ok::<_, io::Error>(match request {
             Ok(request) => {
                 request_received = true;
-                handle(request, verifier, owner).await
+                handle(request, verifier, session).await
             }
             Err(response) => response,
         })
@@ -83,7 +83,7 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/sessions/abort" {
         return Response::not_found();
@@ -113,12 +113,12 @@ async fn handle(
     };
     if matches!(
         command.endpoint,
-        crate::session_abort::NativeEndpoint::Unsupported
+        crate::sessions::abort::NativeEndpoint::Unsupported
     ) {
         return Response::from_delivery(SessionAbortDelivery::Unsupported);
     }
     drop(verifier);
-    let outcome = match owner.abort_session(command).await {
+    let outcome = match session.abort_session(command).await {
         Ok(outcome) => outcome,
         Err(_) => return Response::unavailable(),
     };
@@ -156,7 +156,7 @@ impl Response {
 
     fn deadline() -> Self {
         Self::from_delivery(SessionAbortDelivery::Outcome(
-            crate::session_abort::SessionAbortOutcome::Unknown,
+            crate::sessions::abort::SessionAbortOutcome::Unknown,
         ))
     }
 

@@ -1,9 +1,11 @@
 {
-    "gatewayNotRunning": "网关未运行",
-    "gatewayRequired": "OpenClaw 网关需要运行才能使用聊天。它将自动启动，或者您可以从设置中启动。",
-    "gatewayPreparing": {
-        "title": "正在准备工作区",
-        "description": "正在启动并连接 OpenClaw，马上就可以开始对话。"
+    "runtimePreparing": {
+        "title": "正在启动运行时",
+        "description": "Runtime Host 正在准备会话运行时，马上就可以开始对话。"
+    },
+    "runtimeUnavailable": {
+        "title": "没有可用运行时",
+        "description": "当前没有可用的聊天运行时 endpoint。请稍后重试，或到设置中检查 Runtime Host。"
     },
     "welcome": {
         "title": "MatchaClaw 聊天",
@@ -14,8 +16,8 @@
         "creativeTasksDesc": "写作、头脑风暴、创意"
     },
     "input": {
-        "gatewayDisconnectedPlaceholder": "网关未连接...",
-        "gatewayRecoveringNotice": "连接中断，正在恢复…",
+        "gatewayDisconnectedPlaceholder": "运行时不可用...",
+        "gatewayRecoveringNotice": "运行时正在准备…",
         "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
         "approvalWaitingPlaceholder": "等待审批中...",
         "pickModel": "选择模型",

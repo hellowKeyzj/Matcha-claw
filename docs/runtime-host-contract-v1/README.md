@@ -13,7 +13,7 @@
 | `host:event`、事件 payload、顺序和丢失语义是什么？ | [events.md](events.md) |
 | child 如何调用 Electron parent？ | [parent-callbacks.md](parent-callbacks.md) |
 | child 如何启动、ready、停止、重启和代理 WebSocket？ | [lifecycle.md](lifecycle.md) |
-| 为什么删除通用 RuntimeJob，但保留旧异步投影？ | [async-projection.md](async-projection.md) |
+| 异步 operation 的 owner-local 终态契约是什么？ | [async-projection.md](async-projection.md) |
 | 现有测试证明了什么，还缺什么？ | [verification.md](verification.md) |
 | 当前源码、类型、文档之间有哪些未裁决差异？ | [open-items.md](open-items.md) |
 | TS 真实行为对应哪些 owner、事实源和状态平面？ | [runtime-host-owner-model/README.md](../runtime-host-owner-model/README.md) |
@@ -57,12 +57,15 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 - `PAYLOAD_TOO_LARGE` 是 legacy child 对超大 dispatch body 的真实 413 响应；Renderer 不需要感知新 API。
 - `INVALID_TRANSPORT_PAYLOAD` 是 Electron 解析非法 child 响应时的本地错误；Rust 不主动返回该码。
 - child health lifecycle 与 Electron process-manager lifecycle 分层处理，不强行统一枚举。
+- **旧 generic RuntimeJob public contract 已删除，不是待办：** 不存在 `runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；文档中的这些名称只用于标识已删除项，禁止重新引入。
+- **Toolchain final path 已冻结：** `hostUvInstallAll` 直接调用 `platform.runtime` / `toolchain.installUv`，target 为 `platform-runtime`；Electron public adapter 调用 Rust private `openclaw.toolchain.install-uv`，等待真实结果后才返回。
+- **ClawHub marketplace route 不变：** `POST /api/clawhub/search` 由 Rust external `ClawHubRegistryClient` 执行 registry HTTP search，不经 RuntimeDriver 或 OpenClaw Gateway；`POST /api/skills/clawhub/install` 仍经 Skills runtime ops，但底层执行 legacy ClawHub CLI + registry fallback。
 
 ## 当前迁移决定
 
 - Renderer、Electron、preload 和页面 API **不因 Rust 移植而改动**。
-- Rust 内部 **不重建 Host-wide `RuntimeJobQueue` / `RuntimeJobRegistry`**。
-- 现有 `jobGet`、`runtime-job:done`、`runtime-job:progress` 仅作为旧客户端所需的异步完成投影保留，详见 [async-projection.md](async-projection.md)。
+- Rust 内部 **不建立跨 owner 的通用异步 operation queue、registry 或 compatibility projection**。
+- 异步完成由具体 owner/facade 的 typed operation query/event 表达，详见 [async-projection.md](async-projection.md)。
 - 新 Rust owner、crate、状态模型和切换顺序必须在本基线之上推导，不能从现有 `runtime-host-rust/` 目录反推契约。
 
 ## 完整性的边界

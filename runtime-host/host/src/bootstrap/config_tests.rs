@@ -192,6 +192,60 @@ fn decodes_a_strict_configuration_without_materializing_files() {
 }
 
 #[test]
+fn defaults_runtime_observation_off() {
+    let root = TestRoot::new();
+    let bootstrap = decode(serde_json::to_vec(&materializable_wire(&root)).unwrap()).unwrap();
+    let parts = bootstrap.into_parts().unwrap();
+
+    assert_eq!(
+        parts.host.runtime_observation,
+        RuntimeObservationConfig::off()
+    );
+}
+
+#[test]
+fn decodes_runtime_observation_modes() {
+    let mut normal = wire();
+    normal["runtimeObservation"] = serde_json::json!({
+        "mode": "normal",
+        "archive": true
+    });
+    let bootstrap = decode(serde_json::to_vec(&normal).unwrap()).unwrap();
+    assert_eq!(
+        bootstrap.runtime_observation,
+        RuntimeObservationConfig::normal(true)
+    );
+
+    let mut diagnostic = wire();
+    diagnostic["runtimeObservation"] = serde_json::json!({
+        "mode": "diagnostic",
+        "archive": true,
+        "diagnosticTtlMs": 5000
+    });
+    let bootstrap = decode(serde_json::to_vec(&diagnostic).unwrap()).unwrap();
+    assert_eq!(
+        bootstrap.runtime_observation,
+        RuntimeObservationConfig::diagnostic(true, std::time::Duration::from_millis(5000))
+    );
+}
+
+#[test]
+fn rejects_diagnostic_runtime_observation_without_ttl() {
+    let mut missing = wire();
+    missing["runtimeObservation"] = serde_json::json!({
+        "mode": "diagnostic"
+    });
+    assert!(decode(serde_json::to_vec(&missing).unwrap()).is_err());
+
+    let mut zero = wire();
+    zero["runtimeObservation"] = serde_json::json!({
+        "mode": "diagnostic",
+        "diagnosticTtlMs": 0
+    });
+    assert!(decode(serde_json::to_vec(&zero).unwrap()).is_err());
+}
+
+#[test]
 fn decodes_a_sealed_provider_credential_resolver() {
     let root = TestRoot::new();
     let mut value = materializable_wire(&root);

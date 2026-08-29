@@ -51,15 +51,12 @@ function normalizeIdentifier(value: unknown): string {
 
 function resolveSessionUpdateRecordKey(
   state: Pick<ChatStoreState, 'loadedSessions'>,
-  backendSessionKey: string,
+  sourceSessionKey: string,
   sessionIdentity: SessionStateSnapshot['catalog']['sessionIdentity'],
 ): string {
-  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, backendSessionKey)) {
-    return backendSessionKey;
-  }
   const identity = {
     ...sessionIdentity,
-    sessionKey: sessionIdentity.sessionKey || backendSessionKey,
+    sessionKey: sessionIdentity.sessionKey || sourceSessionKey,
   };
   const existingRecordKey = findSessionRecordKey(state, identity);
   if (existingRecordKey) {
@@ -93,7 +90,7 @@ function scheduleMissingPreviewLoads(input: CreateStoreRuntimeEventActionsInput 
 function applySessionLifecycleEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
-    targetBackendSessionKey: string;
+    targetEventSessionKey: string;
     currentSessionKey: string;
     event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
   },
@@ -102,7 +99,7 @@ function applySessionLifecycleEvent(
     set,
     get,
     targetSessionKey,
-    targetBackendSessionKey,
+    targetEventSessionKey,
     currentSessionKey,
     event,
   } = input;
@@ -145,7 +142,7 @@ function applySessionLifecycleEvent(
 
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,
-    targetBackendSessionKey,
+    targetEventSessionKey,
   })) {
     return;
   }
@@ -235,13 +232,13 @@ export function handleStoreSessionUpdateEvent(
   if (eventSessionKey && snapshotSessionKey && eventSessionKey !== snapshotSessionKey) {
     return;
   }
-  const backendSessionKey = eventSessionKey || snapshotSessionKey;
-  if (!backendSessionKey) {
+  const sourceSessionKey = eventSessionKey || snapshotSessionKey;
+  if (!sourceSessionKey) {
     return;
   }
   const targetSessionKey = resolveSessionUpdateRecordKey(
     stateBeforeHandle,
-    backendSessionKey,
+    sourceSessionKey,
     sessionUpdate.snapshot.catalog.sessionIdentity,
   );
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
@@ -263,7 +260,7 @@ export function handleStoreSessionUpdateEvent(
       set,
       get,
       targetSessionKey,
-      targetBackendSessionKey: backendSessionKey,
+      targetEventSessionKey: sourceSessionKey,
       currentSessionKey,
       event: sessionUpdate,
     });
@@ -274,7 +271,7 @@ export function handleStoreSessionUpdateEvent(
     useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     if (shouldIgnoreRuntimeEvent({
       eventSessionKey: null,
-      targetBackendSessionKey: backendSessionKey,
+      targetEventSessionKey: sourceSessionKey,
     })) {
       return;
     }
@@ -297,7 +294,7 @@ export function handleStoreSessionUpdateEvent(
 
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,
-    targetBackendSessionKey: backendSessionKey,
+    targetEventSessionKey: sourceSessionKey,
   })) {
     return;
   }

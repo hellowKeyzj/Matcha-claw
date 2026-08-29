@@ -2,8 +2,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
+
+const WRITER_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITER_LOCK_POLL: Duration = Duration::from_millis(1);
 
 use platform::endpoint::NativeAgentId;
 
@@ -74,6 +77,17 @@ pub enum IngressCredential {
 
 impl FleetStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+        Self::open_with_recovery(path, true)
+    }
+
+    pub fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+        Self::open_with_recovery(path, false)
+    }
+
+    fn open_with_recovery(
+        path: impl Into<PathBuf>,
+        recover_interrupted_delivery: bool,
+    ) -> Result<Self, StoreFault> {
         let path = path.into();
         ensure_parent_directory(&path)?;
         let lock_path = lock_path(&path);
@@ -94,7 +108,7 @@ impl FleetStore {
         } else {
             epoch
         };
-        let epoch = if had_interrupted_delivery {
+        let epoch = if recover_interrupted_delivery && had_interrupted_delivery {
             facts.recover_interrupted_deliveries();
             commit_recovered_facts(&path, epoch, &facts)?
         } else {
@@ -374,17 +388,24 @@ struct WriterLock {
 
 impl WriterLock {
     fn acquire(path: &Path) -> Result<Self, StoreFault> {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(file) => {
-                drop(file);
-                Ok(Self {
-                    path: path.to_owned(),
-                })
+        let started = SystemTime::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self {
+                        path: path.to_owned(),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let elapsed = started.elapsed().unwrap_or_default();
+                    if elapsed >= WRITER_LOCK_TIMEOUT {
+                        return Err(StoreFault::WriterBusy);
+                    }
+                    std::thread::sleep(WRITER_LOCK_POLL.min(WRITER_LOCK_TIMEOUT - elapsed));
+                }
+                Err(error) => return Err(StoreFault::Lock(error.kind())),
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                Err(StoreFault::WriterBusy)
-            }
-            Err(error) => Err(StoreFault::Lock(error.kind())),
         }
     }
 

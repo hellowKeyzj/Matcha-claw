@@ -4,8 +4,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::StreamExt;
-use serde_json::{Value, json};
+use clawhub::ClawHubRegistryClient;
+use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -13,7 +13,10 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{
+    facade::{PluginsHandle, SkillsHandle},
+    transport::authorization::CapabilityDecisionVerifier,
+};
 
 use super::{ProviderModelsCommand, ProviderModelsDelivery, ProviderModelsRequest, RequestError};
 
@@ -39,19 +42,31 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
+    skills: SkillsHandle,
+    clawhub_registry: ClawHubRegistryClient,
+    plugins: PluginsHandle,
+    connector_handle: crate::connectors::ConnectorHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        owner: crate::provider::ProviderHandle,
+        skills: SkillsHandle,
+        clawhub_registry: ClawHubRegistryClient,
+        plugins: PluginsHandle,
+        connector_handle: crate::connectors::ConnectorHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
             owner,
+            skills,
+            clawhub_registry,
+            plugins,
+            connector_handle,
         })
     }
 
@@ -60,8 +75,21 @@ impl Server {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
             let owner = self.owner.clone();
+            let skills = self.skills.clone();
+            let clawhub_registry = self.clawhub_registry.clone();
+            let plugins = self.plugins.clone();
+            let connector_handle = self.connector_handle.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(
+                    stream,
+                    verifier,
+                    owner,
+                    skills,
+                    clawhub_registry,
+                    plugins,
+                    connector_handle,
+                )
+                .await;
             });
         }
     }
@@ -78,12 +106,27 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
+    skills: SkillsHandle,
+    clawhub_registry: ClawHubRegistryClient,
+    plugins: PluginsHandle,
+    connector_handle: crate::connectors::ConnectorHandle,
 ) -> io::Result<()> {
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => {
+                handle(
+                    request,
+                    verifier,
+                    owner,
+                    skills,
+                    clawhub_registry,
+                    plugins,
+                    connector_handle,
+                )
+                .await
+            }
             Err(response) => response,
         })
     })
@@ -99,7 +142,11 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
+    skills: SkillsHandle,
+    clawhub_registry: ClawHubRegistryClient,
+    plugins: PluginsHandle,
+    connector_handle: crate::connectors::ConnectorHandle,
 ) -> Response {
     if request.method == "GET" {
         let path = request
@@ -128,22 +175,21 @@ async fn handle(
             handle_provider_routing(request, verifier, owner).await
         }
         plugins::CATALOG_ENDPOINT if request.method == "GET" => {
-            handle_plugin_catalog(request, verifier, owner).await
+            handle_plugin_catalog(request, verifier, plugins).await
         }
         plugins::RUNTIME_ENDPOINT if request.method == "GET" => {
-            handle_plugin_runtime(request, verifier, owner).await
+            handle_plugin_runtime(request, verifier, plugins).await
         }
         plugins::CONFIGURATION_ENDPOINT if request.method == "POST" => {
-            handle_plugin_configuration(request, verifier, owner).await
+            handle_plugin_configuration(request, verifier, plugins).await
         }
         plugins::OPERATION_ENDPOINT if request.method == "POST" => {
-            handle_plugin_operation(request, verifier, owner).await
+            handle_plugin_operation(request, verifier, plugins).await
         }
         skills::ENDPOINT if request.method == "GET" => {
-            handle_skills_status(request, verifier, owner).await
+            handle_skills_status(request, verifier, skills).await
         }
-        skills::SEARCH_ENDPOINT
-        | skills::DETAIL_ENDPOINT
+        skills::DETAIL_ENDPOINT
         | skills::CONFIG_ENDPOINT
         | skills::CLAWHUB_INSTALL_ENDPOINT
         | skills::CLAWHUB_UPDATE_ENDPOINT
@@ -156,22 +202,22 @@ async fn handle(
         | skills::README_ENDPOINT
             if request.method == "POST" =>
         {
-            handle_skills_management(request, verifier, owner).await
+            handle_skills_management(request, verifier, skills).await
         }
         clawhub_search::ENDPOINT if request.method == "POST" => {
-            handle_clawhub_search(request, verifier, owner).await
+            handle_clawhub_search(request, verifier, clawhub_registry).await
         }
         clawhub_skill::ENDPOINT if request.method == "POST" => {
-            handle_clawhub_skill_install(request, verifier, owner).await
+            handle_clawhub_skill_install(request, verifier, skills).await
         }
         skill_bundle::EXPORT_ENDPOINT if request.method == "POST" => {
-            handle_skill_bundle_export(request, verifier, owner).await
+            handle_skill_bundle_export(request, verifier, skills).await
         }
         skill_bundle::IMPORT_ENDPOINT if request.method == "POST" => {
-            handle_skill_bundle_import(request, verifier, owner).await
+            handle_skill_bundle_import(request, verifier, skills).await
         }
         external_connectors::ENDPOINT if request.method == "POST" => {
-            handle_external_connectors(request, verifier, owner).await
+            handle_external_connectors(request, verifier, connector_handle).await
         }
         _ => Response::not_found(&request.path),
     }
@@ -181,7 +227,7 @@ async fn handle_get_list(
     request: Request,
     query: &str,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     if !query.is_empty() || !request.body.is_empty() {
         return Response::bad_request();
@@ -202,7 +248,7 @@ async fn handle_get_selectable(
     request: Request,
     query: &str,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     if !request.body.is_empty() {
         return Response::bad_request();
@@ -269,7 +315,7 @@ fn authorization(headers: &[(String, String)]) -> Option<&str> {
 async fn handle_provider_models(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     let Some(authorization) = request
         .headers
@@ -317,9 +363,9 @@ async fn handle_provider_models(
 async fn handle_plugin_catalog(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    plugins: PluginsHandle,
 ) -> Response {
-    match plugins::catalog(&request.headers, verifier, owner, now_millis()).await {
+    match plugins::catalog(&request.headers, verifier, plugins, now_millis()).await {
         Ok(body) => Response { status: 200, body },
         Err(plugins::RequestError::Invalid) => {
             Response::fixed(503, "Plugin catalog is unavailable")
@@ -333,9 +379,9 @@ async fn handle_plugin_catalog(
 async fn handle_plugin_runtime(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    plugins: PluginsHandle,
 ) -> Response {
-    match plugins::runtime(&request.headers, verifier, owner, now_millis()).await {
+    match plugins::runtime(&request.headers, verifier, plugins, now_millis()).await {
         Ok(body) => Response { status: 200, body },
         Err(plugins::RequestError::Invalid) => {
             Response::fixed(503, "Plugin runtime is unavailable")
@@ -349,13 +395,13 @@ async fn handle_plugin_runtime(
 async fn handle_plugin_configuration(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    plugins: PluginsHandle,
 ) -> Response {
     match plugins::configuration(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        plugins,
         now_millis(),
     )
     .await
@@ -373,13 +419,13 @@ async fn handle_plugin_configuration(
 async fn handle_plugin_operation(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    plugins: PluginsHandle,
 ) -> Response {
     match plugins::operation(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        plugins,
         now_millis(),
     )
     .await
@@ -397,7 +443,7 @@ async fn handle_plugin_operation(
 async fn handle_external_connectors(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    connector_handle: crate::connectors::ConnectorHandle,
 ) -> Response {
     let Some(authorization) = request
         .headers
@@ -429,8 +475,8 @@ async fn handle_external_connectors(
         }
     };
     let delivery = match command {
-        external_connectors::Command::List => owner
-            .list_external_connectors()
+        external_connectors::Command::List => connector_handle
+            .list()
             .await
             .map(|outcome| match outcome {
                 crate::external_connectors::ListOutcome::Available(connectors) => {
@@ -445,16 +491,27 @@ async fn handle_external_connectors(
                 }
             })
             .unwrap_or(external_connectors::Delivery::Unavailable),
-        external_connectors::Command::Catalog => owner
-            .external_connector_catalog()
+        external_connectors::Command::Catalog => connector_handle
+            .catalog()
             .await
             .map(external_connectors::Delivery::Catalog)
             .unwrap_or(external_connectors::Delivery::Unavailable),
-        external_connectors::Command::Status => external_connector_status(owner).await,
+        external_connectors::Command::Status => connector_handle
+            .status()
+            .await
+            .map(|outcome| match outcome {
+                crate::external_connectors::StatusOutcome::Available(statuses) => {
+                    external_connectors::Delivery::Status(statuses)
+                }
+                crate::external_connectors::StatusOutcome::Unavailable => {
+                    external_connectors::Delivery::Unavailable
+                }
+            })
+            .unwrap_or(external_connectors::Delivery::Unavailable),
         external_connectors::Command::SessionStatus(identity) => {
             let native_openclaw = is_native_openclaw_session(&identity);
-            owner
-                .session_connector_status(identity)
+            connector_handle
+                .session_status(identity)
                 .await
                 .map(|outcome| match outcome {
                     crate::external_connectors::SessionStatusOutcome::Available(statuses) => {
@@ -471,46 +528,45 @@ async fn handle_external_connectors(
                 })
                 .unwrap_or(external_connectors::Delivery::Unavailable)
         }
-        external_connectors::Command::Probe(id) => external_connector_probe(owner, id).await,
-        external_connectors::Command::Get(id) => owner
-            .get_external_connector(id)
+        external_connectors::Command::Probe(id) => connector_handle
+            .probe(id.clone())
             .await
-            .map(external_connectors::Delivery::Get)
+            .map(|outcome| match outcome {
+                crate::external_connectors::ProbeOutcome::Observed(observation) => {
+                    external_connectors::Delivery::Probe(id, observation)
+                }
+                crate::external_connectors::ProbeOutcome::Missing => {
+                    external_connectors::Delivery::Missing
+                }
+                crate::external_connectors::ProbeOutcome::Unavailable => {
+                    external_connectors::Delivery::Unavailable
+                }
+            })
             .unwrap_or(external_connectors::Delivery::Unavailable),
-        external_connectors::Command::Upsert(connector) => owner
-            .upsert_external_connector(*connector)
+        external_connectors::Command::Get(id) => connector_handle
+            .get(id)
+            .await
+            .map(|outcome| match outcome {
+                crate::external_connectors::GetOutcome::Found(connector)
+                    if is_system_runtime_connector(&connector) =>
+                {
+                    external_connectors::Delivery::Missing
+                }
+                outcome => external_connectors::Delivery::Get(outcome),
+            })
+            .unwrap_or(external_connectors::Delivery::Unavailable),
+        external_connectors::Command::Upsert(connector) => connector_handle
+            .upsert(*connector)
             .await
             .map(external_connectors::Delivery::Mutation)
             .unwrap_or(external_connectors::Delivery::Unavailable),
-        external_connectors::Command::Remove(id) => owner
-            .remove_external_connector(id)
+        external_connectors::Command::Remove(id) => connector_handle
+            .remove(id)
             .await
             .map(external_connectors::Delivery::Mutation)
             .unwrap_or(external_connectors::Delivery::Unavailable),
     };
     Response::from_external_connectors_delivery(delivery)
-}
-
-async fn external_connector_status(owner: crate::owner::Handle) -> external_connectors::Delivery {
-    let connectors = match owner.list_external_connectors().await {
-        Ok(crate::external_connectors::ListOutcome::Available(connectors)) => {
-            public_connectors(connectors)
-        }
-        Ok(crate::external_connectors::ListOutcome::Unavailable) | Err(_) => {
-            return external_connectors::Delivery::Unavailable;
-        }
-    };
-    let statuses = futures_util::stream::iter(connectors)
-        .then(|connector| async move {
-            let id = connector.id.clone();
-            let observation =
-                openclaw::projection::connector::external::probe_external_connector(&connector)
-                    .await;
-            (id, observation)
-        })
-        .collect()
-        .await;
-    external_connectors::Delivery::Status(statuses)
 }
 
 fn public_connectors(connectors: Vec<environment::Connector>) -> Vec<environment::Connector> {
@@ -548,31 +604,10 @@ fn is_native_openclaw_session(identity: &crate::external_connectors::SessionIden
     )
 }
 
-async fn external_connector_probe(
-    owner: crate::owner::Handle,
-    id: String,
-) -> external_connectors::Delivery {
-    match owner.probe_external_connector(id.clone()).await {
-        Ok(crate::external_connectors::ProbeOutcome::Connector(connector)) => {
-            external_connectors::Delivery::Probe(
-                id,
-                openclaw::projection::connector::external::probe_external_connector(&connector)
-                    .await,
-            )
-        }
-        Ok(crate::external_connectors::ProbeOutcome::Missing) => {
-            external_connectors::Delivery::Missing
-        }
-        Ok(crate::external_connectors::ProbeOutcome::Unavailable) | Err(_) => {
-            external_connectors::Delivery::Unavailable
-        }
-    }
-}
-
 async fn handle_provider_routing(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: crate::provider::ProviderHandle,
 ) -> Response {
     match provider_routing::handle(
         &request.headers,
@@ -594,9 +629,9 @@ async fn handle_provider_routing(
 async fn handle_skills_status(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    skills: SkillsHandle,
 ) -> Response {
-    match skills::handle_status(&request.headers, verifier, owner, now_millis()).await {
+    match skills::handle_status(&request.headers, verifier, skills, now_millis()).await {
         Ok(body) => Response { status: 200, body },
         Err(skills::RequestError::Unauthorized) => Response::skills_unauthorized(),
         Err(skills::RequestError::Invalid) => Response::skills_unavailable(),
@@ -606,14 +641,14 @@ async fn handle_skills_status(
 async fn handle_skills_management(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    skills: SkillsHandle,
 ) -> Response {
     match skills::handle_management(
         &request.path,
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        skills,
         now_millis(),
     )
     .await
@@ -630,13 +665,13 @@ async fn handle_skills_management(
 async fn handle_clawhub_search(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    clawhub_registry: ClawHubRegistryClient,
 ) -> Response {
     match clawhub_search::handle(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        clawhub_registry,
         now_millis(),
     )
     .await
@@ -650,13 +685,13 @@ async fn handle_clawhub_search(
 async fn handle_clawhub_skill_install(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    skills: SkillsHandle,
 ) -> Response {
     match clawhub_skill::handle(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        skills,
         now_millis(),
     )
     .await
@@ -670,13 +705,13 @@ async fn handle_clawhub_skill_install(
 async fn handle_skill_bundle_export(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    skills: SkillsHandle,
 ) -> Response {
     match skill_bundle::export(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        skills,
         now_millis(),
     )
     .await
@@ -690,13 +725,13 @@ async fn handle_skill_bundle_export(
 async fn handle_skill_bundle_import(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    skills: SkillsHandle,
 ) -> Response {
     match skill_bundle::import(
         &request.headers,
         &request.body,
         verifier,
-        owner,
+        skills,
         now_millis(),
     )
     .await
@@ -736,8 +771,7 @@ impl Response {
                 Self::fixed(404, "ClawHub skill install route is not available")
             }
             skills::ENDPOINT => Self::fixed(404, "Skills status route is not available"),
-            skills::SEARCH_ENDPOINT
-            | skills::DETAIL_ENDPOINT
+            skills::DETAIL_ENDPOINT
             | skills::CONFIG_ENDPOINT
             | skills::CLAWHUB_INSTALL_ENDPOINT
             | skills::CLAWHUB_UPDATE_ENDPOINT
@@ -1036,7 +1070,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, owner};
+    use crate::{
+        Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner,
+    };
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -1095,7 +1131,7 @@ mod tests {
     impl RunningServer {
         async fn start() -> Self {
             let root = TestRoot::new();
-            let (mut host, events) = Host::new(host_input(&root)).expect("construct host");
+            let (mut host, events, handles) = Host::new(host_input(&root)).expect("construct host");
             host.start_admission_only()
                 .await
                 .expect("start host admission");
@@ -1104,9 +1140,17 @@ mod tests {
             let events_task = tokio::spawn(async move { while events.recv().await.is_some() {} });
             let verifier =
                 CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
-            let server = Server::bind(0, verifier, owner.handle())
-                .await
-                .expect("bind server");
+            let server = Server::bind(
+                0,
+                verifier,
+                handles.provider,
+                handles.skills,
+                handles.clawhub_registry,
+                handles.plugins,
+                handles.connector,
+            )
+            .await
+            .expect("bind server");
             let port = server.port();
             let task = tokio::spawn(server.run());
             Self {
@@ -1139,7 +1183,7 @@ mod tests {
                 .open(&target)
                 .expect("hold connector target without delete sharing");
 
-            let (mut host, events) = Host::new(host_input(&root)).expect("construct host");
+            let (mut host, events, handles) = Host::new(host_input(&root)).expect("construct host");
             host.start_admission_only()
                 .await
                 .expect("start host admission");
@@ -1148,9 +1192,17 @@ mod tests {
             let events_task = tokio::spawn(async move { while events.recv().await.is_some() {} });
             let verifier =
                 CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
-            let server = Server::bind(0, verifier, owner.handle())
-                .await
-                .expect("bind server");
+            let server = Server::bind(
+                0,
+                verifier,
+                handles.provider,
+                handles.skills,
+                handles.clawhub_registry,
+                handles.plugins,
+                handles.connector,
+            )
+            .await
+            .expect("bind server");
             let port = server.port();
             let task = tokio::spawn(server.run());
             Self {
@@ -1959,6 +2011,7 @@ mod tests {
             parent_callback_base_url: "http://127.0.0.1:34100".into(),
             parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
             cron_transport_port: 18_791,
+            runtime_observation: RuntimeObservationConfig::off(),
         }
     }
 

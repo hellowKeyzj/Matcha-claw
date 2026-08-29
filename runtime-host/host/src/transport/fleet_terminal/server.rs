@@ -56,7 +56,7 @@ impl SessionFinalizer {
         }
     }
 
-    async fn finalize(&mut self, handle: Option<&mut TerminalProviderHandle>) {
+    async fn close(&mut self, handle: Option<&mut TerminalProviderHandle>) {
         if self.finalized {
             return;
         }
@@ -68,6 +68,21 @@ impl SessionFinalizer {
         let _ = self
             .tickets
             .close(self.session.clone(), self.generation)
+            .await;
+    }
+
+    async fn fail(&mut self, handle: Option<&mut TerminalProviderHandle>) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        if let Some(handle) = handle {
+            handle.close().await;
+        }
+        remove_active_generation(&self.generations, &self.session, self.generation).await;
+        let _ = self
+            .tickets
+            .fail(self.session.clone(), self.generation)
             .await;
     }
 }
@@ -95,6 +110,12 @@ pub trait TicketPort: Send + Sync + 'static {
         session: SessionId,
         generation: Generation,
     ) -> Pin<Box<dyn Future<Output = Result<(), TicketError>> + Send>>;
+
+    fn fail(
+        &self,
+        session: SessionId,
+        generation: Generation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TicketError>> + Send>>;
 }
 
 /// Host actor adapter for one-time terminal tickets and lifecycle closure.
@@ -102,11 +123,11 @@ pub trait TicketPort: Send + Sync + 'static {
 /// Ticket redemption and close both execute through the Host actor, so the
 /// transport never owns a second session map or fabricates authorization facts.
 pub struct HostTicketPort {
-    owner: crate::owner::Handle,
+    owner: crate::fleet::handle::FleetHandle,
 }
 
 impl HostTicketPort {
-    pub fn new(owner: crate::owner::Handle) -> Self {
+    pub fn new(owner: crate::fleet::handle::FleetHandle) -> Self {
         Self { owner }
     }
 }
@@ -119,20 +140,20 @@ impl TicketPort for HostTicketPort {
         let owner = self.owner.clone();
         Box::pin(async move {
             let summary = owner
-                .fleet_terminal_consume_ticket(ticket)
+                .terminal_consume_ticket(ticket)
                 .await
                 .map_err(|_| TicketError::Unavailable)?
                 .map_err(|_| TicketError::Invalid)?;
             let session = summary.id().clone();
             let generation = summary.generation();
-            match owner.fleet_terminal_context(summary).await {
-                Ok(Some(context)) => Ok(context),
-                Ok(None) => {
-                    let _ = owner.fleet_terminal_close_fenced(session, generation).await;
+            match owner.terminal_context(summary).await {
+                Ok(Ok(Some(context))) => Ok(context),
+                Ok(Ok(None)) => {
+                    let _ = owner.terminal_close_fenced(session, generation).await;
                     Err(TicketError::Invalid)
                 }
-                Err(_) => {
-                    let _ = owner.fleet_terminal_close_fenced(session, generation).await;
+                Ok(Err(_)) | Err(_) => {
+                    let _ = owner.terminal_close_fenced(session, generation).await;
                     Err(TicketError::Unavailable)
                 }
             }
@@ -147,7 +168,26 @@ impl TicketPort for HostTicketPort {
         let owner = self.owner.clone();
         Box::pin(async move {
             owner
-                .fleet_terminal_close_fenced(session, generation)
+                .terminal_close_fenced(session, generation)
+                .await
+                .map_err(|_| TicketError::Unavailable)?
+                .map(|_| ())
+                .map_err(|error| match error {
+                    fleet::terminal::TerminalSessionError::InvalidState => TicketError::Fenced,
+                    _ => TicketError::Unavailable,
+                })
+        })
+    }
+
+    fn fail(
+        &self,
+        session: SessionId,
+        generation: Generation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TicketError>> + Send>> {
+        let owner = self.owner.clone();
+        Box::pin(async move {
+            owner
+                .terminal_fail_fenced(session, generation)
                 .await
                 .map_err(|_| TicketError::Unavailable)?
                 .map(|_| ())
@@ -400,7 +440,7 @@ async fn serve_upgrade_inner(
         result = provider.open(context.clone()) => match result {
             Ok(opened) => opened,
             Err(_) => {
-                finalizer.finalize(None).await;
+                finalizer.fail(None).await;
                 let _ = write_json(
                     &mut stream,
                     serde_json::json!({"type":"terminal.error","code":"provider_unavailable"}),
@@ -411,12 +451,12 @@ async fn serve_upgrade_inner(
             }
         },
         _ = cancellation.cancelled() => {
-            finalizer.finalize(None).await;
+            finalizer.close(None).await;
             let _ = write_frame(&mut stream, 8, &[]).await;
             return Ok(());
         },
         _ = shutdown.cancelled() => {
-            finalizer.finalize(None).await;
+            finalizer.close(None).await;
             let _ = write_frame(&mut stream, 8, &[]).await;
             return Ok(());
         },
@@ -429,7 +469,7 @@ async fn serve_upgrade_inner(
     .await
     .is_err()
     {
-        finalizer.finalize(Some(&mut handle)).await;
+        finalizer.close(Some(&mut handle)).await;
         return Ok(());
     }
     let result = run_session(
@@ -440,9 +480,19 @@ async fn serve_upgrade_inner(
         shutdown,
     )
     .await;
-    finalizer.finalize(Some(&mut handle)).await;
+    match result {
+        Ok(SessionEnd::Closed) => finalizer.close(Some(&mut handle)).await,
+        Ok(SessionEnd::ProviderFailed) => finalizer.fail(Some(&mut handle)).await,
+        Err(_) => finalizer.close(Some(&mut handle)).await,
+    }
     let _ = write_frame(&mut stream, 8, &[]).await;
-    result
+    result.map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionEnd {
+    Closed,
+    ProviderFailed,
 }
 
 async fn run_session(
@@ -451,37 +501,37 @@ async fn run_session(
     mut events: super::provider::TerminalStream,
     cancellation: CancellationToken,
     shutdown: CancellationToken,
-) -> io::Result<()> {
+) -> io::Result<SessionEnd> {
     let pending_output = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
         tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            _ = shutdown.cancelled() => return Ok(()),
+            _ = cancellation.cancelled() => return Ok(SessionEnd::Closed),
+            _ = shutdown.cancelled() => return Ok(SessionEnd::Closed),
             frame = read_frame(stream) => match frame {
-                Ok(frame) if frame.opcode == 8 => return Ok(()),
+                Ok(frame) if frame.opcode == 8 => return Ok(SessionEnd::Closed),
                 Ok(frame) if frame.opcode == 9 => { write_frame(stream, 10, &frame.payload).await?; },
                 Ok(frame) if frame.opcode == 2 => {
                     handle.send(ProviderCommand::Input(frame.payload)).await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "provider unavailable"))?;
                 },
                 Ok(frame) if frame.opcode == 1 => {
                     if process_control(stream, handle, &frame.payload).await? {
-                        return Ok(());
+                        return Ok(SessionEnd::Closed);
                     }
                 }
-                Ok(_) => return Ok(()),
-                Err(_) => return Ok(()),
+                Ok(_) => return Ok(SessionEnd::Closed),
+                Err(_) => return Ok(SessionEnd::Closed),
             },
             event = events.recv() => match event {
                 Some(Ok(ProviderEvent::Output(payload))) => {
                     if payload.len() > MAX_PAYLOAD {
                         let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"output_overflow"})).await;
-                        return Ok(());
+                        return Ok(SessionEnd::Closed);
                     }
                     let previous = pending_output.fetch_add(payload.len(), std::sync::atomic::Ordering::AcqRel);
                     if previous.saturating_add(payload.len()) > MAX_SESSION_OUTPUT_BYTES {
                         pending_output.fetch_sub(payload.len(), std::sync::atomic::Ordering::AcqRel);
                         let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
-                        return Ok(());
+                        return Ok(SessionEnd::Closed);
                     }
                     let write = timeout(OUTPUT_QUEUE_WAIT, write_frame(stream, 2, &payload)).await;
                     pending_output.fetch_sub(payload.len(), std::sync::atomic::Ordering::AcqRel);
@@ -489,17 +539,17 @@ async fn run_session(
                         Ok(Ok(())) => {}
                         Ok(Err(_)) | Err(_) => {
                             let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
-                            return Ok(());
+                            return Ok(SessionEnd::Closed);
                         }
                     }
                 },
                 Some(Ok(ProviderEvent::Exit { code })) => {
-                    write_json(stream, serde_json::json!({"type":"terminal.exit","code":code})).await?;
-                    return Ok(());
+                    write_json(stream, terminal_exit_frame(code)).await?;
+                    return Ok(SessionEnd::Closed);
                 },
                 Some(Err(_)) | None => {
                     let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"provider_failed"})).await;
-                    return Ok(());
+                    return Ok(SessionEnd::ProviderFailed);
                 },
             }
         }
@@ -508,7 +558,24 @@ async fn run_session(
 
 #[cfg(test)]
 mod tests {
-    use super::websocket_accept;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use tokio::{net::TcpListener, sync::mpsc};
+
+    use super::super::provider::{ProviderError, TerminalProviderOpen};
+    use super::*;
+
+    #[test]
+    fn terminal_exit_projection_matches_renderer_fields() {
+        assert_eq!(
+            terminal_exit_frame(Some(7)),
+            serde_json::json!({"type":"terminal.exit","exitCode":7})
+        );
+        assert_eq!(
+            terminal_exit_frame(None),
+            serde_json::json!({"type":"terminal.exit"})
+        );
+    }
 
     #[test]
     fn websocket_accept_matches_rfc6455_example() {
@@ -516,6 +583,281 @@ mod tests {
             websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
         );
+    }
+
+    #[tokio::test]
+    async fn provider_open_failure_marks_failed_not_closed() {
+        let tickets = Arc::new(FakeTickets::new(context()));
+        let frames =
+            run_fake_session(Arc::clone(&tickets), Arc::new(FakeProvider::open_error())).await;
+
+        assert_eq!(tickets.failed(), 1);
+        assert_eq!(tickets.closed(), 0);
+        assert!(
+            frames.contains(
+                &serde_json::json!({"type":"terminal.error","code":"provider_unavailable"})
+            )
+        );
+        assert!(!frames.iter().any(is_terminal_closed));
+    }
+
+    #[tokio::test]
+    async fn provider_stream_failure_marks_failed_not_closed() {
+        let tickets = Arc::new(FakeTickets::new(context()));
+        let frames =
+            run_fake_session(Arc::clone(&tickets), Arc::new(FakeProvider::stream_error())).await;
+
+        assert_eq!(tickets.failed(), 1);
+        assert_eq!(tickets.closed(), 0);
+        assert!(
+            frames.contains(&serde_json::json!({"type":"terminal.error","code":"provider_failed"}))
+        );
+        assert!(!frames.iter().any(is_terminal_closed));
+    }
+
+    #[tokio::test]
+    async fn provider_exit_remains_normal_close() {
+        let tickets = Arc::new(FakeTickets::new(context()));
+        let frames =
+            run_fake_session(Arc::clone(&tickets), Arc::new(FakeProvider::exit(Some(7)))).await;
+
+        assert_eq!(tickets.closed(), 1);
+        assert_eq!(tickets.failed(), 0);
+        assert!(frames.contains(&serde_json::json!({"type":"terminal.exit","exitCode":7})));
+        assert!(!frames.iter().any(is_terminal_closed));
+    }
+
+    fn context() -> TerminalContext {
+        TerminalContext {
+            session: SessionId::try_new("session").unwrap(),
+            target: TargetId::try_new("target").unwrap(),
+            provider: ProviderId::try_new("ssh").unwrap(),
+            generation: Generation::FIRST,
+            node: fleet::topology::NodeId::try_new("node").unwrap(),
+            endpoint: platform::endpoint::EndpointId::try_new("endpoint").unwrap(),
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    async fn run_fake_session(
+        tickets: Arc<FakeTickets>,
+        provider: Arc<FakeProvider>,
+    ) -> Vec<serde_json::Value> {
+        let dependencies = ServerDependencies::new(tickets, provider);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_upgrade(
+                stream,
+                PATH.to_owned(),
+                "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
+                true,
+                dependencies,
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        read_upgrade_response(&mut client).await;
+        write_client_frame(
+            &mut client,
+            1,
+            serde_json::json!({"ticket": BASE64.encode(b"ticket")})
+                .to_string()
+                .as_bytes(),
+        )
+        .await;
+        let frames = read_json_until_close(&mut client).await;
+        server.await.unwrap();
+        frames
+    }
+
+    async fn read_upgrade_response(stream: &mut TcpStream) {
+        let mut bytes = Vec::new();
+        let mut b = [0; 128];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let n = stream.read(&mut b).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&b[..n]);
+        }
+    }
+
+    async fn write_client_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) {
+        assert!(payload.len() <= 125);
+        let mask = [1, 2, 3, 4];
+        let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
+        stream.write_all(&frame).await.unwrap();
+    }
+
+    async fn read_json_until_close(stream: &mut TcpStream) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        loop {
+            let mut head = [0; 2];
+            stream.read_exact(&mut head).await.unwrap();
+            let opcode = head[0] & 0x0f;
+            let length = match head[1] & 0x7f {
+                126 => {
+                    let mut b = [0; 2];
+                    stream.read_exact(&mut b).await.unwrap();
+                    u16::from_be_bytes(b) as usize
+                }
+                127 => {
+                    let mut b = [0; 8];
+                    stream.read_exact(&mut b).await.unwrap();
+                    u64::from_be_bytes(b) as usize
+                }
+                n => n as usize,
+            };
+            let mut payload = vec![0; length];
+            stream.read_exact(&mut payload).await.unwrap();
+            if opcode == 8 {
+                break;
+            }
+            if opcode == 1 {
+                frames.push(serde_json::from_slice(&payload).unwrap());
+            }
+        }
+        frames
+    }
+
+    fn is_terminal_closed(value: &serde_json::Value) -> bool {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("terminal.closed")
+    }
+
+    struct FakeTickets {
+        context: TerminalContext,
+        closed: StdMutex<usize>,
+        failed: StdMutex<usize>,
+    }
+
+    impl FakeTickets {
+        fn new(context: TerminalContext) -> Self {
+            Self {
+                context,
+                closed: StdMutex::new(0),
+                failed: StdMutex::new(0),
+            }
+        }
+
+        fn closed(&self) -> usize {
+            *self.closed.lock().unwrap()
+        }
+
+        fn failed(&self) -> usize {
+            *self.failed.lock().unwrap()
+        }
+    }
+
+    impl TicketPort for FakeTickets {
+        fn consume(
+            &self,
+            ticket: Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<TerminalContext, TicketError>> + Send>> {
+            let context = self.context.clone();
+            Box::pin(async move {
+                if ticket == b"ticket" {
+                    Ok(context)
+                } else {
+                    Err(TicketError::Invalid)
+                }
+            })
+        }
+
+        fn close(
+            &self,
+            _session: SessionId,
+            _generation: Generation,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TicketError>> + Send>> {
+            *self.closed.lock().unwrap() += 1;
+            Box::pin(async { Ok(()) })
+        }
+
+        fn fail(
+            &self,
+            _session: SessionId,
+            _generation: Generation,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TicketError>> + Send>> {
+            *self.failed.lock().unwrap() += 1;
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    enum FakeProviderMode {
+        OpenError,
+        StreamError,
+        Exit(Option<i32>),
+    }
+
+    struct FakeProvider {
+        mode: FakeProviderMode,
+    }
+
+    impl FakeProvider {
+        fn open_error() -> Self {
+            Self {
+                mode: FakeProviderMode::OpenError,
+            }
+        }
+
+        fn stream_error() -> Self {
+            Self {
+                mode: FakeProviderMode::StreamError,
+            }
+        }
+
+        fn exit(code: Option<i32>) -> Self {
+            Self {
+                mode: FakeProviderMode::Exit(code),
+            }
+        }
+    }
+
+    impl TerminalProvider for FakeProvider {
+        fn open(&self, _context: TerminalContext) -> super::super::provider::ProviderFuture {
+            let mode = match self.mode {
+                FakeProviderMode::OpenError => FakeProviderMode::OpenError,
+                FakeProviderMode::StreamError => FakeProviderMode::StreamError,
+                FakeProviderMode::Exit(code) => FakeProviderMode::Exit(code),
+            };
+            Box::pin(async move {
+                match mode {
+                    FakeProviderMode::OpenError => Err(ProviderError::message("open failed")),
+                    FakeProviderMode::StreamError => {
+                        let (command_tx, _) = mpsc::channel(1);
+                        let (event_tx, events) = mpsc::channel(1);
+                        event_tx
+                            .send(Err(ProviderError::message("stream failed")))
+                            .await
+                            .unwrap();
+                        Ok(TerminalProviderOpen {
+                            commands: command_tx,
+                            events,
+                        })
+                    }
+                    FakeProviderMode::Exit(code) => {
+                        let (command_tx, _) = mpsc::channel(1);
+                        let (event_tx, events) = mpsc::channel(1);
+                        event_tx
+                            .send(Ok(ProviderEvent::Exit { code }))
+                            .await
+                            .unwrap();
+                        Ok(TerminalProviderOpen {
+                            commands: command_tx,
+                            events,
+                        })
+                    }
+                }
+            })
+        }
     }
 }
 
@@ -598,6 +940,14 @@ async fn write_json(stream: &mut TcpStream, value: serde_json::Value) -> io::Res
     let body = value.to_string();
     write_frame(stream, 1, body.as_bytes()).await
 }
+
+fn terminal_exit_frame(code: Option<i32>) -> serde_json::Value {
+    match code {
+        Some(code) => serde_json::json!({"type":"terminal.exit","exitCode":code}),
+        None => serde_json::json!({"type":"terminal.exit"}),
+    }
+}
+
 fn parse_ticket(payload: &[u8]) -> Option<Vec<u8>> {
     let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let object = value.as_object()?;

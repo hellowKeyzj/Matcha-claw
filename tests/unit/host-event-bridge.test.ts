@@ -198,6 +198,52 @@ describe('host event bridge', () => {
     });
   });
 
+  it('bridges Matcha lifecycle as independent app-server status without refreshing OpenClaw gateway', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const send = vi.fn();
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => ({ webContents: { send } }) as never,
+      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
+    });
+    await flushBridge();
+    eventBus.emit.mockClear();
+    send.mockClear();
+
+    runtimeHost.emitSafeEvent({
+      type: 'matcha.lifecycle',
+      lifecycle: 'running',
+      ready: true,
+      observedAtMs: 1_725_000_000_000,
+    });
+    await flushBridge();
+
+    expect(eventBus.emit).toHaveBeenCalledWith('matcha-agent:status', {
+      processState: 'running',
+      port: null,
+      pid: null,
+      ready: true,
+      lastError: null,
+      updatedAt: 1_725_000_000_000,
+    });
+    expect(eventBus.emit.mock.calls.some(([eventName]) => eventName === 'gateway:status')).toBe(false);
+    expect(send).toHaveBeenCalledWith('host:event', {
+      eventName: 'matcha-agent:status',
+      payload: {
+        processState: 'running',
+        port: null,
+        pid: null,
+        ready: true,
+        lastError: null,
+        updatedAt: 1_725_000_000_000,
+      },
+    });
+  });
+
   it('将 parent callback team:event 原样投影为 Renderer 事件', async () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
@@ -228,41 +274,6 @@ describe('host event bridge', () => {
     expect(send).toHaveBeenCalledWith('host:event', {
       eventName: 'team:event',
       payload,
-    });
-  });
-
-  it('将 parent callback runtime-job done/progress 原样投影为 Renderer 事件', async () => {
-    const runtimeHost = createRuntimeHost({});
-    const eventBus = createEventBus();
-    const send = vi.fn();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
-
-    registerHostEventBridge({
-      runtimeHost,
-      hostEventBus: eventBus as never,
-      getMainWindow: () => ({ webContents: { send } }) as never,
-      rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
-    });
-
-    const donePayload = {
-      jobId: 'job-1',
-      result: { status: 'completed', native: { privateValue: 'opaque' } },
-    };
-    const progressPayload = {
-      jobId: 'job-1',
-      progress: 0.5,
-      native: { privateValue: 'opaque-progress' },
-    };
-    eventBus.emit('runtime-job:done', donePayload);
-    eventBus.emit('runtime-job:progress', progressPayload);
-
-    expect(send).toHaveBeenCalledWith('host:event', {
-      eventName: 'runtime-job:done',
-      payload: donePayload,
-    });
-    expect(send).toHaveBeenCalledWith('host:event', {
-      eventName: 'runtime-job:progress',
-      payload: progressPayload,
     });
   });
 
@@ -552,6 +563,46 @@ describe('host event bridge', () => {
           phase: 'started', activeRunId: null, issue: null,
         } }],
       }),
+    });
+
+    expect(eventBus.emit).toHaveBeenCalledTimes(1);
+    expect(eventBus.emit).toHaveBeenCalledWith('session.delta', expect.objectContaining({ routeKey }));
+    expect(routes.matchesSession(routeKey, 'session-1')).toBe(false);
+  });
+
+  it('在 terminal runtimeChanged 后释放 route，并拒绝后续 stale delta', async () => {
+    const runtimeHost = createRuntimeHost({});
+    const eventBus = createEventBus();
+    const routes = new RendererEventRouteRegistry();
+    const routeKey = routes.issue({
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    });
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+
+    registerHostEventBridge({
+      runtimeHost,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+      rendererEventRoutes: routes,
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({
+        routeKey,
+        changes: [{ kind: 'runtimeChanged', runtime: {
+          phase: 'failed', activeRunId: null, issue: 'unavailable',
+        } }],
+      }),
+    });
+    runtimeHost.emitSafeEvent({
+      type: 'session.delta',
+      delta: createSessionDelta({ routeKey, seq: 2, cursor: 2 }),
     });
 
     expect(eventBus.emit).toHaveBeenCalledTimes(1);

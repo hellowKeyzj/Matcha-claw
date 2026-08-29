@@ -4,6 +4,7 @@ import {
   hostSessionUnarchive,
   hostSessionUpdateStatus,
   hostSessionList,
+  hostSessionNew,
   hostSessionPrompt,
   hostSessionWindowFetch,
 } from '@/lib/host-api';
@@ -12,6 +13,8 @@ import {
   type RuntimeEndpointRef,
   type SessionIdentity,
 } from '../../../electron/desktop-contract/runtime-address';
+import { buildSessionOperationTarget, type SessionOperationTarget } from './session-operation-target';
+export type { SessionOperationTarget } from './session-operation-target';
 import type { SessionRenderItem } from '../../types/session/render-item';
 import { decodeHistorySessionView, resolveSessionViewError } from '@/stores/chat/history-fetch-helpers';
 import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
@@ -27,23 +30,15 @@ export interface AssistantSnapshot {
   toolNames: string[];
 }
 
-export interface FetchChatHistoryInput {
-  sessionKey: string;
-  sessionIdentity: SessionIdentity;
-  endpointSessionId?: string;
+export interface FetchChatHistoryInput extends SessionOperationTarget {
   limit?: number;
 }
 
-export interface FetchChatTimelineInput {
-  sessionKey: string;
-  sessionIdentity: SessionIdentity;
-  endpointSessionId?: string;
+export interface FetchChatTimelineInput extends SessionOperationTarget {
   limit?: number;
 }
 
-export interface SendChatMessageInput {
-  sessionKey: string;
-  sessionIdentity: SessionIdentity;
+export interface SendChatMessageInput extends SessionOperationTarget {
   message: string;
   deliver?: boolean;
   idempotencyKey?: string;
@@ -60,14 +55,32 @@ export interface ListSessionsInput {
   offset?: number;
 }
 
+export interface CreateSessionInput {
+  endpoint: RuntimeEndpointRef;
+  agentId: string;
+  endpointSessionId?: string;
+}
+
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
+
+export async function createSessionTarget(input: CreateSessionInput): Promise<SessionOperationTarget> {
+  const view = decodeHistorySessionView(await hostSessionNew(input));
+  return buildSessionOperationTarget({
+    endpoint: {
+      kind: 'native-runtime',
+      runtimeAdapterId: view.identity.endpoint.runtimeAdapterId,
+      runtimeInstanceId: view.identity.endpoint.runtimeInstanceId,
+    },
+    agentId: view.identity.agentId ?? input.agentId,
+    sessionKey: view.identity.sessionKey,
+  }, view.endpointSessionId);
+}
 
 export async function fetchChatTimeline(
   input: FetchChatTimelineInput,
 ): Promise<SessionRenderItem[]> {
   try {
     const view = decodeHistorySessionView(await hostSessionWindowFetch({
-      sessionKey: input.sessionKey,
       ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
       sessionIdentity: input.sessionIdentity,
       mode: 'latest',
@@ -120,7 +133,7 @@ export async function sendChatMessage(
   input: SendChatMessageInput,
 ): Promise<Awaited<ReturnType<typeof hostSessionPrompt>>> {
   return await hostSessionPrompt({
-    sessionKey: input.sessionKey,
+    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
     sessionIdentity: input.sessionIdentity,
     message: input.message,
     deliver: input.deliver,
@@ -132,21 +145,18 @@ export async function deleteSession(
   input: DeleteSessionInput,
 ): Promise<void> {
   await hostSessionDelete({
-    sessionKey: input.key,
     sessionIdentity: input.sessionIdentity,
   });
 }
 
 export async function archiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionArchive({
-    sessionKey: input.key,
     sessionIdentity: input.sessionIdentity,
   });
 }
 
 export async function unarchiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionUnarchive({
-    sessionKey: input.key,
     sessionIdentity: input.sessionIdentity,
   });
 }
@@ -157,7 +167,6 @@ export async function updateSessionStatus(input: {
   status: 'active' | 'completed' | 'archived' | 'deleted';
 }): Promise<void> {
   await hostSessionUpdateStatus({
-    sessionKey: input.key,
     sessionIdentity: input.sessionIdentity,
     status: input.status,
   });
@@ -169,7 +178,6 @@ export async function listSessions(
   const result = await hostSessionList({ endpoint: input.endpoint });
   return result.sessions.map((session) => ({
     key: buildSessionIdentityKey(session.sessionIdentity),
-    backendSessionKey: session.key,
     agentId: session.agentId,
     sessionIdentity: session.sessionIdentity,
     kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'

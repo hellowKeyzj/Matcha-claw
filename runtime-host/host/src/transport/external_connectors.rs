@@ -167,7 +167,6 @@ fn is_private_system_runtime_connector(connector: &environment::Connector) -> bo
         .as_ref()
         .is_some_and(|program| {
             matches!(program.source, environment::McpProgramSource::SystemRuntime)
-                && program.program_id.as_deref() == Some("system-runtime:matcha")
         })
 }
 

@@ -120,6 +120,6 @@ Renderer 不直接得到 child outer envelope。Electron Host API proxy：
 | Electron → child `/dispatch` | 默认 `30s`，请求可覆盖 | [runtime-host-client.ts](../../electron/main/runtime-host-client.ts#L12-L13) |
 | Electron → child `/health` | `min(request timeout, 3s)` | [runtime-host-client.ts](../../electron/main/runtime-host-client.ts#L191-L217) |
 | child → Electron shell callback | `15s` | [parent-transport-client.ts](../../runtime-host/composition/parent-transport-client.ts) |
-| child → Electron gateway/job event | `3s`，best effort | [parent-transport-client.ts](../../runtime-host/composition/parent-transport-client.ts) |
+| child → Electron gateway event | `3s`，best effort | [parent-transport-client.ts](../../runtime-host/composition/parent-transport-client.ts) |
 
 `docs/runtime-host-transport-v1.md` 仍写 main→child default dispatch timeout 为 `15s`，与当前 Electron client 不一致；本基线记录实际源码为 `30s`，正式治理决定见 [open-items.md](open-items.md)。

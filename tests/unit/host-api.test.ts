@@ -263,10 +263,7 @@ describe('host-api', () => {
   });
 
   it('hostUvInstallAll uses the platform runtime install capability', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
-      success: true,
-      job: { id: 'job-uv', status: 'queued' },
-    }));
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true }));
 
     const { hostUvInstallAll } = await import('@/lib/host-api');
     await hostUvInstallAll(testRuntimeEndpoint);
@@ -276,37 +273,13 @@ describe('host-api', () => {
       expect.objectContaining({
         path: '/api/capabilities/execute',
         method: 'POST',
+        timeoutMs: 120000,
         body: JSON.stringify({
           id: 'platform.runtime',
           operationId: 'toolchain.installUv',
           scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          target: { kind: 'runtime-job' },
+          target: { kind: 'platform-runtime' },
           input: {},
-        }),
-      }),
-    );
-  });
-
-  it('hostRuntimeJobGet binds the job id in target and input', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
-      success: true,
-      job: null,
-    }));
-
-    const { hostRuntimeJobGet } = await import('@/lib/host-api');
-    await hostRuntimeJobGet('job-uv', testRuntimeEndpoint);
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/capabilities/execute',
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'runtime.host',
-          operationId: 'runtimeHost.jobGet',
-          scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          target: { kind: 'runtime-job', jobId: 'job-uv' },
-          input: { jobId: 'job-uv' },
         }),
       }),
     );
@@ -536,8 +509,8 @@ describe('host-api', () => {
       .mockResolvedValueOnce(proxyEnvelope({ capabilities: [] }))
       .mockResolvedValueOnce(proxyEnvelope({
         capabilities: [{
-          id: 'runtime.host',
-          kind: 'runtime-host',
+          id: 'platform.runtime',
+          kind: 'platform-runtime',
           scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
           scopeKind: 'runtime-instance',
           runtimeAdapterId: 'openclaw',
@@ -546,10 +519,10 @@ describe('host-api', () => {
           supportLevel: 'native',
           availability: 'available',
           operations: [],
-          policyScope: 'runtime.host',
+          policyScope: 'platform.runtime',
         }, {
-          id: 'runtime.host',
-          kind: 'runtime-host',
+          id: 'platform.runtime',
+          kind: 'platform-runtime',
           scope: { kind: 'runtime-instance', endpoint: { ...testRuntimeEndpoint, runtimeInstanceId: 'workspace-b' } },
           scopeKind: 'runtime-instance',
           runtimeAdapterId: 'openclaw',
@@ -558,21 +531,21 @@ describe('host-api', () => {
           supportLevel: 'native',
           availability: 'available',
           operations: [],
-          policyScope: 'runtime.host',
+          policyScope: 'platform.runtime',
         }],
       }));
 
     const { resolveSingleCapabilityScope } = await import('@/lib/host-api');
 
-    await expect(resolveSingleCapabilityScope('runtime.host')).rejects.toThrow('available scopes: none');
-    await expect(resolveSingleCapabilityScope('runtime.host')).rejects.toThrow('got 2; available scopes:');
+    await expect(resolveSingleCapabilityScope('platform.runtime')).rejects.toThrow('available scopes: none');
+    await expect(resolveSingleCapabilityScope('platform.runtime')).rejects.toThrow('got 2; available scopes:');
   });
 
   it('resolveSingleCapabilityScope shares inflight capability list requests', async () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
       capabilities: [{
-        id: 'runtime.host',
-        kind: 'runtime-host',
+        id: 'platform.runtime',
+        kind: 'platform-runtime',
         scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
         scopeKind: 'runtime-instance',
         runtimeAdapterId: 'openclaw',
@@ -581,14 +554,14 @@ describe('host-api', () => {
         supportLevel: 'native',
         availability: 'available',
         operations: [],
-        policyScope: 'runtime.host',
+        policyScope: 'platform.runtime',
       }],
     }));
 
     const { resolveSingleCapabilityScope } = await import('@/lib/host-api');
     const [first, second] = await Promise.all([
-      resolveSingleCapabilityScope('runtime.host'),
-      resolveSingleCapabilityScope('runtime.host'),
+      resolveSingleCapabilityScope('platform.runtime'),
+      resolveSingleCapabilityScope('platform.runtime'),
     ]);
 
     expect(first).toEqual({ kind: 'runtime-instance', endpoint: testRuntimeEndpoint });
@@ -596,20 +569,24 @@ describe('host-api', () => {
     expect(invokeIpcMock).toHaveBeenCalledTimes(1);
   });
 
-  it('hostCapabilityExecute 保持内部化且不暴露命名过渡出口', async () => {
+  it('hostCapabilityExecute 保持内部化且不暴露旧 runtime host active 出口', async () => {
     const source = await readFile(join(process.cwd(), 'src/lib/host-api.ts'), 'utf8');
 
     expect(source).toContain('async function hostCapabilityExecute');
     expect(source).not.toContain('export async function hostCapabilityExecute');
     expect(source).not.toContain('hostNamedCapabilityExecute');
+    expect(source).not.toContain('runtimeHostCapabilityExecute');
+    expect(source).not.toContain('hostRuntimePrepareGatewayLaunch');
+    expect(source).not.toContain('hostRuntimeGatewayLifecycle');
+    expect(source).not.toContain('hostRuntimeGatewayReady');
+    expect(source).not.toContain('hostRuntimeGatewayControlUiAutoApprove');
   });
 
   it('hostSessionLoad executes the session load capability and preserves timeoutMs', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ snapshot: { sessionKey: 'agent:main:main' } }));
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ snapshot: { sessionKey: testSessionIdentity.sessionKey } }));
 
     const { hostSessionLoad } = await import('@/lib/host-api');
     await hostSessionLoad({
-      sessionKey: 'agent:main:main',
       sessionIdentity: testSessionIdentity,
     }, { timeoutMs: 35000 });
 
@@ -625,8 +602,8 @@ describe('host-api', () => {
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
-            sessionKey: 'agent:main:main',
             sessionIdentity: testSessionIdentity,
+            sessionKey: testSessionIdentity.sessionKey,
           },
         }),
       }),
@@ -640,7 +617,6 @@ describe('host-api', () => {
     await hostSessionNew({
       endpoint: testRuntimeEndpoint,
       agentId: 'main',
-      sessionKey: 'agent:main:session-1',
       endpointSessionId: 'session-1',
     });
 
@@ -657,7 +633,6 @@ describe('host-api', () => {
           input: {
             endpoint: testRuntimeEndpoint,
             agentId: 'main',
-            sessionKey: 'agent:main:session-1',
             endpointSessionId: 'session-1',
           },
         }),
@@ -682,7 +657,6 @@ describe('host-api', () => {
 
     const { hostSessionWindowFetch } = await import('@/lib/host-api');
     await hostSessionWindowFetch({
-      sessionKey: 'agent:main:main',
       sessionIdentity: testSessionIdentity,
       mode: 'latest',
       limit: 50,
@@ -699,10 +673,10 @@ describe('host-api', () => {
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
-            sessionKey: 'agent:main:main',
             sessionIdentity: testSessionIdentity,
             mode: 'latest',
             limit: 50,
+            sessionKey: testSessionIdentity.sessionKey,
           },
         }),
       }),
@@ -774,7 +748,6 @@ describe('host-api', () => {
 
     const { hostSessionPrompt } = await import('@/lib/host-api');
     await expect(hostSessionPrompt({
-      sessionKey: testSessionIdentity.sessionKey,
       sessionIdentity: testSessionIdentity,
       message: 'Review the image',
       idempotencyKey: 'user-local-media-1',
@@ -804,7 +777,6 @@ describe('host-api', () => {
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
-            sessionKey: testSessionIdentity.sessionKey,
             sessionIdentity: testSessionIdentity,
             message: 'Review the image',
             idempotencyKey: 'user-local-media-1',
@@ -815,6 +787,7 @@ describe('host-api', () => {
               fileName: 'image.png',
               fileSize: 5,
             }],
+            sessionKey: testSessionIdentity.sessionKey,
           },
         }),
       }),
@@ -822,11 +795,11 @@ describe('host-api', () => {
   });
 
   it('hostSessionPatch executes the session model selection capability', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, snapshot: { sessionKey: 'agent:main:main' } }));
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, snapshot: { sessionKey: testSessionIdentity.sessionKey } }));
 
     const { hostSessionPatch } = await import('@/lib/host-api');
     await hostSessionPatch({
-      sessionKey: 'agent:main:main',
+      endpointSessionId: 'main',
       sessionIdentity: testSessionIdentity,
       modelSelectionId: 'anthropic:claude-sonnet-4-6',
     });
@@ -836,16 +809,17 @@ describe('host-api', () => {
       expect.objectContaining({
         path: '/api/capabilities/execute',
         method: 'POST',
-        timeoutMs: 15000,
+        timeoutMs: 30000,
         body: JSON.stringify({
           id: 'session.modelSelection',
           operationId: 'sessions.patchModel',
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'model-selection', identity: testSessionIdentity, modelSelectionId: 'anthropic:claude-sonnet-4-6' },
           input: {
-            sessionKey: 'agent:main:main',
+            endpointSessionId: 'main',
             sessionIdentity: testSessionIdentity,
             modelSelectionId: 'anthropic:claude-sonnet-4-6',
+            sessionKey: testSessionIdentity.sessionKey,
           },
         }),
       }),
@@ -858,9 +832,9 @@ describe('host-api', () => {
     const { hostSessionResolveApproval } = await import('@/lib/host-api');
     await hostSessionResolveApproval({
       id: 'approval-1',
-      sessionKey: testSessionIdentity.sessionKey,
+      endpointSessionId: 'main',
       sessionIdentity: testSessionIdentity,
-      decision: 'allow',
+      decision: 'allow-once',
     });
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
@@ -875,9 +849,10 @@ describe('host-api', () => {
           target: { kind: 'approval', identity: testSessionIdentity, approvalId: 'approval-1' },
           input: {
             id: 'approval-1',
-            sessionKey: testSessionIdentity.sessionKey,
+            endpointSessionId: 'main',
             sessionIdentity: testSessionIdentity,
-            decision: 'allow',
+            decision: 'allow-once',
+            sessionKey: testSessionIdentity.sessionKey,
           },
         }),
       }),
@@ -888,7 +863,7 @@ describe('host-api', () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ approvals: [] }));
 
     const { hostSessionApprovals } = await import('@/lib/host-api');
-    await hostSessionApprovals({ sessionIdentity: testSessionIdentity });
+    await hostSessionApprovals({ sessionIdentity: testSessionIdentity, endpointSessionId: 'main' });
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
@@ -900,7 +875,7 @@ describe('host-api', () => {
           operationId: 'approvals.list',
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
-          input: { sessionIdentity: testSessionIdentity },
+          input: { sessionIdentity: testSessionIdentity, endpointSessionId: 'main' },
         }),
       }),
     );

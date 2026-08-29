@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use super::{
@@ -29,6 +29,9 @@ use crate::{
     },
 };
 use crate::{TeamDecisionCommand, TeamDecisionReceipt};
+
+const WRITER_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITER_LOCK_POLL: Duration = Duration::from_millis(1);
 
 pub struct OrganizationStore {
     path: PathBuf,
@@ -74,8 +77,45 @@ impl OrganizationStore {
         })
     }
 
+    pub fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+        let path = path.into();
+        ensure_parent_directory(&path)?;
+        let lock_path = lock_path(&path);
+        let recovered = match File::open(&path) {
+            Ok(file) => recover_log(file)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Self::open(path),
+            Err(error) => return Err(StoreFault::Read(error.kind())),
+        };
+        Ok(Self {
+            path,
+            lock_path,
+            facts: recovered.facts,
+            epoch: recovered.epoch,
+            requires_reopen: false,
+        })
+    }
+
     pub fn facts(&self) -> &OrganizationFacts {
         &self.facts
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn reopen(&mut self) -> Result<(), StoreFault> {
+        let reopened = Self::open(self.path.clone())?;
+        *self = reopened;
+        Ok(())
+    }
+
+    pub fn refresh(&mut self) -> Result<(), StoreFault> {
+        let recovered =
+            recover_log(File::open(&self.path).map_err(|error| StoreFault::Read(error.kind()))?)?;
+        self.facts = recovered.facts;
+        self.epoch = recovered.epoch;
+        self.requires_reopen = false;
+        Ok(())
     }
 
     pub fn task_board(&self) -> &crate::run::TaskBoardFacts {
@@ -1020,17 +1060,24 @@ struct WriterLock {
 
 impl WriterLock {
     fn acquire(path: &Path) -> Result<Self, StoreFault> {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(file) => {
-                drop(file);
-                Ok(Self {
-                    path: path.to_owned(),
-                })
+        let started = SystemTime::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self {
+                        path: path.to_owned(),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let elapsed = started.elapsed().unwrap_or_default();
+                    if elapsed >= WRITER_LOCK_TIMEOUT {
+                        return Err(StoreFault::WriterBusy);
+                    }
+                    std::thread::sleep(WRITER_LOCK_POLL.min(WRITER_LOCK_TIMEOUT - elapsed));
+                }
+                Err(error) => return Err(StoreFault::Lock(error.kind())),
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                Err(StoreFault::WriterBusy)
-            }
-            Err(error) => Err(StoreFault::Lock(error.kind())),
         }
     }
 

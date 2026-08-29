@@ -88,22 +88,26 @@ pub(crate) enum Command {
     SkillConfiguration {
         endpoint: NativeEndpoint,
         agent_id: String,
+        trace_id: Option<String>,
     },
     SetSkillConfiguration {
         endpoint: NativeEndpoint,
         agent_id: String,
         revision: String,
         selection: SkillSelection,
+        trace_id: Option<String>,
     },
     ToolConfiguration {
         endpoint: NativeEndpoint,
         agent_id: String,
+        trace_id: Option<String>,
     },
     SetToolConfiguration {
         endpoint: NativeEndpoint,
         agent_id: String,
         revision: String,
         selection: ToolSelection,
+        trace_id: Option<String>,
     },
 }
 

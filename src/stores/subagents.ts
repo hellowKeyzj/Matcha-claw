@@ -5,7 +5,6 @@ import {
 } from '../../electron/desktop-contract/runtime-address';
 import type {
   AgentScope,
-  SessionIdentity,
 } from '../../electron/desktop-contract/runtime-address';
 import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 import { buildLineDiff } from '@/lib/line-diff';
@@ -29,10 +28,12 @@ import {
   waitAgentRunWithProgress,
 } from '@/services/openclaw/agent-runtime';
 import {
+  createSessionTarget,
   deleteSession,
   fetchLatestAssistantTurnText,
   sendChatMessage,
 } from '@/services/runtime/session-runtime';
+import type { SessionOperationTarget } from '@/services/runtime/session-operation-target';
 import {
   buildSubagentWorkspacePath,
   hasSubagentNameConflict,
@@ -78,18 +79,6 @@ let configDisplayReadSeq = 0;
 let configDisplayGeneration = 0;
 let queuedLoadAgentsTask: Promise<void> | null = null;
 let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
-
-function buildDraftSessionKey(agentId: string): string {
-  return `agent:${agentId}:subagent-draft`;
-}
-
-function buildAgentSessionIdentity(scope: AgentScope, sessionKey: string): SessionIdentity {
-  return {
-    endpoint: scope.endpoint,
-    agentId: scope.agentId,
-    sessionKey,
-  };
-}
 
 function buildSubagentScope(scope: AgentScope, agentId: string): AgentScope {
   return agentScope(scope.endpoint, agentId);
@@ -212,7 +201,7 @@ interface SubagentsState {
   draftGeneratingByAgent: Record<string, boolean>;
   draftApplyingByAgent: Record<string, boolean>;
   draftApplySuccessByAgent: Record<string, boolean>;
-  draftSessionKeyByAgent: Record<string, string>;
+  draftSessionTargetByAgent: Record<string, SessionOperationTarget>;
   draftRawOutputByAgent: Record<string, string>;
   draftIncludeCurrentFilesByAgent: Record<string, boolean>;
   persistedFilesByAgent: Record<string, Partial<Record<SubagentTargetFile, string>>>;
@@ -1032,22 +1021,19 @@ async function updateAgentWithCreateBarrier(params: {
 }
 
 async function waitForDraftOutputFromHistory(
-  sessionKey: string,
-  sessionIdentity: SessionIdentity,
+  target: SessionOperationTarget,
 ): Promise<string> {
-  return waitForDraftOutputFromHistoryWithTimeout(sessionKey, sessionIdentity, DRAFT_HISTORY_READ_TIMEOUT_MS);
+  return waitForDraftOutputFromHistoryWithTimeout(target, DRAFT_HISTORY_READ_TIMEOUT_MS);
 }
 
 async function waitForDraftOutputFromHistoryWithTimeout(
-  sessionKey: string,
-  sessionIdentity: SessionIdentity,
+  target: SessionOperationTarget,
   timeoutMs: number,
 ): Promise<string> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const output = await fetchLatestAssistantTurnText({
-      sessionKey,
-      sessionIdentity,
+      ...target,
       limit: 20,
     });
     if (output) {
@@ -1083,14 +1069,14 @@ async function waitAgentRunSlice(input: {
 
 async function waitForRunCompletion(
   runId: string,
-  sessionKey: string,
+  target: SessionOperationTarget,
   scope: AgentScope,
-  sessionIdentity: SessionIdentity,
 ): Promise<void> {
   await waitAgentRunWithProgress(null, {
     runId,
-    sessionKey,
-    sessionIdentity,
+    sessionKey: target.sessionKey,
+    ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
+    sessionIdentity: target.sessionIdentity,
     waitScope: scope,
     waitSliceMs: 30000,
     idleTimeoutMs: DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS,
@@ -1100,18 +1086,16 @@ async function waitForRunCompletion(
   });
 }
 
-async function cleanupSession(sessionKey: string, sessionIdentity: SessionIdentity): Promise<void> {
-  await deleteSession({ key: sessionKey, sessionIdentity });
+async function cleanupSession(target: SessionOperationTarget): Promise<void> {
+  await deleteSession({ key: target.sessionKey, sessionIdentity: target.sessionIdentity });
 }
 
 async function cleanupDraftSessionForAgent(agentId: string, getState: () => SubagentsState): Promise<void> {
-  const sessionKey = getState().draftSessionKeyByAgent[agentId];
-  if (!sessionKey) {
+  const target = getState().draftSessionTargetByAgent[agentId];
+  if (!target) {
     return;
   }
-  const managementScope = await resolveSubagentManagementScope();
-  const scope = buildSubagentScope(managementScope, agentId);
-  await cleanupSession(sessionKey, buildAgentSessionIdentity(scope, sessionKey));
+  await cleanupSession(target);
 }
 
 function normalizeAgentFileContent(result: AgentFileGetResult): string {
@@ -1280,7 +1264,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   draftGeneratingByAgent: {},
   draftApplyingByAgent: {},
   draftApplySuccessByAgent: {},
-  draftSessionKeyByAgent: {},
+  draftSessionTargetByAgent: {},
   draftRawOutputByAgent: {},
   draftIncludeCurrentFilesByAgent: {},
   persistedFilesByAgent: {},
@@ -1495,7 +1479,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       set({ error: getErrorMessage(error) || 'Failed to cleanup draft session' });
     } finally {
       set((state) => {
-        const nextSessionMap = { ...state.draftSessionKeyByAgent };
+        const nextSessionMap = { ...state.draftSessionTargetByAgent };
         delete nextSessionMap[agentId];
         const nextApplyingByAgent = { ...state.draftApplyingByAgent };
         delete nextApplyingByAgent[agentId];
@@ -1514,7 +1498,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             ...state.draftApplySuccessByAgent,
             [agentId]: false,
           },
-          draftSessionKeyByAgent: nextSessionMap,
+          draftSessionTargetByAgent: nextSessionMap,
         };
       });
     }
@@ -1946,13 +1930,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       set({ error: message, draftError: message });
       throw new Error(message);
     }
-    const existingSessionKey = get().draftSessionKeyByAgent[agentId];
-    const sessionKey = existingSessionKey || buildDraftSessionKey(agentId);
-    const sessionIdentity = buildAgentSessionIdentity(scope, sessionKey);
-    let persistedFiles = includeCurrentFiles && !existingSessionKey
+    const existingSessionTarget = get().draftSessionTargetByAgent[agentId];
+    let persistedFiles = includeCurrentFiles && !existingSessionTarget
       ? get().persistedFilesByAgent[agentId]
       : {};
-    if (includeCurrentFiles && !existingSessionKey && !persistedFiles) {
+    if (includeCurrentFiles && !existingSessionTarget && !persistedFiles) {
       persistedFiles = await get().loadPersistedFilesForAgent(agentId);
     }
     beginGlobalMutating(set);
@@ -1966,10 +1948,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         ...state.draftApplySuccessByAgent,
         [agentId]: false,
       },
-      draftSessionKeyByAgent: {
-        ...state.draftSessionKeyByAgent,
-        [agentId]: sessionKey,
-      },
       draftGeneratingByAgent: {
         ...state.draftGeneratingByAgent,
         [agentId]: true,
@@ -1977,29 +1955,40 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }));
     let lastModelOutput = '';
     try {
+      const sessionTarget = existingSessionTarget ?? await createSessionTarget({
+        endpoint: scope.endpoint,
+        agentId: scope.agentId,
+        endpointSessionId: 'subagent-draft',
+      });
+      if (!existingSessionTarget) {
+        set((state) => ({
+          draftSessionTargetByAgent: {
+            ...state.draftSessionTargetByAgent,
+            [agentId]: sessionTarget,
+          },
+        }));
+      }
       const payload = buildSubagentPromptPayload(trimmedPrompt, {
-        includeCurrentFiles: includeCurrentFiles && !existingSessionKey,
+        includeCurrentFiles: includeCurrentFiles && !existingSessionTarget,
         persistedFilesByName: persistedFiles ?? {},
       });
       const baseMessage = `${payload.systemPrompt}\n\n${payload.userPrompt}`;
       const sendDraftMessage = async (message: string): Promise<string> => {
         const result = await sendChatMessage({
-          sessionKey,
-          sessionIdentity,
+          ...sessionTarget,
           message,
           deliver: false,
           idempotencyKey: crypto.randomUUID(),
         });
         const runId = typeof result.runId === 'string' ? result.runId.trim() : '';
         if (runId) {
-          await waitForRunCompletion(runId, sessionKey, scope, sessionIdentity);
+          await waitForRunCompletion(runId, sessionTarget, scope);
           return waitForDraftOutputFromHistoryWithTimeout(
-            sessionKey,
-            sessionIdentity,
+            sessionTarget,
             DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS,
           );
         }
-        return waitForDraftOutputFromHistory(sessionKey, sessionIdentity);
+        return waitForDraftOutputFromHistory(sessionTarget);
       };
 
       let outputText = await sendDraftMessage(baseMessage);

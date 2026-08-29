@@ -49,8 +49,8 @@ describe('chat workspace layout', () => {
 
     expect(resolveChatSidePanelLayout(false, 1200)).toEqual({
       sidePanelOpen: false,
-      sidePanelMode: 'hidden',
-      sidePanelWidth: 0,
+      sidePanelMode: 'docked',
+      sidePanelWidth: CHAT_WORKSPACE_LAYOUT.sidePanelLightDefaultWidth,
     });
 
     expect(resolveChatSidePanelLayout(true, threshold - 1)).toEqual({

@@ -134,6 +134,127 @@ describe('fleet host API route', () => {
     expect(result.state).toEqual({ statusCode: 200, body: { outcome } });
   });
 
+  it.each([
+    ['/api/remote-fleet/start-runtime', 'runtimeId', 'runtime-1', 'fleet.runtimes.start.begin', 'runtimeStartBegin', 'start-runtime', 'startRuntime', 'runtimeLifecycleUpdated', 'queued'],
+    ['/api/remote-fleet/stop-runtime', 'runtimeId', 'runtime-1', 'fleet.runtimes.stop.begin', 'runtimeStopBegin', 'stop-runtime', 'stopRuntime', 'runtimeLifecycleUpdated', 'queued'],
+    ['/api/remote-fleet/sync-capabilities', 'endpointId', 'endpoint-1', 'fleet.capabilities.sync.begin', 'capabilitySyncBegin', 'sync-capabilities', 'syncCapabilities', 'capabilitySyncStarted', 'queued'],
+  ] as const)('maps %s to a direct typed Fleet mutation begin request', async (pathname, field, id, operation, kind, action, command, outcome, status) => {
+    const mutate = vi.fn().mockResolvedValue({ status: 200, body: { outcome } });
+    const result = response();
+
+    await expect(handleFleetRoutes(
+      incomingJson({ [field]: id }),
+      result.raw as never,
+      new URL(`http://127.0.0.1${pathname}`),
+      { read: vi.fn(), mutate },
+    )).resolves.toBe(true);
+
+    expect(mutate).toHaveBeenCalledWith({
+      operation,
+      input: {
+        kind,
+        payload: {
+          id,
+          commandId: expect.stringMatching(new RegExp(`^${action}:${id}:\\d+$`)),
+        },
+      },
+    });
+    const commandId = mutate.mock.calls[0][0].input.payload.commandId;
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: {
+        outcome,
+        command: { id: commandId, [field]: id, command, status },
+      },
+    });
+  });
+
+  it.each([
+    ['/api/remote-fleet/probe', 'nodeId', 'node-1', 'probeNode', 'accepted', 'queued'],
+    ['/api/remote-fleet/install-agent', 'nodeId', 'node-1', 'installAgent', 'completed', 'succeeded'],
+  ] as const)('projects %s dispatch receipts into a renderer command payload', async (pathname, field, id, command, outcome, status) => {
+    const raw = {
+      outcome,
+      dispatchId: 'dispatch:command-1',
+      attempt: 1,
+      target: { id: 'target-1', revision: 3, kind: 'ssh' },
+    };
+    const mutate = vi.fn().mockResolvedValue({ status: 200, body: raw });
+    const result = response();
+
+    await handleFleetRoutes(
+      incomingJson({ [field]: id }),
+      result.raw as never,
+      new URL(`http://127.0.0.1${pathname}`),
+      { read: vi.fn(), mutate },
+    );
+
+    const commandId = mutate.mock.calls[0][0].input.payload.commandId;
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: {
+        ...raw,
+        command: {
+          id: commandId,
+          nodeId: id,
+          command,
+          status,
+        },
+      },
+    });
+  });
+
+  it.each([
+    ['/api/remote-fleet/probe-connection', 'connectionId', 'connection-1', 'probeConnection', 'probeCompleted', 'succeeded'],
+    ['/api/remote-fleet/probe-connection', 'connectionId', 'connection-1', 'probeConnection', 'probeRejected', 'failed'],
+    ['/api/remote-fleet/deploy-environment', 'environmentId', 'environment-1', 'deployEnvironment', 'deploymentCompleted', 'succeeded'],
+    ['/api/remote-fleet/deploy-environment', 'environmentId', 'environment-1', 'deployEnvironment', 'deploymentFailed', 'failed'],
+  ] as const)('projects %s owner-local receipts into a renderer command payload', async (pathname, field, id, command, outcome, status) => {
+    const mutate = vi.fn().mockResolvedValue({ status: 200, body: { outcome } });
+    const result = response();
+
+    await handleFleetRoutes(
+      incomingJson({ [field]: id }),
+      result.raw as never,
+      new URL(`http://127.0.0.1${pathname}`),
+      { read: vi.fn(), mutate },
+    );
+
+    const commandId = mutate.mock.calls[0][0].input.payload.commandId;
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: {
+        outcome,
+        command: { id: commandId, [field]: id, command, status },
+      },
+    });
+  });
+
+  it.each([
+    ['/api/remote-fleet/start-runtime', { runtimeId: '' }],
+    ['/api/remote-fleet/start-runtime', { endpointId: 'endpoint-1' }],
+    ['/api/remote-fleet/stop-runtime', { runtimeId: `runtime${String.fromCharCode(0)}id` }],
+    ['/api/remote-fleet/stop-runtime', { runtimeId: 42 }],
+    ['/api/remote-fleet/sync-capabilities', { endpointId: '' }],
+    ['/api/remote-fleet/sync-capabilities', { runtimeId: 'runtime-1' }],
+  ] as const)('rejects malformed direct Fleet mutation input on %s without dispatch', async (pathname, body) => {
+    const mutate = vi.fn();
+    const result = response();
+
+    await handleFleetRoutes(
+      incomingJson(body),
+      result.raw as never,
+      new URL(`http://127.0.0.1${pathname}`),
+      { read: vi.fn(), mutate },
+    );
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(result.state).toEqual({
+      statusCode: 400,
+      body: { success: false, error: 'Fleet request is invalid' },
+    });
+  });
+
   it('registers a connection through signed mutation and canonical readback', async () => {
     const read = vi.fn()
       .mockResolvedValue({
@@ -256,6 +377,24 @@ describe('fleet host API route', () => {
         registration: { status: 'accepted' },
       },
     });
+  });
+
+  it('does not handle legacy node registration or dispatch legacy upserts', async () => {
+    const transport = { read: vi.fn(), mutate: vi.fn() };
+    const result = response();
+
+    await expect(handleFleetRoutes(
+      incomingJson({ node: { id: 'node-1', connectionId: 'connection-1', enabled: true } }),
+      result.raw as never,
+      new URL('http://127.0.0.1/api/remote-fleet/register'),
+      transport,
+    )).resolves.toBe(false);
+
+    expect(transport.read).not.toHaveBeenCalled();
+    expect(transport.mutate).not.toHaveBeenCalledWith(expect.objectContaining({ operation: 'fleet.nodes.upsert' }));
+    expect(transport.mutate).not.toHaveBeenCalledWith(expect.objectContaining({ operation: 'fleet.agents.upsert' }));
+    expect(transport.mutate).not.toHaveBeenCalledWith(expect.objectContaining({ operation: 'fleet.runtimes.upsert' }));
+    expect(transport.mutate).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -417,7 +556,6 @@ describe('fleet host API route', () => {
   it.each([
     '/api/remote-fleet/register-connection',
     '/api/remote-fleet/register-environment',
-    '/api/remote-fleet/register',
     '/api/remote-fleet/probe-connection',
     '/api/remote-fleet/probe',
     '/api/remote-fleet/install-agent',

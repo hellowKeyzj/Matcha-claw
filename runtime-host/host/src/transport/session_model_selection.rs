@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_model_selection::{
+    sessions::model_selection::{
         NativeEndpoint, OpenClawPatchRejection, SessionModelSelectionCommand,
         SessionModelSelectionOutcome,
     },
@@ -16,6 +16,7 @@ const OPERATION_ID: &str = "sessions.patchModel";
 const AUTHORIZATION_ENDPOINT: &str = "/api/sessions/model";
 const AUTHORIZATION_SCOPE: &str = "sessions:write";
 const AUTHORIZATION_SUBJECT: &str = "session-model-selection";
+const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestError {
@@ -57,6 +58,7 @@ struct Target {
 struct Input {
     endpoint: Endpoint,
     session_key: String,
+    endpoint_session_id: Option<String>,
     model_selection_id: String,
 }
 
@@ -76,6 +78,13 @@ impl Endpoint {
             &self.runtime_instance_id,
         )
     }
+}
+
+fn valid_endpoint_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ENDPOINT_SESSION_ID_BYTES
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 impl SessionModelSelectionRequest {
@@ -111,17 +120,27 @@ impl SessionModelSelectionRequest {
             && self.target.kind == "model-selection"
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.parse().is_some()
-            && self.scope.session_key == self.input.session_key)
-            .then_some(())
-            .ok_or(RequestError::Invalid)
+            && self.scope.session_key == self.input.session_key
+            && self
+                .input
+                .endpoint_session_id
+                .as_deref()
+                .is_none_or(valid_endpoint_session_id))
+        .then_some(())
+        .ok_or(RequestError::Invalid)
     }
 
-    pub(crate) fn into_command(self) -> Result<SessionModelSelectionCommand, RequestError> {
+    pub(crate) fn into_command(
+        self,
+        trace_id: Option<String>,
+    ) -> Result<SessionModelSelectionCommand, RequestError> {
         SessionModelSelectionCommand::try_new(
             self.scope.endpoint.parse().ok_or(RequestError::Invalid)?,
             self.input.session_key,
+            self.input.endpoint_session_id,
             self.input.model_selection_id,
         )
+        .map(|command| command.with_trace_id(trace_id))
         .map_err(|_| RequestError::Invalid)
     }
 }
@@ -167,7 +186,7 @@ impl SessionModelSelectionDelivery {
 
     pub(crate) fn diagnostic(
         &self,
-    ) -> Option<&crate::session_model_selection::SessionModelSelectionDiagnostic> {
+    ) -> Option<&crate::sessions::model_selection::SessionModelSelectionDiagnostic> {
         match self {
             Self::Outcome(outcome) => outcome.diagnostic(),
             Self::Unsupported | Self::Unavailable => None,
@@ -226,21 +245,38 @@ mod tests {
     fn parses_supported_and_unsupported_native_endpoint_commands() {
         let openclaw = SessionModelSelectionRequest::decode_semantics(request("openclaw"))
             .unwrap()
-            .into_command()
+            .into_command(None)
             .unwrap();
         assert_eq!(openclaw.endpoint, NativeEndpoint::OpenClawLocal);
+        assert_eq!(openclaw.endpoint_session_id, None);
 
         let matcha = SessionModelSelectionRequest::decode_semantics(request("matcha-agent"))
             .unwrap()
-            .into_command()
+            .into_command(None)
             .unwrap();
         assert_eq!(matcha.endpoint, NativeEndpoint::MatchaAgentLocal);
 
         let unsupported = SessionModelSelectionRequest::decode_semantics(request("other-runtime"))
             .unwrap()
-            .into_command()
+            .into_command(None)
             .unwrap();
         assert_eq!(unsupported.endpoint, NativeEndpoint::Unsupported);
+    }
+
+    #[test]
+    fn preserves_endpoint_session_binding() {
+        let mut value = request("matcha-agent");
+        value["input"]["endpointSessionId"] = json!("native-session-1");
+
+        let command = SessionModelSelectionRequest::decode_semantics(value)
+            .unwrap()
+            .into_command(None)
+            .unwrap();
+        assert_eq!(command.session_key, "agent:main:demo");
+        assert_eq!(
+            command.endpoint_session_id.as_deref(),
+            Some("native-session-1")
+        );
     }
 
     #[test]
@@ -269,7 +305,7 @@ mod tests {
         ] {
             assert_eq!(
                 SessionModelSelectionRequest::decode_semantics(value)
-                    .and_then(SessionModelSelectionRequest::into_command),
+                    .and_then(|request| request.into_command(None)),
                 Err(RequestError::Invalid)
             );
         }

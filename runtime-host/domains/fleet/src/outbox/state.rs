@@ -15,6 +15,19 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn restore(records: impl IntoIterator<Item = OutboxRecord>) -> Result<Self, RestoreError> {
+        Self::restore_with_recovery(records, true)
+    }
+
+    pub(crate) fn restore_live(
+        records: impl IntoIterator<Item = OutboxRecord>,
+    ) -> Result<Self, RestoreError> {
+        Self::restore_with_recovery(records, false)
+    }
+
+    fn restore_with_recovery(
+        records: impl IntoIterator<Item = OutboxRecord>,
+        recover_interrupted_delivery: bool,
+    ) -> Result<Self, RestoreError> {
         let mut outbox = Self::default();
 
         for mut record in records {
@@ -28,7 +41,9 @@ impl Outbox {
                 return Err(RestoreError::DuplicateCommandId(command_id));
             }
 
-            record.recover_after_restore();
+            if recover_interrupted_delivery {
+                record.recover_after_restore();
+            }
             outbox
                 .dispatches_by_command_id
                 .insert(command_id, dispatch_id.clone());

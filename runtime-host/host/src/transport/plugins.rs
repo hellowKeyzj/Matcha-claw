@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{owner::Handle, transport::authorization::CapabilityDecisionVerifier};
+use crate::{facade::PluginsHandle, transport::authorization::CapabilityDecisionVerifier};
 
 pub(crate) const CATALOG_ENDPOINT: &str = "/api/plugins/catalog";
 pub(crate) const RUNTIME_ENDPOINT: &str = "/api/plugins/runtime";
@@ -22,7 +22,7 @@ pub(crate) enum RequestError {
 pub(crate) async fn catalog(
     headers: &[(String, String)],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Handle,
+    handle: PluginsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     verify(
@@ -35,8 +35,8 @@ pub(crate) async fn catalog(
         "plugin-catalog",
     )
     .await?;
-    owner
-        .plugins_catalog()
+    handle
+        .catalog()
         .await
         .map_err(|_| RequestError::Invalid)?
         .map(project_catalog)
@@ -46,7 +46,7 @@ pub(crate) async fn catalog(
 pub(crate) async fn runtime(
     headers: &[(String, String)],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Handle,
+    handle: PluginsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     verify(
@@ -59,8 +59,8 @@ pub(crate) async fn runtime(
         "plugin-runtime",
     )
     .await?;
-    owner
-        .plugins_runtime()
+    handle
+        .runtime()
         .await
         .map_err(|_| RequestError::Invalid)?
         .map(project_runtime)
@@ -124,7 +124,7 @@ pub(crate) async fn operation(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Handle,
+    handle: PluginsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     verify(
@@ -148,8 +148,8 @@ pub(crate) async fn operation(
         "uninstall" => crate::plugin::Operation::Uninstall,
         _ => return Err(RequestError::Invalid),
     };
-    let outcome = owner
-        .plugins_operation(operation, request.plugin_id)
+    let outcome = handle
+        .operation(operation, request.plugin_id)
         .await
         .map_err(|_| RequestError::Invalid)?;
     Ok(json!({ "outcome": match outcome {
@@ -163,7 +163,7 @@ pub(crate) async fn configuration(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: Handle,
+    handle: PluginsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     verify(
@@ -181,8 +181,8 @@ pub(crate) async fn configuration(
     if request.runtime != "openclaw" || request.plugin_id.trim().is_empty() {
         return Err(RequestError::Invalid);
     }
-    let outcome = owner
-        .plugins_set_enabled(request.plugin_id, request.enabled)
+    let outcome = handle
+        .set_enabled(request.plugin_id, request.enabled)
         .await
         .map_err(|_| RequestError::Invalid)?;
     Ok(json!({ "outcome": match outcome {

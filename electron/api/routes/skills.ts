@@ -46,7 +46,6 @@ function routeOperation(pathname: string, method: string | undefined): SkillsRou
   if (method === 'GET' && pathname === '/api/skills/status') return 'status';
   if (method !== 'POST') return undefined;
   switch (pathname) {
-    case '/api/skills/search': return 'search';
     case '/api/skills/detail': return 'detail';
     case '/api/skills/config': return 'mutateConfig';
     case '/api/skills/clawhub/install': return 'installClawHub';

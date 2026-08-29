@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    channel_control::{ChannelControlAction, ChannelControlDeliveryOutcome},
+    channel::control::{ChannelControlAction, ChannelControlDeliveryOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 

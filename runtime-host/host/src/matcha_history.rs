@@ -1,15 +1,8 @@
-use matcha_agent::session::{
-    canonical::CanonicalSessionAssembler,
-    history::HistoryResult,
-    hydration::{HydratedMessageRole, HydrationWindowMode, HydrationWindowRequest},
-    model::SessionId,
-};
-
-use crate::Host;
+use matcha_agent::session::{canonical::CanonicalSessionAssembler, hydration::HydratedMessageRole};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Command {
-    session_id: String,
+    pub(crate) session_id: String,
 }
 
 impl Command {
@@ -68,49 +61,23 @@ pub(crate) enum Outcome {
     Unavailable,
 }
 
-impl Host {
-    pub(crate) async fn load_matcha_history(&self, command: Command) -> Outcome {
-        if self.admission.admit_request().is_err() {
-            return Outcome::Unavailable;
-        }
-        let Some(session_id) = SessionId::try_new(command.session_id).ok() else {
-            return Outcome::Incomplete;
-        };
-        let result = self
-            .matcha()
-            .read_canonical_session(
-                session_id,
-                HydrationWindowRequest::new(
-                    HydrationWindowMode::Latest,
-                    HydrationWindowRequest::MAX_LIMIT,
-                    None,
-                ),
-            )
-            .await;
-        let facts = match result {
-            HistoryResult::Complete(facts) => facts,
-            HistoryResult::Unavailable => return Outcome::Unavailable,
-            HistoryResult::NotFound | HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
-                return Outcome::Incomplete;
-            }
-        };
-        let view = CanonicalSessionAssembler::project(&facts);
-        Outcome::Complete(History {
-            messages: view
-                .transcript_messages()
-                .iter()
-                .filter_map(|message| {
-                    match message.role() {
-                        HydratedMessageRole::User => Some(Role::User),
-                        HydratedMessageRole::Assistant => Some(Role::Assistant),
-                        HydratedMessageRole::System => None,
-                    }
-                    .map(|role| Message {
-                        role,
-                        text: message.text().to_owned(),
-                    })
+pub(crate) fn project(facts: &matcha_agent::session::facts::NativeSessionFacts) -> History {
+    let view = CanonicalSessionAssembler::project(facts);
+    History {
+        messages: view
+            .transcript_messages()
+            .iter()
+            .filter_map(|message| {
+                match message.role() {
+                    HydratedMessageRole::User => Some(Role::User),
+                    HydratedMessageRole::Assistant => Some(Role::Assistant),
+                    HydratedMessageRole::System => None,
+                }
+                .map(|role| Message {
+                    role,
+                    text: message.text().to_owned(),
                 })
-                .collect(),
-        })
+            })
+            .collect(),
     }
 }

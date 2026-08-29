@@ -25,7 +25,6 @@ function response() {
 
 const transport = {
   readStatus: vi.fn(),
-  search: vi.fn(),
   detail: vi.fn(),
   mutateConfig: vi.fn(),
   installClawHub: vi.fn(),
@@ -41,18 +40,18 @@ const transport = {
 
 describe('skills fixed host API routes', () => {
   it('dispatches only concrete endpoint operations', async () => {
-    transport.search.mockResolvedValue({ status: 200, body: { results: [] } });
+    transport.detail.mockResolvedValue({ status: 200, body: { skill: null } });
     const result = response();
 
     await expect(handleSkillsRoutes(
-      incoming({ query: 'calendar' }),
+      incoming({ slug: 'calendar' }),
       result.raw as never,
-      new URL('http://127.0.0.1/api/skills/search'),
+      new URL('http://127.0.0.1/api/skills/detail'),
       transport,
     )).resolves.toBe(true);
 
-    expect(transport.search).toHaveBeenCalledWith({ query: 'calendar' });
-    expect(result.state).toEqual({ statusCode: 200, body: { results: [] } });
+    expect(transport.detail).toHaveBeenCalledWith({ slug: 'calendar' });
+    expect(result.state).toEqual({ statusCode: 200, body: { skill: null } });
   });
 
   it('redacts route-local transport failures', async () => {
@@ -104,7 +103,7 @@ describe('skills fixed host API routes', () => {
   it('does not claim an unknown endpoint or method', async () => {
     const result = response();
     await expect(handleSkillsRoutes(
-      incoming({}, 'GET'),
+      incoming({}, 'POST'),
       result.raw as never,
       new URL('http://127.0.0.1/api/skills/search'),
       transport,

@@ -158,6 +158,14 @@ impl SupervisorLifecycleHandle {
         self.handle.snapshot()
     }
 
+    pub(super) fn lease(&self) -> Option<SupervisorLease> {
+        self.handle.lease()
+    }
+
+    pub(super) fn subscribe(&self) -> tokio::sync::watch::Receiver<SupervisorSnapshot> {
+        self.handle.subscribe()
+    }
+
     pub(super) async fn start(&self) -> Result<SupervisorStart, SupervisorStartFailureKind> {
         match self.handle.start().await {
             CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
@@ -196,11 +204,16 @@ impl SupervisorLifecycleHandle {
     pub(super) async fn restart(
         &self,
     ) -> Result<SupervisorRestart, SupervisorLifecycleFailureKind> {
+        self.restart_outcome().await.map(SupervisorRestart::from)
+    }
+
+    pub(super) async fn restart_outcome(
+        &self,
+    ) -> Result<RestartOutcome, SupervisorLifecycleFailureKind> {
         match self.handle.restart().await {
             CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
                 .wait()
                 .await
-                .map(SupervisorRestart::from)
                 .map_err(SupervisorLifecycleFailureKind::from),
             CommandReceipt::AlreadySatisfied => {
                 Err(SupervisorLifecycleFailureKind::AlreadySatisfied)
@@ -210,6 +223,32 @@ impl SupervisorLifecycleHandle {
                 Err(SupervisorLifecycleFailureKind::Rejected(rejection))
             }
             CommandReceipt::ShuttingDown => Err(SupervisorLifecycleFailureKind::ShuttingDown),
+        }
+    }
+
+    pub(super) async fn confirm_shutdown(
+        &self,
+    ) -> Result<ShutdownOutcome, SupervisorShutdownFailureKind> {
+        match self.handle.shutdown().await {
+            CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
+                .wait()
+                .await
+                .map_err(SupervisorShutdownFailureKind::from),
+            CommandReceipt::AlreadySatisfied => self
+                .confirmed_shutdown_outcome()
+                .ok_or(SupervisorShutdownFailureKind::MissingOutcome),
+            CommandReceipt::Busy => Err(SupervisorShutdownFailureKind::Busy),
+            CommandReceipt::Rejected(rejection) => {
+                Err(SupervisorShutdownFailureKind::Rejected(rejection))
+            }
+            CommandReceipt::ShuttingDown => Err(SupervisorShutdownFailureKind::ShuttingDown),
+        }
+    }
+
+    fn confirmed_shutdown_outcome(&self) -> Option<ShutdownOutcome> {
+        match self.handle.snapshot().last_outcome() {
+            Some(SupervisorOutcome::ShutDown(outcome)) => Some(outcome.clone()),
+            _ => None,
         }
     }
 }

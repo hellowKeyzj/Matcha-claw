@@ -24,7 +24,7 @@ const matchaEndpoint = {
 
 const openClawIdentity = {
   endpoint: openClawEndpoint,
-  agentId: 'default',
+  agentId: 'main',
   sessionKey: 'agent:main:main',
 } as const;
 
@@ -88,16 +88,17 @@ describe('session Host API public delivery route', () => {
     const sessionIdentity = {
       endpoint: openClawEndpoint,
       agentId: 'alpha',
-      sessionKey: 'session-1',
+      sessionKey: 'agent:alpha:session-1',
     };
     const list = vi.fn().mockResolvedValue({
       status: 200,
       body: {
         sessions: [{
-          key: 'session-1',
+          key: 'agent:alpha:session-1',
           agentId: 'alpha',
           sessionIdentity,
-          kind: 'direct',
+          kind: 'session',
+          endpointSessionId: 'session-1',
           updatedAt: 1,
         }],
       },
@@ -116,10 +117,11 @@ describe('session Host API public delivery route', () => {
       statusCode: 200,
       body: {
         sessions: [{
-          key: 'session-1',
+          key: 'agent:alpha:session-1',
           agentId: 'alpha',
           sessionIdentity,
-          kind: 'direct',
+          kind: 'session',
+          endpointSessionId: 'session-1',
           updatedAt: 1,
         }],
       },
@@ -189,7 +191,7 @@ describe('session Host API public delivery route', () => {
         runId: 'run-1',
         attachments: [],
       },
-    });
+    }, null);
     expect(rendererEventRoutes.release).not.toHaveBeenCalled();
     expect(response.state).toEqual({
       statusCode: 202,
@@ -243,7 +245,7 @@ describe('session Host API public delivery route', () => {
         runId: 'run-media-1',
         attachments: [{ mimeType: 'image/png', fileName: 'image.png', content: 'aGVsbG8=' }],
       },
-    });
+    }, null);
     expect(response.state).toEqual({
       statusCode: 202,
       body: { outcome: 'queued', runId: 'run-media-1', routeKey: 'renderer-route:issued' },

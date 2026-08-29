@@ -11,7 +11,6 @@ import { parseJsonBody, sendJson } from '../../api/route-utils';
 const CALLBACK_VERSION = 1;
 const DISPATCH_TOKEN_HEADER = 'x-runtime-host-dispatch-token';
 const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
-const RUNTIME_JOB_EVENT_PATH = '/internal/runtime-host/runtime-jobs';
 
 const GATEWAY_EVENT_NAMES = new Set([
   'gateway:lifecycle',
@@ -21,11 +20,6 @@ const GATEWAY_EVENT_NAMES = new Set([
   'gateway:channel-status',
   'gateway:error',
   'team:event',
-]);
-
-const RUNTIME_JOB_EVENT_NAMES = new Set([
-  'runtime-job:done',
-  'runtime-job:progress',
 ]);
 
 type ParentCallbackEvent = Readonly<{
@@ -72,7 +66,7 @@ async function handleParentCallbackRequest(
   eventBus: HostEventBus,
 ): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
-  if (pathname !== GATEWAY_EVENT_PATH && pathname !== RUNTIME_JOB_EVENT_PATH) {
+  if (pathname !== GATEWAY_EVENT_PATH) {
     sendJson(res, 404, { version: CALLBACK_VERSION, success: false, status: 404 });
     return;
   }
@@ -102,10 +96,7 @@ async function handleParentCallbackRequest(
     return;
   }
 
-  const allowedNames = pathname === GATEWAY_EVENT_PATH
-    ? GATEWAY_EVENT_NAMES
-    : RUNTIME_JOB_EVENT_NAMES;
-  if (!allowedNames.has(body.eventName)) {
+  if (!GATEWAY_EVENT_NAMES.has(body.eventName)) {
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
   }

@@ -34,7 +34,7 @@ pub(crate) async fn handle(
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
-    owner: &crate::owner::Handle,
+    owner: &crate::fleet::handle::FleetHandle,
 ) -> Option<(u16, Value)> {
     if path != PATH {
         return None;
@@ -79,7 +79,7 @@ pub(crate) async fn handle(
         Some(value) => value,
         None => return Some(rejected(Some(&request), "invalid-request", 400)),
     };
-    if required_string(record, "sentAt").is_err() {
+    if timestamp(record, "sentAt").is_err() {
         return Some(rejected(Some(&request), "invalid-request", 400));
     }
     let parsed = match parse_operation(request_type, record) {
@@ -173,14 +173,14 @@ pub(crate) async fn handle(
 }
 
 async fn authenticate_runtime_agent_ingress(
-    owner: &crate::owner::Handle,
+    owner: &crate::fleet::handle::FleetHandle,
     agent_id: fleet::runtime_agent::RuntimeAgentId,
     presented_hash: fleet::topology::CredentialHash,
     enrollment_hash: Option<fleet::topology::CredentialHash>,
 ) -> Result<fleet::store::IngressAuthentication, ()> {
     let at = SystemTime::now();
     let initial = owner
-        .fleet_authenticate_runtime_agent_ingress(fleet::store::AgentIngressIdentity::new(
+        .authenticate_runtime_agent_ingress(fleet::store::AgentIngressIdentity::new(
             agent_id.clone(),
             presented_hash.clone(),
             None,
@@ -199,7 +199,7 @@ async fn authenticate_runtime_agent_ingress(
         return Ok(initial);
     };
     owner
-        .fleet_authenticate_runtime_agent_ingress(fleet::store::AgentIngressIdentity::new(
+        .authenticate_runtime_agent_ingress(fleet::store::AgentIngressIdentity::new(
             agent_id,
             presented_hash,
             Some(enrollment_hash),
@@ -214,7 +214,7 @@ async fn heartbeat(
     request_id: &str,
     agent_id: fleet::runtime_agent::RuntimeAgentId,
     heartbeat: fleet::runtime_agent::RuntimeAgentHeartbeat,
-    owner: &crate::owner::Handle,
+    owner: &crate::fleet::handle::FleetHandle,
 ) -> (u16, Value) {
     let status = heartbeat.status();
     let observed_at = heartbeat.observed_at();
@@ -223,10 +223,24 @@ async fn heartbeat(
         .iter()
         .map(|id| id.as_str().to_owned())
         .collect::<Vec<_>>();
-    match owner
-        .fleet_record_runtime_agent_heartbeat(agent_id.clone(), heartbeat)
-        .await
+    let result = match timeout(
+        REQUEST_DEADLINE,
+        owner.record_runtime_agent_heartbeat(agent_id.clone(), heartbeat),
+    )
+    .await
     {
+        Ok(result) => result,
+        Err(_) => {
+            return rejected_for_request(
+                request_id,
+                agent_id.as_str(),
+                "runtime-agent.heartbeat.response",
+                "runtime-unavailable",
+                503,
+            );
+        }
+    };
+    match result {
         Ok(Ok(_)) => (
             200,
             serde_json::json!({
@@ -262,20 +276,34 @@ async fn progress(
     reported_at: SystemTime,
     command_attempt: fleet::command::CommandAttempt,
     dispatch_attempt: fleet::outbox::DispatchAttempt,
-    owner: &crate::owner::Handle,
+    owner: &crate::fleet::handle::FleetHandle,
 ) -> (u16, Value) {
     let command_id = correlation.command_id().as_str().to_owned();
-    match owner
-        .fleet_record_runtime_agent_progress(
+    let result = match timeout(
+        REQUEST_DEADLINE,
+        owner.record_runtime_agent_progress(
             agent_id.clone(),
             correlation,
             progress,
             reported_at,
             command_attempt,
             dispatch_attempt,
-        )
-        .await
+        ),
+    )
+    .await
     {
+        Ok(result) => result,
+        Err(_) => {
+            return rejected_for_request(
+                request_id,
+                agent_id.as_str(),
+                "runtime-agent.command.progress.response",
+                "runtime-unavailable",
+                503,
+            );
+        }
+    };
+    match result {
         Ok(Ok(_)) => (
             200,
             serde_json::json!({"type":"runtime-agent.command.progress.response","requestId":request_id,"agentId":agent_id.as_str(),"commandId":command_id,"resultType":"recorded","recordedAt":now_iso()}),
@@ -303,19 +331,33 @@ async fn result(
     result: fleet::runtime_agent::RuntimeAgentResult,
     command_attempt: fleet::command::CommandAttempt,
     dispatch_attempt: fleet::outbox::DispatchAttempt,
-    owner: &crate::owner::Handle,
+    owner: &crate::fleet::handle::FleetHandle,
 ) -> (u16, Value) {
     let command_id = correlation.command_id().as_str().to_owned();
-    match owner
-        .fleet_record_runtime_agent_result(
+    let result = match timeout(
+        REQUEST_DEADLINE,
+        owner.record_runtime_agent_result(
             agent_id.clone(),
             correlation,
             result,
             command_attempt,
             dispatch_attempt,
-        )
-        .await
+        ),
+    )
+    .await
     {
+        Ok(result) => result,
+        Err(_) => {
+            return rejected_for_request(
+                request_id,
+                agent_id.as_str(),
+                "runtime-agent.command.result.response",
+                "runtime-unavailable",
+                503,
+            );
+        }
+    };
+    match result {
         Ok(Ok(_)) => (
             200,
             serde_json::json!({"type":"runtime-agent.command.result.response","requestId":request_id,"agentId":agent_id.as_str(),"commandId":command_id,"resultType":"recorded","recordedAt":now_iso()}),

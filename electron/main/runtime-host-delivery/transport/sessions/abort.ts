@@ -3,7 +3,7 @@ import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
 const DECISION_TTL_MS = 30_000;
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_RUN_ID_BYTES = 4096;
-const MAX_ENDPOINT_SESSION_ID_BYTES = 128;
+const MAX_ENDPOINT_SESSION_ID_BYTES = 4096;
 const MAX_APPROVAL_IDS = 32;
 const MAX_APPROVAL_ID_BYTES = 4096;
 

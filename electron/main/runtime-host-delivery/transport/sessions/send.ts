@@ -47,7 +47,7 @@ export type SessionSendRequest = Readonly<{
 type RustSessionSendResponse =
   | Readonly<{ outcome: 'queued'; runId: string }>
   | Readonly<{ outcome: 'succeeded'; runId: string; status: 'started' | 'in_flight' | 'ok' }>
-  | Readonly<{ outcome: 'target_rejected' | 'unknown' }>;
+  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>;
 
 type SessionSendResponse =
   | Readonly<{ outcome: 'queued'; runId: string }>
@@ -56,7 +56,7 @@ type SessionSendResponse =
     runId: string;
     status: 'started' | 'in_flight' | 'ok';
   }>
-  | Readonly<{ outcome: 'target_rejected' | 'unknown' }>;
+  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>;
 
 type SessionSendInvalidRequest = Readonly<{
   success: false;
@@ -82,7 +82,7 @@ type E2EProcess = typeof process & {
       fileNameLengths: readonly number[];
       fileNamesSafe: boolean;
       routeKeyLength: number;
-      runIdLength: number;
+      requestRunIdentityLength: number;
     }>;
   }>;
 };
@@ -105,7 +105,7 @@ function e2eAttachmentShape(request: SessionSendRequest): NonNullable<
         && !hasControlCharacter(attachment.fileName),
     ),
     routeKeyLength: request.scope.routeKey.length,
-    runIdLength: request.input.runId?.length ?? request.input.idempotencyKey?.length ?? 0,
+    requestRunIdentityLength: request.input.runId?.length ?? request.input.idempotencyKey?.length ?? 0,
   };
 }
 
@@ -148,7 +148,8 @@ export function createSessionSendTransport(
         adapter: request.input.endpoint.runtimeAdapterId,
         sessionKey: summarizeIdentifier(request.input.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
-        runId: summarizeIdentifier(request.input.runId ?? request.input.idempotencyKey),
+        runId: summarizeIdentifier(request.input.runId),
+        idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
         attachmentCount: request.input.attachments.length,
       });
       try {
@@ -203,7 +204,7 @@ export function createSessionSendTransport(
               },
             };
           }
-          if (body.outcome === 'target_rejected' || body.outcome === 'unknown') {
+          if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown') {
             return { status: 200, body };
           }
         }
@@ -233,7 +234,7 @@ function isRustSessionSendResponse(value: unknown): value is RustSessionSendResp
       && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok');
   }
   return hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'target_rejected' || value.outcome === 'unknown');
+    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown');
 }
 
 function isSessionSendRequest(value: unknown): value is SessionSendRequest {

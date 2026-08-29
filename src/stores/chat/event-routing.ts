@@ -2,11 +2,11 @@ export type RuntimeEventKind = 'started' | 'delta' | 'final' | 'error' | 'aborte
 
 export interface RuntimeEventFilterInput {
   eventSessionKey: string | null;
-  targetBackendSessionKey: string;
+  targetEventSessionKey: string;
 }
 
 export function shouldIgnoreRuntimeEvent(input: RuntimeEventFilterInput): boolean {
-  if (input.eventSessionKey && input.eventSessionKey !== input.targetBackendSessionKey) {
+  if (input.eventSessionKey && input.eventSessionKey !== input.targetEventSessionKey) {
     return true;
   }
   return false;

@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/role-chat";
 const AUTHORIZATION_SCOPE: &str = "team:write";
@@ -85,11 +87,12 @@ pub(crate) fn decode(
     })
 }
 
-pub(crate) async fn handle(owner: &owner::Handle, request: Request, requested_at: u64) -> Delivery {
-    let sessions = match owner
-        .query_team_role_sessions(request.team_id.clone())
-        .await
-    {
+pub(crate) async fn handle(
+    owner: &OrganizationHandle,
+    request: Request,
+    requested_at: u64,
+) -> Delivery {
+    let sessions = match owner.role_sessions(request.team_id.clone()).await {
         Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => sessions,
         Ok(organization::TeamRoleSessionQueryOutcome::Unavailable) => return Delivery::Rejected,
         Ok(organization::TeamRoleSessionQueryOutcome::OutcomeUnknown) | Err(_) => {
@@ -112,7 +115,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request, requested_at
         Ok(admission) => admission,
         Err(_) => return Delivery::Rejected,
     };
-    match owner.admit_team_run_role_chat(admission).await {
+    match owner.role_message_submit(admission).await {
         Ok(Ok(organization::RoleChatAdmissionOutcome::Accepted { .. })) => Delivery::Accepted,
         Ok(Ok(organization::RoleChatAdmissionOutcome::Rejected(_))) => Delivery::Rejected,
         Ok(Ok(organization::RoleChatAdmissionOutcome::OutcomeUnknown)) | Ok(Err(_)) | Err(_) => {

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::{channel_delete::Outcome, transport::authorization::CapabilityDecisionVerifier};
+use crate::{channel::delete::Outcome, transport::authorization::CapabilityDecisionVerifier};
 
 const OPERATION_ID: &str = "channels.config.delete";
 const AUTHORIZATION_ENDPOINT: &str = "/api/channels/delete-config";

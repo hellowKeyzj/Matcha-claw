@@ -23,7 +23,7 @@ Foundation 的 in-process execution 机制已经确认；未决的只是跨平�
 | `A-11` | `BLOCKED` | connector v1/v3/schema/secret/status parity 尚未闭合 | version fixture、single writer、MCP probe/readback matrix |
 | `A-12` | `CONFIRMED` | Fleet runtime-agent ingress、Fleet command 与 Organization webhook/Team ingress 分离 | 各 external ingress 的后续协议实现 |
 | `A-13` | `CONFIRMED` | Organization 通过 typed effect ports，由 Host composition 注入，不直接依赖 peer crate | 各 port 的真实 consumer/source walk |
-| `A-14a` | `CONFIRMED` | Foundation in-process execution：`OwnedTask` / `TaskHandle` / `OperationHandle` / `ServiceHandle` 可供业务 owner 复用，不拥有 RuntimeJob facts | 已确认：继续作为底层机制使用 |
+| `A-14a` | `CONFIRMED` | Foundation in-process execution：`OwnedTask` / `TaskHandle` / `OperationHandle` / `ServiceHandle` 可供业务 owner 复用，不拥有 Host-wide generic operation facts | 已确认：继续作为底层机制使用 |
 | `A-14b` | `OPEN` | Foundation platform-specific process custody mechanisms | Windows/POSIX implementation evidence、fault smoke 和实际 peer consumer |
 | `A-15` | `BLOCKED` | final physical workspace move and package artifact | 单一 `runtime-host/` workspace、artifact path、Electron launch plan、旧目录不可达 |
 

@@ -25,10 +25,9 @@ type HostEventName =
   | 'runtime-host:status'
   | 'runtime-host:error'
   | 'runtime-host:restart'
-  | 'runtime-job:done'
-  | 'runtime-job:progress'
   | 'license:gate-changed'
   | 'team:event'
+  | 'matcha-agent:status'
   | 'openclaw:cli-installed'
   | 'oauth:code'
   | 'oauth:start'
@@ -100,8 +99,6 @@ export function registerHostEventBridge(deps: {
     'gateway:channel-status',
     'gateway:exit',
     'team:event',
-    'runtime-job:done',
-    'runtime-job:progress',
   ] as const) {
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
@@ -124,6 +121,16 @@ export function registerHostEventBridge(deps: {
       case 'openclaw.runtime':
         void publishRuntimeHostStatus();
         void publishGatewayStatus({ freshness: 'fresh' });
+        return;
+      case 'matcha.lifecycle':
+        emit('matcha-agent:status', {
+          processState: event.lifecycle,
+          port: null,
+          pid: null,
+          ready: event.ready,
+          lastError: null,
+          updatedAt: event.observedAtMs,
+        });
         return;
       case 'openclaw.cron.execution':
         emit('openclaw:cron', {
@@ -161,8 +168,10 @@ function publishSessionDelta(
 ): void {
   if (!delta || delta.routeKey === undefined || !isBoundSessionDelta(delta, routes)) return;
   emit('session.delta', delta);
-  if (delta.changes.some((change) => change.kind === 'runPhaseChanged'
-    && isTerminalRunPhase(change.phase))) {
+  if (delta.changes.some((change) => (
+    change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
+    || (change.kind === 'runtimeChanged' && isTerminalRunPhase(change.runtime.phase))
+  )) {
     routes.release(delta.routeKey);
   }
 }

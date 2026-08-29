@@ -12,7 +12,10 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{
+    facade::AgentsHandle,
+    transport::{authorization::CapabilityDecisionVerifier, session_trace},
+};
 
 use super::{AgentsRequest, Delivery, map_outcome};
 
@@ -27,19 +30,19 @@ const ROUTE: &str = "/api/subagents/agents";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: AgentsHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        handle: AgentsHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            handle,
         })
     }
 
@@ -47,9 +50,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let agents_handle = self.handle.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, agents_handle).await;
             });
         }
     }
@@ -58,7 +61,7 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: AgentsHandle,
 ) -> io::Result<()> {
     let request = match timeout(REQUEST_DEADLINE, read_request(&mut stream)).await {
         Ok(Ok(request)) => request,
@@ -66,7 +69,7 @@ async fn serve(
         Err(_) => return write_response(&mut stream, Response::bad_request()).await,
     };
     let response = match request {
-        Ok(request) => handle(request, verifier, owner).await,
+        Ok(request) => self::handle(request, verifier, handle).await,
         Err(response) => response,
     };
     write_response(&mut stream, response).await
@@ -75,9 +78,20 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: AgentsHandle,
 ) -> Response {
+    let trace_id = session_trace::trace_id(&request.headers).map(str::to_owned);
+    session_trace::log(
+        "runtime.agents.request",
+        trace_id.as_deref(),
+        serde_json::json!({ "method": &request.method, "path": &request.path }),
+    );
     if request.method != "POST" || request.path != ROUTE {
+        session_trace::log(
+            "runtime.agents.not-found",
+            trace_id.as_deref(),
+            serde_json::json!({}),
+        );
         return Response::not_found();
     }
     let Some(authorization) = request
@@ -86,111 +100,87 @@ async fn handle(
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
     else {
+        session_trace::log(
+            "runtime.agents.unauthorized",
+            trace_id.as_deref(),
+            serde_json::json!({}),
+        );
         return Response::unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => {
+            session_trace::log(
+                "runtime.agents.bad-json",
+                trace_id.as_deref(),
+                serde_json::json!({}),
+            );
+            return Response::bad_request();
+        }
     };
     let mut verifier = verifier.lock().await;
     let request = match AgentsRequest::decode(value, authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
-        Err(_) => return Response::unauthorized(),
+        Err(_) => {
+            session_trace::log(
+                "runtime.agents.decode-invalid",
+                trace_id.as_deref(),
+                serde_json::json!({}),
+            );
+            return Response::unauthorized();
+        }
+    };
+    session_trace::log(
+        "runtime.agents.decode-accepted",
+        trace_id.as_deref(),
+        serde_json::json!({
+            "capability": &request.id,
+            "operation": &request.operation_id,
+            "adapter": &request.scope.endpoint.runtime_adapter_id,
+            "instance": &request.scope.endpoint.runtime_instance_id,
+            "scopeAgentId": session_trace::id_shape(Some(&request.scope.agent_id)),
+            "targetSubagentId": session_trace::id_shape(request.target.subagent_id.as_deref()),
+        }),
+    );
+    let operation_id = request.operation_id.clone();
+    let command = match request.command(trace_id.as_deref()) {
+        Ok(command) => command,
+        Err(_) => {
+            session_trace::log(
+                "runtime.agents.command-invalid",
+                trace_id.as_deref(),
+                serde_json::json!({ "operation": operation_id }),
+            );
+            return Response::bad_request();
+        }
     };
     drop(verifier);
-    let command = match request.command() {
-        Ok(command) => command,
-        Err(_) => return Response::bad_request(),
-    };
-    let outcome = match command {
-        crate::agents::Command::List { endpoint } => owner.agents_list(endpoint).await,
-        crate::agents::Command::Wait { endpoint, input } => {
-            owner.agents_wait(endpoint, input).await
-        }
-        crate::agents::Command::Create { endpoint, input } => {
-            owner.agents_create(endpoint, input).await
-        }
-        crate::agents::Command::Update { endpoint, input } => {
-            owner.agents_update(endpoint, input).await
-        }
-        crate::agents::Command::Delete { endpoint, input } => {
-            owner.agents_delete(endpoint, input).await
-        }
-        crate::agents::Command::ListFiles { endpoint, agent_id } => {
-            owner.agents_files_list(endpoint, agent_id).await
-        }
-        crate::agents::Command::GetFile {
-            endpoint,
-            agent_id,
-            name,
-        } => owner.agents_files_get(endpoint, agent_id, name).await,
-        crate::agents::Command::SetFile {
-            endpoint,
-            agent_id,
-            name,
-            content,
-        } => {
-            owner
-                .agents_files_set(endpoint, agent_id, name, content)
-                .await
-        }
-        crate::agents::Command::DisplayConfiguration { endpoint } => {
-            owner.agents_configuration_display(endpoint).await
-        }
-        crate::agents::Command::SetDescription {
-            endpoint,
-            agent_id,
-            description,
-        } => {
-            owner
-                .agents_set_description(endpoint, agent_id, description)
-                .await
-        }
-        crate::agents::Command::SetConfigurationModel {
-            endpoint,
-            agent_id,
-            model,
-        } => {
-            owner
-                .agents_set_configuration_model(endpoint, agent_id, model)
-                .await
-        }
-        crate::agents::Command::SetSkills {
-            endpoint,
-            agent_id,
-            skills,
-        } => owner.agents_set_skills(endpoint, agent_id, skills).await,
-        crate::agents::Command::SkillConfiguration { endpoint, agent_id } => {
-            owner.agents_skill_configuration(endpoint, agent_id).await
-        }
-        crate::agents::Command::SetSkillConfiguration {
-            endpoint,
-            agent_id,
-            revision,
-            selection,
-        } => {
-            owner
-                .agents_set_skill_configuration(endpoint, agent_id, revision, selection)
-                .await
-        }
-        crate::agents::Command::ToolConfiguration { endpoint, agent_id } => {
-            owner.agents_tool_configuration(endpoint, agent_id).await
-        }
-        crate::agents::Command::SetToolConfiguration {
-            endpoint,
-            agent_id,
-            revision,
-            selection,
-        } => {
-            owner
-                .agents_set_tool_configuration(endpoint, agent_id, revision, selection)
-                .await
+    session_trace::log(
+        "runtime.agents.command",
+        trace_id.as_deref(),
+        serde_json::json!({ "operation": operation_id }),
+    );
+    let delivery = match handle.agents(command).await {
+        Ok(outcome) => map_outcome(outcome),
+        Err(_) => {
+            session_trace::log(
+                "runtime.agents.owner-unavailable",
+                trace_id.as_deref(),
+                serde_json::json!({ "operation": operation_id }),
+            );
+            Delivery::Unavailable
         }
     };
-    match outcome {
-        Ok(outcome) => Response::from_delivery(map_outcome(outcome)),
-        Err(_) => Response::from_delivery(Delivery::Unavailable),
-    }
+    session_trace::log(
+        "runtime.agents.outcome",
+        trace_id.as_deref(),
+        serde_json::json!({
+            "operation": operation_id,
+            "status": delivery.status_code(),
+            "delivery": delivery_trace_kind(&delivery),
+        }),
+    );
+    Response::from_delivery(delivery)
 }
 
 struct Request {
@@ -230,6 +220,27 @@ impl Response {
             status: delivery.status_code(),
             body: delivery.body(),
         }
+    }
+}
+
+fn delivery_trace_kind(delivery: &Delivery) -> &'static str {
+    match delivery {
+        Delivery::Agents { .. } => "agents",
+        Delivery::Wait(_) => "wait",
+        Delivery::Created(_) => "created",
+        Delivery::Updated(_) => "updated",
+        Delivery::Deleted(_) => "deleted",
+        Delivery::Files(_) => "files",
+        Delivery::File(_) => "file",
+        Delivery::Configuration(_) => "configuration",
+        Delivery::ConfigurationApplied => "configurationApplied",
+        Delivery::SkillConfiguration(_) => "skillConfiguration",
+        Delivery::ToolConfiguration(_) => "toolConfiguration",
+        Delivery::Rejected => "rejected",
+        Delivery::OutcomeUnknown => "outcomeUnknown",
+        Delivery::WaitUnknown => "waitUnknown",
+        Delivery::Unsupported => "unsupported",
+        Delivery::Unavailable => "unavailable",
     }
 }
 

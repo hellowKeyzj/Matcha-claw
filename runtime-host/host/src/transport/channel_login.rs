@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    channel_login::ChannelLoginAction, transport::authorization::CapabilityDecisionVerifier,
+    channel::login::ChannelLoginAction, transport::authorization::CapabilityDecisionVerifier,
 };
 
 pub(crate) mod server;
@@ -63,7 +63,7 @@ pub(crate) fn decode(
             )?;
             let config = match body.get("config") {
                 Some(value) => {
-                    crate::channel_login::parse_login_config(value).ok_or(DecodeError::Invalid)?
+                    crate::channel::login::parse_login_config(value).ok_or(DecodeError::Invalid)?
                 }
                 None => zeroize::Zeroizing::new(br#"{}"#.to_vec()),
             };
@@ -93,7 +93,7 @@ pub(crate) fn decode(
                 .map(str::to_owned);
             if current_qr_data_url
                 .as_deref()
-                .is_some_and(|value| !crate::channel_login::valid_qr_data_url(value))
+                .is_some_and(|value| !crate::channel::login::valid_qr_data_url(value))
             {
                 return Err(DecodeError::Invalid);
             }
@@ -158,7 +158,7 @@ fn optional_u64(
         .get(name)
         .map(|value| value.as_u64().ok_or(DecodeError::Invalid))
         .transpose()?;
-    if !crate::channel_login::valid_timeout(value) {
+    if !crate::channel::login::valid_timeout(value) {
         return Err(DecodeError::Invalid);
     }
     Ok(value)
@@ -166,12 +166,12 @@ fn optional_u64(
 
 fn identity(value: Option<&Value>) -> Option<String> {
     let value = value?.as_str()?;
-    (value.len() <= MAX_IDENTITY_LENGTH && crate::channel_login::valid_identity(value))
+    (value.len() <= MAX_IDENTITY_LENGTH && crate::channel::login::valid_identity(value))
         .then(|| value.to_owned())
 }
 
 pub(crate) enum Delivery {
-    Progress(crate::channel_login::LoginProgress),
+    Progress(crate::channel::login::LoginProgress),
     Confirmed,
     Cancelled,
     Rejected,
@@ -189,7 +189,7 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Progress(progress) => crate::channel_login::project_progress(progress.clone()),
+            Self::Progress(progress) => crate::channel::login::project_progress(progress.clone()),
             Self::Confirmed => json!({"outcome": "connected"}),
             Self::Cancelled => json!({"outcome": "cancelled"}),
             Self::Rejected => json!({"outcome": "rejected"}),
@@ -200,14 +200,12 @@ impl Delivery {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn strict_actions_and_qr_validation_are_enforced() {
-        assert!(crate::channel_login::valid_qr_data_url(
+        assert!(crate::channel::login::valid_qr_data_url(
             "data:image/png;base64,ok"
         ));
-        assert!(!crate::channel_login::valid_qr_data_url(
+        assert!(!crate::channel::login::valid_qr_data_url(
             "data:image/jpeg;base64,no"
         ));
     }

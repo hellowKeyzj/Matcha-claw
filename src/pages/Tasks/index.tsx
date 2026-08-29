@@ -215,7 +215,6 @@ export function TasksPage() {
     if (!initialized) {
       void init(currentSession ? {
         recordKey: currentSession.key,
-        backendSessionKey: currentSession.backendSessionKey,
         sessionIdentity: currentSession.sessionIdentity,
       } : undefined);
       return;
@@ -225,7 +224,6 @@ export function TasksPage() {
     }
     void refreshTasks({
       sessionKey: currentSession.key,
-      backendSessionKey: currentSession.backendSessionKey,
       sessionIdentity: currentSession.sessionIdentity,
       silent: true,
     });
@@ -247,7 +245,7 @@ export function TasksPage() {
       return;
     }
     if (scopeFilter.type === 'team') {
-      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.backendSessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
+      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
       if (scopedTasksRequestSeqRef.current !== requestSeq) {
         return;
       }
@@ -266,7 +264,7 @@ export function TasksPage() {
       const session = sessionByKey.get(sessionKey)!;
       return {
         sessionKey,
-        snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, sessionIdentity: session.sessionIdentity }),
+        snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
       };
     }));
     if (scopedTasksRequestSeqRef.current !== requestSeq) {
@@ -644,7 +642,6 @@ export function TasksPage() {
     await deleteTaskById({
       taskId: deletingTaskId,
       sessionKey: selectedSession.key,
-      backendSessionKey: selectedSession.backendSessionKey,
       sessionIdentity: selectedSession.sessionIdentity,
       ...(selected?.sourceTeamKey ? { teamKey: selected.sourceTeamKey } : {}),
     });

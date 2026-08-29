@@ -35,6 +35,7 @@ export interface WaitAgentRunInput {
 export interface WaitAgentRunWithProgressInput {
   runId: string;
   sessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   waitScope: AgentScope;
   waitSliceMs: number;
@@ -157,6 +158,7 @@ export async function waitAgentRunWithProgress(
   const {
     runId,
     sessionKey,
+    endpointSessionId,
     waitSliceMs,
     idleTimeoutMs,
     rpcTimeoutBufferMs,
@@ -169,7 +171,12 @@ export async function waitAgentRunWithProgress(
   let fingerprint = '';
 
   try {
-    const initial = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
+    const initial = await fetchLatestAssistantSnapshot({
+      sessionKey,
+      ...(endpointSessionId ? { endpointSessionId } : {}),
+      sessionIdentity: input.sessionIdentity,
+      limit: 20,
+    });
     fingerprint = buildSnapshotFingerprint(initial);
     if (fingerprint) {
       lastProgressAt = Date.now();
@@ -214,7 +221,12 @@ export async function waitAgentRunWithProgress(
       }
 
       try {
-        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
+        const snapshot = await fetchLatestAssistantSnapshot({
+          sessionKey,
+          ...(endpointSessionId ? { endpointSessionId } : {}),
+          sessionIdentity: input.sessionIdentity,
+          limit: 20,
+        });
         const nextFingerprint = buildSnapshotFingerprint(snapshot);
         if (nextFingerprint !== fingerprint) {
           fingerprint = nextFingerprint;
@@ -240,7 +252,12 @@ export async function waitAgentRunWithProgress(
     }
 
     try {
-      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
+      const snapshot = await fetchLatestAssistantSnapshot({
+        sessionKey,
+        ...(endpointSessionId ? { endpointSessionId } : {}),
+        sessionIdentity: input.sessionIdentity,
+        limit: 20,
+      });
       const nextFingerprint = buildSnapshotFingerprint(snapshot);
       if (nextFingerprint !== fingerprint) {
         fingerprint = nextFingerprint;

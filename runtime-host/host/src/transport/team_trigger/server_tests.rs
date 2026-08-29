@@ -30,7 +30,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, owner};
+use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner};
 
 const ROUTE: &str = "/api/team/trigger";
 const WEBHOOK_AUTH_ROUTE: &str = "/api/team/webhook-auth";
@@ -85,11 +85,11 @@ impl RunningServer {
                 .replace_facts(facts)
                 .expect("seed organization facts");
         }
-        let (host, events) = Host::new(input).expect("construct host");
+        let (host, events, handles) = Host::new(input).expect("construct host");
         let owner = owner::Owner::spawn(host, events);
         let verifier = CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
         let token = WebhookToken::try_new(&test_webhook_token()).expect("valid webhook token");
-        let server = Server::bind(0, verifier, token, owner.handle())
+        let server = Server::bind(0, verifier, token, handles.organization.clone())
             .await
             .expect("bind server");
         let port = server.port();
@@ -580,6 +580,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
         cron_transport_port: 18_791,
+        runtime_observation: RuntimeObservationConfig::off(),
     }
 }
 

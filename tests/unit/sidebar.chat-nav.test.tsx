@@ -51,7 +51,6 @@ function createSessionRecord(input?: {
   return {
     meta: {
       ...base.meta,
-      backendSessionKey: recordKey,
       agentId: recordKey.split(':')[1] ?? null,
       sessionIdentity: {
         endpoint: {

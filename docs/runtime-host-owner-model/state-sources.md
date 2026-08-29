@@ -157,7 +157,7 @@ Renderer store              = cache/projection
 事件是状态变化的通知或 replay input，不是所有领域的 durable authority：
 
 ```text
-runtime-job:done       = completion hint
+owner operation event  = best-effort completion/progress hint; query is recovery path
 host:event             = delivery projection, no ack/replay
 Gateway channel event  = native event projection, shape must be preserved
 app-server events.jsonl= peer runtime event fact source
@@ -175,4 +175,4 @@ app-server events.jsonl= peer runtime event fact source
 4. observed 从哪个 native/外部 readback 得到，是否有 TTL/刷新/unknown？
 5. event/projection 如何到 Renderer，丢失后如何 query 恢复？
 6. old TS writer 何时停止，是否存在双写或双 owner？
-7. 旧 route、错误码、timeout、HTTP status、job projection 是否仍一致？
+7. 旧 route、错误码、timeout、HTTP status、owner operation projection 是否仍一致？

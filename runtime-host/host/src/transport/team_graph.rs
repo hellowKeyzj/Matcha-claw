@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use crate::{owner, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    organization::OrganizationHandle, transport::authorization::CapabilityDecisionVerifier,
+};
 
 const OPERATION_ID: &str = "team.graph.yaml";
 const AUTHORIZATION_ENDPOINT: &str = "/api/team/graph";
@@ -103,18 +105,17 @@ impl Delivery {
     }
 }
 
-pub(crate) async fn handle(owner: &owner::Handle, request: Request) -> Delivery {
+pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Delivery {
     match request {
-        Request::Export { team_id, run_id } => match owner
-            .team_run_graph_definition(team_id, run_id.clone())
-            .await
-        {
-            Ok(Some(definition)) => Delivery::Exported {
-                run_id: run_id.as_str().to_owned(),
-                yaml: organization::export_yaml(&definition),
-            },
-            Ok(None) | Err(_) => Delivery::Unavailable,
-        },
+        Request::Export { team_id, run_id } => {
+            match owner.graph_definition(team_id, run_id.clone()).await {
+                Ok(Some(definition)) => Delivery::Exported {
+                    run_id: run_id.as_str().to_owned(),
+                    yaml: organization::export_yaml(&definition),
+                },
+                Ok(None) | Err(_) => Delivery::Unavailable,
+            }
+        }
         Request::Replace {
             team_id,
             command,
@@ -146,7 +147,7 @@ pub(crate) async fn handle(owner: &owner::Handle, request: Request) -> Delivery 
 }
 
 async fn replace(
-    owner: &owner::Handle,
+    owner: &OrganizationHandle,
     team_id: organization::TeamId,
     command: organization::RunCommand,
     definition: organization::GraphDefinition,
@@ -158,13 +159,13 @@ async fn replace(
     }
     let run_id = definition.run_id().clone();
     match owner
-        .team_run_graph_definition(team_id.clone(), run_id.clone())
+        .graph_definition(team_id.clone(), run_id.clone())
         .await
     {
         Ok(Some(_)) => {}
         Ok(None) | Err(_) => return Delivery::Unavailable,
     }
-    match owner.replace_team_run_graph(command, definition).await {
+    match owner.graph_save(command, definition).await {
         Ok(Ok(_)) => Delivery::Replaced {
             run_id: run_id.as_str().to_owned(),
         },

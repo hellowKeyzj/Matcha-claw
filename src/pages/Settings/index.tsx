@@ -34,6 +34,12 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
+import {
+  findRuntimeEndpointByAdapter,
+  runtimeEndpointBadgeVariant,
+  runtimeEndpointStatusLabel,
+  useRuntimeEndpointsStore,
+} from '@/stores/runtime-endpoints';
 import { usePluginsStore } from '@/stores/plugins-store';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
@@ -85,6 +91,60 @@ type MatchaAgentAppServerStatus = {
   lastError: string | null;
   updatedAt: number | string;
 };
+
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+
+function summarizeMatchaAgentAppServerTrace(status: MatchaAgentAppServerStatus | null | undefined) {
+  if (!status) return null;
+  return {
+    processState: status.processState,
+    ready: status.ready,
+    port: status.port,
+    pid: status.pid,
+    updatedAt: status.updatedAt,
+    hasLastError: Boolean(status.lastError),
+  };
+}
+
+function summarizeSettingsTraceError(error: unknown): { errorName: string; message: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    errorName: error instanceof Error ? error.name : typeof error,
+    message: message
+      .replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp|private)\/)[^\s"'<>)]*/g, '[path]')
+      .replace(/(token|authorization|password|secret|api[-_ ]?key)(["'\s:=]+)[^\s"',}]+/gi, '$1$2[redacted]')
+      .slice(0, 200),
+  };
+}
+
+function traceSettingsStartup(phase: string, payload: Record<string, unknown>): void {
+  console.info(JSON.stringify({
+    prefix: STARTUP_TRACE_PREFIX,
+    source: 'settings-page',
+    phase,
+    atMs: Date.now(),
+    ...payload,
+  }));
+}
+
+function formatMatchaAgentAppServerStatusLabel(
+  status: MatchaAgentAppServerStatus | null,
+  loading: boolean,
+  loadingLabel: string,
+): string {
+  if (status) return status.processState;
+  return loading ? loadingLabel : 'unknown';
+}
+
+function matchaAgentAppServerBadgeVariantForStatus(
+  status: MatchaAgentAppServerStatus | null,
+  loading: boolean,
+): 'success' | 'outline' | 'destructive' | 'secondary' {
+  if (!status) return loading ? 'outline' : 'secondary';
+  if (status.processState === 'running' && status.ready) return 'success';
+  if (status.processState === 'failed' || status.processState === 'unavailable' || status.processState === 'shutDown') return 'destructive';
+  return 'outline';
+}
 
 type BrowserRelayInfo = {
   relativeDir: string;
@@ -287,6 +347,10 @@ export function Settings() {
 
   const gatewayStatus = useGatewayStore((state) => state.status);
   const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
+  const runtimeEndpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const runtimeEndpointsStatus = useRuntimeEndpointsStore((state) => state.status);
+  const initRuntimeEndpoints = useRuntimeEndpointsStore((state) => state.init);
+  const refreshRuntimeEndpoints = useRuntimeEndpointsStore((state) => state.refresh);
   const initGatewayEvents = useGatewayStore((state) => state.init);
   const refreshRuntimeHostStatusSnapshot = useGatewayStore((state) => state.refreshRuntimeHostStatus);
   const restartGateway = useGatewayStore((state) => state.restart);
@@ -1015,6 +1079,23 @@ export function Settings() {
 
   const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
   const effectiveRuntimeHostStatus = observedRuntimeHostStatus;
+  const runtimeEndpointCatalogLoading = runtimeEndpointsStatus === 'idle' || runtimeEndpointsStatus === 'loading';
+  const openClawEndpoint = findRuntimeEndpointByAdapter(runtimeEndpoints, 'openclaw');
+  const openClawEndpointStatus = runtimeEndpointCatalogLoading && !openClawEndpoint
+    ? t('common:status.loading')
+    : runtimeEndpointStatusLabel(openClawEndpoint);
+  const matchaAgentAppServerStatusLabel = formatMatchaAgentAppServerStatusLabel(
+    matchaAgentAppServerStatus,
+    matchaAgentAppServerLoading,
+    t('common:status.loading'),
+  );
+  const openClawEndpointBadgeVariant = openClawEndpoint
+    ? runtimeEndpointBadgeVariant(openClawEndpoint)
+    : runtimeEndpointCatalogLoading ? 'outline' : 'secondary';
+  const matchaAgentAppServerBadgeVariant = matchaAgentAppServerBadgeVariantForStatus(
+    matchaAgentAppServerStatus,
+    matchaAgentAppServerLoading,
+  );
   const showRuntimeHostError = effectiveRuntimeHostStatus === 'degraded'
     || effectiveRuntimeHostStatus === 'error'
     || effectiveRuntimeHostStatus === 'stopped';
@@ -1031,19 +1112,39 @@ export function Settings() {
     }
   }, [refreshRuntimeHostStatusSnapshot, t]);
 
+  const applyMatchaAgentAppServerStatus = useCallback((status: MatchaAgentAppServerStatus) => {
+    traceSettingsStartup('matcha-agent-status-apply', summarizeMatchaAgentAppServerTrace(status) ?? {});
+    setMatchaAgentAppServerStatus(status);
+    setMatchaAgentAppServerError('');
+  }, []);
+
   const loadMatchaAgentAppServerStatus = useCallback(async () => {
     const ownedRequestSequence = matchaAgentAppServerStatusRequestSequenceRef.current + 1;
+    const startedAtMs = Date.now();
     matchaAgentAppServerStatusRequestSequenceRef.current = ownedRequestSequence;
     const isOwnedStatusRequest = () => matchaAgentAppServerStatusRequestSequenceRef.current === ownedRequestSequence;
 
+    traceSettingsStartup('matcha-agent-status-request-start', { sequence: ownedRequestSequence });
     setMatchaAgentAppServerLoading(true);
     setMatchaAgentAppServerError('');
     try {
       const status = await hostApiFetch<MatchaAgentAppServerStatus>('/api/matcha-agent/app-server/status');
+      traceSettingsStartup('matcha-agent-status-request-success', {
+        sequence: ownedRequestSequence,
+        durationMs: Date.now() - startedAtMs,
+        owned: isOwnedStatusRequest(),
+        ...(summarizeMatchaAgentAppServerTrace(status) ?? {}),
+      });
       if (isOwnedStatusRequest()) {
-        setMatchaAgentAppServerStatus(status);
+        applyMatchaAgentAppServerStatus(status);
       }
     } catch (error) {
+      traceSettingsStartup('matcha-agent-status-request-error', {
+        sequence: ownedRequestSequence,
+        durationMs: Date.now() - startedAtMs,
+        owned: isOwnedStatusRequest(),
+        ...summarizeSettingsTraceError(error),
+      });
       if (isOwnedStatusRequest()) {
         setMatchaAgentAppServerError(toUserMessage(error));
       }
@@ -1052,7 +1153,7 @@ export function Settings() {
         setMatchaAgentAppServerLoading(false);
       }
     }
-  }, []);
+  }, [applyMatchaAgentAppServerStatus]);
 
   const restartMatchaAgentAppServer = useCallback(async () => {
     setMatchaAgentAppServerRestarting(true);
@@ -1069,14 +1170,6 @@ export function Settings() {
     }
   }, [loadMatchaAgentAppServerStatus, t]);
 
-  const matchaAgentAppServerState = matchaAgentAppServerStatus?.processState ?? 'unknown';
-  const matchaAgentAppServerBadgeVariant = matchaAgentAppServerState === 'running'
-    ? 'success'
-    : matchaAgentAppServerState === 'failed' || matchaAgentAppServerState === 'stopping'
-      ? 'destructive'
-      : matchaAgentAppServerState === 'starting' || matchaAgentAppServerState === 'waitingToRestart'
-        ? 'outline'
-        : 'secondary';
   const matchaAgentAppServerPort = matchaAgentAppServerStatus?.port ?? t('gateway.unknown');
   const matchaAgentAppServerPid = matchaAgentAppServerStatus?.pid ?? t('gateway.unknown');
   const matchaAgentAppServerStatusError = matchaAgentAppServerStatus?.lastError || matchaAgentAppServerError;
@@ -1085,8 +1178,19 @@ export function Settings() {
     if (activeSection !== 'gateway') {
       return;
     }
+    initRuntimeEndpoints();
+    void refreshRuntimeEndpoints();
     void loadMatchaAgentAppServerStatus();
-  }, [activeSection, loadMatchaAgentAppServerStatus]);
+    const unsubscribe = subscribeHostEvent<MatchaAgentAppServerStatus>('matcha-agent:status', (payload) => {
+      if (payload && typeof payload === 'object' && typeof payload.processState === 'string') {
+        traceSettingsStartup('matcha-agent-status-event', summarizeMatchaAgentAppServerTrace(payload) ?? {});
+        applyMatchaAgentAppServerStatus(payload);
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [activeSection, applyMatchaAgentAppServerStatus, initRuntimeEndpoints, loadMatchaAgentAppServerStatus, refreshRuntimeEndpoints]);
 
   const restartRuntimeHost = useCallback(async () => {
     try {
@@ -1565,16 +1669,8 @@ export function Settings() {
               description={t('gateway.openclawDescription')}
               badges={(
                 <>
-                  <Badge
-                    variant={
-                      gatewayStatus.processState === 'running'
-                        ? 'success'
-                        : gatewayStatus.processState === 'error'
-                          ? 'destructive'
-                          : 'secondary'
-                    }
-                  >
-                    {gatewayStatus.processState}
+                  <Badge variant={openClawEndpointBadgeVariant}>
+                    {openClawEndpointStatus}
                   </Badge>
                   <Badge variant="outline">{t('gateway.port')}: {gatewayStatus.port}</Badge>
                 </>
@@ -1695,7 +1791,7 @@ export function Settings() {
               badges={(
                 <>
                   <Badge variant={matchaAgentAppServerBadgeVariant}>
-                    {matchaAgentAppServerState}
+                    {matchaAgentAppServerStatusLabel}
                   </Badge>
                   <Badge variant="outline">{t('gateway.port')}: {matchaAgentAppServerPort}</Badge>
                   <Badge variant="outline">{t('gateway.pid')}: {matchaAgentAppServerPid}</Badge>

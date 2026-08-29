@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::{channel_credentials::Outcome, transport::authorization::CapabilityDecisionVerifier};
+use crate::{channel::credentials::Outcome, transport::authorization::CapabilityDecisionVerifier};
 
 const OPERATION_ID: &str = "channels.credentials.validate";
 const AUTHORIZATION_ENDPOINT: &str = "/api/channels/credentials/validate";

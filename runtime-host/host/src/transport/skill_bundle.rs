@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{
+    facade::SkillsHandle,
     skill_bundle::{Bundle, BundleFile, Command, Outcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
@@ -53,13 +54,13 @@ pub(crate) async fn export(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: SkillsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     authorize(headers, &verifier, EXPORT_ENDPOINT, now).await?;
     let request =
         serde_json::from_slice::<ExportRequest>(body).map_err(|_| RequestError::Invalid)?;
-    match owner
+    match handle
         .skill_bundles(Command::Export {
             skill_keys: request.skill_keys,
         })
@@ -77,7 +78,7 @@ pub(crate) async fn import(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: SkillsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     authorize(headers, &verifier, IMPORT_ENDPOINT, now).await?;
@@ -97,7 +98,7 @@ pub(crate) async fn import(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| RequestError::Invalid)?;
     crate::skill_bundle::validate_batch(&bundles).map_err(|_| RequestError::Invalid)?;
-    match owner.skill_bundles(Command::Import { bundles }).await {
+    match handle.skill_bundles(Command::Import { bundles }).await {
         Ok(Outcome::Accepted) => Ok(json!({ "outcome": "accepted" })),
         Ok(Outcome::Rejected) => Ok(json!({ "outcome": "rejected" })),
         Ok(Outcome::Exported(_) | Outcome::Unknown) | Err(_) => Ok(json!({ "outcome": "unknown" })),

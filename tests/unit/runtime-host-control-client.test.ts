@@ -72,6 +72,19 @@ function runtimeEventFrame(): Buffer {
   });
 }
 
+function matchaLifecycleEventFrame(): Buffer {
+  return frame({
+    version: 1,
+    type: 'event',
+    event: {
+      type: 'matcha.lifecycle',
+      lifecycle: 'running',
+      ready: true,
+      observedAtMs: 1_725_000_000_000,
+    },
+  });
+}
+
 function succeededOutcome(id: unknown, result: unknown): Buffer {
   return frame({
     version: 1,
@@ -140,6 +153,22 @@ describe('runtime-host framed control client', () => {
     streams.output.emit('data', Buffer.concat([readyFrame(), runtimeEventFrame()]));
 
     expect(event).toHaveBeenCalledWith({ type: 'openclaw.runtime' });
+  });
+
+  it('accepts the public Matcha lifecycle event without private process fields', async () => {
+    const { client, streams } = createClient();
+    const event = vi.fn();
+    client.onSafeEvent(event);
+
+    streams.output.emit('data', Buffer.concat([readyFrame(), matchaLifecycleEventFrame()]));
+
+    expect(event).toHaveBeenCalledWith({
+      type: 'matcha.lifecycle',
+      lifecycle: 'running',
+      ready: true,
+      observedAtMs: 1_725_000_000_000,
+    });
+    expect(JSON.stringify(event.mock.calls)).not.toMatch(/pid|port|token|path|stderr/);
   });
 
   it('strictly decodes Matcha session activity and rejects private or malformed fields', () => {
@@ -679,59 +708,29 @@ describe('runtime-host framed control client', () => {
     await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });
   });
 
-  it('encodes toolchain submission and job lookup commands without rebuilding job state', async () => {
+  it('encodes the direct toolchain install command without rebuilding job state', async () => {
     const { client, streams } = createClient();
-    const install = client.command({ name: 'openclaw.toolchain.install-submit' });
-    const lookup = client.command({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId: 'toolchain-job-1' },
-    });
-    const commands = streams.writes.map(outboundCommand);
+    const install = client.command({ name: 'openclaw.toolchain.install-uv' });
+    const [outbound] = streams.writes.map(outboundCommand);
 
-    expect(commands.map(({ command }) => command)).toEqual([
-      { name: 'openclaw.toolchain.install-submit' },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: 'toolchain-job-1' } },
-    ]);
-    expect(Object.keys(commands[0].command as Record<string, unknown>)).toEqual(['name']);
-    expect(Object.keys(commands[1].command as Record<string, unknown>).sort()).toEqual(['input', 'name']);
-    expect(JSON.stringify(commands)).not.toMatch(/method|route|payload|native/);
+    expect(outbound.command).toEqual({ name: 'openclaw.toolchain.install-uv' });
+    expect(Object.keys(outbound.command as Record<string, unknown>)).toEqual(['name']);
+    expect(JSON.stringify(outbound)).not.toMatch(/method|route|payload|native/);
 
     streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(commands[0].id, {
-      job: { id: 'toolchain-job-1', status: 'submitted' },
-    }));
-    streams.output.emit('data', succeededOutcome(commands[1].id, {
-      job: { id: 'toolchain-job-1', status: 'running' },
-      outcome: 'known',
-    }));
+    streams.output.emit('data', succeededOutcome(outbound.id, { result: { outcome: 'installed' } }));
 
     await expect(install).resolves.toEqual({
       kind: 'succeeded',
-      result: { job: { id: 'toolchain-job-1', status: 'submitted' } },
-    });
-    await expect(lookup).resolves.toEqual({
-      kind: 'succeeded',
-      result: {
-        job: { id: 'toolchain-job-1', status: 'running' },
-        outcome: 'known',
-      },
+      result: { result: { outcome: 'installed' } },
     });
   });
 
-  it('rejects toolchain command schema drift before writing', async () => {
+  it('rejects toolchain install-uv input and extra fields before writing', async () => {
     const { client, streams } = createClient();
     const invalidCommands = [
-      { name: 'openclaw.toolchain.install-submit', input: {} },
-      { name: 'openclaw.toolchain.install-submit', extra: true },
-      { name: 'openclaw.toolchain.job-get' },
-      { name: 'openclaw.toolchain.job-get', input: null },
-      { name: 'openclaw.toolchain.job-get', input: [] },
-      { name: 'openclaw.toolchain.job-get', input: {} },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: '' } },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: '   ' } },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: 'x'.repeat(129) } },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: '中'.repeat(43) } },
-      { name: 'openclaw.toolchain.job-get', input: { jobId: 'toolchain-job-1', extra: true } },
+      { name: 'openclaw.toolchain.install-uv', input: {} },
+      { name: 'openclaw.toolchain.install-uv', extra: true },
     ];
 
     for (const command of invalidCommands) {
@@ -743,7 +742,7 @@ describe('runtime-host framed control client', () => {
     expect(streams.writes).toHaveLength(0);
   });
 
-  it('classifies toolchain install-submit delivery as unknown while job-get remains not delivered', async () => {
+  it('classifies toolchain install-uv write failure, timeout, and disconnect as unknown delivery', async () => {
     const failedWrite = new ControlStreams();
     failedWrite.input.write = (chunk, callback) => {
       failedWrite.writes.push(Buffer.from(chunk));
@@ -755,57 +754,32 @@ describe('runtime-host framed control client', () => {
       stdout: failedWrite.output,
     });
 
-    await expect(failedWriteClient.command({ name: 'openclaw.toolchain.install-submit' })).rejects.toMatchObject({
+    await expect(failedWriteClient.command({ name: 'openclaw.toolchain.install-uv' })).rejects.toMatchObject({
       kind: 'write-failed',
       delivery: 'unknown-delivery',
-      retryable: false,
-    } satisfies Partial<RuntimeHostControlError>);
-    await expect(failedWriteClient.command({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId: 'toolchain-job-1' },
-    })).rejects.toMatchObject({
-      kind: 'write-failed',
-      delivery: 'not-delivered',
       retryable: false,
     } satisfies Partial<RuntimeHostControlError>);
 
     vi.useFakeTimers();
     try {
       const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const install = timedOut.client.command({ name: 'openclaw.toolchain.install-submit' });
-      const lookup = timedOut.client.command({
-        name: 'openclaw.toolchain.job-get',
-        input: { jobId: 'toolchain-job-1' },
-      });
-      const installAssertion = expect(install).rejects.toMatchObject({
+      const install = timedOut.client.command({ name: 'openclaw.toolchain.install-uv' });
+      const assertion = expect(install).rejects.toMatchObject({
         kind: 'timeout-exceeded',
         delivery: 'unknown-delivery',
       } satisfies Partial<RuntimeHostControlError>);
-      const lookupAssertion = expect(lookup).rejects.toMatchObject({
-        kind: 'timeout-exceeded',
-        delivery: 'not-delivered',
-      } satisfies Partial<RuntimeHostControlError>);
       await vi.advanceTimersByTimeAsync(10);
-      await installAssertion;
-      await lookupAssertion;
+      await assertion;
     } finally {
       vi.useRealTimers();
     }
 
     const disconnected = createClient();
-    const install = disconnected.client.command({ name: 'openclaw.toolchain.install-submit' });
-    const lookup = disconnected.client.command({
-      name: 'openclaw.toolchain.job-get',
-      input: { jobId: 'toolchain-job-1' },
-    });
+    const install = disconnected.client.command({ name: 'openclaw.toolchain.install-uv' });
     disconnected.streams.output.emit('close');
     await expect(install).rejects.toMatchObject({
       kind: 'disconnected',
       delivery: 'unknown-delivery',
-    } satisfies Partial<RuntimeHostControlError>);
-    await expect(lookup).rejects.toMatchObject({
-      kind: 'disconnected',
-      delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
   });
 
@@ -936,17 +910,17 @@ describe('runtime-host framed control client', () => {
     expect(removeDisconnect()).toBe(true);
   });
 
-  it('enforces frozen one-to-30,000 ms timeout bounds before writing', async () => {
+  it('enforces frozen one-to-120,000 ms timeout bounds before writing', async () => {
     expect(() => createClient({ defaultTimeoutMs: 0 })).toThrow(RangeError);
-    expect(() => createClient({ defaultTimeoutMs: 30_001 })).toThrow(RangeError);
+    expect(() => createClient({ defaultTimeoutMs: 120_001 })).toThrow(RangeError);
 
     const { client, streams } = createClient();
     expect(() => client.command({ name: 'host.health' }, { timeoutMs: 0 })).toThrow(RangeError);
-    expect(() => client.command({ name: 'host.health' }, { timeoutMs: 30_001 })).toThrow(RangeError);
+    expect(() => client.command({ name: 'host.health' }, { timeoutMs: 120_001 })).toThrow(RangeError);
 
-    const command = client.command({ name: 'host.health' }, { timeoutMs: 30_000 });
+    const command = client.command({ name: 'host.health' }, { timeoutMs: 120_000 });
     const outbound = outboundCommand(streams.writes[0]);
-    expect(outbound.timeoutMs).toBe(30_000);
+    expect(outbound.timeoutMs).toBe(120_000);
     streams.output.emit('data', readyFrame());
     streams.output.emit('data', succeededOutcome(outbound.id, {}));
     await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });

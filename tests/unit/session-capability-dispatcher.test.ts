@@ -22,23 +22,23 @@ const matchaEndpoint = {
 } as const;
 
 function sessionSendRequest(endpoint = openClawEndpoint) {
-  const sessionKey = endpoint.runtimeAdapterId === 'openclaw'
-    ? 'agent:main:main'
-    : 'matcha-session-1';
+  const isOpenClaw = endpoint.runtimeAdapterId === 'openclaw';
+  const sessionKey = isOpenClaw ? 'agent:main:main' : 'matcha-session-1';
+  const agentId = isOpenClaw ? 'main' : 'default';
   return {
     id: 'session.prompt',
     operationId: 'sessions.prompt',
     scope: {
       kind: 'session',
-      identity: { endpoint, agentId: 'default', sessionKey },
+      identity: { endpoint, agentId, sessionKey },
     },
     target: {
       kind: 'session',
-      identity: { endpoint, agentId: 'default', sessionKey },
+      identity: { endpoint, agentId, sessionKey },
     },
     input: {
       sessionKey,
-      sessionIdentity: { endpoint, agentId: 'default', sessionKey },
+      sessionIdentity: { endpoint, agentId, sessionKey },
       message: 'Hello',
       runId: 'run-1',
       attachments: [],
@@ -286,6 +286,54 @@ describe('session capability dispatcher', () => {
     expect(rendererEventRoutes.release).not.toHaveBeenCalled();
   });
 
+  it('keeps OpenClaw route when native ack run differs from request identity', async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({
+        status: 202,
+        body: { outcome: 'queued', runId: 'native-run-1' },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        body: { outcome: 'succeeded', runId: 'native-run-2', status: 'started' },
+      });
+    const { deps, rendererEventRoutes } = routeDeps(send);
+
+    await expect(dispatchSessionCapability(sessionSendRequest(), deps)).resolves.toEqual({
+      status: 202,
+      body: { outcome: 'queued', runId: 'native-run-1', routeKey: 'renderer-route:issued' },
+    });
+    await expect(dispatchSessionCapability(sessionSendRequest(), deps)).resolves.toEqual({
+      status: 200,
+      body: { outcome: 'succeeded', runId: 'native-run-2', status: 'started' },
+    });
+    expect(rendererEventRoutes.release).not.toHaveBeenCalled();
+  });
+
+  it('keeps terminal send outcomes routed until the session delta closes them', async () => {
+    const send = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'unavailable' } });
+    const { deps, rendererEventRoutes } = routeDeps(send);
+
+    await expect(dispatchSessionCapability(sessionSendRequest(), deps)).resolves.toEqual({
+      status: 200,
+      body: { outcome: 'unavailable' },
+    });
+    expect(rendererEventRoutes.release).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched Matcha native run receipts', async () => {
+    const send = vi.fn().mockResolvedValue({
+      status: 200,
+      body: { outcome: 'succeeded', runId: 'native-run-1', status: 'started' },
+    });
+    const { deps, rendererEventRoutes } = routeDeps(send, true);
+
+    await expect(dispatchSessionCapability(sessionSendRequest(matchaEndpoint), deps)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Session send is unavailable' },
+    });
+    expect(rendererEventRoutes.release).toHaveBeenCalledWith('renderer-route:issued');
+  });
+
   it.each([
     {
       endpoint: openClawEndpoint,
@@ -313,5 +361,139 @@ describe('session capability dispatcher', () => {
     });
     expect(rendererEventRoutes.release).toHaveBeenCalledWith('renderer-route:issued');
     expect(JSON.stringify(response)).not.toContain('private-token');
+  });
+
+  it('flattens legacy renderer model selection requests to the native Rust schema', async () => {
+    const identity = { endpoint: openClawEndpoint, agentId: 'default', sessionKey: 'agent:default:main' };
+    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+
+    const response = await dispatchSessionCapability({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', identity },
+      target: { kind: 'model-selection', identity, modelSelectionId: 'anthropic/claude-opus-4-6' },
+      input: {
+        sessionKey: identity.sessionKey,
+        sessionIdentity: identity,
+        modelSelectionId: 'anthropic/claude-opus-4-6',
+      },
+    }, { sessionModelSelectionTransport: { select } } as never);
+
+    expect(response).toEqual({ status: 200, body: { outcome: 'succeeded' } });
+    expect(select).toHaveBeenCalledWith({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', endpoint: openClawEndpoint, sessionKey: identity.sessionKey },
+      target: { kind: 'model-selection' },
+      input: {
+        endpoint: openClawEndpoint,
+        sessionKey: identity.sessionKey,
+        modelSelectionId: 'anthropic/claude-opus-4-6',
+      },
+    });
+  });
+
+  it('accepts OpenClaw agent-scoped model selection requests with optional endpointSessionId', async () => {
+    const identity = { endpoint: openClawEndpoint, agentId: 'designer-agent', sessionKey: 'agent:designer-agent:main' };
+    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+
+    await expect(dispatchSessionCapability({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', identity },
+      target: { kind: 'model-selection', identity, modelSelectionId: 'openai/gpt-5.4' },
+      input: {
+        sessionKey: identity.sessionKey,
+        endpointSessionId: 'main',
+        sessionIdentity: identity,
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    }, { sessionModelSelectionTransport: { select } } as never)).resolves.toEqual({
+      status: 200,
+      body: { outcome: 'succeeded' },
+    });
+    expect(select.mock.calls[0]?.[0]).toEqual({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', endpoint: openClawEndpoint, sessionKey: identity.sessionKey },
+      target: { kind: 'model-selection' },
+      input: {
+        endpoint: openClawEndpoint,
+        sessionKey: identity.sessionKey,
+        endpointSessionId: 'main',
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    });
+  });
+
+  it('rejects OpenClaw model selection when the input session key is only the native handle', async () => {
+    const identity = { endpoint: openClawEndpoint, agentId: 'designer-agent', sessionKey: 'agent:designer-agent:main' };
+    const select = vi.fn();
+
+    await expect(dispatchSessionCapability({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', identity },
+      target: { kind: 'model-selection', identity, modelSelectionId: 'openai/gpt-5.4' },
+      input: {
+        sessionKey: 'main',
+        endpointSessionId: 'main',
+        sessionIdentity: identity,
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    }, { sessionModelSelectionTransport: { select } } as never)).rejects.toThrow('Session model selection request is invalid');
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('passes Matcha endpointSessionId through model selection without replacing the Host key', async () => {
+    const identity = { endpoint: matchaEndpoint, agentId: 'matcha', sessionKey: 'matcha-agent:matcha:native-session-1' };
+    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+
+    await expect(dispatchSessionCapability({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', identity },
+      target: { kind: 'model-selection', identity, modelSelectionId: 'openai/gpt-5.4' },
+      input: {
+        sessionKey: identity.sessionKey,
+        endpointSessionId: 'native-session-1',
+        sessionIdentity: identity,
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    }, { sessionModelSelectionTransport: { select } } as never)).resolves.toEqual({
+      status: 200,
+      body: { outcome: 'succeeded' },
+    });
+    expect(select).toHaveBeenCalledWith({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', endpoint: matchaEndpoint, sessionKey: identity.sessionKey },
+      target: { kind: 'model-selection' },
+      input: {
+        endpoint: matchaEndpoint,
+        sessionKey: identity.sessionKey,
+        endpointSessionId: 'native-session-1',
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    });
+  });
+
+  it('rejects non-OpenClaw model selection requests when the input session key is not the bound identity', async () => {
+    const identity = { endpoint: matchaEndpoint, agentId: 'default', sessionKey: 'matcha-session-1' };
+    const select = vi.fn();
+
+    await expect(dispatchSessionCapability({
+      id: 'session.modelSelection',
+      operationId: 'sessions.patchModel',
+      scope: { kind: 'session', identity },
+      target: { kind: 'model-selection', identity, modelSelectionId: 'openai/gpt-5.4' },
+      input: {
+        sessionKey: 'native-session-1',
+        endpointSessionId: 'native-session-1',
+        sessionIdentity: identity,
+        modelSelectionId: 'openai/gpt-5.4',
+      },
+    }, { sessionModelSelectionTransport: { select } } as never)).rejects.toThrow('Session model selection request is invalid');
+    expect(select).not.toHaveBeenCalled();
   });
 });

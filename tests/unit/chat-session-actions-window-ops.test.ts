@@ -101,7 +101,6 @@ function createStateHarness(input: {
         ...createEmptySessionRecord(),
         meta: {
           ...createEmptySessionRecord().meta,
-          backendSessionKey: input.currentSessionKey,
           agentId: input.currentSessionKey.split(':')[1] ?? null,
           kind: input.currentSessionKey.endsWith(':main') ? 'main' : 'session',
           preferred: input.currentSessionKey.endsWith(':main'),
@@ -350,7 +349,6 @@ describe('chat session window ops', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            backendSessionKey: sessionKey,
             sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
           },
           items: projectSessionViewItems(buildView({
@@ -600,7 +598,6 @@ describe('chat session window ops', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            backendSessionKey: nextSessionKey,
             sessionIdentity: createOpenClawTestSessionIdentity(nextSessionKey),
           },
         },
@@ -650,7 +647,6 @@ describe('chat session window ops', () => {
           meta: {
             ...createEmptySessionRecord().meta,
             historyStatus: 'ready' as const,
-            backendSessionKey: currentSessionKey,
             sessionIdentity: createOpenClawTestSessionIdentity(currentSessionKey),
           },
           window: createViewportWindowState({
@@ -667,7 +663,6 @@ describe('chat session window ops', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            backendSessionKey: targetSessionKey,
             sessionIdentity: createOpenClawTestSessionIdentity(targetSessionKey),
           },
         },

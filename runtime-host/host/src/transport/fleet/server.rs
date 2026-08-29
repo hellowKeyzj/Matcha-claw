@@ -13,6 +13,7 @@ use tokio::{
 };
 
 use super::{DecodeError, Delivery, Request, read};
+use crate::fleet::handle::FleetHandle;
 use crate::transport::authorization::CapabilityDecisionVerifier;
 use crate::transport::fleet_terminal::ServerDependencies as TerminalServerDependencies;
 
@@ -22,14 +23,14 @@ pub(crate) mod runtime_agent_ingress;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: FleetHandle,
     terminal: TerminalServerDependencies,
 }
 
@@ -37,7 +38,7 @@ impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        owner: FleetHandle,
         terminal: TerminalServerDependencies,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -64,10 +65,13 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: FleetHandle,
     terminal: TerminalServerDependencies,
 ) -> io::Result<()> {
-    let request = read_request(&mut stream).await?;
+    let request = match timeout(REQUEST_READ_DEADLINE, read_request(&mut stream)).await {
+        Ok(request) => request?,
+        Err(_) => return write_response(&mut stream, Response::bad_request()).await,
+    };
     if let Ok(request) = &request {
         if request.method == "GET" && request.path == "/api/fleet/terminal" {
             let Some(key) = request
@@ -100,17 +104,9 @@ async fn serve(
             .await;
         }
     }
-    let response = match timeout(REQUEST_DEADLINE, async {
-        Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
-            Err(response) => response,
-        })
-    })
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+    let response = match request {
+        Ok(request) => handle(request, verifier, owner).await,
+        Err(response) => response,
     };
     write_response(&mut stream, response).await
 }
@@ -118,7 +114,7 @@ async fn serve(
 async fn handle(
     request: HttpRequest,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    owner: FleetHandle,
 ) -> Response {
     if request.path == "/api/remote-fleet/runtime-agent/ingress" {
         return match runtime_agent_ingress::handle(
@@ -323,6 +319,10 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
@@ -374,6 +374,50 @@ mod tests {
         assert!(
             bearer_authorization(&[("authorization".to_owned(), "Basic x".to_owned())]).is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn write_response_uses_status_reason_phrases() {
+        for (status, reason) in [
+            (405_u16, "Method Not Allowed"),
+            (409, "Conflict"),
+            (413, "Payload Too Large"),
+            (422, "Unprocessable Entity"),
+            (503, "Service Unavailable"),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind test listener");
+            let address = listener.local_addr().expect("test listener address");
+            let mut client = TcpStream::connect(address)
+                .await
+                .expect("connect test listener");
+            let (mut stream, _) = listener.accept().await.expect("accept test connection");
+            write_response(
+                &mut stream,
+                Response {
+                    status,
+                    body: serde_json::json!({ "success": false }),
+                },
+            )
+            .await
+            .expect("write response");
+            drop(stream);
+
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .await
+                .expect("read response");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} {reason}\r\n")),
+                "unexpected status line for {status}: {response:?}"
+            );
+            assert!(
+                !response.starts_with(&format!("HTTP/1.1 {status} Internal Server Error\r\n")),
+                "status {status} used fallback reason phrase"
+            );
+        }
     }
 
     #[tokio::test]

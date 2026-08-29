@@ -22,7 +22,7 @@ pub(crate) async fn handle(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     let Some(authorization) = headers
         .iter()
@@ -42,7 +42,7 @@ pub(crate) async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     }
     drop(verifier);
-    match owner.list_matcha_sessions().await {
+    match session.list_matcha_sessions().await {
         Ok(outcome) => Response::from_delivery(Delivery::from(outcome)),
         Err(_) => Response::unavailable(),
     }

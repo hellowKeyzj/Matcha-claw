@@ -11,6 +11,7 @@ import type {
 } from '../../query/runTrace.js'
 import {
   isRunTraceEnabled,
+  logProcessSessionTrace,
   sanitizeRunTraceDetails,
 } from '../../query/runTrace.js'
 import type {
@@ -235,6 +236,17 @@ function applyOptionalEnv(key: string, value: string | undefined): void {
   }
 }
 
+function providerRuntimeTraceDetails(
+  providerRuntime: ProviderRuntimeConfig | undefined,
+): RunTraceDetails {
+  return {
+    hasProviderRuntime: providerRuntime !== undefined,
+    providerRuntimeKind: providerRuntime?.kind ?? null,
+    hasBaseUrl: Boolean(providerRuntime?.baseUrl),
+    hasApiKey: Boolean(providerRuntime?.apiKey),
+  }
+}
+
 export async function createWorkerSession(
   payload: WorkerInitializePayload,
   sink: WorkerSessionSink,
@@ -302,6 +314,15 @@ export async function createWorkerSession(
   prepareHostProviderRuntime(payload.providerRuntime)
   managedEnv.applySafeConfigEnvironmentVariables()
   applyHostProviderRuntime(payload.providerRuntime)
+  logProcessSessionTrace(
+    'matcha-agent-worker',
+    'worker.session.initialize.model',
+    {
+      sessionIdLength: payload.sessionId.length,
+      model: payload.model ?? null,
+      ...providerRuntimeTraceDetails(payload.providerRuntime),
+    },
+  )
   const restoredLog = resolvedSessionFile
     ? await getLastSessionLog(payload.sessionId as UUID)
     : null
@@ -502,6 +523,14 @@ class QueryEngineWorkerSession implements WorkerSession {
       throw new Error('Worker session is not initialized')
     }
     this.queryEngine.setModel(model)
+    logProcessSessionTrace(
+      'matcha-agent-worker',
+      'worker.session.setModel.applied',
+      {
+        sessionIdLength: this.sessionId.length,
+        model,
+      },
+    )
   }
 
   async shutdown(
@@ -518,6 +547,17 @@ class QueryEngineWorkerSession implements WorkerSession {
       if (!runId) return
 
       const sanitizedDetails = sanitizeRunTraceDetails(details)
+      if (
+        stage === 'query_engine.model.resolved' ||
+        stage === 'query.api.loop.start' ||
+        stage === 'query.api.streaming.start'
+      ) {
+        logProcessSessionTrace('matcha-agent-worker', stage, {
+          sessionIdLength: this.sessionId.length,
+          runId,
+          ...(sanitizedDetails ?? {}),
+        })
+      }
       this.sink.emit({
         type: 'event',
         runId,

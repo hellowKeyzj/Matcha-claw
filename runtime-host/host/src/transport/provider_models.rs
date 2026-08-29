@@ -7,8 +7,8 @@ use openclaw::port::{
 };
 
 use crate::{
-    provider_accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
-    provider_models::{
+    provider::accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
+    provider::models::{
         ProviderModelDraft, ProviderModelListOutcome, ProviderModelReplaceOutcome,
         ProviderModelSelectableOutcome, ProviderModelView, SelectableProviderModelView,
     },
@@ -300,12 +300,17 @@ fn native_diagnostic_json(diagnostic: &ProviderNativeConfigurationDiagnostic) ->
         "reason": diagnostic.reason(),
         "configPath": diagnostic.config_path(),
     });
-    let object = value.as_object_mut().expect("provider native diagnostic JSON is an object");
+    let object = value
+        .as_object_mut()
+        .expect("provider native diagnostic JSON is an object");
     if let Some(method) = diagnostic.method() {
         object.insert("method".into(), Value::String(method.to_owned()));
     }
     if let Some(expected_path) = diagnostic.expected_path() {
-        object.insert("expectedPath".into(), Value::String(expected_path.to_owned()));
+        object.insert(
+            "expectedPath".into(),
+            Value::String(expected_path.to_owned()),
+        );
     }
     if let Some(detail) = diagnostic.detail() {
         object.insert("detail".into(), Value::String(detail.to_owned()));

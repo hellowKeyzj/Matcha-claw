@@ -4,10 +4,6 @@ use crate::skill_bundle::{Bundle, BundleFile};
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Command {
-    Search {
-        query: Option<String>,
-        limit: Option<u16>,
-    },
     Detail {
         slug: String,
     },
@@ -60,7 +56,6 @@ pub(crate) enum Command {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Outcome {
-    Search(Result<Vec<SearchResult>, ReadError>),
     Detail(Result<Detail, ReadError>),
     Mutation(MutationOutcome),
     Upload(UploadOutcome),
@@ -69,16 +64,6 @@ pub(crate) enum Outcome {
     Readme(Result<ReadmeReceipt, ReadmeError>),
     Unavailable,
     Rejected,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SearchResult {
-    pub(crate) score: f64,
-    pub(crate) slug: String,
-    pub(crate) display_name: String,
-    pub(crate) summary: Option<String>,
-    pub(crate) version: Option<String>,
-    pub(crate) updated_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,19 +164,6 @@ pub(crate) enum BundleError {
 }
 
 impl Command {
-    pub(crate) fn search(query: Option<String>, limit: Option<u16>) -> Result<Self, ()> {
-        if query
-            .as_deref()
-            .is_some_and(|v| v.trim().is_empty() || v.len() > 256)
-            || limit.is_some_and(|v| v == 0 || v > 100)
-        {
-            return Err(());
-        }
-        Ok(Self::Search {
-            query: query.map(|v| v.trim().to_owned()),
-            limit,
-        })
-    }
     pub(crate) fn detail(slug: String) -> Result<Self, ()> {
         valid_slug(&slug)
             .then_some(Self::Detail {

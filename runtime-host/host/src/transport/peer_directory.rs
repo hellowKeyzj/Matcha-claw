@@ -68,7 +68,7 @@ fn now_millis() -> u64 {
 
 pub(crate) mod server {
     use super::{AUTHORIZATION_HEADER, BEARER_PREFIX, Delivery};
-    use crate::transport::authorization::CapabilityDecisionVerifier;
+    use crate::{composition::PeerHandle, transport::authorization::CapabilityDecisionVerifier};
     use serde_json::Value;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -81,7 +81,7 @@ pub(crate) mod server {
     pub(crate) async fn handle(
         headers: &[(String, String)],
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-        owner: crate::owner::Handle,
+        peer: PeerHandle,
     ) -> Response {
         let authorization_present = headers
             .iter()
@@ -96,12 +96,20 @@ pub(crate) mod server {
         }
         drop(verifier);
 
-        Response::from_delivery(Delivery::Ok(owner.runtime_endpoint_directory().await))
+        let directory = match peer.runtime_endpoint_directory().await {
+            Ok(directory) => directory,
+            Err(_) => return Response::unavailable(),
+        };
+        Response::from_delivery(Delivery::Ok(directory))
     }
 
     impl Response {
         fn unauthorized() -> Self {
             Self::fixed(401, "Runtime endpoint directory authorization is invalid")
+        }
+
+        fn unavailable() -> Self {
+            Self::fixed(503, "Runtime endpoint directory is unavailable")
         }
 
         fn fixed(status: u16, error: &'static str) -> Self {

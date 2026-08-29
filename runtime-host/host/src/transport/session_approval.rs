@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_approval::{
+    sessions::approval::{
         NativeEndpoint, PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
         SessionApprovalOutcome,
     },
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn list_delivery_exposes_only_opaque_approval_and_option_identifiers() {
         let delivery = PendingApprovalsDelivery::from(PendingApprovalsOutcome::Found(
-            crate::session_approval::PendingApprovals {
-                approvals: vec![crate::session_approval::PendingApproval {
+            crate::sessions::approval::PendingApprovals {
+                approvals: vec![crate::sessions::approval::PendingApproval {
                     approval_id: "approval-1".into(),
                     option_ids: vec!["option-1".into()],
                 }],

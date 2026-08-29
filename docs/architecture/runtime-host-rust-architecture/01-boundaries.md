@@ -27,7 +27,7 @@ Electron Host API proxy
 | child control | `/lifecycle/restart`、`/lifecycle/stop` |
 | failure | `BAD_REQUEST`、`PAYLOAD_TOO_LARGE`、`NOT_FOUND`、`INTERNAL_ERROR`、`UPSTREAM_UNAVAILABLE` 等稳定映射 |
 | timeout | dispatch 30s；health ≤3s |
-| parent callback | shell action 15s；gateway/runtime-job event 3s、best effort、不重试 |
+| parent callback | shell action 15s；gateway event 3s、best effort、不重试；owner operation typed event 由具体 facade 定义 |
 | callback auth | parent base URL + `x-runtime-host-dispatch-token` + version/content-type validation |
 
 `/dispatch` 是外部 child ingress；内部可以按 owner 分发到 Rust modules，但不能让内部 module 的 HTTP DTO直接取代它。
@@ -50,10 +50,10 @@ Rust Host 对 OpenClaw、matcha-agent 等 peer 使用 Integration-specific proto
 ```text
 /internal/runtime-host/shell-actions
 /internal/runtime-host/gateway-events
-/internal/runtime-host/runtime-jobs
+owner/facade typed operation events
 ```
 
-shell 是 request/response effect；gateway/job 是 best-effort notification。callback accepted 不等于业务操作成功；业务成功必须由对应 owner 的 terminal oracle 或 readback 确认。
+shell 是 request/response effect；gateway 和 owner operation events 是 best-effort notification。callback accepted 不等于业务操作成功；业务成功必须由对应 owner 的 terminal oracle 或 readback 确认。
 
 ## 2. DirectRuntimeHost 与 signed transport 的定位
 
@@ -78,7 +78,7 @@ Trusted product path
 2. 同一 public route 只有一个实际 owner；
 3. direct transport 不绕过 main-owned route boundary；
 4. `/dispatch` 与 direct transport 的同一 operation 有明确映射；
-5. error/status/timeout/event/job projection 一致；
+5. error/status/timeout/event/owner-operation projection 一致；
 6. cutover 后不保留 dual semantic owner。
 
 如果某个 direct transport 仅服务新的内部 consumer，应标为 private，不得写入 Renderer contract。

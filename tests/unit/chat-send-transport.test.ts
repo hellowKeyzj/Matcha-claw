@@ -148,4 +148,21 @@ describe('chat send transport', () => {
       idempotencyKey: 'user-local-unknown',
     })).resolves.toEqual({ ok: false, error: 'Failed to send message' });
   });
+
+  it('rejects accepted-looking responses without a native run id', async () => {
+    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    for (const response of [
+      { success: true, runId: null },
+      { outcome: 'queued', runId: '   ' },
+      { outcome: 'succeeded' },
+    ]) {
+      hostSessionPromptMock.mockResolvedValueOnce(response);
+      await expect(sendChatTransport({
+        sessionKey: sessionIdentity.sessionKey,
+        sessionIdentity,
+        message: 'hello',
+        idempotencyKey: 'user-local-no-native-run',
+      })).resolves.toEqual({ ok: false, error: 'Failed to send message' });
+    }
+  });
 });

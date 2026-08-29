@@ -9,6 +9,10 @@ export function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
   root.classList.remove('light', 'dark');
   body.classList.remove('light', 'dark');
   root.classList.add(resolvedTheme);
+  root.style.backgroundColor = 'hsl(var(--card))';
+  body.style.backgroundColor = 'hsl(var(--card))';
+  window.document.getElementById('root')?.style.setProperty('background-color', 'hsl(var(--card))');
+  root.dataset.themeSurface = resolvedTheme;
 }
 
 function resolveTheme(theme: ThemePreference): ResolvedTheme {

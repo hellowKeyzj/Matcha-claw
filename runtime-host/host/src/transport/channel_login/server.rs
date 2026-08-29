@@ -1,10 +1,16 @@
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::{
+    channel::{ChannelHandle, ChannelKey},
+    transport::authorization::CapabilityDecisionVerifier,
+};
 
 use super::{DecodeError, Delivery, decode};
 
@@ -14,7 +20,8 @@ pub(crate) async fn handle_login(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    channel: ChannelHandle,
+    endpoint: RuntimeEndpoint,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> (u16, Value) {
     if method != "POST" || path != "/api/channels/login" {
@@ -58,50 +65,89 @@ pub(crate) async fn handle_login(
     drop(verifier);
 
     let outcome = match command.action {
-        crate::channel_login::ChannelLoginAction::Start {
+        crate::channel::login::ChannelLoginAction::Start {
             force,
             timeout_ms,
             account_id,
             config,
-        } => owner
-            .start_channel_login(command.channel, force, timeout_ms, account_id, config)
-            .await
-            .map_err(|_| crate::channel_login::Outcome::Unknown),
-        crate::channel_login::ChannelLoginAction::Wait {
+        } => {
+            let key = match ChannelKey::try_new(
+                endpoint.clone(),
+                command.channel.clone(),
+                account_id.clone(),
+            ) {
+                Ok(key) => key,
+                Err(_) => return (400, serde_json::json!({"outcome": "rejected"})),
+            };
+            channel
+                .login_start(key, force, timeout_ms, config)
+                .await
+                .map_err(|_| crate::channel::login::Outcome::Unknown)
+        }
+        crate::channel::login::ChannelLoginAction::Wait {
             timeout_ms,
             account_id,
             session_key,
             current_qr_data_url,
-        } => owner
-            .wait_channel_login(
-                command.channel,
-                timeout_ms,
-                account_id,
-                session_key,
-                current_qr_data_url,
-                cancellation,
-            )
-            .await
-            .map_err(|_| crate::channel_login::Outcome::Unknown),
-        crate::channel_login::ChannelLoginAction::Logout { account_id } => owner
-            .logout_channel(command.channel, account_id)
-            .await
-            .map_err(|_| crate::channel_login::Outcome::Unknown),
-        crate::channel_login::ChannelLoginAction::Cancel { account_id } => owner
-            .cancel_channel_login(command.channel, account_id)
-            .await
-            .map_err(|_| crate::channel_login::Outcome::Unknown),
+        } => {
+            let key = match ChannelKey::try_new(
+                endpoint.clone(),
+                command.channel.clone(),
+                account_id.clone(),
+            ) {
+                Ok(key) => key,
+                Err(_) => return (400, serde_json::json!({"outcome": "rejected"})),
+            };
+            channel
+                .login_wait(
+                    key,
+                    timeout_ms,
+                    session_key,
+                    current_qr_data_url,
+                    cancellation,
+                )
+                .await
+                .map_err(|_| crate::channel::login::Outcome::Unknown)
+        }
+        crate::channel::login::ChannelLoginAction::Logout { account_id } => {
+            let key = match ChannelKey::try_new(
+                endpoint.clone(),
+                command.channel.clone(),
+                account_id.clone(),
+            ) {
+                Ok(key) => key,
+                Err(_) => return (400, serde_json::json!({"outcome": "rejected"})),
+            };
+            channel
+                .logout(key)
+                .await
+                .map_err(|_| crate::channel::login::Outcome::Unknown)
+        }
+        crate::channel::login::ChannelLoginAction::Cancel { account_id } => {
+            let key = match ChannelKey::try_new(
+                endpoint.clone(),
+                command.channel.clone(),
+                account_id.clone(),
+            ) {
+                Ok(key) => key,
+                Err(_) => return (400, serde_json::json!({"outcome": "rejected"})),
+            };
+            channel
+                .cancel_login(key)
+                .await
+                .map_err(|_| crate::channel::login::Outcome::Unknown)
+        }
     }
-    .unwrap_or(crate::channel_login::Outcome::Unknown);
+    .unwrap_or(crate::channel::login::Outcome::Unknown);
 
     let delivery = match outcome {
-        crate::channel_login::Outcome::Progress(progress) => Delivery::Progress(progress),
-        crate::channel_login::Outcome::Confirmed => Delivery::Confirmed,
-        crate::channel_login::Outcome::Cancelled => Delivery::Cancelled,
-        crate::channel_login::Outcome::Rejected | crate::channel_login::Outcome::Unsupported => {
+        crate::channel::login::Outcome::Progress(progress) => Delivery::Progress(progress),
+        crate::channel::login::Outcome::Confirmed => Delivery::Confirmed,
+        crate::channel::login::Outcome::Cancelled => Delivery::Cancelled,
+        crate::channel::login::Outcome::Rejected | crate::channel::login::Outcome::Unsupported => {
             Delivery::Rejected
         }
-        crate::channel_login::Outcome::Unknown => Delivery::Unknown,
+        crate::channel::login::Outcome::Unknown => Delivery::Unknown,
     };
     (delivery.status_code(), delivery.body())
 }

@@ -91,7 +91,6 @@ export interface TeamRoleChatTargetIndex {
 export interface TeamRoleSessionProbe {
   readonly sessionIdentity?: SessionIdentity | null;
   readonly sessionKey?: string | null;
-  readonly backendSessionKey?: string | null;
   readonly endpointSessionId?: string | null;
 }
 
@@ -234,7 +233,7 @@ function teamRoleTargetFromBinding(teamId: string, role: TeamRoleBindingRecord):
       roleId: role.roleId,
       agentId: role.agentId,
       localSessionId: localSessionKey,
-      endpointSessionId: materializedSessionKey ?? endpointSessionId,
+      endpointSessionId,
       sessionIdentity: role.sessionIdentity,
     },
   };
@@ -304,7 +303,6 @@ export function resolveTeamRoleChatTargetFromProbe(index: TeamRoleChatTargetInde
     probe.endpointSessionId,
     probe.sessionIdentity?.sessionKey,
     probe.sessionKey,
-    probe.backendSessionKey,
   ];
   for (const candidate of candidates) {
     const key = normalizeTeamRoleSessionKey(candidate);
@@ -331,8 +329,7 @@ export function isTeamRoleReservedLocalSessionKey(value: string | null | undefin
 export function isKnownTeamRoleSession(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): boolean {
   return resolveTeamRoleChatTargetFromProbe(index, probe) !== null
     || isTeamRoleReservedLocalSessionKey(probe.sessionIdentity?.sessionKey)
-    || isTeamRoleReservedLocalSessionKey(probe.sessionKey)
-    || isTeamRoleReservedLocalSessionKey(probe.backendSessionKey);
+    || isTeamRoleReservedLocalSessionKey(probe.sessionKey);
 }
 
 let cachedTeamRoleChatTargetIndexInput: TeamRoleChatTargetIndexInput | null = null;
@@ -589,7 +586,7 @@ function appendOptimisticTeamRoleUserMessage(input: {
     const optimisticUserItem = {
       key: itemKey,
       kind: 'user-message',
-      sessionKey: record.meta.backendSessionKey,
+      sessionKey: record.meta.sessionIdentity?.sessionKey ?? sessionRecordKey,
       role: 'user',
       text: input.message,
       images: [],
@@ -602,7 +599,7 @@ function appendOptimisticTeamRoleUserMessage(input: {
     const optimisticAssistantItem = {
       key: assistantItemKey,
       kind: 'assistant-turn',
-      sessionKey: record.meta.backendSessionKey,
+      sessionKey: record.meta.sessionIdentity?.sessionKey ?? sessionRecordKey,
       role: 'assistant',
       runId: input.idempotencyKey,
       text: '',

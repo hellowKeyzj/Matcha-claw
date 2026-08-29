@@ -108,7 +108,9 @@ child accepted prefix:
   /api/remote-fleet/terminal/
 ```
 
-The WebSocket does not travel through `/dispatch`; it is an upgrade/raw stream boundary. Electron destroys disallowed upgrade paths. Child destroys unsupported/failed upgrades. Sources: [route-boundary.ts](../../electron/api/route-boundary.ts#L40-L42)、[server.ts](../../electron/api/server.ts)、[runtime-host-manager.ts](../../electron/main/runtime-host-manager.ts)、[runtime-host-server.ts](../../runtime-host/composition/runtime-host-server.ts#L155-L171)。
+The WebSocket does not travel through `/dispatch`; it is an upgrade/raw stream boundary. Electron destroys disallowed upgrade paths. Rust Fleet server destroys unsupported/failed upgrades. Current evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)。
+
+Terminal provider open is still under FleetOwner owner-local keyed-lane implementation; this is not product E2E/fault/backpressure/package/Windows verification.
 
 ## What Rust may change
 

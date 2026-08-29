@@ -92,12 +92,13 @@ pub(crate) fn prepare_review_dispatch(
 
     let role_id = input.binding.role().as_str();
     let node_id = input.node_id.as_str();
-    let idempotency_key = format!("{}:review:{}", input.workflow_plan_id, node_id);
-    let delivery_id = DeliveryId::new(format!(
-        "team-graph-review-delivery:{}",
+    let delivery_key = format!(
+        "team-graph-review-delivery:{}:{}",
+        input.run_id.as_str(),
         input.fence.attempt_id().as_str()
-    ))
-    .map_err(|_| ReviewDispatchError::InvalidDelivery)?;
+    );
+    let delivery_id =
+        DeliveryId::new(delivery_key.clone()).map_err(|_| ReviewDispatchError::InvalidDelivery)?;
     let prompt = build_review_prompt(
         input.title,
         input.run_id,
@@ -116,7 +117,7 @@ pub(crate) fn prepare_review_dispatch(
         node_execution_id: input.fence.node_execution_id().as_str().to_owned(),
         task_id: node_id.to_owned(),
         role_id: role_id.to_owned(),
-        idempotency_key: idempotency_key.clone(),
+        idempotency_key: delivery_key.clone(),
         message: prompt.clone(),
         requested_at: input.requested_at,
         max_attempts: input
@@ -132,14 +133,14 @@ pub(crate) fn prepare_review_dispatch(
         .map_err(|_| ReviewDispatchError::InvalidDelivery)?;
 
     let review = ReviewerRequest {
-        review_id: idempotency_key.clone(),
+        review_id: delivery_key.clone(),
         run_id: input.run_id.as_str().to_owned(),
         node_id: node_id.to_owned(),
         fence: input.fence.clone(),
         role_id: role_id.to_owned(),
         session_id: input.binding.external_session().as_str().to_owned(),
         prompt,
-        idempotency_key,
+        idempotency_key: delivery_key,
         requested_at: input.requested_at,
     };
     review
@@ -396,7 +397,7 @@ mod tests {
         assert!(delivery.message.contains("Check the release artifact."));
         assert_eq!(
             prepared.delivery_id().as_str(),
-            "team-graph-review-delivery:review:attempt:1"
+            "team-graph-review-delivery:run:review:review:attempt:1"
         );
     }
 

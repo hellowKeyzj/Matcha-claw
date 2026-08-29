@@ -895,6 +895,8 @@ async function* queryLoop(
     queryCheckpoint('query_api_loop_start')
     runTrace?.('query.api.loop.start', {
       queryDepth: queryTracking.depth,
+      mainLoopModel: toolUseContext.options.mainLoopModel,
+      currentModel,
     })
     try {
       while (attemptWithFallback) {
@@ -904,6 +906,7 @@ async function* queryLoop(
           queryCheckpoint('query_api_streaming_start')
           runTrace?.('query.api.streaming.start', {
             queryDepth: queryTracking.depth,
+            currentModel,
           })
           for await (const message of deps.callModel({
             messages: prependUserContext(messagesForQuery, userContext),

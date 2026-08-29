@@ -146,6 +146,21 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('POST', '/api/runtime-host/status')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/runtime-host/restart')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/runtime-host/restart')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/runtime-agent/ingress')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/remote-fleet/runtime-agent/ingress')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/start-runtime')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/remote-fleet/start-runtime')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/stop-runtime')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/remote-fleet/stop-runtime')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/sync-capabilities')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/remote-fleet/sync-capabilities')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/register')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/register-connection')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/register-environment')).toBe(true);
+    expect(isMainOwnedRoute('/api/remote-fleet/register')).toBe(false);
+    expect(isMainOwnedRoute('/api/remote-fleet/runtime-agent/ingress')).toBe(true);
+    expect(isMainOwnedRoute('/api/remote-fleet/register-connection')).toBe(true);
+    expect(isMainOwnedRoute('/api/remote-fleet/register-environment')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/internal/runtime-host/shell-actions')).toBe(false);
   });
 

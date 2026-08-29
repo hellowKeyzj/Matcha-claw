@@ -17,12 +17,12 @@ Renderer receives one IPC channel:
 
 | Segment | Current semantics |
 | --- | --- |
-| child → Electron gateway/job event | best-effort HTTP callback; 3s timeout; no response-envelope validation, retry, persistence or replay. |
+| child → Electron gateway event | best-effort HTTP callback; 3s timeout; no response-envelope validation, retry, persistence or replay. |
 | Electron manager event buses | in-memory `EventEmitter`; no persistence, cursor or replay. |
 | Electron → Renderer | `webContents.send('host:event', ...)`; no ack/retry; absent window or unsubscribed listener loses event. |
-| Renderer job waiter | `runtime-job:done` is fast path; `jobGet` polling compensates for loss/race. |
+| Owner operation observer | owner/facade typed query is the recovery path; typed events are best-effort hints only. |
 
-These are existing observable recovery semantics. Rust must not assume events are durable. Sources: [parent-transport-client.ts](../../runtime-host/composition/parent-transport-client.ts)、[runtime-host-manager.ts](../../electron/main/runtime-host-manager.ts)、[host-event-bridge.ts](../../electron/main/host-event-bridge.ts)、[host-api.ts](../../src/lib/host-api.ts#L707-L796)。
+These are existing observable recovery semantics. Rust must not assume events are durable. Sources: [parent-transport-client.ts](../../runtime-host/composition/parent-transport-client.ts)、[runtime-host-manager.ts](../../electron/main/runtime-host-manager.ts)、[host-event-bridge.ts](../../electron/main/host-event-bridge.ts)。
 
 ## 3. Renderer-visible event families
 
@@ -37,8 +37,8 @@ These are existing observable recovery semantics. Rust must not assume events ar
 | `runtime-host:status` | Electron-generated observed child status. | `{ status, hostLifecycle, runtimeLifecycle, activePluginCount, pid?, error?, updatedAt }`. |
 | `runtime-host:error` | Electron-generated child status failure. | `{ status, message, pid?, updatedAt }`. |
 | `runtime-host:restart` | Electron detects child recovery. | `{ previousPid?, pid?, status, recoveredAt }`. |
-| `runtime-job:done` | job compatibility projection. | terminal job snapshot; Renderer waiter consumes it. |
-| `runtime-job:progress` | job compatibility projection. | allowlisted/forwarded, but current Renderer subscriber not confirmed. |
+| `matcha-agent:status` | Electron bridges Rust `matcha.lifecycle` safe events. | `{ processState, ready, port: null, pid: null, lastError: null, updatedAt }`; Settings consumes it as a best-effort hint and `/api/matcha-agent/app-server/status` remains the recovery query. |
+| owner/facade operation event | typed owner-local operation projection. | optional fast-path hint; query remains the recovery path. |
 | `oauth:code`, `oauth:success`, `oauth:error` | Electron/OAuth path, not child gateway-event allowlist. | Providers Settings consumes them; child callback does not define these names. |
 
 ## 4. child → parent gateway-event allowlist
@@ -61,6 +61,7 @@ Source: [parent-transport-contracts.ts](../../runtime-host/shared/parent-transpo
 - `gateway:lifecycle` → Electron publishes `gateway:status`, not the raw child payload.
 - `gateway:error`, `session:update`, `task:snapshot`, `gateway:channel-status`, `license:gate-changed`, `team:event` are forwarded by host event bridge.
 - Rust `session.delta` is a safe event produced by Host canonical session apply path and bridged separately from legacy rich `session:update`; it does not carry raw peer transcript state.
+- Rust `matcha.lifecycle` is a safe lifecycle hint produced from Matcha peer supervisor state and bridged as `matcha-agent:status`; it does not carry app-server port, pid, path, token, stderr or peer-private payloads.
 - `team:event` is produced only from Organization-owned durable TeamRun events after projection through `TeamRunPublicEvent`; native/runtime-private TeamRun payloads are unsupported and must not be emitted.
 - `gateway:notification` is `ALLOWLISTED-UNCONFIRMED`: current source walk found bridge/allowlist but no confirmed child producer or Renderer consumer.
 

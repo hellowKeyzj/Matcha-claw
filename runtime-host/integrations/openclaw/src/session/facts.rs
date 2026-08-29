@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::protocol::{
-    ChatState, EndpointSessionId, MessageId, RunId, SessionEventEnvelope, SessionEventKind,
+    ChatState, MessageId, NativeSessionId, RunId, SessionEventEnvelope, SessionEventKind,
     SessionKey, SessionKind, SessionSummary,
 };
 
@@ -289,7 +289,7 @@ impl fmt::Debug for SessionRuntimeFacts {
 #[derive(Clone, PartialEq)]
 pub struct BoundedHistoryFacts {
     session_key: Option<SessionKey>,
-    endpoint_session_id: Option<EndpointSessionId>,
+    native_session_id: Option<NativeSessionId>,
     window: SessionWindow,
 }
 
@@ -299,12 +299,12 @@ impl BoundedHistoryFacts {
         request: PageRequest,
     ) -> Result<NativeFactRead<Self>, HistoryError> {
         let window = session_window::decode_window(payload.clone(), request)?;
-        let envelope = payload.as_object().ok_or(HistoryError::Malformed)?;
+        let envelope = payload.as_object().ok_or(HistoryError::malformed())?;
         let session_key = optional_session_key(envelope.get("sessionKey"))?;
-        let endpoint_session_id = optional_endpoint_session_id(envelope.get("sessionId"))?;
+        let native_session_id = optional_native_session_id(envelope.get("sessionId"))?;
         let facts = Self {
             session_key,
-            endpoint_session_id,
+            native_session_id,
             window,
         };
         let mut gaps = vec![NativeFactGap::BoundedHistory];
@@ -318,8 +318,8 @@ impl BoundedHistoryFacts {
         self.session_key.as_ref()
     }
 
-    pub fn endpoint_session_id(&self) -> Option<&EndpointSessionId> {
-        self.endpoint_session_id.as_ref()
+    pub fn native_session_id(&self) -> Option<&NativeSessionId> {
+        self.native_session_id.as_ref()
     }
 
     pub fn window(&self) -> &SessionWindow {
@@ -332,10 +332,7 @@ impl fmt::Debug for BoundedHistoryFacts {
         formatter
             .debug_struct("BoundedHistoryFacts")
             .field("has_session_key", &self.session_key.is_some())
-            .field(
-                "has_endpoint_session_id",
-                &self.endpoint_session_id.is_some(),
-            )
+            .field("has_native_session_id", &self.native_session_id.is_some())
             .field("message_count", &self.window.messages().len())
             .field("range", &self.window.range())
             .finish()
@@ -347,24 +344,22 @@ fn optional_session_key(value: Option<&Value>) -> Result<Option<SessionKey>, His
         None => Ok(None),
         Some(Value::String(value)) if !value.is_empty() => SessionKey::try_new(value.clone())
             .map(Some)
-            .map_err(|_| HistoryError::Malformed),
+            .map_err(|_| HistoryError::malformed()),
         Some(Value::String(_)) => Ok(None),
-        Some(_) => Err(HistoryError::Malformed),
+        Some(_) => Err(HistoryError::malformed()),
     }
 }
 
-fn optional_endpoint_session_id(
+fn optional_native_session_id(
     value: Option<&Value>,
-) -> Result<Option<EndpointSessionId>, HistoryError> {
+) -> Result<Option<NativeSessionId>, HistoryError> {
     match value {
         None => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() => {
-            EndpointSessionId::try_new(value.clone())
-                .map(Some)
-                .map_err(|_| HistoryError::Malformed)
-        }
+        Some(Value::String(value)) if !value.is_empty() => NativeSessionId::try_new(value.clone())
+            .map(Some)
+            .map_err(|_| HistoryError::malformed()),
         Some(Value::String(_)) => Ok(None),
-        Some(_) => Err(HistoryError::Malformed),
+        Some(_) => Err(HistoryError::malformed()),
     }
 }
 
@@ -596,7 +591,7 @@ mod tests {
             "agent:main:session-1"
         );
         assert_eq!(
-            facts.endpoint_session_id().unwrap().as_str(),
+            facts.native_session_id().unwrap().as_str(),
             "opaque-native-id"
         );
         assert_eq!(facts.window().messages().len(), 1);

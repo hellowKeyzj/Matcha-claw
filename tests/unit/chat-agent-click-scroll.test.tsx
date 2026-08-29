@@ -227,7 +227,6 @@ describe('chat 左侧点击链路回归', () => {
             isAtLatest: true,
           }),
           meta: {
-            backendSessionKey: mainSessionKey,
             runtimeScopeKey: buildRuntimeScopeKey(runtimeEndpoint),
             agentId: 'main',
             protocolId: null,
@@ -266,7 +265,6 @@ describe('chat 左侧点击链路回归', () => {
             isAtLatest: true,
           }),
           meta: {
-            backendSessionKey: anotherSessionKey,
             runtimeScopeKey: buildRuntimeScopeKey(runtimeEndpoint),
             agentId: 'another',
             protocolId: null,

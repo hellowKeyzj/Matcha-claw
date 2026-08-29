@@ -2,8 +2,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_state::{SessionCompleteness, SessionView},
-    session_timeline::{Command, Direction, Outcome, Provider, WindowRequest},
+    sessions::state::{SessionCompleteness, SessionView},
+    sessions::timeline::{Command, Direction, Outcome, Provider, WindowRequest},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -236,7 +236,7 @@ impl Delivery {
             Outcome::Incomplete(view) if identity_matches_view(identity, &view) => {
                 Self::Complete(view)
             }
-            Outcome::Incomplete(_) | Outcome::Unavailable => Self::Unavailable,
+            Outcome::Incomplete(_) | Outcome::Unavailable(_) => Self::Unavailable,
         }
     }
 
@@ -271,11 +271,13 @@ fn identity_matches_view(identity: &Identity, view: &SessionView) -> bool {
                 identity.endpoint.runtime_adapter_id.as_str(),
                 view.identity.endpoint.provider()
             ),
-            ("openclaw", crate::session_state::SessionProvider::OpenClaw)
-                | (
-                    "matcha-agent",
-                    crate::session_state::SessionProvider::MatchaAgent
-                )
+            (
+                "openclaw",
+                crate::sessions::state::SessionProvider::OpenClaw
+            ) | (
+                "matcha-agent",
+                crate::sessions::state::SessionProvider::MatchaAgent
+            )
         )
         && !matches!(
             view.completeness,
@@ -286,7 +288,7 @@ fn identity_matches_view(identity: &Identity, view: &SessionView) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_state::{
+    use crate::sessions::state::{
         MissingFact, RunPhase, RuntimeView, SessionCompleteness, SessionFact, SessionIdentity,
         SessionProvider, SessionWindow,
     };
@@ -334,6 +336,7 @@ mod tests {
     fn source_backed_view() -> SessionView {
         SessionView {
             session_key: "session-1".to_owned(),
+            endpoint_session_id: None,
             identity: SessionIdentity::new(
                 "session-1",
                 SessionProvider::OpenClaw,
@@ -343,14 +346,14 @@ mod tests {
             epoch: 1,
             seq: 0,
             cursor: 0,
-            items: SessionFact::Complete(vec![crate::session_state::SessionItem::UserMessage {
+            items: SessionFact::Complete(vec![crate::sessions::state::SessionItem::UserMessage {
                 item_id: "message-1".to_owned(),
                 message_id: Some("message-1".to_owned()),
                 text: "seeded history".to_owned(),
-                content: vec![crate::session_state::SessionContent::Text {
+                content: vec![crate::sessions::state::SessionContent::Text {
                     text: "seeded history".to_owned(),
                 }],
-                status: crate::session_state::ItemStatus::Final,
+                status: crate::sessions::state::ItemStatus::Final,
             }]),
             tools: SessionFact::Complete(Vec::new()),
             approvals: SessionFact::Incomplete {

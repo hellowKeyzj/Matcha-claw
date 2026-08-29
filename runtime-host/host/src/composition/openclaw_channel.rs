@@ -3,16 +3,16 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::{
-    channel_catalog::{
+use crate::channel::{
+    catalog::{
         ChannelCatalog, ChannelCatalogEntry, ChannelCatalogOutcome, ChannelConfigureField,
         ChannelConfigureFieldKind, ChannelConfigureForm, ChannelConfigureFormOutcome,
         ChannelConfigureOutcome,
     },
-    channel_control::{ChannelControlAction, ChannelControlOutcome},
-    channel_delete,
-    channel_login::{LoginProgress, LoginProgressStatus, Outcome as ChannelLoginOutcome},
-    channel_status::{
+    control::{ChannelControlAction, ChannelControlOutcome},
+    delete as channel_delete,
+    login::{LoginProgress, LoginProgressStatus, Outcome as ChannelLoginOutcome},
+    status::{
         ChannelAccountStatus, ChannelConnection, ChannelPairingApprovalOutcome,
         ChannelPairingOutcome, ChannelPairingRequest, ChannelPairingRequestMeta,
         ChannelPairingRequestStatus, ChannelSnapshotOutcome, ChannelStatusFailure,
@@ -360,7 +360,7 @@ impl OpenClawChannelProvider<'_> {
                         .map(|(channel, summary)| {
                             (
                                 channel,
-                                crate::channel_status::ChannelSummarySnapshot::new(
+                                crate::channel::status::ChannelSummarySnapshot::new(
                                     summary.configured,
                                     summary.running,
                                     summary.error,
@@ -378,7 +378,7 @@ impl OpenClawChannelProvider<'_> {
                                 accounts
                                     .into_iter()
                                     .map(|account| {
-                                        crate::channel_status::ChannelAccountSnapshot::new(
+                                        crate::channel::status::ChannelAccountSnapshot::new(
                                             account.account_id,
                                             account.configured,
                                             account.connected,
@@ -391,7 +391,7 @@ impl OpenClawChannelProvider<'_> {
                                             account.last_outbound_at,
                                             account.last_probe_at,
                                             account.probe.map(|probe| {
-                                                crate::channel_status::ChannelProbeSnapshot::new(
+                                                crate::channel::status::ChannelProbeSnapshot::new(
                                                     probe.ok,
                                                 )
                                             }),
@@ -425,21 +425,21 @@ impl OpenClawChannelProvider<'_> {
         &self,
         channel: String,
         account_id: Option<String>,
-    ) -> crate::channel_config_read::Outcome {
+    ) -> crate::channel::config_read::Outcome {
         match self.runtime.read_channel_config(channel, account_id).await {
             openclaw::port::ChannelConfigReadEffect::Values(projection) => {
-                match crate::channel_config_read::Projection::from_source(
+                match crate::channel::config_read::Projection::from_source(
                     projection.values().clone(),
                 ) {
-                    Ok(projection) => crate::channel_config_read::Outcome::Values(projection),
-                    Err(()) => crate::channel_config_read::Outcome::Unknown,
+                    Ok(projection) => crate::channel::config_read::Outcome::Values(projection),
+                    Err(()) => crate::channel::config_read::Outcome::Unknown,
                 }
             }
             openclaw::port::ChannelConfigReadEffect::Rejected => {
-                crate::channel_config_read::Outcome::TargetRejected
+                crate::channel::config_read::Outcome::TargetRejected
             }
             openclaw::port::ChannelConfigReadEffect::OutcomeUnknown => {
-                crate::channel_config_read::Outcome::Unknown
+                crate::channel::config_read::Outcome::Unknown
             }
         }
     }
@@ -448,7 +448,7 @@ impl OpenClawChannelProvider<'_> {
         &self,
         channel: String,
         config: Zeroizing<Vec<u8>>,
-    ) -> crate::channel_credentials::Outcome {
+    ) -> crate::channel::credentials::Outcome {
         match self
             .runtime
             .validate_channel_credentials(channel, None, config)
@@ -456,8 +456,8 @@ impl OpenClawChannelProvider<'_> {
         {
             openclaw::operations::channel_credentials::ChannelCredentialsEffect::Validated(
                 validation,
-            ) => crate::channel_credentials::Outcome::Validated(
-                crate::channel_credentials::Validation {
+            ) => crate::channel::credentials::Outcome::Validated(
+                crate::channel::credentials::Validation {
                     success: true,
                     valid: validation.valid,
                     errors: validation.errors,
@@ -466,10 +466,10 @@ impl OpenClawChannelProvider<'_> {
                 },
             ),
             openclaw::operations::channel_credentials::ChannelCredentialsEffect::Rejected => {
-                crate::channel_credentials::Outcome::TargetRejected
+                crate::channel::credentials::Outcome::TargetRejected
             }
             openclaw::operations::channel_credentials::ChannelCredentialsEffect::OutcomeUnknown => {
-                crate::channel_credentials::Outcome::Unknown
+                crate::channel::credentials::Outcome::Unknown
             }
         }
     }
@@ -480,7 +480,7 @@ impl OpenClawChannelProvider<'_> {
         account: String,
         values: Zeroizing<Vec<u8>>,
     ) -> ChannelConfigureOutcome {
-        let patch = match crate::channel_catalog::parse_patch(values) {
+        let patch = match crate::channel::catalog::parse_patch(values) {
             Ok(patch) => patch,
             Err(()) => return ChannelConfigureOutcome::TargetRejected,
         };

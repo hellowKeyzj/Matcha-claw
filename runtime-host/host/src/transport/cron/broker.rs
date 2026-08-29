@@ -15,6 +15,7 @@ use crate::{
         CronBrokerResult, CronCreateCommand, CronDeleteCommand, CronDeliveryCommand,
         CronHistoryCommand, CronUpdateCommand,
     },
+    facade::CronHandle,
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -59,7 +60,7 @@ pub(crate) fn new_operation_ledger() -> Arc<Mutex<OperationLedger>> {
 pub(crate) async fn handle(
     request: super::server::Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    cron: CronHandle,
     ledger: Arc<Mutex<OperationLedger>>,
 ) -> super::server::Response {
     if request.method != "POST" || request.path != PATH || request.query.is_some() {
@@ -160,13 +161,7 @@ pub(crate) async fn handle(
         }
     }
 
-    let outcome = match owner.execute_cron_broker(request).await {
-        Ok(outcome) => outcome,
-        Err(_) => CronBrokerOutcome::Unavailable {
-            code: "OWNER_UNAVAILABLE",
-            message: "Cron owner is unavailable",
-        },
-    };
+    let outcome = execute(cron, request).await;
     let retryable = matches!(&outcome, CronBrokerOutcome::Unavailable { .. });
     if let Some(entry) = ledger.lock().await.entries.get_mut(&operation_id) {
         entry.state = if retryable {
@@ -176,6 +171,32 @@ pub(crate) async fn handle(
         };
     }
     project_outcome(outcome)
+}
+
+async fn execute(cron: CronHandle, request: CronBrokerRequest) -> CronBrokerOutcome {
+    match request.operation {
+        CronBrokerOperation::List => {
+            let outcome = match cron.list().await {
+                Ok(jobs) => crate::cron::CronListOutcome::Listed(jobs),
+                Err(failure) => failure.into(),
+            };
+            CronBrokerOutcome::Applied(CronBrokerResult::List(outcome))
+        }
+        CronBrokerOperation::History { command } => {
+            CronBrokerOutcome::Applied(CronBrokerResult::History(cron.load_history(command).await))
+        }
+        CronBrokerOperation::Create { command } => {
+            CronBrokerOutcome::Applied(CronBrokerResult::Job(cron.create(command).await))
+        }
+        CronBrokerOperation::Update {
+            command,
+            expected_revision: _,
+        } => CronBrokerOutcome::Applied(CronBrokerResult::Job(cron.update(command).await)),
+        CronBrokerOperation::Delete {
+            command,
+            expected_revision: _,
+        } => CronBrokerOutcome::Applied(CronBrokerResult::Delete(cron.delete(command).await)),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

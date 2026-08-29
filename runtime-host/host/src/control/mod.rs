@@ -5,11 +5,19 @@ mod wire;
 
 pub(crate) use wire::{
     CommandInput, CommandOutcome, CronExecutionId, RejectionCode, SafeCronExecutionStatus,
-    SafeEvent, validate_session_delta,
+    SafeEvent, SafeRuntimeLifecycle, validate_session_delta,
 };
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
+use foundation::execution::{
+    ControlObservation, ControlReason, ControlStage, ObservationRecord, ObservationSink,
+    TraceContext,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -18,12 +26,21 @@ use tokio::{
 };
 use zeroize::Zeroize;
 
-use crate::{Host, HostEvent, HostInput, event_output, owner};
+use crate::{
+    Host, HostEvent, HostInput,
+    composition::PeerHandle,
+    event_output,
+    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    fleet::handle::FleetHandle,
+    owner,
+    sessions::SessionHandle,
+};
 
 const INPUT_CAPACITY: usize = 32;
 const OUTPUT_CAPACITY: usize = 64;
 const REQUEST_CAPACITY: usize = 32;
 const SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+static NEXT_CONTROL_TRACE: AtomicU64 = AtomicU64::new(1);
 
 pub async fn run<R, W>(
     input: HostInput,
@@ -34,17 +51,22 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin,
 {
-    let gateway_auto_start =
-        crate::settings_delivery::bootstrap_gateway_auto_start(input.open_claw.state_dir.as_path())
-            .map_err(|_| {
-                ControlError::Start("OpenClaw settings delivery bootstrap failed".into())
-            })?;
-    let (mut host, events) = Host::new(input).map_err(ControlError::Construction)?;
+    let (mut host, events, handles) = Host::new(input).map_err(ControlError::Construction)?;
+    let gateway_auto_start = handles.settings.gateway_auto_start().await;
     host.start_admission_only()
         .await
         .map_err(|error| ControlError::Start(error.to_string()))?;
     run_owner(
         owner::Owner::spawn(host, events),
+        handles.organization.clone(),
+        handles.peer.clone(),
+        handles.session.clone(),
+        handles.fleet.clone(),
+        handles.platform_runtime.clone(),
+        handles.plugins.clone(),
+        handles.skills.clone(),
+        handles.cron.clone(),
+        handles.observation.clone(),
         gateway_auto_start,
         control_input,
         control_output,
@@ -159,12 +181,8 @@ where
         control_input,
         control_output,
     } = delivery;
-    let state_dir = input.open_claw.state_dir.clone();
-    let gateway_auto_start = crate::settings_delivery::bootstrap_gateway_auto_start(
-        state_dir.as_path(),
-    )
-    .map_err(|_| ControlError::Start("OpenClaw settings delivery bootstrap failed".into()))?;
-    let (mut host, events) = Host::new(input).map_err(ControlError::Construction)?;
+    let (mut host, events, handles) = Host::new(input).map_err(ControlError::Construction)?;
+    let gateway_auto_start = handles.settings.gateway_auto_start().await;
     host.start_admission_only()
         .await
         .map_err(|error| ControlError::Start(error.to_string()))?;
@@ -172,6 +190,11 @@ where
     let compatibility_transport = match crate::transport::compatibility::Server::bind(
         compatibility_transport_port,
         owner.handle(),
+        handles.peer.clone(),
+        handles.platform_runtime.clone(),
+        handles.plugins.clone(),
+        handles.skills.clone(),
+        handles.session.clone(),
     )
     .await
     {
@@ -181,18 +204,10 @@ where
             return Err(ControlError::Transport("compatibility transport"));
         }
     };
-    let security_delivery = match crate::security_delivery::Owner::open(state_dir.as_path()) {
-        Ok(owner) => Arc::new(owner),
-        Err(()) => {
-            let _ = shutdown_host(&mut owner).await;
-            return Err(ControlError::Transport("security delivery"));
-        }
-    };
     let settings_desired_transport = match crate::transport::settings_desired::server::Server::bind(
         settings_desired_transport_port,
         verifier.clone(),
-        state_dir.as_path(),
-        owner.handle(),
+        handles.settings.clone(),
     )
     .await
     {
@@ -205,9 +220,7 @@ where
     let security_policy_transport = match crate::transport::security_policy::server::Server::bind(
         security_policy_transport_port,
         verifier.clone(),
-        Arc::clone(&security_delivery),
-        state_dir.as_path(),
-        owner.handle(),
+        handles.security.clone(),
     )
     .await
     {
@@ -225,7 +238,7 @@ where
     let task_manager_transport = match crate::transport::task_manager::server::Server::bind(
         task_manager_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.task_manager.clone(),
     )
     .await
     {
@@ -238,7 +251,9 @@ where
     let session_transport = match crate::transport::sessions::server::Server::bind(
         session_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.platform_tools.clone(),
+        handles.peer.clone(),
+        handles.session.clone(),
     )
     .await
     {
@@ -251,7 +266,7 @@ where
     let session_send_transport = match crate::transport::session_send::server::Server::bind(
         session_send_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.session.clone(),
     )
     .await
     {
@@ -264,7 +279,7 @@ where
     let session_abort_transport = match crate::transport::session_abort::server::Server::bind(
         session_abort_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.session.clone(),
     )
     .await
     {
@@ -277,7 +292,7 @@ where
     let session_approval_transport = match crate::transport::session_approval::server::Server::bind(
         session_approval_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.session.clone(),
     )
     .await
     {
@@ -291,9 +306,7 @@ where
         match crate::transport::security_emergency::server::Server::bind(
             security_emergency_transport_port,
             verifier.clone(),
-            Arc::clone(&security_delivery),
-            state_dir.clone(),
-            owner.handle(),
+            handles.security.clone(),
         )
         .await
         {
@@ -306,7 +319,7 @@ where
     let channel_status_transport = match crate::transport::channel_status::server::Server::bind(
         channel_status_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.channel.clone(),
     )
     .await
     {
@@ -319,7 +332,8 @@ where
     let channel_catalog_transport = match crate::transport::channel_catalog::server::Server::bind(
         channel_catalog_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.channel.clone(),
+        handles.channel_endpoint.clone(),
     )
     .await
     {
@@ -332,7 +346,8 @@ where
     let channel_control_transport = match crate::transport::channel_control::server::Server::bind(
         channel_control_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.channel.clone(),
+        handles.channel_endpoint.clone(),
     )
     .await
     {
@@ -345,7 +360,8 @@ where
     let channel_pairing_transport = match crate::transport::channel_pairing::server::Server::bind(
         channel_pairing_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.channel.clone(),
+        handles.channel_endpoint.clone(),
     )
     .await
     {
@@ -359,7 +375,7 @@ where
         match crate::transport::session_model_selection::server::Server::bind(
             session_model_selection_transport_port,
             verifier.clone(),
-            owner.handle(),
+            handles.session.clone(),
         )
         .await
         {
@@ -372,7 +388,7 @@ where
     let openclaw_history_transport = match crate::transport::openclaw_history::server::Server::bind(
         openclaw_history_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.session.clone(),
     )
     .await
     {
@@ -385,7 +401,7 @@ where
     let matcha_history_transport = match crate::transport::matcha_history::server::Server::bind(
         matcha_history_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.session.clone(),
     )
     .await
     {
@@ -398,7 +414,7 @@ where
     let usage_transport = match crate::transport::usage::server::Server::bind(
         usage_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.usage.clone(),
     )
     .await
     {
@@ -411,7 +427,8 @@ where
     let diagnostics_transport = match crate::transport::diagnostics::server::Server::bind(
         diagnostics_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.diagnostics.clone(),
+        handles.observation.clone(),
     )
     .await
     {
@@ -424,7 +441,7 @@ where
     let workspace_text_transport = match crate::transport::workspace_text::server::Server::bind(
         workspace_text_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.workspace.clone(),
     )
     .await
     {
@@ -437,7 +454,7 @@ where
     let workspace_binary_transport = match crate::transport::workspace_binary::server::Server::bind(
         workspace_binary_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.workspace.clone(),
     )
     .await
     {
@@ -451,7 +468,7 @@ where
         match crate::transport::workspace_directory::server::Server::bind(
             workspace_directory_transport_port,
             verifier.clone(),
-            owner.handle(),
+            handles.workspace.clone(),
         )
         .await
         {
@@ -464,7 +481,7 @@ where
     let workspace_write_transport = match crate::transport::workspace_write::server::Server::bind(
         workspace_write_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.workspace.clone(),
     )
     .await
     {
@@ -477,7 +494,7 @@ where
     let workspace_media_transport = match crate::transport::workspace_media::server::Server::bind(
         workspace_media_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.workspace.clone(),
     )
     .await
     {
@@ -490,7 +507,7 @@ where
     let cron_transport = match crate::transport::cron::server::Server::bind(
         cron_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.cron.clone(),
     )
     .await
     {
@@ -503,7 +520,7 @@ where
     let cron_broker_transport = match crate::transport::cron::server::BrokerServer::bind(
         cron_broker_transport_port,
         cron_broker_verifier,
-        owner.handle(),
+        handles.cron.clone(),
     )
     .await
     {
@@ -516,7 +533,7 @@ where
     let agents_transport = match crate::transport::agents::server::Server::bind(
         agents_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.agents.clone(),
     )
     .await
     {
@@ -529,7 +546,7 @@ where
     let team_public_transport = match crate::transport::team_public::server::Server::bind(
         team_public_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -542,7 +559,7 @@ where
     let team_task_board_transport = match crate::transport::team_task_board::server::Server::bind(
         team_task_board_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -553,10 +570,10 @@ where
         }
     };
     let fleet_terminal_tickets = std::sync::Arc::new(
-        crate::transport::fleet_terminal::HostTicketPort::new(owner.handle()),
+        crate::transport::fleet_terminal::HostTicketPort::new(handles.fleet.clone()),
     );
     let fleet_terminal_provider = std::sync::Arc::new(
-        crate::transport::fleet_terminal::NativeProvider::new(owner.handle()),
+        crate::transport::fleet_terminal::NativeProvider::new(handles.fleet.clone()),
     );
     let fleet_terminal = crate::transport::fleet_terminal::ServerDependencies::new(
         fleet_terminal_tickets,
@@ -565,7 +582,7 @@ where
     let fleet_transport = match crate::transport::fleet::server::Server::bind(
         fleet_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.fleet.clone(),
         fleet_terminal,
     )
     .await
@@ -580,7 +597,7 @@ where
         match crate::transport::team_role_sessions::server::Server::bind(
             team_role_sessions_transport_port,
             verifier.clone(),
-            owner.handle(),
+            handles.organization.clone(),
         )
         .await
         {
@@ -593,7 +610,7 @@ where
     let team_approvals_transport = match crate::transport::team_approvals::server::Server::bind(
         team_approvals_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -606,7 +623,7 @@ where
     let team_decision_transport = match crate::transport::team_decision::server::Server::bind(
         team_decision_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -619,7 +636,7 @@ where
     let team_role_chat_transport = match crate::transport::team_role_chat::server::Server::bind(
         team_role_chat_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -632,7 +649,7 @@ where
     let team_graph_transport = match crate::transport::team_graph::server::Server::bind(
         team_graph_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -645,7 +662,11 @@ where
     let provider_models_transport = match crate::transport::provider_models::server::Server::bind(
         provider_models_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.provider.clone(),
+        handles.skills.clone(),
+        handles.clawhub_registry.clone(),
+        handles.plugins.clone(),
+        handles.connector.clone(),
     )
     .await
     {
@@ -655,24 +676,33 @@ where
             return Err(ControlError::Transport("provider models transport"));
         }
     };
-    if owner
-        .handle()
-        .configure_provider_private_resolver(
-            provider_credential_resolver.unwrap_or_else(
-                crate::transport::provider_accounts::private_auth::Resolver::disabled,
-            ),
-        )
+    let provider_private_resolver = provider_credential_resolver
+        .unwrap_or_else(crate::transport::provider_accounts::private_auth::Resolver::disabled);
+    if handles
+        .provider
+        .clone()
+        .configure_provider_private_resolver(provider_private_resolver.clone())
         .await
         .is_err()
     {
         let _ = shutdown_host(&mut owner).await;
         return Err(ControlError::Transport("provider credential resolver"));
     }
+    if handles
+        .connector
+        .clone()
+        .configure_private_resolver(provider_private_resolver)
+        .await
+        .is_err()
+    {
+        let _ = shutdown_host(&mut owner).await;
+        return Err(ControlError::Transport("connector credential resolver"));
+    }
     let provider_accounts_transport =
         match crate::transport::provider_accounts::server::Server::bind(
             provider_accounts_transport_port,
             verifier.clone(),
-            owner.handle(),
+            handles.provider,
         )
         .await
         {
@@ -685,7 +715,7 @@ where
     let team_skill_transport = match crate::transport::team_skill::server::Server::bind(
         team_skill_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -699,7 +729,7 @@ where
         team_trigger_transport_port,
         verifier.clone(),
         webhook_token,
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -712,7 +742,7 @@ where
     let team_lifecycle_transport = match crate::transport::team_lifecycle::server::Server::bind(
         team_lifecycle_transport_port,
         verifier.clone(),
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -725,7 +755,7 @@ where
     let manual_team_transport = match crate::transport::manual_team::server::Server::bind(
         manual_team_transport_port,
         verifier,
-        owner.handle(),
+        handles.organization.clone(),
     )
     .await
     {
@@ -775,7 +805,22 @@ where
     let team_trigger_transport = tokio::spawn(team_trigger_transport.run());
     let team_lifecycle_transport = tokio::spawn(team_lifecycle_transport.run());
     let manual_team_transport = tokio::spawn(manual_team_transport.run());
-    let result = run_owner(owner, gateway_auto_start, control_input, control_output).await;
+    let result = run_owner(
+        owner,
+        handles.organization.clone(),
+        handles.peer.clone(),
+        handles.session.clone(),
+        handles.fleet.clone(),
+        handles.platform_runtime.clone(),
+        handles.plugins.clone(),
+        handles.skills.clone(),
+        handles.cron.clone(),
+        handles.observation.clone(),
+        gateway_auto_start,
+        control_input,
+        control_output,
+    )
+    .await;
     compatibility_transport.abort();
     settings_desired_transport.abort();
     security_policy_transport.abort();
@@ -861,6 +906,15 @@ where
 
 async fn run_owner<R, W>(
     mut owner: owner::Owner,
+    organization: crate::organization::OrganizationHandle,
+    peer: PeerHandle,
+    session: SessionHandle,
+    fleet: FleetHandle,
+    platform_runtime: PlatformRuntimeHandle,
+    plugins: PluginsHandle,
+    skills: SkillsHandle,
+    cron: CronHandle,
+    observation: ObservationSink,
     gateway_auto_start: bool,
     control_input: R,
     mut control_output: W,
@@ -880,20 +934,20 @@ where
         "[startup-trace] source=runtime-host phase=ready detail=control-channel-ready gateway_auto_start={gateway_auto_start}"
     );
     let peer_autostart = tokio::spawn({
-        let handle = handle.clone();
+        let peer = peer.clone();
         async move {
             eprintln!(
                 "[startup-trace] source=runtime-host phase=openclaw-autostart-request detail=requesting-peer-autostart gateway_auto_start={gateway_auto_start}"
             );
-            let result = handle.request_peer_autostart(gateway_auto_start).await;
+            let result = peer.request_peer_autostart(gateway_auto_start).await;
             eprintln!(
                 "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-request-finished success={} error={}",
                 result.is_ok(),
-                result
-                    .as_ref()
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_default()
+                if result.is_ok() {
+                    ""
+                } else {
+                    "peer owner unavailable"
+                }
             );
         }
     });
@@ -914,20 +968,49 @@ where
             _ = &mut shutdown_signal => break Ok(()),
             input = input_receiver.recv() => match input {
                 Some(Input::Frame(mut frame)) => {
+                    let trace = next_control_trace();
                     let command = wire::decode_command_request(&frame);
                     frame.zeroize();
                     match command {
                         Ok(command) => {
+                            let command_kind = command_kind(&command.command);
+                            observe_control(
+                                &observation,
+                                trace,
+                                command_kind,
+                                ControlStage::Decode,
+                                Some(ControlReason::Accepted),
+                            );
                             if let Err(error) = spawn_command(
                                 &mut commands,
                                 handle.clone(),
+                                organization.clone(),
+                                peer.clone(),
+                                session.clone(),
+                                fleet.clone(),
+                                platform_runtime.clone(),
+                                plugins.clone(),
+                                skills.clone(),
+                                cron.clone(),
                                 output_sender.clone(),
+                                observation.clone(),
+                                trace,
+                                command_kind,
                                 command,
                             ) {
                                 break Err(error);
                             }
                         }
-                        Err(_) => break Err(ControlError::InvalidCommand),
+                        Err(_) => {
+                            observe_control(
+                                &observation,
+                                trace,
+                                "control.command",
+                                ControlStage::Decode,
+                                Some(ControlReason::DecodeRejected),
+                            );
+                            break Err(ControlError::InvalidCommand);
+                        }
                     }
                 }
                 Some(Input::End) | None => break Ok(()),
@@ -936,16 +1019,39 @@ where
             output = output_receiver.recv() => match output {
                 Some(output) => {
                     if let Err(error) = write_output(&mut control_output, output).await {
+                        observe_control(
+                            &observation,
+                            TraceContext::absent(),
+                            "control.output",
+                            ControlStage::Settle,
+                            Some(ControlReason::OutputClosed),
+                        );
                         break Err(error);
                     }
                 }
-                None => break Err(ControlError::OutputClosed),
+                None => {
+                    observe_control(
+                        &observation,
+                        TraceContext::absent(),
+                        "control.output",
+                        ControlStage::Settle,
+                        Some(ControlReason::OutputClosed),
+                    );
+                    break Err(ControlError::OutputClosed);
+                }
             },
             event = owner_events.recv(), if events_open => match event {
                 Some(event) => {
-                    if let Some(event) = project_event(event)
+                    if let Some(event) = project_event(event, &observation)
                         && output_sender.try_send(event).is_err()
                     {
+                        observe_control(
+                            &observation,
+                            TraceContext::absent(),
+                            "control.output",
+                            ControlStage::Settle,
+                            Some(ControlReason::OutputClosed),
+                        );
                         break Err(ControlError::OutputClosed);
                     }
                 }
@@ -975,11 +1081,36 @@ where
 fn spawn_command(
     commands: &mut JoinSet<()>,
     owner: owner::Handle,
+    organization: crate::organization::OrganizationHandle,
+    peer: PeerHandle,
+    session: SessionHandle,
+    fleet: FleetHandle,
+    platform_runtime: PlatformRuntimeHandle,
+    plugins: PluginsHandle,
+    skills: SkillsHandle,
+    cron: CronHandle,
     output: mpsc::Sender<wire::Output>,
+    observation: ObservationSink,
+    trace: TraceContext,
+    command_kind: &'static str,
     command: wire::CommandRequest,
 ) -> Result<(), ControlError> {
     let id = command.id.clone();
     if commands.len() >= REQUEST_CAPACITY {
+        observe_control(
+            &observation,
+            trace,
+            command_kind,
+            ControlStage::Admit,
+            Some(ControlReason::CapacityExhausted),
+        );
+        observe_control(
+            &observation,
+            trace,
+            command_kind,
+            ControlStage::Settle,
+            Some(ControlReason::Rejected),
+        );
         return output
             .try_send(wire::Output::Outcome(wire::Outcome::new(
                 id,
@@ -991,18 +1122,128 @@ fn spawn_command(
             .map_err(|_| ControlError::OutputClosed);
     }
 
+    observe_control(
+        &observation,
+        trace,
+        command_kind,
+        ControlStage::Admit,
+        Some(ControlReason::Accepted),
+    );
     let timeout_duration = Duration::from_millis(command.timeout.milliseconds());
     commands.spawn(async move {
-        let outcome =
-            match timeout(timeout_duration, dispatch::execute(&owner, command.command)).await {
-                Ok(outcome) => outcome,
-                Err(_) => wire::CommandOutcome::timed_out(),
-            };
+        observe_control(
+            &observation,
+            trace,
+            command_kind,
+            ControlStage::Dispatch,
+            Some(ControlReason::Accepted),
+        );
+        let outcome = match timeout(
+            timeout_duration,
+            dispatch::execute(
+                &owner,
+                &organization,
+                &peer,
+                &fleet,
+                &session,
+                &platform_runtime,
+                &plugins,
+                &skills,
+                &cron,
+                command.command,
+            ),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => wire::CommandOutcome::timed_out(),
+        };
+        observe_control(
+            &observation,
+            trace,
+            command_kind,
+            ControlStage::Settle,
+            Some(outcome_reason(&outcome)),
+        );
         let _ = output
             .send(wire::Output::Outcome(wire::Outcome::new(id, outcome)))
             .await;
     });
     Ok(())
+}
+
+fn observe_control(
+    observation: &ObservationSink,
+    trace: TraceContext,
+    command_kind: &'static str,
+    stage: ControlStage,
+    reason: Option<ControlReason>,
+) {
+    if observation.is_enabled() {
+        observation.observe(ObservationRecord::Control(ControlObservation {
+            trace,
+            command_kind,
+            stage,
+            reason,
+        }));
+    }
+}
+
+fn next_control_trace() -> TraceContext {
+    TraceContext::root(NEXT_CONTROL_TRACE.fetch_add(1, Ordering::Relaxed))
+}
+
+fn outcome_reason(outcome: &wire::CommandOutcome) -> ControlReason {
+    match outcome {
+        wire::CommandOutcome::Succeeded { .. } | wire::CommandOutcome::Unknown { .. } => {
+            ControlReason::Accepted
+        }
+        wire::CommandOutcome::Rejected { .. } => ControlReason::Rejected,
+        wire::CommandOutcome::TimedOut => ControlReason::TimedOut,
+    }
+}
+
+fn command_kind(command: &wire::Command) -> &'static str {
+    match command {
+        wire::Command::HostHealth {} => "host.health",
+        wire::Command::HostCapabilitiesList {} => "host.capabilities.list",
+        wire::Command::HostCapabilitiesDescribe { .. } => "host.capabilities.describe",
+        wire::Command::HostRuntimeSnapshot {} => "host.runtime.snapshot",
+        wire::Command::MatchaStatus {} => "matcha.lifecycle.status",
+        wire::Command::MatchaStart {} => "matcha.lifecycle.start",
+        wire::Command::MatchaStop {} => "matcha.lifecycle.stop",
+        wire::Command::MatchaRestart {} => "matcha.lifecycle.restart",
+        wire::Command::OpenClawStatus {} => "openclaw.lifecycle.status",
+        wire::Command::OpenClawPluginsCatalog {} => "openclaw.plugins.catalog",
+        wire::Command::OpenClawPluginsRuntime {} => "openclaw.plugins.runtime",
+        wire::Command::OpenClawPluginsSetEnabled { .. } => "openclaw.plugins.set-enabled",
+        wire::Command::OpenClawPluginsOperation { .. } => "openclaw.plugins.operation",
+        wire::Command::OpenClawSkillsExecute { .. } => "openclaw.skills.execute",
+        wire::Command::TeamRuntimeExecute { .. } => "team.runtime.execute",
+        wire::Command::OpenClawPluginsExecute { .. } => "openclaw.plugins.execute",
+        wire::Command::OpenClawEnvironmentStatus {} => "openclaw.environment.status",
+        wire::Command::OpenClawRuntimePaths {} => "openclaw.runtime.paths",
+        wire::Command::OpenClawCliCommand {} => "openclaw.cli.command",
+        wire::Command::OpenClawToolPermissionGet {} => "openclaw.tool-permission.get",
+        wire::Command::OpenClawToolPermissionSet { .. } => "openclaw.tool-permission.set",
+        wire::Command::OpenClawToolchainStatus {} => "openclaw.toolchain.status",
+        wire::Command::OpenClawToolchainInstallUv {} => "openclaw.toolchain.install-uv",
+        wire::Command::OpenClawSubagentTemplateCatalog {} => "openclaw.subagent-templates.list",
+        wire::Command::OpenClawSubagentTemplate { .. } => "openclaw.subagent-templates.get",
+        wire::Command::OpenClawStart {} => "openclaw.lifecycle.start",
+        wire::Command::OpenClawStop {} => "openclaw.lifecycle.stop",
+        wire::Command::OpenClawRestart {} => "openclaw.lifecycle.restart",
+        wire::Command::OpenClawLogs { .. } => "openclaw.logs",
+        wire::Command::OpenClawControlReady {} => "openclaw.control.ready",
+        wire::Command::OpenClawGatewayHealth {} => "openclaw.gateway.health",
+        wire::Command::OpenClawGatewayStatus {} => "openclaw.gateway.status",
+        wire::Command::OpenClawControlUiUrl {} => "openclaw.control-ui.url",
+        wire::Command::OpenClawManualCronTrigger { .. } => "openclaw.cron.manual-trigger",
+        wire::Command::OpenClawChatHistory { .. } => "openclaw.chat.history",
+        wire::Command::OpenClawChatSend { .. } => "openclaw.chat.send",
+        wire::Command::OpenClawChatAbort { .. } => "openclaw.chat.abort",
+        wire::Command::FleetCredentialsWrite { .. } => "fleet.credentials.write",
+    }
 }
 
 async fn read_control_input<R>(mut input: R, sender: mpsc::Sender<Input>)
@@ -1038,8 +1279,9 @@ async fn write_output(
         .map_err(|_| ControlError::Output)
 }
 
-fn project_event(event: HostEvent) -> Option<wire::Output> {
-    event_output::project(event).map(|event| wire::Output::Event(wire::Event::new(event)))
+fn project_event(event: HostEvent, observation: &ObservationSink) -> Option<wire::Output> {
+    event_output::project_observed(event, observation)
+        .map(|event| wire::Output::Event(wire::Event::new(event)))
 }
 
 async fn shutdown_host(owner: &mut owner::Owner) -> Result<(), ControlError> {

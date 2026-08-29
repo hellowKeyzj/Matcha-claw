@@ -15,8 +15,7 @@ pub use crate::session::{
 };
 pub use crate::skill::{
     SkillDetail, SkillDetailRequest, SkillInstallRequest, SkillMutationOutcome, SkillReadError,
-    SkillSearchRequest, SkillSearchResult, SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk,
-    SkillUploadCommit,
+    SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk, SkillUploadCommit,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +65,16 @@ impl ProviderNativeConfigurationEffect {
         match self {
             Self::Evidence(evidence) => Some(evidence),
             Self::Unavailable => None,
+        }
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Evidence(a), Self::Evidence(b)) => Self::Evidence(a.merge(b)),
+            (Self::Evidence(e), Self::Unavailable) | (Self::Unavailable, Self::Evidence(e)) => {
+                Self::Evidence(e)
+            }
+            (Self::Unavailable, Self::Unavailable) => Self::Unavailable,
         }
     }
 }
@@ -127,11 +136,10 @@ use crate::{
             SessionsListResult,
         },
     },
-    session_window::{self, PageRequest, SessionWindow},
+    session_window::{self, HistoryError, PageRequest, SessionWindow},
     skill::{
-        ClawHubSkillInstall, ClawHubSkillInstallOutcome, ClawHubSkillInstaller,
-        InstalledSkillCatalog, OpenClawSkillOperations, OpenClawSkillStatusCatalog,
-        SkillStatusCatalog, SkillStatusCatalogError,
+        InstalledSkillCatalog, OpenClawInstalledSkillCatalog, OpenClawSkillOperations,
+        OpenClawSkillStatusCatalog, SkillStatusCatalog, SkillStatusCatalogError,
     },
     task_manager::{
         Task, TaskCreate, TaskCreateReceipt, TaskManagerOperation, TaskMutationOutcome, TaskOutput,
@@ -148,6 +156,11 @@ pub struct OpenClawGateway {
     team_state_dir: Option<CanonicalStateDir>,
     pairing: Option<ChannelPairingOperation>,
     credentials: Option<ChannelCredentialsOperation>,
+}
+
+#[derive(Clone)]
+pub struct OpenClawSessionGateway {
+    client: Arc<GatewayClient>,
 }
 
 impl OpenClawGateway {
@@ -311,6 +324,12 @@ impl OpenClawGateway {
 
     pub fn control_readiness(&self) -> watch::Receiver<u64> {
         self.client.control_readiness()
+    }
+
+    pub fn session_gateway(&self) -> OpenClawSessionGateway {
+        OpenClawSessionGateway {
+            client: Arc::clone(&self.client),
+        }
     }
 
     pub async fn admit_cron_execution(
@@ -628,8 +647,12 @@ impl OpenClawGateway {
             .await
     }
 
-    pub async fn agent_skill_configuration(&self, agent_id: String) -> SkillConfigurationOutcome {
-        AgentConfiguration::new(Arc::clone(&self.client))
+    pub async fn agent_skill_configuration(
+        &self,
+        agent_id: String,
+        trace_id: Option<String>,
+    ) -> SkillConfigurationOutcome {
+        AgentConfiguration::with_trace_id(Arc::clone(&self.client), trace_id)
             .skill_configuration(agent_id)
             .await
     }
@@ -639,14 +662,19 @@ impl OpenClawGateway {
         agent_id: String,
         revision: String,
         selection: SkillSelection,
+        trace_id: Option<String>,
     ) -> SkillConfigurationOutcome {
-        AgentConfiguration::new(Arc::clone(&self.client))
+        AgentConfiguration::with_trace_id(Arc::clone(&self.client), trace_id)
             .set_skill_configuration(agent_id, revision, selection)
             .await
     }
 
-    pub async fn agent_tool_configuration(&self, agent_id: String) -> ToolConfigurationOutcome {
-        AgentConfiguration::new(Arc::clone(&self.client))
+    pub async fn agent_tool_configuration(
+        &self,
+        agent_id: String,
+        trace_id: Option<String>,
+    ) -> ToolConfigurationOutcome {
+        AgentConfiguration::with_trace_id(Arc::clone(&self.client), trace_id)
             .tool_configuration(agent_id)
             .await
     }
@@ -664,8 +692,9 @@ impl OpenClawGateway {
         agent_id: String,
         revision: String,
         selection: ToolSelection,
+        trace_id: Option<String>,
     ) -> ToolConfigurationOutcome {
-        AgentConfiguration::new(Arc::clone(&self.client))
+        AgentConfiguration::with_trace_id(Arc::clone(&self.client), trace_id)
             .set_tool_configuration(agent_id, revision, selection)
             .await
     }
@@ -681,21 +710,9 @@ impl OpenClawGateway {
             .await
     }
 
-    /// Performs the native ClawHub installation effect through the pinned
-    /// OpenClaw Gateway. The returned outcome never treats the Gateway write
-    /// acknowledgement, config state, or workspace discovery as final proof.
-    pub async fn install_clawhub_skill(
-        &self,
-        request: ClawHubSkillInstall,
-    ) -> ClawHubSkillInstallOutcome {
-        ClawHubSkillInstaller::new(Arc::clone(&self.client))
-            .install(request)
-            .await
-    }
-
     pub async fn installed_skill_catalog(&self) -> Option<InstalledSkillCatalog> {
-        ClawHubSkillInstaller::new(Arc::clone(&self.client))
-            .installed_catalog()
+        OpenClawInstalledSkillCatalog::new(Arc::clone(&self.client))
+            .read()
             .await
     }
 
@@ -704,15 +721,6 @@ impl OpenClawGateway {
     ) -> Result<SkillStatusCatalog, SkillStatusCatalogError> {
         OpenClawSkillStatusCatalog::new(Arc::clone(&self.client))
             .read()
-            .await
-    }
-
-    pub async fn search_skills(
-        &self,
-        request: SkillSearchRequest,
-    ) -> Result<Vec<SkillSearchResult>, SkillReadError> {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .search(request)
             .await
     }
 
@@ -861,7 +869,8 @@ impl OpenClawGateway {
             .history_payload(params)
             .await
             .map_err(OpenClawSessionError::from)?;
-        session_window::decode_window(payload, request).map_err(|_| OpenClawSessionError::Protocol)
+        session_window::decode_window(payload, request)
+            .map_err(|error| OpenClawSessionError::Protocol(Some(error)))
     }
 
     pub async fn enqueue_chat(
@@ -1070,6 +1079,157 @@ fn port_outcome<T>(
     }
 }
 
+impl OpenClawSessionGateway {
+    pub async fn list_sessions(
+        &self,
+        params: SessionsListParams,
+    ) -> Result<SessionsListResult, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .list_sessions(params)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn history(
+        &self,
+        params: ChatHistoryParams,
+    ) -> Result<ChatHistoryResult, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .history(params)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn history_window(
+        &self,
+        params: ChatHistoryParams,
+        request: PageRequest,
+    ) -> Result<SessionWindow, OpenClawSessionError> {
+        let payload = SessionOperation::new(Arc::clone(&self.client))
+            .history_payload(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        session_window::decode_window(payload, request)
+            .map_err(|error| OpenClawSessionError::Protocol(Some(error)))
+    }
+
+    pub async fn enqueue_chat(
+        &self,
+        params: ChatSendParams,
+        route_key: String,
+    ) -> Result<ChatSendResult, OpenClawSessionError> {
+        let session_key = params.session_key().clone();
+        self.client.register_session_route(&session_key, route_key);
+        match self.send_chat(params).await {
+            Ok(InvocationOutcome::Succeeded(result)) => Ok(result),
+            Ok(InvocationOutcome::TargetRejected(error)) => {
+                self.client.unregister_session_route(&session_key);
+                Err(error)
+            }
+            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => {
+                self.client.unregister_session_route(&session_key);
+                Err(OpenClawSessionError::UnknownResponse)
+            }
+            Err(error) => {
+                self.client.unregister_session_route(&session_key);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn send_chat(
+        &self,
+        params: ChatSendParams,
+    ) -> Result<InvocationOutcome<ChatSendResult, OpenClawSessionError>, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .send_chat(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn abort_chat(
+        &self,
+        params: ChatAbortParams,
+    ) -> Result<InvocationOutcome<ChatAbortResult, OpenClawSessionError>, OpenClawSessionError>
+    {
+        SessionOperation::new(Arc::clone(&self.client))
+            .abort_chat(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn patch_session_model(
+        &self,
+        params: SessionModelPatchParams,
+    ) -> Result<
+        InvocationOutcome<SessionModelPatchResult, OpenClawSessionError>,
+        OpenClawSessionError,
+    > {
+        match self.patch_session_model_diagnostic(params).await? {
+            InvocationOutcome::Succeeded(result) => Ok(InvocationOutcome::Succeeded(result)),
+            InvocationOutcome::TargetRejected(_) => Ok(InvocationOutcome::TargetRejected(
+                OpenClawSessionError::TargetRejected,
+            )),
+            InvocationOutcome::Cancelled => Ok(InvocationOutcome::Cancelled),
+            InvocationOutcome::Unknown => Ok(InvocationOutcome::Unknown),
+        }
+    }
+
+    pub async fn patch_session_model_diagnostic(
+        &self,
+        params: SessionModelPatchParams,
+    ) -> Result<
+        InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
+            .patch_session_model(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_model_patch_outcome(outcome))
+    }
+
+    pub async fn patch_session_label(
+        &self,
+        params: SessionLabelPatchParams,
+    ) -> Result<
+        InvocationOutcome<SessionLabelPatchResult, OpenClawSessionError>,
+        OpenClawSessionError,
+    > {
+        SessionOperation::new(Arc::clone(&self.client))
+            .patch_session_label(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn create_session(
+        &self,
+        params: SessionCreateParams,
+    ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
+    {
+        SessionOperation::new(Arc::clone(&self.client))
+            .create_session(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn delete_session(
+        &self,
+        params: SessionDeleteParams,
+    ) -> Result<InvocationOutcome<SessionDeleteResult, OpenClawSessionError>, OpenClawSessionError>
+    {
+        SessionOperation::new(Arc::clone(&self.client))
+            .delete_session(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+}
+
 fn session_model_patch_outcome(
     outcome: InvocationOutcome<SessionModelPatchResult, OperationError>,
 ) -> InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure> {
@@ -1137,7 +1297,7 @@ pub enum OpenClawSessionError {
     ConnectionClosed,
     UnknownResponse,
     Transport,
-    Protocol,
+    Protocol(Option<HistoryError>),
     TargetRejected,
     EventBackpressure,
 }
@@ -1150,7 +1310,7 @@ impl From<OperationError> for OpenClawSessionError {
             OperationError::ConnectionClosed => Self::ConnectionClosed,
             OperationError::UnknownResponse => Self::UnknownResponse,
             OperationError::Transport => Self::Transport,
-            OperationError::Protocol => Self::Protocol,
+            OperationError::Protocol => Self::Protocol(None),
             OperationError::Rejected | OperationError::GatewayRejected { .. } => {
                 Self::TargetRejected
             }
@@ -1167,7 +1327,7 @@ impl fmt::Display for OpenClawSessionError {
             Self::ConnectionClosed => "OpenClaw session connection closed",
             Self::UnknownResponse => "OpenClaw session response was not correlated",
             Self::Transport => "OpenClaw session transport failed",
-            Self::Protocol => "OpenClaw session protocol failed",
+            Self::Protocol(_) => "OpenClaw session protocol failed",
             Self::TargetRejected => "OpenClaw session request was rejected",
             Self::EventBackpressure => "OpenClaw session event capacity was exhausted",
         })
@@ -1552,7 +1712,7 @@ mod tests {
     fn mutation_outcomes_project_only_typed_rejections() {
         assert_eq!(
             port_outcome::<()>(InvocationOutcome::TargetRejected(OperationError::Protocol)),
-            InvocationOutcome::TargetRejected(OpenClawSessionError::Protocol)
+            InvocationOutcome::TargetRejected(OpenClawSessionError::Protocol(None))
         );
         assert_eq!(
             port_outcome::<()>(InvocationOutcome::Unknown),

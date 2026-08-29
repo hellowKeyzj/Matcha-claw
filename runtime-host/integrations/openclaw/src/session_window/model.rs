@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
     Latest,
@@ -226,19 +228,29 @@ impl Message {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SessionWindow {
     messages: Vec<Message>,
     range: WindowRange,
     total_item_count: usize,
+    session_key: Option<String>,
+    native_session_id: Option<String>,
 }
 
 impl SessionWindow {
-    pub(crate) fn new(messages: Vec<Message>, range: WindowRange, total_item_count: usize) -> Self {
+    pub(crate) fn new(
+        messages: Vec<Message>,
+        range: WindowRange,
+        total_item_count: usize,
+        session_key: Option<String>,
+        native_session_id: Option<String>,
+    ) -> Self {
         Self {
             messages,
             range,
             total_item_count,
+            session_key,
+            native_session_id,
         }
     }
 
@@ -252,5 +264,26 @@ impl SessionWindow {
 
     pub const fn total_item_count(&self) -> usize {
         self.total_item_count
+    }
+
+    pub fn session_key(&self) -> Option<&str> {
+        self.session_key.as_deref()
+    }
+
+    pub fn native_session_id(&self) -> Option<&str> {
+        self.native_session_id.as_deref()
+    }
+}
+
+impl fmt::Debug for SessionWindow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionWindow")
+            .field("message_count", &self.messages.len())
+            .field("range", &self.range)
+            .field("total_item_count", &self.total_item_count)
+            .field("has_session_key", &self.session_key.is_some())
+            .field("has_native_session_id", &self.native_session_id.is_some())
+            .finish()
     }
 }

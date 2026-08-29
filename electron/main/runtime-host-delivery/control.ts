@@ -5,9 +5,8 @@ export const RUNTIME_HOST_CONTROL_VERSION = 1;
 export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_ID_BYTES = 128;
-const MAX_TOOLCHAIN_JOB_ID_BYTES = 128;
 const DEFAULT_MAX_PENDING_COMMANDS = 64;
 
 type RuntimeHostJsonPrimitive = null | boolean | number | string;
@@ -22,6 +21,16 @@ type RuntimeHostJsonValue =
   | RuntimeHostJsonPrimitive
   | RuntimeHostJsonArray
   | RuntimeHostJsonObject;
+
+type RuntimeHostPeerLifecycle =
+  | 'unavailable'
+  | 'idle'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'waitingToRestart'
+  | 'failed'
+  | 'shutDown';
 
 export type RuntimeHostControlCommand =
   | { readonly name: 'host.health' }
@@ -59,11 +68,6 @@ export type RuntimeHostControlCommand =
     }
   | { readonly name: 'openclaw.toolchain.status' }
   | { readonly name: 'openclaw.toolchain.install-uv' }
-  | { readonly name: 'openclaw.toolchain.install-submit' }
-  | {
-      readonly name: 'openclaw.toolchain.job-get';
-      readonly input: { readonly jobId: string };
-    }
   | { readonly name: 'openclaw.subagent-templates.list' }
   | { readonly name: 'openclaw.subagent-templates.get'; readonly input: { readonly id: string } }
   | { readonly name: 'openclaw.lifecycle.start' }
@@ -119,6 +123,12 @@ export type RuntimeHostSafeEvent =
       readonly hasSessionActivity: boolean;
     }
   | { readonly type: 'openclaw.runtime' }
+  | {
+      readonly type: 'matcha.lifecycle';
+      readonly lifecycle: RuntimeHostPeerLifecycle;
+      readonly ready: boolean;
+      readonly observedAtMs: number;
+    }
   | {
       readonly type: 'openclaw.cron.execution';
       readonly jobId: string;
@@ -599,10 +609,7 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
       return isOpenClawToolPermissionSetCommand(value);
     case 'openclaw.toolchain.status':
     case 'openclaw.toolchain.install-uv':
-    case 'openclaw.toolchain.install-submit':
       return hasExactKeys(value, ['name']);
-    case 'openclaw.toolchain.job-get':
-      return isOpenClawToolchainJobGetCommand(value);
     case 'openclaw.subagent-templates.get':
       return isSubagentTemplateCommand(value);
     case 'openclaw.sessions.patch-model':
@@ -686,16 +693,6 @@ function isOpenClawToolPermissionSetCommand(value: Record<string, unknown>): boo
     && (value.input.mode === 'default' || value.input.mode === 'fullAccess');
 }
 
-function isOpenClawToolchainJobGetCommand(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['name', 'input'])
-    && value.name === 'openclaw.toolchain.job-get'
-    && isRecord(value.input)
-    && hasExactKeys(value.input, ['jobId'])
-    && typeof value.input.jobId === 'string'
-    && value.input.jobId.trim().length > 0
-    && Buffer.byteLength(value.input.jobId, 'utf8') <= MAX_TOOLCHAIN_JOB_ID_BYTES;
-}
-
 function isSubagentTemplateCommand(value: Record<string, unknown>): boolean {
   return hasExactKeys(value, ['name', 'input'])
     && value.name === 'openclaw.subagent-templates.get'
@@ -715,7 +712,6 @@ function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
     || command.name === 'openclaw.lifecycle.restart'
     || command.name === 'openclaw.tool-permission.set'
     || command.name === 'openclaw.toolchain.install-uv'
-    || command.name === 'openclaw.toolchain.install-submit'
     || command.name === 'openclaw.cron.manual-trigger'
     || command.name === 'openclaw.sessions.patch-model'
     || command.name === 'openclaw.chat.send'
@@ -736,6 +732,11 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
         && typeof value.hasSessionActivity === 'boolean';
     case 'openclaw.runtime':
       return hasExactKeys(value, ['type']);
+    case 'matcha.lifecycle':
+      return hasExactKeys(value, ['type', 'lifecycle', 'ready', 'observedAtMs'])
+        && isRuntimeHostPeerLifecycle(value.lifecycle)
+        && typeof value.ready === 'boolean'
+        && isNonNegativeSafeInteger(value.observedAtMs);
     case 'openclaw.cron.execution':
       return hasExactKeys(value, ['type', 'jobId', 'runId', 'status'])
         && isCronExecutionId(value.jobId)
@@ -752,6 +753,17 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
     default:
       return false;
   }
+}
+
+function isRuntimeHostPeerLifecycle(value: unknown): value is RuntimeHostPeerLifecycle {
+  return value === 'unavailable'
+    || value === 'idle'
+    || value === 'starting'
+    || value === 'running'
+    || value === 'stopping'
+    || value === 'waitingToRestart'
+    || value === 'failed'
+    || value === 'shutDown';
 }
 
 function isCronExecutionId(value: unknown): value is string {

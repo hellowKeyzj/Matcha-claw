@@ -250,8 +250,12 @@ export async function bootstrapMainApplication(deps: {
 
   createMenu();
 
-  const mainWindow = createMainWindow({ showOnReady: false });
+  const mainWindow = createMainWindow({ showOnReady: !isE2EMode });
   deps.setMainWindow(mainWindow);
+  registerMainWindowLifecycle({
+    mainWindow,
+    clearMainWindowRef: () => deps.setMainWindow(null),
+  });
   if (!isE2EMode) {
     createTray(mainWindow, {
       checkForUpdates: () => appUpdater.checkForUpdates(),
@@ -646,14 +650,12 @@ export async function bootstrapMainApplication(deps: {
       }
     }
 
-    registerMainWindowLifecycle({
-      mainWindow,
-      clearMainWindowRef: () => deps.setMainWindow(null),
-    });
-    revealMainWindowAfterGatewayLeavesStopped({
-      hostEventBus: deps.hostEventBus,
-      mainWindow,
-    });
+    if (isE2EMode) {
+      revealMainWindowAfterGatewayLeavesStopped({
+        hostEventBus: deps.hostEventBus,
+        mainWindow,
+      });
+    }
 
     publishE2EStartupOutcome({ stage: 'ready', outcome: 'started' });
     return {

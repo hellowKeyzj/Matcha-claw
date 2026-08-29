@@ -34,11 +34,11 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
+import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
+import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
-import type { GatewayStatus } from '@/types/gateway';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -52,7 +52,6 @@ export interface HistoryLoadExecutionDeps {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
-  getGatewayStatus?: () => GatewayStatus | undefined;
 }
 
 export interface ViewportWindowLoadRequest {
@@ -72,15 +71,12 @@ interface CreateApplyLoadedMessagesInput {
 
 const CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS = 35_000;
 const CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS = [800, 2_000, 4_000, 8_000] as const;
-const CHAT_HISTORY_STARTUP_CONNECTION_GRACE_MS = 30_000;
-const CHAT_HISTORY_STARTUP_RUNNING_WINDOW_MS =
-  CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS + CHAT_HISTORY_STARTUP_CONNECTION_GRACE_MS;
 const CHAT_HISTORY_STARTUP_LOADING_TIMEOUT_MS =
   CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS * (CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length + 1)
   + CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.reduce((sum, delay) => sum + delay, 0)
   + 2_000;
 
-type StartupHistoryRetryErrorKind = 'timeout' | 'gateway_unavailable' | 'gateway_startup';
+type StartupHistoryRetryErrorKind = 'timeout' | 'runtime_unavailable' | 'runtime_startup';
 
 function isStartupColdHistoryLoad(request: ChatHistoryLoadRequest): boolean {
   return (
@@ -108,12 +104,13 @@ function classifyStartupHistoryRetryError(error: unknown): StartupHistoryRetryEr
   const message = normalized.message.toLowerCase();
 
   if (
-    message.includes('unavailable during gateway startup')
+    message.includes('unavailable during runtime startup')
+    || message.includes('unavailable during gateway startup')
     || message.includes('unavailable during startup')
     || message.includes('not yet ready')
     || message.includes('service not initialized')
   ) {
-    return 'gateway_startup';
+    return 'runtime_startup';
   }
 
   if (
@@ -128,7 +125,6 @@ function classifyStartupHistoryRetryError(error: unknown): StartupHistoryRetryEr
   if (
     normalized.code === 'GATEWAY'
     || normalized.code === 'NETWORK'
-    || message.includes('gateway')
     || message.includes('socket')
     || message.includes('handshake')
     || message.includes('fetch failed')
@@ -137,45 +133,16 @@ function classifyStartupHistoryRetryError(error: unknown): StartupHistoryRetryEr
     || message.includes('service unavailable')
     || message.includes('unavailable')
   ) {
-    return 'gateway_unavailable';
+    return 'runtime_unavailable';
   }
 
   return null;
 }
 
 function shouldRetryStartupHistoryLoad(
-  gatewayStatus: GatewayStatus | undefined,
   errorKind: StartupHistoryRetryErrorKind | null,
 ): boolean {
-  if (!gatewayStatus || !errorKind) {
-    return false;
-  }
-
-  if (errorKind === 'gateway_startup') {
-    return true;
-  }
-
-  if (
-    gatewayStatus.processState === 'starting'
-    || gatewayStatus.processState === 'control_connecting'
-    || gatewayStatus.processState === 'reconnecting'
-  ) {
-    return true;
-  }
-
-  if (gatewayStatus.processState !== 'running') {
-    return false;
-  }
-
-  if (!gatewayStatus.gatewayReady || gatewayStatus.transportState !== 'connected') {
-    return true;
-  }
-
-  if (gatewayStatus.connectedAt == null) {
-    return true;
-  }
-
-  return Date.now() - gatewayStatus.connectedAt <= CHAT_HISTORY_STARTUP_RUNNING_WINDOW_MS;
+  return errorKind != null;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -188,7 +155,6 @@ async function fetchHistoryWindowWithStartupRetry(input: {
   get: ChatStoreGetFn;
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
-  getGatewayStatus?: () => GatewayStatus | undefined;
   traceId?: string | null;
 }): Promise<HistoryWindowResult> {
   const {
@@ -197,7 +163,6 @@ async function fetchHistoryWindowWithStartupRetry(input: {
     get,
     abortSignal,
     shouldAbortHistoryProcessing,
-    getGatewayStatus,
     traceId,
   } = input;
   const startupColdLoad = isStartupColdHistoryLoad(request);
@@ -209,14 +174,13 @@ async function fetchHistoryWindowWithStartupRetry(input: {
       const target = resolveSessionOperationTarget(get(), requestedSessionKey);
       logSessionTrace('history.target.resolved', traceId, {
         requestedSessionKey: summarizeIdentifier(requestedSessionKey),
-        backendSessionKey: summarizeIdentifier(target.sessionKey),
+        sessionKey: summarizeIdentifier(target.sessionKey),
         endpointSessionId: summarizeIdentifier(target.endpointSessionId),
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         attempt,
       });
       return await fetchHistoryWindow({
         recordKey: requestedSessionKey,
-        backendSessionKey: target.sessionKey,
         endpointSessionId: target.endpointSessionId,
         sessionIdentity: target.sessionIdentity,
         sessions: readSessionsFromState(get()),
@@ -235,7 +199,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
       break;
     }
     const errorKind = classifyStartupHistoryRetryError(lastError);
-    if (!shouldRetryStartupHistoryLoad(getGatewayStatus?.(), errorKind)) {
+    if (!shouldRetryStartupHistoryLoad(errorKind)) {
       break;
     }
     await sleep(CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS[attempt]!);
@@ -311,7 +275,6 @@ export async function executeViewportWindowLoad(
     const target = resolveSessionOperationTarget(currentState, sessionKey);
     const currentItems = getSessionItems(currentState, sessionKey);
     const rawView = await hostSessionWindowFetch({
-      sessionKey: target.sessionKey,
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       mode: request.mode,
@@ -372,8 +335,19 @@ function shouldSuppressStartupForegroundError(input: {
 }): boolean {
   return (
     isStartupColdHistoryLoad(input.request)
-    && classifyStartupHistoryRetryError(input.error) === 'gateway_startup'
+    && classifyStartupHistoryRetryError(input.error) === 'runtime_startup'
   );
+}
+
+function isSessionEndpointStarting(state: ChatStoreState, recordKey: string): boolean {
+  const identity = state.loadedSessions[recordKey]?.meta.sessionIdentity;
+  if (!identity) {
+    return false;
+  }
+  return useRuntimeEndpointsStore.getState().endpoints.some((endpoint) => (
+    sameRuntimeEndpointScope(endpoint.endpointRef, identity.endpoint)
+    && isSessionRuntimeEndpointStarting(endpoint)
+  ));
 }
 
 
@@ -471,7 +445,6 @@ export async function executeHistoryLoad(
     get,
     historyRuntime,
     loadingTimeoutMs,
-    getGatewayStatus,
   } = deps;
   const requestedSessionKey = request.sessionKey;
   const mode = request.mode;
@@ -543,7 +516,6 @@ export async function executeHistoryLoad(
       get,
       abortSignal: abortController.signal,
       shouldAbortHistoryProcessing,
-      getGatewayStatus,
       traceId,
     });
     throwIfHistoryLoadAborted(abortController.signal, shouldAbortHistoryProcessing);
@@ -585,10 +557,11 @@ export async function executeHistoryLoad(
         buildItemRenderFingerprint([]),
       );
       if (scope === 'foreground') {
-        if (shouldSuppressStartupForegroundError({ request, error: err })) {
+        const endpointStarting = isSessionEndpointStarting(get(), requestedSessionKey);
+        if (endpointStarting || shouldSuppressStartupForegroundError({ request, error: err })) {
           set((state) => {
             const loadedSessions = patchSessionMeta(state, requestedSessionKey, {
-              historyStatus: 'ready',
+              historyStatus: endpointStarting ? 'loading' : 'ready',
             });
             return {
               loadedSessions,

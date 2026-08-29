@@ -6,11 +6,12 @@ use serde_json::json;
 
 use crate::{
     RuntimeLifecycle, RuntimeState,
-    diagnostics::RuntimeStateProjection,
-    owner::{
-        Handle, RestartMatchaError, RestartOpenClawError, StartMatchaError, StartOpenClawError,
+    composition::{
+        PeerHandle, RestartMatchaError, RestartOpenClawError, StartMatchaError, StartOpenClawError,
         StopMatchaError, StopOpenClawError,
     },
+    diagnostics::RuntimeStateProjection,
+    owner::Handle,
 };
 
 use super::wire::CommandOutcome;
@@ -46,13 +47,16 @@ pub(crate) async fn host_health(owner: &Handle) -> CommandOutcome {
     }))
 }
 
-pub(crate) async fn runtime_snapshot(owner: &Handle) -> CommandOutcome {
+pub(crate) async fn runtime_snapshot(owner: &Handle, peer: &PeerHandle) -> CommandOutcome {
     let observed_at_ms = observed_at_ms();
     let state = owner.state();
-    let gateway = gateway_snapshot_result(state.open_claw().lifecycle(), observed_at_ms);
-    let control = match owner.control_lease().await {
-        Ok(Ok(lease)) => control_readiness_result(lease.snapshot_control().await),
-        _ => json!({
+    let gateway = match peer.open_claw_status().await {
+        Ok(state) => gateway_snapshot_result(state.lifecycle(), observed_at_ms),
+        Err(_) => json!({ "availability": "unavailable" }),
+    };
+    let control = match peer.control_lease().await {
+        Ok(lease) => control_readiness_result(lease.snapshot_control().await),
+        Err(_) => json!({
             "ready": false,
             "phase": "unavailable",
             "retryable": false,
@@ -115,13 +119,16 @@ fn control_readiness_result(readiness: OpenClawControlReadiness) -> serde_json::
     }
 }
 
-pub(crate) async fn matcha_status(owner: &Handle) -> CommandOutcome {
-    let state = owner.state().matcha().to_owned();
+pub(crate) async fn matcha_status(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.matcha_status().await {
+        Ok(state) => state,
+        Err(_) => return unavailable(),
+    };
     matcha_status_result(state)
 }
 
-pub(crate) async fn start_matcha(owner: &Handle) -> CommandOutcome {
-    let state = match owner.start_matcha().await {
+pub(crate) async fn start_matcha(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.start_matcha().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return start_matcha_failure(error),
         Err(_) => return internal_error(),
@@ -129,8 +136,8 @@ pub(crate) async fn start_matcha(owner: &Handle) -> CommandOutcome {
     matcha_lifecycle_result(state.lifecycle())
 }
 
-pub(crate) async fn stop_matcha(owner: &Handle) -> CommandOutcome {
-    let state = match owner.stop_matcha().await {
+pub(crate) async fn stop_matcha(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.stop_matcha().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return stop_matcha_failure(error),
         Err(_) => return internal_error(),
@@ -138,8 +145,8 @@ pub(crate) async fn stop_matcha(owner: &Handle) -> CommandOutcome {
     matcha_lifecycle_result(state.lifecycle())
 }
 
-pub(crate) async fn restart_matcha(owner: &Handle) -> CommandOutcome {
-    let state = match owner.restart_matcha().await {
+pub(crate) async fn restart_matcha(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.restart_matcha().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return restart_matcha_failure(error),
         Err(_) => return internal_error(),
@@ -147,12 +154,15 @@ pub(crate) async fn restart_matcha(owner: &Handle) -> CommandOutcome {
     matcha_lifecycle_result(state.lifecycle())
 }
 
-pub(crate) async fn status(owner: &Handle) -> CommandOutcome {
-    let state = owner.state().open_claw().to_owned();
+pub(crate) async fn status(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.open_claw_status().await {
+        Ok(state) => state,
+        Err(_) => return unavailable(),
+    };
     runtime_state_result(state)
 }
 
-pub(crate) async fn logs(owner: &Handle, input: super::wire::CommandInput) -> CommandOutcome {
+pub(crate) async fn logs(peer: &PeerHandle, input: super::wire::CommandInput) -> CommandOutcome {
     let input = input.into_value();
     let cursor = match input.get("cursor") {
         None => None,
@@ -166,7 +176,7 @@ pub(crate) async fn logs(owner: &Handle, input: super::wire::CommandInput) -> Co
             }
         },
     };
-    let logs = match owner.open_claw_logs(cursor).await {
+    let logs = match peer.open_claw_logs(cursor).await {
         Ok(Ok(logs)) => logs,
         Ok(Err(_)) => return unavailable(),
         Err(_) => return internal_error(),
@@ -187,8 +197,8 @@ pub(crate) async fn logs(owner: &Handle, input: super::wire::CommandInput) -> Co
     }))
 }
 
-pub(crate) async fn gateway_health(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_gateway_health(false).await {
+pub(crate) async fn gateway_health(peer: &PeerHandle) -> CommandOutcome {
+    match peer.open_claw_gateway_health(false).await {
         Ok(Ok(health)) => CommandOutcome::succeeded(json!({
             "result": {
                 "ok": health.ok,
@@ -203,8 +213,8 @@ pub(crate) async fn gateway_health(owner: &Handle) -> CommandOutcome {
     }
 }
 
-pub(crate) async fn gateway_status(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_gateway_status(true).await {
+pub(crate) async fn gateway_status(peer: &PeerHandle) -> CommandOutcome {
+    match peer.open_claw_gateway_status(true).await {
         Ok(Ok(status)) => CommandOutcome::succeeded(json!({
             "result": {
                 "sessionCount": status.session_count,
@@ -216,18 +226,17 @@ pub(crate) async fn gateway_status(owner: &Handle) -> CommandOutcome {
     }
 }
 
-pub(crate) async fn control_ui_url(owner: &Handle) -> CommandOutcome {
-    match owner.open_claw_control_ui_url().await {
+pub(crate) async fn control_ui_url(peer: &PeerHandle) -> CommandOutcome {
+    match peer.open_claw_control_ui_url().await {
         Ok(url) => CommandOutcome::succeeded(json!({ "result": { "url": url } })),
         Err(_) => unavailable(),
     }
 }
 
-pub(crate) async fn control_ready(owner: &Handle) -> CommandOutcome {
-    let lease = match owner.control_lease().await {
-        Ok(Ok(lease)) => lease,
-        Ok(Err(_)) => return unavailable(),
-        Err(_) => return internal_error(),
+pub(crate) async fn control_ready(peer: &PeerHandle) -> CommandOutcome {
+    let lease = match peer.control_lease().await {
+        Ok(lease) => lease,
+        Err(_) => return unavailable(),
     };
     control_ready_result(lease.snapshot_control().await)
 }
@@ -245,8 +254,8 @@ fn control_ready_result(readiness: OpenClawControlReadiness) -> CommandOutcome {
     }))
 }
 
-pub(crate) async fn start(owner: &Handle) -> CommandOutcome {
-    let state = match owner.start_open_claw().await {
+pub(crate) async fn start(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.start_open_claw().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return start_failure(error),
         Err(_) => return internal_error(),
@@ -254,8 +263,8 @@ pub(crate) async fn start(owner: &Handle) -> CommandOutcome {
     runtime_state_result(state)
 }
 
-pub(crate) async fn stop(owner: &Handle) -> CommandOutcome {
-    let state = match owner.stop_open_claw().await {
+pub(crate) async fn stop(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.stop_open_claw().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return stop_failure(error),
         Err(_) => return internal_error(),
@@ -263,8 +272,8 @@ pub(crate) async fn stop(owner: &Handle) -> CommandOutcome {
     runtime_state_result(state)
 }
 
-pub(crate) async fn restart(owner: &Handle) -> CommandOutcome {
-    let state = match owner.restart_open_claw().await {
+pub(crate) async fn restart(peer: &PeerHandle) -> CommandOutcome {
+    let state = match peer.restart_open_claw().await {
         Ok(Ok(state)) => state,
         Ok(Err(error)) => return restart_failure(error),
         Err(_) => return internal_error(),

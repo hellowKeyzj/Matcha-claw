@@ -102,11 +102,12 @@ impl SessionOperation {
         &self,
         params: SessionModelPatchParams,
     ) -> Result<InvocationOutcome<SessionModelPatchResult, OperationError>, OperationError> {
+        let expected_key = params.key().clone();
         let request_id = next_request_id("sessions-patch-model");
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
-                protocol::decode_session_model_patch_result(&request_id, response)
+                protocol::decode_session_model_patch_result(&request_id, response, &expected_key)
             })
             .await)
     }

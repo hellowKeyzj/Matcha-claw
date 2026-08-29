@@ -11,7 +11,7 @@ Address / Identity
   + peer lifecycle observation
   + event cursor / validated projection
   + SessionProjection
-  + JobCompatibilityProjection
+  + owner/facade typed operation projection
 ```
 
 `HostSnapshot` 最多是 admission、peer snapshot、safe health 和 projection metadata 的组合；它不能成为所有领域事实的总表。
@@ -167,7 +167,7 @@ Unknown    = 请求可能已到达或副作用可能已发生，但当前无法�
 
 `Unknown` 必须保留 correlation、revision/epoch 和 query/reconcile 路径；不能自动盲重试，不能伪造 succeeded。
 
-对外旧 job projection 只有 `queued/running/succeeded/failed`，因此 `Unknown` 不能被通用地翻译成 succeeded。每个 owner 必须定义：等待 readback、保持 running，或按原 TS 行为以 failed + safe unknown error 结束。
+对外 typed operation projection 必须保留 `Unknown`，不能被通用地翻译成 succeeded。每个 owner 必须定义：等待 readback、保持 running，或以 safe unknown error 结束。
 
 ## 5. Peer lifecycle model
 
@@ -269,15 +269,17 @@ cursor 规则：
 
 overflow/closed/gap 都不能当作业务成功；必须进入 recovery 或 Unknown。
 
-## 8. JobCompatibilityProjection
+## 8. OwnerOperationProjection
 
-兼容 projection 最小字段：
+每个 owner/facade 自己定义异步 operation 的最小 public view：
 
 ```text
-id, type, status,
-queuedAt, startedAt?, finishedAt?,
-attempts, maxAttempts,
-progress?, result?, error?
+operationId
+status: accepted | running | succeeded | failed | unknown
+progress?
+result?
+error?
+updatedAt?
 ```
 
 实现原则：
@@ -285,12 +287,12 @@ progress?, result?, error?
 ```text
 具体 owner operation/task/run
   -> owner-local terminal oracle
-  -> owner-local job view
-  -> Host lookup multiplexer（只路由，不存事实）
-  -> runtimeHost.jobGet / runtime-job:done|progress
+  -> owner-local operation view
+  -> owner/facade typed query
+  -> owner/facade typed event hint
 ```
 
-不保留 queue priority、generic retry、generic retention、generic cancellation 或 generic payload store。job id 是兼容键，不是领域主键。
+不保留 queue priority、generic retry、generic retention、generic cancellation、generic payload store 或 Host-wide generic operationId。operationId 是该 owner 的 observation key，不是 Host-wide 领域主键。
 
 ## 9. Foundation execution 与业务后台 operation
 
@@ -303,12 +305,12 @@ business owner
   -> owner-defined result / receipt / projection
 ```
 
-它与兼容 Job projection 的关系是：
+它与 owner operation projection 的关系是：
 
 ```text
 Foundation execution
-  != RuntimeJobQueue
-  != persistent job registry
+  != deleted Host-wide generic operation queue
+  != persistent generic operation registry
   != business terminal oracle
 ```
 
@@ -317,9 +319,9 @@ Foundation 只负责 task 的启动、取消和 join；业务 owner 负责：
 - operation 是否 accepted、running、completed、failed 或 unknown；
 - 是否需要 progress、dedupe、retry、retention 或 recovery；
 - 如何把结果映射为自己的 receipt；
-- 是否需要再投影为旧 `runtimeHost.jobGet` / `runtime-job:*` 形状。
+- 是否需要 owner/facade typed query/event。
 
-`OperationHandle<T>` 的 `Drop`/cancel 不能被解释为业务成功、失败或已撤销；需要可观察结论时，owner 必须显式 `join` 并根据自己的 oracle 发布结果。不得因为删除 Host-wide generic RuntimeJob 而删除这套 Foundation execution mechanism。
+`OperationHandle<T>` 的 `Drop`/cancel 不能被解释为业务成功、失败或已撤销；需要可观察结论时，owner 必须显式 `join` 并根据自己的 oracle 发布结果。不得因为删除 Host-wide generic operation model 而删除这套 Foundation execution mechanism。
 
 ## 10. Storage 分类
 

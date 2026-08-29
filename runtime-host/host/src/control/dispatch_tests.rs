@@ -5,8 +5,6 @@ use super::*;
 const TEST_UNKNOWN_CAPABILITY_MESSAGE: &str = "Capability descriptor is not available.";
 const TEST_INVALID_SCOPE_MESSAGE: &str = "Capability scope is invalid.";
 const TEST_SCOPE_NOT_AVAILABLE_MESSAGE: &str = "Capability scope is not available.";
-const TEST_CRON_DESCRIPTOR_NOT_GENERIC_EXECUTE_MESSAGE: &str =
-    "Scheduler Cron operations are not generic execute commands.";
 
 fn test_native_endpoint() -> Value {
     json!({
@@ -162,7 +160,50 @@ fn control_payload_decoders_keep_the_fixed_product_dtos() {
 }
 
 #[test]
-fn team_run_decision_decode_preserves_each_native_decision() {
+fn node_prompt_settled_decode_requires_team_run_target_and_preserves_run_id() {
+    for phase in ["final", "error", "aborted"] {
+        let command = team_runtime_command(
+            "team.nodePromptSettled",
+            &json!({ "kind": "team-run", "runId": "run:one" }),
+            &json!({
+                "runId": "run:one",
+                "sessionKey": "session:one",
+                "promptRunId": "prompt:one",
+                "phase": phase,
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            TeamRuntimeCommand::NodePromptSettled {
+                run_id,
+                session_key,
+                prompt_run_id,
+                ..
+            } if run_id.as_str() == "run:one"
+                && session_key.as_str() == "session:one"
+                && prompt_run_id.as_str() == "prompt:one"
+        ));
+    }
+
+    for target in [Value::Null, json!({ "kind": "none" })] {
+        assert!(
+            team_runtime_command(
+                "team.nodePromptSettled",
+                &target,
+                &json!({
+                    "sessionKey": "session:one",
+                    "promptRunId": "prompt:one",
+                    "phase": "final",
+                }),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn team_run_decision_decode_accepts_supported_decisions() {
     for (value, expected) in [
         ("retry", organization::TeamDecisionType::Retry),
         (
@@ -203,10 +244,11 @@ fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
             "platform.runtime",
             "plugin.runtime",
             "provider.routing",
-            "runtime.host",
             "scheduler.cron",
             "skill.management",
             "subagent.management",
+            "subagent.skills",
+            "subagent.tools",
             "team.runtime",
         ]
     );
@@ -218,7 +260,7 @@ fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
         assert!(descriptor["operations"].is_array());
     }
     assert_eq!(capabilities[7]["scope"]["agentId"], "main");
-    assert_eq!(capabilities[5]["operations"].as_array().unwrap().len(), 5);
+    assert_eq!(capabilities[4]["operations"].as_array().unwrap().len(), 5);
     for private in [
         "token",
         "secret",
@@ -527,20 +569,6 @@ fn operation_ids(descriptor: &Value) -> Vec<&str> {
         .iter()
         .map(|operation| operation["id"].as_str().unwrap())
         .collect()
-}
-
-#[test]
-fn scheduler_cron_execute_is_rejected_without_falling_through_to_generic_dispatch() {
-    assert_eq!(
-        to_value(scheduler_cron_not_generic_execute()).unwrap(),
-        json!({
-            "kind": "rejected",
-            "error": {
-                "code": "INVALID_INPUT",
-                "message": TEST_CRON_DESCRIPTOR_NOT_GENERIC_EXECUTE_MESSAGE,
-            },
-        })
-    );
 }
 
 #[test]

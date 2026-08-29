@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    session_create::{NativeEndpoint, SessionCreateCommand, SessionCreateOutcome},
+    sessions::create::{SessionCreateAdmissionInput, SessionCreateOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -69,13 +69,11 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    fn native_endpoint(&self) -> Option<NativeEndpoint> {
+    fn native_endpoint(&self) -> Option<RuntimeEndpoint> {
         if self.kind != RUNTIME_KIND {
             return None;
         }
-        RuntimeEndpoint::try_new(&self.runtime_adapter_id, &self.runtime_instance_id)
-            .ok()
-            .map(NativeEndpoint::from_runtime_endpoint)
+        RuntimeEndpoint::try_new(&self.runtime_adapter_id, &self.runtime_instance_id).ok()
     }
 }
 
@@ -113,27 +111,22 @@ impl SessionCreateRequest {
             && self.scope.agent_id == self.target.agent_id
             && self.scope.agent_id == self.input.agent_id
             && self.scope.endpoint == self.input.endpoint
-            && matches!(
-                self.scope.endpoint.native_endpoint(),
-                Some(NativeEndpoint::OpenClawLocal | NativeEndpoint::MatchaAgentLocal)
-            ))
+            && self.scope.endpoint.native_endpoint().is_some())
         .then_some(())
         .ok_or(RequestError::Invalid)
     }
 
-    pub(crate) fn into_command(self) -> Result<SessionCreateCommand, RequestError> {
+    pub(crate) fn into_admission_input(self) -> Result<SessionCreateAdmissionInput, RequestError> {
         let endpoint = self
             .input
             .endpoint
             .native_endpoint()
-            .filter(|endpoint| *endpoint != NativeEndpoint::Unsupported)
             .ok_or(RequestError::Invalid)?;
-        SessionCreateCommand::new(
+        Ok(SessionCreateAdmissionInput::new(
             endpoint,
             self.input.agent_id,
             self.input.endpoint_session_id,
-        )
-        .map_err(|_| RequestError::Invalid)
+        ))
     }
 }
 
@@ -217,6 +210,24 @@ mod tests {
         })
     }
 
+    fn request_without_endpoint_session_id() -> Value {
+        let mut value = request();
+        value["input"]
+            .as_object_mut()
+            .unwrap()
+            .remove("endpointSessionId");
+        value
+    }
+
+    fn matcha_request_without_endpoint_session_id() -> Value {
+        let mut value = matcha_request();
+        value["input"]
+            .as_object_mut()
+            .unwrap()
+            .remove("endpointSessionId");
+        value
+    }
+
     fn decision(capability: &str) -> String {
         let payload = json!({
             "version": 1,
@@ -264,23 +275,52 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_the_fixed_openclaw_local_agent_scope() {
-        let command = SessionCreateRequest::decode_semantics(request())
+    fn accepts_the_fixed_openclaw_local_agent_scope() {
+        let input = SessionCreateRequest::decode_semantics(request())
             .unwrap()
-            .into_command()
+            .into_admission_input()
             .unwrap();
 
-        assert_eq!(command.session_key().unwrap(), "agent:main:session-1");
+        assert_eq!(input.endpoint().runtime_adapter_id(), "openclaw");
+        assert_eq!(input.agent_id(), "main");
+        assert_eq!(input.endpoint_session_id(), Some("session-1"));
     }
 
     #[test]
     fn accepts_the_fixed_matcha_local_agent_scope_with_native_session_identity() {
-        let command = SessionCreateRequest::decode_semantics(matcha_request())
+        let input = SessionCreateRequest::decode_semantics(matcha_request())
             .unwrap()
-            .into_command()
+            .into_admission_input()
             .unwrap();
 
-        assert_eq!(command.session_key().unwrap(), "matcha-session-1");
+        assert_eq!(input.endpoint().runtime_adapter_id(), "matcha-agent");
+        assert_eq!(input.agent_id(), "main");
+        assert_eq!(input.endpoint_session_id(), Some("matcha-session-1"));
+    }
+
+    #[test]
+    fn missing_endpoint_session_id_stays_an_admission_input() {
+        let input = SessionCreateRequest::decode_semantics(request_without_endpoint_session_id())
+            .unwrap()
+            .into_admission_input()
+            .unwrap();
+
+        assert_eq!(input.endpoint().runtime_adapter_id(), "openclaw");
+        assert_eq!(input.agent_id(), "main");
+        assert_eq!(input.endpoint_session_id(), None);
+    }
+
+    #[test]
+    fn missing_matcha_endpoint_session_id_stays_an_admission_input() {
+        let input =
+            SessionCreateRequest::decode_semantics(matcha_request_without_endpoint_session_id())
+                .unwrap()
+                .into_admission_input()
+                .unwrap();
+
+        assert_eq!(input.endpoint().runtime_adapter_id(), "matcha-agent");
+        assert_eq!(input.agent_id(), "main");
+        assert_eq!(input.endpoint_session_id(), None);
     }
 
     #[test]
@@ -304,7 +344,7 @@ mod tests {
         ] {
             assert_eq!(
                 SessionCreateRequest::decode_semantics(value)
-                    .and_then(SessionCreateRequest::into_command),
+                    .and_then(SessionCreateRequest::into_admission_input),
                 Err(RequestError::Invalid)
             );
         }

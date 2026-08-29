@@ -12,9 +12,13 @@ export const openClawTestRuntimeIdentity = {
   eventIdPrefix: 'openclaw',
 };
 
+function readAgentIdFromSessionKey(sessionKey: string): string {
+  return sessionKey.split(':')[1] || 'main';
+}
+
 export function createOpenClawTestSessionIdentity(
   sessionKey = 'agent:main:main',
-  agentId = 'default',
+  agentId = readAgentIdFromSessionKey(sessionKey),
 ): SessionIdentity {
   return {
     endpoint: openClawTestRuntimeEndpoint,

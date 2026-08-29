@@ -12,14 +12,14 @@ use tokio::{
     time::timeout,
 };
 
-use crate::transport::authorization::CapabilityDecisionVerifier;
+use crate::transport::{authorization::CapabilityDecisionVerifier, session_trace};
 
 use super::{SessionModelSelectionDelivery, SessionModelSelectionRequest};
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 const REJECTION_REASON_HEADER: &str = "x-runtime-host-session-model-rejection";
@@ -34,19 +34,19 @@ const MAX_DIAGNOSTIC_HEADER_BYTES: usize = 1024;
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        session: crate::sessions::SessionHandle,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            session,
         })
     }
 
@@ -54,9 +54,9 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, session).await;
             });
         }
     }
@@ -65,12 +65,16 @@ impl Server {
 async fn serve(
     mut stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> io::Result<()> {
+    let mut request_context = None;
     let response = match timeout(REQUEST_DEADLINE, async {
         let request = read_request(&mut stream).await?;
         Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
+            Ok(request) => {
+                request_context = Some(RequestContext::from(&request));
+                handle(request, verifier, session).await
+            }
             Err(response) => response,
         })
     })
@@ -78,7 +82,20 @@ async fn serve(
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+        Err(_) => match request_context {
+            Some(context) => {
+                session_trace::log(
+                    "runtime.model-selection.deadline",
+                    context.trace_id.as_deref(),
+                    serde_json::json!({
+                        "method": &context.method,
+                        "path": &context.path,
+                    }),
+                );
+                Response::deadline()
+            }
+            None => Response::bad_request(),
+        },
     };
     write_response(&mut stream, response).await
 }
@@ -86,22 +103,40 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    session: crate::sessions::SessionHandle,
 ) -> Response {
     if request.method != "POST" || request.path != "/api/sessions/model" {
         return Response::not_found();
     }
+    let trace_id = session_trace::trace_id(&request.headers);
+    session_trace::log(
+        "runtime.model-selection.request",
+        trace_id,
+        serde_json::json!({ "method": &request.method, "path": &request.path }),
+    );
     let Some(authorization) = request
         .headers
         .iter()
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
     else {
+        session_trace::log(
+            "runtime.model-selection.unauthorized",
+            trace_id,
+            serde_json::json!({}),
+        );
         return Response::unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Response::bad_request(),
+        Err(_) => {
+            session_trace::log(
+                "runtime.model-selection.bad-json",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::bad_request();
+        }
     };
     let mut verifier = verifier.lock().await;
     let request = match SessionModelSelectionRequest::decode(
@@ -111,25 +146,77 @@ async fn handle(
         now_millis(),
     ) {
         Ok(request) => request,
-        Err(super::DecodeError::Unauthorized) => return Response::unauthorized(),
-        Err(super::DecodeError::Invalid) => return Response::bad_request(),
+        Err(super::DecodeError::Unauthorized) => {
+            session_trace::log(
+                "runtime.model-selection.decode-unauthorized",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::unauthorized();
+        }
+        Err(super::DecodeError::Invalid) => {
+            session_trace::log(
+                "runtime.model-selection.decode-invalid",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::bad_request();
+        }
     };
-    let command = match request.into_command() {
+    let command = match request.into_command(trace_id.map(str::to_owned)) {
         Ok(command) => command,
-        Err(_) => return Response::bad_request(),
+        Err(_) => {
+            session_trace::log(
+                "runtime.model-selection.command-invalid",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::bad_request();
+        }
     };
+    session_trace::log(
+        "runtime.model-selection.command",
+        trace_id,
+        serde_json::json!({
+            "endpoint": format!("{:?}", command.endpoint),
+            "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+            "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
+            "modelSelectionId": session_trace::id_shape(Some(&command.model_selection_id)),
+        }),
+    );
     if matches!(
         command.endpoint,
-        crate::session_model_selection::NativeEndpoint::Unsupported
+        crate::sessions::model_selection::NativeEndpoint::Unsupported
     ) {
+        session_trace::log(
+            "runtime.model-selection.unsupported",
+            trace_id,
+            serde_json::json!({}),
+        );
         return Response::from_delivery(SessionModelSelectionDelivery::Unsupported);
     }
     drop(verifier);
-    let outcome = match owner.select_session_model(command).await {
+    let outcome = match session.select_model(command).await {
         Ok(outcome) => outcome,
-        Err(_) => return Response::unavailable(),
+        Err(_) => {
+            session_trace::log(
+                "runtime.model-selection.owner-unavailable",
+                trace_id,
+                serde_json::json!({}),
+            );
+            return Response::unavailable();
+        }
     };
-    Response::from_delivery(outcome.into())
+    let delivery = SessionModelSelectionDelivery::from(outcome);
+    session_trace::log(
+        "runtime.model-selection.outcome",
+        trace_id,
+        serde_json::json!({
+            "status": delivery.status_code(),
+            "rejectionReason": delivery.rejection_reason(),
+        }),
+    );
+    Response::from_delivery(delivery)
 }
 
 struct Request {
@@ -137,6 +224,22 @@ struct Request {
     path: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+struct RequestContext {
+    method: String,
+    path: String,
+    trace_id: Option<String>,
+}
+
+impl RequestContext {
+    fn from(request: &Request) -> Self {
+        Self {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            trace_id: session_trace::trace_id(&request.headers).map(str::to_owned),
+        }
+    }
 }
 
 struct Response {
@@ -166,6 +269,12 @@ impl Response {
 
     fn unavailable() -> Self {
         Self::from_delivery(SessionModelSelectionDelivery::Unavailable)
+    }
+
+    fn deadline() -> Self {
+        Self::from_delivery(SessionModelSelectionDelivery::Outcome(
+            crate::sessions::model_selection::SessionModelSelectionOutcome::OutcomeUnknown,
+        ))
     }
 
     fn fixed(status: u16, error: &'static str) -> Self {
@@ -360,4 +469,22 @@ fn now_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use serde_json::json;
+
+    use super::{REQUEST_DEADLINE, Response};
+
+    #[test]
+    fn peer_operation_deadline_matches_openclaw_rpc_and_is_not_invalid_request() {
+        assert_eq!(REQUEST_DEADLINE.as_secs(), 30);
+        assert_eq!(Response::deadline().status, 200);
+        assert_eq!(
+            Response::deadline().body,
+            json!({ "outcome": "outcome_unknown" })
+        );
+        assert_ne!(Response::deadline().status, 400);
+    }
 }

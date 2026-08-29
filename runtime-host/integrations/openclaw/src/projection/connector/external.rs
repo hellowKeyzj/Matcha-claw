@@ -28,6 +28,14 @@ const MCP_PROBE_CLIENT_VERSION: &str = "0.0.0";
 const MCP_PROBE_REQUEST_ID: &str = "matcha-connector-probe";
 const MAX_MCP_PROBE_BODY_BYTES: usize = 1_000_000;
 
+pub fn managed_external_server_id(connector_id: &str) -> String {
+    if connector_id.starts_with(MANAGED_EXTERNAL_SERVER_PREFIX) {
+        connector_id.to_owned()
+    } else {
+        format!("{MANAGED_EXTERNAL_SERVER_PREFIX}{connector_id}")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectorProjectionEffect {
     Written { changed: bool },
@@ -89,8 +97,9 @@ pub fn project_external_connectors(
         }
         match server_for(connector, secrets) {
             Ok(Some(server)) => {
-                report.projected.push(connector.id.clone());
-                servers.insert(connector.id.clone(), server);
+                let server_id = managed_external_server_id(&connector.id);
+                report.projected.push(server_id.clone());
+                servers.insert(server_id, server);
             }
             Ok(None) if !connector.enabled() => report
                 .skipped

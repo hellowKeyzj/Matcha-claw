@@ -4,6 +4,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use foundation::execution::{
+    ControlObservation, ControlReason, ControlStage, EventObservation, EventReason, EventStage,
+    ObservationRecord, ObservationSink, TraceContext,
+};
 use serde_json::Value;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -13,7 +17,7 @@ use tokio::{
 };
 
 use crate::{
-    diagnostics::DiagnosticsArchiveCancellation,
+    diagnostics::DiagnosticsArchiveCancellation, facade::DiagnosticsHandle,
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -33,19 +37,22 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) struct Server {
     listener: TcpListener,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    diagnostics: DiagnosticsHandle,
+    observation: ObservationSink,
 }
 
 impl Server {
     pub(crate) async fn bind(
         port: u16,
         verifier: CapabilityDecisionVerifier,
-        owner: crate::owner::Handle,
+        diagnostics: DiagnosticsHandle,
+        observation: ObservationSink,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(("127.0.0.1", port)).await?,
             verifier: Arc::new(Mutex::new(verifier)),
-            owner,
+            diagnostics,
+            observation,
         })
     }
 
@@ -53,9 +60,10 @@ impl Server {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let verifier = Arc::clone(&self.verifier);
-            let owner = self.owner.clone();
+            let diagnostics = self.diagnostics.clone();
+            let observation = self.observation.clone();
             tokio::spawn(async move {
-                let _ = serve(stream, verifier, owner).await;
+                let _ = serve(stream, verifier, diagnostics, observation).await;
             });
         }
     }
@@ -72,16 +80,29 @@ impl Server {
 async fn serve(
     stream: TcpStream,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    diagnostics: DiagnosticsHandle,
+    observation: ObservationSink,
 ) -> io::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let request = match timeout(REQUEST_DEADLINE, read_request(&mut reader)).await {
         Ok(result) => result?,
-        Err(_) => return write_response(&mut writer, Response::bad_request()).await,
+        Err(_) => {
+            observe_diagnostics_transport(
+                &observation,
+                DiagnosticsTransportObservation::RequestTimedOut,
+            );
+            return write_response(&mut writer, Response::bad_request()).await;
+        }
     };
     let response = match request {
-        Ok(request) => handle(request, verifier, owner, &mut reader).await?,
-        Err(response) => response,
+        Ok(request) => handle(request, verifier, diagnostics, observation, &mut reader).await?,
+        Err(response) => {
+            observe_diagnostics_transport(
+                &observation,
+                DiagnosticsTransportObservation::RequestDecodeRejected,
+            );
+            response
+        }
     };
     write_response(&mut writer, response).await
 }
@@ -89,12 +110,16 @@ async fn serve(
 async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    diagnostics: DiagnosticsHandle,
+    observation: ObservationSink,
     reader: &mut OwnedReadHalf,
 ) -> io::Result<Response> {
-    if request.method != "POST"
-        || (request.path != "/api/diagnostics/archive" && request.path != DOWNLOAD_ENDPOINT)
-    {
+    let endpoint = EndpointKind::from_path(&request.path);
+    if request.method != "POST" || endpoint == EndpointKind::Unknown {
+        observe_diagnostics_transport(
+            &observation,
+            DiagnosticsTransportObservation::MethodOrPathRejected { endpoint },
+        );
         return Ok(Response::not_found());
     }
     let Some(authorization) = request
@@ -103,35 +128,71 @@ async fn handle(
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
     else {
+        observe_diagnostics_transport(
+            &observation,
+            DiagnosticsTransportObservation::MissingAuthorization { endpoint },
+        );
         return Ok(Response::unauthorized());
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
-        Err(_) => return Ok(Response::bad_request()),
+        Err(_) => {
+            observe_diagnostics_transport(
+                &observation,
+                DiagnosticsTransportObservation::BadJson { endpoint },
+            );
+            return Ok(Response::bad_request());
+        }
     };
     let mut verifier = verifier.lock().await;
-    if request.path == DOWNLOAD_ENDPOINT {
+    if endpoint == EndpointKind::Download {
         let archive_id = match authorize_download(value, authorization, &mut verifier, now_millis())
         {
             Ok(archive_id) => archive_id,
-            Err(_) => return Ok(Response::unauthorized()),
+            Err(_) => {
+                drop(verifier);
+                observe_diagnostics_transport(
+                    &observation,
+                    DiagnosticsTransportObservation::CapabilityRejected { endpoint },
+                );
+                return Ok(Response::unauthorized());
+            }
         };
         drop(verifier);
-        return Ok(Response::from_download(download(&owner, archive_id).await));
+        observe_diagnostics_transport(
+            &observation,
+            DiagnosticsTransportObservation::Accepted { endpoint },
+        );
+        let download = download(&diagnostics, archive_id).await;
+        observe_download_delivery(&observation, &download);
+        return Ok(Response::from_download(download));
     }
     if authorize(value, authorization, &mut verifier, now_millis()).is_err() {
+        drop(verifier);
+        observe_diagnostics_transport(
+            &observation,
+            DiagnosticsTransportObservation::CapabilityRejected { endpoint },
+        );
         return Ok(Response::unauthorized());
     }
     drop(verifier);
+    observe_diagnostics_transport(
+        &observation,
+        DiagnosticsTransportObservation::Accepted { endpoint },
+    );
 
     let cancellation = DiagnosticsArchiveCancellation::new();
-    let archive = collect(&owner, cancellation.clone());
+    let archive = collect(&diagnostics, cancellation.clone());
     tokio::pin!(archive);
     tokio::select! {
-        delivery = &mut archive => Ok(Response::from_delivery(delivery)),
+        delivery = &mut archive => {
+            observe_archive_delivery(&observation, &delivery);
+            Ok(Response::from_delivery(delivery))
+        }
         _ = wait_for_disconnect(reader) => {
             cancellation.cancel();
             let _ = archive.await;
+            observe_diagnostics_transport(&observation, DiagnosticsTransportObservation::ArchiveCancelled);
             Err(io::Error::new(io::ErrorKind::ConnectionAborted, "diagnostics archive client disconnected"))
         }
     }
@@ -140,6 +201,212 @@ async fn handle(
 async fn wait_for_disconnect(reader: &mut OwnedReadHalf) {
     let mut buffer = [0_u8; 128];
     while reader.read(&mut buffer).await.unwrap_or(0) != 0 {}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointKind {
+    Archive,
+    Download,
+    Unknown,
+}
+
+impl EndpointKind {
+    fn from_path(path: &str) -> Self {
+        match path {
+            "/api/diagnostics/archive" => Self::Archive,
+            DOWNLOAD_ENDPOINT => Self::Download,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn observation_kind(self) -> &'static str {
+        match self {
+            Self::Archive => "diagnostics.archive",
+            Self::Download => "diagnostics.download",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticsTransportObservation {
+    RequestDecodeRejected,
+    RequestTimedOut,
+    MethodOrPathRejected { endpoint: EndpointKind },
+    MissingAuthorization { endpoint: EndpointKind },
+    BadJson { endpoint: EndpointKind },
+    CapabilityRejected { endpoint: EndpointKind },
+    Accepted { endpoint: EndpointKind },
+    ArchiveCompleted,
+    ArchiveCancelled,
+    ArchiveFailed,
+    DownloadCompleted,
+    DownloadArchiveNotFound,
+    DownloadOutputUnavailable,
+}
+
+impl DiagnosticsTransportObservation {
+    const fn endpoint(self) -> EndpointKind {
+        match self {
+            Self::RequestDecodeRejected | Self::RequestTimedOut => EndpointKind::Unknown,
+            Self::MethodOrPathRejected { endpoint }
+            | Self::MissingAuthorization { endpoint }
+            | Self::BadJson { endpoint }
+            | Self::CapabilityRejected { endpoint }
+            | Self::Accepted { endpoint } => endpoint,
+            Self::ArchiveCompleted | Self::ArchiveCancelled | Self::ArchiveFailed => {
+                EndpointKind::Archive
+            }
+            Self::DownloadCompleted
+            | Self::DownloadArchiveNotFound
+            | Self::DownloadOutputUnavailable => EndpointKind::Download,
+        }
+    }
+
+    const fn category_kind(self) -> &'static str {
+        match self {
+            Self::RequestDecodeRejected => "diagnostics.ingress.decodeRejected",
+            Self::RequestTimedOut => "diagnostics.ingress.timedOut",
+            Self::MethodOrPathRejected { .. } => "diagnostics.ingress.methodOrPathRejected",
+            Self::MissingAuthorization { .. } => "diagnostics.ingress.missingAuthorization",
+            Self::BadJson { .. } => "diagnostics.ingress.badJson",
+            Self::CapabilityRejected { .. } => "diagnostics.ingress.capabilityRejected",
+            Self::Accepted {
+                endpoint: EndpointKind::Archive,
+            } => "diagnostics.archive.accepted",
+            Self::Accepted {
+                endpoint: EndpointKind::Download,
+            } => "diagnostics.download.accepted",
+            Self::Accepted {
+                endpoint: EndpointKind::Unknown,
+            } => "diagnostics.ingress.accepted",
+            Self::ArchiveCompleted => "diagnostics.archive.completed",
+            Self::ArchiveCancelled => "diagnostics.archive.cancelled",
+            Self::ArchiveFailed => "diagnostics.archive.failed",
+            Self::DownloadCompleted => "diagnostics.download.completed",
+            Self::DownloadArchiveNotFound => "diagnostics.download.archiveNotFound",
+            Self::DownloadOutputUnavailable => "diagnostics.download.outputUnavailable",
+        }
+    }
+
+    const fn control_stage(self) -> ControlStage {
+        match self {
+            Self::RequestDecodeRejected | Self::RequestTimedOut | Self::BadJson { .. } => {
+                ControlStage::Decode
+            }
+            Self::MethodOrPathRejected { .. } => ControlStage::Dispatch,
+            Self::MissingAuthorization { .. }
+            | Self::CapabilityRejected { .. }
+            | Self::Accepted { .. } => ControlStage::Admit,
+            Self::ArchiveCompleted
+            | Self::ArchiveCancelled
+            | Self::ArchiveFailed
+            | Self::DownloadCompleted
+            | Self::DownloadArchiveNotFound
+            | Self::DownloadOutputUnavailable => ControlStage::Settle,
+        }
+    }
+
+    const fn control_reason(self) -> ControlReason {
+        match self {
+            Self::RequestTimedOut => ControlReason::TimedOut,
+            Self::RequestDecodeRejected | Self::BadJson { .. } => ControlReason::DecodeRejected,
+            Self::Accepted { .. } | Self::ArchiveCompleted | Self::DownloadCompleted => {
+                ControlReason::Accepted
+            }
+            Self::ArchiveCancelled => ControlReason::OutputClosed,
+            Self::MethodOrPathRejected { .. }
+            | Self::MissingAuthorization { .. }
+            | Self::CapabilityRejected { .. }
+            | Self::ArchiveFailed
+            | Self::DownloadArchiveNotFound
+            | Self::DownloadOutputUnavailable => ControlReason::Rejected,
+        }
+    }
+
+    const fn event_stage(self) -> EventStage {
+        match self {
+            Self::RequestDecodeRejected
+            | Self::RequestTimedOut
+            | Self::MethodOrPathRejected { .. }
+            | Self::MissingAuthorization { .. }
+            | Self::BadJson { .. }
+            | Self::CapabilityRejected { .. }
+            | Self::Accepted { .. } => EventStage::Validate,
+            Self::ArchiveCompleted | Self::DownloadCompleted => EventStage::Emit,
+            Self::ArchiveCancelled
+            | Self::ArchiveFailed
+            | Self::DownloadArchiveNotFound
+            | Self::DownloadOutputUnavailable => EventStage::Drop,
+        }
+    }
+
+    const fn event_reason(self) -> EventReason {
+        match self {
+            Self::Accepted { .. } | Self::ArchiveCompleted | Self::DownloadCompleted => {
+                EventReason::Accepted
+            }
+            Self::MethodOrPathRejected { .. } => EventReason::RouteMismatch,
+            Self::ArchiveCancelled => EventReason::SinkClosed,
+            Self::RequestDecodeRejected
+            | Self::RequestTimedOut
+            | Self::MissingAuthorization { .. }
+            | Self::BadJson { .. }
+            | Self::CapabilityRejected { .. }
+            | Self::ArchiveFailed
+            | Self::DownloadArchiveNotFound
+            | Self::DownloadOutputUnavailable => EventReason::ValidationRejected,
+        }
+    }
+}
+
+fn observe_archive_delivery(observation: &ObservationSink, delivery: &DiagnosticsArchiveDelivery) {
+    let record = match delivery {
+        DiagnosticsArchiveDelivery::Ok(receipt) => match receipt.terminal() {
+            crate::diagnostics::DiagnosticsArchiveTerminal::Completed => {
+                DiagnosticsTransportObservation::ArchiveCompleted
+            }
+            crate::diagnostics::DiagnosticsArchiveTerminal::Cancelled => {
+                DiagnosticsTransportObservation::ArchiveCancelled
+            }
+            crate::diagnostics::DiagnosticsArchiveTerminal::Failed => {
+                DiagnosticsTransportObservation::ArchiveFailed
+            }
+        },
+        DiagnosticsArchiveDelivery::Unavailable => DiagnosticsTransportObservation::ArchiveFailed,
+    };
+    observe_diagnostics_transport(observation, record);
+}
+
+fn observe_download_delivery(observation: &ObservationSink, download: &DiagnosticsArchiveDownload) {
+    let record = match download {
+        DiagnosticsArchiveDownload::Ok { .. } => DiagnosticsTransportObservation::DownloadCompleted,
+        DiagnosticsArchiveDownload::NotFound => {
+            DiagnosticsTransportObservation::DownloadArchiveNotFound
+        }
+        DiagnosticsArchiveDownload::Unavailable => {
+            DiagnosticsTransportObservation::DownloadOutputUnavailable
+        }
+    };
+    observe_diagnostics_transport(observation, record);
+}
+
+fn observe_diagnostics_transport(
+    observation: &ObservationSink,
+    record: DiagnosticsTransportObservation,
+) {
+    observation.observe(ObservationRecord::Control(ControlObservation {
+        trace: TraceContext::absent(),
+        command_kind: record.endpoint().observation_kind(),
+        stage: record.control_stage(),
+        reason: Some(record.control_reason()),
+    }));
+    observation.observe(ObservationRecord::Event(EventObservation {
+        trace: TraceContext::absent(),
+        event_kind: record.category_kind(),
+        stage: record.event_stage(),
+        reason: Some(record.event_reason()),
+    }));
 }
 
 struct Request {

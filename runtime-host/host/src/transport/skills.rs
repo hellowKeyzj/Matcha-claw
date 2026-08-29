@@ -6,13 +6,15 @@ use std::{
 
 use crate::skill_management::{
     Command, Detail, ImportOutcome, MutationOutcome, Outcome, ReadError, ReadmeError,
-    RemoveOutcome, SearchResult, UploadOutcome,
+    RemoveOutcome, UploadOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{skill_status, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    facade::SkillsHandle, skill_status, transport::authorization::CapabilityDecisionVerifier,
+};
 
 pub(crate) const ENDPOINT: &str = "/api/skills/status";
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -27,7 +29,6 @@ const MAX_BUNDLE_PATH_BYTES: usize = 240;
 const MAX_BUNDLE_SKILL_KEY_BYTES: usize = 96;
 const SKILL_MANIFEST: &str = "SKILL.md";
 
-pub(crate) const SEARCH_ENDPOINT: &str = "/api/skills/search";
 pub(crate) const DETAIL_ENDPOINT: &str = "/api/skills/detail";
 pub(crate) const CONFIG_ENDPOINT: &str = "/api/skills/config";
 pub(crate) const CLAWHUB_INSTALL_ENDPOINT: &str = "/api/skills/clawhub/install";
@@ -49,7 +50,7 @@ pub(crate) enum RequestError {
 pub(crate) async fn handle_status(
     headers: &[(String, String)],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: SkillsHandle,
     now: u64,
 ) -> Result<Value, RequestError> {
     verify(
@@ -62,7 +63,7 @@ pub(crate) async fn handle_status(
         STATUS_SUBJECT,
     )
     .await?;
-    match owner
+    match handle
         .skill_status()
         .await
         .map_err(|_| RequestError::Invalid)?
@@ -91,7 +92,7 @@ pub(crate) async fn handle_management(
     headers: &[(String, String)],
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-    owner: crate::owner::Handle,
+    handle: SkillsHandle,
     now: u64,
 ) -> Result<Outcome, RequestError> {
     let (scope, capability, subject) = authorization(endpoint).ok_or(RequestError::Invalid)?;
@@ -104,7 +105,7 @@ pub(crate) async fn handle_management(
     }
     let value = serde_json::from_slice::<Value>(body).map_err(|_| RequestError::Invalid)?;
     let command = decode(endpoint, value).map_err(|_| RequestError::Invalid)?;
-    owner
+    handle
         .manage_skills(command)
         .await
         .map_err(|_| RequestError::Invalid)
@@ -112,7 +113,6 @@ pub(crate) async fn handle_management(
 
 fn authorization(endpoint: &str) -> Option<(&'static str, &'static str, &'static str)> {
     Some(match endpoint {
-        SEARCH_ENDPOINT => ("skills:search", "skills.search", "skills-search"),
         DETAIL_ENDPOINT => ("skills:read", "skills.detail", "skills-detail"),
         CONFIG_ENDPOINT => (
             "skills:config:write",
@@ -175,13 +175,6 @@ fn bearer(headers: &[(String, String)]) -> Option<&str> {
         .iter()
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchRequest {
-    query: Option<String>,
-    limit: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -276,11 +269,6 @@ struct ReadmeRequest {
 
 fn decode(endpoint: &str, value: Value) -> Result<Command, ()> {
     match endpoint {
-        SEARCH_ENDPOINT => {
-            reject_nulls(&value, &["query", "limit"])?;
-            let request = serde_json::from_value::<SearchRequest>(value).map_err(|_| ())?;
-            Command::search(request.query, request.limit)
-        }
         DETAIL_ENDPOINT => {
             let request = serde_json::from_value::<DetailRequest>(value).map_err(|_| ())?;
             Command::detail(request.slug)
@@ -443,17 +431,11 @@ fn validate_bundle_skill_key(value: &str) -> Result<(), ()> {
 
 pub(crate) fn response(outcome: Outcome) -> (u16, Value) {
     match outcome {
-        Outcome::Search(Ok(results)) => (
-            200,
-            json!({ "results": results.iter().map(search_result).collect::<Vec<_>>() }),
-        ),
         Outcome::Detail(Ok(detail)) => (200, detail_projection(&detail)),
-        Outcome::Search(Err(ReadError::Rejected))
-        | Outcome::Detail(Err(ReadError::Rejected))
-        | Outcome::Rejected => (400, json!({ "outcome": "rejected" })),
-        Outcome::Search(Err(_)) | Outcome::Detail(Err(_)) | Outcome::Unavailable => {
-            (503, json!({ "outcome": "unknown" }))
+        Outcome::Detail(Err(ReadError::Rejected)) | Outcome::Rejected => {
+            (400, json!({ "outcome": "rejected" }))
         }
+        Outcome::Detail(Err(_)) | Outcome::Unavailable => (503, json!({ "outcome": "unknown" })),
         Outcome::Upload(UploadOutcome::Accepted(receipt)) => {
             let mut value = json!({
                 "uploadId": receipt.upload_id,
@@ -488,24 +470,6 @@ pub(crate) fn response(outcome: Outcome) -> (u16, Value) {
         Outcome::Mutation(MutationOutcome::Rejected) => (400, json!({ "outcome": "rejected" })),
         Outcome::Mutation(MutationOutcome::Unknown) => (503, json!({ "outcome": "unknown" })),
     }
-}
-
-fn search_result(result: &SearchResult) -> Value {
-    let mut value =
-        json!({ "score": result.score, "slug": result.slug, "displayName": result.display_name });
-    let object = value
-        .as_object_mut()
-        .expect("skill search projection is object");
-    if let Some(summary) = &result.summary {
-        object.insert("summary".into(), json!(summary));
-    }
-    if let Some(version) = &result.version {
-        object.insert("version".into(), json!(version));
-    }
-    if let Some(updated_at) = result.updated_at {
-        object.insert("updatedAt".into(), json!(updated_at));
-    }
-    value
 }
 
 fn detail_projection(detail: &Detail) -> Value {
@@ -547,7 +511,7 @@ mod tests {
             IMPORT_BUNDLE_ENDPOINT,
             json!({
                 "skillKey": "web-search",
-                "files": [{"path": "SKILL.md", "content": "---\\nname: web-search\\ndescription: Search\\n---\\n"}]
+                "files": [{"path": "SKILL.md", "content": "---\nname: web-search\ndescription: Search\n---\n"}]
             })
         )
         .is_ok());

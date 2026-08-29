@@ -1,0 +1,1060 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
+use platform::endpoint::runtime_address::RuntimeEndpoint;
+use tokio::sync::{Mutex, mpsc};
+
+use super::{
+    abort::SessionAbortOutcome,
+    approval::{PendingApprovalsOutcome, SessionApprovalOutcome},
+    command::{
+        SessionAbortRequest, SessionCommand, SessionEnsureOutcome, SessionEvent,
+        SessionEvictOutcome, SessionIngestOutcome, SessionSendRequest, openclaw_agent_lane_key,
+        session_lane_key,
+    },
+    create::{SessionCreateCommand, SessionCreateOutcome},
+    delete::SessionDeleteOutcome,
+    model_selection::{SessionModelSelectionOutcome, SessionModelSelectionRejection},
+    query::SessionQuery,
+    rename::SessionRenameOutcome,
+    send::SessionSendOutcome,
+    state::{
+        RunPhase, RuntimeIssue, RuntimeView, SessionChange, SessionDelta, SessionFacts,
+        SessionIdentity, SessionProvider, SessionSourceBinding, SessionState, SessionView,
+    },
+    timeline,
+};
+use crate::{
+    RuntimeSessionError,
+    provider::handle::ProviderHandle,
+    runtime_directory::RuntimeDriverDirectory,
+    runtime_driver::{LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure},
+};
+use openclaw::{
+    port::OpenClawSessionError,
+    session::protocol::{
+        ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
+        ChatSendResult,
+    },
+};
+use platform::exchange::InvocationOutcome;
+
+pub(crate) struct SessionSnapshot {
+    pub(crate) states: HashMap<String, SessionState>,
+}
+
+pub(crate) struct SessionOwner {
+    shared: SessionShared,
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionShared {
+    runtime_directory: Arc<RuntimeDriverDirectory>,
+    provider_handle: ProviderHandle,
+    snapshot: Arc<ArcSwap<SessionSnapshot>>,
+    snapshot_writer: Arc<Mutex<()>>,
+    session_delta: Option<mpsc::Sender<SessionDelta>>,
+    epoch: u64,
+}
+
+pub(crate) struct SessionLane {
+    state: Option<SessionState>,
+}
+
+impl SessionOwner {
+    pub(crate) fn new(
+        runtime_directory: Arc<RuntimeDriverDirectory>,
+        provider_handle: ProviderHandle,
+        session_delta: Option<mpsc::Sender<SessionDelta>>,
+    ) -> (Self, Arc<ArcSwap<SessionSnapshot>>) {
+        let snapshot = Arc::new(ArcSwap::new(Arc::new(SessionSnapshot {
+            states: HashMap::new(),
+        })));
+        let shared = SessionShared {
+            runtime_directory,
+            provider_handle,
+            snapshot: Arc::clone(&snapshot),
+            snapshot_writer: Arc::new(Mutex::new(())),
+            session_delta,
+            epoch: 1,
+        };
+
+        (Self { shared }, snapshot)
+    }
+
+    pub(crate) fn lane_retention() -> LaneRetention {
+        LaneRetention::LowFrequency
+    }
+}
+
+impl SessionShared {
+    fn open_lane(&self, key: &str) -> SessionLane {
+        SessionLane {
+            state: self.snapshot.load().states.get(key).cloned(),
+        }
+    }
+
+    async fn store_snapshot_state(&self, state: SessionState) {
+        let _guard = self.snapshot_writer.lock().await;
+        let mut states = self.snapshot.load().states.clone();
+        let lane_key =
+            session_lane_key(state.identity().provider(), state.identity().session_key());
+        states.insert(lane_key, state);
+        self.snapshot.store(Arc::new(SessionSnapshot { states }));
+    }
+
+    fn publish_session_delta(&self, delta: SessionDelta) {
+        if let Some(sink) = &self.session_delta {
+            let _ = sink.try_send(delta);
+        }
+    }
+
+    async fn clear_snapshot_state(&self, lane_key: &str) -> bool {
+        let _guard = self.snapshot_writer.lock().await;
+        let mut states = self.snapshot.load().states.clone();
+        let removed = states.remove(lane_key).is_some();
+        self.snapshot.store(Arc::new(SessionSnapshot { states }));
+        removed
+    }
+
+    fn list_session_views(&self) -> Vec<SessionView> {
+        self.snapshot
+            .load()
+            .states
+            .values()
+            .map(|state| state.view())
+            .collect()
+    }
+
+    fn get_session_view(&self, session_key: &str) -> Option<SessionView> {
+        self.snapshot
+            .load()
+            .states
+            .values()
+            .find(|state| state.identity().session_key() == session_key)
+            .map(|state| state.view())
+    }
+
+    fn running_driver(
+        &self,
+        endpoint: Option<RuntimeEndpoint>,
+    ) -> Result<Arc<dyn RuntimeDriver>, RuntimeOperationFailure> {
+        let endpoint = endpoint.ok_or(RuntimeOperationFailure::Unsupported)?;
+        let driver = self
+            .runtime_directory
+            .lookup(&endpoint)
+            .ok_or(RuntimeOperationFailure::Unsupported)?;
+        if driver.lifecycle_ops().is_some_and(LifecycleOps::readiness) {
+            Ok(driver)
+        } else {
+            Err(RuntimeOperationFailure::Unavailable)
+        }
+    }
+
+    fn running_session_driver(
+        &self,
+        endpoint: Option<RuntimeEndpoint>,
+    ) -> Result<Arc<dyn RuntimeDriver>, RuntimeOperationFailure> {
+        let driver = self.running_driver(endpoint)?;
+        if driver.session_ops().is_some() {
+            Ok(driver)
+        } else {
+            Err(RuntimeOperationFailure::Unsupported)
+        }
+    }
+
+    async fn handle_pending_approvals(
+        &self,
+        command: super::approval::PendingApprovalsCommand,
+    ) -> PendingApprovalsOutcome {
+        let driver = match self.running_session_driver(command.endpoint.runtime_endpoint()) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => {
+                return PendingApprovalsOutcome::Unsupported;
+            }
+            Err(RuntimeOperationFailure::Unavailable) => {
+                return PendingApprovalsOutcome::Unavailable;
+            }
+            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
+                return PendingApprovalsOutcome::Unavailable;
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return PendingApprovalsOutcome::Unsupported;
+        };
+        ops.pending_approvals(command).await
+    }
+
+    async fn handle_timeline(&self, command: timeline::Command) -> timeline::Outcome {
+        let endpoint = match command.provider() {
+            timeline::Provider::OpenClaw => RuntimeDriverIdentity::open_claw().endpoint(),
+            timeline::Provider::Matcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
+        };
+        let driver = match self.running_session_driver(Some(endpoint)) {
+            Ok(driver) => driver,
+            Err(failure) => {
+                return timeline::Outcome::unavailable(timeline_driver_failure(failure));
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return timeline::Outcome::unavailable(
+                timeline::UnavailableReason::SessionOpsUnavailable,
+            );
+        };
+        ops.load_session_timeline(command, self.epoch).await
+    }
+
+    async fn handle_list_openclaw(
+        &self,
+    ) -> Result<
+        openclaw::session::protocol::SessionsListResult,
+        RuntimeSessionError<openclaw::port::OpenClawSessionError>,
+    > {
+        let driver = self
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
+        let Some(ops) = driver.session_ops() else {
+            return Err(RuntimeSessionError::RuntimeUnavailable);
+        };
+        ops.list_sessions(Default::default()).await
+    }
+
+    async fn handle_openclaw_history(
+        &self,
+        params: ChatHistoryParams,
+    ) -> Result<ChatHistoryResult, RuntimeSessionError<OpenClawSessionError>> {
+        let driver = self
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
+        let Some(ops) = driver.session_ops() else {
+            return Err(RuntimeSessionError::RuntimeUnavailable);
+        };
+        ops.history(params).await
+    }
+
+    async fn handle_openclaw_send(
+        &self,
+        params: ChatSendParams,
+    ) -> Result<
+        InvocationOutcome<ChatSendResult, OpenClawSessionError>,
+        RuntimeSessionError<OpenClawSessionError>,
+    > {
+        let driver = self
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
+        let Some(ops) = driver.session_ops() else {
+            return Err(RuntimeSessionError::RuntimeUnavailable);
+        };
+        ops.send_open_claw_chat(params).await
+    }
+
+    async fn handle_openclaw_abort(
+        &self,
+        params: ChatAbortParams,
+    ) -> Result<
+        InvocationOutcome<ChatAbortResult, OpenClawSessionError>,
+        RuntimeSessionError<OpenClawSessionError>,
+    > {
+        let driver = self
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
+        let Some(ops) = driver.session_ops() else {
+            return Err(RuntimeSessionError::RuntimeUnavailable);
+        };
+        ops.abort_open_claw_chat(params).await
+    }
+
+    async fn handle_list_matcha(&self) -> crate::matcha_session_catalog::Outcome {
+        let driver = match self
+            .running_session_driver(Some(RuntimeDriverIdentity::matcha_agent().endpoint()))
+        {
+            Ok(driver) => driver,
+            Err(_) => return crate::matcha_session_catalog::Outcome::Unavailable,
+        };
+        let Some(ops) = driver.session_ops() else {
+            return crate::matcha_session_catalog::Outcome::Unavailable;
+        };
+        ops.list_matcha_sessions().await
+    }
+
+    async fn handle_matcha_history(
+        &self,
+        command: crate::matcha_history::Command,
+    ) -> crate::matcha_history::Outcome {
+        let driver = match self
+            .running_session_driver(Some(RuntimeDriverIdentity::matcha_agent().endpoint()))
+        {
+            Ok(driver) => driver,
+            Err(_) => return crate::matcha_history::Outcome::Unavailable,
+        };
+        let Some(ops) = driver.session_ops() else {
+            return crate::matcha_history::Outcome::Unavailable;
+        };
+        ops.load_matcha_history(command).await
+    }
+
+    async fn handle_global_command(&self, command: SessionCommand) {
+        match command {
+            SessionCommand::Send {
+                request: SessionSendRequest::OpenClawChat { params, reply },
+            } => {
+                let outcome = self.handle_openclaw_send(params).await;
+                let _ = reply.send(outcome);
+            }
+            SessionCommand::Abort {
+                request: SessionAbortRequest::OpenClawChat { params, reply },
+            } => {
+                let outcome = self.handle_openclaw_abort(params).await;
+                let _ = reply.send(outcome);
+            }
+            command => command.send_unavailable(),
+        }
+    }
+
+    async fn handle_global_query(&self, query: SessionQuery) {
+        match query {
+            SessionQuery::ListSessions { reply } => {
+                let _ = reply.send(self.list_session_views());
+            }
+            SessionQuery::GetSession { session_key, reply } => {
+                let _ = reply.send(self.get_session_view(&session_key));
+            }
+            SessionQuery::ListOpenClaw { reply } => {
+                let outcome = self.handle_list_openclaw().await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::OpenClawHistory { params, reply } => {
+                let outcome = self.handle_openclaw_history(params).await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::ListMatcha { reply } => {
+                let outcome = self.handle_list_matcha().await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::MatchaHistory { command, reply } => {
+                let outcome = self.handle_matcha_history(command).await;
+                let _ = reply.send(outcome);
+            }
+            query => query.send_unavailable(),
+        }
+    }
+}
+
+impl SessionLane {
+    async fn handle_command(
+        &mut self,
+        shared: &SessionShared,
+        key: String,
+        command: SessionCommand,
+    ) {
+        use SessionCommand::*;
+        match command {
+            Ensure { identity, reply } => {
+                let outcome = self.handle_ensure(shared, &key, identity).await;
+                let _ = reply.send(outcome);
+            }
+            Ingest {
+                identity,
+                event,
+                reply,
+            } => {
+                let outcome = self.handle_ingest(shared, &key, identity, event).await;
+                let _ = reply.send(outcome);
+            }
+            Touch { session_key, reply } => {
+                self.handle_touch(session_key);
+                let _ = reply.send(());
+            }
+            Evict { reply, .. } => {
+                let outcome = self.handle_evict(shared, key).await;
+                let _ = reply.send(outcome);
+            }
+            Create { command, reply } => {
+                let outcome = self.handle_create(shared, &key, command).await;
+                let _ = reply.send(outcome);
+            }
+            Send { request } => match request {
+                SessionSendRequest::Session { command, reply } => {
+                    let outcome = self.handle_send(shared, command).await;
+                    let _ = reply.send(outcome);
+                }
+                SessionSendRequest::OpenClawChat { params, reply } => {
+                    let outcome = shared.handle_openclaw_send(params).await;
+                    let _ = reply.send(outcome);
+                }
+            },
+            Abort { request } => match request {
+                SessionAbortRequest::Session { command, reply } => {
+                    let outcome = self.handle_abort(shared, command).await;
+                    let _ = reply.send(outcome);
+                }
+                SessionAbortRequest::OpenClawChat { params, reply } => {
+                    let outcome = shared.handle_openclaw_abort(params).await;
+                    let _ = reply.send(outcome);
+                }
+            },
+            Delete { command, reply } => {
+                let outcome = self.handle_delete(shared, command).await;
+                let _ = reply.send(outcome);
+            }
+            Rename { command, reply } => {
+                let outcome = self.handle_rename(shared, command).await;
+                let _ = reply.send(outcome);
+            }
+            Approval { command, reply } => {
+                let outcome = self.handle_approval(shared, command).await;
+                let _ = reply.send(outcome);
+            }
+            ModelSelection { command, reply } => {
+                let outcome = self.handle_model_selection(shared, command).await;
+                let _ = reply.send(outcome);
+            }
+        }
+    }
+
+    async fn handle_ensure(
+        &mut self,
+        shared: &SessionShared,
+        key: &str,
+        identity: SessionIdentity,
+    ) -> SessionEnsureOutcome {
+        let expected_key = session_lane_key(identity.provider(), identity.session_key());
+        if expected_key != key {
+            return SessionEnsureOutcome::Failed;
+        }
+
+        if let Some(existing) = &self.state {
+            return SessionEnsureOutcome::Existing(existing.clone());
+        }
+
+        let endpoint = RuntimeEndpoint::try_new(
+            adapter_id_str(&identity.endpoint.runtime_adapter_id),
+            &identity.endpoint.runtime_instance_id,
+        );
+
+        let Some(endpoint) = endpoint.ok() else {
+            return SessionEnsureOutcome::RuntimeNotFound;
+        };
+
+        let Some(runtime) = shared.runtime_directory.lookup(&endpoint) else {
+            return SessionEnsureOutcome::RuntimeNotFound;
+        };
+
+        let Some(_session_ops) = runtime.session_ops() else {
+            return SessionEnsureOutcome::RuntimeNoSessionSupport;
+        };
+
+        let state = match SessionState::new(identity, shared.epoch) {
+            Ok(state) => state,
+            Err(_) => return SessionEnsureOutcome::Failed,
+        };
+
+        self.state = Some(state.clone());
+        shared.store_snapshot_state(state.clone()).await;
+
+        SessionEnsureOutcome::Created(state)
+    }
+
+    async fn handle_ingest(
+        &mut self,
+        shared: &SessionShared,
+        key: &str,
+        identity: SessionIdentity,
+        event: SessionEvent,
+    ) -> SessionIngestOutcome {
+        let session_key = event.binding.session_key().to_owned();
+        if session_lane_key(identity.provider(), &session_key) != key {
+            return SessionIngestOutcome::Rejected {
+                reason: "Session key mismatch".to_owned(),
+            };
+        }
+        let provider = identity.endpoint.provider();
+
+        if let Some(state) = &self.state {
+            if state.identity().provider() != provider {
+                return SessionIngestOutcome::Rejected {
+                    reason: "Provider mismatch".to_owned(),
+                };
+            }
+            if state.native_source_epoch_changed(&event.binding) {
+                let recovery_changes = vec![SessionChange::RecoveryRequired {
+                    reason: super::state::RecoveryReason::EpochChanged,
+                }];
+                let recovery_result = self
+                    .apply_changes_to_state(
+                        shared,
+                        &session_key,
+                        provider,
+                        &identity,
+                        event.binding.clone(),
+                        event.run_id.clone(),
+                        event.cursor,
+                        recovery_changes,
+                    )
+                    .await;
+                if !matches!(
+                    recovery_result,
+                    super::state::SessionApplyResult::Applied(_)
+                ) {
+                    return Self::map_apply_result(recovery_result);
+                }
+            }
+        }
+
+        if let [SessionChange::RecoveryRequired { .. }] = event.changes.as_slice() {
+            let result = self
+                .apply_changes_to_state(
+                    shared,
+                    &session_key,
+                    provider,
+                    &identity,
+                    event.binding,
+                    event.run_id,
+                    event.cursor,
+                    event.changes,
+                )
+                .await;
+            return Self::map_apply_result(result);
+        }
+
+        let result = self
+            .apply_changes_to_state(
+                shared,
+                &session_key,
+                provider,
+                &identity,
+                event.binding,
+                event.run_id,
+                event.cursor,
+                event.changes,
+            )
+            .await;
+        Self::map_apply_result(result)
+    }
+
+    async fn apply_changes_to_state(
+        &mut self,
+        shared: &SessionShared,
+        session_key: &str,
+        provider: SessionProvider,
+        identity: &SessionIdentity,
+        binding: SessionSourceBinding,
+        run_id: Option<String>,
+        native_cursor: Option<u64>,
+        changes: Vec<SessionChange>,
+    ) -> super::state::SessionApplyResult {
+        let state = match &self.state {
+            Some(state) if state.identity().provider() == provider => state.clone(),
+            Some(_) => {
+                return super::state::SessionApplyResult::Rejected {
+                    reason: super::state::SessionApplyRejection::InvalidInput,
+                };
+            }
+            None => {
+                if identity.session_key() != session_key || identity.provider() != provider {
+                    return super::state::SessionApplyResult::Rejected {
+                        reason: super::state::SessionApplyRejection::InvalidInput,
+                    };
+                }
+                let Ok(state) = SessionState::new(identity.clone(), shared.epoch) else {
+                    return super::state::SessionApplyResult::Rejected {
+                        reason: super::state::SessionApplyRejection::InvalidInput,
+                    };
+                };
+                state
+            }
+        };
+
+        let mut next = state;
+        let result = next.apply_native_bound(binding, run_id, native_cursor, changes);
+
+        if matches!(result, super::state::SessionApplyResult::Applied(_)) {
+            self.state = Some(next.clone());
+            shared.store_snapshot_state(next).await;
+        }
+
+        result
+    }
+
+    fn map_apply_result(result: super::state::SessionApplyResult) -> SessionIngestOutcome {
+        match result {
+            super::state::SessionApplyResult::Applied(delta) => {
+                SessionIngestOutcome::Applied(delta)
+            }
+            super::state::SessionApplyResult::Duplicate { cursor } => {
+                SessionIngestOutcome::Duplicate { cursor }
+            }
+            super::state::SessionApplyResult::Stale { cursor, received } => {
+                SessionIngestOutcome::Stale { cursor, received }
+            }
+            super::state::SessionApplyResult::Gap { expected, received } => {
+                SessionIngestOutcome::Gap { expected, received }
+            }
+            super::state::SessionApplyResult::Rejected { reason } => {
+                SessionIngestOutcome::Rejected {
+                    reason: format!("{:?}", reason),
+                }
+            }
+        }
+    }
+
+    fn handle_touch(&mut self, _session_key: String) {}
+
+    async fn handle_evict(
+        &mut self,
+        shared: &SessionShared,
+        session_key: String,
+    ) -> SessionEvictOutcome {
+        let had_lane_state = self.state.take().is_some();
+        let had_snapshot_state = shared.clear_snapshot_state(&session_key).await;
+        if had_lane_state || had_snapshot_state {
+            SessionEvictOutcome::Evicted
+        } else {
+            SessionEvictOutcome::NotFound
+        }
+    }
+
+    async fn handle_create(
+        &mut self,
+        shared: &SessionShared,
+        key: &str,
+        command: SessionCreateCommand,
+    ) -> SessionCreateOutcome {
+        if session_lane_key(command.provider(), command.session_key()) != key {
+            return SessionCreateOutcome::Unknown;
+        }
+        let driver = match shared.running_session_driver(Some(command.endpoint().clone())) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported | RuntimeOperationFailure::Unavailable) => {
+                return SessionCreateOutcome::Unknown;
+            }
+            Err(RuntimeOperationFailure::TargetRejected) => {
+                return SessionCreateOutcome::TargetRejected;
+            }
+            Err(RuntimeOperationFailure::Unknown) => return SessionCreateOutcome::Unknown,
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionCreateOutcome::Unknown;
+        };
+        match ops.create_session(command, shared.epoch).await {
+            SessionCreateOutcome::Succeeded(view) => {
+                let Some(state) = state_from_view(&view) else {
+                    return SessionCreateOutcome::Unknown;
+                };
+                self.state = Some(state.clone());
+                shared.store_snapshot_state(state).await;
+                SessionCreateOutcome::Succeeded(view)
+            }
+            outcome => outcome,
+        }
+    }
+
+    async fn handle_send(
+        &mut self,
+        shared: &SessionShared,
+        command: super::send::SessionSendCommand,
+    ) -> SessionSendOutcome {
+        let provider = command.endpoint.provider();
+        let session_key = command.session_key.clone();
+        let route_key = command.route_key.clone();
+        let failure_run_id = match command.endpoint {
+            super::send::NativeEndpoint::OpenClawLocal => None,
+            super::send::NativeEndpoint::MatchaAgentLocal => {
+                command.request_run_identity().map(str::to_owned)
+            }
+            super::send::NativeEndpoint::Unsupported => None,
+        };
+        let identity = SessionIdentity::new(session_key.clone(), provider, None);
+        let binding = SessionSourceBinding::new(session_key.clone(), Some(route_key), None);
+
+        let outcome = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
+            Ok(driver) => match driver.session_ops() {
+                Some(ops) => ops.send_session(command).await,
+                None => SessionSendOutcome::Unsupported,
+            },
+            Err(RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
+            Err(RuntimeOperationFailure::Unavailable) => SessionSendOutcome::Unavailable,
+            Err(RuntimeOperationFailure::TargetRejected) => SessionSendOutcome::Rejected,
+            Err(RuntimeOperationFailure::Unknown) => SessionSendOutcome::Unknown,
+        };
+        self.apply_send_outcome(
+            shared,
+            &session_key,
+            provider,
+            identity,
+            binding,
+            &outcome,
+            failure_run_id,
+        )
+        .await;
+        outcome
+    }
+
+    async fn apply_send_outcome(
+        &mut self,
+        shared: &SessionShared,
+        session_key: &str,
+        provider: SessionProvider,
+        identity: Option<SessionIdentity>,
+        binding: Option<SessionSourceBinding>,
+        outcome: &SessionSendOutcome,
+        failure_run_id: Option<String>,
+    ) {
+        let (Some(identity), Some(binding)) = (identity, binding) else {
+            return;
+        };
+        let (run_id, runtime) = match send_outcome_runtime(outcome, failure_run_id) {
+            Some(projection) => projection,
+            None => return,
+        };
+        let result = self
+            .apply_changes_to_state(
+                shared,
+                session_key,
+                provider,
+                &identity,
+                binding,
+                run_id,
+                None,
+                vec![SessionChange::RuntimeChanged { runtime }],
+            )
+            .await;
+        if let super::state::SessionApplyResult::Applied(delta) = result {
+            shared.publish_session_delta(delta);
+        }
+    }
+
+    async fn handle_abort(
+        &mut self,
+        shared: &SessionShared,
+        command: super::abort::SessionAbortCommand,
+    ) -> SessionAbortOutcome {
+        let driver = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => return SessionAbortOutcome::Unsupported,
+            Err(RuntimeOperationFailure::Unavailable) => return SessionAbortOutcome::Unavailable,
+            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
+                return SessionAbortOutcome::Unknown;
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionAbortOutcome::Unsupported;
+        };
+        ops.abort_session(command).await
+    }
+
+    async fn handle_delete(
+        &mut self,
+        shared: &SessionShared,
+        command: super::delete::SessionDeleteCommand,
+    ) -> SessionDeleteOutcome {
+        let lane_key = openclaw_agent_lane_key(&command.agent_id, &command.session_key);
+        let driver = match shared
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+        {
+            Ok(driver) => driver,
+            Err(_) => return SessionDeleteOutcome::Unknown,
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionDeleteOutcome::Unknown;
+        };
+        let outcome = ops.delete_session(command).await;
+        if outcome == SessionDeleteOutcome::Succeeded {
+            self.state = None;
+            shared.clear_snapshot_state(&lane_key).await;
+        }
+        outcome
+    }
+
+    async fn handle_rename(
+        &mut self,
+        shared: &SessionShared,
+        command: super::rename::SessionRenameCommand,
+    ) -> SessionRenameOutcome {
+        let driver = match shared
+            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+        {
+            Ok(driver) => driver,
+            Err(_) => return SessionRenameOutcome::Unknown,
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionRenameOutcome::Unknown;
+        };
+        ops.rename_session(command).await
+    }
+
+    async fn handle_approval(
+        &mut self,
+        shared: &SessionShared,
+        command: super::approval::SessionApprovalCommand,
+    ) -> SessionApprovalOutcome {
+        let driver = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => {
+                return SessionApprovalOutcome::Unsupported;
+            }
+            Err(RuntimeOperationFailure::Unavailable) => {
+                return SessionApprovalOutcome::Unavailable;
+            }
+            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
+                return SessionApprovalOutcome::Unavailable;
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionApprovalOutcome::Unsupported;
+        };
+        ops.respond_to_approval(command).await
+    }
+
+    async fn handle_model_selection(
+        &mut self,
+        shared: &SessionShared,
+        command: super::model_selection::SessionModelSelectionCommand,
+    ) -> SessionModelSelectionOutcome {
+        let Some(endpoint) = command.endpoint.runtime_endpoint() else {
+            return SessionModelSelectionOutcome::Unsupported;
+        };
+        if let Err(failure) = shared
+            .running_session_driver(Some(endpoint.clone()))
+            .map(|_| ())
+        {
+            return match failure {
+                RuntimeOperationFailure::Unsupported => SessionModelSelectionOutcome::Unsupported,
+                RuntimeOperationFailure::Unavailable => SessionModelSelectionOutcome::Unavailable,
+                RuntimeOperationFailure::TargetRejected => {
+                    SessionModelSelectionOutcome::target_rejected(
+                        SessionModelSelectionRejection::RuntimeTargetRejected,
+                    )
+                }
+                RuntimeOperationFailure::Unknown => SessionModelSelectionOutcome::OutcomeUnknown,
+            };
+        }
+        let command = match shared
+            .provider_handle
+            .resolve_session_model_selection(command)
+            .await
+        {
+            Ok(command) => command,
+            Err(outcome) => return outcome,
+        };
+        let diagnostic = command.diagnostic.clone();
+        let driver = match shared.running_session_driver(Some(endpoint)) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => {
+                return SessionModelSelectionOutcome::Unsupported;
+            }
+            Err(RuntimeOperationFailure::Unavailable) => {
+                return SessionModelSelectionOutcome::Unavailable;
+            }
+            Err(RuntimeOperationFailure::TargetRejected) => {
+                return SessionModelSelectionOutcome::target_rejected(
+                    SessionModelSelectionRejection::RuntimeTargetRejected,
+                );
+            }
+            Err(RuntimeOperationFailure::Unknown) => {
+                return SessionModelSelectionOutcome::OutcomeUnknown;
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionModelSelectionOutcome::Unsupported;
+        };
+        ops.select_session_model(command)
+            .await
+            .with_diagnostic(diagnostic)
+    }
+
+    async fn handle_query(&self, shared: &SessionShared, query: SessionQuery) {
+        match query {
+            SessionQuery::ListSessions { reply } => {
+                let _ = reply.send(shared.list_session_views());
+            }
+            SessionQuery::GetSession { session_key, reply } => {
+                let _ = reply.send(shared.get_session_view(&session_key));
+            }
+            SessionQuery::PendingApprovals { command, reply } => {
+                let outcome = shared.handle_pending_approvals(command).await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::Timeline { command, reply } => {
+                let outcome = shared.handle_timeline(command).await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::OpenClawHistory { params, reply } => {
+                let outcome = shared.handle_openclaw_history(params).await;
+                let _ = reply.send(outcome);
+            }
+            SessionQuery::MatchaHistory { command, reply } => {
+                let outcome = shared.handle_matcha_history(command).await;
+                let _ = reply.send(outcome);
+            }
+            query @ (SessionQuery::ListOpenClaw { .. } | SessionQuery::ListMatcha { .. }) => {
+                shared.handle_global_query(query).await;
+            }
+        }
+    }
+}
+
+impl OwnerSpec for SessionOwner {
+    type Command = SessionCommand;
+    type Query = SessionQuery;
+    type Key = String;
+    type Shared = SessionShared;
+    type GlobalState = ();
+    type LaneState = SessionLane;
+
+    fn split(self) -> (Self::Shared, Self::GlobalState) {
+        (self.shared, ())
+    }
+
+    fn route_command(command: &Self::Command) -> CommandRoute<Self::Key> {
+        command.route()
+    }
+
+    fn route_query(query: &Self::Query) -> QueryRoute<Self::Key> {
+        query.route()
+    }
+
+    fn open_lane(shared: &Self::Shared, key: &Self::Key) -> Self::LaneState {
+        shared.open_lane(key)
+    }
+
+    async fn handle_keyed_command(
+        shared: Self::Shared,
+        key: Self::Key,
+        lane: &mut Self::LaneState,
+        command: Self::Command,
+    ) {
+        lane.handle_command(&shared, key, command).await;
+    }
+
+    async fn handle_global_command(
+        shared: Self::Shared,
+        _state: &mut Self::GlobalState,
+        command: Self::Command,
+    ) {
+        shared.handle_global_command(command).await;
+    }
+
+    async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
+        match query {
+            SessionQuery::ListSessions { reply } => {
+                let _ = reply.send(shared.list_session_views());
+            }
+            SessionQuery::GetSession { session_key, reply } => {
+                let _ = reply.send(shared.get_session_view(&session_key));
+            }
+            query => query.send_unavailable(),
+        }
+    }
+
+    async fn handle_keyed_query(
+        shared: Self::Shared,
+        _key: Self::Key,
+        lane: &mut Self::LaneState,
+        query: Self::Query,
+    ) {
+        lane.handle_query(&shared, query).await;
+    }
+
+    async fn handle_global_query(
+        shared: Self::Shared,
+        _state: &mut Self::GlobalState,
+        query: Self::Query,
+    ) {
+        shared.handle_global_query(query).await;
+    }
+
+    async fn handle_exclusive_query(
+        shared: Self::Shared,
+        state: &mut Self::GlobalState,
+        query: Self::Query,
+    ) {
+        Self::handle_global_query(shared, state, query).await;
+    }
+
+    async fn shutdown(
+        shared: Self::Shared,
+        _state: &mut Self::GlobalState,
+        lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        for (_key, lane) in lanes {
+            if let Some(state) = lane.state {
+                shared.store_snapshot_state(state).await;
+            }
+        }
+    }
+}
+
+fn send_outcome_runtime(
+    outcome: &SessionSendOutcome,
+    failure_run_id: Option<String>,
+) -> Option<(Option<String>, RuntimeView)> {
+    let (run_id, phase, issue) = match outcome {
+        SessionSendOutcome::Queued { run_id } => (Some(run_id.clone()), RunPhase::Queued, None),
+        SessionSendOutcome::Succeeded { run_id, .. } => {
+            (Some(run_id.clone()), RunPhase::Started, None)
+        }
+        SessionSendOutcome::Rejected => (
+            failure_run_id,
+            RunPhase::Failed,
+            Some(RuntimeIssue::Rejected),
+        ),
+        SessionSendOutcome::Unavailable => (
+            failure_run_id,
+            RunPhase::Failed,
+            Some(RuntimeIssue::Unavailable),
+        ),
+        SessionSendOutcome::Unknown => (
+            failure_run_id,
+            RunPhase::Failed,
+            Some(RuntimeIssue::Unknown),
+        ),
+        SessionSendOutcome::Unsupported => return None,
+    };
+    let active_run_id = match phase {
+        RunPhase::Cancelled | RunPhase::Completed | RunPhase::Failed | RunPhase::Interrupted => {
+            None
+        }
+        _ => run_id.clone(),
+    };
+    Some((
+        run_id.clone(),
+        RuntimeView {
+            phase,
+            active_run_id,
+            issue,
+        },
+    ))
+}
+
+fn timeline_driver_failure(failure: RuntimeOperationFailure) -> timeline::UnavailableReason {
+    match failure {
+        RuntimeOperationFailure::Unsupported => timeline::UnavailableReason::RuntimeUnsupported,
+        RuntimeOperationFailure::Unavailable => timeline::UnavailableReason::RuntimeUnavailable,
+        RuntimeOperationFailure::TargetRejected => {
+            timeline::UnavailableReason::RuntimeTargetRejected
+        }
+        RuntimeOperationFailure::Unknown => timeline::UnavailableReason::RuntimeUnknown,
+    }
+}
+
+fn adapter_id_str(provider: &SessionProvider) -> &'static str {
+    provider.as_str()
+}
+
+fn state_from_view(view: &SessionView) -> Option<SessionState> {
+    let facts = SessionFacts {
+        items: view.items.clone(),
+        tools: view.tools.clone(),
+        approvals: view.approvals.clone(),
+        runtime: view.runtime.clone(),
+        window: view.window.clone(),
+        completeness: view.completeness.clone(),
+    };
+    SessionState::from_facts(view.identity.clone(), view.epoch, view.cursor, facts)
+        .ok()?
+        .with_endpoint_session_id(view.endpoint_session_id.clone())
+        .ok()
+}

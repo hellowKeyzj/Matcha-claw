@@ -70,8 +70,13 @@ fn is_allowed_entry_name(name: &str) -> bool {
         })
 }
 
-fn read_bounded_file(path: &Path) -> Option<Vec<u8>> {
-    let file = open_collected_file(path).ok()?;
+struct ContainedFile {
+    path: PathBuf,
+    file: File,
+}
+
+fn read_bounded_file(collected: ContainedFile) -> Option<Vec<u8>> {
+    let file = collected.file;
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > ENTRY_BYTE_LIMIT
     {
@@ -108,6 +113,71 @@ fn open_collected_file(path: &Path) -> std::io::Result<File> {
 
     #[cfg(not(any(unix, windows)))]
     OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    fn from_metadata(metadata: &Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn matches(self, metadata: &Metadata) -> bool {
+        Self::from_metadata(metadata) == Some(self)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileIdentity {
+    attributes: u32,
+    created: u64,
+    modified: u64,
+    size: u64,
+}
+
+#[cfg(windows)]
+impl FileIdentity {
+    fn from_metadata(metadata: &Metadata) -> Option<Self> {
+        use std::os::windows::fs::MetadataExt;
+
+        Some(Self {
+            attributes: metadata.file_attributes(),
+            created: metadata.creation_time(),
+            modified: metadata.last_write_time(),
+            size: metadata.file_size(),
+        })
+    }
+
+    fn matches(self, metadata: &Metadata) -> bool {
+        Self::from_metadata(metadata) == Some(self)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileIdentity;
+
+#[cfg(not(any(unix, windows)))]
+impl FileIdentity {
+    fn from_metadata(_metadata: &Metadata) -> Option<Self> {
+        Some(Self)
+    }
+
+    fn matches(self, _metadata: &Metadata) -> bool {
+        true
+    }
 }
 
 /// Collects the sealed Host state document plus every collection root that is currently resolvable.
@@ -157,9 +227,24 @@ impl<'root> Source<'root> {
         (name.len() > self.prefix.len()).then_some(name)
     }
 
-    fn contained_file(&self, path: &Path) -> Option<PathBuf> {
+    fn contained_file(&self, path: &Path) -> Option<ContainedFile> {
         let path = fs::canonicalize(path).ok()?;
-        (path.starts_with(self.root) && path.is_file()).then_some(path)
+        let metadata = fs::metadata(&path).ok()?;
+        if !path.starts_with(self.root) || !metadata.is_file() || metadata.file_type().is_symlink()
+        {
+            return None;
+        }
+        let identity = FileIdentity::from_metadata(&metadata)?;
+        let file = open_collected_file(&path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > ENTRY_BYTE_LIMIT
+            || !identity.matches(&metadata)
+        {
+            return None;
+        }
+        Some(ContainedFile { path, file })
     }
 
     fn contained_directory(&self, path: &Path) -> Option<PathBuf> {
@@ -304,13 +389,13 @@ impl Bundle {
         if self.is_full() {
             return;
         }
-        let Some(path) = source.contained_file(path) else {
+        let Some(file) = source.contained_file(path) else {
             return;
         };
-        let Some(name) = source.entry_name(&path) else {
+        let Some(name) = source.entry_name(&file.path) else {
             return;
         };
-        let Some(content) = read_bounded_file(&path) else {
+        let Some(content) = read_bounded_file(file) else {
             return;
         };
         self.push(name, redaction.apply(content));
@@ -377,7 +462,10 @@ fn configured_agent_ids(source: &Source<'_>) -> BTreeSet<String> {
     let Some(config) = source.contained_file(&source.root.join(RUNTIME_CONFIG_FILE)) else {
         return BTreeSet::new();
     };
-    let Ok(Ok(document)) = fs::read(config).map(|raw| serde_json::from_slice::<Value>(&raw)) else {
+    let Some(raw) = read_bounded_file(config) else {
+        return BTreeSet::new();
+    };
+    let Ok(document) = serde_json::from_slice::<Value>(&raw) else {
         return BTreeSet::new();
     };
     document

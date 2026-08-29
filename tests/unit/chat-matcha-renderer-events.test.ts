@@ -24,7 +24,6 @@ function createOpenClawTestSessionIdentity(sessionKey: string) {
 function createSessionRecord(sessionKey: string) {
   return {
     meta: {
-      backendSessionKey: sessionKey,
       runtimeScopeKey: 'native-runtime:openclaw:local',
       agentId: sessionKey.split(':')[1] ?? null,
       protocolId: 'openclaw-v4',

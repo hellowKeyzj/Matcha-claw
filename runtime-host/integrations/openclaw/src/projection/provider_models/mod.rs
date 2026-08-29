@@ -370,7 +370,9 @@ fn apply_model_allowlist(
             || model_references.contains(reference)
     });
     for reference in model_references {
-        models.entry(reference.clone()).or_insert_with(|| Value::Object(Map::new()));
+        models
+            .entry(reference.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
     }
     if models == before {
         return false;
@@ -782,7 +784,10 @@ mod tests {
     }
 
     fn auth_accounts(accounts: &[ProviderAccount]) -> BTreeSet<ProviderAccountId> {
-        accounts.iter().map(|account| account.id().clone()).collect()
+        accounts
+            .iter()
+            .map(|account| account.id().clone())
+            .collect()
     }
 
     #[test]
@@ -918,8 +923,18 @@ mod tests {
     #[test]
     fn scoped_auth_check_does_not_block_complete_public_projection() {
         let root = TestRoot::new();
-        let changed = account("openai-main", "openai", ProviderAccountAuthMode::ApiKey, true);
-        let stale = account("anthropic-stale", "anthropic", ProviderAccountAuthMode::ApiKey, true);
+        let changed = account(
+            "openai-main",
+            "openai",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let stale = account(
+            "anthropic-stale",
+            "anthropic",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
         let catalog = ProviderModelCatalog::try_new(vec![
             model(&changed, "gpt-5.6"),
             model(&stale, "claude-fable-5"),
@@ -939,16 +954,18 @@ mod tests {
         let required = BTreeSet::from([accounts[0].id().clone()]);
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(ProviderModelProjection::apply_to_document(
-            &root.state_dir,
-            &mut document,
-            &accounts,
-            &catalog,
-            &[],
-            &required,
-            1_800_000_000_000,
-        )
-        .expect("unrelated missing auth must not block projection"));
+        assert!(
+            ProviderModelProjection::apply_to_document(
+                &root.state_dir,
+                &mut document,
+                &accounts,
+                &catalog,
+                &[],
+                &required,
+                1_800_000_000_000,
+            )
+            .expect("unrelated missing auth must not block projection")
+        );
         let projected = document.as_value();
         assert_eq!(
             projected.pointer("/models/providers/openai/models/0/id"),
@@ -1005,7 +1022,8 @@ mod tests {
             ProviderAccountAuthMode::ApiKey,
             true,
         );
-        let catalog = ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
+        let catalog =
+            ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
         let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
@@ -1107,10 +1125,7 @@ mod tests {
         );
 
         assert!(plan.apply_to_document(&mut document));
-        assert_eq!(
-            document.get("models"),
-            Some(&json!({ "providers": {} }))
-        );
+        assert_eq!(document.get("models"), Some(&json!({ "providers": {} })));
         assert_eq!(
             document.get("agents"),
             Some(&json!({

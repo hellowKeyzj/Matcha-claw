@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::{
-    channel_status::{ChannelPairingList, ChannelPairingOutcome},
+    channel::status::{ChannelPairingList, ChannelPairingOutcome},
     transport::authorization::CapabilityDecisionVerifier,
 };
 

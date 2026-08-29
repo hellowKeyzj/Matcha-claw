@@ -4,6 +4,7 @@ members = [
   "domains/environment",
   "domains/fleet",
   "domains/organization",
+  "external/clawhub",
   "integrations/matcha-agent",
   "integrations/openclaw",
   "host",

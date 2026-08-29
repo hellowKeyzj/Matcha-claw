@@ -9,7 +9,7 @@ afterEach(async () => {
 });
 
 describe('runtime-host parent callback receiver', () => {
-  it('accepts allowlisted gateway and runtime-job events on loopback', async () => {
+  it('accepts allowlisted gateway events on loopback', async () => {
     const emit = vi.fn();
     const receiver = await createParentCallbackReceiver({ emit } as never);
     receivers.push(receiver);
@@ -18,79 +18,37 @@ describe('runtime-host parent callback receiver', () => {
       'content-type': 'application/json',
       'x-runtime-host-dispatch-token': receiver.dispatchToken,
     };
-    const gatewayResponse = await fetch(`${receiver.baseUrl}/internal/runtime-host/gateway-events`, {
+    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/gateway-events`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ version: 1, eventName: 'session:update', payload: { id: 's1' } }),
     });
-    const jobResponse = await fetch(`${receiver.baseUrl}/internal/runtime-host/runtime-jobs`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ version: 1, eventName: 'runtime-job:progress', payload: { id: 'j1' } }),
-    });
 
-    expect(gatewayResponse.status).toBe(200);
-    expect(jobResponse.status).toBe(200);
-    expect(emit).toHaveBeenNthCalledWith(1, 'session:update', { id: 's1' });
-    expect(emit).toHaveBeenNthCalledWith(2, 'runtime-job:progress', { id: 'j1' });
-  });
-
-  it('projects runtime-job events to subscribers and supports unsubscribe', async () => {
-    const eventBus = new HostEventBus();
-    const progress = vi.fn();
-    const done = vi.fn();
-    const unsubscribeProgress = eventBus.on('runtime-job:progress', progress);
-    eventBus.on('runtime-job:done', done);
-    const receiver = await createParentCallbackReceiver(eventBus);
-    receivers.push(receiver);
-
-    const headers = {
-      'content-type': 'application/json',
-      'x-runtime-host-dispatch-token': receiver.dispatchToken,
-    };
-    const post = (eventName: string, payload: unknown) => fetch(
-      `${receiver.baseUrl}/internal/runtime-host/runtime-jobs`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ version: 1, eventName, payload }),
-      },
-    );
-
-    await expect(post('runtime-job:progress', { id: 'j1', percent: 10 }))
-      .resolves.toHaveProperty('status', 200);
-    unsubscribeProgress();
-    await expect(post('runtime-job:progress', { id: 'j1', percent: 20 }))
-      .resolves.toHaveProperty('status', 200);
-    await expect(post('runtime-job:done', { id: 'j1' }))
-      .resolves.toHaveProperty('status', 200);
-
-    expect(progress).toHaveBeenCalledTimes(1);
-    expect(progress).toHaveBeenCalledWith({ id: 'j1', percent: 10 });
-    expect(done).toHaveBeenCalledWith({ id: 'j1' });
+    expect(response.status).toBe(200);
+    expect(emit).toHaveBeenCalledWith('session:update', { id: 's1' });
   });
 
   it('isolates listener failures from callback delivery', async () => {
     const eventBus = new HostEventBus();
     const received = vi.fn();
-    eventBus.on('runtime-job:progress', () => {
+    eventBus.on('session:update', () => {
       throw new Error('listener failure');
     });
-    eventBus.on('runtime-job:progress', received);
+    eventBus.on('session:update', received);
     const receiver = await createParentCallbackReceiver(eventBus);
     receivers.push(receiver);
 
-    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/runtime-jobs`, {
+    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/gateway-events`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-runtime-host-dispatch-token': receiver.dispatchToken,
       },
-      body: JSON.stringify({ version: 1, eventName: 'runtime-job:progress', payload: { id: 'j2' } }),
+      body: JSON.stringify({ version: 1, eventName: 'session:update', payload: { id: 's2' } }),
     });
 
     expect(response.status).toBe(200);
-    expect(received).toHaveBeenCalledWith({ id: 'j2' });
+    expect(received).toHaveBeenCalledWith({ id: 's2' });
   });
 
   it('rejects invalid dispatch and event contracts without emitting', async () => {
@@ -101,7 +59,7 @@ describe('runtime-host parent callback receiver', () => {
     const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/gateway-events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-runtime-host-dispatch-token': 'wrong' },
-      body: JSON.stringify({ version: 1, eventName: 'runtime-job:done', payload: {} }),
+      body: JSON.stringify({ version: 1, eventName: 'not:allowed', payload: {} }),
     });
 
     expect(response.status).toBe(403);
@@ -139,11 +97,6 @@ describe('runtime-host parent callback receiver', () => {
       .resolves.toHaveProperty('status', 400);
     await expect(request({ body: JSON.stringify({ version: 1, eventName: 'not:allowed', payload: {} }) }))
       .resolves.toHaveProperty('status', 400);
-    await expect(fetch(`${receiver.baseUrl}/internal/runtime-host/runtime-jobs`, {
-      method: 'POST',
-      headers: validHeaders,
-      body: JSON.stringify({ version: 1, eventName: 'session:update', payload: {} }),
-    })).resolves.toHaveProperty('status', 400);
 
     expect(emit).not.toHaveBeenCalled();
   });

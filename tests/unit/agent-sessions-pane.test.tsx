@@ -64,6 +64,10 @@ function buildReadySessionRuntimeCatalog() {
         displayName: 'OpenClaw',
         agentIds: ['main', 'test'],
         acceptsDynamicAgents: true,
+        agentCatalog: {
+          source: 'subagent-management' as const,
+          seedAgents: [{ id: 'main', name: 'main' }, { id: 'test', name: 'test' }],
+        },
         sessionPromptScopes: [openClawMainScope, openClawTestScope],
         defaultSessionPromptScope: openClawMainScope,
       },
@@ -76,6 +80,10 @@ function buildReadySessionRuntimeCatalog() {
         displayName: 'Matcha Agent',
         agentIds: ['matcha'],
         acceptsDynamicAgents: false,
+        agentCatalog: {
+          source: 'runtime-endpoint' as const,
+          agents: [{ id: 'matcha', name: 'matcha' }],
+        },
         sessionPromptScopes: [matchaAgentMatchaScope],
         defaultSessionPromptScope: matchaAgentMatchaScope,
       },
@@ -119,7 +127,6 @@ function createSessionRecord(input?: {
   return {
     meta: {
       ...base.meta,
-      backendSessionKey: sessionKey,
       runtimeScopeKey: buildRuntimeEndpointKey(sessionIdentity.endpoint),
       agentId: input?.agentId === undefined ? sessionIdentity.agentId : input.agentId,
       protocolId: null,
@@ -309,7 +316,7 @@ describe('agent sessions pane', () => {
     expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-new');
     expect(openSessionIdentity).toHaveBeenCalledWith({
       sessionIdentity: roleIdentity,
-      endpointSessionId: 'agent:designer-agent:main',
+      endpointSessionId: 'main',
     });
     expect(refreshSnapshot).toHaveBeenCalledWith('team-1', { force: true });
   });
@@ -612,6 +619,28 @@ describe('agent sessions pane', () => {
     expect(newSessionForScope).toHaveBeenCalledTimes(1);
     expect(newSessionForScope).toHaveBeenCalledWith(matchaAgentMatchaScope);
     expect(newSessionForScope).not.toHaveBeenCalledWith(openClawMainScope);
+  });
+
+  it('Matcha Agent 列表不消费 OpenClaw subagent management 错误', () => {
+    useSubagentsStore.setState({
+      agents: [],
+      agentsResource: {
+        status: 'error',
+        error: 'Subagent management is unavailable',
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByTestId('agent-list-error')).toHaveTextContent('Subagent management is unavailable');
+
+    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
+    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
+
+    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
+    expect(screen.queryByTestId('agent-list-error')).toBeNull();
   });
 
   it('优先使用 catalog displayName 展示未 hydrate 历史会话标题', () => {

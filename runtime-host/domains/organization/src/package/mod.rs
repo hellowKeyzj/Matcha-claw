@@ -19,5 +19,5 @@ pub use selection::{
     TeamSkillDependencyPlanResult, TeamSkillDependencySeverity, TeamSkillDependencyStatus,
     TeamSkillPackageValidation, TeamSkillPackageView, TeamSkillSelectionCommand,
     TeamSkillSelectionCommandResult, TeamSkillSelectionError, TeamSkillSelectionId,
-    TeamSkillSelectionResolver,
+    TeamSkillSelectionResolver, plan_team_skill_dependencies, validate_team_skill_package,
 };

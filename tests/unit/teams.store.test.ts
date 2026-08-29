@@ -1,38 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/services/team-graph', () => ({
-  exportTeamGraphYaml: vi.fn(),
-  importTeamGraphYaml: vi.fn(),
-  saveTeamGraph: vi.fn(),
-}));
-
-vi.mock('@/services/team-public-projection', () => ({
-  readTeamPublicProjection: vi.fn(),
-}));
-
-vi.mock('@/services/team-approvals', () => ({
-  readTeamPendingApprovals: vi.fn(),
-}));
-
-vi.mock('@/services/team-lifecycle', () => ({
-  beginTeamRunCancellation: vi.fn(),
-  createTeamRunLifecycle: vi.fn(),
-  deleteTeamLifecycle: vi.fn(),
-  listTeamRunLifecycle: vi.fn(),
-  resumeTeamRunLifecycle: vi.fn(),
-  tombstoneTeamRun: vi.fn(),
-}));
-
-vi.mock('@/services/team-role-chat', () => ({
-  submitTeamRoleChat: vi.fn(),
-}));
-
-vi.mock('@/services/team-role-sessions', () => ({
-  readTeamRoleSessions: vi.fn(),
-}));
-
-vi.mock('@/services/team-decisions', () => ({
-  resolveTeamHumanDecision: vi.fn(),
+vi.mock('@/services/openclaw/team-runtime-client', () => ({
+  cancelTeamRun: vi.fn(),
+  createTeamRun: vi.fn(),
+  deleteTeamInstance: vi.fn(),
+  deleteTeamRun: vi.fn(),
+  exportTeamRunGraphYaml: vi.fn(),
+  importTeamRunGraphYaml: vi.fn(),
+  listTeamRuns: vi.fn(),
+  provisionTeamAgents: vi.fn(),
+  readTeamRunSnapshot: vi.fn(),
+  resolveTeamApproval: vi.fn(),
+  resumeTeam: vi.fn(),
+  saveTeamRunGraphProjection: vi.fn(),
+  submitTeamRunDecision: vi.fn(),
+  submitTeamRunRoleMessage: vi.fn(),
 }));
 
 import { useChatStore } from '@/stores/chat';
@@ -50,25 +32,22 @@ import {
   type TeamMeta,
   type TeamSkillCandidate,
 } from '@/stores/teams';
-import { resolveTeamHumanDecision } from '@/services/team-decisions';
-import type { ManualTeamProvisionRecord, TeamSkillPackage } from '@/services/team-types';
 import {
-  exportTeamGraphYaml,
-  importTeamGraphYaml,
-  saveTeamGraph,
-} from '@/services/team-graph';
-import { readTeamPublicProjection } from '@/services/team-public-projection';
-import { readTeamPendingApprovals } from '@/services/team-approvals';
-import {
-  beginTeamRunCancellation,
-  createTeamRunLifecycle,
-  deleteTeamLifecycle,
-  listTeamRunLifecycle,
-  resumeTeamRunLifecycle,
-  tombstoneTeamRun,
-} from '@/services/team-lifecycle';
-import { submitTeamRoleChat } from '@/services/team-role-chat';
-import { readTeamRoleSessions } from '@/services/team-role-sessions';
+  cancelTeamRun as beginTeamRunCancellation,
+  createTeamRun as createTeamRunLifecycle,
+  deleteTeamInstance as deleteTeamLifecycle,
+  deleteTeamRun as tombstoneTeamRun,
+  exportTeamRunGraphYaml as exportTeamGraphYaml,
+  importTeamRunGraphYaml as importTeamGraphYaml,
+  listTeamRuns as listTeamRunLifecycle,
+  readTeamRunSnapshot,
+  resolveTeamApproval as resolveTeamHumanDecision,
+  resumeTeam as resumeTeamRunLifecycle,
+  saveTeamRunGraphProjection as saveTeamGraph,
+  submitTeamRunRoleMessage as submitTeamRoleChat,
+  type ManualTeamProvisionRecord,
+  type TeamSkillPackage,
+} from '@/services/openclaw/team-runtime-client';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const basePackage: TeamSkillPackage = {
@@ -197,10 +176,10 @@ function seedTeam(input: Partial<TeamMeta> = {}) {
 }
 
 function sessionRecord(
-  backendSessionKey: string,
+  sessionKey: string,
   agentId: string,
   runPhase: 'idle' | 'streaming' = 'idle',
-  identity = createOpenClawTestSessionIdentity(backendSessionKey, agentId),
+  identity = createOpenClawTestSessionIdentity(sessionKey, agentId),
 ) {
   const recordKey = buildSessionRecordKey(identity);
   return {
@@ -209,7 +188,6 @@ function sessionRecord(
       ...createEmptySessionRecord(),
       meta: {
         ...createEmptySessionRecord().meta,
-        backendSessionKey,
         agentId,
         sessionIdentity: identity,
         historyStatus: 'ready' as const,
@@ -273,37 +251,18 @@ describe('teams store', () => {
       error: null,
     } as never);
 
-    vi.mocked(createTeamRunLifecycle).mockResolvedValue({ runId: 'teamrun-generated', outcome: 'created' });
-    vi.mocked(listTeamRunLifecycle).mockResolvedValue([]);
-    vi.mocked(deleteTeamLifecycle).mockResolvedValue({ teamId: 'team-1', outcome: 'deleted' });
-    vi.mocked(tombstoneTeamRun).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', state: 'tombstoned' });
-    vi.mocked(beginTeamRunCancellation).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', state: 'cancelled' });
-    vi.mocked(exportTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', yaml: 'nodes: []\n' });
-    vi.mocked(importTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000' });
-    vi.mocked(readTeamPublicProjection).mockImplementation(async ({ teamId, runId }) => ({
-      teamId,
-      runId,
-      teamRevision: 1,
-      runtime: 'confirmed',
-      graph: {
-        graphId: `graph:${teamId}`,
-        workflowPlanId: `plan:${teamId}`,
-        title: 'Team graph',
-        status: 'running',
-        nodes: [],
-        edges: [],
-      },
-    }));
-    vi.mocked(readTeamPendingApprovals).mockImplementation(async ({ teamId, runId }) => ({
-      teamId,
-      runId,
-      approvals: [],
-    }));
+    vi.mocked(createTeamRunLifecycle).mockResolvedValue({ runId: 'teamrun-generated', status: 'created', revision: 1 });
+    vi.mocked(listTeamRunLifecycle).mockResolvedValue({ teamId: 'team-1', runs: [] });
+    vi.mocked(deleteTeamLifecycle).mockResolvedValue({ teamId: 'team-1', deleted: true, deletedRunIds: [], deletedAgentIds: [] });
+    vi.mocked(tombstoneTeamRun).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', deleted: true });
+    vi.mocked(beginTeamRunCancellation).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', status: 'cancelled', revision: 1 });
+    vi.mocked(exportTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', fileName: 'team-1-run-1.0.0-1000.team-graph.yaml', yaml: 'nodes: []\n' });
+    vi.mocked(importTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', imported: true });
     vi.mocked(submitTeamRoleChat).mockResolvedValue({ success: true, submitted: true });
-    vi.mocked(readTeamRoleSessions).mockResolvedValue([]);
-    vi.mocked(resumeTeamRunLifecycle).mockResolvedValue([]);
-    vi.mocked(saveTeamGraph).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000' });
-    vi.mocked(resolveTeamHumanDecision).mockResolvedValue({ success: true, outcome: 'recorded' });
+    vi.mocked(resumeTeamRunLifecycle).mockResolvedValue({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [], runs: [] });
+    vi.mocked(saveTeamGraph).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', saved: true });
+    vi.mocked(readTeamRunSnapshot).mockImplementation(async ({ runId }) => buildSnapshot('running', [{ eventId: `event:${runId}`, runId, revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]));
+    vi.mocked(resolveTeamHumanDecision).mockResolvedValue({ success: true, status: 'approved' });
   });
 
   it('creates and selects a TeamSkill team from validated package identity', () => {
@@ -326,10 +285,10 @@ describe('teams store', () => {
   });
 
   it('records a materialized manual team with manual source identity', () => {
-    const id = useTeamsStore.getState().recordMaterializedManualTeam({
+    const id = useTeamsStore.getState().createManualTeam({
       displayName: 'Manual Ops Team',
       manualTeam,
-    }, 'team-manual');
+    });
 
     const state = useTeamsStore.getState();
     expect(state.activeTeamId).toBe(id);
@@ -608,10 +567,10 @@ describe('teams store', () => {
   });
 
   it('does not revive legacy run creation for a materialized manual team', async () => {
-    const id = useTeamsStore.getState().recordMaterializedManualTeam({
+    const id = useTeamsStore.getState().createManualTeam({
       displayName: 'Manual Ops Team',
       manualTeam,
-    }, 'team-manual');
+    });
 
     await expect(useTeamsStore.getState().createRun(id)).rejects.toThrow(
       'Manual Teams are materialized and started together.',
@@ -1018,7 +977,7 @@ describe('teams store', () => {
       roleId: 'analyst',
       agentId: 'analyst-agent',
       localSessionId: bindingAnalyst.localSessionId,
-      endpointSessionId: `agent:analyst-agent:${bindingAnalyst.endpointSessionId}`,
+      endpointSessionId: bindingAnalyst.endpointSessionId,
       sessionIdentity: bindingAnalyst.sessionIdentity,
     });
     expect(resolveTeamRoleChatTarget(targetsByIdentityKey, createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent'))).toBeNull();
@@ -1035,7 +994,7 @@ describe('teams store', () => {
       teamId: 'team-1',
       runId: 'run-from-bindings',
       roleId: 'analyst',
-      endpointSessionId: `agent:analyst-agent:${bindingAnalyst.endpointSessionId}`,
+      endpointSessionId: bindingAnalyst.endpointSessionId,
     });
     expect(useTeamsStore.getState().isTeamRoleSession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toBe(true);
     expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent') })).toBeNull();
@@ -1109,16 +1068,16 @@ describe('teams store', () => {
       teamId: 'team-1',
       runId: 'run-1',
       roleId: 'leader',
-      endpointSessionId: materializedSessionKey,
+      endpointSessionId: leader.endpointSessionId,
     });
     expect(resolveTeamRoleChatTargetFromProbe(index, { endpointSessionId: leader.endpointSessionId })).toMatchObject({
-      endpointSessionId: materializedSessionKey,
+      endpointSessionId: leader.endpointSessionId,
     });
-    expect(resolveTeamRoleChatTargetFromProbe(index, { backendSessionKey: materializedSessionKey })).toMatchObject({
-      endpointSessionId: materializedSessionKey,
+    expect(resolveTeamRoleChatTargetFromProbe(index, { sessionKey: materializedSessionKey })).toMatchObject({
+      endpointSessionId: leader.endpointSessionId,
     });
-    expect(isKnownTeamRoleSession(index, { backendSessionKey: materializedSessionKey })).toBe(true);
-    expect(isKnownTeamRoleSession(index, { backendSessionKey: 'agent:leader-agent:ordinary-session' })).toBe(false);
+    expect(isKnownTeamRoleSession(index, { sessionKey: materializedSessionKey })).toBe(true);
+    expect(isKnownTeamRoleSession(index, { sessionKey: 'agent:leader-agent:ordinary-session' })).toBe(false);
   });
 
   it('keeps the Teams store role index stable and reserves Team role local session keys', () => {
@@ -1135,16 +1094,14 @@ describe('teams store', () => {
     expect(isKnownTeamRoleSession(firstIndex, { sessionIdentity: leader.sessionIdentity })).toBe(true);
     expect(isKnownTeamRoleSession(emptyIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-run-1-leader', 'leader-agent'),
-      backendSessionKey: 'agent:leader-agent:main',
     })).toBe(true);
     expect(isKnownTeamRoleSession(firstIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-orphan-leader', 'leader-agent'),
       sessionKey: 'team-role-session-orphan-leader',
-      backendSessionKey: 'agent:leader-agent:main',
     })).toBe(true);
     expect(isKnownTeamRoleSession(firstIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('agent:leader-agent:main', 'leader-agent'),
-      backendSessionKey: 'agent:leader-agent:main',
+      sessionKey: 'agent:leader-agent:main',
     })).toBe(false);
   });
 

@@ -20,7 +20,7 @@ type SessionSummary = Readonly<{
   key: string;
   agentId: string;
   sessionIdentity: SessionIdentity;
-  kind: 'direct' | 'group' | 'global' | 'unknown';
+  kind: 'main' | 'session';
   endpointSessionId?: string;
   updatedAt?: number;
 }>;
@@ -120,7 +120,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || typeof value.agentId !== 'string'
     || !isSessionIdentity(value.sessionIdentity)
     || typeof value.kind !== 'string'
-    || !['direct', 'group', 'global', 'unknown'].includes(value.kind)) {
+    || !['main', 'session'].includes(value.kind)) {
     return false;
   }
   return (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')

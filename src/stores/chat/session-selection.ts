@@ -7,7 +7,6 @@ function sortByRecentActivity(sessions: ChatSession[]): ChatSession[] {
 
 function sessionMatchesKey(session: ChatSession, sessionKey: string): boolean {
   return session.key === sessionKey
-    || session.backendSessionKey === sessionKey
     || session.sessionIdentity.sessionKey === sessionKey;
 }
 
