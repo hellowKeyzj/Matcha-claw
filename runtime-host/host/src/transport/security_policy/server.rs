@@ -17,7 +17,10 @@ use super::{
     decode_operation,
     wire::{bearer_token, read_request, write_response},
 };
-use crate::{security::SecurityHandle, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    security::SecurityHandle,
+    transport::{authorization::CapabilityDecisionVerifier, session_trace},
+};
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const PUBLIC_AUDIT_ENDPOINT: &str = "/api/security/audit";
@@ -73,8 +76,14 @@ async fn handle(
     security: SecurityHandle,
 ) -> io::Result<Response> {
     let request = read_request(stream).await?;
+    let trace_id = request.trace_id.as_deref();
     if request.method == "GET" {
         if request.path == READ_ENDPOINT {
+            session_trace::log(
+                "runtime.security.policy.request",
+                trace_id,
+                json!({ "method": &request.method, "endpoint": READ_ENDPOINT }),
+            );
             if !verify_read(
                 &verifier,
                 request.authorization.as_deref(),
@@ -83,12 +92,29 @@ async fn handle(
             )
             .await
             {
+                session_trace::log(
+                    "runtime.security.policy.authorization-rejected",
+                    trace_id,
+                    json!({ "status": 401, "contract": "unauthorized" }),
+                );
                 return Ok(Response::unauthorized());
             }
-            let policy = security
-                .current_policy()
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
+            let policy = match security.current_policy().await {
+                Ok(policy) => policy,
+                Err(_) => {
+                    session_trace::log(
+                        "runtime.security.policy.owner-error",
+                        trace_id,
+                        json!({ "status": 503, "contract": "owner-error" }),
+                    );
+                    return Err(io::Error::from(io::ErrorKind::Other));
+                }
+            };
+            session_trace::log(
+                "runtime.security.policy.response",
+                trace_id,
+                json!({ "status": 200, "contract": "policy" }),
+            );
             return Ok(Response::ok(policy));
         }
         if let Some(platform) = catalog::parse_target(&request.path) {

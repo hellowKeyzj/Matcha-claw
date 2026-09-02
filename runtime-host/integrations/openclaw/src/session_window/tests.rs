@@ -147,25 +147,25 @@ fn accepts_openclaw_tool_call_aliases() {
 
     let content = window.messages()[0].content();
     assert!(
-        matches!(&content[0], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-a" && id == "call-a")
+        matches!(&content[0], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-a" && id == "call-a")
     );
     assert!(
-        matches!(&content[1], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-b" && id == "call-b")
+        matches!(&content[1], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-b" && id == "call-b")
     );
     assert!(
-        matches!(&content[2], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-c" && id == "call-c")
+        matches!(&content[2], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-c" && id == "call-c")
     );
     assert!(
-        matches!(&content[3], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-d" && id == "call-d")
+        matches!(&content[3], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-d" && id == "call-d")
     );
     assert!(
-        matches!(&content[4], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-e" && id == "call-e")
+        matches!(&content[4], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-e" && id == "call-e")
     );
     assert!(
-        matches!(&content[5], MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "tool-f" && id == "call-f")
+        matches!(&content[5], MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "tool-f" && id == "call-f")
     );
     assert!(
-        matches!(&content[6], MessageContent::ToolResult { tool_name: Some(name), tool_call_id: Some(id), summary: Some(summary), is_error: Some(true) } if name == "tool-g" && id == "call-g" && summary == "result")
+        matches!(&content[6], MessageContent::ToolResult { tool_name: Some(name), tool_call_id: Some(id), summary: Some(summary), output: Some(output), is_error: Some(true) } if name == "tool-g" && id == "call-g" && summary == "result" && output == "result")
     );
 }
 
@@ -193,9 +193,120 @@ fn decodes_role_level_tool_result_as_tool_content() {
             tool_name: Some(name),
             tool_call_id: Some(id),
             summary: Some(summary),
+            output: Some(output),
             is_error: Some(false),
-        } if name == "read" && id == "call-1" && summary == "file list"
+        } if name == "read" && id == "call-1" && summary == "file list" && output == &json!([{ "type": "text", "text": "file list" }])
     )));
+}
+
+#[test]
+fn projects_tool_payload_aliases_without_private_envelopes() {
+    let window = decode_window(
+        json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    { "type": "toolCall", "name": "args-tool", "id": "call-args", "args": { "path": "Cargo.toml" } },
+                    { "type": "toolCall", "name": "arguments-tool", "id": "call-arguments", "arguments": ["--help"] },
+                    { "type": "toolCall", "name": "input-tool", "id": "call-input", "input": "literal input" },
+                    { "type": "toolCall", "name": "tool-input-tool", "id": "call-tool-input", "toolInput": { "cmd": "cargo test" } },
+                    { "type": "toolCall", "name": "tool-input-snake-tool", "id": "call-tool-input-snake", "tool_input": { "cwd": "repo" } },
+                    { "type": "tool_result", "toolName": "result-tool", "tool_use_id": "call-result", "result": { "ok": true } },
+                    { "type": "tool_result", "toolName": "output-tool", "tool_use_id": "call-output", "output": ["line"] },
+                    { "type": "tool_result", "toolName": "partial-camel-tool", "tool_use_id": "call-partial-camel", "partialResult": { "chunk": 1 } },
+                    { "type": "tool_result", "toolName": "partial-tool", "tool_use_id": "call-partial", "partial_result": "partial" },
+                    { "type": "tool_result", "toolName": "unsafe-tool", "tool_use_id": "call-unsafe", "output": "bad\u{0}payload" }
+                ]
+            }]
+        }),
+        request(Direction::Latest, 1, None),
+    )
+    .unwrap();
+
+    let content = window.messages()[0].content();
+    assert!(
+        matches!(&content[0], MessageContent::ToolUse { input: Some(input), input_text: Some(input_text), .. } if input == &json!({ "path": "Cargo.toml" }) && input_text == "{\n  \"path\": \"Cargo.toml\"\n}")
+    );
+    assert!(
+        matches!(&content[1], MessageContent::ToolUse { input: Some(input), input_text: Some(input_text), .. } if input == &json!(["--help"]) && input_text == "[\n  \"--help\"\n]")
+    );
+    assert!(
+        matches!(&content[2], MessageContent::ToolUse { input: Some(input), input_text: Some(input_text), .. } if input == "literal input" && input_text == "literal input")
+    );
+    assert!(
+        matches!(&content[3], MessageContent::ToolUse { input: Some(input), input_text: Some(input_text), .. } if input == &json!({ "cmd": "cargo test" }) && input_text == "{\n  \"cmd\": \"cargo test\"\n}")
+    );
+    assert!(
+        matches!(&content[4], MessageContent::ToolUse { input: Some(input), input_text: Some(input_text), .. } if input == &json!({ "cwd": "repo" }) && input_text == "{\n  \"cwd\": \"repo\"\n}")
+    );
+    assert!(
+        matches!(&content[5], MessageContent::ToolResult { output: Some(output), summary: None, .. } if output == &json!({ "ok": true }))
+    );
+    assert!(
+        matches!(&content[6], MessageContent::ToolResult { output: Some(output), summary: None, .. } if output == &json!(["line"]))
+    );
+    assert!(
+        matches!(&content[7], MessageContent::ToolResult { output: Some(output), summary: None, .. } if output == &json!({ "chunk": 1 }))
+    );
+    assert!(
+        matches!(&content[8], MessageContent::ToolResult { output: Some(output), summary: Some(summary), .. } if output == "partial" && summary == "partial")
+    );
+    assert!(
+        matches!(&content[9], MessageContent::ToolResult { output: None, summary: Some(summary), .. } if summary == "bad\0payload")
+    );
+}
+
+#[test]
+fn decodes_internal_message_tool_delivery_media() {
+    let window = decode_window(
+        json!({
+            "messages": [{
+                "role": "toolResult",
+                "toolCallId": "call-message",
+                "toolName": "message",
+                "content": "sent",
+                "isError": false,
+                "details": {
+                    "status": "ok",
+                    "sourceReplySink": "internal-ui",
+                    "sourceReply": {
+                        "text": "Here is the image",
+                        "mediaUrl": "api/chat/media/outgoing/session-1/second.svg",
+                        "mediaUrls": [
+                            "/api/chat/media/outgoing/session-1/image.png",
+                            "C:/private/image.png"
+                        ]
+                    },
+                    "media": {
+                        "mediaUrls": ["https://cdn.example.test/image.webp"]
+                    }
+                }
+            }]
+        }),
+        request(Direction::Latest, 1, None),
+    )
+    .unwrap();
+
+    let delivery = window.messages()[0]
+        .content()
+        .iter()
+        .find_map(|content| match content {
+            MessageContent::MessageToolDelivery { text, media } => Some((text, media)),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(delivery.0.as_deref(), Some("Here is the image"));
+    assert_eq!(delivery.1.len(), 3);
+    assert!(delivery.1.iter().any(|media| media.reference()
+        == "/api/chat/media/outgoing/session-1/second.svg"
+        && media.media_type() == Some("image/svg+xml")));
+    assert!(delivery.1.iter().any(|media| media.reference()
+        == "/api/chat/media/outgoing/session-1/image.png"
+        && media.media_type() == Some("image/png")));
+    assert!(delivery.1.iter().any(|media| media.reference()
+        == "https://cdn.example.test/image.webp"
+        && media.media_type() == Some("image/webp")));
 }
 
 #[test]
@@ -229,6 +340,21 @@ fn ignores_unknown_envelope_and_message_fields() {
     let mut tool = payload();
     tool["messages"][1]["toolInput"] = json!({ "path": "C:/secret" });
     assert!(decode_window(tool, request(Direction::Latest, 2, None)).is_ok());
+
+    let window = decode_window(
+        json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [{ "type": "toolCall", "name": "read", "id": "call-1", "toolInput": { "path": "C:/secret" } }]
+            }]
+        }),
+        request(Direction::Latest, 1, None),
+    )
+    .unwrap();
+    assert!(matches!(
+        &window.messages()[0].content()[0],
+        MessageContent::ToolUse { input: Some(input), .. } if input == &json!({ "path": "C:/secret" })
+    ));
 
     let mut approval = payload();
     approval["messages"][1]["approval"] = json!({ "decision": "allow" });
@@ -338,7 +464,7 @@ fn projects_source_backed_rich_content_without_private_payloads() {
     assert_eq!(window.messages()[1].role(), MessageRole::Assistant);
     assert_eq!(window.messages()[1].text(), "visible");
     assert_eq!(window.messages()[1].sequence(), Some(7));
-    assert!(window.messages()[1].content().iter().any(|content| matches!(content, MessageContent::ToolUse { name, tool_call_id: Some(id) } if name == "read" && id == "call-1")));
+    assert!(window.messages()[1].content().iter().any(|content| matches!(content, MessageContent::ToolUse { name, tool_call_id: Some(id), .. } if name == "read" && id == "call-1")));
     assert!(
         window.messages()[1]
             .content()

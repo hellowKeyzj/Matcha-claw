@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { logProcessSessionTrace } from '../../query/runTrace.js'
 import {
   APP_SERVER_PROTOCOL_VERSION,
   type AppServerConfig,
@@ -47,6 +48,13 @@ export class WsServer {
       fetch: (request, server) => this.handleHttpRequest(request, server),
       websocket: {
         open: ws => {
+          logProcessSessionTrace(
+            'matcha-agent-app-server',
+            'app-server.ws.open',
+            {
+              clientIdLength: ws.data.clientId.length,
+            },
+          )
           this.options.clientHub.registerClient(payload => {
             ws.send(payload)
           }, ws.data.clientId)
@@ -54,6 +62,14 @@ export class WsServer {
         },
         message: async (ws, message) => {
           if (typeof message !== 'string') {
+            logProcessSessionTrace(
+              'matcha-agent-app-server',
+              'app-server.ws.close',
+              {
+                clientIdLength: ws.data.clientId.length,
+                reason: 'non-text-message',
+              },
+            )
             ws.close(1003, 'text messages only')
             return
           }
@@ -62,9 +78,27 @@ export class WsServer {
             ws.data.clientId,
             message,
           )
-          if (response) ws.send(response)
+          if (response) {
+            logProcessSessionTrace(
+              'matcha-agent-app-server',
+              'app-server.ws.response',
+              {
+                clientIdLength: ws.data.clientId.length,
+                responseBytes: Buffer.byteLength(response, 'utf8'),
+              },
+            )
+            ws.send(response)
+          }
         },
         close: ws => {
+          logProcessSessionTrace(
+            'matcha-agent-app-server',
+            'app-server.ws.close',
+            {
+              clientIdLength: ws.data.clientId.length,
+              reason: 'socket-closed',
+            },
+          )
           this.clientSockets.delete(ws.data.clientId)
           this.options.clientHub.close(ws.data.clientId, 'clientClosed')
         },

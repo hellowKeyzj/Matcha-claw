@@ -14,6 +14,7 @@ function lazyWithPreload<T extends ComponentType<unknown>>(
 }
 
 export const SetupRoute = lazyWithPreload(() => import('../pages/Setup'));
+export const AuthRoute = lazyWithPreload(() => import('../pages/Auth'));
 export const SkillsRoute = lazyWithPreload(() => import('../pages/Skills'));
 export const SecurityRoute = lazyWithPreload(() => import('../pages/Security'));
 export const SettingsRoute = lazyWithPreload(() => import('../pages/Settings'));
@@ -41,6 +42,9 @@ function normalizePath(path: string): string {
 
 function resolveRoutePreloader(path: string): (() => Promise<unknown>) | null {
   const normalizedPath = normalizePath(path);
+  if (normalizedPath === '/login' || normalizedPath === '/register') {
+    return () => AuthRoute.preload();
+  }
   if (normalizedPath.startsWith('/settings')) {
     return () => SettingsRoute.preload();
   }

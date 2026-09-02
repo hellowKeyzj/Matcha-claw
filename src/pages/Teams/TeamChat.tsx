@@ -60,7 +60,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const cancelRun = useTeamsStore((state) => state.cancelRun);
-  const saveGraph = useTeamsStore((state) => state.saveGraph);
+  const submitGraphPatch = useTeamsStore((state) => state.submitGraphPatch);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
   const importGraphYaml = useTeamsStore((state) => state.importGraphYaml);
 
@@ -435,7 +435,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 end: t('run.graphCanvas.nodePaletteDescriptions.end'),
               },
             }}
-            onSaveGraph={(nextGraph) => saveGraph(team.id, nextGraph)}
+            onPatchGraph={(operations) => submitGraphPatch(team.id, operations)}
           />
         </CardContent>
       </Card>

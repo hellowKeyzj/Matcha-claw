@@ -262,7 +262,7 @@ impl<'peer> MatchaTeamNativeEffects<'peer> {
             crate::session::history::HistoryResult::Incomplete(
                 crate::session::hydration::HydrationIncomplete::SourceRejected
                 | crate::session::hydration::HydrationIncomplete::ProtocolRejected
-                | crate::session::hydration::HydrationIncomplete::TranscriptRejected,
+                | crate::session::hydration::HydrationIncomplete::TranscriptRejected(_),
             ) => MatchaReadbackOutcome::Failed {
                 failure: MatchaEffectFailure::Rejected,
             },

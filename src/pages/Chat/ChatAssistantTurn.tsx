@@ -14,9 +14,11 @@ import {
   ToolCardList,
   type MessageLightboxState,
 } from './chat-message-parts';
+import type { SessionRenderAssistantBubbleToolResult } from '../../types/session/tool-card';
 import { formatDuration } from './message-utils';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
-import { hostFileStat, type WorkspaceFileContext } from '@/lib/host-api';
+import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
+import { hostFileStat, hostWorkspaceMediaThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE, resolveWorkspaceRelativePath } from '@/components/file-preview/types';
 import type {
   SessionIdentity,
@@ -33,6 +35,7 @@ interface ChatAssistantTurnProps {
   replyStartedAt?: number;
   userAvatarImageUrl?: string | null;
   sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
 }
@@ -42,11 +45,10 @@ type MarkdownFenceState = {
   length: number;
 } | null;
 
-type AssistantToolSegment = Extract<ChatAssistantTurnItem['segments'][number], { kind: 'tool' }>;
-type AssistantBubbleCanvasToolSegment = AssistantToolSegment & {
-  tool: AssistantToolSegment['tool'] & {
-    result: Extract<AssistantToolSegment['tool']['result'], { kind: 'canvas' }>;
-  };
+type DerivedGatewayPreview = {
+  preview: string | null;
+  fileSize: number;
+  previewStatus?: 'unavailable';
 };
 
 function readFenceMarker(line: string): { marker: '`' | '~'; length: number; closingOnly: boolean } | null {
@@ -109,17 +111,27 @@ function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem): Map<st
     if (segment.kind !== 'message') {
       continue;
     }
-    renderTextByKey.set(segment.key, removeLeadingFenceClose(segment.text, fenceState));
+    const renderText = sanitizeAssistantDisplayText(removeLeadingFenceClose(segment.text, fenceState));
+    renderTextByKey.set(segment.key, renderText);
     fenceState = advanceMarkdownFenceState(segment.text, fenceState);
   }
   return renderTextByKey;
 }
 
-function isAssistantBubbleCanvasTool(segment: ChatAssistantTurnItem['segments'][number]): segment is AssistantBubbleCanvasToolSegment {
-  return segment.kind === 'tool'
-    && segment.tool.result.kind === 'canvas'
-    && segment.tool.result.surface === 'assistant-bubble'
-    && segment.tool.result.preview.surface === 'assistant_message';
+function toAssistantBubbleToolResult(segment: ChatAssistantTurnItem['segments'][number]): SessionRenderAssistantBubbleToolResult | null {
+  if (segment.kind !== 'tool'
+    || segment.tool.result.kind !== 'canvas'
+    || segment.tool.result.surface !== 'assistant-bubble'
+    || segment.tool.result.preview.surface !== 'assistant_message') {
+    return null;
+  }
+  return {
+    key: segment.tool.toolCallId || segment.tool.id || segment.key,
+    ...(segment.tool.toolCallId ? { toolCallId: segment.tool.toolCallId } : {}),
+    toolName: segment.tool.name,
+    preview: segment.tool.result.preview,
+    ...(segment.tool.result.rawText ? { rawText: segment.tool.result.rawText } : {}),
+  };
 }
 
 function isActiveReplyStatus(status: ChatAssistantTurnItem['status']): boolean {
@@ -162,12 +174,14 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   replyStartedAt,
   userAvatarImageUrl,
   sessionIdentity,
+  endpointSessionId,
   workspaceContext,
   onOpenAttachedArtifact,
 }: ChatAssistantTurnProps) {
   const [collapseVersion, requestCollapse] = useReducer((value: number) => value + 1, 0);
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
+  const [derivedGatewayPreviews, setDerivedGatewayPreviews] = useState<Record<string, DerivedGatewayPreview>>({});
   const [now, setNow] = useState(() => Date.now());
 
   const isStreaming = isActiveReplyStatus(item.status);
@@ -202,7 +216,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       return showThinking && segment.text.trim().length > 0;
     }
     if (segment.kind === 'message') {
-      return segment.text.trim().length > 0;
+      return !!segment.largeText || (messageRenderTextByKey.get(segment.key) ?? segment.text).trim().length > 0;
     }
     if (segment.kind === 'tool') {
       return true;
@@ -212,24 +226,29 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   const pendingMode = !hasContentSegments
     ? (item.status === 'waiting_tool' ? 'activity' : (isStreaming ? 'typing' : null))
     : null;
-  const plainText = getAssistantTurnPlainText(item);
-  const attachedByPath = useMemo(() => {
+  const rawPlainText = getAssistantTurnPlainText(item);
+  const plainText = sanitizeAssistantDisplayText(rawPlainText);
+  const attachedByRef = useMemo(() => {
     const next = new Set<string>();
     for (const segment of item.segments) {
       if (segment.kind !== 'media') {
         continue;
       }
       for (const file of segment.attachedFiles as AttachedFileMeta[]) {
-        if (file.filePath) {
-          next.add(file.filePath);
+        const ref = file.filePath || file.gatewayUrl;
+        if (ref) {
+          next.add(ref);
         }
       }
     }
     return next;
   }, [item.segments]);
   const derivedAttachedFiles = useMemo(() => (
-    extractArtifactRefsFromAssistantText(plainText).filter((file) => !file.filePath || !attachedByPath.has(file.filePath))
-  ), [attachedByPath, plainText]);
+    extractArtifactRefsFromAssistantText(rawPlainText).filter((file) => {
+      const ref = file.filePath || file.gatewayUrl;
+      return !ref || !attachedByRef.has(ref);
+    })
+  ), [attachedByRef, rawPlainText]);
 
   useEffect(() => {
     if (!sessionIdentity) {
@@ -284,10 +303,83 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     };
   }, [derivedAttachedFiles, sessionIdentity, validatedDerivedPaths, workspaceContext]);
 
+  useEffect(() => {
+    if (!sessionIdentity) {
+      return;
+    }
+    const pendingGatewayFiles = derivedAttachedFiles.filter((file) => (
+      file.gatewayUrl && derivedGatewayPreviews[file.gatewayUrl] === undefined
+    ));
+    if (pendingGatewayFiles.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all(pendingGatewayFiles.map(async (file) => {
+      const gatewayUrl = file.gatewayUrl!;
+      try {
+        const thumbnail = await hostWorkspaceMediaThumbnail({
+          gatewayUrl,
+          mimeType: file.mimeType,
+          agentId: sessionIdentity.agentId,
+          sessionIdentity,
+        });
+        return {
+          gatewayUrl,
+          preview: thumbnail.preview ?? null,
+          fileSize: thumbnail.fileSize || file.fileSize,
+          ...(thumbnail.preview ? {} : { previewStatus: 'unavailable' as const }),
+        };
+      } catch {
+        return {
+          gatewayUrl,
+          preview: null,
+          fileSize: file.fileSize,
+          previewStatus: 'unavailable' as const,
+        };
+      }
+    })).then((results) => {
+      if (cancelled) {
+        return;
+      }
+      setDerivedGatewayPreviews((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          next[result.gatewayUrl] = {
+            preview: result.preview,
+            fileSize: result.fileSize,
+            ...(result.previewStatus ? { previewStatus: result.previewStatus } : {}),
+          };
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [derivedAttachedFiles, derivedGatewayPreviews, sessionIdentity]);
+
   const visibleDerivedAttachedFiles = useMemo(() => (
-    derivedAttachedFiles.filter((file) => !file.filePath || validatedDerivedPaths[file.filePath] === true)
-  ), [derivedAttachedFiles, validatedDerivedPaths]);
-  if (!hasContentSegments && !pendingMode) {
+    derivedAttachedFiles
+      .filter((file) => !file.filePath || validatedDerivedPaths[file.filePath] === true)
+      .map((file) => {
+        if (!file.gatewayUrl) {
+          return file;
+        }
+        const preview = derivedGatewayPreviews[file.gatewayUrl];
+        if (!preview) {
+          return file;
+        }
+        return {
+          ...file,
+          preview: preview.preview,
+          fileSize: preview.fileSize,
+          ...(preview.previewStatus ? { previewStatus: preview.previewStatus } : {}),
+        };
+      })
+  ), [derivedAttachedFiles, derivedGatewayPreviews, validatedDerivedPaths]);
+  if (!hasContentSegments && visibleDerivedAttachedFiles.length === 0 && !pendingMode) {
     return null;
   }
 
@@ -313,43 +405,44 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
               return null;
             }
             return (
-              <div key={segment.key} className="flex flex-col items-start gap-0.5 pt-0.5">
+              <div key={segment.key} className="flex w-full flex-col items-start gap-0.5 pt-0.5">
                 <ThinkingSection content={segment.text} collapseVersion={collapseVersion} />
               </div>
             );
           }
           if (segment.kind === 'tool') {
-            if (isAssistantBubbleCanvasTool(segment)) {
-              const embeddedToolResults = [{
-                key: segment.tool.toolCallId || segment.tool.id || segment.key,
-                ...(segment.tool.toolCallId ? { toolCallId: segment.tool.toolCallId } : {}),
-                toolName: segment.tool.name,
-                preview: segment.tool.result.preview,
-                ...(segment.tool.result.rawText ? { rawText: segment.tool.result.rawText } : {}),
-              }];
+            const embeddedToolResult = toAssistantBubbleToolResult(segment);
+            if (embeddedToolResult) {
               return (
-                <div key={segment.key} className="flex flex-col items-start gap-0 pt-0">
+                <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
                   <AssistantEmbeddedToolResults
-                    embeddedToolResults={embeddedToolResults}
+                    embeddedToolResults={[embeddedToolResult]}
                     collapseVersion={collapseVersion}
                   />
                 </div>
               );
             }
             return (
-              <div key={segment.key} className="flex flex-col items-start gap-0 pt-0">
+              <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
                 <ToolCardList tools={[segment.tool]} collapseVersion={collapseVersion} />
               </div>
             );
           }
           if (segment.kind === 'message') {
+            const renderText = messageRenderTextByKey.get(segment.key) ?? segment.text;
+            if (!segment.largeText && !renderText.trim()) {
+              return null;
+            }
             return (
               <AssistantMessageBody
                 key={segment.key}
                 itemKey={`${item.key}:segment:${segment.key}`}
                 createdAt={item.createdAt}
-                text={messageRenderTextByKey.get(segment.key) ?? segment.text}
+                text={renderText}
                 isStreaming={isStreaming}
+                largeText={segment.largeText}
+                sessionIdentity={sessionIdentity}
+                endpointSessionId={endpointSessionId}
                 onBodyClick={requestCollapse}
               />
             );

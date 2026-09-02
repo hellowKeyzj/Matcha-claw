@@ -1,16 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { ApprovalActionsPanel } from '@/pages/Chat/components/ChatStates';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatApprovalDock, ChatErrorBanner } from '@/pages/Chat/components/ChatRuntimeDock';
 import { ChatImageLightbox } from '@/pages/Chat/components/ChatImageLightbox';
+import type { ApprovalItem } from '@/stores/chat';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, params?: Record<string, unknown>) => (
-      key === 'approval.pendingRequest' && typeof params?.title === 'string'
-        ? params.title
-        : key
-    ),
+    t: (key: string, params?: Record<string, unknown>) => {
+      if (key === 'approval.pendingRequest' && typeof params?.title === 'string') {
+        return params.title;
+      }
+      return {
+        'approval.requestLabel': 'Tool needs approval',
+        'approval.allowOnce': 'Allow once',
+        'approval.allowAlways': 'Always allow',
+        'approval.deny': 'Deny',
+      }[key] ?? key;
+    },
   }),
 }));
 
@@ -18,22 +24,50 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: vi.fn(),
 }));
 
+const approval: ApprovalItem = {
+  id: 'approval-1',
+  sessionKey: 'agent:main:main',
+  sessionIdentity: {
+    endpoint: {
+      kind: 'native-runtime',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+    },
+    agentId: 'main',
+    sessionKey: 'agent:main:main',
+  },
+  title: 'Approval required',
+  command: 'pnpm test',
+  allowedDecisions: ['deny', 'allow-once', 'allow-always'],
+  createdAtMs: 1,
+};
+
 describe('chat floating overlays layout', () => {
-  it('runtime dock uses the lighter floating surface language', () => {
-    const { container, rerender } = render(
+  it('approval dock renders as a compact composer action bar', () => {
+    const onResolve = vi.fn();
+    const { container } = render(
       <ChatApprovalDock
         waitingLabel="waiting"
-        approvals={[]}
-        onResolve={vi.fn()}
+        approvals={[approval]}
+        onResolve={onResolve}
       />,
     );
 
-    let root = container.firstElementChild?.firstElementChild as HTMLElement | null;
-    expect(root?.className).toContain('rounded-[22px]');
-    expect(root?.className).toContain('bg-background/92');
+    const root = container.firstElementChild?.firstElementChild as HTMLElement | null;
+    expect(root?.className).toContain('min-h-12');
+    expect(root?.className).toContain('rounded-[18px]');
+    expect(root?.className).toContain('bg-background/94');
     expect(root?.className).toContain('backdrop-blur-xl');
+    expect(screen.getByText('Tool needs approval')).toBeInTheDocument();
+    expect(screen.getByText('pnpm test')).toBeInTheDocument();
 
-    rerender(
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+
+    expect(onResolve).toHaveBeenCalledWith(approval, 'allow-once');
+  });
+
+  it('runtime error banner keeps the lighter floating surface language', () => {
+    const { container } = render(
       <ChatErrorBanner
         error="boom"
         dismissLabel="dismiss"
@@ -41,7 +75,7 @@ describe('chat floating overlays layout', () => {
       />,
     );
 
-    root = container.firstElementChild?.firstElementChild as HTMLElement | null;
+    const root = container.firstElementChild?.firstElementChild as HTMLElement | null;
     expect(root?.className).toContain('rounded-[22px]');
     expect(root?.className).toContain('bg-background/92');
     expect(root?.className).toContain('backdrop-blur-xl');
@@ -63,21 +97,5 @@ describe('chat floating overlays layout', () => {
     const controls = dialog.querySelector('div:last-child') as HTMLElement | null;
     expect(controls?.className).toContain('rounded-full');
     expect(controls?.className).toContain('backdrop-blur-xl');
-  });
-
-  it('approval panel projects only opaque native option IDs', () => {
-    render(
-      <ApprovalActionsPanel
-        approvals={[{
-          approvalId: 'approval-1',
-          sessionKey: 'agent:main:main',
-          optionIds: ['option-1', 'option-2'],
-        }]}
-        onResolve={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByRole('button', { name: 'option-1' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'option-2' })).toBeInTheDocument();
   });
 });

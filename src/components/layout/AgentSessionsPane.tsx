@@ -11,13 +11,8 @@ import {
   useTeamsStore,
 } from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
-import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
-import type { ChatSessionRuntimeEndpointTarget } from '@/stores/chat/types';
-import type {
-  AgentScope,
-  RuntimeEndpointRef,
-} from '../../../electron/desktop-contract/runtime-address';
+import type { ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,51 +40,17 @@ const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapse
 
 type SessionPaneTab = 'agent' | 'team';
 
-function endpointKey(endpoint: RuntimeEndpointRef): string {
-  return buildRuntimeScopeKey(endpoint);
-}
-
-function findRuntimeEndpointByScope(
-  endpoints: readonly ChatSessionRuntimeEndpointTarget[],
-  scope: AgentScope | null,
-): ChatSessionRuntimeEndpointTarget | null {
-  if (!scope) {
-    return null;
+function resolveSelectedRuntimeEndpoint(input: {
+  endpoints: readonly ChatSessionRuntimeEndpointNode[];
+  runtimeScopeKey: string | null;
+}): ChatSessionRuntimeEndpointNode | null {
+  if (input.runtimeScopeKey) {
+    const endpoint = input.endpoints.find((candidate) => candidate.runtimeScopeKey === input.runtimeScopeKey);
+    if (endpoint) {
+      return endpoint;
+    }
   }
-  return endpoints.find((endpoint) => sameRuntimeEndpointScope(endpoint.endpoint, scope.endpoint)) ?? null;
-}
-
-function findRuntimeEndpointByRef(
-  endpoints: readonly ChatSessionRuntimeEndpointTarget[],
-  endpointRef: RuntimeEndpointRef | null,
-): ChatSessionRuntimeEndpointTarget | null {
-  if (!endpointRef) {
-    return null;
-  }
-  return endpoints.find((endpoint) => sameRuntimeEndpointScope(endpoint.endpoint, endpointRef)) ?? null;
-}
-
-function resolveDefaultRuntimeEndpoint(input: {
-  endpoints: readonly ChatSessionRuntimeEndpointTarget[];
-  currentSessionEndpoint: RuntimeEndpointRef | null;
-  defaultScope: AgentScope | null;
-}): ChatSessionRuntimeEndpointTarget | null {
-  const currentEndpoint = findRuntimeEndpointByRef(input.endpoints, input.currentSessionEndpoint);
-  if (currentEndpoint) {
-    return currentEndpoint;
-  }
-  return findRuntimeEndpointByScope(input.endpoints, input.defaultScope)
-    ?? input.endpoints[0]
-    ?? null;
-}
-
-function resolveAgentNodeSessionKey(node: AgentSessionNode | undefined): string | null {
-  if (!node) {
-    return null;
-  }
-  return node.sessions.find((session) => session.preferred || session.kind === 'main')?.key
-    ?? node.sessions[0]?.key
-    ?? null;
+  return input.endpoints[0] ?? null;
 }
 
 function createSessionBucketStateKey(bucketId: SessionBucketId): string {
@@ -731,20 +692,19 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     sessionsLoading,
     sessionsLoadedOnce,
     sessionsError,
+    currentConversation,
+    sessionRuntimeGraph,
     currentSessionKey,
-    currentAgentId,
     switchSession,
     openAgentConversation,
     openSessionIdentity,
     newSessionForScope,
     deleteSession,
     renameSession,
-    sessionRuntimeCatalog,
-    currentSessionEndpoint,
+    selectSessionRuntimeEndpoint,
   } = useChatStore(useShallow((state) => ({
     ...selectAgentSessionsPaneState(state),
-    sessionRuntimeCatalog: state.sessionRuntimeCatalog,
-    currentSessionEndpoint: state.loadedSessions[state.currentSessionKey]?.meta.sessionIdentity?.endpoint ?? null,
+    selectSessionRuntimeEndpoint: state.selectSessionRuntimeEndpoint,
   })));
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
@@ -754,7 +714,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const [activeTab, setActiveTab] = useState<SessionPaneTab>('agent');
-  const [selectedRuntimeEndpointKey, setSelectedRuntimeEndpointKey] = useState<string | null>(null);
   const [expandedTeamIds, setExpandedTeamIds] = useState<Record<string, boolean>>({});
   const [expandedTeamRunIds, setExpandedTeamRunIds] = useState<Record<string, boolean>>({});
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
@@ -768,34 +727,17 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     title: string;
   } | null>(null);
 
-  const runtimeEndpoints = sessionRuntimeCatalog.status === 'ready'
-    ? sessionRuntimeCatalog.endpoints
-    : [];
-  const defaultRuntimeEndpoint = useMemo(
-    () => resolveDefaultRuntimeEndpoint({
-      endpoints: runtimeEndpoints,
-      currentSessionEndpoint,
-      defaultScope: sessionRuntimeCatalog.defaultSessionPromptScope,
-    }),
-    [currentSessionEndpoint, runtimeEndpoints, sessionRuntimeCatalog.defaultSessionPromptScope],
+  const runtimeEndpoints = useMemo(
+    () => sessionRuntimeGraph.endpoints.filter((endpoint) => endpoint.target != null),
+    [sessionRuntimeGraph],
   );
-  const selectedRuntimeEndpoint = useMemo(() => {
-    if (!selectedRuntimeEndpointKey) {
-      return defaultRuntimeEndpoint;
-    }
-    return runtimeEndpoints.find((endpoint) => endpointKey(endpoint.endpoint) === selectedRuntimeEndpointKey)
-      ?? defaultRuntimeEndpoint;
-  }, [defaultRuntimeEndpoint, runtimeEndpoints, selectedRuntimeEndpointKey]);
-
-  useEffect(() => {
-    if (!selectedRuntimeEndpointKey) {
-      return;
-    }
-    if (runtimeEndpoints.some((endpoint) => endpointKey(endpoint.endpoint) === selectedRuntimeEndpointKey)) {
-      return;
-    }
-    setSelectedRuntimeEndpointKey(null);
-  }, [runtimeEndpoints, selectedRuntimeEndpointKey]);
+  const selectedRuntimeEndpoint = useMemo(
+    () => resolveSelectedRuntimeEndpoint({
+      endpoints: runtimeEndpoints,
+      runtimeScopeKey: currentConversation?.runtimeScopeKey ?? null,
+    }),
+    [currentConversation?.runtimeScopeKey, runtimeEndpoints],
+  );
 
   const agentPaneSessionEntries = sessionEntries.filter((entry) => !isKnownTeamRoleSession(teamRoleChatTargetIndex, {
     sessionIdentity: entry.session.sessionIdentity,
@@ -809,8 +751,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     sessionsLoading,
     sessionsLoadedOnce,
     sessionsError,
-    currentAgentId,
-    currentSessionEndpoint,
+    currentConversation,
     selectedRuntimeEndpoint,
     locale: i18n.language,
     t,
@@ -870,33 +811,28 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   }, [switchSession]);
 
   const handleOpenAgent = useCallback((agentId: string) => {
-    const sessionKey = resolveAgentNodeSessionKey(paneViewModel.agentNodes.find((node) => node.agentId === agentId));
+    const sessionKey = paneViewModel.agentNodes.find((node) => node.agentId === agentId)?.preferredSessionKey;
     if (sessionKey) {
       switchSession(sessionKey);
       return;
     }
-    if (selectedRuntimeEndpoint) {
-      const scope = resolveAgentScopeForRuntimeEndpoint(selectedRuntimeEndpoint, agentId);
-      if (scope) {
-        void newSessionForScope(scope);
-        return;
-      }
-    }
     openAgentConversation(agentId);
-  }, [newSessionForScope, openAgentConversation, paneViewModel.agentNodes, selectedRuntimeEndpoint, switchSession]);
+  }, [openAgentConversation, paneViewModel.agentNodes, switchSession]);
 
   const handleCreateSessionForDefaultScope = useCallback(() => {
-    if (!selectedRuntimeEndpoint) {
+    const target = selectedRuntimeEndpoint?.target;
+    if (!target) {
       return;
     }
-    void newSessionForScope(selectedRuntimeEndpoint.defaultSessionPromptScope);
+    void newSessionForScope(target.defaultSessionPromptScope);
   }, [newSessionForScope, selectedRuntimeEndpoint]);
 
   const handleCreateSessionForAgent = useCallback((agentId: string) => {
-    if (!selectedRuntimeEndpoint) {
+    const target = selectedRuntimeEndpoint?.target;
+    if (!target) {
       return;
     }
-    const scope = resolveAgentScopeForRuntimeEndpoint(selectedRuntimeEndpoint, agentId);
+    const scope = resolveAgentScopeForRuntimeEndpoint(target, agentId);
     if (!scope) {
       return;
     }
@@ -1059,7 +995,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 }
                 handleCreateSessionForDefaultScope();
               }}
-              disabled={!selectedRuntimeEndpoint}
+              disabled={!selectedRuntimeEndpoint?.target}
               aria-label={t('sidebar.newSession')}
               title={t('sidebar.newSession')}
             >
@@ -1083,13 +1019,18 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 id="agent-session-runtime-selector"
                 data-testid="agent-session-runtime-selector"
                 className="h-8 max-w-full appearance-none border-0 bg-transparent py-1 pl-2 pr-2 text-sm font-semibold text-foreground shadow-none outline-none ring-0 transition-colors hover:text-foreground focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 disabled:opacity-100"
-                value={selectedRuntimeEndpoint ? endpointKey(selectedRuntimeEndpoint.endpoint) : ''}
+                value={currentConversation?.runtimeScopeKey ?? selectedRuntimeEndpoint?.runtimeScopeKey ?? ''}
                 aria-label={t('sidebar.selectSessionRuntime')}
                 disabled={runtimeEndpoints.length <= 1}
-                onChange={(event) => setSelectedRuntimeEndpointKey(event.target.value || null)}
+                onChange={(event) => {
+                  const endpoint = runtimeEndpoints.find((candidate) => candidate.runtimeScopeKey === event.target.value);
+                  if (endpoint) {
+                    selectSessionRuntimeEndpoint(endpoint.endpoint);
+                  }
+                }}
               >
                 {runtimeEndpoints.map((endpoint) => (
-                  <option key={endpointKey(endpoint.endpoint)} value={endpointKey(endpoint.endpoint)}>
+                  <option key={endpoint.runtimeScopeKey} value={endpoint.runtimeScopeKey}>
                     {endpoint.displayName}
                   </option>
                 ))}
@@ -1101,7 +1042,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 size="icon"
                 className="h-8 w-8 shrink-0 rounded-[calc(var(--radius-interactive)+2px)]"
                 onClick={handleCreateSessionForDefaultScope}
-                disabled={!selectedRuntimeEndpoint}
+                disabled={!selectedRuntimeEndpoint?.target}
                 aria-label={t('sidebar.newSession')}
                 title={t('sidebar.newSession')}
               >

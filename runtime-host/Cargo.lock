@@ -1556,6 +1556,7 @@ name = "matcha-agent"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "foundation",
  "futures-util",
  "libc",
@@ -1563,6 +1564,7 @@ dependencies = [
  "platform",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",

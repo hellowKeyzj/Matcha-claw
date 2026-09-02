@@ -52,7 +52,136 @@
         "pendingBlockerTaskId": "ID задачи {{taskId}}",
         "pendingBlockerSourceChat": "Чат",
         "pendingBlockerApprovalId": "ID подтверждения {{id}}",
-        "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения."
+        "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения.",
+        "account": {
+            "signedOut": "Не выполнен вход",
+            "syncing": "Синхронизация",
+            "offline": "Офлайн",
+            "signedIn": "Вход выполнен",
+            "checking": "Проверка входа",
+            "openMenu": "Открыть меню аккаунта",
+            "loginAria": "Войти в MatchaClaw",
+            "quotaEmpty": "Войдите, чтобы увидеть использование",
+            "subscription": "Подписка",
+            "appearanceSettings": "Вид / Настройки",
+            "about": "О приложении",
+            "logout": "Выйти",
+            "login": "Войти",
+            "register": "Регистрация",
+            "upgradeSubscription": "Обновить / Подписаться",
+            "plan": {
+                "trialing": "Пробный период",
+                "active": "Подписка активна",
+                "pastDue": "Требует оплаты",
+                "cancelled": "Отменена",
+                "expired": "Истекла",
+                "free": "Бесплатно"
+            },
+            "quota": {
+                "usage": "Использование",
+                "usedAmount": "Использовано {{amount}}",
+                "usedOfLimit": "{{used}} / {{limit}}",
+                "subscriptionDaily": "Дневной лимит плана",
+                "subscriptionWeekly": "Недельный лимит плана",
+                "subscriptionMonthly": "Месячный лимит плана",
+                "platformMonthly": "{{platform}} за месяц",
+                "totalUsage": "Всего использовано"
+            }
+        }
+    },
+    "subscriptionDialog": {
+        "title": "Подписка Matcha",
+        "tabs": {
+            "current": "Текущая подписка",
+            "checkout": "Выбрать план"
+        },
+        "loading": "Загрузка планов Matcha и способов оплаты...",
+        "units": {
+            "day": "дн.",
+            "week": "нед.",
+            "month": "мес.",
+            "year": "г.",
+            "cycle": "период"
+        },
+        "subscriptionStatus": {
+            "active": "Подписка активна",
+            "trialing": "Пробный период",
+            "pastDue": "Требует оплаты",
+            "cancelled": "Отменена",
+            "expired": "Истекла",
+            "none": "Нет подписки"
+        },
+        "current": {
+            "subscriptionCount": "Подписок Matcha: {{count}}",
+            "noSubscription": "Нет подписки Matcha",
+            "expiresAt": "Истекает: {{date}}",
+            "quotaTitle": "Лимит подписки",
+            "emptyQuota": "Для текущей подписки нет данных о лимитах.",
+            "platformQuotaTitle": "Лимит платформы"
+        },
+        "quota": {
+            "daily": "Дневной лимит",
+            "weekly": "Недельный лимит",
+            "monthly": "Месячный лимит",
+            "platformMonthly": "{{platform}} за месяц",
+            "unlimited": "Без лимита",
+            "usedOfLimit": "Использовано {{used}} / {{limit}}",
+            "remaining": "Осталось {{amount}}",
+            "resetsAt": "Сброс: {{date}}"
+        },
+        "plan": {
+            "duration": "{{count}} {{unit}}",
+            "otherPlans": "Другие планы",
+            "unitPlans": "Планы на {{unit}}",
+            "allPlans": "Все планы",
+            "empty": "Нет доступных планов Matcha.",
+            "rateMultiplier": "Множитель: ×{{value}}",
+            "validity": "Срок: {{duration}}",
+            "quotaLimit": "{{label}}: {{amount}}",
+            "defaultFeature": "Включает базовые преимущества подписки Matcha."
+        },
+        "payment": {
+            "title": "Оплата",
+            "method": "Способ оплаты",
+            "noMethod": "Нет доступных способов оплаты. Повторите попытку позже.",
+            "unlimited": "Без лимита",
+            "singleRange": "Диапазон одного платежа: {{min}} - {{max}}",
+            "feeRate": ", комиссия {{rate}}%",
+            "agreement": "Я принимаю условия подписки Matcha, описание плана и правила оплаты.",
+            "confirm": "Подтвердить оплату",
+            "confirmWithAmount": "Подтвердить оплату {{amount}}"
+        },
+        "order": {
+            "pending": "Заказ ожидает оплаты",
+            "statusLabel": "Статус оплаты",
+            "payAmount": "К оплате",
+            "expiresAt": "Истекает",
+            "openPayUrl": "Открыть страницу оплаты",
+            "qrCode": "QR-код оплаты",
+            "qrCodeAlt": "QR-код оплаты Matcha",
+            "copied": "Скопировано",
+            "tradeNo": "Номер платежного заказа",
+            "reload": "Обновить заказ",
+            "verify": "Проверить оплату",
+            "polling": "Автопроверка",
+            "status": {
+                "pending": "Ожидает оплаты",
+                "recharging": "Оплата обрабатывается",
+                "paid": "Оплачено",
+                "expired": "Истекло",
+                "failed": "Оплата не прошла",
+                "cancelled": "Отменено",
+                "unknown": "Неизвестный статус"
+            }
+        },
+        "errors": {
+            "loadPlansFailed": "Не удалось загрузить планы",
+            "verifyOrderFailed": "Не удалось проверить статус оплаты: {{message}}",
+            "createOrderFailed": "Не удалось создать платежный заказ: {{message}}",
+            "reloadOrderFailed": "Не удалось обновить заказ: {{message}}",
+            "openPayUrlFailed": "Не удалось открыть страницу оплаты: {{message}}",
+            "copyFailed": "Не удалось скопировать: {{message}}"
+        }
     },
     "actions": {
         "save": "Сохранить",

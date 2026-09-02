@@ -114,6 +114,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe('ClientHub', () => {
+  test('returns subscription confirmation with current server sequence', () => {
+    const hub = new ClientHub({ maxClientQueueSize: 8 })
+    const clientId = hub.registerClient(() => undefined, 'client-1')
+
+    expect(
+      hub.subscribe({
+        clientId,
+        sessionId: 'session-1',
+        afterSeq: 5,
+        lastSeq: 12,
+      }),
+    ).toEqual({
+      resultType: 'subscribed',
+      clientId,
+      sessionId: 'session-1',
+      afterSeq: 5,
+      lastSeq: 12,
+    })
+  })
+
   test('broadcasts only matching subscription events after the subscribed sequence', async () => {
     const sessionPayloads: string[] = []
     const otherSessionPayloads: string[] = []
@@ -126,16 +146,27 @@ describe('ClientHub', () => {
       otherSessionPayloads.push(payload)
     }, 'other-session-client')
 
-    hub.subscribe(sessionClientId, 'session-1', 5)
-    hub.subscribe(otherSessionClientId, 'session-2')
+    hub.subscribe({
+      clientId: sessionClientId,
+      sessionId: 'session-1',
+      afterSeq: 5,
+      lastSeq: 8,
+    })
+    hub.subscribe({
+      clientId: otherSessionClientId,
+      sessionId: 'session-2',
+      lastSeq: 1,
+    })
 
     const skippedBySeq = eventEnvelope('session-1', 5)
-    const deliveredToOtherSession = eventEnvelope('session-2', 1)
+    const skippedByCurrentSeq = eventEnvelope('session-2', 1)
     const deliveredToSession = eventEnvelope('session-1', 6)
+    const deliveredToOtherSession = eventEnvelope('session-2', 2)
 
     await hub.broadcast(skippedBySeq)
-    await hub.broadcast(deliveredToOtherSession)
+    await hub.broadcast(skippedByCurrentSeq)
     await hub.broadcast(deliveredToSession)
+    await hub.broadcast(deliveredToOtherSession)
 
     expect(sessionPayloads).toHaveLength(1)
     expect(otherSessionPayloads).toHaveLength(1)
@@ -153,7 +184,12 @@ describe('ClientHub', () => {
       payloads.push(payload)
     }, 'out-of-order-client')
 
-    hub.subscribe(clientId, 'session-1', 9)
+    hub.subscribe({
+      clientId,
+      sessionId: 'session-1',
+      afterSeq: 9,
+      lastSeq: 12,
+    })
     const higherSequence = eventEnvelope('session-1', 11)
     const delayedSequence = eventEnvelope('session-1', 10)
     const laterSequence = eventEnvelope('session-1', 12)
@@ -183,7 +219,11 @@ describe('ClientHub', () => {
       }
       completedEventIds.push(eventId)
     }, 'ordered-client')
-    hub.subscribe(clientId, 'ordered-session')
+    hub.subscribe({
+      clientId,
+      sessionId: 'ordered-session',
+      lastSeq: 0,
+    })
 
     const firstBroadcast = Promise.resolve(
       hub.broadcast(eventEnvelope('ordered-session', 1)),
@@ -234,7 +274,11 @@ describe('ClientHub', () => {
         await firstSendReleased.promise
       }
     }, 'byte-budget-client')
-    hub.subscribe(clientId, 'byte-session')
+    hub.subscribe({
+      clientId,
+      sessionId: 'byte-session',
+      lastSeq: 0,
+    })
 
     hub.broadcast(eventEnvelope('byte-session', 1))
     await waitFor(
@@ -275,7 +319,11 @@ describe('ClientHub', () => {
         await firstSendReleased.promise
       }
     }, 'slow-client')
-    hub.subscribe(clientId, 'overflow-session')
+    hub.subscribe({
+      clientId,
+      sessionId: 'overflow-session',
+      lastSeq: 0,
+    })
 
     const firstBroadcast = Promise.resolve(
       hub.broadcast(eventEnvelope('overflow-session', 1)),

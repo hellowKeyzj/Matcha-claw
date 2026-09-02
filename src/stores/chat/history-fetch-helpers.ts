@@ -26,6 +26,8 @@ import type {
   SessionRenderToolCard,
   SessionTimelineContentBlock,
 } from '../../types/session/tool-card';
+import { sanitizeCanonicalUserText } from './message-helpers';
+import { projectSessionMedia } from './media-projection';
 
 export interface HistoryWindowResult {
   view: SessionView;
@@ -103,28 +105,13 @@ function richMedia(content: SessionTimelineContentBlock): {
   images: SessionRenderImage[];
   attachedFiles: SessionRenderAttachedFile[];
 } {
-  if (content.kind !== 'media' || !content.reference) {
-    return { images: [], attachedFiles: [] };
-  }
-  const reference = content.reference.trim();
-  if (!reference || reference.startsWith('data:') || reference.startsWith('file:')) {
-    return { images: [], attachedFiles: [] };
-  }
-  const mimeType = content.mediaType ?? 'application/octet-stream';
-  if (mimeType.toLowerCase().startsWith('image/')) {
-    return { images: [{ url: reference, mimeType }], attachedFiles: [] };
-  }
-  return {
-    images: [],
-    attachedFiles: [{
-      fileName: 'media',
-      mimeType,
-      fileSize: 0,
-      preview: null,
-      gatewayUrl: reference,
-      source: 'message-ref',
-    }],
-  };
+  return projectSessionMedia(content);
+}
+
+function richLargeText(content: SessionTimelineContentBlock) {
+  return content.kind === 'largeText'
+    ? { contentRef: content.contentRef, totalBytes: content.totalBytes, loadedBytes: content.loadedBytes }
+    : undefined;
 }
 
 function richToolCard(
@@ -179,14 +166,17 @@ export function richTimelineItems(
     const key = richKey(message, index);
     if (message.role === 'user') {
       const media = (message.content ?? []).map(richMedia);
+      const largeTextBlock = message.content?.find((content) => content.kind === 'largeText');
+      const largeText = largeTextBlock ? richLargeText(largeTextBlock) : undefined;
       items.push({
         key,
         kind: 'user-message',
         role: 'user',
         sessionKey,
-        text: message.text,
+        text: sanitizeCanonicalUserText(largeTextBlock ? largeTextBlock.text : message.text),
         images: media.flatMap((entry) => entry.images),
         attachedFiles: media.flatMap((entry) => entry.attachedFiles),
+        ...(largeText ? { largeText } : {}),
         ...(message.messageId ? { messageId: message.messageId } : {}),
       });
       continue;
@@ -216,6 +206,13 @@ export function richTimelineItems(
     for (const [contentIndex, content] of (message.content ?? []).entries()) {
       if (content.kind === 'text') {
         segments.push({ kind: 'message', key: `${key}:message:${messageIndex++}`, text: content.text });
+      } else if (content.kind === 'largeText') {
+        segments.push({
+          kind: 'message',
+          key: `${key}:message:${messageIndex++}`,
+          text: content.text,
+          largeText: { contentRef: content.contentRef, totalBytes: content.totalBytes, loadedBytes: content.loadedBytes },
+        });
       } else if (content.kind === 'thinking') {
         segments.push({ kind: 'thinking', key: `${key}:thinking:${thinkingIndex++}`, text: content.text });
       } else if (content.kind === 'media') {

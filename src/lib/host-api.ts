@@ -24,12 +24,14 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from './session-trace';
-import type {
-  SessionApprovalDecision,
-  SessionApprovalRequestItem,
-  SessionCatalogItem,
-  SessionListResult,
-  SessionView,
+import {
+  decodeSessionContentLoadResult,
+  type SessionApprovalDecision,
+  type SessionApprovalRequestItem,
+  type SessionCatalogItem,
+  type SessionContentLoadResult,
+  type SessionListResult,
+  type SessionView,
 } from '../types/session/snapshot';
 
 const DEFAULT_HOST_API_PORT = 13210;
@@ -151,6 +153,8 @@ export type HostSessionCatalogItem = SessionCatalogItem;
 export type HostSessionLoadResult = SessionView;
 
 export type HostSessionWindowResult = SessionView;
+
+export type HostSessionContentLoadResult = SessionContentLoadResult;
 
 export type HostSessionAbortResult = Readonly<{ outcome?: string; projection?: unknown }>;
 
@@ -847,7 +851,8 @@ function isSafeWorkspaceRelativePath(value: string): boolean {
 function isWorkspaceGatewayUrl(value: string): boolean {
   return value.length > 0
     && value.length <= 4096
-    && !hasControlCharacter(value);
+    && !hasControlCharacter(value)
+    && /^(?:\/?api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*|https?:\/\/[^/\s]+\/api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*)$/.test(value);
 }
 
 function isIdentifier(value: string): boolean {
@@ -1051,6 +1056,24 @@ export async function hostSessionWindowFetch(
   });
 }
 
+export async function hostSessionContentLoad(
+  payload: {
+    endpointSessionId?: string;
+    sessionIdentity: SessionIdentity;
+    contentRef: string;
+    offset: number;
+    limit?: number;
+  },
+  options?: SessionCapabilityOptions,
+): Promise<HostSessionContentLoadResult> {
+  const result = await sessionIdentityCapabilityExecute<unknown>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.content.load',
+    payload: bindSessionIdentityInput(payload),
+  }, options);
+  return decodeSessionContentLoadResult(result);
+}
+
 export async function hostSessionNew(
   payload: {
     endpointSessionId?: string;
@@ -1206,6 +1229,7 @@ export async function hostSessionAbort(
   payload: {
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
+    runId?: string;
     approvalIds?: string[];
   },
 ): Promise<HostSessionAbortResult> {

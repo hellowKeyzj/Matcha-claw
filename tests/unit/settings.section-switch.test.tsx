@@ -153,6 +153,9 @@ describe('settings page section switch', () => {
       error: null,
       endpoints: [],
       hasLoadedOnce: false,
+      revision: 0,
+      changedRuntimeScopeKeys: [],
+      revisionByRuntimeScopeKey: {},
     });
     licenseRuntimeMock.gate.mockResolvedValue({
       state: 'blocked',

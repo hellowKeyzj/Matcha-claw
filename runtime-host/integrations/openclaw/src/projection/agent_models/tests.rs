@@ -155,7 +155,16 @@ fn applies_models_without_overwriting_provider_transport_or_siblings() {
                         "baseUrl": "https://api.anthropic.com",
                         "api": "anthropic-messages",
                         "agentRuntime": { "id": "pi" },
-                        "models": [{ "id": "old", "name": "old" }]
+                        "models": [
+                            {
+                                "id": "claude-sonnet-4-6",
+                                "name": "Old Claude",
+                                "input": ["text", "image"],
+                                "reasoning": true,
+                                "customField": "keep-me"
+                            },
+                            { "id": "old", "name": "old", "customField": "drop-me" }
+                        ]
                     },
                     "openai": { "baseUrl": "https://api.openai.com", "models": [] }
                 },
@@ -206,12 +215,77 @@ fn applies_models_without_overwriting_provider_transport_or_siblings() {
                         "name": "claude-sonnet-4-6",
                         "input": ["text", "image"],
                         "contextWindow": 200_000,
-                        "maxTokens": 64_000
+                        "maxTokens": 64_000,
+                        "reasoning": true,
+                        "customField": "keep-me"
                     }]
                 },
                 "openai": { "baseUrl": "https://api.openai.com", "models": [] }
             },
             "pricing": { "enabled": true }
+        }))
+    );
+}
+
+#[test]
+fn new_model_rows_do_not_inherit_metadata_from_previous_ids() {
+    let root = TestRoot::new();
+    fs::write(
+        root.config_path(),
+        serde_json::to_vec(&json!({
+            "models": {
+                "providers": {
+                    "custom": {
+                        "models": [{
+                            "id": "old-model",
+                            "name": "old-model",
+                            "reasoning": true,
+                            "customField": "old-only"
+                        }]
+                    }
+                }
+            }
+        }))
+        .expect("serialize seed"),
+    )
+    .expect("seed config");
+    let models = ProviderModels::try_new(
+        ProviderId::try_new("custom".into()).unwrap(),
+        vec![
+            Model::try_new(
+                ModelId::try_new("new-model".into()).unwrap(),
+                None,
+                None,
+                vec![InputModality::Text],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+
+    root.store()
+        .update(|document| {
+            if models.apply_to_document(document) {
+                OpenClawConfigMutation::changed()
+            } else {
+                OpenClawConfigMutation::unchanged()
+            }
+        })
+        .expect("apply models");
+    let document = root.store().read().expect("read config");
+
+    assert_eq!(
+        document.get("models"),
+        Some(&json!({
+            "providers": {
+                "custom": {
+                    "models": [{
+                        "id": "new-model",
+                        "name": "new-model",
+                        "input": ["text"]
+                    }]
+                }
+            }
         }))
     );
 }

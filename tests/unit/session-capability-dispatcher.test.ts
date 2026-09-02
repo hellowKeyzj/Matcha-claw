@@ -60,6 +60,24 @@ function workspaceMediaRequest(operationId: string, input: Record<string, unknow
   };
 }
 
+function sessionContentRequest() {
+  const identity = { endpoint: openClawEndpoint, agentId: 'main', sessionKey: 'agent:main:main' };
+  return {
+    id: 'session.management',
+    operationId: 'sessions.content.load',
+    scope: { kind: 'session', identity },
+    target: { kind: 'session', identity },
+    input: {
+      sessionKey: identity.sessionKey,
+      endpointSessionId: 'main',
+      sessionIdentity: identity,
+      contentRef: 'content-ref-1',
+      offset: 7,
+      limit: 65536,
+    },
+  };
+}
+
 function workspaceDeps(execute: ReturnType<typeof vi.fn>) {
   return {
     deps: {
@@ -140,6 +158,26 @@ describe('session capability dispatcher', () => {
     } });
   });
 
+  it('accepts full outgoing Gateway SVG thumbnail requests', async () => {
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: {
+      preview: 'data:image/svg+xml;base64,PHN2Zw==',
+      fileSize: 6,
+    } });
+    const input = {
+      gatewayUrl: 'https://gateway.local/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
+      mimeType: 'image/svg+xml',
+      agentId: 'main',
+    };
+
+    const response = await dispatchSessionCapability(workspaceMediaRequest('media.thumbnail', input), workspaceDeps(execute).deps);
+
+    expect(response).toEqual({ status: 200, body: {
+      preview: 'data:image/svg+xml;base64,PHN2Zw==',
+      fileSize: 6,
+    } });
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ input: expect.objectContaining(input) }));
+  });
+
   it('keeps stagePaths and stageBuffer public results opaque', async () => {
     const receipt = {
       reference: 'media_0123456789abcdef0123456789abcdef',
@@ -185,6 +223,40 @@ describe('session capability dispatcher', () => {
     expect(directResolve).toEqual({ status: 400, body: { success: false, error: 'Workspace media request is invalid' } });
     expect(oversized?.status).toBe(400);
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('dispatches session content chunk loads through the content transport', async () => {
+    const load = vi.fn().mockResolvedValue({ status: 200, body: {
+      contentRef: 'content-ref-1',
+      offset: 7,
+      text: 'chunk',
+      nextOffset: 12,
+      totalBytes: 12,
+      complete: true,
+    } });
+    const timelineLoad = vi.fn();
+    const window = vi.fn();
+    const list = vi.fn();
+    const request = sessionContentRequest();
+
+    const response = await dispatchSessionCapability(request, {
+      sessionContentTransport: { load },
+      sessionTimelineTransport: { load: timelineLoad, window },
+      matchaSessionListTransport: { list },
+    } as never);
+
+    expect(response).toEqual({ status: 200, body: {
+      contentRef: 'content-ref-1',
+      offset: 7,
+      text: 'chunk',
+      nextOffset: 12,
+      totalBytes: 12,
+      complete: true,
+    } });
+    expect(load).toHaveBeenCalledWith(request);
+    expect(timelineLoad).not.toHaveBeenCalled();
+    expect(window).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
   });
 
   it.each(['sessions.load', 'sessions.window'] as const)(

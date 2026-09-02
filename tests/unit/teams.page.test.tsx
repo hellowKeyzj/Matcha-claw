@@ -56,17 +56,14 @@ function teamMeta(input: Partial<TeamMeta> = {}): TeamMeta {
 function validationResult(input: { version?: string } = {}) {
   const version = input.version ?? '1.0.0';
   return {
-    valid: true,
+    status: 'valid',
     package: {
+      selectionId: `teamskill:v1:${'a'.repeat(64)}`,
       name: 'ascendc-team',
       version,
       kind: 'team-skill',
       description: `AscendC team ${version}`,
-      dependencies: { skills: [], tools: [] },
-      sourcePath: `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
     },
-    errors: [],
-    warnings: [],
   };
 }
 
@@ -106,7 +103,7 @@ function mockTeamRuntimeResponses(input: {
       case 'team.dependencyPlan':
         return plan;
       case 'team.delete':
-        return { teamId: body.teamId, deleted: true, deletedRunIds: [], deletedAgentIds: [] };
+        return { teamId: body.teamId, state: 'tombstoned', deleted: true, deletedRunIds: [], deletedAgentIds: [] };
       default:
         throw new Error(`Unexpected team runtime operation: ${payload.operationId ?? 'unknown'}`);
     }
@@ -352,6 +349,7 @@ describe('teams page', () => {
           expect.objectContaining({
             agentId: 'agent-lead',
             agentName: 'Lead Agent',
+            workspace: '/agents/lead',
             roleId: 'leader',
             isLeader: true,
             skills: ['planning'],
@@ -361,6 +359,7 @@ describe('teams page', () => {
           expect.objectContaining({
             agentId: 'agent-builder',
             agentName: 'Builder Agent',
+            workspace: '/agents/builder',
             roleId: 'agent-builder',
             isLeader: false,
             skills: ['coding'],

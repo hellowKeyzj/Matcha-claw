@@ -330,10 +330,17 @@ export function isTrulyEmptyNonMainSession(
   currentSessionKey: string,
   state: Pick<ChatStoreState, 'loadedSessions'>,
 ): boolean {
-  const record = getSessionRecord(state, currentSessionKey);
+  const sessionKey = currentSessionKey.trim();
+  if (!sessionKey) {
+    return false;
+  }
+  const record = state.loadedSessions[sessionKey];
+  if (!record) {
+    return false;
+  }
   return !record.meta.preferred
     && record.meta.kind !== 'main'
-    && !currentSessionKey.endsWith(':main')
+    && !sessionKey.endsWith(':main')
     && getSessionItemCount(record) === 0
     && !record.meta.lastActivityAt
     && !record.meta.label;

@@ -11,12 +11,12 @@ fn id(value: &str) -> OpaqueId {
 
 fn graph_patch(run_id: &str, command_id: &str, key: &str, created_at: u64) -> RunCommand {
     let patch = GraphPatch::try_new(
-        id("graph-a"),
-        id("plan-a"),
+        "graph-a",
+        "plan-a",
         vec![GraphPatchOperation::AddNode {
-            node_id: id("node-a"),
+            node_id: "node-a".to_owned(),
             kind: GraphNodeKind::Work,
-            role_id: Some(id("role-a")),
+            role_id: Some("role-a".to_owned()),
         }],
     )
     .unwrap();
@@ -80,6 +80,22 @@ fn same_run_records_accepted_graph_patch_rejected_stale_node_and_accepted_approv
 }
 
 #[test]
+fn runtime_generated_graph_patch_event_ids_stay_bounded() {
+    let mut ledger = EventLedger::default();
+    let run_id = "teamrun-e6457829-ec5d-44c9-b18a-06239cf7c000";
+    let key = "team:123456789012:graph-patch:550e8400-e29b-41d4-a716-446655440000";
+    let command_id = format!("graph-patch:{key}");
+
+    let receipt = ledger
+        .try_accept(graph_patch(run_id, &command_id, key, 10))
+        .unwrap();
+
+    assert_eq!(receipt.events().len(), 1);
+    assert!(receipt.events()[0].event_id().len() <= 128);
+    assert_eq!(EventLedger::restore(ledger.snapshot()).unwrap(), ledger);
+}
+
+#[test]
 fn rejected_commands_are_durable_audit_records_without_teamrun_events() {
     let mut ledger = EventLedger::default();
     let command = RunCommand::new(
@@ -102,13 +118,12 @@ fn rejected_commands_are_durable_audit_records_without_teamrun_events() {
 }
 
 #[test]
-fn accepted_command_idempotency_replays_without_reemitting_an_event() {
+fn accepted_command_idempotency_replays_without_requiring_the_same_created_at() {
     let mut ledger = EventLedger::default();
-    let command = graph_patch("run-a", "command-patch", "key-patch", 10);
 
-    let accepted = ledger.accept(command.clone());
+    let accepted = ledger.accept(graph_patch("run-a", "command-patch", "key-patch", 10));
     let facts_before = ledger.snapshot();
-    let replay = ledger.accept(command);
+    let replay = ledger.accept(graph_patch("run-a", "command-patch", "key-patch", 20));
 
     assert!(replay.is_replay());
     assert_eq!(replay.record(), accepted.record());
@@ -196,18 +211,29 @@ fn same_key_with_different_immutable_input_and_duplicate_command_id_fail_closed(
 }
 
 #[test]
-fn unknown_stale_node_rejection_replays_without_creating_a_run_event() {
+fn unknown_stale_node_rejection_replays_without_requiring_the_same_created_at() {
     let mut ledger = EventLedger::default();
-    let command = RunCommand::new(
-        id("unknown-run"),
-        id("command-stale"),
-        id("key-stale"),
-        CommandPayload::NodeProgress(super::NodeProgressCommand::new(id("missing-execution"))),
-        20,
-    );
 
-    let rejected = ledger.reject(command.clone(), CommandRejection::UnknownRun);
-    let replay = ledger.reject(command, CommandRejection::UnknownRun);
+    let rejected = ledger.reject(
+        RunCommand::new(
+            id("unknown-run"),
+            id("command-stale"),
+            id("key-stale"),
+            CommandPayload::NodeProgress(super::NodeProgressCommand::new(id("missing-execution"))),
+            20,
+        ),
+        CommandRejection::UnknownRun,
+    );
+    let replay = ledger.reject(
+        RunCommand::new(
+            id("unknown-run"),
+            id("command-stale"),
+            id("key-stale"),
+            CommandPayload::NodeProgress(super::NodeProgressCommand::new(id("missing-execution"))),
+            30,
+        ),
+        CommandRejection::UnknownRun,
+    );
 
     assert!(replay.is_replay());
     assert_eq!(replay.record(), rejected.record());

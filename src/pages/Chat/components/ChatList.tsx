@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type MouseEventHandler,
   type RefObject,
   type TouchEventHandler,
   type WheelEventHandler,
@@ -58,6 +59,7 @@ export interface ChatListProps {
   showThinking: boolean;
   userAvatarDataUrl: string | null;
   sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onLoadOlder: () => void;
   loadOlderLabel: string;
@@ -79,6 +81,7 @@ interface ChatListSurfaceProps {
   onScroll: () => void;
   onTouchMove: TouchEventHandler<HTMLDivElement>;
   onWheel: WheelEventHandler<HTMLDivElement>;
+  onViewportClickCapture: MouseEventHandler<HTMLDivElement>;
   items: ChatRenderItem[];
   showLoadOlder: boolean;
   isLoadingOlder: boolean;
@@ -88,6 +91,7 @@ interface ChatListSurfaceProps {
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
@@ -97,7 +101,7 @@ interface ChatListSurfaceProps {
 
 type ChatListContentProps = Omit<
   ChatListSurfaceProps,
-  'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'scrollChromeStore'
+  'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'onViewportClickCapture' | 'scrollChromeStore'
 >;
 
 function getMessageDataAttributes(item: ChatRenderItem) {
@@ -175,6 +179,7 @@ function renderChatItem(input: {
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
@@ -189,6 +194,7 @@ function renderChatItem(input: {
         replyStartedAt={input.replyStartedAtByAssistantKey.get(input.item.key)}
         userAvatarImageUrl={input.userAvatarImageUrl}
         sessionIdentity={input.sessionIdentity}
+        endpointSessionId={input.endpointSessionId}
         workspaceContext={input.workspaceContext}
         onOpenAttachedArtifact={input.onOpenAttachedArtifact}
       />
@@ -240,6 +246,8 @@ function renderChatItem(input: {
     <ChatMessage
       item={input.item as ChatUserMessageItem}
       userAvatarImageUrl={input.userAvatarImageUrl}
+      sessionIdentity={input.sessionIdentity}
+      endpointSessionId={input.endpointSessionId}
     />
   );
 }
@@ -257,6 +265,7 @@ const ChatListContent = memo(function ChatListContent({
   showThinking,
   userAvatarImageUrl,
   sessionIdentity,
+  endpointSessionId,
   workspaceContext,
   onJumpToItemKey,
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
@@ -317,6 +326,7 @@ const ChatListContent = memo(function ChatListContent({
                     showThinking,
                     userAvatarImageUrl,
                     sessionIdentity,
+                    endpointSessionId,
                     workspaceContext,
                     onJumpToItemKey,
                     artifactFilesByGraphKey,
@@ -387,6 +397,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   onScroll,
   onTouchMove,
   onWheel,
+  onViewportClickCapture,
   items,
   showLoadOlder,
   isLoadingOlder,
@@ -396,6 +407,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   showThinking,
   userAvatarImageUrl,
   sessionIdentity,
+  endpointSessionId,
   workspaceContext,
   onJumpToItemKey,
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
@@ -421,6 +433,7 @@ export const ChatListSurface = memo(function ChatListSurface({
         onScroll={onScroll}
         onTouchMoveCapture={onTouchMove}
         onWheelCapture={onWheel}
+        onClickCapture={onViewportClickCapture}
       >
         <div className={CHAT_LAYOUT_TOKENS.threadRail}>
           <div
@@ -445,6 +458,7 @@ export const ChatListSurface = memo(function ChatListSurface({
               showThinking={showThinking}
               userAvatarImageUrl={userAvatarImageUrl}
               sessionIdentity={sessionIdentity}
+              endpointSessionId={endpointSessionId}
               workspaceContext={workspaceContext}
               onJumpToItemKey={onJumpToItemKey}
               artifactFilesByGraphKey={artifactFilesByGraphKey}
@@ -473,6 +487,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     showThinking,
     userAvatarDataUrl,
     sessionIdentity,
+    endpointSessionId,
     workspaceContext,
     onLoadOlder,
     loadOlderLabel,
@@ -511,6 +526,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     handleViewportWheel,
     handleViewportScroll,
     notifyViewportGeometryChanged,
+    handleViewportClickCapture,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     scrollViewportByWheelDelta,
@@ -610,6 +626,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onScroll={handleViewportScroll}
       onTouchMove={handleViewportTouchMove}
       onWheel={handleViewportWheel}
+      onViewportClickCapture={handleViewportClickCapture}
       items={items}
       showLoadOlder={viewport.hasMore || viewport.isLoadingMore}
       isLoadingOlder={viewport.isLoadingMore}
@@ -619,6 +636,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       showThinking={showThinking}
       userAvatarImageUrl={userAvatarDataUrl}
       sessionIdentity={sessionIdentity}
+      endpointSessionId={endpointSessionId}
       workspaceContext={workspaceContext}
       onJumpToItemKey={handleJumpToItemKey}
       artifactFilesByGraphKey={artifactFilesByGraphKey}

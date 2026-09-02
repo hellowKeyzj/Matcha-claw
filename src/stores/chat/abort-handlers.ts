@@ -43,10 +43,11 @@ function scheduleAbortRetry(params: {
   sessionKey: string;
   endpointSessionId?: string;
   sessionIdentity: ChatStoreState['loadedSessions'][string]['meta']['sessionIdentity'];
+  runId?: string;
   approvalIds: string[];
   startedAtMs: number;
 }): void {
-  const { set, get, sessionKey, endpointSessionId, sessionIdentity, approvalIds, startedAtMs } = params;
+  const { set, get, sessionKey, endpointSessionId, sessionIdentity, runId, approvalIds, startedAtMs } = params;
   if (!sessionIdentity) {
     return;
   }
@@ -62,6 +63,7 @@ function scheduleAbortRetry(params: {
     void hostSessionAbort({
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
+      ...(runId ? { runId } : {}),
       approvalIds,
     }).then(() => {
       scheduleAbortRetry(params);
@@ -89,10 +91,12 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
       },
     }));
     const target = resolveSessionOperationTarget(get(), sessionKey);
+    const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? undefined;
     const approvalIds = pendingApprovals.map((approval) => approval.id);
     await hostSessionAbort({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
+      ...(runId ? { runId } : {}),
       approvalIds,
     });
     scheduleAbortRetry({
@@ -101,6 +105,7 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
       sessionKey,
       endpointSessionId: target.endpointSessionId,
       sessionIdentity: target.sessionIdentity,
+      runId,
       approvalIds,
       startedAtMs: Date.now(),
     });

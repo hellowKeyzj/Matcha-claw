@@ -33,7 +33,9 @@ use crate::{
     StartTrigger, TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember,
     TeamNodeEvent, TeamNodeEventOutcome, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
     TerminalObservationOutcome, TriggerFireError, TriggerFireRequest, TriggerRegistration,
-    TriggerSource, WorkAssignment, WorkGroup, begin_delivery, query_team_run, reduce,
+    TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
+    ports::materialization::NativeWorkspaceReceipt,
+    query_team_run, reduce,
     run::event::NodeProgressCommand,
     run::lifecycle::{
         BeginCancellationOutcome, CreateGraphRunOutcome, ResumeOutcome, RoleAbortOutcome,
@@ -284,7 +286,7 @@ fn graph_replace_records_once_replays_exactly_and_survives_reopen() {
         crate::run::event::TeamEventPayload::GraphReplaced {
             graph_id,
             workflow_plan_id,
-        } if graph_id.as_str() == "graph:replacement" && workflow_plan_id.as_str() == "plan:replacement"
+        } if graph_id == "graph:replacement" && workflow_plan_id == "plan:replacement"
     ));
     let committed_len = fs::metadata(&path).unwrap().len();
     assert!(
@@ -756,10 +758,10 @@ fn team_graph_patch_replays_without_appending_a_frame_and_conflicts_fail_closed(
         OpaqueId::try_new("patch-key").unwrap(),
         CommandPayload::GraphPatch(
             crate::run::event::GraphPatch::try_new(
-                OpaqueId::try_new("graph:one").unwrap(),
-                OpaqueId::try_new("plan:one").unwrap(),
+                "graph:one",
+                "plan:one",
                 vec![crate::run::event::GraphPatchOperation::RemoveNode {
-                    node_id: OpaqueId::try_new("start").unwrap(),
+                    node_id: "start".to_owned(),
                 }],
             )
             .unwrap(),
@@ -790,10 +792,10 @@ fn team_graph_patch_replays_without_appending_a_frame_and_conflicts_fail_closed(
         OpaqueId::try_new("patch-key-valid").unwrap(),
         CommandPayload::GraphPatch(
             crate::run::event::GraphPatch::try_new(
-                OpaqueId::try_new("graph:one").unwrap(),
-                OpaqueId::try_new("plan:one").unwrap(),
+                "graph:one",
+                "plan:one",
                 vec![crate::run::event::GraphPatchOperation::AddNode {
-                    node_id: OpaqueId::try_new("end").unwrap(),
+                    node_id: "end".to_owned(),
                     kind: crate::run::event::GraphNodeKind::End,
                     role_id: None,
                 }],
@@ -1740,6 +1742,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
             3,
         )
         .unwrap();
+    assert!(store.team_materialization_removal(&team).is_none());
     store
         .tombstone_graph_run(&GraphRunId::new("run:one"), "tombstone:one", 4)
         .unwrap();
@@ -4845,10 +4848,12 @@ fn terminal_materialization() -> MaterializationReceipt {
     MaterializationReceipt::try_new(
         team_id(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-        vec![RoleMaterializationReceipt::new(
+        vec![RoleMaterializationReceipt::with_native_workspace(
             RoleId::try_new("leader").unwrap(),
             ManagedAgentReference::try_new("agent:one").unwrap(),
+            crate::RoleMaterializationOwnership::Managed,
             RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+            NativeWorkspaceReceipt::try_new("workspace:path:one").unwrap(),
         )],
     )
     .unwrap()

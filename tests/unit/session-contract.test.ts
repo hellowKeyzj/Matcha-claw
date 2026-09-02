@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   decodeLegacySessionUpdateDelta,
+  decodeSessionContentLoadResponse,
   decodeSessionDelta,
   decodeSessionView,
   isSessionDelta,
@@ -10,8 +11,12 @@ import {
   assistantItem,
   completeFact,
   incompleteFact,
+  largeTextContent,
   sessionDelta,
   sessionView,
+  toolUseContent,
+  toolView,
+  userItem,
   windowView,
 } from './helpers/session-fixtures';
 
@@ -88,6 +93,40 @@ describe('strict SessionView and SessionDelta contract fixtures', () => {
         status: 'streaming',
       }],
     });
+    const toolDelta = sessionDelta(sessionKey, {
+      epoch: 2,
+      seq: 7,
+      cursor: 7,
+      routeKey: 'renderer-route:fixture',
+      runId: 'run-1',
+      changes: [{
+        kind: 'toolUpdated',
+        tool: toolView('tool-call-1', {
+          runId: 'run-1',
+          name: 'Read',
+          phase: 'completed',
+          input: { file_path: 'src/main.rs' },
+          inputText: '{"file_path":"src/main.rs"}',
+          summary: null,
+          output: [{ type: 'text', text: 'ok' }],
+          isError: false,
+        }),
+      }],
+    });
+    const viewWithTool = sessionView(sessionKey, {
+      identity,
+      items: completeFact([assistantItem('item-1', '', {
+        runId: 'run-1',
+        segments: [toolUseContent('Read', 'tool-call-1')],
+      })]),
+      tools: completeFact([toolView('tool-call-1', {
+        runId: 'run-1',
+        name: 'Read',
+        input: { file_path: 'src/main.rs' },
+        inputText: '{"file_path":"src/main.rs"}',
+        output: [{ type: 'text', text: 'ok' }],
+      })]),
+    });
 
     expect(isSessionView(view)).toBe(true);
     expect(decodeSessionView(view)).toEqual(view);
@@ -95,6 +134,10 @@ describe('strict SessionView and SessionDelta contract fixtures', () => {
     expect(decodeSessionDelta(delta)).toEqual(delta);
     expect(isSessionDelta(messageDelta)).toBe(true);
     expect(decodeSessionDelta(messageDelta)).toEqual(messageDelta);
+    expect(isSessionDelta(toolDelta)).toBe(true);
+    expect(decodeSessionDelta(toolDelta)).toEqual(toolDelta);
+    expect(isSessionView(viewWithTool)).toBe(true);
+    expect(decodeSessionView(viewWithTool)).toEqual(viewWithTool);
     expect(decodeLegacySessionUpdateDelta({ kind: 'delta', delta })).toEqual(delta);
   });
 
@@ -125,5 +168,40 @@ describe('strict SessionView and SessionDelta contract fixtures', () => {
       runId: 'run-1',
       snapshot: legacyView,
     })).toBeNull();
+  });
+
+  it('accepts largeText content previews and rejects malformed byte ranges', () => {
+    const view = sessionView(sessionKey, {
+      identity,
+      items: completeFact([
+        userItem('item-user-1', '', { content: [largeTextContent('preview', 'content-ref-1', 10, 7)] }),
+      ]),
+    });
+    const malformed = sessionView(sessionKey, {
+      identity,
+      items: completeFact([
+        userItem('item-user-1', '', { content: [largeTextContent('preview', 'content-ref-1', 6, 7)] }),
+      ]),
+    });
+
+    expect(isSessionView(view)).toBe(true);
+    expect(decodeSessionView(view)).toEqual(view);
+    expect(isSessionView(malformed)).toBe(false);
+    expect(decodeSessionView(malformed)).toBeNull();
+  });
+
+  it('decodes session content load responses without private fields', () => {
+    const response = {
+      contentRef: 'content-ref-1',
+      offset: 7,
+      text: 'chunk',
+      nextOffset: 12,
+      totalBytes: 12,
+      complete: true,
+    };
+
+    expect(decodeSessionContentLoadResponse(response)).toEqual(response);
+    expect(decodeSessionContentLoadResponse({ ...response, private: 'secret' })).toBeNull();
+    expect(decodeSessionContentLoadResponse({ ...response, nextOffset: 13 })).toBeNull();
   });
 });

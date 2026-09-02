@@ -1,16 +1,19 @@
 use std::path::PathBuf;
 
 use organization::{
-    BeginCancellationOutcome, CreateGraphRunOutcome, GraphDefinition, GraphPatch, GraphRunId,
-    GraphRunPurgeOutcome, IdempotencyKey, ResumeOutcome, RoleChatAdmission,
-    RoleChatAdmissionOutcome, StoreFault, TeamDecisionReceipt, TeamDecisionType,
-    TeamGraphContextResult, TeamGraphContextView, TeamId, TeamNodeEventOutcome,
-    TeamRunDiagnosticsQueryOutcome, TeamRunQueryOutcome, TeamTriggerFireOutcome,
-    TriggerFireRequest,
+    BeginCancellationOutcome, CommandPayload, CreateGraphRunOutcome, EdgeAction, GraphDefinition,
+    GraphPatch, GraphPatchOperation, GraphRunId, GraphRunPurgeOutcome, IdempotencyKey, NodeKind,
+    ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault,
+    TeamDecisionReceipt, TeamDecisionType, TeamGraphContextResult, TeamGraphContextView, TeamId,
+    TeamNodeEventOutcome, TeamRunDiagnosticsQueryOutcome, TeamRunQueryOutcome,
+    TeamTriggerFireOutcome, TriggerFireRequest,
     package::{TeamSkillDependencyPlanResult, TeamSkillPackageValidation},
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
-        event::OpaqueId,
+        event::{
+            GraphEdgeAction, GraphNodeKind, GraphPatch as EventGraphPatch,
+            GraphPatchOperation as EventGraphPatchOperation, InvalidEventInput, OpaqueId,
+        },
         public_projection::TeamRunPublicSnapshotQueryOutcome,
         scheduler::NodePromptRetryDueQueryOutcome,
     },
@@ -41,6 +44,138 @@ pub(crate) enum TeamRuntimeCreateSource {
 /// This is deliberately an owner request, not a public DTO. Public adapters must construct the
 /// domain inputs below before entering the Host actor; unsupported legacy projections remain an
 /// explicit status rather than an invented success payload.
+pub(crate) struct ManualTeamProvision {
+    pub(crate) team_name: String,
+    pub(crate) roles: Vec<organization::ManualTeamRoleBinding>,
+}
+
+pub(crate) struct TeamGraphPatchDraft {
+    pub(crate) run_id: GraphRunId,
+    pub(crate) audit_run_id: OpaqueId,
+    pub(crate) command_id: OpaqueId,
+    pub(crate) idempotency_key: OpaqueId,
+    pub(crate) base_graph_id: Option<String>,
+    pub(crate) base_workflow_plan_id: Option<String>,
+    pub(crate) operations: Vec<GraphPatchOperation>,
+    pub(crate) created_at: u64,
+}
+
+pub(crate) enum TeamGraphPatchResolveError {
+    InvalidInput,
+}
+
+impl TeamGraphPatchDraft {
+    pub(crate) fn resolve(
+        self,
+        current: &GraphDefinition,
+    ) -> Result<(RunCommand, GraphPatch), TeamGraphPatchResolveError> {
+        let base_graph_id = self
+            .base_graph_id
+            .unwrap_or_else(|| current.graph_id().to_owned());
+        let base_workflow_plan_id = self
+            .base_workflow_plan_id
+            .unwrap_or_else(|| current.workflow_plan_id().to_owned());
+        let patch = GraphPatch::new(
+            base_graph_id.clone(),
+            base_workflow_plan_id.clone(),
+            self.operations,
+        )
+        .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?;
+        let command_patch = EventGraphPatch::try_new(
+            base_graph_id,
+            base_workflow_plan_id,
+            patch
+                .operations()
+                .iter()
+                .map(team_event_graph_patch_operation)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(map_event_input)?;
+        Ok((
+            RunCommand::new(
+                self.audit_run_id,
+                self.command_id,
+                self.idempotency_key,
+                CommandPayload::GraphPatch(command_patch),
+                self.created_at,
+            ),
+            patch,
+        ))
+    }
+}
+
+fn map_event_input(_: InvalidEventInput) -> TeamGraphPatchResolveError {
+    TeamGraphPatchResolveError::InvalidInput
+}
+
+fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGraphPatchOperation {
+    match operation {
+        GraphPatchOperation::AddNode(node) => EventGraphPatchOperation::AddNode {
+            node_id: node.id().as_str().to_owned(),
+            kind: team_event_graph_node_kind(node.kind()),
+            role_id: team_event_graph_node_role_id(node),
+        },
+        GraphPatchOperation::ReplaceNode(node) => EventGraphPatchOperation::ReplaceNode {
+            node_id: node.id().as_str().to_owned(),
+            kind: team_event_graph_node_kind(node.kind()),
+            role_id: team_event_graph_node_role_id(node),
+        },
+        GraphPatchOperation::RemoveNode(node_id) => EventGraphPatchOperation::RemoveNode {
+            node_id: node_id.as_str().to_owned(),
+        },
+        GraphPatchOperation::AddEdge(edge) => EventGraphPatchOperation::AddEdge {
+            edge_id: edge.id().as_str().to_owned(),
+            source_node_id: edge.source_node_id().as_str().to_owned(),
+            target_node_id: edge.target_node_id().as_str().to_owned(),
+            action: team_event_graph_edge_action(edge.action()),
+        },
+        GraphPatchOperation::ReplaceEdge(edge) => EventGraphPatchOperation::ReplaceEdge {
+            edge_id: edge.id().as_str().to_owned(),
+            source_node_id: edge.source_node_id().as_str().to_owned(),
+            target_node_id: edge.target_node_id().as_str().to_owned(),
+            action: team_event_graph_edge_action(edge.action()),
+        },
+        GraphPatchOperation::RemoveEdge(edge_id) => EventGraphPatchOperation::RemoveEdge {
+            edge_id: edge_id.as_str().to_owned(),
+        },
+        GraphPatchOperation::SetMetadata { key, value } => EventGraphPatchOperation::SetMetadata {
+            key: key.clone(),
+            value: value.clone(),
+        },
+    }
+}
+
+fn team_event_graph_node_kind(kind: NodeKind) -> GraphNodeKind {
+    match kind {
+        NodeKind::Start => GraphNodeKind::Start,
+        NodeKind::Work => GraphNodeKind::Work,
+        NodeKind::Review => GraphNodeKind::Review,
+        NodeKind::HumanDecision => GraphNodeKind::HumanDecision,
+        NodeKind::ScriptReview => GraphNodeKind::ScriptReview,
+        NodeKind::Join => GraphNodeKind::Join,
+        NodeKind::End => GraphNodeKind::End,
+    }
+}
+
+fn team_event_graph_edge_action(action: EdgeAction) -> GraphEdgeAction {
+    match action {
+        EdgeAction::Activate => GraphEdgeAction::Activate,
+        EdgeAction::Rework => GraphEdgeAction::Rework,
+        EdgeAction::Gate => GraphEdgeAction::Gate,
+        EdgeAction::Finish => GraphEdgeAction::Finish,
+    }
+}
+
+fn team_event_graph_node_role_id(node: &organization::NodeDefinition) -> Option<String> {
+    node.work_assignment()
+        .map(|assignment| assignment.role_id())
+        .or_else(|| {
+            node.review_assignment()
+                .map(|assignment| assignment.role_id())
+        })
+        .map(str::to_owned)
+}
+
 pub(crate) enum TeamRuntimeCommand {
     PackageValidate {
         package_root: PathBuf,
@@ -52,7 +187,9 @@ pub(crate) enum TeamRuntimeCommand {
         package_root: PathBuf,
         team_id: Option<TeamId>,
         idempotency_key: IdempotencyKey,
+        endpoint: organization::RuntimeEndpointReference,
         source: TeamRuntimeCreateSource,
+        manual_team: Option<ManualTeamProvision>,
     },
     Delete {
         team_id: TeamId,
@@ -88,8 +225,7 @@ pub(crate) enum TeamRuntimeCommand {
         definition: GraphDefinition,
     },
     GraphPatch {
-        command: Box<organization::RunCommand>,
-        patch: GraphPatch,
+        patch: TeamGraphPatchDraft,
     },
     GraphContext {
         team_id: Option<TeamId>,
@@ -122,7 +258,6 @@ pub(crate) enum TeamRuntimeCommand {
         run_id: GraphRunId,
     },
     NodePromptSettled {
-        run_id: GraphRunId,
         session_key: OpaqueId,
         prompt_run_id: OpaqueId,
         phase: TeamRuntimePromptPhase,
@@ -182,7 +317,10 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     RunList(Vec<TeamRunQueryOutcome>),
     TriggerList(Vec<crate::composition::ArmedTrigger>),
     WebhookTriggerFire(Result<TeamTriggerFireOutcome, TeamRuntimeStatus>),
-    RunSnapshot(TeamRunPublicSnapshotQueryOutcome),
+    RunSnapshot {
+        snapshot: TeamRunPublicSnapshotQueryOutcome,
+        role_sessions: Option<Vec<organization::RoleSessionReceipt>>,
+    },
     RunSnapshotInvalidInput,
     GraphSave(Result<TeamRunCommandOutcome, StoreFault>),
     GraphPatch(Result<TeamRunCommandOutcome, StoreFault>),
@@ -197,7 +335,11 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
     RunDecisionSubmit(Result<TeamDecisionReceipt, TeamRuntimeStatus>),
-    Resume(Vec<ResumeOutcome>),
+    Resume {
+        team_id: TeamId,
+        outcomes: Vec<ResumeOutcome>,
+        runs: Vec<TeamRunQueryOutcome>,
+    },
     ApprovalResolve(Result<HumanDecisionOutcome, StoreFault>),
     RunCancel(Result<BeginCancellationOutcome, StoreFault>),
     RunDelete(Result<GraphRunPurgeOutcome, StoreFault>),

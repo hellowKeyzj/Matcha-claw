@@ -23,6 +23,9 @@ pub struct ClawHubSearchResult {
     name: String,
     description: String,
     version: String,
+    author: Option<String>,
+    downloads: Option<u64>,
+    stars: Option<u64>,
 }
 
 impl ClawHubSearchResult {
@@ -32,7 +35,22 @@ impl ClawHubSearchResult {
             name,
             description,
             version,
+            author: None,
+            downloads: None,
+            stars: None,
         }
+    }
+
+    pub fn with_marketplace_stats(
+        mut self,
+        author: Option<String>,
+        downloads: Option<u64>,
+        stars: Option<u64>,
+    ) -> Self {
+        self.author = author;
+        self.downloads = downloads;
+        self.stars = stars;
+        self
     }
 
     pub fn slug(&self) -> &str {
@@ -49,6 +67,18 @@ impl ClawHubSearchResult {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    pub fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
+
+    pub fn downloads(&self) -> Option<u64> {
+        self.downloads
+    }
+
+    pub fn stars(&self) -> Option<u64> {
+        self.stars
     }
 }
 
@@ -193,10 +223,17 @@ fn map_search_results(payload: &Value) -> Vec<ScoredSearchResult> {
             let name = text(row.get("displayName"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| slug.clone());
-            let description = text(row.get("summary")).unwrap_or_default();
+            let description = display_description(row);
             let version = text(row.get("version"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "latest".to_owned());
+            let author = row
+                .get("metaContent")
+                .and_then(Value::as_object)
+                .and_then(|meta| text(meta.get("owner")))
+                .filter(|value| !value.is_empty())
+                .or_else(|| text(row.get("author")).filter(|value| !value.is_empty()));
+            let stats = row.get("stats").and_then(Value::as_object);
             let score = row.get("score").and_then(Value::as_f64).unwrap_or(0.0);
             Some(ScoredSearchResult {
                 item: ClawHubSearchResult {
@@ -204,6 +241,13 @@ fn map_search_results(payload: &Value) -> Vec<ScoredSearchResult> {
                     name,
                     description,
                     version,
+                    author,
+                    downloads: stats
+                        .and_then(|stats| stats.get("downloads"))
+                        .and_then(optional_count),
+                    stars: stats
+                        .and_then(|stats| stats.get("stars"))
+                        .and_then(optional_count),
                 },
                 score,
             })
@@ -211,6 +255,64 @@ fn map_search_results(payload: &Value) -> Vec<ScoredSearchResult> {
         .collect()
 }
 
+fn display_description(row: &serde_json::Map<String, Value>) -> String {
+    let summary = text(row.get("summary")).unwrap_or_default();
+    if !is_placeholder_description(&summary) {
+        return summary;
+    }
+    row.get("metaContent")
+        .and_then(Value::as_object)
+        .and_then(|meta| text(meta.get("DisplayDescription")))
+        .filter(|value| !is_placeholder_description(value))
+        .unwrap_or_default()
+}
+
+fn is_placeholder_description(value: &str) -> bool {
+    matches!(value.trim(), "[object Object]" | "metadata:")
+}
+
+fn optional_count(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 fn text(value: Option<&Value>) -> Option<String> {
     value?.as_str().map(str::trim).map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn maps_clawhub_registry_metadata_like_the_legacy_runtime() {
+        let results = map_search_results(&json!({
+            "results": [{
+                "slug": "windylamdatahive",
+                "displayName": "windylam",
+                "summary": "[object Object]",
+                "version": "1.0.0",
+                "score": 4.0,
+                "stats": { "downloads": 12, "stars": "3" },
+                "metaContent": {
+                    "owner": "windylam1986",
+                    "DisplayDescription": "当前该技能的功能说明存在异常"
+                }
+            }]
+        }));
+        let result = &results[0].item;
+
+        assert_eq!(result.slug(), "windylamdatahive");
+        assert_eq!(result.name(), "windylam");
+        assert_eq!(result.description(), "当前该技能的功能说明存在异常");
+        assert_eq!(result.version(), "1.0.0");
+        assert_eq!(result.author(), Some("windylam1986"));
+        assert_eq!(result.downloads(), Some(12));
+        assert_eq!(result.stars(), Some(3));
+    }
 }

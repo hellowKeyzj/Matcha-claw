@@ -103,6 +103,34 @@ const spawnFakeChild: WorkerProcessSpawn = (
   return child
 }
 
+async function withProcessEnv<T>(
+  patch: Record<string, string | undefined>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, string | undefined>()
+  for (const key of Object.keys(patch)) {
+    previous.set(key, process.env[key])
+  }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+  try {
+    return await run()
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+}
+
 function createRequestIdFactory(): () => string {
   let nextRequestId = 0
   return () => {
@@ -140,6 +168,87 @@ afterEach(() => {
 })
 
 describe('WorkerSupervisor', () => {
+  test('spawns workers from process env and overrides worker id', async () => {
+    const spawnedEnvs: NodeJS.ProcessEnv[] = []
+    await withProcessEnv(
+      {
+        PATH: 'C:\\Python312;C:\\Windows\\System32',
+        SystemRoot: 'C:\\Windows',
+        MATCHACLAW_UV_BIN: 'C:\\toolchain\\uv.exe',
+        MATCHA_AGENT_WORKER_ID: 'parent-worker-id',
+      },
+      async () => {
+        const supervisor = new WorkerSupervisor({
+          command: 'fake-worker',
+          requestTimeoutMs: 100,
+          spawnWorker: ((
+            command: string,
+            args: string[],
+            options: SpawnOptionsWithoutStdio,
+          ) => {
+            spawnedEnvs.push(options.env ?? {})
+            return spawnFakeChild(command, args, options)
+          }) as WorkerProcessSpawn,
+          createRequestId: createRequestIdFactory(),
+        })
+
+        const ensurePromise = supervisor.ensureWorker(testSession())
+        emitInitializedWorker(children[0]!)
+        await ensurePromise
+      },
+    )
+
+    expect(spawnedEnvs).toHaveLength(1)
+    expect(spawnedEnvs[0]?.PATH).toContain('C:\\Python312')
+    expect(spawnedEnvs[0]?.SystemRoot).toBe('C:\\Windows')
+    expect(spawnedEnvs[0]?.MATCHACLAW_UV_BIN).toBe('C:\\toolchain\\uv.exe')
+    expect(spawnedEnvs[0]?.MATCHA_AGENT_WORKER_ID).toBeString()
+    expect(spawnedEnvs[0]?.MATCHA_AGENT_WORKER_ID).not.toBe('parent-worker-id')
+  })
+
+  test('merges explicit env over process env before assigning worker id', async () => {
+    const spawnedEnvs: NodeJS.ProcessEnv[] = []
+    await withProcessEnv(
+      {
+        PATH: 'C:\\Windows\\System32',
+        SystemRoot: 'C:\\Windows',
+        MATCHA_AGENT_WORKER_ID: 'parent-worker-id',
+      },
+      async () => {
+        const supervisor = new WorkerSupervisor({
+          command: 'fake-worker',
+          env: {
+            PATH: 'C:\\Python312;C:\\Windows\\System32',
+            MATCHA_AGENT_WORKER_ID: 'explicit-worker-id',
+          },
+          requestTimeoutMs: 100,
+          spawnWorker: ((
+            command: string,
+            args: string[],
+            options: SpawnOptionsWithoutStdio,
+          ) => {
+            spawnedEnvs.push(options.env ?? {})
+            return spawnFakeChild(command, args, options)
+          }) as WorkerProcessSpawn,
+          createRequestId: createRequestIdFactory(),
+        })
+
+        const ensurePromise = supervisor.ensureWorker(testSession())
+        emitInitializedWorker(children[0]!)
+        await ensurePromise
+      },
+    )
+
+    expect(spawnedEnvs).toHaveLength(1)
+    expect(spawnedEnvs[0]?.PATH).toContain('C:\\Python312')
+    expect(spawnedEnvs[0]?.SystemRoot).toBe('C:\\Windows')
+    expect(spawnedEnvs[0]?.MATCHA_AGENT_WORKER_ID).toBeString()
+    expect(spawnedEnvs[0]?.MATCHA_AGENT_WORKER_ID).not.toBe('parent-worker-id')
+    expect(spawnedEnvs[0]?.MATCHA_AGENT_WORKER_ID).not.toBe(
+      'explicit-worker-id',
+    )
+  })
+
   test('kills and reports one crash when heartbeat times out', async () => {
     const crashes: Array<{ sessionId: string; workerId: string }> = []
     const supervisor = new WorkerSupervisor({

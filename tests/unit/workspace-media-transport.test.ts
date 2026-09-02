@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { createWorkspaceMediaTransport } from '../../electron/main/runtime-host-delivery/transport/workspace/media';
 
 const port = 34_107;
-const mediaUrl = `http://127.0.0.1:${port}/api/workspace/media`;
 const endpoint = {
   kind: 'native-runtime',
   runtimeAdapterId: 'openclaw',
@@ -44,6 +43,20 @@ const thumbnailRequest = {
     sessionKey: 'agent:main:demo',
     relativePath: 'docs/image.png',
     mimeType: 'image/png',
+  },
+} as const;
+
+const gatewayThumbnailRequest = {
+  id: 'workspace.media',
+  operationId: 'media.thumbnail',
+  scope: { kind: 'session', endpoint, sessionKey: 'agent:main:demo' },
+  target: { kind: 'workspace-media' },
+  input: {
+    endpoint,
+    sessionKey: 'agent:main:demo',
+    gatewayUrl: 'https://gateway.local/api/chat/media/outgoing/agent%3Amain%3Ademo/attachment-1/full',
+    mimeType: 'image/svg+xml',
+    agentId: 'main',
   },
 } as const;
 
@@ -93,6 +106,7 @@ const validPrepareResponse = {
   preview: 'preview',
 };
 const validThumbnailResponse = { preview: 'preview', fileSize: 1_024 };
+const validSvgThumbnailResponse = { preview: 'data:image/svg+xml;base64,PHN2Zw==', fileSize: 6 };
 const validThumbnailsResponse = {
   'docs/image.png': validThumbnailResponse,
 };
@@ -143,6 +157,19 @@ describe('Electron Main workspace media transport', () => {
     expect(fetcher.mock.calls.map(([, options]) => JSON.parse((options as RequestInit).body as string).operationId)).toEqual([
       'media.prepare', 'media.resolve', 'media.thumbnail', 'media.thumbnails', 'media.stagePaths', 'media.stageBuffer',
     ]);
+  });
+
+  it('forwards outgoing Gateway SVG thumbnail requests', async () => {
+    const signDecision = vi.fn().mockReturnValue('signed-decision');
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => validSvgThumbnailResponse });
+    const transport = createTransport(signDecision, fetcher);
+
+    await expect(transport.execute(gatewayThumbnailRequest)).resolves.toEqual({ status: 200, body: validSvgThumbnailResponse });
+
+    expect(signDecision).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetcher.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body.input).toEqual(gatewayThumbnailRequest.input);
   });
 
   const invalidRequests: Array<[string, unknown]> = [

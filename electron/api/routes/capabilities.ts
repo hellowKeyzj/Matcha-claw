@@ -266,18 +266,28 @@ export async function handleCapabilityRoutes(
   }
 
   if (body.id === 'team.runtime') {
+    const traceId = readTraceHeader(req.headers);
+    logSessionTrace('electron.team.runtime.request', traceId, summarizeTeamRuntimeRequest(body));
     if (!isTeamRuntimeCapabilityRequest(body)) {
+      logSessionTrace('electron.team.runtime.request-invalid', traceId, summarizeTeamRuntimeRequest(body));
       sendJson(res, 400, TEAM_RUNTIME_REQUEST_INVALID);
       return true;
     }
     try {
+      logSessionTrace('electron.team.runtime.control.request', traceId, summarizeTeamRuntimeRequest(body));
       const outcome = await deps.runtimeHost.command({
         name: 'team.runtime.execute',
-        input: body,
+        input: traceId ? { ...body, traceId } : body,
       });
+      logSessionTrace('electron.team.runtime.control.response', traceId, summarizeTeamRuntimeOutcome(outcome));
       const response = projectTeamRuntimeOutcome(outcome);
+      logSessionTrace('electron.team.runtime.response', traceId, {
+        status: response.status,
+        contract: response.status === 200 ? 'operation-result' : 'unavailable',
+      });
       sendJson(res, response.status, response.body);
     } catch {
+      logSessionTrace('electron.team.runtime.failure', traceId, {});
       sendJson(res, 503, TEAM_RUNTIME_UNAVAILABLE);
     }
     return true;
@@ -379,8 +389,7 @@ function projectTeamRuntimeOutcome(
   outcome: RuntimeHostControlOutcome,
 ): { status: number; body: unknown } {
   if (outcome.kind === 'succeeded') return { status: 200, body: outcome.result };
-  if (outcome.kind === 'unknown') return { status: 200, body: outcome.result };
-  if (outcome.kind === 'timed-out') {
+  if (outcome.kind === 'unknown' || outcome.kind === 'timed-out') {
     return { status: 503, body: TEAM_RUNTIME_UNAVAILABLE };
   }
   const status = outcome.error.code === 'INVALID_INPUT'
@@ -427,6 +436,54 @@ function summarizeSubagentConfigurationResponse(body: unknown): string {
   if (typeof body.resultType === 'string') return `mutation:${body.resultType}`;
   if (typeof body.agentId === 'string' && isRecord(body.support)) return 'view';
   return 'invalid';
+}
+
+function summarizeTeamRuntimeRequest(body: Record<string, unknown>): Record<string, unknown> {
+  const target = isRecord(body.target) ? body.target : null;
+  const input = isRecord(body.input) ? body.input : null;
+  return {
+    operationId: typeof body.operationId === 'string' ? body.operationId : null,
+    targetKind: target && typeof target.kind === 'string' ? target.kind : null,
+    teamId: summarizeIdentifier(readString(input, 'teamId') ?? readString(target, 'teamId')),
+    runId: summarizeIdentifier(readString(input, 'runId') ?? readString(target, 'runId')),
+    approvalId: summarizeIdentifier(readString(input, 'approvalId') ?? readString(target, 'approvalId')),
+    packagePath: summarizeIdentifier(readString(input, 'packagePath') ?? readString(target, 'packagePath')),
+    webhookPath: summarizeIdentifier(readString(input, 'webhookPath')),
+    sessionKey: summarizeIdentifier(readString(input, 'sessionKey')),
+    promptRunId: summarizeIdentifier(readString(input, 'promptRunId')),
+    sourceType: readString(input, 'sourceType'),
+    phase: readString(input, 'phase'),
+    decision: readString(input, 'decision'),
+    event: readString(input, 'event'),
+  };
+}
+
+function summarizeTeamRuntimeOutcome(outcome: RuntimeHostControlOutcome): Record<string, unknown> {
+  if (outcome.kind === 'succeeded') return { outcome: 'succeeded', contract: summarizeTeamRuntimeResult(outcome.result) };
+  if (outcome.kind === 'unknown') return { outcome: 'unknown', contract: summarizeTeamRuntimeResult(outcome.result) };
+  if (outcome.kind === 'timed-out') return { outcome: 'timed-out' };
+  return {
+    outcome: 'rejected',
+    rejectionCode: outcome.error.code,
+  };
+}
+
+function summarizeTeamRuntimeResult(result: unknown): string {
+  if (!isRecord(result)) return 'invalid';
+  if (typeof result.outcome === 'string') return `outcome:${result.outcome}`;
+  if (result.success === true && typeof result.outcome === 'string') return `success:${result.outcome}`;
+  if (Array.isArray(result.runs)) return 'run-list';
+  if (isRecord(result.diagnostics)) return 'snapshot';
+  if (result.status === 'valid' || result.status === 'invalid' || result.status === 'unavailable') return `package:${result.status}`;
+  if (typeof result.managedAgentCount === 'number') return 'provisioned';
+  if (typeof result.yaml === 'string') return 'graph-yaml';
+  if (Array.isArray(result.triggers)) return 'trigger-list';
+  return 'operation-result';
+}
+
+function readString(record: Record<string, unknown> | null, key: string): string | null {
+  const value = record?.[key];
+  return typeof value === 'string' ? value : null;
 }
 
 async function executeSkillManagementCapability(
@@ -1178,7 +1235,7 @@ function isCapabilityAvailability(value: unknown): boolean {
 function isCapabilityText(value: unknown): value is string {
   return typeof value === 'string'
     && value.trim().length > 0
-    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
+    && !hasControlCharacter(value);
 }
 
 function optionalCapabilityText(value: unknown): value is string | undefined {
@@ -1562,5 +1619,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+  return keys.length === expected.length && expected.every((key) => hasOwn(value, key));
 }

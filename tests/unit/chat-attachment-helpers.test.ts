@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostWorkspaceMediaThumbnailMock = vi.fn();
 
@@ -23,6 +23,10 @@ describe('chat attachment helpers', () => {
   beforeEach(() => {
     hostWorkspaceMediaThumbnailMock.mockReset();
     localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('does not persist huge thumbnail data URLs in localStorage', async () => {
@@ -93,7 +97,7 @@ describe('chat attachment helpers', () => {
     });
   });
 
-  it('marks image previews unavailable when thumbnail loading returns no image data', async () => {
+  it('marks local image previews unavailable when thumbnail loading returns no image data', async () => {
     const sessionIdentity = {
       endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
       agentId: 'main',
@@ -116,6 +120,7 @@ describe('chat attachment helpers', () => {
 
     const updated = await loadMissingItemPreviews(items, { sessionIdentity });
 
+    expect(hostWorkspaceMediaThumbnailMock).toHaveBeenCalledTimes(1);
     expect(updated?.[0]).toMatchObject({
       kind: 'assistant-turn',
       segments: [{

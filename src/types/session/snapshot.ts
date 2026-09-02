@@ -132,7 +132,7 @@ export type SessionCompleteness =
 export type SessionWireIdentity = {
   sessionKey: string;
   endpoint: {
-    kind: string;
+    kind: 'native-runtime';
     runtimeAdapterId: 'openclaw' | 'matcha-agent';
     runtimeInstanceId: string;
   };
@@ -142,6 +142,7 @@ export type SessionWireIdentity = {
 export type SessionWireContent =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; text: string }
+  | { kind: 'largeText'; text: string; contentRef: string; totalBytes: number; loadedBytes: number }
   | { kind: 'toolUse'; name: string; toolCallId: string }
   | { kind: 'toolResult'; toolCallId: string; summary: string | null; isError: boolean }
   | { kind: 'media'; mediaType: string | null; reference: string }
@@ -185,7 +186,10 @@ export type SessionWireTool = {
   runId: string | null;
   name: string | null;
   phase: 'started' | 'updated' | 'completed' | 'failed';
+  input: unknown | null;
+  inputText: string | null;
   summary: string | null;
+  output: unknown | null;
   isError: boolean | null;
 };
 
@@ -279,8 +283,18 @@ export type SessionProjectionSnapshot = {
 
 export type SessionProjectionFactStatus = 'complete' | 'incomplete' | 'unavailable' | 'unknown';
 
+export type SessionContentLoadResult = {
+  contentRef: string;
+  offset: number;
+  text: string;
+  nextOffset: number;
+  totalBytes: number;
+  complete: boolean;
+};
+
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
+const MAX_CONTENT_REF_BYTES = 512;
 const MAX_TEXT_BYTES = 128 * 1024;
 const MAX_ITEMS = 200;
 const MAX_TOOLS = 128;
@@ -303,18 +317,38 @@ function isSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value);
 }
 
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
 function isNonEmptyIdentifier(value: unknown, maxBytes = MAX_ID_BYTES): value is string {
   return typeof value === 'string'
     && value.length > 0
-    && value.length <= maxBytes
+    && utf8ByteLength(value) <= maxBytes
     && value.trim() === value
     && ![...value].some((character) => (character.codePointAt(0) ?? 0) < 32 || character === '\\0');
 }
 
 function isPayloadText(value: unknown): value is string {
   return typeof value === 'string'
-    && value.length <= MAX_TEXT_BYTES
-    && !value.includes('\\0');
+    && utf8ByteLength(value) <= MAX_TEXT_BYTES
+    && !value.includes('\0');
+}
+
+function isPayloadValue(value: unknown): boolean {
+  const text = JSON.stringify(value);
+  return text !== undefined
+    && utf8ByteLength(text) <= MAX_TEXT_BYTES
+    && !payloadValueContainsNul(value)
+    && (value === null || typeof value !== 'object' || value.constructor === Object || Array.isArray(value));
+}
+
+function payloadValueContainsNul(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('\0');
+  if (Array.isArray(value)) return value.some(payloadValueContainsNul);
+  if (isRecord(value)) return Object.entries(value)
+    .some(([key, entry]) => key.includes('\0') || payloadValueContainsNul(entry));
+  return false;
 }
 
 function isValidMissingFacts(value: unknown): value is SessionMissingFact[] {
@@ -361,7 +395,7 @@ function decodeIdentity(value: unknown): SessionWireIdentity | null {
   if (!isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || !isRecord(value.endpoint)
     || !hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    || !isNonEmptyIdentifier(value.endpoint.kind)
+    || value.endpoint.kind !== 'native-runtime'
     || (value.endpoint.runtimeAdapterId !== 'openclaw' && value.endpoint.runtimeAdapterId !== 'matcha-agent')
     || !isNonEmptyIdentifier(value.endpoint.runtimeInstanceId)
     || (Object.hasOwn(value, 'agentId')
@@ -378,6 +412,29 @@ function decodeIdentity(value: unknown): SessionWireIdentity | null {
   };
 }
 
+export function decodeSessionContentLoadResult(value: unknown): SessionContentLoadResult {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['contentRef', 'offset', 'text', 'nextOffset', 'totalBytes', 'complete'])
+    || !isNonEmptyIdentifier(value.contentRef, MAX_CONTENT_REF_BYTES)
+    || !isSafeInteger(value.offset) || value.offset < 0 || value.offset > MAX_SAFE_INTEGER
+    || !isPayloadText(value.text)
+    || !isSafeInteger(value.nextOffset) || value.nextOffset < value.offset || value.nextOffset > MAX_SAFE_INTEGER
+    || !isSafeInteger(value.totalBytes) || value.totalBytes < value.nextOffset || value.totalBytes > MAX_SAFE_INTEGER
+    || value.offset + utf8ByteLength(value.text) !== value.nextOffset
+    || typeof value.complete !== 'boolean'
+    || (value.complete && value.nextOffset !== value.totalBytes)) {
+    throw new Error('Invalid SessionContentLoadResult payload');
+  }
+  return {
+    contentRef: value.contentRef,
+    offset: value.offset,
+    text: value.text,
+    nextOffset: value.nextOffset,
+    totalBytes: value.totalBytes,
+    complete: value.complete,
+  };
+}
+
 function decodeContent(value: unknown): SessionWireContent | null {
   if (!isRecord(value) || typeof value.kind !== 'string') return null;
   switch (value.kind) {
@@ -385,6 +442,25 @@ function decodeContent(value: unknown): SessionWireContent | null {
     case 'thinking':
       return hasExactKeys(value, ['kind', 'text']) && isPayloadText(value.text)
         ? { kind: value.kind, text: value.text }
+        : null;
+    case 'largeText':
+      return hasExactKeys(value, ['kind', 'text', 'contentRef', 'totalBytes', 'loadedBytes'])
+        && isPayloadText(value.text)
+        && isNonEmptyIdentifier(value.contentRef, MAX_CONTENT_REF_BYTES)
+        && isSafeInteger(value.totalBytes)
+        && value.totalBytes >= 0
+        && value.totalBytes <= MAX_SAFE_INTEGER
+        && isSafeInteger(value.loadedBytes)
+        && value.loadedBytes >= 0
+        && value.loadedBytes <= value.totalBytes
+        && utf8ByteLength(value.text) === value.loadedBytes
+        ? {
+          kind: 'largeText',
+          text: value.text,
+          contentRef: value.contentRef,
+          totalBytes: value.totalBytes,
+          loadedBytes: value.loadedBytes,
+        }
         : null;
     case 'toolUse':
       return hasExactKeys(value, ['kind', 'name', 'toolCallId'])
@@ -452,14 +528,27 @@ function isItemStatus(value: unknown): value is SessionWireItemStatus {
 
 function decodeTool(value: unknown): SessionWireTool | null {
   return isRecord(value)
-    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'summary', 'isError'])
+    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'isError'])
     && isNonEmptyIdentifier(value.toolCallId)
     && (value.runId === null || isNonEmptyIdentifier(value.runId))
     && (value.name === null || isNonEmptyIdentifier(value.name))
     && (value.phase === 'started' || value.phase === 'updated' || value.phase === 'completed' || value.phase === 'failed')
+    && (value.input === null || isPayloadValue(value.input))
+    && (value.inputText === null || isPayloadText(value.inputText))
     && (value.summary === null || isPayloadText(value.summary))
+    && (value.output === null || isPayloadValue(value.output))
     && (value.isError === null || typeof value.isError === 'boolean')
-    ? { toolCallId: value.toolCallId, runId: value.runId, name: value.name, phase: value.phase, summary: value.summary, isError: value.isError }
+    ? {
+      toolCallId: value.toolCallId,
+      runId: value.runId,
+      name: value.name,
+      phase: value.phase,
+      input: value.input,
+      inputText: value.inputText,
+      summary: value.summary,
+      output: value.output,
+      isError: value.isError,
+    }
     : null;
 }
 

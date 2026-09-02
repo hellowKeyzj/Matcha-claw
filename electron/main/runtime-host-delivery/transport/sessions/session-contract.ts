@@ -1,5 +1,6 @@
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
+const MAX_CONTENT_REF_BYTES = 512;
 const MAX_TEXT_BYTES = 128 * 1024;
 const MAX_ITEMS = 200;
 const MAX_TOOLS = 128;
@@ -37,10 +38,28 @@ export type SessionItem = Readonly<{
   readonly itemId: string;
   readonly runId?: string | null;
 }>;
-export type ToolView = Readonly<{ toolCallId: string; runId?: string | null; phase: string }>;
+export type ToolView = Readonly<{
+  toolCallId: string;
+  runId: string | null;
+  name: string | null;
+  phase: string;
+  input: unknown | null;
+  inputText: string | null;
+  summary: string | null;
+  output: unknown | null;
+  isError: boolean | null;
+}>;
 export type ApprovalView = Readonly<{ approvalId: string; runId?: string | null; phase: string }>;
 export type RuntimeView = Readonly<{ phase: string; activeRunId?: string | null }>;
 export type SessionWindow = Readonly<{ totalItemCount: number; windowStartOffset: number; windowEndOffset: number }>;
+export type SessionContentLoadResponse = Readonly<{
+  contentRef: string;
+  offset: number;
+  text: string;
+  nextOffset: number;
+  totalBytes: number;
+  complete: boolean;
+}>;
 
 export type SessionChange =
   | Readonly<{ kind: 'runPhaseChanged'; runId: string; phase: SessionRunPhase }>
@@ -84,6 +103,24 @@ type SessionRecoveryReason =
 
 export function isSessionView(value: unknown): value is SessionView {
   return decodeSessionView(value) !== null;
+}
+
+export function decodeSessionContentLoadResponse(value: unknown): SessionContentLoadResponse | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['contentRef', 'offset', 'text', 'nextOffset', 'totalBytes', 'complete'])
+    || !isContentRef(value.contentRef)
+    || !isSafeNonNegativeInteger(value.offset)
+    || !isText(value.text)
+    || !isSafeNonNegativeInteger(value.nextOffset)
+    || !isSafeNonNegativeInteger(value.totalBytes)
+    || value.offset > value.nextOffset
+    || value.nextOffset > value.totalBytes
+    || value.offset + Buffer.byteLength(value.text, 'utf8') !== value.nextOffset
+    || typeof value.complete !== 'boolean'
+    || (value.complete && value.nextOffset !== value.totalBytes)) {
+    return null;
+  }
+  return value as SessionContentLoadResponse;
 }
 
 export function decodeSessionView(value: unknown): SessionView | null {
@@ -253,6 +290,14 @@ function isContent(value: unknown): boolean {
     case 'text':
     case 'thinking':
       return hasExactKeys(value, ['kind', 'text']) && isText(value.text);
+    case 'largeText':
+      return hasExactKeys(value, ['kind', 'text', 'contentRef', 'totalBytes', 'loadedBytes'])
+        && isText(value.text)
+        && isContentRef(value.contentRef)
+        && isSafeNonNegativeInteger(value.totalBytes)
+        && isSafeNonNegativeInteger(value.loadedBytes)
+        && value.loadedBytes <= value.totalBytes
+        && Buffer.byteLength(value.text, 'utf8') === value.loadedBytes;
     case 'toolUse':
       return hasExactKeys(value, ['kind', 'name', 'toolCallId'])
         && isId(value.name) && isId(value.toolCallId);
@@ -274,12 +319,15 @@ function isContent(value: unknown): boolean {
 
 function isTool(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'summary', 'isError'])
+    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'isError'])
     && isId(value.toolCallId)
     && isNullableId(value.runId)
     && isNullableId(value.name)
     && isToolPhase(value.phase)
+    && (value.input === null || isPayloadValue(value.input))
+    && isNullableText(value.inputText)
     && isNullableText(value.summary)
+    && (value.output === null || isPayloadValue(value.output))
     && (value.isError === null || typeof value.isError === 'boolean');
 }
 
@@ -394,6 +442,10 @@ function isSessionKey(value: unknown): value is string {
   return typeof value === 'string' && isBoundedString(value, MAX_SESSION_KEY_BYTES, true);
 }
 
+function isContentRef(value: unknown): value is string {
+  return typeof value === 'string' && isBoundedString(value, MAX_CONTENT_REF_BYTES, true);
+}
+
 function isNullableSessionKey(value: unknown): boolean {
   return value === null || isSessionKey(value);
 }
@@ -412,6 +464,22 @@ function isText(value: unknown): value is string {
 
 function isNullableText(value: unknown): boolean {
   return value === null || isText(value);
+}
+
+function isPayloadValue(value: unknown): boolean {
+  const text = JSON.stringify(value);
+  return text !== undefined
+    && Buffer.byteLength(text, 'utf8') <= MAX_TEXT_BYTES
+    && !payloadValueContainsNul(value)
+    && (value === null || typeof value !== 'object' || value.constructor === Object || Array.isArray(value));
+}
+
+function payloadValueContainsNul(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('\0');
+  if (Array.isArray(value)) return value.some(payloadValueContainsNul);
+  if (isRecord(value)) return Object.entries(value)
+    .some(([key, entry]) => key.includes('\0') || payloadValueContainsNul(entry));
+  return false;
 }
 
 function isBoundedString(value: string, maxBytes: number, rejectControl: boolean): boolean {
@@ -439,7 +507,7 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_SAFE_INTEGER;
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 

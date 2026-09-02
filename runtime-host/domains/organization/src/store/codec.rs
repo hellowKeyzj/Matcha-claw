@@ -61,7 +61,7 @@ use super::{GraphRunFacts, OrganizationFacts, StoreFault, TeamFacts};
 pub(super) const HEADER_LEN: usize = 17;
 pub(super) const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_MAGIC: [u8; 8] = *b"MORGDU01";
-const CURRENT_SCHEMA_VERSION: u8 = 18;
+const CURRENT_SCHEMA_VERSION: u8 = 19;
 const FRAME_MARKER: u8 = 0xA1;
 const FRAME_METADATA_LEN: usize = 16;
 const MAX_FACTS_BYTES: usize = 1024 * 1024;
@@ -501,6 +501,11 @@ fn encode_materialization(
             crate::RoleMaterializationOwnership::External => 1,
         });
         push_string(output, role.endpoint().as_str())?;
+        push_optional_string(
+            output,
+            role.native_workspace()
+                .map(crate::ports::materialization::NativeWorkspaceReceipt::as_str),
+        )?;
     }
     Ok(())
 }
@@ -1003,8 +1008,8 @@ fn encode_command_payload(
     match payload {
         CommandPayload::GraphPatch(patch) => {
             output.push(0);
-            push_string(output, patch.base_graph_id().as_str())?;
-            push_string(output, patch.base_workflow_plan_id().as_str())?;
+            push_string(output, patch.base_graph_id())?;
+            push_string(output, patch.base_workflow_plan_id())?;
             push_count(output, patch.operations().len())?;
             for operation in patch.operations() {
                 encode_graph_patch_operation(output, operation)?;
@@ -1166,25 +1171,25 @@ fn encode_graph_patch_operation(
 
 fn encode_graph_node(
     output: &mut Vec<u8>,
-    node_id: &OpaqueId,
+    node_id: &str,
     kind: GraphNodeKind,
-    role_id: Option<&OpaqueId>,
+    role_id: Option<&String>,
 ) -> Result<(), StoreFault> {
-    push_string(output, node_id.as_str())?;
+    push_string(output, node_id)?;
     output.push(graph_node_kind_tag(kind));
-    push_optional_string(output, role_id.map(OpaqueId::as_str))
+    push_optional_string(output, role_id.map(String::as_str))
 }
 
 fn encode_graph_edge(
     output: &mut Vec<u8>,
-    edge_id: &OpaqueId,
-    source_node_id: &OpaqueId,
-    target_node_id: &OpaqueId,
+    edge_id: &str,
+    source_node_id: &str,
+    target_node_id: &str,
     action: GraphEdgeAction,
 ) -> Result<(), StoreFault> {
-    push_string(output, edge_id.as_str())?;
-    push_string(output, source_node_id.as_str())?;
-    push_string(output, target_node_id.as_str())?;
+    push_string(output, edge_id)?;
+    push_string(output, source_node_id)?;
+    push_string(output, target_node_id)?;
     output.push(graph_edge_action_tag(action));
     Ok(())
 }
@@ -1218,8 +1223,8 @@ fn encode_team_event_payload(
             operation_count,
         } => {
             output.push(0);
-            push_string(output, base_graph_id.as_str())?;
-            push_string(output, base_workflow_plan_id.as_str())?;
+            push_string(output, base_graph_id)?;
+            push_string(output, base_workflow_plan_id)?;
             output.extend_from_slice(&operation_count.get().to_le_bytes());
         }
         TeamEventPayload::GraphReplaced {
@@ -1227,8 +1232,8 @@ fn encode_team_event_payload(
             workflow_plan_id,
         } => {
             output.push(4);
-            push_string(output, graph_id.as_str())?;
-            push_string(output, workflow_plan_id.as_str())?;
+            push_string(output, graph_id)?;
+            push_string(output, workflow_plan_id)?;
         }
         TeamEventPayload::NodeProgressed { node_execution_id } => {
             output.push(1);
@@ -1580,18 +1585,29 @@ impl<'a> Reader<'a> {
             .map_err(|_| StoreFault::InvalidFacts)?;
         let roles = (0..self.count()?)
             .map(|_| {
-                Ok(RoleMaterializationReceipt::with_ownership(
-                    RoleId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?,
-                    ManagedAgentReference::try_new(self.string()?)
-                        .map_err(|_| StoreFault::InvalidFacts)?,
-                    match self.byte()? {
-                        0 => crate::RoleMaterializationOwnership::Managed,
-                        1 => crate::RoleMaterializationOwnership::External,
-                        _ => return Err(StoreFault::InvalidFacts),
-                    },
-                    RuntimeEndpointReference::try_new(self.string()?)
-                        .map_err(|_| StoreFault::InvalidFacts)?,
-                ))
+                let role = RoleId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
+                let agent = ManagedAgentReference::try_new(self.string()?)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                let ownership = match self.byte()? {
+                    0 => crate::RoleMaterializationOwnership::Managed,
+                    1 => crate::RoleMaterializationOwnership::External,
+                    _ => return Err(StoreFault::InvalidFacts),
+                };
+                let endpoint = RuntimeEndpointReference::try_new(self.string()?)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                Ok(match self.optional_string()? {
+                    Some(workspace) => RoleMaterializationReceipt::with_native_workspace(
+                        role,
+                        agent,
+                        ownership,
+                        endpoint,
+                        crate::ports::materialization::NativeWorkspaceReceipt::try_new(workspace)
+                            .map_err(|_| StoreFault::InvalidFacts)?,
+                    ),
+                    None => {
+                        RoleMaterializationReceipt::with_ownership(role, agent, ownership, endpoint)
+                    }
+                })
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
         MaterializationReceipt::try_new(team, endpoint, roles).map_err(|_| StoreFault::InvalidFacts)
@@ -2386,8 +2402,8 @@ impl<'a> Reader<'a> {
     fn command_payload(&mut self) -> Result<CommandPayload, StoreFault> {
         match self.byte()? {
             0 => {
-                let graph_id = self.opaque_id()?;
-                let workflow_plan_id = self.opaque_id()?;
+                let graph_id = self.string()?;
+                let workflow_plan_id = self.string()?;
                 let operations = (0..self.count()?)
                     .map(|_| self.graph_patch_operation())
                     .collect::<Result<Vec<_>, _>>()?;
@@ -2555,7 +2571,7 @@ impl<'a> Reader<'a> {
                 })
             }
             2 => Ok(GraphPatchOperation::RemoveNode {
-                node_id: self.opaque_id()?,
+                node_id: self.string()?,
             }),
             3 => {
                 let (edge_id, source_node_id, target_node_id, action) = self.graph_edge()?;
@@ -2576,7 +2592,7 @@ impl<'a> Reader<'a> {
                 })
             }
             5 => Ok(GraphPatchOperation::RemoveEdge {
-                edge_id: self.opaque_id()?,
+                edge_id: self.string()?,
             }),
             6 => Ok(GraphPatchOperation::SetMetadata {
                 key: self.opaque_id()?,
@@ -2586,24 +2602,19 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn graph_node(&mut self) -> Result<(OpaqueId, GraphNodeKind, Option<OpaqueId>), StoreFault> {
-        let node_id = self.opaque_id()?;
-        let kind = self.graph_node_kind()?;
-        let role_id = self
-            .optional_string()?
-            .map(OpaqueId::try_new)
-            .transpose()
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        Ok((node_id, kind, role_id))
+    fn graph_node(&mut self) -> Result<(String, GraphNodeKind, Option<String>), StoreFault> {
+        Ok((
+            self.string()?,
+            self.graph_node_kind()?,
+            self.optional_string()?,
+        ))
     }
 
-    fn graph_edge(
-        &mut self,
-    ) -> Result<(OpaqueId, OpaqueId, OpaqueId, GraphEdgeAction), StoreFault> {
+    fn graph_edge(&mut self) -> Result<(String, String, String, GraphEdgeAction), StoreFault> {
         Ok((
-            self.opaque_id()?,
-            self.opaque_id()?,
-            self.opaque_id()?,
+            self.string()?,
+            self.string()?,
+            self.string()?,
             self.graph_edge_action()?,
         ))
     }
@@ -2620,16 +2631,16 @@ impl<'a> Reader<'a> {
     fn team_event_payload(&mut self) -> Result<TeamEventPayload, StoreFault> {
         match self.byte()? {
             0 => Ok(TeamEventPayload::GraphPatchAccepted {
-                base_graph_id: self.opaque_id()?,
-                base_workflow_plan_id: self.opaque_id()?,
+                base_graph_id: self.string()?,
+                base_workflow_plan_id: self.string()?,
                 operation_count: NonZeroU64::new(self.u64()?).ok_or(StoreFault::CorruptRecord)?,
             }),
             1 => Ok(TeamEventPayload::NodeProgressed {
                 node_execution_id: self.opaque_id()?,
             }),
             4 => Ok(TeamEventPayload::GraphReplaced {
-                graph_id: self.opaque_id()?,
-                workflow_plan_id: self.opaque_id()?,
+                graph_id: self.string()?,
+                workflow_plan_id: self.string()?,
             }),
             2 => Ok(TeamEventPayload::ApprovalRequested {
                 approval_id: self.opaque_id()?,
@@ -3277,6 +3288,7 @@ mod tests {
         MaterializationReceipt, MemberId, NodeDefinition, NodeId, RoleAssignment, RoleId, RoleKind,
         RoleMaterializationOwnership, RoleMaterializationReceipt, RuntimeEndpointReference,
         StartTrigger, TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole,
+        ports::materialization::NativeWorkspaceReceipt,
     };
 
     use super::*;
@@ -3591,17 +3603,19 @@ mod tests {
                     TeamId::try_new("team:one").unwrap(),
                     endpoint.clone(),
                     vec![
-                        RoleMaterializationReceipt::with_ownership(
+                        RoleMaterializationReceipt::with_native_workspace(
                             RoleId::try_new("managed").unwrap(),
                             ManagedAgentReference::try_new("agent:managed").unwrap(),
                             RoleMaterializationOwnership::Managed,
                             endpoint.clone(),
+                            NativeWorkspaceReceipt::try_new("workspace:managed").unwrap(),
                         ),
-                        RoleMaterializationReceipt::with_ownership(
+                        RoleMaterializationReceipt::with_native_workspace(
                             RoleId::try_new("external").unwrap(),
                             ManagedAgentReference::try_new("agent:external").unwrap(),
                             RoleMaterializationOwnership::External,
                             endpoint.clone(),
+                            NativeWorkspaceReceipt::try_new("workspace:external").unwrap(),
                         ),
                     ],
                 )
@@ -3625,6 +3639,14 @@ mod tests {
                 RoleMaterializationOwnership::Managed,
                 RoleMaterializationOwnership::External,
             ]
+        );
+        assert_eq!(
+            receipt
+                .roles()
+                .iter()
+                .map(|role| role.native_workspace().map(NativeWorkspaceReceipt::as_str))
+                .collect::<Vec<_>>(),
+            vec![Some("workspace:managed"), Some("workspace:external")]
         );
 
         let ownership_tag = payload

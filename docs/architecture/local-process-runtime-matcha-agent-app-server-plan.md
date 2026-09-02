@@ -279,7 +279,7 @@ flowchart LR
 | runtime-host transport | app-server JSON-RPC |
 |---|---|
 | `ensureSession` | `session.create`；已存在或重复时 `session.load` |
-| `startSessionEvents` | `events.subscribe`；返回体里的 `replayed`/`events` 先消费，再接 live event notification |
+| `startSessionEvents` | `events.subscribe`；只建立 live event notification 订阅并返回当前 `lastSeq`，缺口恢复单独走 `events.replay(afterSeq, limit)` |
 | `sendPrompt` | `session.prompt` |
 | `abortSession` | `session.cancel` |
 | `resolveApproval` | `approval.respond` |
@@ -306,9 +306,10 @@ sequenceDiagram
   participant Timeline as canonical timeline
 
   Bridge->>AS: events.subscribe(sessionId, afterSeq)
-  AS-->>Bridge: { resultType: subscribed, replayed/events }
-  AS-->>Bridge: live event notifications
-  Bridge->>Bridge: consume replayed/events first, buffer early live events
+  AS-->>Bridge: { resultType: subscribed, afterSeq?, lastSeq }
+  AS-->>Bridge: live event notifications where seq > (afterSeq ?? lastSeq)
+  Bridge->>AS: events.replay(sessionId, afterSeq, limit) when gap recovery is needed
+  AS-->>Bridge: { events }
   Bridge->>Ingress: consumeEndpointConversationEvent
   Ingress->>Timeline: canonical events
   Bridge->>Store: save lastSeq
@@ -316,8 +317,8 @@ sequenceDiagram
 
 当前实现事实：
 
-1. `MatchaAgentEventBridge` 读取 lastSeq 后调用 `events.subscribe(sessionId, afterSeq)`；app-server subscribe handler 会把订阅与 replay 合在一次响应里，返回 `replayed`。
-2. bridge 同时监听 live JSON-RPC `event` notification；subscribe 响应消费完成前到达的 live events 会先 buffer，再按序消费。
+1. `MatchaAgentEventBridge` 调用 `events.subscribe(sessionId, afterSeq)`；app-server subscribe handler 只注册 live 订阅并返回当前 `lastSeq`，未传 `afterSeq` 时从 `lastSeq` 之后开始发 live。
+2. bridge 监听 JSON-RPC `event` notification；历史补齐和缺口恢复单独调用 `events.replay(afterSeq, limit)`。
 3. bridge 对每个 envelope 用 checkpoint 去重：`seq <= lastSeq` 的事件丢弃，成功消费后写入 lastSeq。
 4. `session.snapshot` 当前不是 `MatchaAgentRuntimeTransport.startSessionEvents` 的事件恢复路径。
 5. `sdk.message` 由 app-server worker 作为事件 envelope 发出；runtime-host `MatchaAgentProtocolAdapter` 把 `sdk.message` 投影成 canonical assistant message parts。
@@ -394,8 +395,8 @@ Renderer 不直连 app-server。Electron 只负责进程生命周期和 endpoint
 5. `MatchaAgentAppServerProcessAdapter` 只保留 app-server 专属启动、探活、endpoint snapshot 知识；app-server runtime child process lifecycle 由 `LocalProcessRuntime` 统一拥有。Electron 先启 app-server，再把 endpoint/token 只注入 runtime-host 内部 env。
 6. `OpenClawGatewayProcessAdapter` 只负责 OpenClaw 专属 prepare launch、readiness、recovery、log classify；OpenClaw gateway runtime child process ownership 仍归 `LocalProcessRuntime`，但 supervisor 的端口占用、既有进程探测与 attach 判定属于 gateway 专属实现。
 7. OpenClaw gateway 的 `config-sync`、`public-status`、`config-sync-env`、manager、supervisor、process-launcher 等都位于 `electron/main/process-runtime/openclaw-gateway/**`；`GatewayManager` 是 domain/status facade，不拥有 runtime child process；`electron/gateway/**` 不再是合法目录。
-8. runtime-host 已注册 `MatchaAgentRuntimeAdapter`，负责 app-server `session.create/load`、`events.subscribe`、`session.prompt` 等命令面。
-9. `MatchaAgentEventBridge` 已负责 `events.subscribe` 返回体 replay 消费、live event notification、lastSeq checkpoint 和 `seq <= lastSeq` 去重。
+8. runtime-host 已注册 `MatchaAgentRuntimeAdapter`，负责 app-server `session.create/load`、`events.subscribe`、`events.replay`、`session.prompt` 等命令面。
+9. `MatchaAgentEventBridge` 已负责 `events.subscribe` live event notification、独立 `events.replay` 缺口恢复、lastSeq checkpoint 和 `seq <= lastSeq` 去重。
 10. `MatchaAgentProtocolAdapter` 已把 app-server `sdk.message` 投影为 canonical assistant message parts。
 11. app-server `session.prompt` 保留 runtime-host 传入的 runId，并在重复 runId 时返回既有 runId，避免重复入队。
 12. UI 继续走现有 session routes，不新增直连通道；renderer 不直连 app-server，app-server token 不进入 renderer。
@@ -412,7 +413,7 @@ Renderer 不直连 app-server。Electron 只负责进程生命周期和 endpoint
 - runtime-host 不 spawn Bun、不知道 worker args。
 - app-server worker IPC 不暴露给 runtime-host/UI。
 - renderer 不直连 app-server；app-server endpoint/token 只作为 Electron main 注入 runtime-host 的内部通道。
-- runtime-host 按 lastSeq 启动订阅，并对 subscribe 返回的 replayed/events 与 live events 做 checkpoint 去重。
+- runtime-host 以 `events.subscribe` 返回的 `lastSeq` 作为 live 订阅起始游标；`events.subscribe` 不返回历史事件，缺口恢复只消费独立 `events.replay` 返回的 events，live events 做 checkpoint 去重。
 - approval 通过同一事件流入账，并受 checkpoint 去重保护。
 - `sessionKey` 与 `endpointSessionId` 语义清楚。
 - dev/prod 都能启动 app-server 并跑通 `session.prompt`。

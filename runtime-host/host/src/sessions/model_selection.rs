@@ -7,6 +7,8 @@ use crate::runtime_driver::RuntimeDriverIdentity;
 const MAX_MODEL_SELECTION_ID_BYTES: usize = 4096;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
+const MAX_MATCHA_MODEL_BYTES: usize = 4096;
+const MAX_PROVIDER_FINGERPRINT_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeEndpoint {
@@ -70,8 +72,19 @@ pub(crate) struct ResolvedSessionModelSelection {
     pub(crate) endpoint: NativeEndpoint,
     pub(crate) session_key: String,
     pub(crate) endpoint_session_id: Option<String>,
+    pub(crate) model_selection_id: String,
     pub(crate) binding: SessionModelSelectionBinding,
     pub(crate) diagnostic: Option<SessionModelSelectionDiagnostic>,
+    pub(crate) trace_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MatchaSessionModelRuntimeCommand {
+    pub(crate) session_key: String,
+    pub(crate) endpoint_session_id: Option<String>,
+    pub(crate) model: String,
+    pub(crate) model_selection_id: Option<String>,
+    pub(crate) provider_fingerprint: Option<String>,
     pub(crate) trace_id: Option<String>,
 }
 
@@ -167,6 +180,50 @@ pub(crate) enum SessionModelSelectionBinding {
     },
 }
 
+impl MatchaSessionModelRuntimeCommand {
+    pub(crate) fn try_new(
+        session_key: String,
+        endpoint_session_id: Option<String>,
+        model: String,
+        model_selection_id: Option<String>,
+        provider_fingerprint: Option<String>,
+    ) -> Result<Self, InvalidCommand> {
+        if session_key.is_empty()
+            || session_key.len() > MAX_SESSION_KEY_BYTES
+            || session_key.as_bytes().contains(&0)
+            || endpoint_session_id
+                .as_deref()
+                .is_some_and(|endpoint_session_id| !valid_endpoint_session_id(endpoint_session_id))
+            || !valid_model_value(&model, MAX_MATCHA_MODEL_BYTES)
+            || model_selection_id
+                .as_deref()
+                .is_some_and(|value| !valid_model_value(value, MAX_MODEL_SELECTION_ID_BYTES))
+            || provider_fingerprint
+                .as_deref()
+                .is_some_and(|value| !valid_model_value(value, MAX_PROVIDER_FINGERPRINT_BYTES))
+        {
+            return Err(InvalidCommand);
+        }
+        Ok(Self {
+            session_key,
+            endpoint_session_id,
+            model,
+            model_selection_id,
+            provider_fingerprint,
+            trace_id: None,
+        })
+    }
+
+    pub(crate) fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
+    }
+
+    pub(crate) fn trace_id(&self) -> Option<&str> {
+        self.trace_id.as_deref()
+    }
+}
+
 impl SessionModelSelectionCommand {
     pub(crate) fn try_new(
         endpoint: NativeEndpoint,
@@ -206,6 +263,10 @@ fn valid_endpoint_session_id(value: &str) -> bool {
         && value.len() <= MAX_ENDPOINT_SESSION_ID_BYTES
         && value.trim() == value
         && !value.chars().any(char::is_control)
+}
+
+fn valid_model_value(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.as_bytes().contains(&0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

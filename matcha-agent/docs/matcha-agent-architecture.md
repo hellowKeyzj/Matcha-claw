@@ -45,7 +45,7 @@ packages/mcp-client/*
 
 ## App-server note
 
-Product/runtime-host integration should not bind directly to `QueryEngine` in-process. Use the app-server boundary instead:
+Product/runtime-host integration should not bind directly to `QueryEngine` in-process. Live session effects use the app-server boundary; Rust runtime-host history projection may read transcript JSONL directly:
 
 ```text
 runtime-host adapter

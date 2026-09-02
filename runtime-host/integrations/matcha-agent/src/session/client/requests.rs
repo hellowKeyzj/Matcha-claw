@@ -349,15 +349,15 @@ impl AppServerClient {
             EventsSubscribeResult::Subscribed {
                 session_id: returned_session,
                 after_seq,
-                replayed,
+                last_seq,
                 ..
             } if returned_session == session_id
-                && after_seq.unwrap_or_else(zero_sequence)
-                    == after.unwrap_or_else(zero_sequence) =>
+                && after_seq
+                    .is_none_or(|returned| returned == after.unwrap_or_else(zero_sequence)) =>
             {
                 let replay = self
                     .ingress
-                    .settle_subscription(session_id, after, replayed.unwrap_or_default())
+                    .settle_subscription(session_id, after, last_seq)
                     .await
                     .map_err(AppServerClientError::from_ingress)?;
                 Ok(EventSubscriptionCursor::Subscribed(replay))

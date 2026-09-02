@@ -278,6 +278,7 @@ pub(super) async fn run(
             }
             Next::Event(Some(HostEvent::Matcha(SessionSubscriptionItem::Recovery {
                 route_key,
+                session_key,
                 run_id,
                 recovery,
             }))) => {
@@ -298,6 +299,7 @@ pub(super) async fn run(
                         "runtime.matcha.recovery.shutdown",
                         serde_json::json!({
                             "routeKey": &route_key,
+                            "sessionKey": &session_key,
                             "runId": &run_id,
                             "sourceEpoch": source_epoch,
                             "reason": "missing-native-cursor",
@@ -305,7 +307,6 @@ pub(super) async fn run(
                     );
                     return host.shutdown().await.map(|_| ());
                 };
-                let session_key = cursor.session_id().as_str().to_owned();
                 let source_cursor = cursor.sequence().get();
                 let Some(binding) = SessionSourceBinding::new(
                     session_key.clone(),
@@ -476,24 +477,43 @@ fn matcha_renderer_event_shape(event: &RendererEvent) -> serde_json::Value {
             message_id,
             lifecycle,
             text_delta,
+            thinking_delta,
             message_text,
+            thinking_text,
         } => serde_json::json!({
             "sequence": sequence,
             "messageId": message_id,
             "lifecycle": matcha_message_lifecycle(*lifecycle),
             "hasTextDelta": text_delta.is_some(),
             "textDeltaLength": text_delta.as_ref().map_or(0, String::len),
+            "hasThinkingDelta": thinking_delta.is_some(),
+            "thinkingDeltaLength": thinking_delta.as_ref().map_or(0, String::len),
             "hasMessageText": message_text.is_some(),
             "messageTextLength": message_text.as_ref().map_or(0, String::len),
+            "hasThinkingText": thinking_text.is_some(),
+            "thinkingTextLength": thinking_text.as_ref().map_or(0, String::len),
         }),
         RendererEvent::Tool {
             sequence,
             tool_call_id,
+            name,
             phase,
+            input,
+            input_text,
+            summary,
+            output,
+            is_error,
         } => serde_json::json!({
             "sequence": sequence,
             "toolCallId": tool_call_id,
+            "hasName": name.is_some(),
             "phase": matcha_tool_phase(*phase),
+            "hasInput": input.is_some(),
+            "inputTextLength": input_text.as_ref().map_or(0, String::len),
+            "hasSummary": summary.is_some(),
+            "summaryLength": summary.as_ref().map_or(0, String::len),
+            "hasOutput": output.is_some(),
+            "isError": is_error,
         }),
         RendererEvent::Approval {
             sequence,
@@ -513,6 +533,7 @@ fn matcha_run_phase(phase: RendererRunPhase) -> &'static str {
     match phase {
         RendererRunPhase::Started => "started",
         RendererRunPhase::WaitingForApproval => "waiting-for-approval",
+        RendererRunPhase::CancellationRequested => "cancellation-requested",
         RendererRunPhase::Completed => "completed",
         RendererRunPhase::Cancelled => "cancelled",
         RendererRunPhase::Failed => "failed",
@@ -613,8 +634,9 @@ mod tests {
             .expect("actor must retain the Matcha recovery event branch");
 
         for branch in [openclaw_branch, recovery_branch] {
-            assert!(branch.contains("Ok(SessionIngestOutcome::Rejected { .. }) => {}"));
+            assert!(branch.contains("Ok(SessionIngestOutcome::Rejected"));
             assert!(!branch.contains("Ok(SessionIngestOutcome::Rejected { .. }) => {\n                        return host.shutdown()"));
+            assert!(!branch.contains("Ok(SessionIngestOutcome::Rejected { reason }) => {\n                        return host.shutdown()"));
         }
     }
 

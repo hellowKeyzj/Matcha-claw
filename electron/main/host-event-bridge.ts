@@ -12,6 +12,7 @@ import {
   unavailableGatewayStatus,
 } from '../api/routes/app';
 import type { RendererEventRouteRegistry } from './renderer-event-routes';
+import { logSessionTrace } from './runtime-host-delivery/transport/sessions/trace';
 
 type HostEventName =
   | 'gateway:status'
@@ -167,6 +168,15 @@ function publishSessionDelta(
   routes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>,
 ): void {
   if (!delta || delta.routeKey === undefined || !isBoundSessionDelta(delta, routes)) return;
+  logSessionTrace('electron.session.delta.publish', 'session-delta-boundary', {
+    sessionKey: summarizeDeltaIdentifier(delta.sessionKey),
+    runId: summarizeDeltaIdentifier(sessionDeltaRunId(delta)),
+    seq: delta.seq,
+    cursor: delta.cursor,
+    changeKinds: delta.changes.map((change) => change.kind),
+    changeCount: delta.changes.length,
+    textLength: sessionDeltaTextLength(delta.changes),
+  });
   emit('session.delta', delta);
   if (delta.changes.some((change) => (
     change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
@@ -174,6 +184,31 @@ function publishSessionDelta(
   )) {
     routes.release(delta.routeKey);
   }
+}
+
+function sessionDeltaTextLength(
+  changes: readonly { readonly kind: string; readonly text?: string }[],
+): number {
+  return changes.reduce((total, change) => (
+    change.kind === 'messageDelta' && typeof change.text === 'string'
+      ? total + change.text.length
+      : total
+  ), 0);
+}
+
+function sessionDeltaRunId(delta: ReturnType<typeof decodeSessionDelta>): string | undefined {
+  if (delta?.runId) return delta.runId;
+  for (const change of delta?.changes ?? []) {
+    if ('runId' in change && typeof change.runId === 'string') return change.runId;
+  }
+  return undefined;
+}
+
+function summarizeDeltaIdentifier(value: string | null | undefined): {
+  present: boolean;
+  length: number;
+} {
+  return value ? { present: true, length: value.length } : { present: false, length: 0 };
 }
 
 function isBoundSessionDelta(

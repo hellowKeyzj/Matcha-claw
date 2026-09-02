@@ -13,7 +13,6 @@ import {
   isTrulyEmptyNonMainSession,
   parseSessionUpdatedAtMs,
   readSessionsFromState,
-  resolvePreferredSessionKeyForAgent,
   shouldKeepMissingCurrentSession,
   shouldRetainLocalSessionRecord,
 } from './session-helpers';
@@ -44,7 +43,12 @@ import {
   resolveSessionOperationTarget,
   sameRuntimeEndpointScope,
 } from './session-identity';
-import { pickStartupSessionFallback } from './session-selection';
+import {
+  buildCurrentConversationFromSessionRecord,
+  buildSessionRuntimeGraph,
+  createDraftCurrentConversation,
+  findPreferredSessionForAgent,
+} from './session-runtime-graph';
 import {
   decodeHistorySessionView,
   resolveSessionViewError,
@@ -61,11 +65,14 @@ import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../r
 import type { StoreHistoryCache } from './history-cache';
 import type {
   AgentScope,
+  RuntimeEndpointRef,
   SessionIdentity,
 } from '../../../electron/desktop-contract/runtime-address';
 import type {
+  ChatCurrentConversation,
   ChatSession,
   ChatSessionRuntimeEndpointTarget,
+  ChatSessionRuntimeGraph,
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
@@ -113,7 +120,6 @@ interface CreateStoreSessionActionsInput {
   get: ChatStoreGetFn;
   beginMutating: () => void;
   finishMutating: () => void;
-  defaultSessionKey: string;
   historyRuntime: StoreHistoryCache;
 }
 
@@ -265,9 +271,150 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
 
 function findRuntimeTargetForEndpoint(
   targets: readonly ChatSessionRuntimeEndpointTarget[],
-  identity: SessionIdentity,
+  endpoint: RuntimeEndpointRef,
 ): ChatSessionRuntimeEndpointTarget | null {
-  return targets.find((target) => sameRuntimeEndpointScope(target.endpoint, identity.endpoint)) ?? null;
+  return targets.find((target) => sameRuntimeEndpointScope(target.endpoint, endpoint)) ?? null;
+}
+
+function findRuntimeEndpointNode(
+  graph: ChatSessionRuntimeGraph,
+  endpoint: RuntimeEndpointRef,
+) {
+  return graph.endpoints.find((candidate) => sameRuntimeEndpointScope(candidate.endpoint, endpoint)) ?? null;
+}
+
+function buildCurrentConversationForSessionKey(
+  loadedSessions: ChatStoreState['loadedSessions'],
+  sessionKey: string,
+): ChatCurrentConversation | null {
+  const record = loadedSessions[sessionKey];
+  return record ? buildCurrentConversationFromSessionRecord(record) : null;
+}
+
+function buildRuntimeCatalogContextPatch(
+  state: ChatStoreState,
+  target: ChatSessionRuntimeEndpointTarget,
+): Pick<ChatStoreState, 'sessionRuntimeCatalog'> {
+  return {
+    sessionRuntimeCatalog: state.sessionRuntimeCatalog.defaultSessionPromptScope === target.defaultSessionPromptScope
+      ? state.sessionRuntimeCatalog
+      : {
+          ...state.sessionRuntimeCatalog,
+          defaultSessionPromptScope: target.defaultSessionPromptScope,
+        },
+  };
+}
+
+function buildRuntimeCatalogContextPatchForEndpoint(
+  state: ChatStoreState,
+  endpoint: RuntimeEndpointRef,
+): Pick<ChatStoreState, 'sessionRuntimeCatalog'> {
+  const target = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), endpoint);
+  return target ? buildRuntimeCatalogContextPatch(state, target) : { sessionRuntimeCatalog: state.sessionRuntimeCatalog };
+}
+
+function buildLastSelectedSessionPatchForEndpoint(
+  state: ChatStoreState,
+  endpoint: RuntimeEndpointRef,
+  sessionKey: string,
+): Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> {
+  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
+  if (state.lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey] === sessionKey) {
+    return { lastSelectedSessionKeyByRuntimeScopeKey: state.lastSelectedSessionKeyByRuntimeScopeKey };
+  }
+  return {
+    lastSelectedSessionKeyByRuntimeScopeKey: {
+      ...state.lastSelectedSessionKeyByRuntimeScopeKey,
+      [runtimeScopeKey]: sessionKey,
+    },
+  };
+}
+
+function buildLastSelectedSessionPatchAfterRemoval(
+  state: ChatStoreState,
+  removedSessionKey: string,
+  replacement?: { endpoint: RuntimeEndpointRef; sessionKey: string | null },
+): Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> {
+  let lastSelectedSessionKeyByRuntimeScopeKey = state.lastSelectedSessionKeyByRuntimeScopeKey;
+  for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
+    if (sessionKey !== removedSessionKey) {
+      continue;
+    }
+    lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
+    delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
+    break;
+  }
+  if (replacement?.sessionKey) {
+    const runtimeScopeKey = buildRuntimeScopeKey(replacement.endpoint);
+    if (lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey] !== replacement.sessionKey) {
+      lastSelectedSessionKeyByRuntimeScopeKey = {
+        ...lastSelectedSessionKeyByRuntimeScopeKey,
+        [runtimeScopeKey]: replacement.sessionKey,
+      };
+    }
+  }
+  return { lastSelectedSessionKeyByRuntimeScopeKey };
+}
+
+function findRememberedSessionKeyForRuntimeEndpoint(
+  state: Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey' | 'loadedSessions'>,
+  endpoint: RuntimeEndpointRef,
+): string | null {
+  const sessionKey = state.lastSelectedSessionKeyByRuntimeScopeKey[buildRuntimeScopeKey(endpoint)];
+  const identity = sessionKey ? state.loadedSessions[sessionKey]?.meta.sessionIdentity : null;
+  return identity && sameRuntimeEndpointScope(identity.endpoint, endpoint) ? sessionKey : null;
+}
+
+function findPreferredSessionKeyForRuntimeEndpoint(
+  graph: ChatSessionRuntimeGraph,
+  endpoint: RuntimeEndpointRef,
+  currentSessionKey = '',
+): string | null {
+  const endpointNode = findRuntimeEndpointNode(graph, endpoint);
+  if (!endpointNode) {
+    return null;
+  }
+  if (currentSessionKey) {
+    for (const agent of endpointNode.agents) {
+      const currentSession = agent.sessions.find((session) => session.sessionRecordKey === currentSessionKey);
+      if (currentSession) {
+        return currentSession.sessionRecordKey;
+      }
+    }
+  }
+  for (const agent of endpointNode.agents) {
+    if (agent.preferredSessionKey) {
+      return agent.preferredSessionKey;
+    }
+  }
+  return null;
+}
+
+function findExistingSessionKeyForRuntimeEndpoint(
+  state: ChatStoreState,
+  endpoint: RuntimeEndpointRef,
+): string | null {
+  return findRememberedSessionKeyForRuntimeEndpoint(state, endpoint)
+    ?? findPreferredSessionKeyForRuntimeEndpoint(state.sessionRuntimeGraph, endpoint, state.currentSessionKey)
+    ?? readSessionsFromState(state).find((session) => sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))?.key
+    ?? null;
+}
+
+function findRuntimeTargetForConversationContext(state: ChatStoreState): ChatSessionRuntimeEndpointTarget | null {
+  const endpoint = state.currentConversation?.endpoint
+    ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint
+    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint;
+  return endpoint ? findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), endpoint) : null;
+}
+
+function sameOptionalCurrentConversation(left: ChatCurrentConversation | null, right: ChatCurrentConversation | null): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  if (left.kind !== right.kind || left.agentId !== right.agentId || !sameRuntimeEndpointScope(left.endpoint, right.endpoint)) {
+    return false;
+  }
+  return left.kind === 'draft' || right.kind === 'draft' || left.sessionRecordKey === right.sessionRecordKey;
 }
 
 function resolveScopeForAgent(target: ChatSessionRuntimeEndpointTarget, agentId: string): AgentScope {
@@ -290,19 +437,84 @@ function resolveNewSessionAgentScope(state: ChatStoreState, agentId?: string): A
     throw new Error('Session runtime is not ready');
   }
   const currentMeta = getSessionMeta(state, state.currentSessionKey);
-  const targetEndpoint = currentMeta.sessionIdentity
-    ? findRuntimeTargetForEndpoint(targets, currentMeta.sessionIdentity)
+  const currentConversation = state.currentConversation;
+  const currentEndpoint = currentConversation?.endpoint
+    ?? currentMeta.sessionIdentity?.endpoint
+    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint
+    ?? null;
+  const targetEndpoint = currentEndpoint
+    ? findRuntimeTargetForEndpoint(targets, currentEndpoint)
     : null;
   const defaultScope = state.sessionRuntimeCatalog.defaultSessionPromptScope;
   const defaultEndpoint = defaultScope
     ? targets.find((target) => target.sessionPromptScopes.some((scope) => scope === defaultScope || (scope.agentId === defaultScope.agentId && sameRuntimeEndpointScope(scope.endpoint, defaultScope.endpoint)))) ?? null
     : null;
   const target = targetEndpoint ?? defaultEndpoint ?? targets[0]!;
+  const currentAgentId = currentConversation && sameRuntimeEndpointScope(currentConversation.endpoint, target.endpoint)
+    ? currentConversation.agentId
+    : currentMeta.sessionIdentity && sameRuntimeEndpointScope(currentMeta.sessionIdentity.endpoint, target.endpoint)
+      ? currentMeta.agentId ?? currentMeta.sessionIdentity.agentId
+      : null;
   const targetAgentId = agentId?.trim()
-    || currentMeta.agentId
-    || currentMeta.sessionIdentity?.agentId
+    || currentAgentId
     || target.defaultSessionPromptScope.agentId;
   return resolveScopeForAgent(target, targetAgentId);
+}
+
+function resolveCurrentConversationAfterSessionCatalogLoad(input: {
+  previousConversation: ChatCurrentConversation | null;
+  currentSessionKey: string;
+  contextTarget: ChatSessionRuntimeEndpointTarget | null;
+  graph: ChatSessionRuntimeGraph;
+  loadedSessions: ChatStoreState['loadedSessions'];
+  lastSelectedSessionKeyByRuntimeScopeKey: ChatStoreState['lastSelectedSessionKeyByRuntimeScopeKey'];
+}): ChatCurrentConversation | null {
+  const currentSessionConversation = buildCurrentConversationForSessionKey(input.loadedSessions, input.currentSessionKey);
+  if (currentSessionConversation) {
+    return currentSessionConversation;
+  }
+  const previousConversation = input.previousConversation;
+  if (previousConversation?.kind === 'draft') {
+    const rememberedSessionKey = findRememberedSessionKeyForRuntimeEndpoint(input, previousConversation.endpoint);
+    const rememberedConversation = rememberedSessionKey
+      ? buildCurrentConversationForSessionKey(input.loadedSessions, rememberedSessionKey)
+      : null;
+    if (rememberedConversation) {
+      return rememberedConversation;
+    }
+    const session = findPreferredSessionForAgent(input.graph, previousConversation.endpoint, previousConversation.agentId);
+    return session
+      ? buildCurrentConversationForSessionKey(input.loadedSessions, session.sessionRecordKey)
+      : createDraftCurrentConversation(previousConversation.endpoint, previousConversation.agentId);
+  }
+  const endpoint = previousConversation?.endpoint ?? input.contextTarget?.endpoint ?? null;
+  const agentId = previousConversation?.agentId ?? input.contextTarget?.defaultSessionPromptScope.agentId ?? null;
+  if (!endpoint || !agentId) {
+    return null;
+  }
+  const rememberedSessionKey = findRememberedSessionKeyForRuntimeEndpoint(input, endpoint);
+  const sessionKey = rememberedSessionKey
+    ?? findPreferredSessionKeyForRuntimeEndpoint(input.graph, endpoint, input.currentSessionKey);
+  return sessionKey
+    ? buildCurrentConversationForSessionKey(input.loadedSessions, sessionKey)
+    : createDraftCurrentConversation(endpoint, agentId);
+}
+
+function buildSessionRuntimeProjectionPatch(input: {
+  state: ChatStoreState;
+  loadedSessions: ChatStoreState['loadedSessions'];
+  currentSessionKey?: string;
+  currentConversation?: ChatCurrentConversation | null;
+}): Pick<ChatStoreState, 'sessionRuntimeGraph' | 'currentConversation'> {
+  const graph = buildSessionRuntimeGraph(input.state.sessionRuntimeCatalog, input.loadedSessions);
+  const currentSessionKey = input.currentSessionKey ?? input.state.currentSessionKey;
+  const currentConversation = input.currentConversation === undefined
+    ? buildCurrentConversationForSessionKey(input.loadedSessions, currentSessionKey) ?? input.state.currentConversation
+    : input.currentConversation;
+  return {
+    sessionRuntimeGraph: graph,
+    currentConversation,
+  };
 }
 
 async function requestSessionLifecycleView(
@@ -346,9 +558,19 @@ function applyBackendSessionView(
   if (result.status === 'unavailable' || result.status === 'epoch-mismatch') {
     throw new Error('Session view is unavailable');
   }
-  input.set((state) => ({
-    loadedSessions: patchSessionMeta(state, input.sessionKey, { historyStatus: 'ready' }),
-  }));
+  input.set((state) => {
+    const loadedSessions = patchSessionMeta(state, input.sessionKey, { historyStatus: 'ready' });
+    return {
+      ...buildSessionRuntimeProjectionPatch({
+        state,
+        loadedSessions,
+        currentConversation: state.currentSessionKey === input.sessionKey
+          ? buildCurrentConversationForSessionKey(loadedSessions, input.sessionKey)
+          : state.currentConversation,
+      }),
+      loadedSessions,
+    };
+  });
 }
 
 function shouldMarkSessionLoadingOnSwitch(
@@ -391,6 +613,7 @@ async function executeLoadSessionsNow(
   const stateBeforeLoad = get();
   const previousResource = stateBeforeLoad.sessionCatalogStatus;
   const currentSessionKeyBeforeLoad = stateBeforeLoad.currentSessionKey;
+  const currentConversationBeforeLoad = stateBeforeLoad.currentConversation;
   set({
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
@@ -455,35 +678,48 @@ async function executeLoadSessionsNow(
   }
   const stateSnapshot = get();
   const { currentSessionKey } = stateSnapshot;
+  const contextTarget = findRuntimeTargetForConversationContext(stateSnapshot);
+  const contextSessions = contextTarget
+    ? sessions.filter((session) => sameRuntimeEndpointScope(session.sessionIdentity.endpoint, contextTarget.endpoint))
+    : sessions;
+  const loadedAt = Date.now();
+  const endpointRevisionByRuntimeScopeKey = useRuntimeEndpointsStore.getState().revisionByRuntimeScopeKey;
+  const successfulRuntimeScopes = new Set(
+    readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptScope.endpoint)),
+  );
+  const contextCatalogLoaded = contextTarget
+    ? successfulRuntimeScopes.has(buildRuntimeScopeKey(contextTarget.defaultSessionPromptScope.endpoint))
+    : true;
   const hasSessionInBackend = (sessionKey: string): boolean => Boolean(sessionKey) && mergedSessions.has(sessionKey);
   let nextSessionKey = currentSessionKey;
   let shouldKeepMissingCurrent = false;
   if (nextSessionKey && !hasSessionInBackend(nextSessionKey)) {
-    shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
+    const currentMeta = getSessionMeta(stateSnapshot, nextSessionKey);
+    const currentMatchesContext = !contextTarget || (currentMeta.sessionIdentity
+      ? sameRuntimeEndpointScope(currentMeta.sessionIdentity.endpoint, contextTarget.endpoint)
+      : false);
+    shouldKeepMissingCurrent = currentMatchesContext && !contextCatalogLoaded && shouldKeepMissingCurrentSession(
       nextSessionKey,
       stateSnapshot,
-      sessions.length,
+      contextSessions.length,
     );
-    if (!shouldKeepMissingCurrent && sessions.length > 0) {
-      nextSessionKey = pickStartupSessionFallback(nextSessionKey, sessions) ?? nextSessionKey;
+    if (!shouldKeepMissingCurrent) {
+      nextSessionKey = '';
     }
   }
   const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
   const shouldMarkCurrentAsReadyEmpty = (
     !currentExistsInBackend
     && shouldKeepMissingCurrent
-    && sessions.length === 0
+    && contextSessions.length === 0
     && nextSessionKey.length > 0
-  );
-  const loadedAt = Date.now();
-  const successfulRuntimeScopes = new Set(
-    readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptScope.endpoint)),
   );
   set((state) => {
     if (sessionCatalogLoadSequence !== requestSequence) {
       return state;
     }
-    const ownsCurrentSessionSelection = state.currentSessionKey === currentSessionKeyBeforeLoad;
+    const ownsCurrentSessionSelection = state.currentSessionKey === currentSessionKeyBeforeLoad
+      && sameOptionalCurrentConversation(state.currentConversation, currentConversationBeforeLoad);
     const ownedNextSessionKey = ownsCurrentSessionSelection ? nextSessionKey : state.currentSessionKey;
     const sessionRecordKeys = new Set(sessions.map((session) => session.key));
     let loadedSessions = Object.fromEntries(
@@ -530,15 +766,63 @@ async function executeLoadSessionsNow(
       });
     }
 
+    let lastSelectedSessionKeyByRuntimeScopeKey = state.lastSelectedSessionKeyByRuntimeScopeKey;
+    for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
+      if (loadedSessions[sessionKey]) {
+        continue;
+      }
+      if (lastSelectedSessionKeyByRuntimeScopeKey === state.lastSelectedSessionKeyByRuntimeScopeKey) {
+        lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
+      }
+      delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
+    }
+
     if (ownsCurrentSessionSelection && shouldMarkCurrentAsReadyEmpty) {
       loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
       loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
     }
 
+    const sessionRuntimeGraph = buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions);
+    const ownedCurrentConversation = ownsCurrentSessionSelection
+      ? resolveCurrentConversationAfterSessionCatalogLoad({
+          previousConversation: state.currentConversation,
+          currentSessionKey: ownedNextSessionKey,
+          contextTarget,
+          graph: sessionRuntimeGraph,
+          loadedSessions,
+          lastSelectedSessionKeyByRuntimeScopeKey,
+        })
+      : state.currentConversation;
     const retainedSessionKeys = new Set(Object.keys(loadedSessions));
+    const sessionCatalogLoadedAtByRuntimeScopeKey = {
+      ...state.sessionCatalogLoadedAtByRuntimeScopeKey,
+    };
+    const sessionCatalogLoadedRevisionByRuntimeScopeKey = {
+      ...state.sessionCatalogLoadedRevisionByRuntimeScopeKey,
+    };
+    for (const runtimeScopeKey of successfulRuntimeScopes) {
+      sessionCatalogLoadedAtByRuntimeScopeKey[runtimeScopeKey] = loadedAt;
+      sessionCatalogLoadedRevisionByRuntimeScopeKey[runtimeScopeKey] = endpointRevisionByRuntimeScopeKey[runtimeScopeKey] ?? 0;
+    }
+    let lastSelectedSessionPatch: Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> = {
+      lastSelectedSessionKeyByRuntimeScopeKey,
+    };
+    if (ownsCurrentSessionSelection && ownedCurrentConversation?.kind === 'session') {
+      lastSelectedSessionPatch = buildLastSelectedSessionPatchForEndpoint(
+        { ...state, lastSelectedSessionKeyByRuntimeScopeKey },
+        ownedCurrentConversation.endpoint,
+        ownedCurrentConversation.sessionRecordKey,
+      );
+    }
     return {
+      ...(ownsCurrentSessionSelection && contextTarget ? buildRuntimeCatalogContextPatch(state, contextTarget) : {}),
       sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
-      currentSessionKey: ownedNextSessionKey,
+      sessionCatalogLoadedAtByRuntimeScopeKey,
+      sessionCatalogLoadedRevisionByRuntimeScopeKey,
+      ...lastSelectedSessionPatch,
+      currentSessionKey: ownedCurrentConversation?.kind === 'session' ? ownedCurrentConversation.sessionRecordKey : '',
+      currentConversation: ownedCurrentConversation,
+      sessionRuntimeGraph,
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       pendingApprovalsBySession: Object.fromEntries(
@@ -550,28 +834,40 @@ async function executeLoadSessionsNow(
 }
 
 export function executeOpenAgentConversation(input: CreateStoreSessionActionsInput, agentId: string): void {
-  const { get } = input;
+  const { get, set } = input;
   const normalized = agentId.trim();
   if (!normalized) {
     return;
   }
   const traceId = createSessionTraceId('open-agent');
   const state = get();
-  const preferredSessionKey = resolvePreferredSessionKeyForAgent(
-    normalized,
-    readSessionsFromState(state),
-    state.loadedSessions,
-  );
-  logSessionTrace('open-agent.request', traceId, {
-    agentId: summarizeIdentifier(normalized),
-    preferredSessionKey: summarizeIdentifier(preferredSessionKey),
-    currentSessionKey: summarizeIdentifier(state.currentSessionKey),
-  });
-  if (preferredSessionKey) {
-    get().switchSession(preferredSessionKey, traceId);
+  const contextEndpoint = state.currentConversation?.endpoint
+    ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint
+    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint;
+  if (!contextEndpoint) {
     return;
   }
-  get().newSession(normalized, traceId);
+  const preferredSession = findPreferredSessionForAgent(state.sessionRuntimeGraph, contextEndpoint, normalized);
+  logSessionTrace('open-agent.request', traceId, {
+    agentId: summarizeIdentifier(normalized),
+    preferredSessionKey: summarizeIdentifier(preferredSession?.sessionRecordKey),
+    currentSessionKey: summarizeIdentifier(state.currentSessionKey),
+  });
+  if (preferredSession) {
+    get().switchSession(preferredSession.sessionRecordKey, traceId);
+    return;
+  }
+  const target = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), contextEndpoint);
+  if (!target) {
+    return;
+  }
+  const draftScope = resolveScopeForAgent(target, normalized);
+  set((stateValue) => ({
+    ...buildRuntimeCatalogContextPatch(stateValue, target),
+    currentSessionKey: '',
+    currentConversation: createDraftCurrentConversation(draftScope.endpoint, draftScope.agentId),
+    error: null,
+  }));
 }
 
 export function executeOpenSessionIdentity(
@@ -603,14 +899,27 @@ export function executeOpenSessionIdentity(
       preferred: currentMeta.preferred,
       historyStatus: existing ? currentMeta.historyStatus : 'loading',
     });
+    const currentSessionKey = existing ? state.currentSessionKey : recordKey;
+    const currentConversation = existing
+      ? state.currentConversation
+      : buildCurrentConversationForSessionKey(loadedSessions, recordKey);
     return {
+      ...(existing ? {} : buildRuntimeCatalogContextPatchForEndpoint(state, identity.endpoint)),
+      ...(existing ? {} : buildLastSelectedSessionPatchForEndpoint(state, identity.endpoint, recordKey)),
+      ...buildSessionRuntimeProjectionPatch({
+        state,
+        loadedSessions,
+        currentSessionKey,
+        currentConversation,
+      }),
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-      currentSessionKey: existing ? state.currentSessionKey : recordKey,
+      currentSessionKey,
       error: null,
     };
   });
   if (existing) {
+    set((state) => buildRuntimeCatalogContextPatchForEndpoint(state, identity.endpoint));
     get().switchSession(recordKey, traceId);
     return;
   }
@@ -621,6 +930,62 @@ export function executeOpenSessionIdentity(
     reason: 'open_session_identity',
     traceId,
   });
+}
+
+export function executeSelectSessionRuntimeEndpoint(
+  input: CreateStoreSessionActionsInput,
+  endpoint: RuntimeEndpointRef,
+): void {
+  const { get, set, historyRuntime } = input;
+  const state = get();
+  const target = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), endpoint);
+  if (!target) {
+    return;
+  }
+  const currentSessionKey = state.currentSessionKey;
+  const existingSessionKey = findExistingSessionKeyForRuntimeEndpoint(state, endpoint);
+  if (existingSessionKey && existingSessionKey !== currentSessionKey) {
+    executeSwitchSession(input, existingSessionKey, createSessionTraceId('select-runtime'));
+    return;
+  }
+  if (existingSessionKey) {
+    set((stateValue) => ({
+      ...buildRuntimeCatalogContextPatch(stateValue, target),
+      ...buildLastSelectedSessionPatchForEndpoint(stateValue, endpoint, existingSessionKey),
+      currentSessionKey: existingSessionKey,
+      currentConversation: buildCurrentConversationForSessionKey(stateValue.loadedSessions, existingSessionKey),
+      error: null,
+    }));
+    return;
+  }
+
+  clearHistoryPoll();
+  clearErrorRecoveryTimer();
+  const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
+  let loadedSessions = state.loadedSessions;
+  if (leavingEmpty) {
+    clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+    loadedSessions = removeSessionRecord(state, currentSessionKey);
+  }
+  set((stateValue) => ({
+    ...buildRuntimeCatalogContextPatch(stateValue, target),
+    ...buildSessionRuntimeProjectionPatch({
+      state: stateValue,
+      loadedSessions,
+      currentSessionKey: '',
+      currentConversation: createDraftCurrentConversation(target.defaultSessionPromptScope.endpoint, target.defaultSessionPromptScope.agentId),
+    }),
+    currentSessionKey: '',
+    loadedSessions,
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+    foregroundHistorySessionKey: null,
+    pendingApprovalsBySession: leavingEmpty
+      ? Object.fromEntries(
+          Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+        )
+      : stateValue.pendingApprovalsBySession,
+    error: null,
+  }));
 }
 
 export function executeSwitchSession(input: CreateStoreSessionActionsInput, key: string, inheritedTraceId?: string | null): void {
@@ -635,6 +1000,14 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   });
   if (key === currentState.currentSessionKey) {
     logSessionTrace('switch-session.branch', traceId, { branch: 'same-current' });
+    const targetEndpoint = getSessionMeta(currentState, key).sessionIdentity?.endpoint;
+    if (targetEndpoint) {
+      set((stateValue) => ({
+        ...buildRuntimeCatalogContextPatchForEndpoint(stateValue, targetEndpoint),
+        ...buildLastSelectedSessionPatchForEndpoint(stateValue, targetEndpoint, key),
+        currentConversation: buildCurrentConversationForSessionKey(stateValue.loadedSessions, key),
+      }));
+    }
     void (async () => {
       try {
         const target = resolveOperationTarget(get(), key);
@@ -668,10 +1041,14 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           starting,
           ...summarizeError(error),
         });
-        set((state) => ({
-          error: starting ? null : resolveSessionViewError(error).message,
-          loadedSessions: patchSessionMeta(state, key, { historyStatus: starting ? 'loading' : 'ready' }),
-        }));
+        set((state) => {
+          const loadedSessions = patchSessionMeta(state, key, { historyStatus: starting ? 'loading' : 'ready' });
+          return {
+            ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+            error: starting ? null : resolveSessionViewError(error).message,
+            loadedSessions,
+          };
+        });
       }
     })();
     return;
@@ -702,18 +1079,30 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     targetRecord: summarizeSwitchSessionRecord(targetRecord),
   });
 
-  set((stateValue) => ({
-    sessionCatalogStatus: stateValue.sessionCatalogStatus,
-    currentSessionKey: key,
-    error: null,
-    loadedSessions: nextloadedSessions,
-    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(nextloadedSessions),
-    ...(leavingEmpty ? {
-      pendingApprovalsBySession: Object.fromEntries(
-        Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-      ),
-    } : {}),
-  }));
+  set((stateValue) => {
+    const targetMeta = getSessionMeta({ loadedSessions: nextloadedSessions }, key);
+    const targetEndpoint = targetMeta.sessionIdentity?.endpoint;
+    return {
+      ...(targetEndpoint ? buildRuntimeCatalogContextPatchForEndpoint(stateValue, targetEndpoint) : {}),
+      ...(targetEndpoint ? buildLastSelectedSessionPatchForEndpoint(stateValue, targetEndpoint, key) : {}),
+      ...buildSessionRuntimeProjectionPatch({
+        state: stateValue,
+        loadedSessions: nextloadedSessions,
+        currentSessionKey: key,
+        currentConversation: buildCurrentConversationForSessionKey(nextloadedSessions, key),
+      }),
+      sessionCatalogStatus: stateValue.sessionCatalogStatus,
+      currentSessionKey: key,
+      error: null,
+      loadedSessions: nextloadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(nextloadedSessions),
+      ...(leavingEmpty ? {
+        pendingApprovalsBySession: Object.fromEntries(
+          Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+        ),
+      } : {}),
+    };
+  });
   logSessionTrace('switch-session.state-applied', traceId, {
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(get().currentSessionKey),
@@ -764,12 +1153,16 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         targetSessionReady,
         ...summarizeError(error),
       });
-      set((state) => ({
-        error: starting ? null : resolveSessionViewError(error).message,
-        loadedSessions: patchSessionMeta(state, key, {
+      set((state) => {
+        const loadedSessions = patchSessionMeta(state, key, {
           historyStatus: starting ? 'loading' : targetSessionReady ? 'ready' : 'error',
-        }),
-      }));
+        });
+        return {
+          ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+          error: starting ? null : resolveSessionViewError(error).message,
+          loadedSessions,
+        };
+      });
     }
   })();
 }
@@ -817,7 +1210,6 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     get,
     beginMutating,
     finishMutating,
-    defaultSessionKey,
     historyRuntime,
   } = input;
   beginMutating();
@@ -843,10 +1235,31 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     if (currentSessionKey === key) {
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      const next = remainingSessions[0];
+      const next = remainingSessions.find((session) => sameRuntimeEndpointScope(
+        session.sessionIdentity.endpoint,
+        target.sessionIdentity.endpoint,
+      ));
       set((state) => {
         const loadedSessions = removeSessionRecord(state, key);
+        const targetRuntime = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), target.sessionIdentity.endpoint);
+        const currentConversation = next
+          ? buildCurrentConversationForSessionKey(loadedSessions, next.key)
+          : createDraftCurrentConversation(
+              targetRuntime?.defaultSessionPromptScope.endpoint ?? target.sessionIdentity.endpoint,
+              targetRuntime?.defaultSessionPromptScope.agentId ?? target.sessionIdentity.agentId,
+            );
         return {
+          ...(targetRuntime ? buildRuntimeCatalogContextPatch(state, targetRuntime) : {}),
+          ...buildLastSelectedSessionPatchAfterRemoval(state, key, {
+            endpoint: target.sessionIdentity.endpoint,
+            sessionKey: next?.key ?? null,
+          }),
+          ...buildSessionRuntimeProjectionPatch({
+            state,
+            loadedSessions,
+            currentSessionKey: next?.key ?? '',
+            currentConversation,
+          }),
           loadedSessions,
           sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
           sessionCatalogStatus: state.sessionCatalogStatus,
@@ -854,7 +1267,7 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
             Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
           ),
           error: null,
-          currentSessionKey: next?.key ?? defaultSessionKey,
+          currentSessionKey: next?.key ?? '',
         };
       });
       if (next) {
@@ -871,12 +1284,16 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
           }
         } catch (error) {
           if (get().currentSessionKey === next.key) {
-            set((state) => ({
-              error: resolveSessionViewError(error).message,
-              loadedSessions: patchSessionMeta(state, next.key, {
+            set((state) => {
+              const loadedSessions = patchSessionMeta(state, next.key, {
                 historyStatus: 'error',
-              }),
-            }));
+              });
+              return {
+                ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+                error: resolveSessionViewError(error).message,
+                loadedSessions,
+              };
+            });
           }
         }
       }
@@ -887,6 +1304,8 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     set((state) => {
       const loadedSessions = removeSessionRecord(state, key);
       return {
+        ...buildLastSelectedSessionPatchAfterRemoval(state, key),
+        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
         loadedSessions,
         sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: state.sessionCatalogStatus,
@@ -931,6 +1350,7 @@ export async function executeRenameSession(
         manualLabel: true,
       });
       return {
+        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
         loadedSessions,
         sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       };
@@ -1000,12 +1420,9 @@ async function executeNewSessionWithScopeResolver(
     if (!createdAgentId) {
       throw new Error('Session view identity is incomplete');
     }
+    const createdEndpoint = created.identity.endpoint;
     const newKey = buildSessionRecordKey({
-      endpoint: {
-        kind: 'native-runtime',
-        runtimeAdapterId: created.identity.endpoint.runtimeAdapterId,
-        runtimeInstanceId: created.identity.endpoint.runtimeInstanceId,
-      },
+      endpoint: createdEndpoint,
       agentId: createdAgentId,
       sessionKey: created.sessionKey,
     });
@@ -1029,11 +1446,22 @@ async function executeNewSessionWithScopeResolver(
         newKey,
         { historyStatus: 'ready' },
       );
+      const selectedSessionKey = ownsSelection ? newKey : stateValue.currentSessionKey;
       return {
+        ...(ownsSelection ? buildRuntimeCatalogContextPatchForEndpoint(stateValue, createdEndpoint) : {}),
+        ...(ownsSelection ? buildLastSelectedSessionPatchForEndpoint(stateValue, createdEndpoint, newKey) : {}),
+        ...buildSessionRuntimeProjectionPatch({
+          state: stateValue,
+          loadedSessions,
+          currentSessionKey: selectedSessionKey,
+          currentConversation: ownsSelection
+            ? buildCurrentConversationForSessionKey(loadedSessions, newKey)
+            : stateValue.currentConversation,
+        }),
         loadedSessions,
         sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: stateValue.sessionCatalogStatus,
-        currentSessionKey: ownsSelection ? newKey : stateValue.currentSessionKey,
+        currentSessionKey: selectedSessionKey,
         pendingApprovalsBySession: ownsSelection && leavingEmpty
           ? Object.fromEntries(
               Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
@@ -1077,6 +1505,7 @@ export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput
   set((stateValue) => {
     const loadedSessions = removeSessionRecord(stateValue, currentSessionKey);
     return {
+      ...buildSessionRuntimeProjectionPatch({ state: stateValue, loadedSessions }),
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       sessionCatalogStatus: stateValue.sessionCatalogStatus,

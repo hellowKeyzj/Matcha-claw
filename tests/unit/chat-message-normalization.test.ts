@@ -214,18 +214,46 @@ describe('chat message normalization', () => {
     expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(true);
   });
 
-  it('strips standalone assistant control and artifact marker lines from visible assistant text', () => {
+  it('strips assistant control and artifact markers from visible assistant text', () => {
     expect(sanitizeAssistantDisplayText([
       'Real reply',
       'NO_REPLY',
       '',
       String.raw`MEDIA:C:\Users\me\.openclaw\workspace\out.svg`,
+      String.raw`Inline MEDIA:C:\Users\me\.openclaw\workspace\inline.svg done`,
+      String.raw`Bare C:\Users\me\.openclaw\media\artifact.svg path`,
       'More detail',
       'HEARTBEAT_OK',
     ].join('\n'))).toBe([
       'Real reply',
+      'Inline  done',
+      'Bare  path',
       'More detail',
     ].join('\n'));
+  });
+
+  it('strips internal delivery planning and loose media markers from assistant text', () => {
+    expect(sanitizeAssistantDisplayText([
+      'The message tool isn\'t suitable here, so I will fall back to writing the normal final reply with MEDIA directives.',
+      '',
+      'Real reply',
+      String.raw`必备~MEDIA:C:\Users\me\.openclaw\workspace\space name.svg done`,
+      String.raw`Bare C:\Users\me\.openclaw\media\artifact with spaces.svg path`,
+    ].join('\n'))).toBe([
+      'Real reply',
+      '必备~ done',
+      'Bare  path',
+    ].join('\n'));
+  });
+
+  it('filters standalone internal delivery planning messages', () => {
+    const message = {
+      role: 'assistant',
+      content: 'Webchat isn\'t a valid channel for the message tool. Fall back to writing the normal final reply.',
+    };
+
+    expect(isInternalRuntimeDisplayMessage(message)).toBe(true);
+    expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(false);
   });
 
   it('detects only uppercase silent reply streaming prefixes for assistant messages', () => {

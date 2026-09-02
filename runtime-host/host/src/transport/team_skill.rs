@@ -196,7 +196,7 @@ pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> De
             .team_skill_materialize(selection_id, team_id, idempotency_key)
             .await
         {
-            Ok(crate::composition::TeamMaterializationCommandOutcome::Materialized) => {
+            Ok(crate::composition::TeamMaterializationCommandOutcome::Materialized { .. }) => {
                 Delivery::Materialized
             }
             Ok(crate::composition::TeamMaterializationCommandOutcome::Rejected) => {

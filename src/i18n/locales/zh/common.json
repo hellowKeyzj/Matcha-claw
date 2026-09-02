@@ -55,7 +55,136 @@
         "pendingBlockerTaskId": "任务ID {{taskId}}",
         "pendingBlockerSourceChat": "聊天会话",
         "pendingBlockerApprovalId": "审批ID {{id}}",
-        "pendingBlockerApprovalHint": "当前有工具调用等待审批。"
+        "pendingBlockerApprovalHint": "当前有工具调用等待审批。",
+        "account": {
+            "signedOut": "未登录",
+            "syncing": "同步中",
+            "offline": "离线",
+            "signedIn": "已登录",
+            "checking": "检查登录状态",
+            "openMenu": "打开账号菜单",
+            "loginAria": "登录 MatchaClaw",
+            "quotaEmpty": "登录后显示用量",
+            "subscription": "订阅服务",
+            "appearanceSettings": "外观/设置",
+            "about": "关于",
+            "logout": "退出登录",
+            "login": "登录",
+            "register": "注册",
+            "upgradeSubscription": "升级/订阅",
+            "plan": {
+                "trialing": "试用中",
+                "active": "已订阅",
+                "pastDue": "待处理",
+                "cancelled": "已取消",
+                "expired": "已过期",
+                "free": "免费版"
+            },
+            "quota": {
+                "usage": "用量",
+                "usedAmount": "已用 {{amount}}",
+                "usedOfLimit": "{{used}} / {{limit}}",
+                "subscriptionDaily": "套餐日额度",
+                "subscriptionWeekly": "套餐周额度",
+                "subscriptionMonthly": "套餐月额度",
+                "platformMonthly": "{{platform}} 月度",
+                "totalUsage": "总用量"
+            }
+        }
+    },
+    "subscriptionDialog": {
+        "title": "Matcha 套餐续购",
+        "tabs": {
+            "current": "当前订阅",
+            "checkout": "选择套餐"
+        },
+        "loading": "正在加载 Matcha 套餐和支付方式...",
+        "units": {
+            "day": "天",
+            "week": "周",
+            "month": "月",
+            "year": "年",
+            "cycle": "周期"
+        },
+        "subscriptionStatus": {
+            "active": "订阅中",
+            "trialing": "试用中",
+            "pastDue": "待处理",
+            "cancelled": "已取消",
+            "expired": "已过期",
+            "none": "未订阅"
+        },
+        "current": {
+            "subscriptionCount": "{{count}} 个 Matcha 订阅",
+            "noSubscription": "暂无 Matcha 订阅",
+            "expiresAt": "到期时间：{{date}}",
+            "quotaTitle": "订阅额度",
+            "emptyQuota": "当前订阅没有返回额度详情。",
+            "platformQuotaTitle": "平台额度"
+        },
+        "quota": {
+            "daily": "日额度",
+            "weekly": "周额度",
+            "monthly": "月额度",
+            "platformMonthly": "{{platform}} 月度",
+            "unlimited": "不限量",
+            "usedOfLimit": "已用 {{used}} / {{limit}}",
+            "remaining": "剩余 {{amount}}",
+            "resetsAt": "重置：{{date}}"
+        },
+        "plan": {
+            "duration": "{{count}} {{unit}}",
+            "otherPlans": "其他套餐",
+            "unitPlans": "{{unit}}套餐",
+            "allPlans": "全部套餐",
+            "empty": "暂无可购买的 Matcha 套餐。",
+            "rateMultiplier": "倍率：×{{value}}",
+            "validity": "有效期：{{duration}}",
+            "quotaLimit": "{{label}}：{{amount}}",
+            "defaultFeature": "包含 Matcha 订阅基础权益。"
+        },
+        "payment": {
+            "title": "付款信息",
+            "method": "支付方式",
+            "noMethod": "当前没有可用支付方式，请稍后重试。",
+            "unlimited": "不限",
+            "singleRange": "单笔范围：{{min}} - {{max}}",
+            "feeRate": "，手续费 {{rate}}%",
+            "agreement": "我已阅读并同意 Matcha 订阅服务协议、套餐说明和支付规则。",
+            "confirm": "确认支付",
+            "confirmWithAmount": "确认支付 {{amount}}"
+        },
+        "order": {
+            "pending": "订单待支付",
+            "statusLabel": "支付状态",
+            "payAmount": "应付金额",
+            "expiresAt": "过期时间",
+            "openPayUrl": "打开支付页面",
+            "qrCode": "支付二维码",
+            "qrCodeAlt": "Matcha 支付二维码",
+            "copied": "已复制",
+            "tradeNo": "支付订单号",
+            "reload": "刷新订单",
+            "verify": "检查支付结果",
+            "polling": "自动轮询中",
+            "status": {
+                "pending": "待支付",
+                "recharging": "支付处理中",
+                "paid": "支付完成",
+                "expired": "已过期",
+                "failed": "支付失败",
+                "cancelled": "已取消",
+                "unknown": "未知状态"
+            }
+        },
+        "errors": {
+            "loadPlansFailed": "套餐加载失败",
+            "verifyOrderFailed": "支付状态检查失败：{{message}}",
+            "createOrderFailed": "创建支付订单失败：{{message}}",
+            "reloadOrderFailed": "刷新订单失败：{{message}}",
+            "openPayUrlFailed": "打开支付页面失败：{{message}}",
+            "copyFailed": "复制失败：{{message}}"
+        }
     },
     "actions": {
         "save": "保存",

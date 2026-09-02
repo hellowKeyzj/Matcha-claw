@@ -23,7 +23,10 @@ use super::{
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     state::{SessionIdentity, SessionView},
-    timeline::{Command as SessionTimelineCommand, Outcome as SessionTimelineOutcome},
+    timeline::{
+        Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
+        ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
+    },
 };
 use crate::{RuntimeSessionError, runtime_directory::RuntimeDriverDirectory};
 use openclaw::{
@@ -182,6 +185,14 @@ impl SessionHandle {
         command: SessionTimelineCommand,
     ) -> Result<SessionTimelineOutcome, ()> {
         self.request_query(|reply| SessionQuery::Timeline { command, reply })
+            .await
+    }
+
+    pub(crate) async fn load_content(
+        &self,
+        command: SessionContentCommand,
+    ) -> Result<SessionContentOutcome, ()> {
+        self.request_query(|reply| SessionQuery::Content { command, reply })
             .await
     }
 

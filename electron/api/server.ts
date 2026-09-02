@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { HostApiContext } from './context';
+import { handleAccountRoutes } from './routes/account';
+import { handleBillingRoutes } from './routes/billing';
 import { handleCapabilityRoutes } from './routes/capabilities';
 import { handleAgentsRoutes } from './routes/agents';
 import { handleAppRoutes } from './routes/app';
@@ -43,6 +46,7 @@ import { handleSettingsDesiredRoutes } from './routes/settings-desired';
 import { handleSettingsRoutes } from './routes/settings';
 import { handleSkillBundleRoutes } from './routes/skill-bundle';
 import { handleSkillsRoutes } from './routes/skills';
+import { handleSubscriptionRoutes } from './routes/subscription';
 import { handleTeamApprovalsRoutes } from './routes/team-approvals';
 import { handleTeamDecisionRoutes } from './routes/team-decision';
 import { handleTeamGraphRoutes } from './routes/team-graph';
@@ -75,7 +79,9 @@ type RouteHandler = (
 
 const routeHandlers: readonly RouteHandler[] = [
   handleAppRoutes,
+  (req, res, url, deps) => handleAccountRoutes(req, res, url, deps),
   (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.agentsTransport),
+  (req, res, url, deps) => handleBillingRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
   (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.channelCatalogTransport),
   (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.channelCatalogTransport),
@@ -137,6 +143,7 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleSettingsRoutes(req, res, url, deps.settingsDesiredTransport),
   (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.skillBundleTransport),
   (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.skillsManagementTransport),
+  (req, res, url, deps) => handleSubscriptionRoutes(req, res, url, deps),
   (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.teamApprovalsTransport),
   (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.teamHumanDecisionTransport),
   (req, res, url, deps) => handleTeamGraphRoutes(req, res, url, deps.teamGraphTransport),
@@ -157,8 +164,43 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.usageTransport),
 ];
 
+export type HostApiConnection = Readonly<{
+  baseUrl: string;
+  token: string;
+}>;
+
 let hostApiToken = '';
 let hostApiBaseUrl = '';
+let resolveHostApiReady: (() => void) | null = null;
+let rejectHostApiReady: ((error: Error) => void) | null = null;
+let hostApiReadyPromise: Promise<void>;
+let isHostApiReadySettled = false;
+let hostApiServerGeneration = 0;
+
+function createHostApiReadyBarrier(): void {
+  isHostApiReadySettled = false;
+  hostApiReadyPromise = new Promise((resolve, reject) => {
+    resolveHostApiReady = () => {
+      isHostApiReadySettled = true;
+      resolve();
+    };
+    rejectHostApiReady = (error) => {
+      isHostApiReadySettled = true;
+      reject(error);
+    };
+  });
+  void hostApiReadyPromise.catch(() => undefined);
+}
+
+function prepareHostApiReadyBarrier(): number {
+  hostApiServerGeneration += 1;
+  if (isHostApiReadySettled) {
+    createHostApiReadyBarrier();
+  }
+  return hostApiServerGeneration;
+}
+
+createHostApiReadyBarrier();
 
 export function getHostApiToken(): string {
   return hostApiToken;
@@ -166,6 +208,15 @@ export function getHostApiToken(): string {
 
 export function getHostApiBaseUrl(): string {
   return hostApiBaseUrl;
+}
+
+export async function waitForHostApiReady(): Promise<void> {
+  await hostApiReadyPromise;
+}
+
+export async function readHostApiConnection(): Promise<HostApiConnection> {
+  await waitForHostApiReady();
+  return { baseUrl: hostApiBaseUrl, token: hostApiToken };
 }
 
 export function createHostApiRequestHandler(deps: HostApiContext, port: number, fleetTransportPort?: number) {
@@ -252,8 +303,9 @@ export function startHostApiServer(
   const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
     ? Number(port)
     : getPort('MATCHACLAW_HOST_API');
+  const readyGeneration = prepareHostApiReadyBarrier();
   hostApiToken = randomBytes(32).toString('hex');
-  hostApiBaseUrl = `http://127.0.0.1:${resolvedPort}`;
+  hostApiBaseUrl = '';
 
   const server = createServer(createHostApiRequestHandler(ctx, resolvedPort, fleetTransportPort));
 
@@ -267,6 +319,9 @@ export function startHostApiServer(
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
+    if (!server.listening && readyGeneration === hostApiServerGeneration) {
+      rejectHostApiReady?.(error);
+    }
     if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
       logger.error(
         `Host API server failed to bind port ${resolvedPort}: ${error.message}. ` +
@@ -278,7 +333,14 @@ export function startHostApiServer(
   });
 
   server.listen(resolvedPort, '127.0.0.1', () => {
-    logger.info(`Host API server listening on http://127.0.0.1:${resolvedPort}`);
+    const address = server.address() as AddressInfo | null;
+    const listeningPort = address?.port ?? resolvedPort;
+    const listeningBaseUrl = `http://127.0.0.1:${listeningPort}`;
+    if (readyGeneration === hostApiServerGeneration) {
+      hostApiBaseUrl = listeningBaseUrl;
+      resolveHostApiReady?.();
+    }
+    logger.info(`Host API server listening on ${listeningBaseUrl}`);
   });
 
   return server;

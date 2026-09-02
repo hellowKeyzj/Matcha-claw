@@ -153,11 +153,11 @@ impl EventIngress {
         &self,
         session_id: SessionId,
         after: Option<Sequence>,
-        replayed: Vec<EventEnvelope>,
+        last_seq: Sequence,
     ) -> Result<EventReplay, IngressError> {
         Ok(self
             .ingress
-            .settle(session_id, after, replayed, true)
+            .settle_subscription(session_id, after, last_seq)
             .await?
             .summary())
     }
@@ -169,7 +169,7 @@ impl EventIngress {
         replayed: Vec<EventEnvelope>,
     ) -> Result<EventReplayPayload, IngressError> {
         self.ingress
-            .settle(session_id, after, replayed, false)
+            .settle(session_id, after, replayed, false, None)
             .await
     }
 
@@ -241,12 +241,23 @@ impl Ingress {
         received.await.map_err(|_| IngressError::Closed)?
     }
 
+    async fn settle_subscription(
+        &self,
+        session_id: SessionId,
+        after: Option<Sequence>,
+        last_seq: Sequence,
+    ) -> Result<EventReplayPayload, IngressError> {
+        self.settle(session_id, after, Vec::new(), true, Some(last_seq))
+            .await
+    }
+
     async fn settle(
         &self,
         session_id: SessionId,
         after: Option<Sequence>,
         replayed: Vec<EventEnvelope>,
         subscription: bool,
+        confirmed_cursor: Option<Sequence>,
     ) -> Result<EventReplayPayload, IngressError> {
         let (reply, received) = oneshot::channel();
         self.commands
@@ -255,6 +266,7 @@ impl Ingress {
                 after,
                 replayed,
                 subscription,
+                confirmed_cursor,
                 reply,
             })
             .await

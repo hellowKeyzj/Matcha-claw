@@ -56,14 +56,14 @@ query.ts / tools / MCP / transcript JSONL
 - matcha-agent JSONL transcript remains the conversation-content and recovery truth.
 - `EventStore` is an app-server protocol/runtime event log for replay and projection, not a second transcript.
 - `QueryEngine` does not know WebSocket/runtime-host.
-- runtime-host does not know worker IPC and must not read transcript JSONL directly.
+- runtime-host does not know worker IPC; Rust matcha-agent integration may read transcript JSONL only as a bounded read-only history projection.
 - Chat does not depend on Claude Code SDK internals.
 
 ## Process model
 
 ```text
 logical app-server session
-  ├─ metadata: sessionId / cwd / model / permissionMode / lastSeq
+  ├─ metadata: sessionId / cwd / model / modelSelectionId / providerFingerprint / permissionMode / lastSeq
   ├─ app-server replay log: events.jsonl
   ├─ rebuildable app-server projection: snapshot.json
   ├─ matcha-agent content/recovery truth: transcript JSONL owned by QueryEngine pipeline
@@ -78,6 +78,7 @@ Rules:
 - App-server `events.jsonl` is protocol/runtime replay history. It is not the matcha-agent conversation transcript.
 - Session content recovery uses the existing matcha-agent transcript JSONL/recovery path.
 - `setModel` / `setMode` updates app-server session metadata and restarts warm worker so next prompt initializes with new settings; active runs reject settings changes.
+- `setModel` persists only non-secret model identity (`model`, `modelSelectionId`, `providerFingerprint`). Provider runtime secrets remain runtime-only: runtime-host sends them through internal app-server protocol, app-server caches them in memory, and worker initialization receives them.
 - Worker crash interrupts active worker-owned runs and cancels pending approvals owned by that worker.
 - App-server shutdown first closes ingress, then sends `worker.shutdown` to every managed worker, waits for each OS child exit within a bounded grace period, and kills only workers that miss that deadline. Electron's process-tree termination is an outer fallback, not normal worker lifecycle.
 - App-server restart does not persist raw queued prompt text. Recovered nonterminal runs become `run.interrupted(serverShutdown)` and recovered pending approvals become cancelled.
@@ -137,7 +138,7 @@ SnapshotStore projection update
 ClientHub.broadcast() enqueue
 ```
 
-For one session, the complete pipeline is serialized: the next `seq` must not enter it until the preceding event has completed every stage (including an explicitly recorded projection failure). Pipelines for different sessions may run in parallel. Append precedes broadcast. `ClientHub.broadcast()` completes when the envelope is enqueued in each applicable per-client transport queue; it does not wait for socket writes. Slow clients are closed rather than blocking worker drain or event persistence. `events.subscribe(..., afterSeq)` treats `afterSeq` as the client-provided replay lower bound at subscription time, never as a server-side live-delivery cursor. After a successful append, a projection failure must be explicitly recorded but must not block later projection stages or live delivery: EventStore remains the durable truth, and SnapshotStore can be rebuilt from it. This ordering governs app-server events only; it does not redefine matcha-agent transcript persistence.
+For one session, the complete pipeline is serialized: the next `seq` must not enter it until the preceding event has completed every stage (including an explicitly recorded projection failure). Pipelines for different sessions may run in parallel. Append precedes broadcast. `ClientHub.broadcast()` completes when the envelope is enqueued in each applicable per-client transport queue; it does not wait for socket writes. Slow clients are closed rather than blocking worker drain or event persistence. `events.subscribe(..., afterSeq)` only registers live delivery and returns the current `lastSeq`; historical catch-up and gap recovery use `events.replay(afterSeq, limit)`. After a successful append, a projection failure must be explicitly recorded but must not block later projection stages or live delivery: EventStore remains the durable truth, and SnapshotStore can be rebuilt from it. This ordering governs app-server events only; it does not redefine matcha-agent transcript persistence.
 
 ## Session lifecycle
 
@@ -358,7 +359,7 @@ runtime-host MatchaAgentRuntimeAdapter
 Adapter responsibilities:
 
 - Map runtime-host session commands to app-server JSON-RPC methods.
-- Use `session.transcript` for historical conversation hydration; do not read transcript JSONL directly.
+- Use `session.transcript` for live app-server hydration; Rust runtime-host integration may read transcript JSONL directly for cold-start history list/window projection.
 - Use `events.replay`, `events.subscribe`, and `session.snapshot` for app-server runtime synchronization.
 - Persist last seen `seq` per logical session; `seq` is app-server event order, not transcript offset.
 - Project app-server events into runtime-host canonical session view.
@@ -382,7 +383,7 @@ Adapter responsibilities:
 - app-server does not become a second agent runtime.
 - JSONL transcript/recovery remains the matcha-agent session content truth.
 - EventStore is the app-server protocol/runtime replay source; Snapshot is rebuildable from it.
-- runtime-host uses app-server protocol and never reads transcript JSONL directly.
+- runtime-host uses app-server protocol for live session effects; its Rust matcha-agent integration may read transcript JSONL directly for read-only historical projection.
 - `seq` orders app-server session events.
 - `runId` owns prompt execution; `messageId` owns projected UI message identity.
 - `session.close` cannot resurrect closed session through later event metadata updates.

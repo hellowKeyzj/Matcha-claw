@@ -1,4 +1,4 @@
-import { hostWorkspaceMediaThumbnail } from '@/lib/host-api';
+import { hostWorkspaceMediaThumbnail, type FileThumbnailResult } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
 import {
   getSessionItems,
@@ -19,6 +19,7 @@ import type {
 const IMAGE_CACHE_KEY = 'matchaclaw:image-cache';
 const IMAGE_CACHE_MAX = 100;
 const IMAGE_CACHE_MAX_PERSISTED_PREVIEW_CHARS = 512 * 1024;
+const IMAGE_PREVIEW_RETRY_DELAYS_MS = [300, 900, 1800] as const;
 const THUMBNAIL_LOAD_CONCURRENCY = 3;
 
 function loadImageCache(): Map<string, AttachedFileMeta> {
@@ -463,6 +464,99 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function previewRetryDelay(ms: number, abortSignal?: AbortSignal): Promise<void> {
+  if (abortSignal) {
+    throwIfHistoryLoadAborted(abortSignal);
+  }
+  return new Promise((resolve, reject) => {
+    let timeoutId: number | null = null;
+    function cleanup() {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      abortSignal?.removeEventListener('abort', abort);
+    }
+    function abort() {
+      cleanup();
+      try {
+        if (abortSignal) {
+          throwIfHistoryLoadAborted(abortSignal);
+        }
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      reject(new Error('history_load_aborted'));
+    }
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    abortSignal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+type PendingPreviewLoad = {
+  refKey: string;
+  file: AttachedFileMeta;
+  relativePath?: string;
+  gatewayUrl?: string;
+};
+
+async function loadPreview(
+  entry: PendingPreviewLoad,
+  context: AttachmentPreviewLoadContext,
+): Promise<FileThumbnailResult> {
+  return entry.gatewayUrl
+    ? hostWorkspaceMediaThumbnail({
+      gatewayUrl: entry.gatewayUrl,
+      mimeType: entry.file.mimeType,
+      agentId: context.sessionIdentity.agentId,
+      sessionIdentity: context.sessionIdentity,
+    })
+    : hostWorkspaceMediaThumbnail({
+      relativePath: entry.relativePath!,
+      mimeType: entry.file.mimeType,
+      sessionIdentity: context.sessionIdentity,
+    });
+}
+
+function hasPreviewPayload(thumbnail: FileThumbnailResult): boolean {
+  return !!thumbnail.preview || thumbnail.fileSize > 0;
+}
+
+function shouldRetryPreviewLoad(
+  entry: PendingPreviewLoad,
+  thumbnail: FileThumbnailResult,
+): boolean {
+  return !!entry.gatewayUrl
+    && entry.file.mimeType.startsWith('image/')
+    && !hasPreviewPayload(thumbnail)
+    && thumbnail.error !== 'invalidPath';
+}
+
+async function loadPreviewWithRetry(
+  entry: PendingPreviewLoad,
+  context: AttachmentPreviewLoadContext,
+  abortSignal?: AbortSignal,
+): Promise<FileThumbnailResult> {
+  let thumbnail = await loadPreview(entry, context);
+  for (const delay of IMAGE_PREVIEW_RETRY_DELAYS_MS) {
+    if (!shouldRetryPreviewLoad(entry, thumbnail)) {
+      return thumbnail;
+    }
+    await previewRetryDelay(delay, abortSignal);
+    if (abortSignal) {
+      throwIfHistoryLoadAborted(abortSignal);
+    }
+    thumbnail = await loadPreview(entry, context);
+    if (abortSignal) {
+      throwIfHistoryLoadAborted(abortSignal);
+    }
+  }
+  return thumbnail;
+}
+
 export async function loadMissingItemPreviews(
   items: SessionRenderItem[],
   context: AttachmentPreviewLoadContext,
@@ -472,12 +566,7 @@ export async function loadMissingItemPreviews(
     throwIfHistoryLoadAborted(abortSignal);
   }
   const normalizedItems = hydrateAttachedFilesFromItems(items);
-  const needPreview: Array<{
-    refKey: string;
-    file: AttachedFileMeta;
-    relativePath?: string;
-    gatewayUrl?: string;
-  }> = [];
+  const needPreview: PendingPreviewLoad[] = [];
   const seenRefs = new Set<string>();
 
   for (const item of normalizedItems) {
@@ -508,20 +597,14 @@ export async function loadMissingItemPreviews(
   try {
     const thumbnails = Object.fromEntries(await mapWithConcurrency(needPreview, THUMBNAIL_LOAD_CONCURRENCY, async (entry) => {
       try {
-        const thumbnail = entry.gatewayUrl
-          ? await hostWorkspaceMediaThumbnail({
-            gatewayUrl: entry.gatewayUrl,
-            mimeType: entry.file.mimeType,
-            agentId: context.sessionIdentity.agentId,
-            sessionIdentity: context.sessionIdentity,
-          })
-          : await hostWorkspaceMediaThumbnail({
-            relativePath: entry.relativePath!,
-            mimeType: entry.file.mimeType,
-            sessionIdentity: context.sessionIdentity,
-          });
-        return [entry.refKey, thumbnail] as const;
-      } catch {
+        return [entry.refKey, await loadPreviewWithRetry(entry, context, abortSignal)] as const;
+      } catch (error) {
+        if (abortSignal) {
+          throwIfHistoryLoadAborted(abortSignal);
+        }
+        if ((error as { name?: unknown })?.name === 'AbortError') {
+          throw error;
+        }
         return [entry.refKey, { preview: null, fileSize: 0 }] as const;
       }
     })) as Record<string, { preview: string | null; fileSize: number }>;

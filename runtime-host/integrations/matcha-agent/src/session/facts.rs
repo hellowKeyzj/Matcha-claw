@@ -367,6 +367,8 @@ mod tests {
             last_seq: Sequence::try_new(last_seq).unwrap(),
             last_snapshot_version: 3,
             model: None,
+            model_selection_id: None,
+            provider_fingerprint: None,
             permission_mode: None,
             worker_state: WorkerRuntimeState::Unloaded {
                 reason: crate::session::model::UnloadedReason::NotStarted,
@@ -384,6 +386,12 @@ mod tests {
             created_at: "now".into(),
             event: Event::try_new(event).unwrap(),
         }
+    }
+
+    fn metadata_envelope(seq: u64, event: serde_json::Value) -> EventEnvelope {
+        let mut envelope = envelope(seq, event);
+        envelope.run_id = None;
+        envelope
     }
 
     fn payload(cursor: u64, events: Vec<EventEnvelope>) -> EventReplayPayload {
@@ -453,6 +461,60 @@ mod tests {
             "message-native"
         );
         assert!(!format!("{facts:?}").contains("payload"));
+    }
+
+    #[test]
+    fn facts_ignore_native_metadata_events_without_run_identity() {
+        let session = session("session-1", 2);
+        let snapshot = SessionSnapshot {
+            session: session.clone(),
+            version: 2,
+            updated_at: "snapshot-updated".into(),
+            runs: vec![],
+            messages: vec![],
+            pending_approvals: vec![],
+            usage: None,
+        };
+        let replay = payload(
+            2,
+            vec![
+                metadata_envelope(
+                    1,
+                    json!({
+                        "type": "session.loaded",
+                        "session": {
+                            "sessionId": "session-1",
+                            "workspaceRoot": "workspace",
+                            "createdAt": "created",
+                            "updatedAt": "updated",
+                            "runtime": "matcha-agent",
+                            "lastSeq": 1,
+                            "lastSnapshotVersion": 1,
+                            "workerState": {"state":"unloaded","reason":"notStarted"}
+                        }
+                    }),
+                ),
+                metadata_envelope(
+                    2,
+                    json!({"type": "worker.ready", "workerId": "worker-1", "pid": 7}),
+                ),
+            ],
+        );
+        let facts = NativeSessionFacts::from_native(
+            session,
+            snapshot,
+            HydrationSnapshot::new(
+                Vec::new(),
+                crate::session::hydration::HydrationWindow::new(0, 0, 0),
+            ),
+            replay,
+        )
+        .expect("metadata events should not poison canonical reads");
+
+        assert_eq!(facts.replay_cursor().sequence().get(), 2);
+        assert_eq!(facts.replay_event_count(), 2);
+        assert!(facts.replay_events().is_empty());
+        assert!(facts.has_complete_replay_boundary());
     }
 
     #[test]

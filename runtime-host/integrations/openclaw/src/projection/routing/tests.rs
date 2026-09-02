@@ -216,11 +216,11 @@ fn routing_credential_check_uses_projected_provider_key() {
         .replace_auth_profiles(
             &agent,
             &PrivateAuthProfiles::try_new(
-                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
+                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
             )
-            .expect("raw provider profile"),
+            .expect("legacy provider profile"),
         )
-        .expect("store raw provider profile");
+        .expect("store legacy provider profile");
 
     assert_eq!(
         ProviderRoutingProjection::apply(
@@ -237,11 +237,11 @@ fn routing_credential_check_uses_projected_provider_key() {
         .replace_auth_profiles(
             &agent,
             &PrivateAuthProfiles::try_new(
-                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
+                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
             )
-            .expect("projected provider profile"),
+            .expect("canonical provider profile"),
         )
-        .expect("store projected provider profile");
+        .expect("store canonical provider profile");
 
     let effect = ProviderRoutingProjection::apply(
         root.state_dir.clone(),
@@ -250,7 +250,7 @@ fn routing_credential_check_uses_projected_provider_key() {
         &routing,
         1_800_000_000_000,
     )
-    .expect("project routing with projected provider profile");
+    .expect("project routing with canonical provider profile");
 
     assert!(matches!(
         effect,
@@ -263,7 +263,7 @@ fn routing_credential_check_uses_projected_provider_key() {
         document
             .as_value()
             .pointer("/agents/defaults/model/primary"),
-        Some(&json!("openai-codex/gpt-5.6"))
+        Some(&json!("openai/gpt-5.6"))
     );
 }
 

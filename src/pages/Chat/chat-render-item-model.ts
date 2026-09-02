@@ -66,12 +66,19 @@ function hashText(value: string | null | undefined): string {
   return hashStringDjb2(value ?? '');
 }
 
+function largeTextSignature(value: { contentRef: string; totalBytes: number; loadedBytes: number } | null | undefined): string {
+  return value ? `${value.contentRef}:${value.loadedBytes}:${value.totalBytes}` : '';
+}
+
 function buildAttachedFilesSignature(
   attachedFiles: ReadonlyArray<{
     fileName?: string;
     filePath?: string | null;
+    gatewayUrl?: string | null;
     mimeType?: string;
     fileSize?: number;
+    preview?: string | null;
+    previewStatus?: string;
     source?: string;
   }>,
 ): string {
@@ -81,8 +88,11 @@ function buildAttachedFilesSignature(
   const parts = attachedFiles.map((file) => [
     file.fileName ?? '',
     file.filePath ?? '',
+    file.gatewayUrl ?? '',
     file.mimeType ?? '',
     String(file.fileSize ?? ''),
+    file.preview ?? '',
+    file.previewStatus ?? '',
     file.source ?? '',
   ].join(':'));
   return hashStringDjb2(parts.join('|'));
@@ -98,6 +108,13 @@ function buildImageSignature(images: ReadonlyArray<SessionRenderImage>): string 
     String(image.data?.length ?? 0),
   ].join(':'));
   return hashStringDjb2(parts.join('|'));
+}
+
+function toolPayloadSignature(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return hashText(typeof value === 'string' ? value : JSON.stringify(value));
 }
 
 function buildAssistantToolResultSignature(result: SessionAssistantToolSegment['tool']['result']): string {
@@ -133,6 +150,7 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
         segment.kind,
         segment.key,
         hashText(segment.text),
+        largeTextSignature(segment.largeText),
       ].join(':');
     }
     if (segment.kind === 'thinking') {
@@ -159,6 +177,9 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
       segment.tool.status,
       String(segment.tool.updatedAt ?? ''),
       String(segment.tool.durationMs ?? ''),
+      toolPayloadSignature(segment.tool.input),
+      hashText(segment.tool.inputText),
+      toolPayloadSignature(segment.tool.output),
       hashText(segment.tool.summary),
       buildAssistantToolResultSignature(segment.tool.result),
     ].join(':');
@@ -171,6 +192,9 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
     tool.status,
     String(tool.updatedAt ?? ''),
     String(tool.durationMs ?? ''),
+    toolPayloadSignature(tool.input),
+    hashText(tool.inputText),
+    toolPayloadSignature(tool.output),
     hashText(tool.summary),
     buildAssistantToolResultSignature(tool.result),
   ].join(':'));
@@ -266,6 +290,7 @@ function buildRenderSignature(item: SessionRenderItem): string {
     'clientId' in item ? (item.clientId ?? '') : '',
     'status' in item ? (item.status ?? '') : '',
     hashText(item.text),
+    'largeText' in item ? largeTextSignature(item.largeText) : '',
     'images' in item ? buildImageSignature(item.images ?? []) : '',
     'attachedFiles' in item ? buildAttachedFilesSignature(item.attachedFiles ?? []) : '',
   ].join('|'));

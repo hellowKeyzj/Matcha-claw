@@ -10,7 +10,7 @@ use crate::{
 
 use super::materialization::{
     MaterializationOperationOutcome, MaterializationOperationReceipt, MaterializationRejection,
-    TeamMaterializationRemoval, TeamMaterializationRequest,
+    NativeWorkspaceReceipt, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 use super::*;
 
@@ -117,6 +117,28 @@ fn materialization_intent_makes_agent_ownership_explicit() {
         external.agent(),
         RoleMaterializationAgent::External { .. }
     ));
+}
+
+#[test]
+fn materialization_receipt_debug_redacts_native_workspace() {
+    assert!(NativeWorkspaceReceipt::try_new("\n").is_err());
+    let receipt = RoleMaterializationReceipt::with_native_workspace(
+        role(),
+        ManagedAgentReference::try_new("agent-reviewer").unwrap(),
+        RoleMaterializationOwnership::Managed,
+        endpoint(),
+        NativeWorkspaceReceipt::try_new("workspace-path-private-canary").unwrap(),
+    );
+
+    assert_eq!(
+        receipt
+            .native_workspace()
+            .map(NativeWorkspaceReceipt::as_str),
+        Some("workspace-path-private-canary")
+    );
+    let debug = format!("{receipt:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("workspace-path-private-canary"));
 }
 
 #[test]

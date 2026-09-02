@@ -20,6 +20,9 @@ export type ClawHubMarketplaceSkill = Readonly<{
   name: string;
   description: string;
   version: string;
+  author?: string;
+  downloads?: number;
+  stars?: number;
 }>;
 
 export type ClawHubSkillSearchSuccess = Readonly<{
@@ -118,17 +121,28 @@ function isSearchFailure(
 
 function isMarketplaceSkill(value: unknown): value is ClawHubMarketplaceSkill {
   return isRecord(value)
-    && hasExactKeys(value, ['slug', 'name', 'description', 'version'])
+    && hasOnlyKeys(value, ['slug', 'name', 'description', 'version', 'author', 'downloads', 'stars'])
+    && Object.hasOwn(value, 'slug')
+    && Object.hasOwn(value, 'name')
+    && Object.hasOwn(value, 'description')
+    && Object.hasOwn(value, 'version')
     && isSlug(value.slug)
     && isBoundedText(value.name, 256, false)
     && isBoundedText(value.description, 8_192, true)
-    && isBoundedText(value.version, 128, false);
+    && isBoundedText(value.version, 128, false)
+    && (value.author === undefined || isBoundedText(value.author, 256, false))
+    && (value.downloads === undefined || isOptionalCount(value.downloads))
+    && (value.stars === undefined || isOptionalCount(value.stars));
 }
 
 function isSlug(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= 128
     && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+}
+
+function isOptionalCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function isBoundedText(value: unknown, maxBytes: number, allowEmpty: boolean): value is string {
@@ -145,4 +159,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }

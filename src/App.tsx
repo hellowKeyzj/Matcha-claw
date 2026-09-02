@@ -13,6 +13,7 @@ import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
 import { useUpdateStore } from './stores/update';
+import { useAccountStore } from './stores/account';
 import { hostApiFetch } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
@@ -20,6 +21,7 @@ import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import {
   SetupRoute,
+  AuthRoute,
   SkillsRoute,
   SecurityRoute,
   SettingsRoute,
@@ -130,9 +132,12 @@ function App() {
   const language = useSettingsStore((state) => state.language);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
+  const isAuthRoute = location.pathname === '/login' || location.pathname === '/register';
   const initGateway = useGatewayStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
   const initUpdate = useUpdateStore((state) => state.init);
+  const initAccount = useAccountStore((state) => state.init);
+  const accountStatus = useAccountStore((state) => state.status);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -156,6 +161,10 @@ function App() {
     }
     void initUpdate();
   }, [initUpdate, settingsInitialized]);
+
+  useEffect(() => {
+    void initAccount();
+  }, [initAccount]);
 
   // Sync i18n language with persisted settings on mount
   useEffect(() => {
@@ -195,7 +204,7 @@ function App() {
         return;
       }
 
-      if (gateSnapshot.state !== 'granted' && !location.pathname.startsWith('/settings')) {
+      if (gateSnapshot.state !== 'granted' && !location.pathname.startsWith('/settings') && !isAuthRoute) {
         navigate('/settings?section=license', { replace: true });
         return;
       }
@@ -209,7 +218,13 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [fetchLicenseGateSnapshot, location.pathname, navigate, settingsInitialized, setupComplete]);
+  }, [fetchLicenseGateSnapshot, isAuthRoute, location.pathname, navigate, settingsInitialized, setupComplete]);
+
+  useEffect(() => {
+    if (accountStatus === 'signedIn' && isAuthRoute) {
+      navigate('/', { replace: true });
+    }
+  }, [accountStatus, isAuthRoute, navigate]);
 
   // Listen for navigation events from main process
   useEffect(() => {
@@ -272,6 +287,22 @@ function App() {
             element={(
               <Suspense fallback={<RouteLoadingFallback />}>
                 <SetupRoute />
+              </Suspense>
+            )}
+          />
+          <Route
+            path="/login"
+            element={(
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <AuthRoute />
+              </Suspense>
+            )}
+          />
+          <Route
+            path="/register"
+            element={(
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <AuthRoute />
               </Suspense>
             )}
           />

@@ -47,6 +47,7 @@ import {
 } from './todo-tool-debug';
 import { findLatestAssistantTextFromItems } from './timeline-message';
 import { sanitizeCanonicalUserText } from './message-helpers';
+import { projectSessionMedia } from './media-projection';
 import { syncViewportState } from './viewport-state';
 import { useTaskSnapshotStore } from './task-snapshot-store';
 import {
@@ -108,6 +109,10 @@ function hashStringDjb2(input: string): string {
 
 function hashText(value: string | null | undefined): string {
   return hashStringDjb2(value ?? '');
+}
+
+function largeTextSignature(value: { contentRef: string; totalBytes: number; loadedBytes: number } | null | undefined): string {
+  return value ? `${value.contentRef}:${value.loadedBytes}:${value.totalBytes}` : '';
 }
 
 function resolveTodoToolDebugCaller(): string {
@@ -189,7 +194,10 @@ function buildAssistantToolResultSignature(result: SessionAssistantTurnItem['too
 
 function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
   const segmentParts = item.segments.map((segment) => {
-    if (segment.kind === 'message' || segment.kind === 'thinking') {
+    if (segment.kind === 'message') {
+      return `${segment.kind}:${segment.key}:${hashText(segment.text)}:${largeTextSignature(segment.largeText)}`;
+    }
+    if (segment.kind === 'thinking') {
       return `${segment.kind}:${segment.key}:${hashText(segment.text)}`;
     }
     if (segment.kind === 'media') {
@@ -209,6 +217,9 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
       segment.tool.status,
       String(segment.tool.updatedAt ?? ''),
       String(segment.tool.durationMs ?? ''),
+      toolPayloadSignature(segment.tool.input),
+      hashText(segment.tool.inputText),
+      toolPayloadSignature(segment.tool.output),
       hashText(segment.tool.summary),
       buildAssistantToolResultSignature(segment.tool.result),
     ].join(':');
@@ -221,6 +232,9 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
     tool.status,
     String(tool.updatedAt ?? ''),
     String(tool.durationMs ?? ''),
+    toolPayloadSignature(tool.input),
+    hashText(tool.inputText),
+    toolPayloadSignature(tool.output),
     hashText(tool.summary),
     buildAssistantToolResultSignature(tool.result),
   ].join(':'));
@@ -306,6 +320,7 @@ function buildProtocolItemSignature(item: SessionRenderItem): string {
       item.createdAt ?? '',
       item.updatedAt ?? '',
       hashText(item.text),
+      largeTextSignature(item.largeText),
       buildImageSignature(item.images),
       buildAttachedFilesSignature(item.attachedFiles),
     ].join('|'));
@@ -325,61 +340,157 @@ function isPendingUserItem(item: SessionRenderItem): boolean {
   return item.kind === 'user-message' && (item.status === 'pending' || item.status === 'sending');
 }
 
-function buildUserConfirmationKey(item: SessionRenderItem): string | null {
+function isAuthoritativeUserItem(item: SessionRenderItem): boolean {
+  return item.kind === 'user-message' && !isPendingUserItem(item);
+}
+
+function buildUserConfirmationKeys(item: SessionRenderItem): string[] {
   if (item.kind !== 'user-message') {
-    return null;
+    return [];
   }
+  const keys: string[] = [];
   const clientId = item.clientId?.trim();
   if (clientId) {
-    return `client:${clientId}`;
+    keys.push(`client:${clientId}`);
   }
   const messageId = item.messageId?.trim();
   if (messageId) {
-    return `message:${messageId}`;
+    keys.push(`message:${messageId}`);
   }
-  const text = sanitizeCanonicalUserText(item.text).trim();
-  const createdAt = item.createdAt ?? null;
-  if (!text || createdAt == null) {
-    return null;
-  }
-  return `echo:${hashStringDjb2(text)}:${createdAt}`;
+  return keys;
 }
 
-function authoritativeUserMatchesPending(
-  authoritative: SessionRenderItem,
-  pending: SessionRenderItem,
-): boolean {
-  if (authoritative.kind !== 'user-message' || pending.kind !== 'user-message') {
+function addStableUserKeys(keys: Set<string>, item: SessionRenderItem): void {
+  if (item.kind !== 'user-message') {
+    return;
+  }
+  keys.add(`key:${item.key}`);
+  for (const confirmationKey of buildUserConfirmationKeys(item)) {
+    keys.add(confirmationKey);
+  }
+}
+
+function hasStableUserKey(keys: Set<string>, item: SessionRenderItem): boolean {
+  if (item.kind !== 'user-message') {
     return false;
   }
-  const authoritativeKey = buildUserConfirmationKey(authoritative);
-  const pendingKey = buildUserConfirmationKey(pending);
-  if (authoritativeKey && authoritativeKey === pendingKey) {
+  if (keys.has(`key:${item.key}`)) {
     return true;
   }
-  const authoritativeText = sanitizeCanonicalUserText(authoritative.text).trim();
-  return authoritativeText.length > 0
-    && authoritativeText === sanitizeCanonicalUserText(pending.text).trim();
+  return buildUserConfirmationKeys(item).some((confirmationKey) => keys.has(confirmationKey));
+}
+
+type UserConfirmationState = {
+  authoritativeConfirmationKeys: Set<string>;
+  newAuthoritativeUsers: SessionRenderItem[];
+  newAuthoritativeIndexesByConfirmationKey: Map<string, number>;
+  consumedNewAuthoritativeIndexes: Set<number>;
+  nextSequentialNewAuthoritativeIndex: number;
+};
+
+function createUserConfirmationState(
+  currentItems: SessionRenderItem[],
+  nextItems: SessionRenderItem[],
+): UserConfirmationState {
+  const currentAuthoritativeUserKeys = new Set<string>();
+  for (const item of currentItems) {
+    if (isAuthoritativeUserItem(item)) {
+      addStableUserKeys(currentAuthoritativeUserKeys, item);
+    }
+  }
+
+  const authoritativeConfirmationKeys = new Set<string>();
+  const newAuthoritativeUsers: SessionRenderItem[] = [];
+  const newAuthoritativeIndexesByConfirmationKey = new Map<string, number>();
+  for (const item of nextItems) {
+    if (!isAuthoritativeUserItem(item)) {
+      continue;
+    }
+    const confirmationKeys = buildUserConfirmationKeys(item);
+    for (const confirmationKey of confirmationKeys) {
+      authoritativeConfirmationKeys.add(confirmationKey);
+    }
+    if (hasStableUserKey(currentAuthoritativeUserKeys, item)) {
+      continue;
+    }
+    const newAuthoritativeIndex = newAuthoritativeUsers.length;
+    newAuthoritativeUsers.push(item);
+    for (const confirmationKey of confirmationKeys) {
+      newAuthoritativeIndexesByConfirmationKey.set(confirmationKey, newAuthoritativeIndex);
+    }
+  }
+
+  return {
+    authoritativeConfirmationKeys,
+    newAuthoritativeUsers,
+    newAuthoritativeIndexesByConfirmationKey,
+    consumedNewAuthoritativeIndexes: new Set<number>(),
+    nextSequentialNewAuthoritativeIndex: 0,
+  };
+}
+
+function userTextMatches(left: SessionRenderItem, right: SessionRenderItem): boolean {
+  if (left.kind !== 'user-message' || right.kind !== 'user-message') {
+    return false;
+  }
+  const leftText = sanitizeCanonicalUserText(left.text).trim();
+  return leftText.length > 0 && leftText === sanitizeCanonicalUserText(right.text).trim();
+}
+
+function isUserConfirmedByAuthoritativeItems(
+  pending: SessionRenderItem,
+  confirmationState: UserConfirmationState,
+): boolean {
+  if (pending.kind !== 'user-message') {
+    return false;
+  }
+  for (const confirmationKey of buildUserConfirmationKeys(pending)) {
+    if (confirmationState.authoritativeConfirmationKeys.has(confirmationKey)) {
+      const newAuthoritativeIndex = confirmationState.newAuthoritativeIndexesByConfirmationKey.get(confirmationKey);
+      if (newAuthoritativeIndex !== undefined) {
+        confirmationState.consumedNewAuthoritativeIndexes.add(newAuthoritativeIndex);
+      }
+      return true;
+    }
+  }
+
+  while (confirmationState.consumedNewAuthoritativeIndexes.has(
+    confirmationState.nextSequentialNewAuthoritativeIndex,
+  )) {
+    confirmationState.nextSequentialNewAuthoritativeIndex += 1;
+  }
+  const authoritative = confirmationState.newAuthoritativeUsers[
+    confirmationState.nextSequentialNewAuthoritativeIndex
+  ];
+  if (!authoritative || !userTextMatches(authoritative, pending)) {
+    return false;
+  }
+  confirmationState.consumedNewAuthoritativeIndexes.add(
+    confirmationState.nextSequentialNewAuthoritativeIndex,
+  );
+  confirmationState.nextSequentialNewAuthoritativeIndex += 1;
+  return true;
 }
 
 function dropReconciledOptimisticItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
 ): SessionRenderItem[] {
-  const authoritativeUsers = nextItems.filter((item) => item.kind === 'user-message' && !isPendingUserItem(item));
+  const confirmationState = createUserConfirmationState(currentItems, nextItems);
   const pendingItems = currentItems.filter((item) => (
     isPendingUserItem(item)
-      && !authoritativeUsers.some((authoritative) => authoritativeUserMatchesPending(authoritative, item))
+      && !isUserConfirmedByAuthoritativeItems(item, confirmationState)
   ));
   if (pendingItems.length === 0) {
     return nextItems;
   }
+  const pendingItemKeys = new Set(pendingItems.map((item) => item.key));
   const nextByKey = new Map(nextItems.map((item) => [item.key, item] as const));
   const emittedNextKeys = new Set<string>();
   const emittedPendingKeys = new Set<string>();
   const merged: SessionRenderItem[] = [];
   for (const currentItem of currentItems) {
-    if (pendingItems.some((pending) => pending.key === currentItem.key)) {
+    if (pendingItemKeys.has(currentItem.key)) {
       emittedPendingKeys.add(currentItem.key);
       merged.push(currentItem);
       continue;
@@ -435,11 +546,12 @@ export function reconcileSessionItems(
     }
     return currentItem;
   });
+  const receiptConfirmationState = createUserConfirmationState(currentItems, canonicalNextItems);
   const preservedReceipts = currentItems.filter((item) => (
     item.kind === 'user-message'
     && item.rendererReceiptRunId
     && !canonicalNextItems.some((nextItem) => nextItem.key === item.key)
-    && !canonicalNextItems.some((nextItem) => authoritativeUserMatchesPending(nextItem, item))
+    && !isUserConfirmedByAuthoritativeItems(item, receiptConfirmationState)
     && canonicalNextItems.some((nextItem) => (
       (
         nextItem.kind === 'assistant-turn'
@@ -1089,54 +1201,44 @@ function projectionToolCard(tool: SessionWireTool): SessionRenderToolCard {
     ? 'error'
     : tool.phase === 'completed' ? 'completed' : 'running';
   const summary = tool.summary ?? undefined;
+  const input = tool.input ?? {};
+  const inputText = tool.inputText ?? stringifyToolPayload(tool.input);
+  const outputText = stringifyToolPayload(tool.output) ?? summary;
   return {
     id: tool.toolCallId,
     toolCallId: tool.toolCallId,
     name: tool.name ?? 'tool',
     displayTitle: tool.name ?? 'tool',
-    input: {},
+    input,
+    ...(inputText ? { inputText } : {}),
     status,
     ...(summary ? { summary } : {}),
-    result: summary
-      ? { kind: 'text', surface: 'tool-card', collapsedPreview: summary, bodyText: summary }
+    ...(tool.output === null ? {} : { output: tool.output }),
+    result: outputText
+      ? { kind: tool.output === null ? 'text' : 'json', surface: 'tool-card', collapsedPreview: summary ?? outputText, bodyText: outputText }
       : { kind: 'none', surface: 'tool-card' },
   };
 }
 
-function safeMediaReference(reference: string | undefined): string | undefined {
-  if (typeof reference !== 'string') {
+function stringifyToolPayload(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
     return undefined;
   }
-  const value = reference.trim();
-  if (!value || value.startsWith('data:') || value.startsWith('file:')) {
-    return undefined;
-  }
-  return value.startsWith('http://')
-    || value.startsWith('https://')
-    || value.startsWith('/api/')
-    ? value
-    : undefined;
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+function toolPayloadSignature(value: unknown): string {
+  return hashText(stringifyToolPayload(value));
 }
 
 function projectionMedia(content: SessionWireContent): { images: SessionRenderImage[]; attachedFiles: SessionRenderAttachedFile[] } {
-  if (content.kind !== 'media') return { images: [], attachedFiles: [] };
-  const reference = safeMediaReference(content.reference);
-  if (!reference) return { images: [], attachedFiles: [] };
-  const mimeType = content.mediaType || 'application/octet-stream';
-  if (mimeType.toLowerCase().startsWith('image/')) {
-    return { images: [{ url: reference, mimeType }], attachedFiles: [] };
-  }
-  return {
-    images: [],
-    attachedFiles: [{
-      fileName: 'media',
-      mimeType,
-      fileSize: 0,
-      preview: null,
-      gatewayUrl: reference,
-      source: 'message-ref',
-    }],
-  };
+  return projectSessionMedia(content);
+}
+
+function projectionLargeText(content: SessionWireContent) {
+  return content.kind === 'largeText'
+    ? { contentRef: content.contentRef, totalBytes: content.totalBytes, loadedBytes: content.loadedBytes }
+    : undefined;
 }
 
 export function projectSessionViewItems(view: SessionView): SessionRenderItem[] {
@@ -1149,14 +1251,16 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
   return items.map((item) => {
     if (item.kind === 'userMessage') {
       const media = item.content.flatMap((content) => projectionMedia(content));
+      const largeText = item.content.map(projectionLargeText).find(Boolean);
       return {
         key: item.itemId,
         kind: 'user-message',
         role: 'user',
         sessionKey: view.sessionKey,
-        text: item.text,
+        text: sanitizeCanonicalUserText(largeText ? item.content.find((content) => content.kind === 'largeText')!.text : item.text),
         images: media.flatMap((entry) => entry.images),
         attachedFiles: media.flatMap((entry) => entry.attachedFiles),
+        ...(largeText ? { largeText } : {}),
         ...(item.messageId ? { messageId: item.messageId } : {}),
       };
     }
@@ -1177,6 +1281,13 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
     for (const [index, content] of item.segments.entries()) {
       if (content.kind === 'text') {
         segments.push({ kind: 'message', key: `${item.itemId}:message:${messageIndex++}`, text: content.text });
+      } else if (content.kind === 'largeText') {
+        segments.push({
+          kind: 'message',
+          key: `${item.itemId}:message:${messageIndex++}`,
+          text: content.text,
+          largeText: { contentRef: content.contentRef, totalBytes: content.totalBytes, loadedBytes: content.loadedBytes },
+        });
       } else if (content.kind === 'thinking') {
         segments.push({ kind: 'thinking', key: `${item.itemId}:thinking:${thinkingIndex++}`, text: content.text });
       } else if (content.kind === 'media') {

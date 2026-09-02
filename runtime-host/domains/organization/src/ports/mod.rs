@@ -19,9 +19,10 @@ pub use materialization::{
     InvalidMaterializationReceipt, InvalidRoleAgentMaterialization,
     InvalidTeamMaterializationIntent, MaterializationOperationOutcome,
     MaterializationOperationReceipt, MaterializationReceipt, MaterializationRejection,
-    MaterializationSource, RoleAgentMaterialization, RoleMaterializationAgent,
-    RoleMaterializationOwnership, RoleMaterializationReceipt, TeamMaterializationIntent,
-    TeamMaterializationPort, TeamMaterializationRemoval, TeamMaterializationRequest,
+    MaterializationSource, NativeWorkspaceReceipt, RoleAgentMaterialization,
+    RoleMaterializationAgent, RoleMaterializationOwnership, RoleMaterializationReceipt,
+    TeamMaterializationIntent, TeamMaterializationPort, TeamMaterializationRemoval,
+    TeamMaterializationRequest,
 };
 pub use native_effects::{
     NativeEffectFailure, RoleSessionAbortOutcome, RoleSessionAbortReceipt,

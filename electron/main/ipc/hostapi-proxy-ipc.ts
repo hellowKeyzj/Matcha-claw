@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { isHostApiRequestAllowed } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
-import { getHostApiBaseUrl, getHostApiToken } from '../../api/server';
+import { getHostApiBaseUrl, getHostApiToken, waitForHostApiReady } from '../../api/server';
 import { handleE2EHostApiFetch } from '@electron/e2e-fixture-loader';
 import { SESSION_TRACE_HEADER } from '../runtime-host-delivery/transport/sessions/trace';
 
@@ -69,6 +69,30 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((headerName) => headerName.toLowerCase() === name);
 }
 
+async function waitForHostApiReadyOrAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    throw new Error('Host API request aborted.');
+  }
+
+  let abortListener: (() => void) | null = null;
+  const abortPromise = new Promise<never>((_, reject) => {
+    abortListener = () => reject(new Error('Host API request aborted.'));
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+
+  try {
+    await Promise.race([waitForHostApiReady(), abortPromise]);
+  } finally {
+    if (abortListener) {
+      signal.removeEventListener('abort', abortListener);
+    }
+  }
+
+  if (signal.aborted) {
+    throw new Error('Host API request aborted.');
+  }
+}
+
 export function registerHostApiProxyHandlers(): void {
   // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
   // 避免页面切换后还白白等几秒再丢弃响应。
@@ -91,10 +115,6 @@ export function registerHostApiProxyHandlers(): void {
   ipcMain.handle('hostapi:base-url', () => getHostApiBaseUrl());
 
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
-    const e2eMock = await handleE2EHostApiFetch(request);
-    if (e2eMock) {
-      return e2eMock;
-    }
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     const normalizedPath = normalizeHostApiProxyPath(request?.path);
     const method = (request?.method || 'GET').toUpperCase();
@@ -104,28 +124,14 @@ export function registerHostApiProxyHandlers(): void {
       if (!isHostApiRequestAllowed(method, routeUrl.pathname)) {
         throw new Error(`hostapi route is not available: ${method} ${routeUrl.pathname}`);
       }
+      const e2eMock = await handleE2EHostApiFetch(request);
+      if (e2eMock) {
+        return e2eMock;
+      }
       const timeoutMs =
         typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
           ? request.timeoutMs
           : DEFAULT_HOST_API_TIMEOUT_MS;
-
-      const headers = withoutRendererAuthenticationHeaders(request?.headers);
-      const traceId = typeof request?.headers?.[SESSION_TRACE_HEADER] === 'string'
-        ? request.headers[SESSION_TRACE_HEADER]
-        : typeof request?.headers?.[SESSION_TRACE_HEADER.toLowerCase()] === 'string'
-          ? request.headers[SESSION_TRACE_HEADER.toLowerCase()]
-          : null;
-      if (traceId) {
-        headers[SESSION_TRACE_HEADER] = traceId;
-      }
-      headers.Authorization = `Bearer ${getHostApiToken()}`;
-      let body: string | undefined;
-      if (request?.body !== undefined && request.body !== null && method !== 'GET' && method !== 'HEAD') {
-        body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
-        if (!hasHeader(headers, 'content-type')) {
-          headers['Content-Type'] = 'application/json';
-        }
-      }
 
       const controller = new AbortController();
       inflightRequest = { controller, failureCode: 'UNAVAILABLE' };
@@ -136,43 +142,62 @@ export function registerHostApiProxyHandlers(): void {
         inflightRequest.failureCode = 'TIMEOUT';
         controller.abort();
       }, timeoutMs);
-      let response: Awaited<ReturnType<typeof proxyAwareFetch>>;
       try {
-        response = await proxyAwareFetch(`${getHostApiBaseUrl()}${normalizedPath}`, {
+        await waitForHostApiReadyOrAbort(controller.signal);
+
+        const headers = withoutRendererAuthenticationHeaders(request?.headers);
+        const traceId = typeof request?.headers?.[SESSION_TRACE_HEADER] === 'string'
+          ? request.headers[SESSION_TRACE_HEADER]
+          : typeof request?.headers?.[SESSION_TRACE_HEADER.toLowerCase()] === 'string'
+            ? request.headers[SESSION_TRACE_HEADER.toLowerCase()]
+            : null;
+        if (traceId) {
+          headers[SESSION_TRACE_HEADER] = traceId;
+        }
+        headers.Authorization = `Bearer ${getHostApiToken()}`;
+        let body: string | undefined;
+        if (request?.body !== undefined && request.body !== null && method !== 'GET' && method !== 'HEAD') {
+          body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
+          if (!hasHeader(headers, 'content-type')) {
+            headers['Content-Type'] = 'application/json';
+          }
+        }
+
+        const response = await proxyAwareFetch(`${getHostApiBaseUrl()}${normalizedPath}`, {
           method,
           headers,
           body,
           signal: controller.signal,
         });
+
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json')) {
+          const json = await response.json();
+          return {
+            ok: true,
+            data: {
+              status: response.status,
+              ok: response.ok,
+              json,
+            },
+          };
+        }
+
+        const text = await response.text();
+        return {
+          ok: true,
+          data: {
+            status: response.status,
+            ok: response.ok,
+            text,
+          },
+        };
       } finally {
         clearTimeout(timer);
         if (requestId) {
           inflightRequests.delete(requestId);
         }
       }
-
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('application/json')) {
-        const json = await response.json();
-        return {
-          ok: true,
-          data: {
-            status: response.status,
-            ok: response.ok,
-            json,
-          },
-        };
-      }
-
-      const text = await response.text();
-      return {
-        ok: true,
-        data: {
-          status: response.status,
-          ok: response.ok,
-          text,
-        },
-      };
     } catch {
       publishE2EHostApiBoundary({ stage: 'proxy-failure', method, path: normalizedPath });
       return {

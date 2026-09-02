@@ -96,19 +96,19 @@ impl TeamRunMcpFacade {
         let command_id = opaque(request.command_id)?;
         let idempotency_key = opaque(request.idempotency_key)?;
         let patch = GraphPatch::new(
-            request.base_graph_id.as_str(),
-            request.base_workflow_plan_id.as_str(),
-            request.operations.clone(),
+            request.base_graph_id.clone(),
+            request.base_workflow_plan_id.clone(),
+            request.operations,
         )
         .map_err(|_| TeamRunMcpError::Invalid)?;
         let command_patch = CommandGraphPatch::try_new(
-            opaque(request.base_graph_id)?,
-            opaque(request.base_workflow_plan_id)?,
-            request
-                .operations
+            request.base_graph_id,
+            request.base_workflow_plan_id,
+            patch
+                .operations()
                 .iter()
                 .map(command_graph_patch_operation)
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Vec<_>>(),
         )
         .map_err(|_| TeamRunMcpError::Invalid)?;
         let command = RunCommand::new(
@@ -635,59 +635,42 @@ fn opaque(value: impl Into<String>) -> Result<OpaqueId, TeamRunMcpError> {
     OpaqueId::try_new(value).map_err(|_| TeamRunMcpError::Invalid)
 }
 
-fn command_graph_patch_operation(
-    operation: &GraphPatchOperation,
-) -> Result<CommandGraphPatchOperation, TeamRunMcpError> {
+fn command_graph_patch_operation(operation: &GraphPatchOperation) -> CommandGraphPatchOperation {
     match operation {
-        GraphPatchOperation::AddNode(node) | GraphPatchOperation::ReplaceNode(node) => {
-            let node_id = opaque(node.id().as_str())?;
-            let kind = command_node_kind(node.kind());
-            let role_id = node
-                .work_assignment()
-                .map(|work| opaque(work.role_id()))
-                .transpose()?;
-            Ok(if matches!(operation, GraphPatchOperation::AddNode(_)) {
-                CommandGraphPatchOperation::AddNode {
-                    node_id,
-                    kind,
-                    role_id,
-                }
-            } else {
-                CommandGraphPatchOperation::ReplaceNode {
-                    node_id,
-                    kind,
-                    role_id,
-                }
-            })
+        GraphPatchOperation::AddNode(node) => CommandGraphPatchOperation::AddNode {
+            node_id: node.id().as_str().to_owned(),
+            kind: command_node_kind(node.kind()),
+            role_id: node.work_assignment().map(|work| work.role_id().to_owned()),
+        },
+        GraphPatchOperation::ReplaceNode(node) => CommandGraphPatchOperation::ReplaceNode {
+            node_id: node.id().as_str().to_owned(),
+            kind: command_node_kind(node.kind()),
+            role_id: node.work_assignment().map(|work| work.role_id().to_owned()),
+        },
+        GraphPatchOperation::RemoveNode(node_id) => CommandGraphPatchOperation::RemoveNode {
+            node_id: node_id.as_str().to_owned(),
+        },
+        GraphPatchOperation::AddEdge(edge) => CommandGraphPatchOperation::AddEdge {
+            edge_id: edge.id().as_str().to_owned(),
+            source_node_id: edge.source_node_id().as_str().to_owned(),
+            target_node_id: edge.target_node_id().as_str().to_owned(),
+            action: command_edge_action(edge.action()),
+        },
+        GraphPatchOperation::ReplaceEdge(edge) => CommandGraphPatchOperation::ReplaceEdge {
+            edge_id: edge.id().as_str().to_owned(),
+            source_node_id: edge.source_node_id().as_str().to_owned(),
+            target_node_id: edge.target_node_id().as_str().to_owned(),
+            action: command_edge_action(edge.action()),
+        },
+        GraphPatchOperation::RemoveEdge(edge_id) => CommandGraphPatchOperation::RemoveEdge {
+            edge_id: edge_id.as_str().to_owned(),
+        },
+        GraphPatchOperation::SetMetadata { key, value } => {
+            CommandGraphPatchOperation::SetMetadata {
+                key: key.clone(),
+                value: value.clone(),
+            }
         }
-        GraphPatchOperation::RemoveNode(node_id) => Ok(CommandGraphPatchOperation::RemoveNode {
-            node_id: opaque(node_id.as_str())?,
-        }),
-        GraphPatchOperation::AddEdge(edge) | GraphPatchOperation::ReplaceEdge(edge) => {
-            let edge_id = opaque(edge.id().as_str())?;
-            let source_node_id = opaque(edge.source_node_id().as_str())?;
-            let target_node_id = opaque(edge.target_node_id().as_str())?;
-            let action = command_edge_action(edge.action());
-            Ok(if matches!(operation, GraphPatchOperation::AddEdge(_)) {
-                CommandGraphPatchOperation::AddEdge {
-                    edge_id,
-                    source_node_id,
-                    target_node_id,
-                    action,
-                }
-            } else {
-                CommandGraphPatchOperation::ReplaceEdge {
-                    edge_id,
-                    source_node_id,
-                    target_node_id,
-                    action,
-                }
-            })
-        }
-        GraphPatchOperation::RemoveEdge(edge_id) => Ok(CommandGraphPatchOperation::RemoveEdge {
-            edge_id: opaque(edge_id.as_str())?,
-        }),
-        GraphPatchOperation::SetMetadata { .. } => Err(TeamRunMcpError::Unavailable),
     }
 }
 

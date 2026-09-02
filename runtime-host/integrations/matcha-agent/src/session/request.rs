@@ -463,6 +463,8 @@ pub struct SessionSetModelParams {
     session_id: SessionId,
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    model_selection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_runtime: Option<SessionProviderRuntime>,
@@ -474,6 +476,7 @@ impl fmt::Debug for SessionSetModelParams {
             .debug_struct("SessionSetModelParams")
             .field("has_session_id", &true)
             .field("has_model", &true)
+            .field("has_model_selection_id", &self.model_selection_id.is_some())
             .field(
                 "has_provider_fingerprint",
                 &self.provider_fingerprint.is_some(),
@@ -491,9 +494,15 @@ impl SessionSetModelParams {
         Ok(Self {
             session_id,
             model: non_empty(model, "model must be a non-empty string")?,
+            model_selection_id: None,
             provider_fingerprint: None,
             provider_runtime: None,
         })
+    }
+
+    pub fn with_model_selection_id(mut self, model_selection_id: impl Into<String>) -> Self {
+        self.model_selection_id = Some(model_selection_id.into());
+        self
     }
 
     pub fn with_provider_fingerprint(mut self, provider_fingerprint: impl Into<String>) -> Self {
@@ -834,6 +843,7 @@ mod tests {
                 id("set-model"),
                 SessionSetModelParams::try_new(session_id(), "ark-code-latest")
                     .unwrap()
+                    .with_model_selection_id("ark/ark-code-latest")
                     .with_provider_fingerprint("matcha-provider:v1:test")
                     .with_provider_runtime(SessionProviderRuntime::open_ai_chat_completions(
                         Some("https://ark.example/v1".to_owned()),
@@ -841,7 +851,7 @@ mod tests {
                     )),
             )
             .unwrap(),
-            "{\"jsonrpc\":\"2.0\",\"id\":\"set-model\",\"method\":\"session.setModel\",\"params\":{\"sessionId\":\"session-1\",\"model\":\"ark-code-latest\",\"providerFingerprint\":\"matcha-provider:v1:test\",\"providerRuntime\":{\"kind\":\"openAiChatCompletions\",\"baseUrl\":\"https://ark.example/v1\",\"apiKey\":\"ark-secret\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":\"set-model\",\"method\":\"session.setModel\",\"params\":{\"sessionId\":\"session-1\",\"model\":\"ark-code-latest\",\"modelSelectionId\":\"ark/ark-code-latest\",\"providerFingerprint\":\"matcha-provider:v1:test\",\"providerRuntime\":{\"kind\":\"openAiChatCompletions\",\"baseUrl\":\"https://ark.example/v1\",\"apiKey\":\"ark-secret\"}}}\n",
         );
         assert_frame(
             session_set_model_request(
@@ -913,6 +923,7 @@ mod tests {
                 "{:?}",
                 SessionSetModelParams::try_new(session_id.clone(), model_canary)
                     .unwrap()
+                    .with_model_selection_id("model-selection-debug-canary")
                     .with_provider_fingerprint("provider-fingerprint-debug-canary")
                     .with_provider_runtime(SessionProviderRuntime::open_ai_chat_completions(
                         Some("https://provider-runtime-debug-canary".to_owned()),
@@ -933,7 +944,7 @@ mod tests {
         assert!(debug.contains("has_run_id: true, has_attachments: true }"));
         assert!(debug.contains("SessionCancelParams { has_session_id: true, has_run_id: true"));
         assert!(debug.contains(
-            "SessionSetModelParams { has_session_id: true, has_model: true, has_provider_fingerprint: true, has_provider_runtime: true }"
+            "SessionSetModelParams { has_session_id: true, has_model: true, has_model_selection_id: true, has_provider_fingerprint: true, has_provider_runtime: true }"
         ));
         assert!(debug.contains("SessionSetModeParams { has_session_id: true, has_mode: true }"));
         for canary in [
@@ -947,6 +958,7 @@ mod tests {
             "mode-debug-canary",
             "debug-image-canary",
             "permission-debug-canary",
+            "model-selection-debug-canary",
             "provider-fingerprint-debug-canary",
             "https://provider-runtime-debug-canary",
             "provider-api-key-debug-canary",

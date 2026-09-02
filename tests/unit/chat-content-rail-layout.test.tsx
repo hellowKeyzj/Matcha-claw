@@ -1,5 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 import { ChatList, ChatListSurface } from '@/pages/Chat/components/ChatList';
 import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
@@ -47,6 +48,24 @@ vi.mock('@/pages/Chat/ChatAssistantTurn', async () => {
 vi.mock('@/pages/Chat/components/ChatStates', () => ({
   FailureScreen: () => <div data-testid="chat-failure-screen" />,
 }));
+
+const testSessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+  agentId: 'default',
+  sessionKey: 'test-session',
+};
+
+const readySendGate = {
+  canSend: true as const,
+  kind: 'session' as const,
+  sessionKey: testSessionIdentity.sessionKey,
+  endpointSessionId: undefined,
+  sessionIdentity: testSessionIdentity,
+};
 
 function buildScrollChromeStore(options?: {
   phase?: 'follow' | 'detached';
@@ -779,8 +798,10 @@ describe('chat content rail layout', () => {
 
   it('chat input uses a floating narrow composer rail instead of a full-width dock strip', () => {
     const { container } = render(
-      <ChatInput
+      <MemoryRouter><ChatInput
         onSend={vi.fn()}
+        sendGate={readySendGate}
+        sessionIdentity={testSessionIdentity}
         modelPicker={{
           currentModelId: 'openai/gpt-5.4',
           currentLabel: 'OpenAI / gpt-5.4',
@@ -792,7 +813,7 @@ describe('chat content rail layout', () => {
           switching: false,
           onSelect: vi.fn(),
         }}
-      />,
+      /></MemoryRouter>,
     );
 
     const classNames = Array.from(container.querySelectorAll<HTMLElement>('div'))
@@ -811,9 +832,11 @@ describe('chat content rail layout', () => {
 
   it('chat input keeps the action controls inside the card when the composer narrows', () => {
     render(
-      <div className="w-[320px]">
+      <MemoryRouter><div className="w-[320px]">
         <ChatInput
           onSend={vi.fn()}
+          sendGate={readySendGate}
+          sessionIdentity={testSessionIdentity}
           modelPicker={{
             currentModelId: 'anthropic/claude-opus-4-6',
             currentLabel: 'anthropic / claude-opus-4-6',
@@ -826,7 +849,7 @@ describe('chat content rail layout', () => {
             onSelect: vi.fn(),
           }}
         />
-      </div>,
+      </div></MemoryRouter>,
     );
 
     const picker = screen.getByTestId('chat-model-picker');
@@ -834,8 +857,8 @@ describe('chat content rail layout', () => {
     const controlsRow = pickerWrap?.parentElement as HTMLElement | null;
     const statusRow = controlsRow?.nextElementSibling as HTMLElement | null;
 
-    expect(pickerWrap?.className).toContain('w-[clamp(0px,calc(100%-7.5rem),148px)]');
-    expect(pickerWrap?.className).toContain('max-sm:w-[clamp(0px,calc(100%-7.5rem),132px)]');
+    expect(pickerWrap?.className).toContain('w-[clamp(0px,calc(100%-16rem),148px)]');
+    expect(pickerWrap?.className).toContain('max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]');
     expect(pickerWrap?.className).toContain('flex-none');
     expect(controlsRow?.className).toContain('w-full');
     expect(controlsRow?.className).toContain('min-w-0');

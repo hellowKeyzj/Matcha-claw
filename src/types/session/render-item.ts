@@ -1,6 +1,7 @@
 import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
 import type {
   SessionAssistantTurnSegment,
+  SessionLargeTextMetadata,
   SessionRenderAssistantBubbleToolResult,
   SessionRenderAttachedFile,
   SessionRenderImage,
@@ -201,6 +202,7 @@ export interface SessionRenderUserMessageItem extends SessionRenderItemBase {
   text: string;
   images: ReadonlyArray<SessionRenderImage>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  largeText?: SessionLargeTextMetadata;
   messageId?: string;
   clientId?: string;
   status?: 'pending' | 'sending';

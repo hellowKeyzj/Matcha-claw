@@ -686,7 +686,7 @@ function decryptPrivateCredential(encrypted: string): ReturnType<typeof parsePri
 }
 
 function openClawProviderKey(provider: string, providerId: string, authMode?: AuthMode): string {
-  if (provider === 'openai' && authMode === 'oauthBrowser') return 'openai-codex';
+  if (provider === 'openai' && authMode === 'oauthBrowser') return 'openai';
   if (provider === 'minimax-portal-cn') return 'minimax-portal';
   if (provider === 'custom' || provider === 'ollama') return multiInstanceProviderKey(provider, providerId);
   return provider;

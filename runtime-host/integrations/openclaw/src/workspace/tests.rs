@@ -25,6 +25,9 @@ const ONE_PIXEL_PNG: &[u8] = &[
 const ONE_PIXEL_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const ONE_PIXEL_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const ONE_PIXEL_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1"/></svg>"#;
+const ONE_PIXEL_SVG_BASE64: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiPjxyZWN0IHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48L3N2Zz4=";
+const ONE_PIXEL_SVG_DATA_URL: &str = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiPjxyZWN0IHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz48L3N2Zz4=";
 
 struct FixtureRoot(PathBuf);
 
@@ -652,6 +655,84 @@ fn workspace_media_supports_thumbnail_batches_and_bounded_buffer_staging() {
             .content(),
         ONE_PIXEL_PNG
     );
+}
+
+#[test]
+fn workspace_media_supports_svg_previews() {
+    let root = FixtureRoot::new();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("artifact.svg"), ONE_PIXEL_SVG).unwrap();
+    let state_dir =
+        crate::lifecycle::state_dir::CanonicalStateDir::provision(root.path().join("state"))
+            .unwrap();
+    fs::create_dir_all(state_dir.as_path().join("media/outgoing/records")).unwrap();
+    fs::write(
+        state_dir
+            .as_path()
+            .join("media/outgoing/records/svg-asset.json"),
+        serde_json::to_vec(&json!({
+            "sessionIdentity": {
+                "agentId": "reviewer",
+                "sessionKey": "agent:reviewer:workspace-files"
+            },
+            "original": {
+                "path": workspace.join("artifact.svg"),
+                "contentType": "image/svg+xml"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let media = WorkspaceMedia::new();
+    let files = files(&workspace, root.path());
+
+    let receipt = media
+        .prepare(
+            "agent:reviewer:workspace-files",
+            &files,
+            "artifact.svg",
+            "image/svg+xml",
+        )
+        .unwrap();
+    assert_eq!(receipt.mime_type(), "image/svg+xml");
+    assert_eq!(receipt.preview(), Some(ONE_PIXEL_SVG_DATA_URL));
+    assert_eq!(
+        media
+            .resolve("agent:reviewer:workspace-files", receipt.handle().as_str())
+            .unwrap()
+            .content(),
+        ONE_PIXEL_SVG
+    );
+
+    let thumbnail = media
+        .thumbnail(&files, "artifact.svg", "image/svg+xml")
+        .unwrap();
+    assert_eq!(thumbnail.file_size(), ONE_PIXEL_SVG.len() as u64);
+    assert_eq!(thumbnail.preview(), Some(ONE_PIXEL_SVG_DATA_URL));
+
+    let receipt = media
+        .stage_buffer(
+            "agent:reviewer:workspace-files",
+            ONE_PIXEL_SVG_BASE64,
+            "buffer.svg",
+            "image/svg+xml",
+        )
+        .unwrap();
+    assert_eq!(receipt.mime_type(), "image/svg+xml");
+    assert_eq!(receipt.preview(), Some(ONE_PIXEL_SVG_DATA_URL));
+
+    let thumbnail = media
+        .thumbnail_gateway(
+            &state_dir,
+            "agent:reviewer:workspace-files",
+            "http://localhost/api/chat/media/outgoing/owner/svg-asset/artifact.svg",
+            "reviewer",
+            "image/svg+xml",
+        )
+        .unwrap();
+    assert_eq!(thumbnail.file_size(), ONE_PIXEL_SVG.len() as u64);
+    assert_eq!(thumbnail.preview(), Some(ONE_PIXEL_SVG_DATA_URL));
 }
 
 #[test]

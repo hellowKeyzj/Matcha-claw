@@ -5,7 +5,10 @@ use super::{
     approval::{PendingApprovalsCommand, PendingApprovalsOutcome},
     command::{OpenClawSessionResult, session_lane_key},
     state::SessionView,
-    timeline::{Command as SessionTimelineCommand, Outcome as SessionTimelineOutcome},
+    timeline::{
+        Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
+        ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
+    },
 };
 use crate::RuntimeSessionError;
 
@@ -24,6 +27,10 @@ pub(crate) enum SessionQuery {
     Timeline {
         command: SessionTimelineCommand,
         reply: oneshot::Sender<SessionTimelineOutcome>,
+    },
+    Content {
+        command: SessionContentCommand,
+        reply: oneshot::Sender<SessionContentOutcome>,
     },
     ListOpenClaw {
         reply:
@@ -60,6 +67,11 @@ impl SessionQuery {
                     super::timeline::UnavailableReason::RuntimeUnavailable,
                 ));
             }
+            Self::Content { reply, .. } => {
+                let _ = reply.send(SessionContentOutcome::unavailable(
+                    super::timeline::UnavailableReason::RuntimeUnavailable,
+                ));
+            }
             Self::ListOpenClaw { reply } => {
                 let _ = reply.send(Err(RuntimeSessionError::RuntimeUnavailable));
             }
@@ -85,6 +97,10 @@ impl SessionQuery {
                 &command.session_id,
             )),
             Self::Timeline { command, .. } => QueryRoute::Keyed(session_lane_key(
+                command.session_provider(),
+                command.session_key(),
+            )),
+            Self::Content { command, .. } => QueryRoute::Keyed(session_lane_key(
                 command.session_provider(),
                 command.session_key(),
             )),

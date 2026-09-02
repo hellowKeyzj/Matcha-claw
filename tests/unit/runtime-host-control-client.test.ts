@@ -561,6 +561,28 @@ describe('runtime-host framed control client', () => {
     await expect(command).resolves.toEqual({ kind: 'succeeded', result: { accepted: true } });
   });
 
+  it('accepts team runtime trace id as private control metadata', async () => {
+    const { client, streams } = createClient();
+    const traceId = 'session-trace:team-runtime:team.runList:trace-1';
+    const command = client.command({
+      name: 'team.runtime.execute',
+      input: {
+        id: 'team.runtime',
+        operationId: 'teams.list',
+        scope: { kind: 'team' },
+        target: null,
+        input: {},
+        traceId,
+      },
+    });
+    const outbound = outboundCommand(streams.writes[0]);
+
+    expect((outbound.command as Record<string, unknown>).input).toMatchObject({ traceId });
+    streams.output.emit('data', readyFrame());
+    streams.output.emit('data', succeededOutcome(outbound.id, { accepted: true }));
+    await expect(command).resolves.toEqual({ kind: 'succeeded', result: { accepted: true } });
+  });
+
   it('rejects team runtime execute schema drift and non-JSON fields before writing', async () => {
     const { client, streams } = createClient();
     const validInput = {
@@ -585,6 +607,9 @@ describe('runtime-host framed control client', () => {
       { name: 'team.runtime.execute', input: { ...validInput, target: cyclic } },
       { name: 'team.runtime.execute', input: { ...validInput, input: [] } },
       { name: 'team.runtime.execute', input: { ...validInput, input: { value: BigInt(1) } } },
+      { name: 'team.runtime.execute', input: { ...validInput, traceId: '' } },
+      { name: 'team.runtime.execute', input: { ...validInput, traceId: 'bad\ntrace' } },
+      { name: 'team.runtime.execute', input: { ...validInput, traceId: 'x'.repeat(257) } },
     ];
 
     for (const invalidCommand of invalidCommands) {

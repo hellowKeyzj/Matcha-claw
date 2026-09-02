@@ -341,10 +341,17 @@ impl TeamRunOwner {
     pub(crate) fn apply_graph_patch(
         &self,
         store: &mut OrganizationStore,
-        command: organization::RunCommand,
-        patch: organization::GraphPatch,
+        patch: crate::organization::TeamGraphPatchDraft,
     ) -> Result<TeamRunCommandOutcome, StoreFault> {
-        let run_id = GraphRunId::new(command.run_id().as_str());
+        let run_id = patch.run_id.clone();
+        let Some(current) = store.facts().run(&run_id).cloned() else {
+            return Err(StoreFault::EventLedger(
+                organization::RecordCommandError::InvalidEventId,
+            ));
+        };
+        let (command, patch) = patch
+            .resolve(current.graph().definition())
+            .map_err(|_| StoreFault::InvalidFacts)?;
         store.team_graph_patch(command, patch)?;
         let team = store
             .facts()
@@ -711,7 +718,6 @@ impl TeamRunOwner {
     pub(crate) fn settle_node_prompt(
         &self,
         store: &mut OrganizationStore,
-        run_id: &GraphRunId,
         session_key: &str,
         prompt_run_id: &str,
         phase: NativeTerminalStatus,
@@ -722,9 +728,6 @@ impl TeamRunOwner {
             .deliveries()
             .deliveries()
             .filter_map(|delivery| {
-                if delivery.facts().run_id != run_id.as_str() {
-                    return None;
-                }
                 let correlation = match delivery.phase() {
                     DeliveryPhase::Delivered {
                         matcha_correlation: Some(correlation),
@@ -733,7 +736,8 @@ impl TeamRunOwner {
                     DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
                     _ => return None,
                 };
-                let run = store.facts().run(run_id)?;
+                let run_id = GraphRunId::new(delivery.facts().run_id.clone());
+                let run = store.facts().run(&run_id)?;
                 let binding = run
                     .runtime()?
                     .bindings()
@@ -750,11 +754,12 @@ impl TeamRunOwner {
         let Some(delivery) = matches.pop() else {
             return Ok(TeamNodePromptSettledResult::NotFound);
         };
+        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
         if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {
             if observation.native_terminal() != phase {
                 return Err(StoreFault::InvalidFacts);
             }
-            return Ok(TeamNodePromptSettledResult::Replayed(run_id.clone()));
+            return Ok(TeamNodePromptSettledResult::Replayed(run_id));
         }
         let delivery_id = DeliveryId::new(delivery.facts().delivery_id.as_str().to_owned())
             .map_err(|_| StoreFault::InvalidFacts)?;
@@ -763,12 +768,10 @@ impl TeamRunOwner {
             .ok_or(StoreFault::InvalidFacts)?;
         let outcome = store.observe_matcha_terminal(target, phase, settled_at)?;
         Ok(match outcome {
-            TerminalObservationOutcome::Replayed => {
-                TeamNodePromptSettledResult::Replayed(run_id.clone())
-            }
+            TerminalObservationOutcome::Replayed => TeamNodePromptSettledResult::Replayed(run_id),
             TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution
             | TerminalObservationOutcome::RecordedNodeCancelled => {
-                TeamNodePromptSettledResult::Recorded(run_id.clone())
+                TeamNodePromptSettledResult::Recorded(run_id)
             }
         })
     }

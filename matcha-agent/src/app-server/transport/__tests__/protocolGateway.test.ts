@@ -55,6 +55,7 @@ function createTestPorts(overrides: TestPortsOverrides = {}): AppServerPorts {
           ...(params.afterSeq !== undefined
             ? { afterSeq: params.afterSeq }
             : {}),
+          lastSeq: 11,
         }
       },
     },
@@ -255,6 +256,7 @@ describe('ProtocolGateway', () => {
               lastSeq: 0,
               lastSnapshotVersion: 0,
               model: params.model,
+              modelSelectionId: params.modelSelectionId,
               providerFingerprint: params.providerFingerprint,
               workerState: { state: 'unloaded', reason: 'notStarted' },
             }
@@ -273,6 +275,7 @@ describe('ProtocolGateway', () => {
           params: {
             sessionId: 'session-1',
             model: 'gpt-5',
+            modelSelectionId: 'openai/gpt-5',
             providerFingerprint: 'matcha-provider:v1:test',
             providerRuntime: {
               kind: 'openAiResponses',
@@ -293,6 +296,7 @@ describe('ProtocolGateway', () => {
       {
         sessionId: 'session-1',
         model: 'gpt-5',
+        modelSelectionId: 'openai/gpt-5',
         providerFingerprint: 'matcha-provider:v1:test',
         providerRuntime: {
           kind: 'openAiResponses',
@@ -329,8 +333,18 @@ describe('ProtocolGateway', () => {
     })
   })
 
-  test('replays events before reporting an event subscription', async () => {
-    const gateway = new ProtocolGateway(createTestPorts())
+  test('reports event subscription without replaying historical events', async () => {
+    let replayCalled = false
+    const gateway = new ProtocolGateway(
+      createTestPorts({
+        events: {
+          replay: () => {
+            replayCalled = true
+            return { events: [eventEnvelope('session-1', 7)] }
+          },
+        },
+      }),
+    )
 
     const response = parseResponse(
       await gateway.handleTextMessage(
@@ -344,7 +358,7 @@ describe('ProtocolGateway', () => {
       ),
     )
 
-    expect(response).toMatchObject({
+    expect(response).toEqual({
       jsonrpc: '2.0',
       id: 'sub-1',
       result: {
@@ -352,8 +366,9 @@ describe('ProtocolGateway', () => {
         clientId: 'client-1',
         sessionId: 'session-1',
         afterSeq: 7,
-        replayed: [{ eventId: 'session-1-7' }],
+        lastSeq: 11,
       },
     })
+    expect(replayCalled).toBe(false)
   })
 })

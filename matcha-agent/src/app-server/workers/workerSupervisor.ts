@@ -11,7 +11,10 @@ import type {
   ClassifiedError,
 } from '../protocol/types.js'
 import { isRecord } from '../protocol/jsonRpc.js'
-import { WorkerProcess } from './workerProcess.js'
+import {
+  createWorkerProcessEnvironment,
+  WorkerProcess,
+} from './workerProcess.js'
 import type {
   WorkerProcessExit,
   WorkerProcessOptions,
@@ -294,10 +297,10 @@ export class WorkerSupervisor {
   ): WorkerProcess {
     const options: WorkerProcessOptions = {
       ...this.spawnOptions,
-      env: {
-        ...this.spawnOptions.env,
-        MATCHA_AGENT_WORKER_ID: workerId,
-      },
+      env: createWorkerProcessEnvironment({
+        env: this.spawnOptions.env,
+        workerId,
+      }),
       workerId,
       requestTimeoutMs: this.requestTimeoutMs,
       stderrTailBytes: this.stderrTailBytes,

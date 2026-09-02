@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ChatShell } from '@/pages/Chat/components/ChatShell';
 
@@ -39,7 +39,7 @@ describe('chat shell stage layout', () => {
     expect(container.querySelector('[data-testid="chat-approval-dock"]')).toBeInTheDocument();
     expect(container.querySelector('[data-testid="chat-todo-panel"]')).toBeInTheDocument();
 
-    const composerOverlay = screen.getByTestId('chat-input').parentElement?.parentElement?.parentElement as HTMLElement | null;
+    const composerOverlay = screen.getByTestId('chat-input').parentElement?.parentElement?.parentElement?.parentElement as HTMLElement | null;
     expect(composerOverlay?.className).toContain('absolute');
     expect(composerOverlay?.className).toContain('bottom-0');
     expect(composerOverlay?.className).toContain('pointer-events-none');

@@ -313,6 +313,7 @@ async fn accepts_bodyless_policy_reads_without_content_headers() {
             request.method,
             request.path,
             request.authorization,
+            request.trace_id,
             request.body,
         )
     });
@@ -326,10 +327,11 @@ async fn accepts_bodyless_policy_reads_without_content_headers() {
         .expect("write request");
     drop(client);
 
-    let (method, path, authorization, body) = server.await.expect("server task");
+    let (method, path, authorization, trace_id, body) = server.await.expect("server task");
     assert_eq!(method, "GET");
     assert_eq!(path, "/api/security/policy/current");
     assert_eq!(authorization, None);
+    assert_eq!(trace_id, None);
     assert!(body.is_empty());
 }
 

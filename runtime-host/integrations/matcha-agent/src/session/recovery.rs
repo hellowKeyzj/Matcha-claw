@@ -274,6 +274,8 @@ mod tests {
             last_seq: sequence(last_seq),
             last_snapshot_version: 1,
             model: None,
+            model_selection_id: None,
+            provider_fingerprint: None,
             permission_mode: None,
             worker_state: WorkerRuntimeState::Unloaded {
                 reason: crate::session::model::UnloadedReason::NotStarted,

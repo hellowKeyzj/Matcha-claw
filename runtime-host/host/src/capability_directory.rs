@@ -136,6 +136,7 @@ fn dynamic_descriptor_for_scope(id: &str, scope: &Value) -> Option<Value> {
             scope.clone(),
             vec![
                 operation("sessions.window", "Get session window", "session"),
+                operation("sessions.content.load", "Load session content", "session"),
                 operation("sessions.delete", "Delete session", "session"),
                 operation("sessions.rename", "Rename session", "session"),
                 operation("sessions.archive", "Archive session", "session"),
@@ -449,7 +450,7 @@ fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Val
         "kind": "team-runtime",
         "scopeKind": "runtime-instance",
         "scope": scope,
-        "targetKinds": ["team", "team-run", "team-approval"],
+        "targetKinds": ["none", "team", "team-run", "team-approval"],
         "runtimeAdapterId": identity.runtime_adapter_id(),
         "runtimeInstanceId": identity.runtime_instance_id(),
         "supportLevel": "native",
@@ -471,8 +472,8 @@ fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Val
             operation("team.graphImportYaml", "Import TeamRun graph YAML", "team-run"),
             operation("team.triggerFire", "Fire TeamRun StartNode trigger", "team-run"),
             operation("team.roleMessageSubmit", "Submit Team role chat message", "team-run"),
-            operation("team.nodePromptRetryDue", "Wake due TeamRun node prompt retries", "team-run"),
-            operation("team.nodePromptSettled", "Wake TeamRun after a node prompt session turn settles", "team-run"),
+            operation("team.nodePromptRetryDue", "Read due TeamRun node prompt retry plan", "team-run"),
+            operation("team.nodePromptSettled", "Wake TeamRun after a node prompt session turn settles", "none"),
             operation("team.nodeEvent", "Submit TeamRun node event command", "team-run"),
             operation("team.runDiagnostics", "Read TeamRun diagnostics", "team-run"),
             operation("team.runDecisionSubmit", "Submit TeamRun decision", "team-run"),
@@ -547,7 +548,7 @@ fn operation(id: &'static str, title: &'static str, target_kind: &'static str) -
         "id": id,
         "title": title,
         "targetKind": target_kind,
-        "targetRequired": true,
+        "targetRequired": target_kind != "none",
     })
 }
 
@@ -831,6 +832,24 @@ mod tests {
         let team = &outcome["result"]["capabilities"][9];
         assert_eq!(team["kind"], "team-runtime");
         assert_eq!(team["supportLevel"], "native");
+        let settled = team["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == "team.nodePromptSettled")
+            .unwrap();
+        assert_eq!(settled["targetKind"], "none");
+        assert_eq!(settled["targetRequired"], false);
+        let retry_due = team["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == "team.nodePromptRetryDue")
+            .unwrap();
+        assert_eq!(
+            retry_due["title"],
+            "Read due TeamRun node prompt retry plan"
+        );
         for private in [
             "token",
             "secret",

@@ -191,6 +191,11 @@ describe('chat send handlers', () => {
         text: '',
       }),
     ]);
+    expect(state.loadedSessions[sessionKey]!.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'submitted',
+      pendingTurnKey: beforeAck[1]!.key,
+    });
 
     resolveSend?.({ ok: true, runId: 'native-run-1', projection: null });
     await sendPromise;
@@ -460,8 +465,13 @@ describe('chat send handlers', () => {
     expect(JSON.stringify(receipt)).not.toContain('aW1hZ2U=');
   });
 
-  it('does not send while a previous send mutation is still in flight', async () => {
+  it('sends when a global mutation is in flight but the current session is ready', async () => {
     const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: true,
+      runId: 'run-while-mutating',
+      projection: null,
+    });
     let state = {
       currentSessionKey: sessionKey,
       loadedSessions: {
@@ -480,18 +490,88 @@ describe('chat send handlers', () => {
       state = { ...state, ...patch } as ChatStoreState;
     };
     const beginMutating = vi.fn();
+    const finishMutating = vi.fn();
 
-    await executeStoreSend({
+    const result = await executeStoreSend({
       set,
       get: () => state,
       sessionRunCache: createStoreSessionRunCache(),
       beginMutating,
-      finishMutating: vi.fn(),
+      finishMutating,
       text: '你好',
     });
 
+    expect(result).toEqual({ accepted: true });
+    expect(sendChatTransportMock).toHaveBeenCalledWith(expect.objectContaining({ message: '你好' }));
+    expect(beginMutating).toHaveBeenCalledTimes(1);
+    expect(finishMutating).toHaveBeenCalledTimes(1);
+    expect(state.loadedSessions[sessionKey]!.runtime).toMatchObject({
+      activeRunId: 'run-while-mutating',
+      runPhase: 'submitted',
+    });
+  });
+
+  it('rejects send while the current session has an optimistic pending turn', async () => {
+    const sessionKey = 'agent:main:session-1';
+    const beginMutating = vi.fn();
+    const finishMutating = vi.fn();
+    const record = createSessionRecord({ sessionKey });
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: {
+          ...record,
+          runtime: {
+            ...record.runtime,
+            runPhase: 'submitted' as const,
+            pendingTurnKey: 'renderer-assistant:client-1',
+          },
+          items: [{
+            key: 'renderer-assistant:client-1',
+            kind: 'assistant-turn' as const,
+            role: 'assistant' as const,
+            sessionKey,
+            identitySource: 'client' as const,
+            identityMode: 'client' as const,
+            identityConfidence: 'strong' as const,
+            status: 'streaming' as const,
+            segments: [],
+            thinking: null,
+            tools: [],
+            text: '',
+            images: [],
+            attachedFiles: [],
+            pendingState: 'typing' as const,
+          }],
+        },
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+
+    const result = await executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating,
+      finishMutating,
+      text: 'next',
+    });
+
+    expect(result).toEqual({ accepted: false, reason: 'active', error: undefined });
     expect(sendChatTransportMock).not.toHaveBeenCalled();
     expect(beginMutating).not.toHaveBeenCalled();
+    expect(finishMutating).not.toHaveBeenCalled();
+    expect(getSessionItems(state, sessionKey).map((item) => item.key)).toEqual(['renderer-assistant:client-1']);
   });
 
   it('does not poll history while a run is active', async () => {

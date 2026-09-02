@@ -25,10 +25,7 @@ pub(super) async fn create(
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
     let outcome = create_native(&client, &peer.working_directory, session_id).await;
-    match client.close().await {
-        Ok(()) => outcome,
-        Err(_) => InvocationOutcome::Unknown,
-    }
+    client.finish_with_cleanup(outcome).await
 }
 
 pub(super) async fn create_native(
@@ -68,6 +65,18 @@ mod tests {
                 "cwd": "E:/matcha-chat-workspace",
                 "sessionId": "matcha-session-1"
             })
+        );
+    }
+
+    #[test]
+    fn cleanup_close_failure_preserves_confirmed_session_create() {
+        let session_id = SessionId::try_new("matcha-session-1").unwrap();
+        assert_eq!(
+            crate::session::client::outcome_after_cleanup(
+                InvocationOutcome::<SessionId, AppServerClientError>::Succeeded(session_id.clone()),
+                Err(AppServerClientError::CloseFailed),
+            ),
+            InvocationOutcome::Succeeded(session_id)
         );
     }
 }

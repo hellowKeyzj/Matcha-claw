@@ -1,8 +1,14 @@
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import type { SubagentSummary } from '@/types/subagent';
-import { cn } from '@/lib/utils';
-import { Download, MessageCircle, Pencil, Trash2 } from 'lucide-react';
+import { Download, MessageCircle, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface SubagentCardProps {
@@ -42,30 +48,39 @@ export function SubagentCard({
         <span className="max-w-[60%] truncate rounded-full border bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground">
           {modelLabel ?? t('card.modelFallback')}
         </span>
-        <div className="flex items-center gap-1.5">
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 rounded-full text-muted-foreground hover:text-foreground"
-            aria-label={`Export ${agent.id}`}
-            title={t('card.actions.export')}
-            disabled={exportLocked}
-            onClick={onExport}
-          >
-            <Download className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 rounded-full text-muted-foreground hover:text-destructive"
-            aria-label={`Delete ${agent.id}`}
-            title={deleteLocked ? t('card.lockedHint') : t('card.actions.delete')}
-            disabled={deleteLocked}
-            onClick={onDelete}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 rounded-full text-muted-foreground hover:text-foreground"
+              aria-label={`${t('card.actions.more')} ${agent.id}`}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-36">
+            <DropdownMenuItem disabled={exportLocked} onSelect={onExport}>
+              <Download className="h-4 w-4" />
+              <span className="min-w-0 flex-1 truncate">{t('card.actions.export')}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={editLocked} onSelect={onEdit}>
+              <Pencil className="h-4 w-4" />
+              <span className="min-w-0 flex-1 truncate">{t('card.actions.edit')}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={deleteLocked}
+              title={deleteLocked ? t('card.lockedHint') : undefined}
+              className="text-destructive data-[highlighted]:text-destructive"
+              onSelect={onDelete}
+            >
+              <Trash2 className="h-4 w-4" />
+              <span className="min-w-0 flex-1 truncate">{t('card.actions.delete')}</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       <div className="relative mt-4 flex flex-col items-center text-center">
@@ -94,10 +109,10 @@ export function SubagentCard({
         ) : null}
       </div>
 
-      <div className="relative mt-4 grid grid-cols-2 gap-2">
+      <div className="relative mt-4">
         <Button
           size="sm"
-          className="gap-1.5"
+          className="w-full gap-1.5"
           aria-label={`Chat ${agent.id}`}
           disabled={chatDisabled}
           title={chatDisabled ? t('card.modelMissingHint') : undefined}
@@ -105,18 +120,6 @@ export function SubagentCard({
         >
           <MessageCircle className="h-3.5 w-3.5" />
           {t('card.actions.chat')}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className={cn('gap-1.5 bg-background/70', editLocked && 'text-muted-foreground')}
-          aria-label={`Edit ${agent.id}`}
-          disabled={editLocked}
-          title={editLocked ? t('card.lockedHint') : undefined}
-          onClick={onEdit}
-        >
-          <Pencil className="h-3.5 w-3.5" />
-          {t('card.actions.edit')}
         </Button>
       </div>
     </article>

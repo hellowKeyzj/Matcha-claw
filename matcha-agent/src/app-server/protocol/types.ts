@@ -76,6 +76,7 @@ export type SessionCreateParams = {
   sessionId?: string
   title?: string
   model?: string
+  modelSelectionId?: string
   permissionMode?: string
 }
 
@@ -155,6 +156,7 @@ export type ProviderRuntimeConfig =
 export type SessionSetModelParams = {
   sessionId: string
   model: string
+  modelSelectionId?: string
   providerFingerprint?: string
   providerRuntime?: ProviderRuntimeConfig
 }
@@ -200,6 +202,7 @@ export type SessionRecord = {
   lastSeq: number
   lastSnapshotVersion: number
   model?: string
+  modelSelectionId?: string
   providerFingerprint?: string
   permissionMode?: string
   workerState: WorkerRuntimeState

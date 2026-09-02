@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import {
   encodeJsonRpcMessage,
   internalError,
@@ -7,6 +8,7 @@ import {
   methodNotFound,
   parseJsonRpcMessage,
 } from '../protocol/jsonRpc.js'
+import { logProcessSessionTrace } from '../../query/runTrace.js'
 import type {
   ApprovalRespondParams,
   EventsReplayParams,
@@ -209,26 +211,8 @@ export class ProtocolGateway {
       clientId,
       parsed.params,
     )
-    const replayed = this.ports.events.replay
-      ? await this.ports.events.replay({
-          sessionId: parsed.params.sessionId,
-          ...(parsed.params.afterSeq !== undefined
-            ? { afterSeq: parsed.params.afterSeq }
-            : {}),
-        })
-      : undefined
-
-    if (!replayed || subscribed.resultType !== 'subscribed') {
-      return { resultType: 'success', result: subscribed }
-    }
-
-    return {
-      resultType: 'success',
-      result: {
-        ...subscribed,
-        replayed: replayed.events,
-      },
-    }
+    logSubscribeResponse(parsed.params.sessionId, subscribed)
+    return { resultType: 'success', result: subscribed }
   }
 
   private async callWithParams<TParams>(
@@ -242,6 +226,34 @@ export class ProtocolGateway {
     const result = await callback(parsed.params)
     return { resultType: 'success', result }
   }
+}
+
+function logSubscribeResponse(sessionId: string, result: unknown): void {
+  if (!isRecord(result)) {
+    logProcessSessionTrace(
+      'matcha-agent-app-server',
+      'app-server.events.subscribe.response',
+      {
+        sessionIdLength: sessionId.length,
+        resultType: 'non-object',
+        lastSeq: null,
+        responseBytes: 0,
+      },
+    )
+    return
+  }
+
+  logProcessSessionTrace(
+    'matcha-agent-app-server',
+    'app-server.events.subscribe.response',
+    {
+      sessionIdLength: sessionId.length,
+      resultType:
+        typeof result.resultType === 'string' ? result.resultType : 'unknown',
+      lastSeq: typeof result.lastSeq === 'number' ? result.lastSeq : null,
+      responseBytes: Buffer.byteLength(JSON.stringify(result) ?? '', 'utf8'),
+    },
+  )
 }
 
 function parseInitializeParams(
@@ -285,6 +297,11 @@ function parseSessionCreateParams(
   if (title.resultType === 'invalidParams') return title
   const model = optionalString(parsed.params, 'model')
   if (model.resultType === 'invalidParams') return model
+  const modelSelectionId = optionalNonEmptyString(
+    parsed.params,
+    'modelSelectionId',
+  )
+  if (modelSelectionId.resultType === 'invalidParams') return modelSelectionId
   const permissionMode = optionalString(parsed.params, 'permissionMode')
   if (permissionMode.resultType === 'invalidParams') return permissionMode
 
@@ -295,6 +312,9 @@ function parseSessionCreateParams(
       ...(sessionId.value !== undefined ? { sessionId: sessionId.value } : {}),
       ...(title.value !== undefined ? { title: title.value } : {}),
       ...(model.value !== undefined ? { model: model.value } : {}),
+      ...(modelSelectionId.value !== undefined
+        ? { modelSelectionId: modelSelectionId.value }
+        : {}),
       ...(permissionMode.value !== undefined
         ? { permissionMode: permissionMode.value }
         : {}),
@@ -471,6 +491,11 @@ function parseSessionSetModelParams(
   if (sessionId.resultType === 'invalidParams') return sessionId
   const model = requiredString(parsed.params, 'model')
   if (model.resultType === 'invalidParams') return model
+  const modelSelectionId = optionalNonEmptyString(
+    parsed.params,
+    'modelSelectionId',
+  )
+  if (modelSelectionId.resultType === 'invalidParams') return modelSelectionId
   const providerFingerprint = optionalString(
     parsed.params,
     'providerFingerprint',
@@ -489,6 +514,9 @@ function parseSessionSetModelParams(
     params: {
       sessionId: sessionId.value,
       model: model.value,
+      ...(modelSelectionId.value !== undefined
+        ? { modelSelectionId: modelSelectionId.value }
+        : {}),
       ...(providerFingerprint.value !== undefined
         ? { providerFingerprint: providerFingerprint.value }
         : {}),

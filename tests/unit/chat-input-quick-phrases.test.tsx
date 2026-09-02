@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 
 vi.mock('react-i18next', () => ({
@@ -24,6 +25,14 @@ const testSessionIdentity = {
   sessionKey: 'test-session',
 };
 
+const readySendGate = {
+  canSend: true as const,
+  kind: 'session' as const,
+  sessionKey: testSessionIdentity.sessionKey,
+  endpointSessionId: undefined,
+  sessionIdentity: testSessionIdentity,
+};
+
 
 describe('chat input quick phrases', () => {
   beforeEach(() => {
@@ -31,7 +40,7 @@ describe('chat input quick phrases', () => {
   });
 
   it('opens an empty quick phrase dialog by default', () => {
-    const { container } = render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
+    const { container } = render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: '快捷短语' }));
 
@@ -43,7 +52,7 @@ describe('chat input quick phrases', () => {
   });
 
   it('adds a quick phrase and inserts the selected phrase', () => {
-    render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
+    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '请看', selectionStart: 2, selectionEnd: 2 } });

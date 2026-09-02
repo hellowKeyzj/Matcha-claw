@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { hostRuntimeEndpointsList } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { buildRuntimeEndpointKey } from '../../electron/desktop-contract/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const RUNTIME_ENDPOINT_DIRECTORY_PENDING_MESSAGE = 'runtime endpoint directory is unavailable';
@@ -23,6 +24,9 @@ interface RuntimeEndpointsState {
   error: string | null;
   endpoints: RuntimeEndpointSummary[];
   hasLoadedOnce: boolean;
+  revision: number;
+  changedRuntimeScopeKeys: string[];
+  revisionByRuntimeScopeKey: Record<string, number>;
   refresh: () => Promise<void>;
   init: () => void;
 }
@@ -177,6 +181,52 @@ function scheduleRuntimeEndpointRefresh(refresh: () => Promise<void>): void {
   }, RUNTIME_ENDPOINT_EVENT_REFRESH_DELAY_MS);
 }
 
+function runtimeEndpointScopeKey(endpoint: RuntimeEndpointSummary): string {
+  return buildRuntimeEndpointKey(endpoint.endpointRef);
+}
+
+function runtimeEndpointFingerprint(endpoint: RuntimeEndpointSummary): string {
+  return JSON.stringify(endpoint);
+}
+
+function runtimeEndpointFingerprintByScopeKey(endpoints: readonly RuntimeEndpointSummary[]): Map<string, string> {
+  return new Map(endpoints.map((endpoint) => [runtimeEndpointScopeKey(endpoint), runtimeEndpointFingerprint(endpoint)]));
+}
+
+function changedRuntimeEndpointScopeKeys(
+  previousEndpoints: readonly RuntimeEndpointSummary[],
+  nextEndpoints: readonly RuntimeEndpointSummary[],
+): string[] {
+  const previous = runtimeEndpointFingerprintByScopeKey(previousEndpoints);
+  const next = runtimeEndpointFingerprintByScopeKey(nextEndpoints);
+  const changed = new Set<string>();
+  for (const [scopeKey, fingerprint] of next) {
+    if (previous.get(scopeKey) !== fingerprint) {
+      changed.add(scopeKey);
+    }
+  }
+  for (const scopeKey of previous.keys()) {
+    if (!next.has(scopeKey)) {
+      changed.add(scopeKey);
+    }
+  }
+  return [...changed].sort();
+}
+
+function bumpRuntimeEndpointRevisions(
+  previous: Record<string, number>,
+  changedRuntimeScopeKeys: readonly string[],
+): Record<string, number> {
+  if (changedRuntimeScopeKeys.length === 0) {
+    return previous;
+  }
+  const next = { ...previous };
+  for (const scopeKey of changedRuntimeScopeKeys) {
+    next[scopeKey] = (next[scopeKey] ?? 0) + 1;
+  }
+  return next;
+}
+
 export function findRuntimeEndpointByAdapter(
   endpoints: readonly RuntimeEndpointSummary[],
   runtimeAdapterId: string,
@@ -189,6 +239,9 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
   error: null,
   endpoints: [],
   hasLoadedOnce: false,
+  revision: 0,
+  changedRuntimeScopeKeys: [],
+  revisionByRuntimeScopeKey: {},
 
   refresh: async () => {
     const requestSequence = runtimeEndpointLoadSequence + 1;
@@ -201,6 +254,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
     set((state) => ({
       status: state.hasLoadedOnce ? state.status : 'loading',
       error: null,
+      changedRuntimeScopeKeys: [],
     }));
     try {
       const { endpoints } = await hostRuntimeEndpointsList();
@@ -220,11 +274,17 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
         });
         return;
       }
-      set({
-        status: 'ready',
-        error: null,
-        endpoints: [...endpoints],
-        hasLoadedOnce: true,
+      set((state) => {
+        const changedRuntimeScopeKeys = changedRuntimeEndpointScopeKeys(state.endpoints, endpoints);
+        return {
+          status: 'ready',
+          error: null,
+          endpoints: [...endpoints],
+          hasLoadedOnce: true,
+          revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
+          changedRuntimeScopeKeys,
+          revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
+        };
       });
     } catch (error) {
       if (runtimeEndpointLoadSequence !== requestSequence) {
@@ -244,12 +304,19 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
         pending,
         ...summarizeRuntimeEndpointTraceError(error),
       });
-      set((state) => ({
-        status: pending ? 'loading' : 'error',
-        error: pending ? null : message,
-        endpoints: pending ? state.endpoints : [],
-        hasLoadedOnce: state.hasLoadedOnce,
-      }));
+      set((state) => {
+        const nextEndpoints = pending ? state.endpoints : [];
+        const changedRuntimeScopeKeys = pending ? [] : changedRuntimeEndpointScopeKeys(state.endpoints, nextEndpoints);
+        return {
+          status: pending ? 'loading' : 'error',
+          error: pending ? null : message,
+          endpoints: nextEndpoints,
+          hasLoadedOnce: state.hasLoadedOnce,
+          revision: changedRuntimeScopeKeys.length > 0 ? state.revision + 1 : state.revision,
+          changedRuntimeScopeKeys,
+          revisionByRuntimeScopeKey: bumpRuntimeEndpointRevisions(state.revisionByRuntimeScopeKey, changedRuntimeScopeKeys),
+        };
+      });
     }
   },
 

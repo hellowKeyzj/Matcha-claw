@@ -11,6 +11,12 @@ import {
   getSessionItemCount,
 } from './store-state-helpers';
 import type { ChatSessionHistoryStatus, ChatSessionRecord } from './types';
+import {
+  areCurrentChatSendGateSourcesEquivalent,
+  deriveChatSendGate,
+  readCurrentChatSendGateSource,
+  type CurrentChatSendGateSource,
+} from './send-gate';
 
 const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
 
@@ -24,6 +30,8 @@ export interface AgentSessionsPaneSessionEntry {
 let cachedAgentPaneSessionEntries: AgentSessionsPaneSessionEntry[] = [];
 let cachedAgentPaneSessionEntryByKey = new Map<string, AgentSessionsPaneSessionEntry>();
 let cachedAgentSessionsPaneState: ReturnType<typeof buildAgentSessionsPaneState> | null = null;
+let cachedCurrentSendGateSource: CurrentChatSendGateSource | null = null;
+let cachedCurrentSendGate: ReturnType<typeof deriveChatSendGate> | null = null;
 
 function normalizeAgentPaneSessionLabel(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -33,9 +41,14 @@ function normalizeAgentPaneSessionLabel(value: string | null | undefined): strin
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function resolveCurrentSessionRecordKey(state: ChatStoreState): string {
+  return state.currentConversation?.kind === 'session'
+    ? state.currentConversation.sessionRecordKey
+    : '';
+}
+
 function resolveCurrentAgentId(state: ChatStoreState): string {
-  const meta = getSessionMeta(state, state.currentSessionKey);
-  return meta.agentId ?? meta.sessionIdentity?.agentId ?? '';
+  return state.currentConversation?.agentId ?? '';
 }
 
 function hasSessionPaneActivity(record: ChatSessionRecord): boolean {
@@ -103,7 +116,9 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
   return {
     sessionEntries,
     ...sessionCatalogStatus,
-    currentSessionKey: state.currentSessionKey,
+    currentConversation: state.currentConversation,
+    sessionRuntimeGraph: state.sessionRuntimeGraph,
+    currentSessionKey: resolveCurrentSessionRecordKey(state),
     currentAgentId: resolveCurrentAgentId(state),
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
@@ -127,10 +142,24 @@ export function selectSessionRuntime(state: ChatStoreState, sessionKey: string) 
   return getSessionRuntime(state, sessionKey);
 }
 
+export function selectCurrentChatSendGate(state: ChatStoreState) {
+  const source = readCurrentChatSendGateSource(state);
+  if (
+    cachedCurrentSendGate
+    && cachedCurrentSendGateSource
+    && areCurrentChatSendGateSourcesEquivalent(cachedCurrentSendGateSource, source)
+  ) {
+    return cachedCurrentSendGate;
+  }
+  cachedCurrentSendGateSource = source;
+  cachedCurrentSendGate = deriveChatSendGate(source);
+  return cachedCurrentSendGate;
+}
+
 export function selectSnapshotLayerState(state: ChatStoreState) {
   return {
     sessions: readSessionsFromState(state),
-    currentSessionKey: state.currentSessionKey,
+    currentSessionKey: resolveCurrentSessionRecordKey(state),
   };
 }
 
@@ -166,7 +195,9 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.sessionsLoading === sessionCatalogStatus.sessionsLoading
     && cachedAgentSessionsPaneState.sessionsLoadedOnce === sessionCatalogStatus.sessionsLoadedOnce
     && cachedAgentSessionsPaneState.sessionsError === sessionCatalogStatus.sessionsError
-    && cachedAgentSessionsPaneState.currentSessionKey === state.currentSessionKey
+    && cachedAgentSessionsPaneState.currentConversation === state.currentConversation
+    && cachedAgentSessionsPaneState.sessionRuntimeGraph === state.sessionRuntimeGraph
+    && cachedAgentSessionsPaneState.currentSessionKey === resolveCurrentSessionRecordKey(state)
     && cachedAgentSessionsPaneState.currentAgentId === resolveCurrentAgentId(state)
     && cachedAgentSessionsPaneState.switchSession === state.switchSession
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation

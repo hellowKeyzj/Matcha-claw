@@ -1,10 +1,11 @@
-import type { RefObject, TouchEventHandler, WheelEventHandler } from 'react';
+import type { MouseEventHandler, RefObject, TouchEventHandler, WheelEventHandler } from 'react';
 import {
   INITIAL_SCOPE_STATE,
   bottomScrollTop,
   hasScrollableOverflow,
   isAtBottom,
   readViewportMetrics,
+  restoreElementOffsetWithinViewport,
   restoreViewportAnchor,
   sampleViewportAnchor,
   viewportHasRenderableItems,
@@ -18,10 +19,10 @@ export interface ChatScrollControllerConfig {
   scrollScopeKey: string;
   setChromePhase: (phase: ChatScrollPhase) => void;
   viewportRef: RefObject<HTMLDivElement | null>;
-  contentRef: RefObject<HTMLDivElement | null>;
 }
 
 export interface ChatScrollController {
+  setConfig: (config: ChatScrollControllerConfig) => void;
   /** scope key 变化时调用 */
   onScopeChanged: () => void;
   /** ResizeObserver 回调：唯一的"被动几何变化"入口 */
@@ -31,8 +32,12 @@ export interface ChatScrollController {
   handleViewportPointerDown: () => void;
   handleViewportTouchMove: TouchEventHandler<HTMLDivElement>;
   handleViewportWheel: WheelEventHandler<HTMLDivElement>;
+  /** viewport click capture：在展开状态变化前采样局部锚点 */
+  handleViewportClickCapture: MouseEventHandler<HTMLDivElement>;
   /** 来自外层（输入框浮层）的滚轮代理 */
   scrollViewportByWheelDelta: (deltaY: number) => void;
+  /** 用户触发的局部展开/收起：保持触发元素在视口内的位置不变 */
+  prepareElementAnchorRestore: (anchorElement: HTMLElement) => boolean;
   /** 加载更早消息前调用：先记下当前位置，加载完后会自动按 scrollHeight delta 补偿 */
   prepareScopeAnchorRestore: (nextScopeKey: string) => void;
   /** 显式让某 scope 进入 follow 并立即贴底（发送消息 / 跳到底部按钮） */
@@ -54,15 +59,30 @@ interface PendingTransition {
   anchor?: ViewportAnchor;
 }
 
+interface PendingElementAnchorRestore {
+  scopeKey: string;
+  anchorElement: HTMLElement;
+  offsetWithinViewport: number;
+}
+
 interface ControllerState {
   scopeStateByScope: Map<string, ChatScrollScopeState>;
   lastScopeKey: string | null;
   pendingPrepend: PendingPrepend | null;
   pendingTransition: PendingTransition | null;
+  pendingElementAnchorRestore: PendingElementAnchorRestore | null;
   userLeavingBottom: boolean;
   /** 触摸手势起始 y 坐标，用于在 touchmove 时判定手势方向 */
   touchStartY: number | null;
 }
+
+const DISABLED_VIEWPORT_REF: RefObject<HTMLDivElement | null> = { current: null };
+const DISABLED_CONTROLLER_CONFIG: ChatScrollControllerConfig = {
+  enabled: false,
+  scrollScopeKey: '',
+  setChromePhase: () => {},
+  viewportRef: DISABLED_VIEWPORT_REF,
+};
 
 function ensureScopeState(
   scopeKey: string,
@@ -77,19 +97,23 @@ function ensureScopeState(
   return next;
 }
 
-export function createChatScrollController(
-  getConfig: () => ChatScrollControllerConfig,
-): ChatScrollController {
-  const initialConfig = getConfig();
+export function createChatScrollController(): ChatScrollController {
   const state: ControllerState = {
     scopeStateByScope: new Map(),
     lastScopeKey: null,
     pendingPrepend: null,
     pendingTransition: null,
+    pendingElementAnchorRestore: null,
     userLeavingBottom: false,
     touchStartY: null,
   };
-  ensureScopeState(initialConfig.scrollScopeKey, state.scopeStateByScope);
+
+  let config: ChatScrollControllerConfig = DISABLED_CONTROLLER_CONFIG;
+  const getConfig = () => config;
+  const setConfig = (nextConfig: ChatScrollControllerConfig) => {
+    config = nextConfig;
+    ensureScopeState(config.scrollScopeKey, state.scopeStateByScope);
+  };
 
   const getScope = (key: string) => ensureScopeState(key, state.scopeStateByScope);
 
@@ -142,13 +166,34 @@ export function createChatScrollController(
   };
 
   /**
+   * 用户点击展开/收起会触发局部高度变化；保持触发控件在视口内的位置不变。
+   */
+  const applyPendingElementAnchorRestore = () => {
+    const pending = state.pendingElementAnchorRestore;
+    if (!pending) {
+      return false;
+    }
+    const config = getConfig();
+    if (pending.scopeKey !== config.scrollScopeKey) {
+      state.pendingElementAnchorRestore = null;
+      return false;
+    }
+    state.pendingElementAnchorRestore = null;
+    return restoreElementOffsetWithinViewport(
+      config.viewportRef.current,
+      pending.anchorElement,
+      pending.offsetWithinViewport,
+    );
+  };
+
+  /**
    * 应用历史 prepend 的位置补偿。
    *
    * 仅当：
    *   a. 当前 scope 有挂起的 pendingPrepend
    *   b. phase=detached（用户没主动回到底部）
    * 时才补偿。如果用户在加载完成前已经下滑到底，phase 已被 scroll 事件改成 follow，
-   * 此时保留 follow 即可——pendingPrepend 在 scroll handler 转 follow 时已经被清。
+   * 此时保留 follow 即可，pendingPrepend 在 scroll handler 转 follow 时已经被清。
    */
   const applyPendingPrepend = () => {
     const config = getConfig();
@@ -254,6 +299,36 @@ export function createChatScrollController(
     handleViewportScroll();
   };
 
+  const prepareElementAnchorRestore = (anchorElement: HTMLElement) => {
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    if (!config.enabled || !viewport || !viewport.contains(anchorElement)) {
+      return false;
+    }
+    if (state.pendingPrepend?.scopeKey === config.scrollScopeKey) {
+      return false;
+    }
+    const viewportRect = viewport.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+    state.pendingElementAnchorRestore = {
+      scopeKey: config.scrollScopeKey,
+      anchorElement,
+      offsetWithinViewport: anchorRect.top - viewportRect.top,
+    };
+    return true;
+  };
+
+  const handleViewportClickCapture: MouseEventHandler<HTMLDivElement> = (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const anchorElement = target.closest<HTMLElement>('[data-chat-local-geometry-anchor="true"]');
+    if (anchorElement) {
+      prepareElementAnchorRestore(anchorElement);
+    }
+  };
+
   /**
    * scroll 事件只确认两件事：
    *   到底                 → follow
@@ -271,6 +346,7 @@ export function createChatScrollController(
     }
     if (isAtBottom(metrics)) {
       state.pendingPrepend = null;
+      state.pendingElementAnchorRestore = null;
       setPhase('follow');
     } else if (state.userLeavingBottom) {
       setPhase('detached');
@@ -286,6 +362,10 @@ export function createChatScrollController(
       return;
     }
     if (applyPendingTransition()) {
+      syncSyncContainerDataset();
+      return;
+    }
+    if (applyPendingElementAnchorRestore()) {
       syncSyncContainerDataset();
       return;
     }
@@ -314,6 +394,9 @@ export function createChatScrollController(
     }
     const previousScopeKey = state.lastScopeKey;
     state.lastScopeKey = config.scrollScopeKey;
+    if (previousScopeKey !== null && previousScopeKey !== config.scrollScopeKey) {
+      state.pendingElementAnchorRestore = null;
+    }
     const scope = getScope(config.scrollScopeKey);
     config.setChromePhase(scope.phase);
 
@@ -355,6 +438,7 @@ export function createChatScrollController(
     scope.anchor = sampleViewportAnchor(viewport);
     if (nextScopeKey === config.scrollScopeKey) {
       // 同 scope 加载更早：内容到位后用 scrollHeight delta 补偿。
+      state.pendingElementAnchorRestore = null;
       state.pendingPrepend = {
         scopeKey: nextScopeKey,
         previousScrollHeight: viewport.scrollHeight,
@@ -364,6 +448,7 @@ export function createChatScrollController(
       setPhase('detached');
       return;
     }
+    state.pendingElementAnchorRestore = null;
     state.pendingTransition = {
       scopeKey: nextScopeKey,
       mode: 'restore-anchor',
@@ -378,11 +463,13 @@ export function createChatScrollController(
     const config = getConfig();
     if (nextScopeKey === config.scrollScopeKey) {
       state.pendingPrepend = null;
+      state.pendingElementAnchorRestore = null;
       setPhase('follow');
       stickToBottom();
       syncSyncContainerDataset();
       return;
     }
+    state.pendingElementAnchorRestore = null;
     state.pendingTransition = { scopeKey: nextScopeKey, mode: 'force-follow' };
   };
 
@@ -392,6 +479,7 @@ export function createChatScrollController(
       return;
     }
     state.pendingPrepend = null;
+    state.pendingElementAnchorRestore = null;
     setPhase('follow');
     stickToBottom();
     syncSyncContainerDataset();
@@ -400,18 +488,22 @@ export function createChatScrollController(
   const cleanup = () => {
     state.pendingPrepend = null;
     state.pendingTransition = null;
+    state.pendingElementAnchorRestore = null;
     state.userLeavingBottom = false;
     state.touchStartY = null;
   };
 
   return {
+    setConfig,
     onScopeChanged,
     onGeometryChanged,
     handleViewportScroll,
     handleViewportPointerDown,
     handleViewportTouchMove,
     handleViewportWheel,
+    handleViewportClickCapture,
     scrollViewportByWheelDelta,
+    prepareElementAnchorRestore,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     jumpToBottom,

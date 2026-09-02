@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { handleCapabilityRoutes } from '../../electron/api/routes/capabilities';
 import { RuntimeHostControlError } from '../../electron/main/runtime-host-delivery/control';
 
-function incoming(body?: unknown, method = 'POST') {
+function incoming(body?: unknown, method = 'POST', headers: Record<string, string> = {}) {
   return Object.assign(Readable.from(body === undefined ? [] : [JSON.stringify(body)]), {
     method,
-    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    headers: body === undefined ? headers : { 'content-type': 'application/json', ...headers },
   });
 }
 
@@ -276,6 +276,47 @@ describe('capability route sealed projection', () => {
     expect(result.state).toEqual({ statusCode: 200, body: { success: true, teamId: 'team-1' } });
   });
 
+  it('accepts the public graphSummary Team graph context view', async () => {
+    const request = {
+      id: 'team.runtime',
+      operationId: 'team.graphContext',
+      scope: schedulerScope,
+      target: { kind: 'team-run', teamId: 'team-1', runId: 'run-1' },
+      input: { teamId: 'team-1', runId: 'run-1', view: 'graphSummary' },
+    } as const;
+    const command = vi.fn().mockResolvedValue(succeeded({ success: true }));
+    const result = response();
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({ name: 'team.runtime.execute', input: request });
+    expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
+  });
+
+  it('forwards Team runtime trace id only as private control metadata', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({ success: true, teamId: 'team-1' }));
+    const result = response();
+    const traceId = 'session-trace:team-runtime:team.runList:trace-1';
+
+    await handleCapabilityRoutes(
+      incoming(teamRuntimeRequest, 'POST', { 'x-matchaclaw-session-trace': traceId }) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'team.runtime.execute',
+      input: { ...teamRuntimeRequest, traceId },
+    });
+    expect(result.state).toEqual({ statusCode: 200, body: { success: true, teamId: 'team-1' } });
+  });
+
   it('dispatches workspace media through the Rust transport', async () => {
     const workspaceMediaTransport = {
       execute: vi.fn().mockResolvedValue({ status: 200, body: { preview: null, fileSize: 12 } }),
@@ -310,7 +351,7 @@ describe('capability route sealed projection', () => {
     expect(JSON.stringify(result.state)).not.toContain('C:/private');
   });
 
-  it('preserves unknown Team runtime results as HTTP 200 without faking success', async () => {
+  it('rejects unknown Team runtime results without faking success', async () => {
     const command = vi.fn().mockResolvedValue({ kind: 'unknown', result: { outcome: 'unknown' } });
     const result = response();
 
@@ -321,7 +362,28 @@ describe('capability route sealed projection', () => {
       { runtimeHost: { command } } as never,
     );
 
-    expect(result.state).toEqual({ statusCode: 200, body: { outcome: 'unknown' } });
+    expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
+  });
+
+  it('does not project Team resume outcome unknown as success', async () => {
+    const request = {
+      id: 'team.runtime',
+      operationId: 'team.resume',
+      scope: schedulerScope,
+      target: { kind: 'team', teamId: 'team-1' },
+      input: { teamId: 'team-1', idempotencyKey: 'resume:team-1' },
+    } as const;
+    const command = vi.fn().mockResolvedValue({ kind: 'unknown', result: { teamId: 'team-1', state: 'outcome_unknown' } });
+    const result = response();
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
   });
 
   it.each([

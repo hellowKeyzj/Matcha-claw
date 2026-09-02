@@ -1,7 +1,9 @@
 {
   "allowedRouteFiles": [
+    "account.ts",
     "agents.ts",
     "app.ts",
+    "billing.ts",
     "capabilities.ts",
     "channel-catalog.ts",
     "channel-configure.ts",
@@ -25,6 +27,7 @@
     "settings.ts",
     "skill-bundle.ts",
     "skills.ts",
+    "subscription.ts",
     "files.ts",
     "gateway.ts",
     "license.ts",
@@ -55,9 +58,24 @@
     "team-webhook-auth.ts",
     "usage.ts"
   ],
+  "hostapiProxyWebsocketExactRoutes": [
+    "/api/remote-fleet/terminal/stream"
+  ],
   "mainOwnedExactRoutes": [
     "/api/events",
+    "/api/account/public-settings",
+    "/api/account/session",
+    "/api/account/login",
+    "/api/account/login/2fa",
+    "/api/account/register",
+    "/api/account/send-verify-code",
+    "/api/account/refresh",
+    "/api/account/logout",
     "/api/app/browser-relay-info",
+    "/api/billing/checkout-info",
+    "/api/billing/plans",
+    "/api/billing/orders",
+    "/api/billing/orders/verify",
     "/api/subagents/agents",
     "/api/capabilities/list",
     "/api/capabilities/describe",
@@ -160,6 +178,10 @@
     "/api/skills/readme",
     "/api/subagents/skill-bundles/export",
     "/api/subagents/skill-bundles/import",
+    "/api/subscription/summary",
+    "/api/subscription/active",
+    "/api/subscription/progress",
+    "/api/subscription/platform-quotas",
     "/api/matcha-agent/app-server/status",
     "/api/matcha-agent/app-server/restart",
     "/api/runtime-host/usage/recent",
@@ -216,7 +238,55 @@
     ],
     [
       "GET",
+      "/api/account/public-settings"
+    ],
+    [
+      "GET",
+      "/api/account/session"
+    ],
+    [
+      "POST",
+      "/api/account/login"
+    ],
+    [
+      "POST",
+      "/api/account/login/2fa"
+    ],
+    [
+      "POST",
+      "/api/account/register"
+    ],
+    [
+      "POST",
+      "/api/account/send-verify-code"
+    ],
+    [
+      "POST",
+      "/api/account/refresh"
+    ],
+    [
+      "POST",
+      "/api/account/logout"
+    ],
+    [
+      "GET",
       "/api/app/browser-relay-info"
+    ],
+    [
+      "GET",
+      "/api/billing/checkout-info"
+    ],
+    [
+      "GET",
+      "/api/billing/plans"
+    ],
+    [
+      "POST",
+      "/api/billing/orders"
+    ],
+    [
+      "POST",
+      "/api/billing/orders/verify"
     ],
     [
       "POST",
@@ -640,6 +710,22 @@
     ],
     [
       "GET",
+      "/api/subscription/summary"
+    ],
+    [
+      "GET",
+      "/api/subscription/active"
+    ],
+    [
+      "GET",
+      "/api/subscription/progress"
+    ],
+    [
+      "GET",
+      "/api/subscription/platform-quotas"
+    ],
+    [
+      "GET",
       "/api/matcha-agent/app-server/status"
     ],
     [
@@ -840,6 +926,10 @@
     ]
   ],
   "hostApiAllowedDynamicRequests": [
+    [
+      "GET",
+      "/api/billing/orders/:orderId"
+    ],
     [
       "GET",
       "/api/channels/pairing/:channelType"

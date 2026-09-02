@@ -4,7 +4,12 @@ import {
   isRecord,
   normalizeMessageRole,
 } from './message-content';
-import { sanitizeCanonicalUserText } from './message-display';
+import {
+  isImageGenerationStatusNarration,
+  isInternalDeliveryPlanningText,
+  isOpenClawRuntimeEventPrompt,
+  sanitizeCanonicalUserText,
+} from './message-display';
 
 function readAssistantControlText(message: ChatMessageRecord): string {
   if (typeof message.text === 'string') {
@@ -52,6 +57,18 @@ export function isAssistantControlPrefixMessage(value: unknown): boolean {
   return text === 'NO';
 }
 
+function messageHasToolUse(message: ChatMessageRecord): boolean {
+  if ((Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    || (Array.isArray(message.toolCalls) && message.toolCalls.length > 0)) {
+    return true;
+  }
+  const content = message.content;
+  return Array.isArray(content) && content.some((block) => (
+    isRecord(block)
+    && (block.type === 'tool_use' || block.type === 'toolCall' || block.kind === 'toolUse')
+  ));
+}
+
 function isRuntimeSystemInjectionText(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) {
@@ -65,6 +82,12 @@ function isRuntimeSystemInjectionText(text: string): boolean {
     return true;
   }
   if (/^\s*System\s*\(untrusted\)\s*:/i.test(normalized)) {
+    return true;
+  }
+  if (/^\[Inter-session message\]/i.test(normalized)) {
+    return true;
+  }
+  if (isOpenClawRuntimeEventPrompt(normalized)) {
     return true;
   }
   if (
@@ -88,7 +111,16 @@ export function isInternalRuntimeDisplayMessage(value: unknown): boolean {
   const text = role === 'assistant'
     ? readAssistantControlText(message)
     : extractMessageText(message.content ?? message.text);
+  if (role === 'assistant' && messageHasToolUse(message)) {
+    return false;
+  }
   if (role === 'assistant' && isExactAssistantControlText(text)) {
+    return true;
+  }
+  if (role === 'assistant' && isImageGenerationStatusNarration(text)) {
+    return true;
+  }
+  if (role === 'assistant' && isInternalDeliveryPlanningText(text)) {
     return true;
   }
   return isRuntimeSystemInjectionText(text);

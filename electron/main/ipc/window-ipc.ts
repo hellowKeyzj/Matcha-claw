@@ -1,4 +1,5 @@
 import { ipcMain, type BrowserWindow } from 'electron';
+import { syncMacTrafficLightPosition } from '../traffic-light-layout';
 import { setWindowRightDockWidth } from '../window';
 
 function requireMainWindow(getMainWindow: () => BrowserWindow | null): BrowserWindow {
@@ -32,6 +33,13 @@ export function registerWindowHandlers(getMainWindow: () => BrowserWindow | null
   ipcMain.handle('window:isMaximized', () => {
     const mainWindow = requireMainWindow(getMainWindow);
     return mainWindow.isMaximized();
+  });
+
+  ipcMain.handle('window:syncTrafficLightPosition', (_event, sidebarCollapsed: unknown) => {
+    if (typeof sidebarCollapsed !== 'boolean') {
+      return;
+    }
+    syncMacTrafficLightPosition(requireMainWindow(getMainWindow), sidebarCollapsed);
   });
 
   ipcMain.handle('window:setRightDockWidth', async (_event, width: unknown, options: unknown) => {

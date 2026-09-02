@@ -7,7 +7,10 @@ use std::{
 
 #[cfg(unix)]
 use foundation::process::InvalidGuardianExecutable;
-use foundation::process::{ProcessContainment, supervise};
+use foundation::{
+    process::{ProcessContainment, supervise},
+    toolchain::NativeToolchainRuntime,
+};
 
 use super::lifecycle::MatchaPeer;
 use crate::{
@@ -30,6 +33,7 @@ pub struct MatchaPeerInput {
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
+    pub toolchain: Arc<NativeToolchainRuntime>,
     pub report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
     #[cfg(windows)]
     pub git_bash: PathBuf,
@@ -69,6 +73,7 @@ impl MatchaPeerFactory {
             storage_root: input.storage_root,
             port: input.port,
             secret: Arc::clone(&secret),
+            toolchain: input.toolchain,
             #[cfg(windows)]
             git_bash: input.git_bash,
         }

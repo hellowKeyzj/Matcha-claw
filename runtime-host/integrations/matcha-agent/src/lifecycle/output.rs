@@ -154,7 +154,10 @@ fn classify_line(stream: OutputStream, bytes: &[u8]) -> Option<StartupDiagnostic
         return Some(StartupDiagnosticCategory::InvalidUtf8);
     };
     let line = line.trim();
-    if line.is_empty() || stream == OutputStream::Stdout {
+    if line.is_empty()
+        || line.contains("\"prefix\":\"session-trace\"")
+        || stream == OutputStream::Stdout
+    {
         return None;
     }
 

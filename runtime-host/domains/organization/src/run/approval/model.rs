@@ -132,7 +132,7 @@ impl Approval {
         idempotency_key: &str,
         decision: ApprovalDecision,
         note: Option<&str>,
-        resolved_at: u64,
+        _resolved_at: u64,
         cause: ApprovalResolutionCause,
     ) -> bool {
         let Some((index, existing)) = self
@@ -143,10 +143,7 @@ impl Approval {
         else {
             return false;
         };
-        if existing.decision != decision
-            || existing.resolved_at != resolved_at
-            || existing.cause != cause
-        {
+        if existing.decision != decision || existing.cause != cause {
             return false;
         }
         let inherited_note = index

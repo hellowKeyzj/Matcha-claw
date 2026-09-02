@@ -70,8 +70,12 @@ impl Desired {
             .get("input")
             .and_then(Value::as_object)
             .and_then(|input| input.get("policy"))
-            .and_then(Value::as_object)
             .ok_or(())?;
+        Self::try_from_policy(policy)
+    }
+
+    fn try_from_policy(value: &Value) -> Result<Self, ()> {
+        let policy = value.as_object().ok_or(())?;
         if policy.len() != 3
             || policy.keys().any(|field| {
                 !["preset", "securityPolicyVersion", "runtime"].contains(&field.as_str())
@@ -144,8 +148,9 @@ pub(crate) struct Owner {
 impl Owner {
     pub(crate) fn open(state_dir: &Path) -> Result<Self, ()> {
         let path = state_dir.join(STATE_FILE);
+        let state = load(&path)?;
         Ok(Self {
-            state: Mutex::new(load(&path)?),
+            state: Mutex::new(state),
             path,
             effect: tokio::sync::Mutex::new(()),
         })
@@ -592,7 +597,10 @@ fn load(path: &Path) -> Result<PersistedDesired, ()> {
     if fs::metadata(path).map_err(|_| ())?.len() > MAX_STATE_BYTES {
         return Err(());
     }
-    serde_json::from_slice(&fs::read(path).map_err(|_| ())?).map_err(|_| ())
+    let mut state: PersistedDesired =
+        serde_json::from_slice(&fs::read(path).map_err(|_| ())?).map_err(|_| ())?;
+    state.policy = Desired::try_from_policy(&state.policy)?.into_policy();
+    Ok(state)
 }
 fn persist(path: &Path, state: &PersistedDesired) -> Result<(), ()> {
     let bytes = serde_json::to_vec(state).map_err(|_| ())?;
@@ -722,6 +730,49 @@ mod tests {
             Err(()) => panic!("fresh security owner policy must be readable"),
         };
         assert_eq!(policy["preset"], "relaxed");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_policy_is_normalized_before_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "security-delivery-normalized-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(STATE_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "revision": 7,
+                "policy": {
+                    "preset": "balanced",
+                    "securityPolicyVersion": 2,
+                    "runtime": {
+                        "allowDomains": [" api.example.com ", "api.example.com"]
+                    }
+                },
+                "effect": "confirmed",
+                "correlations": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let owner = Owner::open(&root).unwrap();
+        let policy = owner.policy().unwrap();
+        let runtime = &policy["runtime"];
+        assert_eq!(policy["preset"], "balanced");
+        assert_eq!(
+            runtime["allowDomains"],
+            serde_json::json!(["api.example.com"])
+        );
+        assert!(runtime["secrets"].is_object());
+        assert!(runtime["secretPatterns"].is_array());
         let _ = fs::remove_dir_all(root);
     }
 

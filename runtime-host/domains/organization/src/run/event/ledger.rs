@@ -326,7 +326,7 @@ fn replay_or_conflict(
     status: CommandStatus,
     rejection_reason: Option<CommandRejection>,
 ) -> Result<CommandReceipt, RecordCommandError> {
-    if existing.command() != command {
+    if !command_replay_matches(existing.command(), command) {
         return Err(RecordCommandError::IdempotencyConflict);
     }
     if existing.status() != status || existing.rejection_reason() != rejection_reason {
@@ -337,6 +337,13 @@ fn replay_or_conflict(
         events: Vec::new(),
         replayed: true,
     })
+}
+
+fn command_replay_matches(existing: &RunCommand, command: &RunCommand) -> bool {
+    existing.run_id() == command.run_id()
+        && existing.command_id() == command.command_id()
+        && existing.idempotency_key() == command.idempotency_key()
+        && existing.payload() == command.payload()
 }
 
 fn next_sequence(existing_count: usize) -> Option<NonZeroU64> {
@@ -374,14 +381,16 @@ fn approval_resolution_event_is_canonical(event: &TeamEvent) -> bool {
             decision,
             status,
         } => {
+            let Ok(expected_event_id) = super::model::team_event_id(
+                super::model::TeamEventIdentityKind::Approval,
+                event.run_id(),
+                approval_id.as_str(),
+                event.sequence(),
+            ) else {
+                return false;
+            };
             event.causation_id() == approval_id.as_str()
-                && event.event_id()
-                    == format!(
-                        "team-event-{}-approval-{}-{}",
-                        event.run_id(),
-                        approval_id.as_str(),
-                        event.sequence()
-                    )
+                && event.event_id() == expected_event_id.as_str()
                 && decision.status() == *status
         }
         _ => false,

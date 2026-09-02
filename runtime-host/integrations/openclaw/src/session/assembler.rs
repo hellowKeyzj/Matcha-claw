@@ -201,6 +201,8 @@ pub struct CanonicalToolCall<'facts> {
     block_index: usize,
     name: &'facts str,
     tool_call_id: Option<&'facts str>,
+    input: Option<&'facts serde_json::Value>,
+    input_text: Option<&'facts str>,
     identity_conflict: bool,
 }
 
@@ -210,6 +212,8 @@ impl<'facts> CanonicalToolCall<'facts> {
         block_index: usize,
         name: &'facts str,
         block_tool_call_id: Option<&'facts str>,
+        input: Option<&'facts serde_json::Value>,
+        input_text: Option<&'facts str>,
     ) -> Self {
         let (tool_call_id, identity_conflict) =
             resolve_tool_identity(message.tool_call_id(), block_tool_call_id);
@@ -218,6 +222,8 @@ impl<'facts> CanonicalToolCall<'facts> {
             block_index,
             name,
             tool_call_id,
+            input,
+            input_text,
             identity_conflict,
         }
     }
@@ -238,6 +244,14 @@ impl<'facts> CanonicalToolCall<'facts> {
         self.tool_call_id
     }
 
+    pub fn input(self) -> Option<&'facts serde_json::Value> {
+        self.input
+    }
+
+    pub fn input_text(self) -> Option<&'facts str> {
+        self.input_text
+    }
+
     pub const fn identity_conflict(self) -> bool {
         self.identity_conflict
     }
@@ -248,6 +262,8 @@ impl fmt::Debug for CanonicalToolCall<'_> {
         formatter
             .debug_struct("CanonicalToolCall")
             .field("has_tool_call_id", &self.tool_call_id.is_some())
+            .field("has_input", &self.input.is_some())
+            .field("input_text_len", &self.input_text.map(str::len))
             .field("identity_conflict", &self.identity_conflict)
             .finish_non_exhaustive()
     }
@@ -260,6 +276,7 @@ pub struct CanonicalToolResult<'facts> {
     tool_name: Option<&'facts str>,
     tool_call_id: Option<&'facts str>,
     summary: Option<&'facts str>,
+    output: Option<&'facts serde_json::Value>,
     is_error: Option<bool>,
     identity_conflict: bool,
 }
@@ -271,6 +288,7 @@ impl<'facts> CanonicalToolResult<'facts> {
         tool_name: Option<&'facts str>,
         block_tool_call_id: Option<&'facts str>,
         summary: Option<&'facts str>,
+        output: Option<&'facts serde_json::Value>,
         is_error: Option<bool>,
     ) -> Self {
         let (tool_call_id, identity_conflict) =
@@ -281,6 +299,7 @@ impl<'facts> CanonicalToolResult<'facts> {
             tool_name,
             tool_call_id,
             summary,
+            output,
             is_error,
             identity_conflict,
         }
@@ -306,6 +325,10 @@ impl<'facts> CanonicalToolResult<'facts> {
         self.summary
     }
 
+    pub fn output(self) -> Option<&'facts serde_json::Value> {
+        self.output
+    }
+
     pub const fn is_error(self) -> Option<bool> {
         self.is_error
     }
@@ -322,6 +345,7 @@ impl fmt::Debug for CanonicalToolResult<'_> {
             .field("has_tool_name", &self.tool_name.is_some())
             .field("has_tool_call_id", &self.tool_call_id.is_some())
             .field("has_summary", &self.summary.is_some())
+            .field("has_output", &self.output.is_some())
             .field("is_error", &self.is_error)
             .field("identity_conflict", &self.identity_conflict)
             .finish()
@@ -537,18 +561,24 @@ impl<'facts> CanonicalSessionView<'facts> {
             let canonical = CanonicalHistoryMessage::new(message);
             for (block_index, block) in message.content().iter().enumerate() {
                 match block {
-                    MessageContent::ToolUse { name, tool_call_id } => {
-                        calls.push(CanonicalToolCall::new(
-                            canonical,
-                            block_index,
-                            name,
-                            tool_call_id.as_deref(),
-                        ))
-                    }
+                    MessageContent::ToolUse {
+                        name,
+                        tool_call_id,
+                        input,
+                        input_text,
+                    } => calls.push(CanonicalToolCall::new(
+                        canonical,
+                        block_index,
+                        name,
+                        tool_call_id.as_deref(),
+                        input.as_ref(),
+                        input_text.as_deref(),
+                    )),
                     MessageContent::ToolResult {
                         tool_name,
                         tool_call_id,
                         summary,
+                        output,
                         is_error,
                     } => results.push(CanonicalToolResult::new(
                         canonical,
@@ -556,9 +586,11 @@ impl<'facts> CanonicalSessionView<'facts> {
                         tool_name.as_deref(),
                         tool_call_id.as_deref(),
                         summary.as_deref(),
+                        output.as_ref(),
                         *is_error,
                     )),
                     MessageContent::Text { .. }
+                    | MessageContent::MessageToolDelivery { .. }
                     | MessageContent::Media { .. }
                     | MessageContent::Omitted { .. } => {}
                 }
@@ -831,6 +863,62 @@ mod tests {
                 .iter()
                 .any(|pair| pair.state() == ToolPairState::ConflictingIdentity)
         );
+    }
+
+    #[test]
+    fn paired_tool_payloads_are_readable_without_debug_leakage() {
+        let canary = "tool-payload-canary";
+        let history = BoundedHistoryFacts::decode(
+            json!({
+                "sessionKey":"agent:main:session-1",
+                "messages":[
+                    {
+                        "role":"assistant",
+                        "messageId":"assistant-1",
+                        "runId":"run-1",
+                        "content":[{
+                            "type":"toolCall",
+                            "name":"read",
+                            "id":"tool-1",
+                            "input":{"path":canary},
+                            "inputText":format!("read {canary}")
+                        }]
+                    },
+                    {
+                        "role":"toolResult",
+                        "messageId":"result-1",
+                        "runId":"run-1",
+                        "toolCallId":"tool-1",
+                        "content":[{
+                            "type":"toolResult",
+                            "toolCallId":"tool-1",
+                            "content":"ok",
+                            "output":{"content":canary},
+                            "isError":false
+                        }]
+                    }
+                ]
+            }),
+            PageRequest::latest(),
+        )
+        .unwrap();
+        let projection = projection(history, NativeFactRead::Unavailable);
+        let view = CanonicalSessionAssembler::assemble(&projection);
+        let pairs = view.tool_pairs();
+        let pair = pairs[0];
+        let call = pair.call().unwrap();
+        let result = pair.result().unwrap();
+
+        assert_eq!(pair.state(), ToolPairState::Paired);
+        assert_eq!(call.input().unwrap()["path"], canary);
+        assert_eq!(call.input_text(), Some("read tool-payload-canary"));
+        assert_eq!(result.output().unwrap()["content"], canary);
+
+        let debug = format!("{pair:?} {call:?} {result:?}");
+        assert!(debug.contains("has_input: true"));
+        assert!(debug.contains("input_text_len: Some(24)"));
+        assert!(debug.contains("has_output: true"));
+        assert!(!debug.contains(canary));
     }
 
     #[test]

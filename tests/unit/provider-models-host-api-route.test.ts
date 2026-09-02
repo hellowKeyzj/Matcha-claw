@@ -23,12 +23,13 @@ const listBody = {
 const selectableBody = {
   models: [{
     accountId: 'account-main',
-    selectionId: 'openai/gpt-test',
+    selectionId: 'model-selection:v1:6666666666666666666666666666666666666666666666666666666666666666',
     label: 'Main provider',
     modelId: 'gpt-test',
     capabilities: ['chat'],
     contextWindow: 128000,
     maxTokens: 8192,
+    modelReferences: ['openai/gpt-test'],
   }],
 };
 

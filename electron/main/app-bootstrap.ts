@@ -34,9 +34,11 @@ import {
 import { createParentCallbackReceiver, type ParentCallbackReceiver } from './runtime-host-delivery/parent-callback';
 import { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
 import { composeLicenseService } from './license/composition';
+import { createCloudAccountService } from './cloud-account/service';
 import { createSessionListTransport } from './runtime-host-delivery/transport/sessions/list';
 import { createRuntimeEndpointDirectoryTransport } from './runtime-host-delivery/transport/runtime-directory';
 import { createFleetTransport } from './runtime-host-delivery/transport/fleet';
+import { createSessionContentTransport } from './runtime-host-delivery/transport/sessions/content';
 import { createSessionTimelineTransport } from './runtime-host-delivery/transport/sessions/timeline';
 import { createMatchaSessionListTransport } from './runtime-host-delivery/transport/sessions/matcha-list';
 import { createDiagnosticsArchiveTransport } from './runtime-host-delivery/transport/diagnostics';
@@ -278,6 +280,7 @@ export async function bootstrapMainApplication(deps: {
   let sessionListTransport: ReturnType<typeof createSessionListTransport>;
   let runtimeDirectoryTransport: ReturnType<typeof createRuntimeEndpointDirectoryTransport>;
   let fleetTransport: ReturnType<typeof createFleetTransport>;
+  let sessionContentTransport: ReturnType<typeof createSessionContentTransport>;
   let sessionTimelineTransport: ReturnType<typeof createSessionTimelineTransport>;
   let matchaSessionListTransport: ReturnType<typeof createMatchaSessionListTransport>;
   let diagnosticsArchiveTransport: ReturnType<typeof createDiagnosticsArchiveTransport>;
@@ -359,6 +362,7 @@ export async function bootstrapMainApplication(deps: {
       delivery.sessionTransportPort,
     );
     fleetTransport = createFleetTransport(delivery.issuer, delivery.fleetTransportPort);
+    sessionContentTransport = createSessionContentTransport(delivery.issuer, delivery.sessionTransportPort);
     sessionTimelineTransport = createSessionTimelineTransport(delivery.issuer, delivery.sessionTransportPort);
     matchaSessionListTransport = createMatchaSessionListTransport(
       delivery.issuer,
@@ -566,11 +570,13 @@ export async function bootstrapMainApplication(deps: {
     await waitForHostApiServerListening(
       startHostApiServer({
         licenseService,
+        cloudAccountService: createCloudAccountService(),
         eventBus: deps.hostEventBus,
         runtimeHost: directRuntimeHost,
         sessionListTransport,
         runtimeDirectoryTransport,
         fleetTransport,
+        sessionContentTransport,
         sessionTimelineTransport,
         matchaSessionListTransport,
         sessionAbortTransport,

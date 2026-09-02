@@ -78,6 +78,10 @@ pub(crate) fn openclaw_canonical_changes(
                 tool_name,
                 phase,
                 summary,
+                input,
+                input_text,
+                output,
+                is_error,
             } => {
                 projected.push(SessionChange::ToolUpdated {
                     tool: ToolView {
@@ -90,8 +94,12 @@ pub(crate) fn openclaw_canonical_changes(
                             ToolActivityPhase::Completed => ToolPhase::Completed,
                             ToolActivityPhase::Failed => ToolPhase::Failed,
                         },
+                        input: input.clone(),
+                        input_text: input_text.clone(),
                         summary: summary.clone(),
-                        is_error: matches!(phase, ToolActivityPhase::Failed).then_some(true),
+                        output: output.clone(),
+                        is_error: (*is_error)
+                            .or_else(|| matches!(phase, ToolActivityPhase::Failed).then_some(true)),
                     },
                 });
             }
@@ -160,6 +168,7 @@ pub(crate) fn openclaw_canonical_changes(
 #[cfg(test)]
 mod tests {
     use openclaw::session::protocol::{RunId, ToolId};
+    use serde_json::json;
 
     use super::*;
 
@@ -172,6 +181,10 @@ mod tests {
                 tool_name: Some("read".to_owned()),
                 phase: ToolActivityPhase::Started,
                 summary: None,
+                input: None,
+                input_text: None,
+                output: None,
+                is_error: None,
             }],
             Some("run-1"),
         );
@@ -182,6 +195,38 @@ mod tests {
                 SessionChange::RunPhaseChanged { .. },
                 SessionChange::ToolUpdated { tool }
             ] if tool.tool_call_id == "tool-1" && tool.name.as_deref() == Some("read")
+        ));
+    }
+
+    #[test]
+    fn live_tool_preserves_input_input_text_output_is_error() {
+        let input = json!({ "path": "Cargo.toml" });
+        let output = json!({ "content": "workspace" });
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::ToolActivity {
+                run_id: RunId::try_new("run-1").unwrap(),
+                tool_id: ToolId::try_new("tool-1").unwrap(),
+                tool_name: Some("read".to_owned()),
+                phase: ToolActivityPhase::Failed,
+                summary: Some("read failed".to_owned()),
+                input: Some(input.clone()),
+                input_text: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                output: Some(output.clone()),
+                is_error: Some(false),
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [
+                SessionChange::RunPhaseChanged { .. },
+                SessionChange::ToolUpdated { tool }
+            ] if tool.input.as_ref() == Some(&input)
+                && tool.input_text.as_deref() == Some("{\"path\":\"Cargo.toml\"}")
+                && tool.output.as_ref() == Some(&output)
+                && tool.is_error == Some(false)
+                && tool.phase == ToolPhase::Failed
         ));
     }
 }

@@ -236,7 +236,9 @@ impl NativeFactAssembler {
                             image,
                         });
                     }
-                    HydratedContentBlock::Text { .. } | HydratedContentBlock::Thinking { .. } => {}
+                    HydratedContentBlock::Text { .. }
+                    | HydratedContentBlock::LargeText(_)
+                    | HydratedContentBlock::Thinking { .. } => {}
                 }
             }
         }
@@ -813,6 +815,8 @@ mod tests {
             last_seq: Sequence::try_new(2).unwrap(),
             last_snapshot_version: 7,
             model: Some("model".into()),
+            model_selection_id: Some("model-selection".into()),
+            provider_fingerprint: Some("provider-fingerprint".into()),
             permission_mode: Some("default".into()),
             worker_state: WorkerRuntimeState::Unloaded {
                 reason: UnloadedReason::NotStarted,

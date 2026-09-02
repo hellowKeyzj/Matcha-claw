@@ -174,7 +174,8 @@
       "delete": "Delete",
       "export": "Export",
       "manage": "Manage",
-      "chat": "Chat"
+      "chat": "Chat",
+      "more": "More actions"
     }
   }
 }

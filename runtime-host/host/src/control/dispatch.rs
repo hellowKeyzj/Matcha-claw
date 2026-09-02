@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,12 +17,13 @@ use crate::{
         SendChatResponse,
     },
     organization::{
-        OrganizationHandle, TeamNodeEventCommandOutcome, TeamRuntimeCommand,
-        TeamRuntimeCommandOutcome, TeamRuntimeCreateSource, TeamRuntimePromptPhase,
-        TeamRuntimeStatus,
+        ManualTeamProvision, OrganizationHandle, TeamGraphPatchDraft, TeamNodeEventCommandOutcome,
+        TeamRuntimeCommand, TeamRuntimeCommandOutcome, TeamRuntimeCreateSource,
+        TeamRuntimePromptPhase, TeamRuntimeStatus,
     },
     owner::Handle,
     runtime_driver::RuntimeDriverIdentity,
+    transport::session_trace,
 };
 
 use super::wire::{Command, CommandInput, CommandOutcome, RejectionCode};
@@ -29,6 +31,25 @@ use super::wire::{Command, CommandInput, CommandOutcome, RejectionCode};
 const INVALID_INPUT_MESSAGE: &str = "Runtime Host command input is invalid.";
 const RUNTIME_UNAVAILABLE_MESSAGE: &str = "Runtime Host is unavailable.";
 const COMMAND_FAILED_MESSAGE: &str = "Runtime Host command failed.";
+
+#[derive(Clone, Copy)]
+enum RunCommandIdentityKind {
+    GraphImportYaml,
+    GraphSave,
+    GraphPatch,
+    TeamNodeEvent,
+}
+
+impl RunCommandIdentityKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::GraphImportYaml => "graph-import-yaml",
+            Self::GraphSave => "graph-save",
+            Self::GraphPatch => "graph-patch",
+            Self::TeamNodeEvent => "team-node-event",
+        }
+    }
+}
 
 pub(crate) async fn execute(
     owner: &Handle,
@@ -106,6 +127,8 @@ struct CapabilityExecuteRequest {
     scope: Value,
     target: Value,
     input: Value,
+    #[serde(rename = "traceId", default)]
+    trace_id: Option<String>,
 }
 
 async fn team_runtime_execute(owner: &OrganizationHandle, input: CommandInput) -> CommandOutcome {
@@ -113,9 +136,28 @@ async fn team_runtime_execute(owner: &OrganizationHandle, input: CommandInput) -
         Ok(request) if request.id == "team.runtime" => request,
         _ => return invalid_input(),
     };
+    let trace_id = request.trace_id.as_deref();
+    let input_object = request.input.as_object();
+    session_trace::log(
+        "runtime.team.runtime.request",
+        trace_id,
+        json!({
+            "operationId": &request.operation_id,
+            "targetKind": team_runtime_target_kind(&request.target),
+            "teamId": session_trace::id_shape(team_runtime_input_string(input_object, "teamId")),
+            "runId": session_trace::id_shape(team_runtime_input_string(input_object, "runId")),
+        }),
+    );
     if !is_team_runtime_facade_scope(&request.scope) {
+        session_trace::log(
+            "runtime.team.runtime.scope-invalid",
+            trace_id,
+            json!({ "operationId": &request.operation_id }),
+        );
         return invalid_input();
     }
+    let endpoint = team_runtime_facade_endpoint(&request.scope)
+        .expect("validated team runtime facade scope has a runtime endpoint");
 
     let team_id = request
         .input
@@ -129,17 +171,66 @@ async fn team_runtime_execute(owner: &OrganizationHandle, input: CommandInput) -
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned);
-    let command = match team_runtime_command(&request.operation_id, &request.target, &request.input)
-    {
-        Ok(command) => command,
-        Err(TeamRuntimeDecodeError::Unavailable) => return unavailable(),
-        Err(TeamRuntimeDecodeError::InvalidInput) => return invalid_input(),
+    let command = match team_runtime_command(
+        &request.operation_id,
+        &request.target,
+        &request.input,
+        endpoint,
+    ) {
+        Ok(command) => {
+            session_trace::log(
+                "runtime.team.runtime.decode",
+                trace_id,
+                json!({ "operationId": &request.operation_id, "status": "ok" }),
+            );
+            command
+        }
+        Err(error) => {
+            let status = match error {
+                TeamRuntimeDecodeError::Unavailable => "unavailable",
+                TeamRuntimeDecodeError::InvalidInput => "invalid-input",
+            };
+            session_trace::log(
+                "runtime.team.runtime.decode",
+                trace_id,
+                json!({ "operationId": &request.operation_id, "status": status }),
+            );
+            return match error {
+                TeamRuntimeDecodeError::Unavailable => unavailable(),
+                TeamRuntimeDecodeError::InvalidInput => invalid_input(),
+            };
+        }
     };
+    session_trace::log(
+        "runtime.team.runtime.owner.request",
+        trace_id,
+        json!({ "operationId": &request.operation_id }),
+    );
     let outcome = match execute_team_runtime(owner, command).await {
-        Some(outcome) => outcome,
-        None => return unavailable(),
+        Some(outcome) => {
+            session_trace::log(
+                "runtime.team.runtime.owner.response",
+                trace_id,
+                json!({ "operationId": &request.operation_id, "status": "ok" }),
+            );
+            outcome
+        }
+        None => {
+            session_trace::log(
+                "runtime.team.runtime.owner.response",
+                trace_id,
+                json!({ "operationId": &request.operation_id, "status": "unavailable" }),
+            );
+            return unavailable();
+        }
     };
-    team_runtime_outcome(outcome, team_id.as_deref(), run_id.as_deref())
+    let response = team_runtime_outcome(outcome, team_id.as_deref(), run_id.as_deref());
+    session_trace::log(
+        "runtime.team.runtime.response",
+        trace_id,
+        summarize_team_runtime_response(&request.operation_id, &response),
+    );
+    response
 }
 
 async fn execute_team_runtime(
@@ -161,8 +252,12 @@ async fn execute_team_runtime(
             package_root,
             team_id: Some(team_id),
             idempotency_key,
+            endpoint,
             source: TeamRuntimeCreateSource::TeamSkill,
-        } => {
+            manual_team: None,
+        } if endpoint.as_str()
+            == RuntimeDriverIdentity::open_claw().runtime_endpoint_reference() =>
+        {
             let selection_id = match owner.team_skill_authorize(package_root).await.ok()? {
                 Ok(selection_id) => selection_id,
                 Err(organization::package::TeamSkillSelectionError::InvalidSelection) => {
@@ -183,6 +278,25 @@ async fn execute_team_runtime(
                     .ok()?,
             )
         }
+        TeamRuntimeCommand::ProvisionAgents {
+            team_id: Some(team_id),
+            idempotency_key,
+            endpoint,
+            source: TeamRuntimeCreateSource::Manual,
+            manual_team: Some(manual_team),
+            ..
+        } => TeamRuntimeCommandOutcome::ProvisionAgents(
+            owner
+                .manual_team_materialize(
+                    team_id,
+                    manual_team.team_name,
+                    endpoint,
+                    manual_team.roles,
+                    idempotency_key,
+                )
+                .await
+                .ok()?,
+        ),
         TeamRuntimeCommand::ProvisionAgents { .. } => TeamRuntimeCommandOutcome::ProvisionAgents(
             crate::composition::TeamMaterializationCommandOutcome::Rejected,
         ),
@@ -259,19 +373,19 @@ async fn execute_team_runtime(
                         .await
                         .ok()?
                     {
-                        crate::composition::TeamMaterializationCommandOutcome::Materialized => {
-                            TeamRuntimeCommandOutcome::RunCreate(
-                                owner
-                                    .run_create_from_team_template(
-                                        team_id,
-                                        run_id,
-                                        idempotency_key,
-                                        now_millis(),
-                                    )
-                                    .await
-                                    .ok()?,
-                            )
-                        }
+                        crate::composition::TeamMaterializationCommandOutcome::Materialized {
+                            ..
+                        } => TeamRuntimeCommandOutcome::RunCreate(
+                            owner
+                                .run_create_from_team_template(
+                                    team_id,
+                                    run_id,
+                                    idempotency_key,
+                                    now_millis(),
+                                )
+                                .await
+                                .ok()?,
+                        ),
                         outcome => TeamRuntimeCommandOutcome::RunCreate(Err(
                             team_materialization_status(outcome),
                         )),
@@ -319,11 +433,37 @@ async fn execute_team_runtime(
             event_cursor,
             event_limit,
         } => match owner
-            .team_run_public_snapshot(team_id, run_id, event_cursor, event_limit)
+            .team_run_public_snapshot(team_id.clone(), run_id.clone(), event_cursor, event_limit)
             .await
             .ok()?
         {
-            Some(outcome) => TeamRuntimeCommandOutcome::RunSnapshot(outcome),
+            Some(snapshot) => {
+                let query_team_id = match (&team_id, &snapshot) {
+                    (Some(team_id), _) => Some(team_id.clone()),
+                    (None, organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(snapshot)) => {
+                        organization::TeamId::try_new(snapshot.run().team_id().to_owned()).ok()
+                    }
+                    (None, organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(_)) => None,
+                };
+                let role_sessions = match query_team_id {
+                    Some(team_id) => owner
+                        .run_snapshot(organization::TeamRunQuery::get(team_id, run_id))
+                        .await
+                        .ok()
+                        .and_then(|outcome| match outcome {
+                            organization::TeamRunQueryOutcome::Available(run) => {
+                                Some(run.role_sessions().to_vec())
+                            }
+                            organization::TeamRunQueryOutcome::Unavailable
+                            | organization::TeamRunQueryOutcome::OutcomeUnknown => None,
+                        }),
+                    None => None,
+                };
+                TeamRuntimeCommandOutcome::RunSnapshot {
+                    snapshot,
+                    role_sessions,
+                }
+            }
             None => TeamRuntimeCommandOutcome::RunSnapshotInvalidInput,
         },
         TeamRuntimeCommand::GraphSave {
@@ -332,8 +472,8 @@ async fn execute_team_runtime(
         } => {
             TeamRuntimeCommandOutcome::GraphSave(owner.graph_save(*command, definition).await.ok()?)
         }
-        TeamRuntimeCommand::GraphPatch { command, patch } => {
-            TeamRuntimeCommandOutcome::GraphPatch(owner.graph_patch(*command, patch).await.ok()?)
+        TeamRuntimeCommand::GraphPatch { patch } => {
+            TeamRuntimeCommandOutcome::GraphPatch(owner.graph_patch(patch).await.ok()?)
         }
         TeamRuntimeCommand::GraphContext {
             team_id,
@@ -407,14 +547,12 @@ async fn execute_team_runtime(
             )
         }
         TeamRuntimeCommand::NodePromptSettled {
-            run_id,
             session_key,
             prompt_run_id,
             phase,
         } => TeamRuntimeCommandOutcome::NodePromptSettled(
             owner
                 .node_prompt_settled(
-                    run_id,
                     session_key.as_str().to_owned(),
                     prompt_run_id.as_str().to_owned(),
                     phase,
@@ -477,7 +615,13 @@ async fn execute_team_runtime(
             })
         }
         TeamRuntimeCommand::Resume { team_id } => {
-            TeamRuntimeCommandOutcome::Resume(owner.resume(team_id).await.ok()?)
+            let outcomes = owner.resume(team_id.clone()).await.ok()?;
+            let runs = owner.run_list(team_id.clone()).await.ok()?;
+            TeamRuntimeCommandOutcome::Resume {
+                team_id,
+                outcomes,
+                runs,
+            }
         }
         TeamRuntimeCommand::ApprovalResolve { command } => {
             TeamRuntimeCommandOutcome::ApprovalResolve(owner.approval_resolve(command).await.ok()?)
@@ -548,10 +692,10 @@ async fn execute_team_node_event(
         },
         _ => return Err(TeamRuntimeStatus::Rejected),
     };
-    let command_id = organization::run::event::OpaqueId::try_new(format!(
-        "team-node-event-{}",
-        idempotency_key.as_str()
-    ))
+    let command_id = bounded_run_command_id(
+        RunCommandIdentityKind::TeamNodeEvent,
+        idempotency_key.as_str(),
+    )
     .map_err(|_| TeamRuntimeStatus::Rejected)?;
     let event = organization::TeamNodeEventProducer::non_terminal(
         organization::run::event::OpaqueId::try_new(run_id.as_str())
@@ -586,7 +730,7 @@ fn team_materialization_status(
     outcome: crate::composition::TeamMaterializationCommandOutcome,
 ) -> TeamRuntimeStatus {
     match outcome {
-        crate::composition::TeamMaterializationCommandOutcome::Materialized => {
+        crate::composition::TeamMaterializationCommandOutcome::Materialized { .. } => {
             TeamRuntimeStatus::OutcomeUnknown
         }
         crate::composition::TeamMaterializationCommandOutcome::Rejected => {
@@ -607,10 +751,79 @@ enum TeamRuntimeDecodeError {
     Unavailable,
 }
 
+fn team_runtime_target_kind(target: &Value) -> Option<&str> {
+    target
+        .as_object()
+        .and_then(|target| target.get("kind"))
+        .and_then(Value::as_str)
+}
+
+fn team_runtime_input_string<'a>(
+    input: Option<&'a serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<&'a str> {
+    input?
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn summarize_team_runtime_response(operation_id: &str, response: &CommandOutcome) -> Value {
+    match response {
+        CommandOutcome::Succeeded { result } => json!({
+            "operationId": operation_id,
+            "outcome": "succeeded",
+            "contract": team_runtime_result_contract(result),
+        }),
+        CommandOutcome::Unknown { result } => json!({
+            "operationId": operation_id,
+            "outcome": "unknown",
+            "contract": team_runtime_result_contract(result),
+        }),
+        CommandOutcome::Rejected { .. } => json!({
+            "operationId": operation_id,
+            "outcome": "rejected",
+        }),
+        CommandOutcome::TimedOut => json!({
+            "operationId": operation_id,
+            "outcome": "timed-out",
+        }),
+    }
+}
+
+fn team_runtime_result_contract(result: &Value) -> &'static str {
+    let Some(result) = result.as_object() else {
+        return "invalid";
+    };
+    if result.get("runs").is_some_and(Value::is_array) {
+        return "run-list";
+    }
+    if result.get("diagnostics").is_some_and(Value::is_object) {
+        return "snapshot";
+    }
+    if result
+        .get("managedAgentCount")
+        .is_some_and(Value::is_number)
+    {
+        return "provisioned";
+    }
+    if result.get("yaml").is_some_and(Value::is_string) {
+        return "graph-yaml";
+    }
+    if result.get("triggers").is_some_and(Value::is_array) {
+        return "trigger-list";
+    }
+    if result.get("status").is_some_and(Value::is_string) {
+        return "package-validation";
+    }
+    "operation-result"
+}
+
 fn team_runtime_command(
     operation_id: &str,
     target: &Value,
     input: &Value,
+    endpoint: organization::RuntimeEndpointReference,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
     let input = input
         .as_object()
@@ -639,7 +852,7 @@ fn team_runtime_command(
                 Ok(TeamRuntimeCommand::DependencyPlan { package_root })
             }
         }
-        "team.provisionAgents" => decode_team_provision(input, target),
+        "team.provisionAgents" => decode_team_provision(input, target, endpoint),
         "team.delete" => decode_team_delete(input, target),
         "team.runDelete" => decode_team_run_delete(input, target),
         "team.runList" => {
@@ -710,9 +923,13 @@ fn team_runtime_outcome(
             serde_json::to_value(plan).expect("dependency plan serializable"),
         ),
         TeamRuntimeCommandOutcome::ProvisionAgents(outcome) => match outcome {
-            crate::composition::TeamMaterializationCommandOutcome::Materialized => {
-                CommandOutcome::succeeded(json!({ "success": true, "outcome": "materialized" }))
-            }
+            crate::composition::TeamMaterializationCommandOutcome::Materialized {
+                team_id,
+                managed_agent_count,
+            } => CommandOutcome::succeeded(json!({
+                "teamId": team_id.as_str(),
+                "managedAgentCount": managed_agent_count,
+            })),
             crate::composition::TeamMaterializationCommandOutcome::Rejected => {
                 CommandOutcome::rejected(RejectionCode::Failed, "Team agent materialization was rejected.")
             }
@@ -758,8 +975,23 @@ fn team_runtime_outcome(
         },
         TeamRuntimeCommandOutcome::RunList(runs) => CommandOutcome::succeeded(json!({
             "teamId": team_id,
-            "runs": runs.iter().map(team_run_json).collect::<Vec<_>>(),
+            "runs": runs.iter().filter_map(team_run_list_item_legacy_json).collect::<Vec<_>>(),
         })),
+        TeamRuntimeCommandOutcome::Resume {
+            team_id,
+            outcomes,
+            runs,
+        } => {
+            let result = team_resume_legacy_json(&team_id, &outcomes, &runs);
+            if outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, organization::ResumeOutcome::OutcomeUnknown(_)))
+            {
+                CommandOutcome::unknown(result)
+            } else {
+                CommandOutcome::succeeded(result)
+            }
+        },
         TeamRuntimeCommandOutcome::TriggerList(triggers) => CommandOutcome::succeeded(json!({
             "triggers": triggers.iter().map(team_trigger_json).collect::<Vec<_>>(),
         })),
@@ -785,15 +1017,19 @@ fn team_runtime_outcome(
             }
         },
         TeamRuntimeCommandOutcome::RunSnapshotInvalidInput => invalid_input(),
-        TeamRuntimeCommandOutcome::RunSnapshot(snapshot) => match snapshot {
+        TeamRuntimeCommandOutcome::RunSnapshot {
+            snapshot,
+            role_sessions,
+        } => match snapshot {
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(snapshot) => {
-                CommandOutcome::succeeded(serde_json::to_value(snapshot).expect("snapshot serializable"))
+                CommandOutcome::succeeded(team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref()))
             }
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(_) => unavailable(),
         },
         TeamRuntimeCommandOutcome::GraphExportYaml(result) => match result {
             Ok(yaml) => CommandOutcome::succeeded(json!({
                 "runId": run_id,
+                "fileName": run_id.map(|run_id| format!("{run_id}.yaml")),
                 "yaml": yaml,
             })),
             Err(TeamRuntimeStatus::Rejected) => {
@@ -1200,6 +1436,7 @@ fn decode_team_runtime_source(
 fn decode_team_provision(
     input: &serde_json::Map<String, Value>,
     target: &Value,
+    endpoint: organization::RuntimeEndpointReference,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
     let target = target
         .as_object()
@@ -1210,47 +1447,34 @@ fn decode_team_provision(
     {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
-    let team_id = match (target.get("teamId"), input.get("teamId")) {
-        (None, None) => None,
-        (Some(target_team), Some(input_team)) if target_team == input_team => Some(
-            organization::TeamId::try_new(
-                input_team
-                    .as_str()
-                    .filter(|value| valid_identifier(value))
-                    .ok_or(TeamRuntimeDecodeError::InvalidInput)?
-                    .to_owned(),
-            )
-            .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?,
-        ),
-        _ => return Err(TeamRuntimeDecodeError::InvalidInput),
-    };
+    let team_id = decode_optional_team_id(input.get("teamId"), target.get("teamId"))?;
     let package_path = input
         .get("packagePath")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let idempotency_key = input
-        .get("idempotencyKey")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let idempotency_key = organization::IdempotencyKey::try_new(idempotency_key.to_owned())
-        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
-    let source = match input.get("sourceType").and_then(Value::as_str) {
-        None | Some("teamskill") => TeamRuntimeCreateSource::TeamSkill,
-        Some("manual") => return Err(TeamRuntimeDecodeError::Unavailable),
-        Some(_) => return Err(TeamRuntimeDecodeError::InvalidInput),
+    let idempotency_key = decode_idempotency_key(input, "idempotencyKey")?;
+    let source = decode_team_runtime_source(input.get("sourceType"))?;
+    let manual_team = match source {
+        TeamRuntimeCreateSource::TeamSkill => {
+            if input.contains_key("manualTeam") {
+                return Err(TeamRuntimeDecodeError::InvalidInput);
+            }
+            None
+        }
+        TeamRuntimeCreateSource::Manual => Some(decode_manual_team_provision(
+            input
+                .get("manualTeam")
+                .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        )?),
     };
-    if input.contains_key("manualTeam") {
-        return Err(TeamRuntimeDecodeError::Unavailable);
-    }
     if team_id.is_none() {
-        return Err(TeamRuntimeDecodeError::Unavailable);
+        return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "packagePath" | "teamId" | "idempotencyKey" | "sourceType"
+            "packagePath" | "teamId" | "idempotencyKey" | "sourceType" | "manualTeam"
         )
     }) {
         return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -1259,8 +1483,113 @@ fn decode_team_provision(
         package_root: PathBuf::from(package_path),
         team_id,
         idempotency_key,
+        endpoint,
         source,
+        manual_team,
     })
+}
+
+fn decode_manual_team_provision(
+    value: &Value,
+) -> Result<ManualTeamProvision, TeamRuntimeDecodeError> {
+    let record = value
+        .as_object()
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    if !record
+        .keys()
+        .all(|key| matches!(key.as_str(), "name" | "description" | "version" | "members"))
+    {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    let team_name = manual_required_string(record, "name")?;
+    let members = record
+        .get("members")
+        .and_then(Value::as_array)
+        .filter(|members| !members.is_empty())
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let mut leader_count = 0usize;
+    let mut role_ids = BTreeSet::new();
+    let mut agent_ids = BTreeSet::new();
+    let mut roles = Vec::with_capacity(members.len());
+    for member in members {
+        roles.push(decode_manual_team_member_provision(
+            member,
+            &mut leader_count,
+            &mut role_ids,
+            &mut agent_ids,
+        )?);
+    }
+    if leader_count != 1 {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    Ok(ManualTeamProvision {
+        team_name: team_name.to_owned(),
+        roles,
+    })
+}
+
+fn decode_manual_team_member_provision(
+    value: &Value,
+    leader_count: &mut usize,
+    role_ids: &mut BTreeSet<String>,
+    agent_ids: &mut BTreeSet<String>,
+) -> Result<organization::ManualTeamRoleBinding, TeamRuntimeDecodeError> {
+    let member = value
+        .as_object()
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    if !member.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "agentId"
+                | "agentName"
+                | "workspace"
+                | "roleId"
+                | "skills"
+                | "tools"
+                | "model"
+                | "isLeader"
+        )
+    }) {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    let agent_id = manual_required_string(member, "agentId")?;
+    let _workspace = manual_required_string(member, "workspace")?;
+    let declared_role = manual_required_string(member, "roleId")?;
+    let leader = matches!(member.get("isLeader").and_then(Value::as_bool), Some(true));
+    let role_id = if leader {
+        *leader_count += 1;
+        organization::LEADER_ROLE_ID
+    } else {
+        if declared_role == organization::LEADER_ROLE_ID {
+            return Err(TeamRuntimeDecodeError::InvalidInput);
+        }
+        declared_role
+    };
+    if !agent_ids.insert(agent_id.to_owned()) || !role_ids.insert(role_id.to_owned()) {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    let member_name = member
+        .get("agentName")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(agent_id);
+    let role = organization::RoleId::try_new(role_id.to_owned())
+        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
+    let agent = organization::ManagedAgentReference::try_new(agent_id.to_owned())
+        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
+    organization::ManualTeamRoleBinding::try_new(role, member_name.to_owned(), agent, leader)
+        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
+}
+
+fn manual_required_string<'a>(
+    record: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, TeamRuntimeDecodeError> {
+    record
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)
 }
 
 fn decode_team_snapshot(
@@ -1315,8 +1644,10 @@ fn decode_team_graph_import(
     let definition = organization::import_for_run(yaml, &run_id)
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
     let idempotency_key = decode_opaque(input, "idempotencyKey")?;
-    let command_id =
-        decode_opaque_value(&format!("graph-import-yaml:{}", idempotency_key.as_str()))?;
+    let command_id = bounded_run_command_id(
+        RunCommandIdentityKind::GraphImportYaml,
+        idempotency_key.as_str(),
+    )?;
     let run_id = decode_opaque_value(run_id.as_str())?;
     Ok(TeamRuntimeCommand::GraphImportYaml {
         command: Box::new(organization::RunCommand::new(
@@ -1362,13 +1693,20 @@ fn decode_team_trigger(
         Some("webhook") => organization::TriggerSource::Webhook,
         _ => return Err(TeamRuntimeDecodeError::InvalidInput),
     };
-    if input.contains_key("payloadSummary") {
-        return Err(TeamRuntimeDecodeError::Unavailable);
+    if let Some(value) = input.get("payloadSummary")
+        && !value.is_string()
+    {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "runId" | "teamId" | "startNodeId" | "triggerSource" | "idempotencyKey"
+            "runId"
+                | "teamId"
+                | "startNodeId"
+                | "triggerSource"
+                | "payloadSummary"
+                | "idempotencyKey"
         )
     }) {
         return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -1663,6 +2001,15 @@ fn decode_team_graph_context(
                 .ok_or(TeamRuntimeDecodeError::InvalidInput)
         })
         .transpose()?;
+    match view {
+        organization::TeamGraphContextView::CurrentNode if node_execution_id.is_none() => {
+            return Err(TeamRuntimeDecodeError::InvalidInput);
+        }
+        organization::TeamGraphContextView::GraphSummary if node_execution_id.is_some() => {
+            return Err(TeamRuntimeDecodeError::InvalidInput);
+        }
+        _ => {}
+    }
     Ok(TeamRuntimeCommand::GraphContext {
         team_id,
         run_id,
@@ -1676,7 +2023,23 @@ fn decode_team_graph_save(
     target: &Value,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
     let (_, run_id) = decode_team_target(target, input, false)?;
-    if input.len() != 3 {
+    if !input.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "runId" | "graph" | "idempotencyKey" | "summary" | "metadata"
+        )
+    }) || input.len() < 3
+    {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    if let Some(summary) = input.get("summary")
+        && !summary.is_string()
+    {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    if let Some(metadata) = input.get("metadata")
+        && !metadata.is_object()
+    {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     let graph = input
@@ -1684,7 +2047,8 @@ fn decode_team_graph_save(
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
     let definition = decode_team_graph_definition(graph, &run_id)?;
     let idempotency_key = decode_opaque(input, "idempotencyKey")?;
-    let command_id = decode_opaque_value(&format!("graph-save:{}", idempotency_key.as_str()))?;
+    let command_id =
+        bounded_run_command_id(RunCommandIdentityKind::GraphSave, idempotency_key.as_str())?;
     let run_id = decode_opaque_value(run_id.as_str())?;
     Ok(TeamRuntimeCommand::GraphSave {
         command: Box::new(organization::RunCommand::new(
@@ -1706,38 +2070,41 @@ fn decode_team_graph_patch(
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "runId" | "summary" | "patch" | "idempotencyKey"
+            "runId" | "summary" | "patch" | "idempotencyKey" | "metadata"
         )
-    }) || input.len() != 4
+    }) || input.len() < 4
     {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
+    if input.get("summary").and_then(Value::as_str).is_none() {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    if let Some(metadata) = input.get("metadata")
+        && !metadata.is_object()
+    {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    let idempotency_key = decode_opaque(input, "idempotencyKey")?;
+    let command_id =
+        bounded_run_command_id(RunCommandIdentityKind::GraphPatch, idempotency_key.as_str())?;
+    let audit_run_id = decode_opaque_value(run_id.as_str())?;
     let patch = decode_team_graph_patch_value(
         input
             .get("patch")
             .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        run_id,
+        audit_run_id,
+        command_id,
+        idempotency_key,
     )?;
-    let idempotency_key = decode_opaque(input, "idempotencyKey")?;
-    let command_id = decode_opaque_value(&format!("graph-patch:{}", idempotency_key.as_str()))?;
-    let run_id = decode_opaque_value(run_id.as_str())?;
-    Ok(TeamRuntimeCommand::GraphPatch {
-        command: Box::new(organization::RunCommand::new(
-            run_id,
-            command_id,
-            idempotency_key.clone(),
-            organization::CommandPayload::GraphPatch(decode_team_event_graph_patch(&patch)?),
-            now_millis(),
-        )),
-        patch,
-    })
+    Ok(TeamRuntimeCommand::GraphPatch { patch })
 }
 
 fn decode_team_node_prompt_settled(
     input: &serde_json::Map<String, Value>,
     target: &Value,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (_, run_id) = decode_team_target(target, input, false)?;
-    if input.len() != 4 {
+    if !target.is_null() || input.len() != 3 {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
     let phase = match input.get("phase").and_then(Value::as_str) {
@@ -1747,7 +2114,6 @@ fn decode_team_node_prompt_settled(
         _ => return Err(TeamRuntimeDecodeError::InvalidInput),
     };
     Ok(TeamRuntimeCommand::NodePromptSettled {
-        run_id,
         session_key: decode_opaque(input, "sessionKey")?,
         prompt_run_id: decode_opaque(input, "promptRunId")?,
         phase,
@@ -1972,6 +2338,29 @@ fn decode_opaque_value(
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
 }
 
+fn bounded_run_command_id(
+    kind: RunCommandIdentityKind,
+    idempotency_key: &str,
+) -> Result<organization::run::event::OpaqueId, TeamRuntimeDecodeError> {
+    let label = kind.label();
+    let candidate = format!("{label}:{idempotency_key}");
+    if let Ok(command_id) = decode_opaque_value(&candidate) {
+        return Ok(command_id);
+    }
+
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(idempotency_key.as_bytes());
+    let mut value = String::with_capacity(label.len() + 65);
+    value.push_str(label);
+    value.push(':');
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    decode_opaque_value(&value)
+}
+
 fn decode_team_graph_definition(
     value: &Value,
     run_id: &organization::GraphRunId,
@@ -1979,24 +2368,20 @@ fn decode_team_graph_definition(
     let graph = value
         .as_object()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    if graph.len() != 6 || graph.get("runId") != Some(&json!(run_id.as_str())) {
+    if let Some(graph_run_id) = graph.get("runId")
+        && graph_run_id.as_str() != Some(run_id.as_str())
+    {
         return Err(TeamRuntimeDecodeError::InvalidInput);
     }
-    let graph_id = graph
-        .get("graphId")
-        .and_then(Value::as_str)
-        .filter(|value| valid_identifier(value))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let workflow_plan_id = graph
-        .get("workflowPlanId")
-        .and_then(Value::as_str)
-        .filter(|value| valid_identifier(value))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let title = graph
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|value| valid_identifier(value))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let graph_id = graph_string_field(graph, "graphId")
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_team_graph_id(run_id));
+    let workflow_plan_id = graph_string_field(graph, "workflowPlanId")
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_team_workflow_plan_id(run_id));
+    let title = graph_string_field(graph, "title")
+        .map(str::to_owned)
+        .unwrap_or_else(|| "Team graph".to_owned());
     let nodes = decode_team_graph_nodes(
         graph
             .get("nodes")
@@ -2018,6 +2403,34 @@ fn decode_team_graph_definition(
     .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
 }
 
+fn default_team_graph_id(run_id: &organization::GraphRunId) -> String {
+    format!("graph:{}", run_id.as_str())
+}
+
+fn default_team_workflow_plan_id(run_id: &organization::GraphRunId) -> String {
+    format!("workflow:{}", run_id.as_str())
+}
+
+fn graph_string_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && valid_identifier(value))
+}
+
+fn graph_text_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn decode_team_graph_nodes(
     value: &Value,
 ) -> Result<Vec<organization::NodeDefinition>, TeamRuntimeDecodeError> {
@@ -2033,68 +2446,73 @@ fn decode_team_graph_node(
     let node = value
         .as_object()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let id = organization::NodeId::new(
-        node.get("nodeId")
-            .and_then(Value::as_str)
-            .filter(|value| valid_identifier(value))
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-    );
-    let title = node.get("title").and_then(Value::as_str).unwrap_or("node");
-    let max_attempts = node
-        .get("config")
-        .and_then(Value::as_object)
-        .and_then(|config| config.get("maxAttempts"))
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .and_then(std::num::NonZeroU32::new)
-        .unwrap_or_else(|| std::num::NonZeroU32::new(1).expect("nonzero"));
-    let kind = match node.get("kind").and_then(Value::as_str).unwrap_or("work") {
-        "start" => organization::NodeKind::Start,
-        "work" => organization::NodeKind::Work,
-        "review" => organization::NodeKind::Review,
-        "humanDecision" => organization::NodeKind::HumanDecision,
-        "scriptReview" => organization::NodeKind::ScriptReview,
-        "join" => organization::NodeKind::Join,
-        "end" => organization::NodeKind::End,
-        _ => return Err(TeamRuntimeDecodeError::InvalidInput),
-    };
-    let title = title.to_owned();
+    let node_id = graph_string_field(node, "nodeId")
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?
+        .to_owned();
+    let id = organization::NodeId::new(node_id.clone());
+    let title = graph_string_field(node, "title")
+        .unwrap_or(node_id.as_str())
+        .to_owned();
+    let config = node.get("config").and_then(Value::as_object);
+    let max_attempts = decode_team_graph_node_max_attempts(node, config);
+    let kind =
+        decode_team_graph_node_kind(node.get("kind").and_then(Value::as_str).unwrap_or("work"))?;
     match kind {
         organization::NodeKind::Start => Ok(organization::NodeDefinition::start(
             id,
             title,
             max_attempts,
-            None,
+            decode_team_graph_start_trigger(config)?,
         )),
         organization::NodeKind::Work => {
-            let task_id = node
-                .get("taskId")
-                .and_then(Value::as_str)
-                .unwrap_or(node.get("nodeId").and_then(Value::as_str).unwrap_or("task"));
-            let role_id = node.get("roleId").and_then(Value::as_str).unwrap_or("team");
+            let task_id = graph_string_field(node, "taskId").unwrap_or(node_id.as_str());
+            let role_id = decode_team_graph_role_id(node).unwrap_or("team");
+            let prompt = config
+                .and_then(|config| graph_text_field(config, "prompt"))
+                .unwrap_or("");
+            let output_artifact_kind = config
+                .and_then(|config| graph_text_field(config, "outputArtifactKind"))
+                .map(str::to_owned);
+            let group_id = graph_string_field(node, "groupId")
+                .map(|group_id| organization::GroupId::new(group_id.to_owned()));
             Ok(organization::NodeDefinition::work(
                 id,
                 title,
                 max_attempts,
                 organization::WorkAssignment::typed(
                     task_id,
-                    "",
+                    prompt,
                     organization::ExecutorPolicy::team_role(role_id),
-                    None,
-                    None,
+                    output_artifact_kind,
+                    group_id,
                 ),
             ))
+        }
+        organization::NodeKind::Review => {
+            let role_id = decode_team_graph_role_id(node);
+            let prompt = config.and_then(|config| graph_text_field(config, "prompt"));
+            if let (Some(role_id), Some(prompt)) = (role_id, prompt) {
+                Ok(organization::NodeDefinition::review(
+                    id,
+                    title,
+                    max_attempts,
+                    organization::ReviewAssignment::new(role_id, prompt),
+                ))
+            } else {
+                Ok(organization::NodeDefinition::control(
+                    id,
+                    kind,
+                    title,
+                    max_attempts,
+                ))
+            }
         }
         organization::NodeKind::Join => Ok(organization::NodeDefinition::join(
             id,
             title,
             max_attempts,
             organization::WorkGroup::new(
-                organization::GroupId::new(
-                    node.get("groupId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("group"),
-                ),
+                organization::GroupId::new(graph_string_field(node, "groupId").unwrap_or("group")),
                 organization::JoinPolicy::new(true, false, 0),
             ),
         )),
@@ -2107,143 +2525,253 @@ fn decode_team_graph_node(
     }
 }
 
+fn decode_team_graph_node_kind(
+    kind: &str,
+) -> Result<organization::NodeKind, TeamRuntimeDecodeError> {
+    match kind {
+        "start" => Ok(organization::NodeKind::Start),
+        "work" => Ok(organization::NodeKind::Work),
+        "review" => Ok(organization::NodeKind::Review),
+        "human_decision" | "humanDecision" => Ok(organization::NodeKind::HumanDecision),
+        "script_review" | "scriptReview" => Ok(organization::NodeKind::ScriptReview),
+        "join" => Ok(organization::NodeKind::Join),
+        "end" => Ok(organization::NodeKind::End),
+        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+    }
+}
+
+fn decode_team_graph_node_max_attempts(
+    node: &serde_json::Map<String, Value>,
+    config: Option<&serde_json::Map<String, Value>>,
+) -> std::num::NonZeroU32 {
+    node.get("maxAttempts")
+        .or_else(|| config.and_then(|config| config.get("maxAttempts")))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .and_then(std::num::NonZeroU32::new)
+        .unwrap_or_else(|| std::num::NonZeroU32::new(1).expect("nonzero"))
+}
+
+fn decode_team_graph_role_id(node: &serde_json::Map<String, Value>) -> Option<&str> {
+    graph_string_field(node, "roleId").or_else(|| {
+        node.get("executor")
+            .and_then(Value::as_object)
+            .and_then(|executor| graph_string_field(executor, "roleId"))
+    })
+}
+
+fn decode_team_graph_start_trigger(
+    config: Option<&serde_json::Map<String, Value>>,
+) -> Result<Option<organization::StartTrigger>, TeamRuntimeDecodeError> {
+    let Some(trigger) = config
+        .and_then(|config| config.get("trigger"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+    match trigger
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("webhook")
+    {
+        "cron" => Ok(Some(organization::StartTrigger::Cron {
+            expression: graph_text_field(trigger, "cron")
+                .ok_or(TeamRuntimeDecodeError::InvalidInput)?
+                .to_owned(),
+        })),
+        "webhook" => {
+            Ok(
+                graph_text_field(trigger, "path").map(|path| organization::StartTrigger::Webhook {
+                    path: path.to_owned(),
+                }),
+            )
+        }
+        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+    }
+}
+
 fn decode_team_graph_edges(
     value: &Value,
 ) -> Result<Vec<organization::EdgeDefinition>, TeamRuntimeDecodeError> {
     let edges = value
         .as_array()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    edges
-        .iter()
-        .map(|value| {
-            let edge = value
-                .as_object()
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-            let action = match edge
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("activate")
-            {
-                "activate" => organization::EdgeAction::Activate,
-                "rework" => organization::EdgeAction::Rework,
-                "gate" => organization::EdgeAction::Gate,
-                "finish" => organization::EdgeAction::Finish,
-                _ => return Err(TeamRuntimeDecodeError::InvalidInput),
-            };
-            Ok(organization::EdgeDefinition::new(
-                organization::EdgeId::new(
-                    edge.get("edgeId")
-                        .and_then(Value::as_str)
-                        .filter(|value| valid_identifier(value))
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                ),
-                organization::NodeId::new(
-                    edge.get("sourceNodeId")
-                        .and_then(Value::as_str)
-                        .filter(|value| valid_identifier(value))
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                ),
-                edge.get("sourcePort")
-                    .and_then(Value::as_str)
-                    .unwrap_or("default"),
-                organization::NodeId::new(
-                    edge.get("targetNodeId")
-                        .and_then(Value::as_str)
-                        .filter(|value| valid_identifier(value))
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                ),
-                edge.get("targetPort")
-                    .and_then(Value::as_str)
-                    .unwrap_or("default"),
-                action,
-            ))
-        })
-        .collect()
+    edges.iter().map(decode_team_graph_edge).collect()
 }
 
-fn decode_team_event_graph_patch(
-    patch: &organization::GraphPatch,
-) -> Result<organization::run::event::GraphPatch, TeamRuntimeDecodeError> {
-    let operations = patch
-        .operations()
-        .iter()
-        .map(|operation| match operation {
-            organization::GraphPatchOperation::RemoveNode(node_id) => {
-                Ok(organization::run::event::GraphPatchOperation::RemoveNode {
-                    node_id: decode_opaque_value(node_id.as_str())?,
-                })
-            }
-            organization::GraphPatchOperation::RemoveEdge(edge_id) => {
-                Ok(organization::run::event::GraphPatchOperation::RemoveEdge {
-                    edge_id: decode_opaque_value(edge_id.as_str())?,
-                })
-            }
-            _ => Err(TeamRuntimeDecodeError::Unavailable),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    organization::run::event::GraphPatch::try_new(
-        decode_opaque_value(patch.expected_graph_id())?,
-        decode_opaque_value(patch.expected_workflow_plan_id())?,
-        operations,
+fn decode_team_graph_edge(
+    value: &Value,
+) -> Result<organization::EdgeDefinition, TeamRuntimeDecodeError> {
+    let edge = value
+        .as_object()
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let action = decode_team_graph_edge_action(
+        edge.get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("activate"),
+    )?;
+    let source_node_id = graph_string_field(edge, "sourceNodeId")
+        .or_else(|| graph_string_field(edge, "fromNodeId"))
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let target_node_id = graph_string_field(edge, "targetNodeId")
+        .or_else(|| graph_string_field(edge, "toNodeId"))
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let include_upstream_result = match edge
+        .get("payload")
+        .and_then(Value::as_object)
+        .and_then(|payload| payload.get("includeUpstreamResult"))
+    {
+        Some(value) => value
+            .as_bool()
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        None => true,
+    };
+    Ok(organization::EdgeDefinition::new(
+        organization::EdgeId::new(
+            graph_string_field(edge, "edgeId").ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        ),
+        organization::NodeId::new(source_node_id),
+        graph_string_field(edge, "sourcePort").unwrap_or("default"),
+        organization::NodeId::new(target_node_id),
+        graph_string_field(edge, "targetPort").unwrap_or("default"),
+        action,
     )
-    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
+    .with_payload(organization::EdgePayloadPolicy::new(
+        include_upstream_result,
+    )))
+}
+
+fn decode_team_graph_edge_action(
+    action: &str,
+) -> Result<organization::EdgeAction, TeamRuntimeDecodeError> {
+    match action {
+        "activate" => Ok(organization::EdgeAction::Activate),
+        "rework" => Ok(organization::EdgeAction::Rework),
+        "gate" => Ok(organization::EdgeAction::Gate),
+        "finish" => Ok(organization::EdgeAction::Finish),
+        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+    }
 }
 
 fn decode_team_graph_patch_value(
     value: &Value,
-) -> Result<organization::GraphPatch, TeamRuntimeDecodeError> {
+    run_id: organization::GraphRunId,
+    audit_run_id: organization::run::event::OpaqueId,
+    command_id: organization::run::event::OpaqueId,
+    idempotency_key: organization::run::event::OpaqueId,
+) -> Result<TeamGraphPatchDraft, TeamRuntimeDecodeError> {
     let patch = value
         .as_object()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let base_graph_id = patch
-        .get("baseGraphId")
-        .and_then(Value::as_str)
-        .filter(|value| valid_identifier(value))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let base_workflow_plan_id = patch
-        .get("baseWorkflowPlanId")
-        .and_then(Value::as_str)
-        .filter(|value| valid_identifier(value))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let operations = patch
+    let base_graph_id = graph_string_field(patch, "baseGraphId").map(str::to_owned);
+    let base_workflow_plan_id = graph_string_field(patch, "baseWorkflowPlanId").map(str::to_owned);
+    let operation_values = patch
         .get("operations")
         .and_then(Value::as_array)
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let operations = operations
-        .iter()
-        .map(|value| {
-            let operation = value
-                .as_object()
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-            let op = operation
-                .get("op")
-                .and_then(Value::as_str)
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-            match op {
-                "remove_node" => Ok(organization::GraphPatchOperation::RemoveNode(
-                    organization::NodeId::new(
-                        operation
-                            .get("nodeId")
-                            .and_then(Value::as_str)
-                            .filter(|value| valid_identifier(value))
-                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                    ),
-                )),
-                "remove_edge" => Ok(organization::GraphPatchOperation::RemoveEdge(
-                    organization::EdgeId::new(
-                        operation
-                            .get("edgeId")
-                            .and_then(Value::as_str)
-                            .filter(|value| valid_identifier(value))
-                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                    ),
-                )),
-                _ => Err(TeamRuntimeDecodeError::Unavailable),
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    organization::GraphPatch::new(base_graph_id, base_workflow_plan_id, operations)
-        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
+    let mut operations = Vec::with_capacity(operation_values.len());
+    for value in operation_values {
+        let operation = value
+            .as_object()
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        let op = operation
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        match op {
+            "add_node" => operations.push(organization::GraphPatchOperation::AddNode(
+                decode_team_graph_node(
+                    operation
+                        .get("node")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                )?,
+            )),
+            "replace_node" => operations.push(organization::GraphPatchOperation::ReplaceNode(
+                decode_team_graph_node(
+                    operation
+                        .get("node")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                )?,
+            )),
+            "remove_node" => operations.push(organization::GraphPatchOperation::RemoveNode(
+                organization::NodeId::new(
+                    graph_string_field(operation, "nodeId")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                ),
+            )),
+            "add_edge" => operations.push(organization::GraphPatchOperation::AddEdge(
+                decode_team_graph_edge(
+                    operation
+                        .get("edge")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                )?,
+            )),
+            "replace_edge" => operations.push(organization::GraphPatchOperation::ReplaceEdge(
+                decode_team_graph_edge(
+                    operation
+                        .get("edge")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                )?,
+            )),
+            "remove_edge" => operations.push(organization::GraphPatchOperation::RemoveEdge(
+                organization::EdgeId::new(
+                    graph_string_field(operation, "edgeId")
+                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                ),
+            )),
+            "set_metadata" => decode_team_graph_metadata_patch(operation, &mut operations)?,
+            _ => return Err(TeamRuntimeDecodeError::Unavailable),
+        }
+    }
+    if operations.is_empty() {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    Ok(TeamGraphPatchDraft {
+        run_id,
+        audit_run_id,
+        command_id,
+        idempotency_key,
+        base_graph_id,
+        base_workflow_plan_id,
+        operations,
+        created_at: now_millis(),
+    })
+}
+
+fn decode_team_graph_metadata_patch(
+    operation: &serde_json::Map<String, Value>,
+    operations: &mut Vec<organization::GraphPatchOperation>,
+) -> Result<(), TeamRuntimeDecodeError> {
+    let metadata = operation
+        .get("metadata")
+        .and_then(Value::as_object)
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    if metadata.is_empty() {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    for (key, value) in metadata {
+        operations.push(organization::GraphPatchOperation::SetMetadata {
+            key: decode_opaque_value(key)?,
+            value: decode_team_graph_metadata_value(value)?,
+        });
+    }
+    Ok(())
+}
+
+fn decode_team_graph_metadata_value(
+    value: &Value,
+) -> Result<organization::run::event::MetadataValue, TeamRuntimeDecodeError> {
+    match value {
+        Value::Bool(value) => Ok(organization::run::event::MetadataValue::Enabled(*value)),
+        Value::Number(value) => value
+            .as_u64()
+            .map(organization::run::event::MetadataValue::Revision)
+            .ok_or(TeamRuntimeDecodeError::InvalidInput),
+        Value::String(value) => Ok(organization::run::event::MetadataValue::OpaqueId(
+            decode_opaque_value(value)?,
+        )),
+        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+    }
 }
 
 fn decode_team_target(
@@ -2334,36 +2862,578 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn team_run_json(outcome: &organization::TeamRunQueryOutcome) -> Value {
+fn team_run_list_item_legacy_json(outcome: &organization::TeamRunQueryOutcome) -> Option<Value> {
     match outcome {
-        organization::TeamRunQueryOutcome::Available(run) => json!({
-            "state": "available",
-            "teamId": run.team().as_str(),
-            "runId": run.run().as_str(),
-            "teamRevision": run.team_revision().get(),
-            "graphStatus": team_graph_status_name(run.graph_status()),
-        }),
-        organization::TeamRunQueryOutcome::Unavailable => json!({ "state": "unavailable" }),
-        organization::TeamRunQueryOutcome::OutcomeUnknown => {
-            json!({ "state": "outcome_unknown" })
+        organization::TeamRunQueryOutcome::Available(run) => {
+            let sessions = team_role_bindings_legacy_json(run.role_sessions())?;
+            Some(json!({
+                "runId": run.run().as_str(),
+                "status": team_run_status_from_graph_status(run.graph_status()),
+                "revision": run.team_revision().get(),
+                "packageName": "",
+                "packageVersion": "",
+                "sourcePath": "",
+                "createdAt": 0,
+                "updatedAt": 0,
+                "sessions": sessions,
+            }))
+        }
+        organization::TeamRunQueryOutcome::Unavailable
+        | organization::TeamRunQueryOutcome::OutcomeUnknown => None,
+    }
+}
+
+fn team_run_public_snapshot_legacy_json(
+    snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
+    role_sessions: Option<&[organization::RoleSessionReceipt]>,
+) -> Value {
+    let roles = role_sessions.and_then(team_role_bindings_legacy_json);
+    json!({
+        "run": team_public_run_legacy_json(snapshot),
+        "graph": team_public_graph_legacy_json(snapshot.run().run_id(), snapshot.graph()),
+        "nodeInputStates": [],
+        "nodeExecutions": snapshot.attempts().iter().map(|attempt| team_public_attempt_legacy_json(snapshot.run().run_id(), attempt)).collect::<Vec<_>>(),
+        "nodeDeliveries": [],
+        "roles": roles.clone().unwrap_or_default(),
+        "stages": [],
+        "workflowPlan": null,
+        "dispatchGroups": [],
+        "dispatchTasks": [],
+        "approvals": snapshot.approvals().iter().map(team_public_approval_legacy_json).collect::<Vec<_>>(),
+        "artifacts": snapshot.artifacts().iter().map(team_public_artifact_legacy_json).collect::<Vec<_>>(),
+        "dispatches": [],
+        "dispatchExecutions": [],
+        "messages": [],
+        "nodePromptDeliveries": [],
+        "gates": [],
+        "kickbacks": [],
+        "decisions": snapshot.decisions().iter().map(team_public_decision_legacy_json).collect::<Vec<_>>(),
+        "unavailableSections": team_public_unavailable_sections_legacy_json(snapshot, roles.is_some()),
+        "diagnostics": team_public_diagnostics_legacy_json(snapshot.diagnostics()),
+        "events": snapshot.events().iter().map(team_public_event_legacy_json).collect::<Vec<_>>(),
+        "nextEventCursor": snapshot.next_event_cursor(),
+    })
+}
+
+fn team_public_unavailable_sections_legacy_json(
+    snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
+    roles_available: bool,
+) -> Vec<&'static str> {
+    snapshot
+        .unavailable_sections()
+        .iter()
+        .filter(|section| {
+            !roles_available
+                || **section
+                    != organization::run::public_projection::TeamRunPublicUnavailableSection::Roles
+        })
+        .map(|section| team_public_unavailable_section_name(*section))
+        .collect()
+}
+
+fn team_role_bindings_legacy_json(
+    bindings: &[organization::RoleSessionReceipt],
+) -> Option<Vec<Value>> {
+    bindings.iter().map(team_role_binding_legacy_json).collect()
+}
+
+fn team_role_binding_legacy_json(binding: &organization::RoleSessionReceipt) -> Option<Value> {
+    let endpoint = runtime_endpoint_json(binding.endpoint())?;
+    Some(json!({
+        "teamId": binding.team().as_str(),
+        "runId": binding.team_run().as_str(),
+        "roleId": binding.role().as_str(),
+        "agentId": binding.agent().as_str(),
+        "endpointRef": endpoint.clone(),
+        "localSessionId": binding.local_session().as_str(),
+        "endpointSessionId": binding.external_session().as_str(),
+        "sessionIdentity": {
+            "endpoint": endpoint,
+            "agentId": binding.agent().as_str(),
+            "sessionKey": binding.local_session().as_str(),
+        },
+    }))
+}
+
+fn runtime_endpoint_json(endpoint: &organization::RuntimeEndpointReference) -> Option<Value> {
+    [
+        RuntimeDriverIdentity::open_claw(),
+        RuntimeDriverIdentity::matcha_agent(),
+    ]
+    .into_iter()
+    .find(|identity| endpoint.as_str() == identity.runtime_endpoint_reference())
+    .map(|identity| {
+        json!({
+            "kind": "native-runtime",
+            "runtimeAdapterId": identity.runtime_adapter_id(),
+            "runtimeInstanceId": identity.runtime_instance_id(),
+        })
+    })
+}
+
+fn team_public_run_legacy_json(
+    snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
+) -> Value {
+    let run = snapshot.run();
+    json!({
+        "runId": run.run_id(),
+        "status": team_run_status_from_public_snapshot(snapshot),
+        "revision": run.team_revision(),
+        "packageName": "",
+        "packageVersion": "",
+        "sourcePath": "",
+        "createdAt": 0,
+        "updatedAt": 0,
+    })
+}
+
+fn team_public_graph_legacy_json(
+    run_id: &str,
+    graph: &organization::run::public_projection::TeamPublicGraph,
+) -> Value {
+    json!({
+        "runId": run_id,
+        "graphId": graph.graph_id(),
+        "workflowPlanId": graph.workflow_plan_id(),
+        "title": graph.title(),
+        "nodes": graph.nodes().iter().map(team_public_node_legacy_json).collect::<Vec<_>>(),
+        "edges": graph.edges().iter().map(team_public_edge_legacy_json).collect::<Vec<_>>(),
+        "status": team_public_graph_status_name(graph.status()),
+    })
+}
+
+fn team_public_node_legacy_json(
+    node: &organization::run::public_projection::TeamPublicNode,
+) -> Value {
+    json!({
+        "nodeId": node.node_id(),
+        "kind": team_public_node_kind_name(node.kind()),
+        "title": node.title(),
+        "roleId": node.role_id(),
+        "taskId": node.task_id(),
+        "status": team_public_attempt_status_name(node.attempt().status()),
+        "maxAttempts": node.max_attempts(),
+        "config": team_public_node_config_json(node),
+    })
+}
+
+fn team_public_node_config_json(
+    node: &organization::run::public_projection::TeamPublicNode,
+) -> Value {
+    match node.trigger() {
+        Some(organization::run::public_projection::TeamPublicStartTrigger::Webhook) => {
+            json!({ "trigger": { "mode": "webhook" } })
+        }
+        Some(organization::run::public_projection::TeamPublicStartTrigger::Cron { expression }) => {
+            json!({ "trigger": { "mode": "cron", "cron": expression } })
+        }
+        None => json!({}),
+    }
+}
+
+fn team_public_edge_legacy_json(
+    edge: &organization::run::public_projection::TeamPublicEdge,
+) -> Value {
+    json!({
+        "edgeId": edge.edge_id(),
+        "sourceNodeId": edge.source_node_id(),
+        "targetNodeId": edge.target_node_id(),
+        "sourcePort": edge.source_port(),
+        "targetPort": edge.target_port(),
+        "action": team_public_edge_action_name(edge.action()),
+        "payload": { "includeUpstreamResult": true },
+        "status": team_public_edge_status_name(edge.status()),
+    })
+}
+
+fn team_public_attempt_legacy_json(
+    run_id: &str,
+    attempt: &organization::run::public_projection::TeamRunPublicAttempt,
+) -> Value {
+    json!({
+        "runId": run_id,
+        "nodeId": attempt.node_id(),
+        "nodeExecutionId": attempt.node_execution_id(),
+        "attemptId": attempt.attempt_id(),
+        "attemptNumber": attempt.number(),
+        "reason": team_public_attempt_reason_name(attempt.reason()),
+        "status": team_public_attempt_status_name(attempt.status()),
+        "createdAt": attempt.created_at(),
+        "updatedAt": attempt.updated_at(),
+        "outputSummary": attempt.output_port().map(|port| json!({ "outputPort": port })),
+    })
+}
+
+fn team_public_approval_legacy_json(
+    approval: &organization::run::public_projection::TeamRunPublicApproval,
+) -> Value {
+    json!({
+        "approvalId": approval.approval_id(),
+        "runId": approval.run_id(),
+        "stageId": approval.stage_id(),
+        "roleId": approval.role_id(),
+        "reason": approval.reason(),
+        "requestedAction": approval.requested_action(),
+        "risk": "",
+        "status": team_public_approval_status_name(approval.status()),
+        "decision": approval.decision().map(team_public_approval_decision_name),
+        "idempotencyKey": "",
+        "createdAt": approval.created_at(),
+        "resolvedAt": approval.resolved_at(),
+    })
+}
+
+fn team_public_artifact_legacy_json(
+    artifact: &organization::run::public_projection::TeamRunPublicArtifact,
+) -> Value {
+    json!({
+        "artifactId": artifact.artifact_id(),
+        "runId": artifact.run_id(),
+        "stageId": artifact.node_id(),
+        "roleId": artifact.role_id(),
+        "kind": artifact.kind(),
+        "title": artifact.title(),
+        "contentRef": "",
+        "summary": artifact.summary(),
+        "evidenceRefs": [],
+        "idempotencyKey": "",
+        "createdAt": artifact.created_at(),
+        "updatedAt": artifact.updated_at(),
+    })
+}
+
+fn team_public_decision_legacy_json(
+    decision: &organization::run::public_projection::TeamRunPublicDecision,
+) -> Value {
+    json!({
+        "decisionId": decision.decision_id(),
+        "runId": decision.run_id(),
+        "stageId": decision.stage_id(),
+        "decision": team_public_decision_name(decision.decision()),
+        "idempotencyKey": "",
+        "createdAt": decision.created_at(),
+    })
+}
+
+fn team_public_event_legacy_json(
+    event: &organization::run::public_projection::TeamRunPublicEvent,
+) -> Value {
+    json!({
+        "eventId": event.event_id(),
+        "runId": event.run_id(),
+        "revision": event.sequence(),
+        "type": team_public_event_type_name(event.event_type()),
+        "payload": {},
+        "createdAt": event.created_at(),
+    })
+}
+
+fn team_public_diagnostics_legacy_json(
+    diagnostics: &organization::run::public_projection::TeamRunPublicDiagnostics,
+) -> Value {
+    let counts = diagnostics.counts();
+    json!({
+        "runId": diagnostics.run_id(),
+        "recoveredFromStorage": false,
+        "storageRoot": "",
+        "budgets": {
+            "roleWallClockBudgetMs": {},
+            "roleTokenBudget": {},
+            "wallClockExceeded": false,
+        },
+        "limits": {
+            "maxArtifactContentBytes": 0,
+            "maxMessageBodyBytes": 0,
+            "staleDispatchExecutionMs": 0,
+        },
+        "staleDispatchExecutions": [],
+        "counts": {
+            "attempts": counts.attempts(),
+            "deliveries": counts.deliveries(),
+            "approvals": counts.approvals(),
+            "decisions": counts.decisions(),
+            "evidence": counts.evidence(),
+            "artifacts": counts.artifacts(),
+            "events": counts.events(),
+        },
+    })
+}
+
+fn team_run_status_from_public_snapshot(
+    snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
+) -> &'static str {
+    match snapshot.run().lifecycle() {
+        organization::run::public_projection::TeamRunPublicLifecycle::Active => {
+            if snapshot.run().runtime()
+                == organization::run::public_projection::TeamRuntimeState::Unknown
+            {
+                "provisioning"
+            } else {
+                team_run_status_from_public_graph_status(snapshot.graph().status())
+            }
+        }
+        organization::run::public_projection::TeamRunPublicLifecycle::Cancelling => "cancelling",
+        organization::run::public_projection::TeamRunPublicLifecycle::Cancelled => "cancelled",
+        organization::run::public_projection::TeamRunPublicLifecycle::OutcomeUnknown => {
+            "provisioning"
         }
     }
 }
 
-fn team_resume_json(outcome: &organization::ResumeOutcome) -> Value {
+fn team_run_status_from_graph_status(status: organization::GraphStatus) -> &'static str {
+    match status {
+        organization::GraphStatus::Pending | organization::GraphStatus::Ready => "created",
+        organization::GraphStatus::Running => "running",
+        organization::GraphStatus::Waiting => "waiting_for_user",
+        organization::GraphStatus::Completed => "completed",
+        organization::GraphStatus::Failed => "failed",
+        organization::GraphStatus::Cancelled => "cancelled",
+    }
+}
+
+fn team_run_status_from_public_graph_status(
+    status: organization::run::public_projection::TeamPublicGraphStatus,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamPublicGraphStatus::Pending
+        | organization::run::public_projection::TeamPublicGraphStatus::Ready => "created",
+        organization::run::public_projection::TeamPublicGraphStatus::Running => "running",
+        organization::run::public_projection::TeamPublicGraphStatus::Waiting => "waiting_for_user",
+        organization::run::public_projection::TeamPublicGraphStatus::Completed => "completed",
+        organization::run::public_projection::TeamPublicGraphStatus::Failed => "failed",
+        organization::run::public_projection::TeamPublicGraphStatus::Cancelled => "cancelled",
+    }
+}
+
+fn team_public_graph_status_name(
+    status: organization::run::public_projection::TeamPublicGraphStatus,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamPublicGraphStatus::Pending => "pending",
+        organization::run::public_projection::TeamPublicGraphStatus::Ready => "ready",
+        organization::run::public_projection::TeamPublicGraphStatus::Running => "running",
+        organization::run::public_projection::TeamPublicGraphStatus::Waiting => "waiting",
+        organization::run::public_projection::TeamPublicGraphStatus::Completed => "completed",
+        organization::run::public_projection::TeamPublicGraphStatus::Failed => "failed",
+        organization::run::public_projection::TeamPublicGraphStatus::Cancelled => "cancelled",
+    }
+}
+
+fn team_public_node_kind_name(
+    kind: organization::run::public_projection::TeamPublicNodeKind,
+) -> &'static str {
+    match kind {
+        organization::run::public_projection::TeamPublicNodeKind::Start => "start",
+        organization::run::public_projection::TeamPublicNodeKind::Work => "work",
+        organization::run::public_projection::TeamPublicNodeKind::Review => "review",
+        organization::run::public_projection::TeamPublicNodeKind::HumanDecision => "human_decision",
+        organization::run::public_projection::TeamPublicNodeKind::ScriptReview => "script_review",
+        organization::run::public_projection::TeamPublicNodeKind::Join => "join",
+        organization::run::public_projection::TeamPublicNodeKind::End => "end",
+    }
+}
+
+fn team_public_attempt_status_name(
+    status: organization::run::public_projection::TeamPublicAttemptStatus,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamPublicAttemptStatus::Pending => "pending",
+        organization::run::public_projection::TeamPublicAttemptStatus::Ready => "ready",
+        organization::run::public_projection::TeamPublicAttemptStatus::Running => "running",
+        organization::run::public_projection::TeamPublicAttemptStatus::Waiting => "waiting",
+        organization::run::public_projection::TeamPublicAttemptStatus::Completed => "completed",
+        organization::run::public_projection::TeamPublicAttemptStatus::Failed => "failed",
+        organization::run::public_projection::TeamPublicAttemptStatus::Cancelled => "cancelled",
+    }
+}
+
+fn team_public_attempt_reason_name(
+    reason: &organization::run::public_projection::TeamPublicAttemptReason,
+) -> &'static str {
+    match reason {
+        organization::run::public_projection::TeamPublicAttemptReason::Initial => "initial",
+        organization::run::public_projection::TeamPublicAttemptReason::Trigger => "trigger",
+        organization::run::public_projection::TeamPublicAttemptReason::Edge { .. } => "edge",
+        organization::run::public_projection::TeamPublicAttemptReason::Rework => "rework",
+    }
+}
+
+fn team_public_edge_action_name(
+    action: organization::run::public_projection::TeamPublicEdgeAction,
+) -> &'static str {
+    match action {
+        organization::run::public_projection::TeamPublicEdgeAction::Activate => "activate",
+        organization::run::public_projection::TeamPublicEdgeAction::Rework => "rework",
+        organization::run::public_projection::TeamPublicEdgeAction::Gate => "gate",
+        organization::run::public_projection::TeamPublicEdgeAction::Finish => "finish",
+    }
+}
+
+fn team_public_edge_status_name(
+    status: organization::run::public_projection::TeamPublicEdgeStatus,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamPublicEdgeStatus::Waiting => "waiting",
+        organization::run::public_projection::TeamPublicEdgeStatus::Satisfied => "satisfied",
+    }
+}
+
+fn team_public_approval_status_name(
+    status: organization::run::public_projection::TeamPublicApprovalStatus,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamPublicApprovalStatus::Pending => "pending",
+        organization::run::public_projection::TeamPublicApprovalStatus::Approved => "approved",
+        organization::run::public_projection::TeamPublicApprovalStatus::Denied => "denied",
+        organization::run::public_projection::TeamPublicApprovalStatus::Aborted => "aborted",
+    }
+}
+
+fn team_public_approval_decision_name(
+    decision: organization::run::public_projection::TeamPublicApprovalDecision,
+) -> &'static str {
+    match decision {
+        organization::run::public_projection::TeamPublicApprovalDecision::Approve => "approve",
+        organization::run::public_projection::TeamPublicApprovalDecision::Deny => "deny",
+        organization::run::public_projection::TeamPublicApprovalDecision::Abort => "abort",
+    }
+}
+
+fn team_public_decision_name(
+    decision: organization::run::public_projection::TeamPublicDecisionType,
+) -> &'static str {
+    match decision {
+        organization::run::public_projection::TeamPublicDecisionType::Retry => "retry",
+        organization::run::public_projection::TeamPublicDecisionType::ProceedDegraded => {
+            "proceed_degraded"
+        }
+        organization::run::public_projection::TeamPublicDecisionType::Abort => "abort",
+    }
+}
+
+fn team_public_event_type_name(
+    event_type: organization::run::public_projection::TeamPublicEventType,
+) -> &'static str {
+    match event_type {
+        organization::run::public_projection::TeamPublicEventType::GraphPatchAccepted => {
+            "graph_patch_accepted"
+        }
+        organization::run::public_projection::TeamPublicEventType::GraphReplaced => {
+            "graph_replaced"
+        }
+        organization::run::public_projection::TeamPublicEventType::NodeProgressed => {
+            "node_progressed"
+        }
+        organization::run::public_projection::TeamPublicEventType::ApprovalRequested => {
+            "approval_requested"
+        }
+        organization::run::public_projection::TeamPublicEventType::ApprovalResolved => {
+            "approval_resolved"
+        }
+    }
+}
+
+fn team_public_unavailable_section_name(
+    section: organization::run::public_projection::TeamRunPublicUnavailableSection,
+) -> &'static str {
+    match section {
+        organization::run::public_projection::TeamRunPublicUnavailableSection::NodeInputStates => {
+            "nodeInputStates"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Roles => "roles",
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Stages => "stages",
+        organization::run::public_projection::TeamRunPublicUnavailableSection::WorkflowPlan => {
+            "workflowPlan"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::DispatchGroups => {
+            "dispatchGroups"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::DispatchTasks => {
+            "dispatchTasks"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Dispatches => {
+            "dispatches"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::DispatchExecutions => {
+            "dispatchExecutions"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Messages => "messages",
+        organization::run::public_projection::TeamRunPublicUnavailableSection::NodePromptDeliveries => {
+            "nodePromptDeliveries"
+        }
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Gates => "gates",
+        organization::run::public_projection::TeamRunPublicUnavailableSection::Kickbacks => {
+            "kickbacks"
+        }
+    }
+}
+
+fn team_resume_legacy_json(
+    team_id: &organization::TeamId,
+    outcomes: &[organization::ResumeOutcome],
+    runs: &[organization::TeamRunQueryOutcome],
+) -> Value {
+    let terminal_run_ids = runs
+        .iter()
+        .filter_map(team_terminal_run_id)
+        .collect::<BTreeSet<_>>();
+    let restored_run_ids = outcomes.iter().map(team_resume_run_id).collect::<Vec<_>>();
+    let active_run_ids = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            organization::ResumeOutcome::Active(run_id)
+                if !terminal_run_ids.contains(run_id.as_str()) =>
+            {
+                Some(run_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut skipped_terminal_run_ids = BTreeSet::new();
+    for outcome in outcomes {
+        let run_id = team_resume_run_id(outcome);
+        if terminal_run_ids.contains(run_id)
+            || matches!(
+                outcome,
+                organization::ResumeOutcome::Cancelled(_)
+                    | organization::ResumeOutcome::Tombstoned(_)
+            )
+        {
+            skipped_terminal_run_ids.insert(run_id);
+        }
+    }
+    json!({
+        "success": true,
+        "teamId": team_id.as_str(),
+        "restoredRunIds": restored_run_ids,
+        "activeRunIds": active_run_ids,
+        "skippedTerminalRunIds": skipped_terminal_run_ids.into_iter().collect::<Vec<_>>(),
+        "runs": runs.iter().filter_map(team_run_list_item_legacy_json).collect::<Vec<_>>(),
+    })
+}
+
+fn team_resume_run_id(outcome: &organization::ResumeOutcome) -> &str {
     match outcome {
-        organization::ResumeOutcome::Active(run_id) => {
-            json!({ "runId": run_id.as_str(), "state": "active" })
+        organization::ResumeOutcome::Active(run_id)
+        | organization::ResumeOutcome::Cancelled(run_id)
+        | organization::ResumeOutcome::OutcomeUnknown(run_id)
+        | organization::ResumeOutcome::Tombstoned(run_id) => run_id.as_str(),
+    }
+}
+
+fn team_terminal_run_id(outcome: &organization::TeamRunQueryOutcome) -> Option<&str> {
+    match outcome {
+        organization::TeamRunQueryOutcome::Available(run)
+            if matches!(
+                run.graph_status(),
+                organization::GraphStatus::Completed
+                    | organization::GraphStatus::Failed
+                    | organization::GraphStatus::Cancelled
+            ) =>
+        {
+            Some(run.run().as_str())
         }
-        organization::ResumeOutcome::Cancelled(run_id) => {
-            json!({ "runId": run_id.as_str(), "state": "cancelled" })
-        }
-        organization::ResumeOutcome::OutcomeUnknown(run_id) => {
-            json!({ "runId": run_id.as_str(), "state": "outcome_unknown" })
-        }
-        organization::ResumeOutcome::Tombstoned(run_id) => {
-            json!({ "runId": run_id.as_str(), "state": "tombstoned" })
-        }
+        _ => None,
     }
 }
 
@@ -2535,8 +3605,22 @@ fn is_native_runtime_scope(value: &Value) -> bool {
 }
 
 fn is_team_runtime_facade_scope(value: &Value) -> bool {
-    is_native_runtime_scope_for(value, RuntimeDriverIdentity::open_claw())
-        || is_native_runtime_scope_for(value, RuntimeDriverIdentity::matcha_agent())
+    team_runtime_facade_endpoint(value).is_some()
+}
+
+fn team_runtime_facade_endpoint(value: &Value) -> Option<organization::RuntimeEndpointReference> {
+    for identity in [
+        RuntimeDriverIdentity::open_claw(),
+        RuntimeDriverIdentity::matcha_agent(),
+    ] {
+        if is_native_runtime_scope_for(value, identity) {
+            return organization::RuntimeEndpointReference::try_new(
+                identity.runtime_endpoint_reference().to_owned(),
+            )
+            .ok();
+        }
+    }
+    None
 }
 
 fn is_native_runtime_scope_for(value: &Value, identity: RuntimeDriverIdentity) -> bool {

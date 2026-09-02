@@ -1310,16 +1310,16 @@ pub fn project_team_run_public_event(event: &crate::run::event::TeamEvent) -> Te
             base_workflow_plan_id,
             operation_count,
         } => {
-            projection.graph_id = Some(base_graph_id.as_str().to_owned());
-            projection.workflow_plan_id = Some(base_workflow_plan_id.as_str().to_owned());
+            projection.graph_id = Some(base_graph_id.clone());
+            projection.workflow_plan_id = Some(base_workflow_plan_id.clone());
             projection.operation_count = Some(operation_count.get());
         }
         crate::run::event::TeamEventPayload::GraphReplaced {
             graph_id,
             workflow_plan_id,
         } => {
-            projection.graph_id = Some(graph_id.as_str().to_owned());
-            projection.workflow_plan_id = Some(workflow_plan_id.as_str().to_owned());
+            projection.graph_id = Some(graph_id.clone());
+            projection.workflow_plan_id = Some(workflow_plan_id.clone());
         }
         crate::run::event::TeamEventPayload::NodeProgressed { node_execution_id } => {
             projection.node_execution_id = Some(node_execution_id.as_str().to_owned());

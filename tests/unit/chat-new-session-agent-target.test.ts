@@ -3,7 +3,9 @@ import { useChatStore } from '@/stores/chat';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph, createDraftCurrentConversation } from '@/stores/chat/session-runtime-graph';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import type { ChatCurrentConversation } from '@/stores/chat/types';
 import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 import { completeFact, sessionView, windowView } from './helpers/session-fixtures';
 
@@ -63,6 +65,8 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       protocolId: 'openclaw-v4',
       runtimeEndpointId: 'openclaw-local',
       sessionIdentity,
+      kind: sessionKey.endsWith(':main') ? 'main' : 'session',
+      preferred: sessionKey.endsWith(':main'),
       ...overrides?.meta,
     },
     runtime: {
@@ -84,6 +88,19 @@ function buildCreateView(sessionKey: string, agentId = sessionKey.split(':')[1] 
 
 function buildEmptyTimeline(sessionKey = 'agent:main:main') {
   return buildCreateView(sessionKey);
+}
+
+function syncChatSessionRuntimeState(currentConversation?: ChatCurrentConversation | null): void {
+  const state = useChatStore.getState();
+  useChatStore.setState({
+    sessionRuntimeGraph: buildSessionRuntimeGraph(state.sessionRuntimeCatalog, state.loadedSessions),
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(state.loadedSessions),
+    currentConversation: currentConversation === undefined
+      ? state.currentSessionKey && state.loadedSessions[state.currentSessionKey]
+        ? buildCurrentConversationFromSessionRecord(state.loadedSessions[state.currentSessionKey]!)
+        : null
+      : currentConversation,
+  } as never);
 }
 
 function buildOpenClawEndpointSummary(overrides: Record<string, unknown> = {}) {
@@ -180,6 +197,9 @@ describe('chat store newSession agent targeting', () => {
       error: null,
       endpoints: [],
       hasLoadedOnce: false,
+      revision: 0,
+      changedRuntimeScopeKeys: [],
+      revisionByRuntimeScopeKey: {},
     });
     useChatStore.setState({
       foregroundHistorySessionKey: null,
@@ -220,6 +240,7 @@ describe('chat store newSession agent targeting', () => {
       showThinking: true,
       loadHistory,
     } as never);
+    syncChatSessionRuntimeState();
   });
 
   it('新会话应继承当前选中 agent，而不是 sessions 首项 agent', async () => {
@@ -246,10 +267,12 @@ describe('chat store newSession agent targeting', () => {
   it('当前 session meta 缺少 agentId 时，应从 SessionIdentity 读取目标 agent', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_733_222_222_222);
     const sessionIdentity = createOpenClawTestSessionIdentity('agent:test:main', 'runtime-owner');
+    const runtimeOwnerRecordKey = buildSessionRecordKey(sessionIdentity);
     useChatStore.setState({
+      currentSessionKey: runtimeOwnerRecordKey,
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
-        [testRecordKey]: buildSessionRecord({
+        [runtimeOwnerRecordKey]: buildSessionRecord({
           sessionKey: 'agent:test:main',
           meta: {
             agentId: null,
@@ -258,6 +281,7 @@ describe('chat store newSession agent targeting', () => {
         }),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
     await useChatStore.getState().newSession();
 
@@ -311,6 +335,10 @@ describe('chat store newSession agent targeting', () => {
             endpoint: openClawTestRuntimeEndpoint,
             agentIds: ['main', 'test'],
             acceptsDynamicAgents: true,
+            agentCatalog: {
+              source: 'subagent-management',
+              seedAgents: [{ id: 'main', name: 'main' }, { id: 'test', name: 'test' }],
+            },
             sessionPromptScopes: [mainAgentScope, testAgentScope],
             defaultSessionPromptScope: mainAgentScope,
           },
@@ -323,6 +351,10 @@ describe('chat store newSession agent targeting', () => {
             endpoint: matchaEndpoint,
             agentIds: ['matcha'],
             acceptsDynamicAgents: false,
+            agentCatalog: {
+              source: 'runtime-endpoint',
+              agents: [{ id: 'matcha', name: 'matcha' }],
+            },
             sessionPromptScopes: [matchaDefaultScope],
             defaultSessionPromptScope: matchaDefaultScope,
           },
@@ -330,6 +362,7 @@ describe('chat store newSession agent targeting', () => {
         defaultSessionPromptScope: matchaDefaultScope,
       },
     } as never);
+    syncChatSessionRuntimeState(createDraftCurrentConversation(matchaEndpoint, 'matcha'));
 
     hostSessionNewMock.mockResolvedValueOnce({ outcome: 'target_rejected' });
 
@@ -350,23 +383,26 @@ describe('chat store newSession agent targeting', () => {
   });
 
   it('切换到其他 agent 会话时，应清理当前会话的发送态，避免跨会话锁死输入', () => {
+    const anotherIdentity = createOpenClawTestSessionIdentity('agent:another:main', 'another');
+    const anotherRecordKey = buildSessionRecordKey(anotherIdentity);
     useChatStore.setState({
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
-        'agent:test:main': buildSessionRecord({
+        [testRecordKey]: buildSessionRecord({
           runtime: {
             activeRunId: 'run-from-agent-test',
           },
         }),
-        'agent:another:main': buildSessionRecord({ sessionKey: 'agent:another:main' }),
+        [anotherRecordKey]: buildSessionRecord({ sessionKey: 'agent:another:main' }),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
-    useChatStore.getState().switchSession('agent:another:main');
+    useChatStore.getState().switchSession(anotherRecordKey);
 
     const state = useChatStore.getState();
-    const runtime = state.loadedSessions['agent:another:main']?.runtime;
-    expect(state.currentSessionKey).toBe('agent:another:main');
+    const runtime = state.loadedSessions[anotherRecordKey]?.runtime;
+    expect(state.currentSessionKey).toBe(anotherRecordKey);
     expect(runtime?.activeRunId).toBeNull();
     expect(runtime?.runPhase).toBe('idle');
   });
@@ -378,11 +414,13 @@ describe('chat store newSession agent targeting', () => {
       timestamp: Date.now() / 1000,
       id: 'msg-local-1',
     };
+    const anotherIdentity = createOpenClawTestSessionIdentity('agent:another:main', 'another');
+    const anotherRecordKey = buildSessionRecordKey(anotherIdentity);
     useChatStore.setState({
-      currentSessionKey: 'agent:test:main',
+      currentSessionKey: testRecordKey,
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
-        'agent:test:main': buildSessionRecord({
+        [testRecordKey]: buildSessionRecord({
           items: [{
             key: 'msg-local-1',
             kind: 'user-message',
@@ -404,23 +442,26 @@ describe('chat store newSession agent targeting', () => {
             activeRunId: 'run-agent-test',
           },
         }),
-        'agent:another:main': buildSessionRecord({ sessionKey: 'agent:another:main' }),
+        [anotherRecordKey]: buildSessionRecord({ sessionKey: 'agent:another:main' }),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
-    useChatStore.getState().switchSession('agent:another:main');
-    useChatStore.getState().switchSession('agent:test:main');
+    useChatStore.getState().switchSession(anotherRecordKey);
+    useChatStore.getState().switchSession(testRecordKey);
 
     const state = useChatStore.getState();
-    const record = state.loadedSessions['agent:test:main'];
-    expect(state.currentSessionKey).toBe('agent:test:main');
-    expect(getSessionItems(state, 'agent:test:main')).toHaveLength(1);
+    const record = state.loadedSessions[testRecordKey];
+    expect(state.currentSessionKey).toBe(testRecordKey);
+    expect(getSessionItems(state, testRecordKey)).toHaveLength(1);
     expect(record?.items[0]?.key).toContain('msg-local-1');
   });
 
   it('切换会话时，不应误删“messages 为空但已有历史痕迹”的会话', () => {
+    const sessionAIdentity = createOpenClawTestSessionIdentity('agent:test:session-a', 'test');
+    const sessionARecordKey = buildSessionRecordKey(sessionAIdentity);
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-a',
+      currentSessionKey: sessionARecordKey,
       sessionCatalogStatus: {
         status: 'ready',
         error: null,
@@ -428,27 +469,33 @@ describe('chat store newSession agent targeting', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        'agent:test:session-a': buildSessionRecord({
+        [sessionARecordKey]: buildSessionRecord({
+          sessionKey: 'agent:test:session-a',
           meta: {
             label: '历史会话A',
             lastActivityAt: 1_713_000_000_000,
           },
         }),
-        'agent:test:main': buildSessionRecord(),
+        [testRecordKey]: buildSessionRecord(),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
-    useChatStore.getState().switchSession('agent:test:main');
+    useChatStore.getState().switchSession(testRecordKey);
 
     const state = useChatStore.getState();
     expect(state.sessionCatalogStatus.status).toBe('ready');
-    expect(state.loadedSessions['agent:test:session-a']?.meta.label).toBe('历史会话A');
-    expect(state.loadedSessions['agent:test:session-a']?.meta.lastActivityAt).toBe(1_713_000_000_000);
+    expect(state.loadedSessions[sessionARecordKey]?.meta.label).toBe('历史会话A');
+    expect(state.loadedSessions[sessionARecordKey]?.meta.lastActivityAt).toBe(1_713_000_000_000);
   });
 
   it('cleanupEmptySession 仅清理真正空会话（无消息/无标签/无活动）', () => {
+    const sessionBIdentity = createOpenClawTestSessionIdentity('agent:test:session-b', 'test');
+    const sessionBRecordKey = buildSessionRecordKey(sessionBIdentity);
+    const sessionCIdentity = createOpenClawTestSessionIdentity('agent:test:session-c', 'test');
+    const sessionCRecordKey = buildSessionRecordKey(sessionCIdentity);
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-b',
+      currentSessionKey: sessionBRecordKey,
       sessionCatalogStatus: {
         status: 'ready',
         error: null,
@@ -456,19 +503,21 @@ describe('chat store newSession agent targeting', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        'agent:test:session-b': buildSessionRecord({
+        [sessionBRecordKey]: buildSessionRecord({
+          sessionKey: 'agent:test:session-b',
           meta: { label: 'B' },
         }),
-        'agent:test:main': buildSessionRecord(),
+        [testRecordKey]: buildSessionRecord(),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
     useChatStore.getState().cleanupEmptySession();
     expect(useChatStore.getState().sessionCatalogStatus.status).toBe('ready');
-    expect(useChatStore.getState().loadedSessions['agent:test:session-b']).toBeDefined();
+    expect(useChatStore.getState().loadedSessions[sessionBRecordKey]).toBeDefined();
 
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-c',
+      currentSessionKey: sessionCRecordKey,
       sessionCatalogStatus: {
         status: 'ready',
         error: null,
@@ -476,14 +525,15 @@ describe('chat store newSession agent targeting', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        'agent:test:session-c': buildSessionRecord(),
-        'agent:test:main': buildSessionRecord(),
+        [sessionCRecordKey]: buildSessionRecord({ sessionKey: 'agent:test:session-c' }),
+        [testRecordKey]: buildSessionRecord(),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
     useChatStore.getState().cleanupEmptySession();
     expect(useChatStore.getState().sessionCatalogStatus.status).toBe('ready');
-    expect(useChatStore.getState().loadedSessions['agent:test:session-c']).toBeUndefined();
+    expect(useChatStore.getState().loadedSessions[sessionCRecordKey]).toBeUndefined();
   });
 
   it('创建新会话时，应重置发送态，避免继承上一会话的等待状态', async () => {
@@ -499,6 +549,7 @@ describe('chat store newSession agent targeting', () => {
         }),
       },
     } as never);
+    syncChatSessionRuntimeState();
 
     await useChatStore.getState().newSession();
 

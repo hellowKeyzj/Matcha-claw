@@ -186,6 +186,17 @@ impl AppServerClient {
         let ingress = ingress.close().await;
         connection.and(ingress.map_err(|_| AppServerClientError::CloseFailed))
     }
+
+    pub(crate) async fn finish_with_cleanup<T>(self, outcome: T) -> T {
+        outcome_after_cleanup(outcome, self.close().await)
+    }
+}
+
+pub(crate) fn outcome_after_cleanup<T>(
+    outcome: T,
+    _cleanup: Result<(), AppServerClientError>,
+) -> T {
+    outcome
 }
 
 impl fmt::Debug for AppServerClient {

@@ -982,6 +982,20 @@ impl OpenClawGateway {
             .map_err(Into::into)
     }
 
+    pub async fn abort_chat_diagnostic(
+        &mut self,
+        params: ChatAbortParams,
+    ) -> Result<
+        InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
+            .abort_chat(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_mutation_outcome(outcome))
+    }
+
     pub async fn patch_session_model(
         &mut self,
         params: SessionModelPatchParams,
@@ -1049,6 +1063,20 @@ impl OpenClawGateway {
             .await
             .map(port_outcome)
             .map_err(Into::into)
+    }
+
+    pub async fn delete_session_diagnostic(
+        &mut self,
+        params: SessionDeleteParams,
+    ) -> Result<
+        InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
+            .delete_session(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_mutation_outcome(outcome))
     }
 
     pub async fn invalidate_control(&self) {
@@ -1160,6 +1188,20 @@ impl OpenClawSessionGateway {
             .map_err(Into::into)
     }
 
+    pub async fn abort_chat_diagnostic(
+        &self,
+        params: ChatAbortParams,
+    ) -> Result<
+        InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
+            .abort_chat(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_mutation_outcome(outcome))
+    }
+
     pub async fn patch_session_model(
         &self,
         params: SessionModelPatchParams,
@@ -1228,18 +1270,68 @@ impl OpenClawSessionGateway {
             .map(port_outcome)
             .map_err(Into::into)
     }
+
+    pub async fn delete_session_diagnostic(
+        &self,
+        params: SessionDeleteParams,
+    ) -> Result<
+        InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
+            .delete_session(params)
+            .await
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_mutation_outcome(outcome))
+    }
 }
 
 fn session_model_patch_outcome(
     outcome: InvocationOutcome<SessionModelPatchResult, OperationError>,
 ) -> InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure> {
-    match outcome {
+    match session_mutation_outcome(outcome) {
         InvocationOutcome::Succeeded(result) => InvocationOutcome::Succeeded(result),
-        InvocationOutcome::TargetRejected(error) => InvocationOutcome::TargetRejected(
-            SessionModelPatchFailure::TargetRejected(OpenClawPeerRejection::from_operation(&error)),
+        InvocationOutcome::TargetRejected(failure) => InvocationOutcome::TargetRejected(
+            SessionModelPatchFailure::TargetRejected(failure.peer_rejection),
         ),
         InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
         InvocationOutcome::Unknown => InvocationOutcome::Unknown,
+    }
+}
+
+fn session_mutation_outcome<T>(
+    outcome: InvocationOutcome<T, OperationError>,
+) -> InvocationOutcome<T, OpenClawSessionMutationFailure> {
+    match outcome {
+        InvocationOutcome::Succeeded(result) => InvocationOutcome::Succeeded(result),
+        InvocationOutcome::TargetRejected(error) => {
+            InvocationOutcome::TargetRejected(OpenClawSessionMutationFailure {
+                peer_rejection: OpenClawPeerRejection::from_operation(&error),
+            })
+        }
+        InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
+        InvocationOutcome::Unknown => InvocationOutcome::Unknown,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawSessionMutationFailure {
+    peer_rejection: Option<OpenClawPeerRejection>,
+}
+
+impl OpenClawSessionMutationFailure {
+    pub fn peer_rejection(&self) -> Option<&OpenClawPeerRejection> {
+        self.peer_rejection.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_peer_rejection_for_test(code: impl Into<String>) -> Self {
+        Self {
+            peer_rejection: Some(OpenClawPeerRejection {
+                code: code.into(),
+                message: String::new(),
+            }),
+        }
     }
 }
 
@@ -1704,6 +1796,67 @@ mod tests {
                 .await
                 .unwrap(),
             InvocationOutcome::Succeeded(_)
+        ));
+        timeout(TEST_TIMEOUT, peer).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostic_session_mutations_preserve_peer_not_found_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = TestTlsIdentity::generate();
+        let endpoint = GatewayEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
+        let acceptor = identity.acceptor();
+        let peer = tokio::spawn(async move {
+            let mut socket = accept_websocket(&listener, &acceptor).await;
+            send_json(
+                &mut socket,
+                json!({
+                    "type":"event",
+                    "event":"connect.challenge",
+                    "payload":{"nonce":"port-session-not-found","ts":42}
+                }),
+            )
+            .await;
+            let connect = read_json(&mut socket).await;
+            send_json(&mut socket, hello(connect["id"].as_str().unwrap())).await;
+            for method in ["chat.abort", "sessions.delete"] {
+                let request = read_json(&mut socket).await;
+                assert_session_request(&request, method);
+                send_json(
+                    &mut socket,
+                    json!({"type":"res","id":request["id"],"ok":false,"error":{"code":"NOT_FOUND","message":"gone"}}),
+                )
+                .await;
+            }
+        });
+        let (events, _) = mpsc::channel(1);
+        let (canonical_events, _) = mpsc::channel(32);
+        let mut gateway = OpenClawGateway::new(
+            endpoint,
+            identity.fingerprint(),
+            Arc::new(GatewaySecret::new("port-session-not-found-secret".into()).unwrap()),
+            GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
+            events,
+            canonical_events,
+        );
+
+        let abort = gateway
+            .abort_chat_diagnostic(chat_abort_params())
+            .await
+            .unwrap();
+        assert!(matches!(
+            abort,
+            InvocationOutcome::TargetRejected(ref failure)
+                if failure.peer_rejection().is_some_and(|rejection| rejection.code() == "NOT_FOUND")
+        ));
+        let delete = gateway
+            .delete_session_diagnostic(session_delete_params())
+            .await
+            .unwrap();
+        assert!(matches!(
+            delete,
+            InvocationOutcome::TargetRejected(ref failure)
+                if failure.peer_rejection().is_some_and(|rejection| rejection.code() == "NOT_FOUND")
         ));
         timeout(TEST_TIMEOUT, peer).await.unwrap().unwrap();
     }

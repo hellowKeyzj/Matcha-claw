@@ -107,6 +107,20 @@ export function sampleViewportAnchor(viewport: HTMLElement | null): ViewportAnch
 /**
  * 把视口滚回 anchor 当时的位置。返回是否真正落位。
  */
+export function restoreElementOffsetWithinViewport(
+  viewport: HTMLElement | null,
+  element: HTMLElement,
+  offsetWithinViewport: number,
+): boolean {
+  if (!viewport || !element.isConnected || !viewport.contains(element)) {
+    return false;
+  }
+  const viewportRect = viewport.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  viewport.scrollTop += (elementRect.top - viewportRect.top) - offsetWithinViewport;
+  return true;
+}
+
 export function restoreViewportAnchor(
   viewport: HTMLElement | null,
   anchor: ViewportAnchor,
@@ -143,10 +157,7 @@ export function restoreViewportAnchor(
   if (!target) {
     return false;
   }
-  const viewportRect = viewport.getBoundingClientRect();
-  const targetRect = target.getBoundingClientRect();
-  viewport.scrollTop += (targetRect.top - viewportRect.top) - anchor.offsetWithinViewport;
-  return true;
+  return restoreElementOffsetWithinViewport(viewport, target, anchor.offsetWithinViewport);
 }
 
 export function viewportHasRenderableItems(viewport: HTMLElement | null): boolean {

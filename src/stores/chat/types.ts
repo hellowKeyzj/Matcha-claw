@@ -209,6 +209,68 @@ export interface ChatSessionRuntimeCatalogState {
   defaultSessionPromptScope: AgentScope | null;
 }
 
+export interface ChatSessionRuntimeSessionNode {
+  sessionRecordKey: string;
+  endpointSessionId: string | null;
+  sessionIdentity: SessionIdentity;
+  kind: SessionCatalogKind | null;
+  preferred: boolean;
+  label: string | null;
+  titleSource: SessionCatalogTitleSource;
+  displayName: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  contextTokens?: SessionContextTokenSnapshot;
+  updatedAt: number | null;
+}
+
+export interface ChatSessionRuntimeAgentNode {
+  agentId: string;
+  catalogEntry: ChatSessionRuntimeAgentCatalogEntry | null;
+  sessionPromptScope: AgentScope | null;
+  sessions: ChatSessionRuntimeSessionNode[];
+  preferredSessionKey: string | null;
+}
+
+export interface ChatSessionRuntimeEndpointNode {
+  runtimeScopeKey: string;
+  endpoint: RuntimeEndpointRef;
+  target: ChatSessionRuntimeEndpointTarget | null;
+  displayName: string;
+  defaultAgentId: string | null;
+  agents: ChatSessionRuntimeAgentNode[];
+}
+
+export interface ChatSessionRuntimeGraph {
+  endpoints: ChatSessionRuntimeEndpointNode[];
+}
+
+export type ChatCurrentConversationRuntimeState =
+  | { state: 'resolving' }
+  | { state: 'ready'; runtimeScopeKey: string }
+  | { state: 'starting'; runtimeScopeKey: string }
+  | { state: 'unavailable'; runtimeScopeKey: string; error: string | null };
+
+export interface ChatCurrentSessionConversation {
+  kind: 'session';
+  runtimeScopeKey: string;
+  endpoint: RuntimeEndpointRef;
+  agentId: string;
+  sessionRecordKey: string;
+  endpointSessionId: string | null;
+  sessionIdentity: SessionIdentity;
+}
+
+export interface ChatCurrentDraftConversation {
+  kind: 'draft';
+  runtimeScopeKey: string;
+  endpoint: RuntimeEndpointRef;
+  agentId: string;
+  sessionPromptScope: AgentScope;
+}
+
+export type ChatCurrentConversation = ChatCurrentSessionConversation | ChatCurrentDraftConversation;
+
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
@@ -239,7 +301,12 @@ export interface ChatViewState {
 
 export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
+  currentConversation: ChatCurrentConversation | null;
+  lastSelectedSessionKeyByRuntimeScopeKey: Record<string, string>;
+  sessionRuntimeGraph: ChatSessionRuntimeGraph;
   sessionRuntimeCatalog: ChatSessionRuntimeCatalogState;
+  sessionCatalogLoadedAtByRuntimeScopeKey: Record<string, number>;
+  sessionCatalogLoadedRevisionByRuntimeScopeKey: Record<string, number>;
   loadedSessions: Record<string, ChatSessionRecord>;
   sessionRecordKeyByIdentityKey: Record<string, string>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
@@ -254,7 +321,37 @@ export interface ChatSendAttachment {
   preview: string | null;
 }
 
-export type ChatSendRejectReason = 'empty' | 'mutating' | 'active' | 'stopping' | 'missing-session' | 'error';
+export type ChatSendRejectReason =
+  | 'empty'
+  | 'loading-history'
+  | 'history-error'
+  | 'active'
+  | 'stopping'
+  | 'missing-session'
+  | 'missing-session-identity'
+  | 'error';
+
+export type ChatSendGate =
+  | {
+    canSend: true;
+    kind: 'session';
+    sessionKey: string;
+    endpointSessionId: string | undefined;
+    sessionIdentity: SessionIdentity;
+  }
+  | {
+    canSend: true;
+    kind: 'draft';
+    runtimeScopeKey: string;
+    endpoint: RuntimeEndpointRef;
+    agentId: string;
+  }
+  | {
+    canSend: false;
+    reason: ChatSendRejectReason;
+    error?: string;
+    sessionKey?: string;
+  };
 
 export type ChatSendResult =
   | { accepted: true }
@@ -285,6 +382,7 @@ export interface ChatStoreActions {
   openAgentConversation: (agentId: string) => void;
   openSessionIdentity: (target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null }) => void;
   switchSession: (key: string, traceId?: string | null) => void;
+  selectSessionRuntimeEndpoint: (endpoint: RuntimeEndpointRef) => void;
   newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
   newSessionForScope: (scope: AgentScope) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
@@ -311,7 +409,12 @@ export type ChatStoreState = ChatStoreBaseState & ChatStoreActions;
 
 export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
+  'currentConversation',
+  'lastSelectedSessionKeyByRuntimeScopeKey',
+  'sessionRuntimeGraph',
   'sessionRuntimeCatalog',
+  'sessionCatalogLoadedAtByRuntimeScopeKey',
+  'sessionCatalogLoadedRevisionByRuntimeScopeKey',
   'loadedSessions',
   'pendingApprovalsBySession',
   'dismissedRuntimeErrorBySession',

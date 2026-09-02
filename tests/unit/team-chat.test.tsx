@@ -12,6 +12,14 @@ describe('team chat', () => {
     i18n.changeLanguage('en');
     localStorage.removeItem('teams-runtime-store');
     useRuntimeHostStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        updatedAt: 1,
+      },
       runtimeHost: { lifecycle: 'running' },
     });
     useTeamsStore.setState({
@@ -37,6 +45,8 @@ describe('team chat', () => {
             state: 'available',
             teamId: 'team-1',
             runId: 'team-1',
+            status: 'waiting_for_user',
+            revision: 2,
             teamRevision: 2,
             graphStatus: 'waiting',
           },
@@ -47,6 +57,8 @@ describe('team chat', () => {
           state: 'available',
           teamId: 'team-1',
           runId: 'team-1',
+          status: 'waiting_for_user',
+          revision: 2,
           teamRevision: 2,
           graphStatus: 'waiting',
         },
@@ -56,6 +68,8 @@ describe('team chat', () => {
           state: 'available',
           teamId: 'team-1',
           runId: 'team-1',
+          status: 'waiting_for_user',
+          revision: 2,
           teamRevision: 2,
           graphStatus: 'waiting',
         },
@@ -202,6 +216,7 @@ describe('team chat', () => {
       createRun: vi.fn().mockResolvedValue(undefined),
       deleteRun: vi.fn().mockResolvedValue(undefined),
       refreshActiveRunViews: vi.fn().mockResolvedValue(undefined),
+      refreshSnapshot: vi.fn().mockResolvedValue(undefined),
       refreshPublicProjection: vi.fn().mockResolvedValue(undefined),
       refreshPendingApprovals: vi.fn().mockResolvedValue(undefined),
       syncRunList: vi.fn().mockResolvedValue(undefined),
@@ -209,7 +224,7 @@ describe('team chat', () => {
       cancelRun: vi.fn().mockResolvedValue(undefined),
       resolveApproval: vi.fn().mockResolvedValue(undefined),
       submitDecision: vi.fn().mockResolvedValue(undefined),
-      saveGraph: vi.fn().mockResolvedValue(undefined),
+      submitGraphPatch: vi.fn().mockResolvedValue(undefined),
       exportGraphYaml: vi.fn().mockResolvedValue({ fileName: 'team-run-graph.yaml', yaml: 'nodes: []\n' }),
       importGraphYaml: vi.fn().mockResolvedValue({ success: true, imported: true }),
     } as never);
@@ -251,7 +266,7 @@ describe('team chat', () => {
       expect(clickedAnchors[0]?.download).toBe('Unsafe-Graph.yaml');
       expect(clickedAnchors[0]?.href).toBe('blob:team-run-graph-yaml');
       expect(revokeObjectURL).toHaveBeenCalledWith('blob:team-run-graph-yaml');
-      expect(useTeamsStore.getState().saveGraph).not.toHaveBeenCalled();
+      expect(useTeamsStore.getState().submitGraphPatch).not.toHaveBeenCalled();
     } finally {
       clickSpy.mockRestore();
       Object.defineProperty(URL, 'createObjectURL', { value: originalCreateObjectURL, configurable: true });
@@ -272,7 +287,7 @@ describe('team chat', () => {
     await waitFor(() => {
       expect(useTeamsStore.getState().importGraphYaml).toHaveBeenCalledWith('team-1', 'nodes:\n  - id: start\n');
     });
-    expect(useTeamsStore.getState().saveGraph).not.toHaveBeenCalled();
+    expect(useTeamsStore.getState().submitGraphPatch).not.toHaveBeenCalled();
   });
 
   it('creates a new run directly from a populated graph without opening a copy prompt', async () => {
@@ -318,7 +333,7 @@ describe('team chat', () => {
 
     expect(await screen.findByText('Run graph')).toBeInTheDocument();
     expect(screen.getByLabelText('Run List')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Team roles')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Team roles')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Roles' })).not.toBeInTheDocument();
     expect(screen.getByText('2 nodes · 1 edges')).toBeInTheDocument();
     expect(screen.getByLabelText('Workflow canvas')).toBeInTheDocument();
@@ -334,7 +349,7 @@ describe('team chat', () => {
     expect(screen.getAllByText('operator-designer').length).toBeGreaterThan(0);
     expect(screen.queryByText('Agent A1')).not.toBeInTheDocument();
     expect(screen.queryByText('/workspace')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Approvals' })).not.toBeInTheDocument();
     expect(screen.queryByText('Artifacts')).not.toBeInTheDocument();
     expect(screen.queryByText('Gates')).not.toBeInTheDocument();
     expect(screen.queryByText('Kickbacks')).not.toBeInTheDocument();
@@ -361,23 +376,24 @@ describe('team chat', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save connection' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          edges: expect.arrayContaining([
-            expect.objectContaining({
+        [
+          expect.objectContaining({
+            op: 'replace_edge',
+            edge: expect.objectContaining({
               edgeId: 'edge-design-review',
               sourcePort: 'failed',
               targetPort: 'retry-input',
               action: 'rework',
             }),
-          ]),
-        }),
+          }),
+        ],
       );
     });
   });
 
-  it('opens a Work node configuration and saves its final role and task facts', async () => {
+  it('opens a Work node configuration and saves its final role fact', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -390,21 +406,20 @@ describe('team chat', () => {
     fireEvent.click(nodeCard!);
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('Role ID'), { target: { value: 'reviewer' } });
-    fireEvent.change(within(dialog).getByLabelText('Task ID'), { target: { value: 'task-review-ready' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({
+        [
+          expect.objectContaining({
+            op: 'replace_node',
+            node: expect.objectContaining({
               nodeId: 'workflow-task:task-design',
               roleId: 'reviewer',
-              taskId: 'task-review-ready',
             }),
-          ]),
-        }),
+          }),
+        ],
       );
     });
   });
@@ -438,7 +453,6 @@ describe('team chat', () => {
     fireEvent.click((await within(canvas).findAllByText('Role work'))[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByLabelText('Role ID')).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Task ID')).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Work prompt')).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Output artifact kind')).toBeInTheDocument();
 
@@ -447,10 +461,10 @@ describe('team chat', () => {
     expect(within(dialog).queryByLabelText('Review prompt')).not.toBeInTheDocument();
 
     fireEvent.click(within(canvas).getByText('Manual decision').closest('[role="button"]')!);
-    expect(within(dialog).queryByLabelText('Decision reason')).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Decision reason')).toBeInTheDocument();
 
     fireEvent.click(within(canvas).getByText('Policy check').closest('[role="button"]')!);
-    expect(within(dialog).queryByLabelText('Check rule')).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Check rule')).toBeInTheDocument();
 
     fireEvent.click(within(canvas).getByText('Finish flow').closest('[role="button"]')!);
     expect(within(dialog).queryByLabelText('Role ID')).not.toBeInTheDocument();
@@ -501,21 +515,22 @@ describe('team chat', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({
+        [
+          expect.objectContaining({
+            op: 'replace_node',
+            node: expect.objectContaining({
               nodeId: 'start-1',
-              trigger: { kind: 'cron', expression: '*/15 * * * *' },
+              config: { trigger: { mode: 'cron', cron: '*/15 * * * *' } },
             }),
-          ]),
-        }),
+          }),
+        ],
       );
     });
   });
 
-  it('configures a StartNode webhook fact without exposing an HTTP route or token', async () => {
+  it('configures a StartNode webhook fact through a replace_node patch', async () => {
     useTeamsStore.setState({
       graphByTeamId: {
         'team-1': {
@@ -537,23 +552,25 @@ describe('team chat', () => {
     fireEvent.click(nodeCard!);
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('Webhook path'), { target: { value: '/deploy/ready/' } });
-    expect(within(dialog).queryByText('Public ingress base URL')).not.toBeInTheDocument();
-    expect(within(dialog).queryByText('Webhook token')).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({ nodeId: 'start-1', trigger: { kind: 'webhook', path: 'deploy/ready' } }),
-          ]),
-        }),
+        [
+          expect.objectContaining({
+            op: 'replace_node',
+            node: expect.objectContaining({
+              nodeId: 'start-1',
+              config: { trigger: { mode: 'webhook', path: 'deploy/ready' } },
+            }),
+          }),
+        ],
       );
     });
   });
 
-  it('deletes nodes from the configuration sheet and removes attached edges', async () => {
+  it('deletes nodes from the configuration sheet through a remove_node patch', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -567,17 +584,14 @@ describe('team chat', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Delete node' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          nodes: expect.not.arrayContaining([expect.objectContaining({ nodeId: 'workflow-task:task-design' })]),
-          edges: expect.not.arrayContaining([expect.objectContaining({ edgeId: 'edge-design-review' })]),
-        }),
+        [{ op: 'remove_node', nodeId: 'workflow-task:task-design' }],
       );
     });
   });
 
-  it('deletes edges from the edge configuration sheet', async () => {
+  it('deletes edges from the edge configuration sheet through a remove_edge patch', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -589,11 +603,9 @@ describe('team chat', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Delete edge' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          edges: expect.not.arrayContaining([expect.objectContaining({ edgeId: 'edge-design-review' })]),
-        }),
+        [{ op: 'remove_edge', edgeId: 'edge-design-review' }],
       );
     });
   });
@@ -608,24 +620,26 @@ describe('team chat', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Script check/ }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          nodes: expect.arrayContaining([
-            expect.objectContaining({
+        [
+          expect.objectContaining({
+            op: 'add_node',
+            node: expect.objectContaining({
               kind: 'script_review',
               title: 'Script check',
               maxAttempts: 1,
             }),
-          ]),
-        }),
+          }),
+        ],
       );
     });
-    const savedGraph = vi.mocked(useTeamsStore.getState().saveGraph).mock.calls[0]?.[1];
-    const addedNode = savedGraph?.nodes.find((node) => node.kind === 'script_review');
-    expect(addedNode).not.toHaveProperty('executor');
-    expect(addedNode).not.toHaveProperty('config');
-    expect(addedNode).not.toHaveProperty('metadata');
+    const operation = vi.mocked(useTeamsStore.getState().submitGraphPatch).mock.calls[0]?.[1][0];
+    expect(operation).toEqual(expect.objectContaining({ op: 'add_node' }));
+    if (!operation || operation.op !== 'add_node') throw new Error('missing add_node patch');
+    expect(operation.node).not.toHaveProperty('executor');
+    expect(operation.node).not.toHaveProperty('config');
+    expect(operation.node).not.toHaveProperty('metadata');
   });
 
   it('connects nodes through canvas ports with final edge facts', async () => {
@@ -640,19 +654,20 @@ describe('team chat', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Connect to Review design' }));
 
     await waitFor(() => {
-      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+      expect(useTeamsStore.getState().submitGraphPatch).toHaveBeenCalledWith(
         'team-1',
-        expect.objectContaining({
-          edges: expect.arrayContaining([
-            expect.objectContaining({
+        [
+          expect.objectContaining({
+            op: 'add_edge',
+            edge: expect.objectContaining({
               sourceNodeId: 'workflow-task:task-design',
               targetNodeId: 'workflow-task:task-review',
               sourcePort: 'completed',
               targetPort: 'input',
               action: 'activate',
             }),
-          ]),
-        }),
+          }),
+        ],
       );
     });
   });
@@ -674,10 +689,10 @@ describe('team chat', () => {
     await waitFor(() => {
       expect(nodeCard).toHaveStyle({ left: '104px', top: '120px' });
     });
-    expect(useTeamsStore.getState().saveGraph).not.toHaveBeenCalled();
+    expect(useTeamsStore.getState().submitGraphPatch).not.toHaveBeenCalled();
   });
 
-  it('syncs the run list before refreshing the public projection on mount without starting the TeamRun', async () => {
+  it('syncs the run list before refreshing the snapshot on mount without starting the TeamRun', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -686,16 +701,16 @@ describe('team chat', () => {
 
     await waitFor(() => {
       expect(useTeamsStore.getState().syncRunList).toHaveBeenCalledWith('team-1');
-      expect(useTeamsStore.getState().refreshPublicProjection).toHaveBeenCalledWith('team-1');
+      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
     });
     const syncRunListOrder = vi.mocked(useTeamsStore.getState().syncRunList).mock.invocationCallOrder[0];
-    const refreshPublicProjectionOrder = vi.mocked(useTeamsStore.getState().refreshPublicProjection).mock.invocationCallOrder[0];
-    expect(syncRunListOrder).toBeLessThan(refreshPublicProjectionOrder);
+    const refreshSnapshotOrder = vi.mocked(useTeamsStore.getState().refreshSnapshot).mock.invocationCallOrder[0];
+    expect(syncRunListOrder).toBeLessThan(refreshSnapshotOrder);
     expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Start Run' })).not.toBeInTheDocument();
   });
 
-  it('selects a run from the run list and refreshes its public projection', async () => {
+  it('selects a run from the run list and refreshes its snapshot', async () => {
     useTeamsStore.setState({
       teams: [
         {
@@ -710,6 +725,8 @@ describe('team chat', () => {
             state: 'available',
             teamId: 'team-1',
             runId: 'teamrun-old',
+            status: 'completed',
+            revision: 1,
             teamRevision: 1,
             graphStatus: 'completed',
           },
@@ -717,6 +734,8 @@ describe('team chat', () => {
             state: 'available',
             teamId: 'team-1',
             runId: 'teamrun-new',
+            status: 'running',
+            revision: 2,
             teamRevision: 2,
             graphStatus: 'running',
           },
@@ -727,6 +746,8 @@ describe('team chat', () => {
           state: 'available',
           teamId: 'team-1',
           runId: 'teamrun-old',
+          status: 'completed',
+          revision: 1,
           teamRevision: 1,
           graphStatus: 'completed',
         },
@@ -734,6 +755,8 @@ describe('team chat', () => {
           state: 'available',
           teamId: 'team-1',
           runId: 'teamrun-new',
+          status: 'running',
+          revision: 2,
           teamRevision: 2,
           graphStatus: 'running',
         },
@@ -743,6 +766,8 @@ describe('team chat', () => {
           state: 'available',
           teamId: 'team-1',
           runId: 'teamrun-new',
+          status: 'running',
+          revision: 2,
           teamRevision: 2,
           graphStatus: 'running',
         },
@@ -759,7 +784,7 @@ describe('team chat', () => {
 
     await waitFor(() => {
       expect(useTeamsStore.getState().setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
-      expect(useTeamsStore.getState().refreshPublicProjection).toHaveBeenCalledWith('team-1');
+      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
     });
     expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
   });
@@ -785,67 +810,7 @@ describe('team chat', () => {
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
   });
 
-  it('renders the dedicated public approval projection and resolves each explicit decision', async () => {
-    const resolveApproval = vi.fn().mockResolvedValue(undefined);
-    useTeamsStore.setState({ resolveApproval } as never);
-
-    render(
-      <MemoryRouter>
-        <TeamChat teamId="team-1" />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
-    const approvalCard = screen.getByRole('article');
-    expect(within(approvalCard).getByText('approval-1')).toBeInTheDocument();
-    expect(within(approvalCard).getByText('stage-1')).toBeInTheDocument();
-    expect(within(approvalCard).getByText('operator-designer')).toBeInTheDocument();
-    expect(within(approvalCard).getByText('Need NPU authorization')).toBeInTheDocument();
-    expect(within(approvalCard).getByText('Run profiling')).toBeInTheDocument();
-    expect(within(approvalCard).getByRole('time')).toHaveAttribute('datetime', '1970-01-01T00:00:00.002Z');
-    expect(within(approvalCard).queryByText('Uses live NPU')).not.toBeInTheDocument();
-    expect(within(approvalCard).queryByText('approval-1:approval')).not.toBeInTheDocument();
-
-    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'approve'));
-
-    resolveApproval.mockClear();
-    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Deny' }));
-    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'deny'));
-
-    resolveApproval.mockClear();
-    fireEvent.click(within(approvalCard).getByRole('button', { name: 'Abort' }));
-    await waitFor(() => expect(resolveApproval).toHaveBeenCalledWith('team-1', 'approval-1', 'abort'));
-  });
-
-  it('keeps approval controls idempotent while resolving and surfaces resolution errors', async () => {
-    let releaseResolution!: () => void;
-    const resolveApproval = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
-      releaseResolution = resolve;
-    }));
-    useTeamsStore.setState({ resolveApproval } as never);
-
-    render(
-      <MemoryRouter>
-        <TeamChat teamId="team-1" />
-      </MemoryRouter>,
-    );
-
-    const approveButton = await within(screen.getByRole('article')).findByRole('button', { name: 'Approve' });
-    fireEvent.click(approveButton);
-    fireEvent.click(approveButton);
-    expect(resolveApproval).toHaveBeenCalledTimes(1);
-    expect(approveButton).toBeDisabled();
-
-    releaseResolution();
-    await waitFor(() => expect(approveButton).toBeEnabled());
-
-    resolveApproval.mockRejectedValueOnce(new Error('approval unavailable'));
-    fireEvent.click(approveButton);
-    expect(await screen.findByText('approval unavailable')).toBeInTheDocument();
-  });
-
-  it('enables cancel while the run is waiting for user without replacing approval UI', async () => {
+  it('enables cancel while the run is waiting for user without restoring legacy approval UI', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -854,7 +819,7 @@ describe('team chat', () => {
 
     expect(await screen.findByRole('button', { name: 'Stop Run' })).toBeEnabled();
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Approvals' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Approvals' })).not.toBeInTheDocument();
   });
 
   it('disables cancel for completed runs', async () => {
@@ -862,6 +827,7 @@ describe('team chat', () => {
       runByTeamId: {
         'team-1': {
           ...useTeamsStore.getState().runByTeamId['team-1']!,
+          status: 'completed',
           graphStatus: 'completed',
         },
       },

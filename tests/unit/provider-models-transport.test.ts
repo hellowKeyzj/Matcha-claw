@@ -3,14 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
 import { createProviderModelsTransport } from '../../electron/main/runtime-host-delivery/transport/providers/models';
 
-const listRequest = {
-  id: 'provider.models' as const,
-  operationId: 'providerModels.list' as const,
-  scope: { kind: 'provider-model-catalog' as const },
-  target: { kind: 'provider-models' as const },
-  input: { kind: 'list' as const },
-};
-
 const replaceRequest = {
   id: 'provider.models' as const,
   operationId: 'providerModels.replace' as const,
@@ -26,13 +18,14 @@ const replaceRequest = {
 const selectable = {
   models: [{
     accountId: 'account-main',
-    selectionId: 'openai/gpt-test',
+    selectionId: 'model-selection:v1:6666666666666666666666666666666666666666666666666666666666666666',
     label: 'Main provider',
     modelId: 'gpt-test',
     capabilities: ['chat'],
     contextWindow: 128000,
     maxTokens: 8192,
     timeoutMs: 30000,
+    modelReferences: ['openai/gpt-test'],
     aspectRatio: '16:9',
     resolution: '1080p',
     quality: 'high',

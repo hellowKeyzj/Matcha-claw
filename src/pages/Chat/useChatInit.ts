@@ -3,11 +3,13 @@ import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/stores/chat';
 import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { hasSessionCatalogLoaded } from '@/stores/chat/session-helpers';
+import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
 const SUBAGENTS_SNAPSHOT_TTL_MS = 15_000;
+const SESSION_CATALOG_TTL_MS = 15_000;
 const HISTORY_IDLE_LOAD_TIMEOUT_MS = 1000;
 const RESOURCE_RETRY_DELAY_MS = 1500;
 const RESOURCE_RETRY_MAX_ATTEMPTS = 2;
@@ -40,31 +42,36 @@ function cancelIdleTask(handle: IdleTaskHandle): void {
   clearTimeout(handle);
 }
 
-function sortedSessionRuntimeEndpointIds(): string[] {
+function sortedSessionRuntimeEndpointScopeKeys(): string[] {
   return useRuntimeEndpointsStore.getState().endpoints
     .filter(isSessionRuntimeEndpointReady)
-    .map((endpoint) => endpoint.id)
+    .map((endpoint) => buildRuntimeScopeKey(endpoint.endpointRef))
     .sort();
 }
 
-function sameRuntimeEndpointIds(left: readonly string[], right: readonly string[]): boolean {
+function sameRuntimeEndpointScopeKeys(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length
     && left.every((value, index) => value === right[index]);
 }
 
+function hasReadySessionRuntimeCatalog(): boolean {
+  const catalog = useChatStore.getState().sessionRuntimeCatalog;
+  return catalog.status === 'ready'
+    && catalog.endpoints.length > 0
+    && catalog.defaultSessionPromptScope != null;
+}
+
 function shouldRefreshSessionRuntimeCatalog(): boolean {
   const catalog = useChatStore.getState().sessionRuntimeCatalog;
-  if (catalog.status !== 'ready'
-    || catalog.endpoints.length === 0
-    || catalog.defaultSessionPromptScope == null) {
+  if (!hasReadySessionRuntimeCatalog()) {
     return true;
   }
   if (useRuntimeEndpointsStore.getState().status !== 'ready') {
     return false;
   }
-  return !sameRuntimeEndpointIds(
-    sortedSessionRuntimeEndpointIds(),
-    catalog.endpoints.map((endpoint) => endpoint.endpointId).sort(),
+  return !sameRuntimeEndpointScopeKeys(
+    sortedSessionRuntimeEndpointScopeKeys(),
+    catalog.endpoints.map((endpoint) => buildRuntimeScopeKey(endpoint.endpoint)).sort(),
   );
 }
 
@@ -80,6 +87,44 @@ function shouldLoadSidebarAgentCatalog(): boolean {
   const catalog = useChatStore.getState().sessionRuntimeCatalog;
   return catalog.status === 'ready'
     && catalog.endpoints.some((endpoint) => endpoint.agentCatalog.source === 'subagent-management');
+}
+
+function shouldLoadSelectedSidebarAgentCatalog(): boolean {
+  const state = useChatStore.getState();
+  const endpoint = state.currentConversation?.endpoint
+    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint
+    ?? null;
+  if (!endpoint || state.sessionRuntimeCatalog.status !== 'ready') {
+    return false;
+  }
+  return state.sessionRuntimeCatalog.endpoints.some((target) => (
+    target.agentCatalog.source === 'subagent-management'
+    && sameRuntimeEndpointScope(target.endpoint, endpoint)
+  ));
+}
+
+function shouldLoadSelectedSessionCatalog(): boolean {
+  const state = useChatStore.getState();
+  if (state.sessionCatalogStatus.status === 'loading') {
+    return false;
+  }
+  if (state.sessionCatalogStatus.status === 'error') {
+    return true;
+  }
+  const endpoint = state.currentConversation?.endpoint
+    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint
+    ?? null;
+  if (!endpoint || state.sessionRuntimeCatalog.status !== 'ready') {
+    return !hasSessionCatalogLoaded(state);
+  }
+  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
+  const loadedAt = state.sessionCatalogLoadedAtByRuntimeScopeKey[runtimeScopeKey];
+  if (!loadedAt || (Date.now() - loadedAt) > SESSION_CATALOG_TTL_MS) {
+    return true;
+  }
+  const loadedRevision = state.sessionCatalogLoadedRevisionByRuntimeScopeKey[runtimeScopeKey] ?? 0;
+  const endpointRevision = useRuntimeEndpointsStore.getState().revisionByRuntimeScopeKey[runtimeScopeKey] ?? 0;
+  return endpointRevision > loadedRevision;
 }
 
 function resolveSessionQueryTarget(sessionParam: string): string | null {
@@ -128,6 +173,7 @@ export function useChatInit(input: UseChatInitInput): void {
   const sessionsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRuntimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRuntimeEventRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selectedRuntimeResourceEnsureScheduledRef = useRef(false);
 
   useEffect(() => {
     if (!isActive) return;
@@ -139,7 +185,7 @@ export function useChatInit(input: UseChatInitInput): void {
       return !agentsResource.hasLoadedOnce;
     };
     const shouldRetrySessionsAfterLoad = () => {
-      return !hasSessionCatalogLoaded(useChatStore.getState());
+      return shouldLoadSelectedSessionCatalog();
     };
     const scheduleAgentsRetry = (attempt = 1) => {
       if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS) {
@@ -157,10 +203,11 @@ export function useChatInit(input: UseChatInitInput): void {
       }, RESOURCE_RETRY_DELAY_MS);
     };
     const scheduleSessionsRetry = (attempt = 1) => {
-      if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS) {
+      if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS || sessionsRetryTimerRef.current) {
         return;
       }
       sessionsRetryTimerRef.current = setTimeout(() => {
+        sessionsRetryTimerRef.current = null;
         if (cancelled) {
           return;
         }
@@ -201,7 +248,8 @@ export function useChatInit(input: UseChatInitInput): void {
         }
         const shouldLoadSidebarAgents = shouldLoadAgents && shouldLoadSidebarAgentCatalog();
         const agentsLoadTask = shouldLoadSidebarAgents ? loadAgents() : Promise.resolve();
-        const sessionsLoadTask = loadSessions();
+        const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
+        const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
         await Promise.all([agentsLoadTask, sessionsLoadTask]);
         if (cancelled) return;
         let switchedViaQueryParam = false;
@@ -221,17 +269,18 @@ export function useChatInit(input: UseChatInitInput): void {
         if (shouldLoadSidebarAgents && shouldRetryAgentsAfterLoad()) {
           scheduleAgentsRetry();
         }
-        if (shouldRetrySessionsAfterLoad()) {
+        if (shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
           scheduleSessionsRetry();
         }
         if (switchedViaQueryParam) {
           return;
         }
         const currentChatState = useChatStore.getState();
-        if (!currentChatState.currentSessionKey) {
+        const currentConversation = currentChatState.currentConversation;
+        if (currentConversation?.kind !== 'session' || !currentConversation.sessionRecordKey) {
           return;
         }
-        const currentSessionRecord = currentChatState.loadedSessions[currentChatState.currentSessionKey];
+        const currentSessionRecord = currentChatState.loadedSessions[currentConversation.sessionRecordKey];
         const hasCurrentViewportSnapshot = (
           currentSessionRecord?.meta.historyStatus === 'ready'
           || getSessionItemCount(currentSessionRecord) > 0
@@ -242,8 +291,12 @@ export function useChatInit(input: UseChatInitInput): void {
             if (cancelled) {
               return;
             }
+            const latestConversation = useChatStore.getState().currentConversation;
+            if (latestConversation?.kind !== 'session' || !latestConversation.sessionRecordKey) {
+              return;
+            }
             void loadHistory({
-              sessionKey: useChatStore.getState().currentSessionKey,
+              sessionKey: latestConversation.sessionRecordKey,
               mode: 'quiet',
               scope: 'foreground',
               reason: 'chat_init_snapshot_quiet_refresh',
@@ -252,7 +305,7 @@ export function useChatInit(input: UseChatInitInput): void {
           return;
         }
         await loadHistory({
-          sessionKey: useChatStore.getState().currentSessionKey,
+          sessionKey: currentConversation.sessionRecordKey,
           mode: 'active',
           scope: 'foreground',
           reason: 'chat_init_cold_start',
@@ -262,31 +315,82 @@ export function useChatInit(input: UseChatInitInput): void {
       }
     };
 
+    const ensureSelectedRuntimeSidebarResources = async (): Promise<void> => {
+      const agentsLoadTask = shouldLoadSubagentsSnapshot() && shouldLoadSelectedSidebarAgentCatalog()
+        ? loadAgents()
+        : Promise.resolve();
+      const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
+      const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
+      await Promise.all([agentsLoadTask, sessionsLoadTask]);
+      if (!cancelled && shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
+        scheduleSessionsRetry();
+      }
+    };
+
+    const refreshSessionRuntimeCatalogFromEvent = async (): Promise<void> => {
+      if (!hasReadySessionRuntimeCatalog()) {
+        await runInitialLoad();
+        return;
+      }
+      if (cancelled || sessionRuntimeLoadInFlight) {
+        return;
+      }
+      sessionRuntimeLoadInFlight = true;
+      try {
+        await bootstrapSessionRuntime();
+        if (cancelled) {
+          return;
+        }
+        await ensureSelectedRuntimeSidebarResources();
+      } finally {
+        sessionRuntimeLoadInFlight = false;
+      }
+    };
+
+    const scheduleSelectedRuntimeResourceEnsure = () => {
+      if (cancelled || selectedRuntimeResourceEnsureScheduledRef.current) {
+        return;
+      }
+      selectedRuntimeResourceEnsureScheduledRef.current = true;
+      queueMicrotask(() => {
+        selectedRuntimeResourceEnsureScheduledRef.current = false;
+        if (cancelled || sessionRuntimeLoadInFlight) {
+          return;
+        }
+        void ensureSelectedRuntimeSidebarResources();
+      });
+    };
+
     const scheduleSessionRuntimeEventRefresh = () => {
       const now = Date.now();
       if (cancelled
         || now < sessionRuntimeNextEventRefreshAt
         || sessionRuntimeEventRefreshTimerRef.current
-        || !shouldRefreshSessionRuntimeCatalog()) {
+        || (!shouldRefreshSessionRuntimeCatalog() && !shouldLoadSelectedSessionCatalog())) {
         return;
       }
       sessionRuntimeNextEventRefreshAt = now + RESOURCE_RETRY_DELAY_MS;
       sessionRuntimeEventRefreshTimerRef.current = setTimeout(() => {
         sessionRuntimeEventRefreshTimerRef.current = null;
-        if (cancelled || sessionRuntimeLoadInFlight || !shouldRefreshSessionRuntimeCatalog()) {
+        if (cancelled || sessionRuntimeLoadInFlight || (!shouldRefreshSessionRuntimeCatalog() && !shouldLoadSelectedSessionCatalog())) {
           return;
         }
         if (sessionRuntimeRetryTimerRef.current != null) {
           clearTimeout(sessionRuntimeRetryTimerRef.current);
           sessionRuntimeRetryTimerRef.current = null;
         }
-        void runInitialLoad();
+        void refreshSessionRuntimeCatalogFromEvent();
       }, SESSION_RUNTIME_EVENT_REFRESH_DELAY_MS);
     };
     useRuntimeEndpointsStore.getState().init();
     const unsubscribeRuntimeEndpoints = useRuntimeEndpointsStore.subscribe((state, previousState) => {
-      if (state.status !== previousState.status || state.endpoints !== previousState.endpoints) {
+      if (state.revision !== previousState.revision) {
         scheduleSessionRuntimeEventRefresh();
+      }
+    });
+    const unsubscribeChatRuntimeSelection = useChatStore.subscribe((state, previousState) => {
+      if (state.currentConversation?.runtimeScopeKey !== previousState.currentConversation?.runtimeScopeKey) {
+        scheduleSelectedRuntimeResourceEnsure();
       }
     });
     void runInitialLoad();
@@ -313,7 +417,9 @@ export function useChatInit(input: UseChatInitInput): void {
         clearTimeout(sessionRuntimeEventRefreshTimerRef.current);
         sessionRuntimeEventRefreshTimerRef.current = null;
       }
+      selectedRuntimeResourceEnsureScheduledRef.current = false;
       unsubscribeRuntimeEndpoints();
+      unsubscribeChatRuntimeSelection();
       cleanupEmptySession();
     };
   }, [

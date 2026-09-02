@@ -76,7 +76,7 @@ describe('security policy store', () => {
     expect(state.savedPolicySnapshot.preset).toBe('strict');
   });
 
-  it('有缓存时刷新失败保留旧策略，不回退空白', async () => {
+  it('有缓存时刷新失败保留旧策略并标记不可编辑', async () => {
     hostSecurityReadPolicyMock.mockResolvedValue({
       preset: 'balanced',
       securityPolicyVersion: 1,
@@ -89,7 +89,7 @@ describe('security policy store', () => {
     await useSecurityPolicyStore.getState().loadPolicy();
 
     const state = useSecurityPolicyStore.getState();
-    expect(state.policyReady).toBe(true);
+    expect(state.policyReady).toBe(false);
     expect(state.policy.preset).toBe('balanced');
     expect(state.initialLoading).toBe(false);
     expect(state.refreshing).toBe(false);

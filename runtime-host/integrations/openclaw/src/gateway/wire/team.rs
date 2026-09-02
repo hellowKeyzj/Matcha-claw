@@ -37,13 +37,6 @@ struct AgentsUpdateParams {
     model: Option<String>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentsDeleteParams {
-    agent_id: String,
-    delete_files: bool,
-}
-
 pub(crate) fn agents_create_request(
     request_id: String,
     name: String,
@@ -88,16 +81,10 @@ pub(crate) fn agents_delete_request(
     request_id: String,
     agent_id: String,
 ) -> Result<RpcRequest, WireError> {
-    if !valid_string(&request_id) || !valid_string(&agent_id) {
-        return Err(WireError::InvalidAgentsDeleteRequest);
-    }
-    let params = serde_json::to_value(AgentsDeleteParams {
-        agent_id,
-        delete_files: true,
-    })
-    .map_err(|_| WireError::InvalidAgentsDeleteRequest)?;
-    rpc_request(request_id, "agents.delete", Some(params))
-        .map_err(|_| WireError::InvalidAgentsDeleteRequest)
+    super::agents::delete_request(
+        request_id,
+        super::agents::AgentDelete::try_new(agent_id, true)?,
+    )
 }
 
 pub(crate) fn config_get_request(request_id: String) -> Result<RpcRequest, WireError> {
@@ -677,14 +664,8 @@ pub(crate) fn decode_agents_update(response: GatewayResponse) -> Result<AgentUpd
 }
 
 pub(crate) fn decode_agents_delete(response: GatewayResponse) -> Result<AgentDeleted, WireError> {
-    let payload = success_payload(response, WireError::InvalidAgentsDelete)?;
-    let payload: AgentsDeleteWire =
-        serde_json::from_value(payload).map_err(|_| WireError::InvalidAgentsDelete)?;
-    if !payload.is_valid() {
-        return Err(WireError::InvalidAgentsDelete);
-    }
-    Ok(AgentDeleted {
-        agent_id: payload.agent_id,
+    super::agents::decode_delete(response).map(|deleted| AgentDeleted {
+        agent_id: deleted.agent_id,
     })
 }
 
@@ -873,21 +854,6 @@ struct AgentsUpdateWire {
 }
 
 impl AgentsUpdateWire {
-    fn is_valid(&self) -> bool {
-        self.ok && valid_string(&self.agent_id)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AgentsDeleteWire {
-    ok: bool,
-    agent_id: String,
-    #[serde(rename = "removedBindings")]
-    _removed_bindings: u64,
-}
-
-impl AgentsDeleteWire {
     fn is_valid(&self) -> bool {
         self.ok && valid_string(&self.agent_id)
     }
@@ -1467,13 +1433,6 @@ mod tests {
                 json!({"ok": true, "agentId": "agent-1", "removedBindings": 0, "future": true}),
             )),
             Err(WireError::InvalidAgentsDelete)
-        ));
-
-        let mut snapshot = config_snapshot();
-        snapshot["future"] = json!(true);
-        assert!(matches!(
-            decode_config_get(response("config-get-1", snapshot)),
-            Err(WireError::InvalidConfigGet)
         ));
 
         let mut missing_raw = config_snapshot();

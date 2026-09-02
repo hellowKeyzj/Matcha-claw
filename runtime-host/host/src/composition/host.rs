@@ -10,6 +10,7 @@ use environment::{ProviderCascade, migrate_provider_legacy_stores};
 use foundation::{
     execution::{ObservationSink, OwnedTask, OwnerRuntimeSystem},
     process::supervision::SupervisorSnapshot,
+    toolchain::NativeToolchainRuntime,
 };
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::gateway::auth::GatewaySecret;
@@ -191,14 +192,30 @@ impl Host {
             clawhub::ClawHubRegistryClient::new(diagnostics_state_root.as_path().to_owned());
         let runtime_state_dir = input.runtime_state_dir;
         let runtime_observation = RuntimeFlightRecorder::new(input.runtime_observation);
+        #[cfg(windows)]
+        let toolchain = NativeToolchainRuntime::local(input.open_claw.working_directory.clone());
+        #[cfg(unix)]
+        let toolchain = NativeToolchainRuntime::local(
+            input.open_claw.working_directory.clone(),
+            input.open_claw.guardian_executable.clone(),
+        );
         let mut openclaw_input = input.open_claw;
         openclaw_input.report_diagnostic = report_openclaw_diagnostic;
-        let open_claw = OpenClawInstance::prepare(openclaw_input, input.open_claw_secret)
-            .map_err(ConstructionError::OpenClaw)?;
+        let open_claw = OpenClawInstance::prepare(
+            openclaw_input,
+            input.open_claw_secret,
+            Arc::clone(&toolchain),
+        )
+        .map_err(ConstructionError::OpenClaw)?;
         fs::create_dir_all(&runtime_state_dir).map_err(|_| ConstructionError::RuntimeState)?;
         let fleet_private_root_path = runtime_state_dir.join("fleet-private");
-        let matcha = build_peer(input.matcha, input.matcha_secret, report_matcha_diagnostic)
-            .map_err(ConstructionError::Matcha)?;
+        let matcha = build_peer(
+            input.matcha,
+            input.matcha_secret,
+            toolchain,
+            report_matcha_diagnostic,
+        )
+        .map_err(ConstructionError::Matcha)?;
         let mut matcha = MatchaAgentInstance::new(matcha);
         provision_private_directory(&fleet_private_root_path)
             .map_err(|_| ConstructionError::Fleet)?;

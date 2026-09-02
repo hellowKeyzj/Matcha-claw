@@ -18,8 +18,8 @@ import {
   readTeamRunSnapshot,
   resolveTeamApproval,
   resumeTeam,
-  saveTeamRunGraphProjection,
   submitTeamRunDecision,
+  submitTeamRunGraphPatch,
   submitTeamRunRoleMessage,
   type TeamApprovalRecord,
   type TeamArtifactRecord,
@@ -31,6 +31,7 @@ import {
   type TeamDispatchTaskRecord,
   type TeamEventRecord,
   type TeamGateRecord,
+  type TeamGraphPatchOperation,
   type TeamGraphSnapshotRecord,
   type TeamGraphYamlExportResult,
   type TeamGraphYamlImportResult,
@@ -42,12 +43,36 @@ import {
   type TeamRunListItem,
   type TeamRunRecord,
   type TeamRunSummary,
-  type ManualTeamProvisionRecord,
   type TeamRunWorkflowPlan,
-  type TeamSkillPackage,
   type TeamSourceType,
   type TeamStageRecord,
 } from '@/services/openclaw/team-runtime-client';
+
+export interface TeamSkillPackage {
+  selectionId: string;
+  name: string;
+  version: string;
+  kind: 'team-skill';
+  description: string;
+}
+
+export interface ManualTeamMemberProvisionRecord {
+  agentId: string;
+  agentName: string;
+  workspace: string;
+  roleId: string;
+  skills: string[];
+  tools: string[];
+  model?: string;
+  isLeader: boolean;
+}
+
+export interface ManualTeamProvisionRecord {
+  name: string;
+  description: string;
+  version: string;
+  members: ManualTeamMemberProvisionRecord[];
+}
 
 export interface TeamMeta {
   id: string;
@@ -151,7 +176,7 @@ interface TeamsState {
   syncRunList: (teamId: string) => Promise<void>;
   deleteRun: (teamId: string, runId?: string) => Promise<void>;
   refreshSnapshot: (teamId: string, options?: { force?: boolean }) => Promise<void>;
-  saveGraph: (teamId: string, graph: TeamGraphSnapshotRecord) => Promise<void>;
+  submitGraphPatch: (teamId: string, operations: TeamGraphPatchOperation[]) => Promise<void>;
   exportGraphYaml: (teamId: string) => Promise<TeamGraphYamlExportResult>;
   importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
   resumeRun: (teamId: string) => Promise<void>;
@@ -372,14 +397,15 @@ function isSafeRunId(value: string): boolean {
 }
 
 function toTeamMeta(input: TeamSkillCandidate, teamId: string, now: number): TeamMeta {
+  const packagePath = input.packagePath.trim();
   return {
     id: teamId,
     name: input.displayName.trim() || input.teamSkillPackage.name,
     teamSkillName: input.teamSkillPackage.name,
     teamSkillVersion: input.teamSkillPackage.version,
     teamSkillDescription: input.teamSkillPackage.description,
-    packagePath: input.packagePath.trim(),
-    sourcePath: input.teamSkillPackage.sourcePath,
+    packagePath,
+    sourcePath: packagePath,
     sourceType: 'teamskill',
     createdAt: now,
     updatedAt: now,
@@ -786,13 +812,91 @@ function normalizeTeamGraphProjection(graph: TeamGraphSnapshotRecord | null | un
   };
 }
 
-type TeamRunSnapshotRecord = Awaited<ReturnType<typeof readTeamRunSnapshot>>;
+function patchTeamGraphNodeProjection(
+  current: TeamGraphSnapshotRecord['nodes'][number],
+  patch: Record<string, unknown>,
+): TeamGraphSnapshotRecord['nodes'][number] {
+  const { roleId: _roleId, groupId: _groupId, taskId: _taskId, executor: _executor, config: _config, ...runtimeProjection } = current;
+  return { ...runtimeProjection, ...patch } as TeamGraphSnapshotRecord['nodes'][number];
+}
+
+function patchTeamGraphEdgeProjection(
+  current: TeamGraphSnapshotRecord['edges'][number],
+  patch: Record<string, unknown>,
+): TeamGraphSnapshotRecord['edges'][number] {
+  const { sourcePort: _sourcePort, targetPort: _targetPort, action: _action, payload: _payload, edgeType: _edgeType, kind: _kind, label: _label, ...runtimeProjection } = current;
+  return { ...runtimeProjection, ...patch } as TeamGraphSnapshotRecord['edges'][number];
+}
+
+function applyTeamGraphPatchOperations(
+  graph: TeamGraphSnapshotRecord,
+  operations: readonly TeamGraphPatchOperation[],
+): TeamGraphSnapshotRecord {
+  let nodes = [...graph.nodes];
+  let edges = [...graph.edges];
+  let metadata = graph.metadata;
+  for (const operation of operations) {
+    switch (operation.op) {
+      case 'add_node': {
+        const [node] = normalizeTeamGraphNodes([operation.node]);
+        if (node) nodes = [...nodes, node];
+        break;
+      }
+      case 'replace_node':
+        nodes = nodes.map((node) => node.nodeId === operation.node.nodeId ? patchTeamGraphNodeProjection(node, operation.node) : node);
+        break;
+      case 'remove_node':
+        nodes = nodes.filter((node) => node.nodeId !== operation.nodeId);
+        edges = edges.filter((edge) => edge.sourceNodeId !== operation.nodeId && edge.targetNodeId !== operation.nodeId);
+        break;
+      case 'add_edge': {
+        const [edge] = normalizeTeamGraphEdges([operation.edge]);
+        if (edge) edges = [...edges, edge];
+        break;
+      }
+      case 'replace_edge':
+        edges = edges.map((edge) => edge.edgeId === operation.edge.edgeId ? patchTeamGraphEdgeProjection(edge, operation.edge) : edge);
+        break;
+      case 'remove_edge':
+        edges = edges.filter((edge) => edge.edgeId !== operation.edgeId);
+        break;
+      case 'set_metadata':
+        metadata = { ...(metadata ?? {}), ...operation.metadata };
+        break;
+    }
+  }
+  return { ...graph, nodes, edges, metadata, updatedAt: Date.now() };
+}
+
+type TeamRunSnapshotUnavailableSection =
+  | 'nodeInputStates'
+  | 'roles'
+  | 'stages'
+  | 'workflowPlan'
+  | 'dispatchGroups'
+  | 'dispatchTasks'
+  | 'dispatches'
+  | 'dispatchExecutions'
+  | 'messages'
+  | 'nodePromptDeliveries'
+  | 'gates'
+  | 'kickbacks';
+
+type TeamRunSnapshotRecord = Awaited<ReturnType<typeof readTeamRunSnapshot>> & {
+  unavailableSections?: TeamRunSnapshotUnavailableSection[];
+};
+
+function isSnapshotSectionAvailable(snapshot: TeamRunSnapshotRecord, section: TeamRunSnapshotUnavailableSection): boolean {
+  return !snapshot.unavailableSections?.includes(section);
+}
 
 function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSnapshotRecord, state: TeamsState) {
   const runIds = appendRunId(state.runIdsByTeamId[teamId], runId);
   const eventsForRun = mergeEvents(state.eventsByRunId[runId] ?? [], snapshot.events);
-  const snapshotRunListItem = snapshot.run ? { ...snapshot.run, sessions: snapshot.roles } : null;
   const currentRunList = state.runListByTeamId[teamId] ?? [];
+  const currentRunListItem = currentRunList.find((teamRun) => teamRun.runId === runId);
+  const snapshotRoles = isSnapshotSectionAvailable(snapshot, 'roles') ? snapshot.roles : currentRunListItem?.sessions ?? state.rolesByTeamId[teamId] ?? [];
+  const snapshotRunListItem = snapshot.run ? { ...snapshot.run, sessions: snapshotRoles } : null;
   const nextRunList = snapshotRunListItem
     ? currentRunList.some((teamRun) => teamRun.runId === runId)
       ? currentRunList.map((teamRun) => teamRun.runId === runId ? snapshotRunListItem : teamRun)
@@ -808,21 +912,21 @@ function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSn
     eventsByRunId: { ...state.eventsByRunId, [runId]: eventsForRun },
     eventCursorByRunId: { ...state.eventCursorByRunId, [runId]: snapshot.nextEventCursor },
     runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? state.runsById[runId] },
-    rolesByTeamId: { ...state.rolesByTeamId, [teamId]: snapshot.roles },
-    stagesByTeamId: { ...state.stagesByTeamId, [teamId]: snapshot.stages },
+    rolesByTeamId: isSnapshotSectionAvailable(snapshot, 'roles') ? { ...state.rolesByTeamId, [teamId]: snapshot.roles } : state.rolesByTeamId,
+    stagesByTeamId: isSnapshotSectionAvailable(snapshot, 'stages') ? { ...state.stagesByTeamId, [teamId]: snapshot.stages } : state.stagesByTeamId,
     graphByTeamId: { ...state.graphByTeamId, [teamId]: normalizeTeamGraphProjection(snapshot.graph, runId) },
-    workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan },
-    dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups },
-    dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks },
+    workflowPlanByTeamId: isSnapshotSectionAvailable(snapshot, 'workflowPlan') ? { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan } : state.workflowPlanByTeamId,
+    dispatchGroupsByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatchGroups') ? { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups } : state.dispatchGroupsByTeamId,
+    dispatchTasksByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatchTasks') ? { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks } : state.dispatchTasksByTeamId,
     approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: snapshot.approvals },
     artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: snapshot.artifacts },
-    messagesByTeamId: { ...state.messagesByTeamId, [teamId]: snapshot.messages },
+    messagesByTeamId: isSnapshotSectionAvailable(snapshot, 'messages') ? { ...state.messagesByTeamId, [teamId]: snapshot.messages } : state.messagesByTeamId,
     nodeExecutionsByTeamId: { ...state.nodeExecutionsByTeamId, [teamId]: snapshot.nodeExecutions },
-    nodePromptDeliveryAttemptsByTeamId: { ...state.nodePromptDeliveryAttemptsByTeamId, [teamId]: snapshot.nodePromptDeliveries },
-    dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: snapshot.dispatches },
-    dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: snapshot.dispatchExecutions },
-    gatesByTeamId: { ...state.gatesByTeamId, [teamId]: snapshot.gates },
-    kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks },
+    nodePromptDeliveryAttemptsByTeamId: isSnapshotSectionAvailable(snapshot, 'nodePromptDeliveries') ? { ...state.nodePromptDeliveryAttemptsByTeamId, [teamId]: snapshot.nodePromptDeliveries } : state.nodePromptDeliveryAttemptsByTeamId,
+    dispatchesByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatches') ? { ...state.dispatchesByTeamId, [teamId]: snapshot.dispatches } : state.dispatchesByTeamId,
+    dispatchExecutionsByTeamId: isSnapshotSectionAvailable(snapshot, 'dispatchExecutions') ? { ...state.dispatchExecutionsByTeamId, [teamId]: snapshot.dispatchExecutions } : state.dispatchExecutionsByTeamId,
+    gatesByTeamId: isSnapshotSectionAvailable(snapshot, 'gates') ? { ...state.gatesByTeamId, [teamId]: snapshot.gates } : state.gatesByTeamId,
+    kickbacksByTeamId: isSnapshotSectionAvailable(snapshot, 'kickbacks') ? { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks } : state.kickbacksByTeamId,
     decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: snapshot.decisions },
     eventsByTeamId: { ...state.eventsByTeamId, [teamId]: eventsForRun },
     eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: snapshot.nextEventCursor },
@@ -971,18 +1075,21 @@ export const useTeamsStore = create<TeamsState>()(
         }
         const now = Date.now();
         set((state) => ({
-          teams: state.teams.map((team) => team.id === input.teamId
-            ? {
-              ...team,
-              name: input.candidate.displayName.trim() || team.name,
-              teamSkillVersion: input.candidate.teamSkillPackage.version,
-              teamSkillDescription: input.candidate.teamSkillPackage.description,
-              packagePath: input.candidate.packagePath.trim(),
-              sourcePath: input.candidate.teamSkillPackage.sourcePath,
-              activeRunId: undefined,
-              updatedAt: now,
-            }
-            : team),
+          teams: state.teams.map((team) => {
+            const packagePath = input.candidate.packagePath.trim();
+            return team.id === input.teamId
+              ? {
+                ...team,
+                name: input.candidate.displayName.trim() || team.name,
+                teamSkillVersion: input.candidate.teamSkillPackage.version,
+                teamSkillDescription: input.candidate.teamSkillPackage.description,
+                packagePath,
+                sourcePath: packagePath,
+                activeRunId: undefined,
+                updatedAt: now,
+              }
+              : team;
+          }),
           activeTeamId: input.teamId,
           errorByTeamId: { ...state.errorByTeamId, [input.teamId]: undefined },
         }));
@@ -1255,28 +1362,32 @@ export const useTeamsStore = create<TeamsState>()(
           snapshotInFlightByTeamId.delete(teamId);
         }
       },
-      saveGraph: async (teamId, graph) => {
+      submitGraphPatch: async (teamId, operations) => {
         const state = get();
         const runId = resolveActiveRunId(state, teamId);
-        const actionKey = idempotencyKey(teamId, `graph-save:${runId}:${graph.updatedAt ?? Date.now()}`);
+        const currentGraph = normalizeTeamGraphProjection(state.graphByTeamId[teamId], runId) ?? {
+          runId,
+          status: 'draft',
+          nodes: [],
+          edges: [],
+        };
+        if (operations.length === 0) return;
         set((state) => ({
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          const result = await saveTeamRunGraphProjection({
+          await submitTeamRunGraphPatch({
             runId,
-            graph,
-            idempotencyKey: actionKey,
-          });
-          if (result.snapshot) {
-            set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-            return;
-          }
-          set((state) => ({
-            graphByTeamId: {
-              ...state.graphByTeamId,
-              [teamId]: normalizeTeamGraphProjection({ ...graph, runId, updatedAt: graph.updatedAt ?? Date.now() }, runId),
+            summary: 'graph_patch',
+            patch: {
+              ...(currentGraph.graphId ? { baseGraphId: currentGraph.graphId } : {}),
+              ...(currentGraph.workflowPlanId ? { baseWorkflowPlanId: currentGraph.workflowPlanId } : {}),
+              operations,
             },
+            idempotencyKey: createRequestId('graph-patch'),
+          });
+          set((state) => ({
+            graphByTeamId: { ...state.graphByTeamId, [teamId]: applyTeamGraphPatchOperations(currentGraph, operations) },
           }));
         } catch (error) {
           set((state) => ({

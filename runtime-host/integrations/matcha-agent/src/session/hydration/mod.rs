@@ -4,21 +4,21 @@ mod model;
 use std::collections::VecDeque;
 
 use crate::session::{
-    client::{AppServerClient, AppServerClientError},
+    client::{AppServerClient, AppServerClientError, EventReplay, EventReplayPayload},
     facts::NativeSessionFacts,
-    model::{SessionId, SessionRecord},
+    model::{Sequence, SessionId, SessionRecord},
     protocol_event::ReplayLimit,
     request::{SessionSnapshotParams, SessionTranscriptParams},
 };
 
 pub use model::{
-    HydratedContentBlock, HydratedImage, HydratedMessage, HydratedMessageRole,
+    HydratedContentBlock, HydratedImage, HydratedLargeText, HydratedMessage, HydratedMessageRole,
     HydratedToolMetadata, HydratedToolResult, HydratedToolUse, HydrationIncomplete,
     HydrationResult, HydrationSnapshot, HydrationWindow, HydrationWindowMode,
-    HydrationWindowRequest,
+    HydrationWindowRequest, TranscriptRejection,
 };
 
-const REPLAY_LIMIT: f64 = 10_000.0;
+const REPLAY_PAGE_LIMIT: f64 = 128.0;
 
 pub(crate) async fn hydrate_connected_for_history(
     client: &AppServerClient,
@@ -46,7 +46,7 @@ pub(crate) fn hydrate_lines(
     request: HydrationWindowRequest,
 ) -> Result<HydrationSnapshot, HydrationIncomplete> {
     let (messages, window) = decode_transcript_window(lines, request)
-        .map_err(|_| HydrationIncomplete::TranscriptRejected)?;
+        .map_err(HydrationIncomplete::TranscriptRejected)?;
     Ok(HydrationSnapshot::new(messages, window))
 }
 
@@ -71,24 +71,11 @@ async fn hydrate_loaded(
         Ok(_) => return Err(HydrationIncomplete::ProtocolRejected),
         Err(error) => return Err(client_failure(error)),
     };
-    let replay_limit = ReplayLimit::try_new(REPLAY_LIMIT).expect("replay limit is finite");
-    let replay = match client
-        .replay_event_payload(session_id, None, Some(replay_limit))
-        .await
-    {
-        Ok(replay)
-            if replay.cursor() == snapshot.session.last_seq
-                && (replay.event_count() > 0 || snapshot.session.last_seq.get() == 0) =>
-        {
-            replay
-        }
-        Ok(_) => return Err(HydrationIncomplete::ReplayIncomplete),
-        Err(error) => return Err(client_failure(error)),
-    };
+    let replay = replay_to_snapshot(&session_id, snapshot.session.last_seq, client).await?;
 
     let (messages, window) = match decode_transcript_window(&transcript.lines, request) {
         Ok(window) => window,
-        Err(_) => return Err(HydrationIncomplete::TranscriptRejected),
+        Err(rejection) => return Err(HydrationIncomplete::TranscriptRejected(rejection)),
     };
     let transcript = HydrationSnapshot::new(messages, window);
     let facts = NativeSessionFacts::from_native(session, snapshot, transcript.clone(), replay)
@@ -96,15 +83,38 @@ async fn hydrate_loaded(
     Ok(facts)
 }
 
-#[cfg(test)]
-fn close_outcome(
-    hydration: HydrationResult,
-    close: Result<(), AppServerClientError>,
-) -> HydrationResult {
-    match close {
-        Ok(()) => hydration,
-        Err(_) => HydrationResult::Incomplete(HydrationIncomplete::ConnectionCloseFailed),
+async fn replay_to_snapshot(
+    session_id: &SessionId,
+    target: Sequence,
+    client: &AppServerClient,
+) -> Result<EventReplayPayload, HydrationIncomplete> {
+    if target.get() == 0 {
+        return Ok(EventReplayPayload::new(
+            EventReplay::new(0, target),
+            Vec::new(),
+        ));
     }
+
+    let replay_limit = ReplayLimit::try_new(REPLAY_PAGE_LIMIT).expect("replay limit is finite");
+    let mut cursor = Sequence::try_new(0).expect("zero is a valid replay cursor");
+    let mut events = Vec::new();
+    while cursor.get() < target.get() {
+        let page = client
+            .replay_event_payload(session_id.clone(), Some(cursor), Some(replay_limit))
+            .await
+            .map_err(client_failure)?;
+        let next = page.cursor();
+        if next.get() <= cursor.get() || next.get() > target.get() || page.event_count() == 0 {
+            return Err(HydrationIncomplete::ReplayIncomplete);
+        }
+        events.extend_from_slice(page.events());
+        cursor = next;
+    }
+
+    Ok(EventReplayPayload::new(
+        EventReplay::new(events.len(), cursor),
+        events,
+    ))
 }
 
 fn client_failure(error: AppServerClientError) -> HydrationIncomplete {
@@ -130,14 +140,21 @@ fn client_failure(error: AppServerClientError) -> HydrationIncomplete {
 const MAX_TRANSCRIPT_LINES: usize = 10_000;
 
 type DecodedTranscriptWindow =
-    Result<(Vec<model::HydratedMessage>, HydrationWindow), model::DecodeFailure>;
+    Result<(Vec<model::HydratedMessage>, HydrationWindow), TranscriptRejection>;
 
 fn decode_transcript_window(
     lines: &[String],
     request: HydrationWindowRequest,
 ) -> DecodedTranscriptWindow {
     if lines.len() > MAX_TRANSCRIPT_LINES {
-        return Err(model::DecodeFailure::TranscriptTooLarge);
+        return Err(TranscriptRejection::new(
+            None,
+            None,
+            None,
+            "transcript.lines",
+            model::DecodeFailure::TranscriptTooLarge,
+            "line_count_too_large",
+        ));
     }
 
     let mut decoded_count = 0;
@@ -159,8 +176,18 @@ fn decode_transcript_window(
         HydrationWindowMode::Latest | HydrationWindowMode::Older
     );
 
-    for line in lines {
-        let Some(message) = decode::decode_transcript_line(line)? else {
+    for (line_index, line) in lines.iter().enumerate() {
+        let Some(message) = decode::decode_transcript_line(line).map_err(|failure| {
+            TranscriptRejection::new(
+                Some(line_index),
+                failure.block_index(),
+                failure.block_type(),
+                failure.field(),
+                failure.reason(),
+                failure.actual(),
+            )
+        })?
+        else {
             continue;
         };
         let message = message.with_source_index(decoded_count);
@@ -295,10 +322,11 @@ mod tests {
     #[test]
     fn decode_rejects_transcript_beyond_native_cap() {
         let lines = vec![String::from(r#"{"message":{"role":"user","content":"x"}}"#); 10_001];
-        assert_eq!(
-            decode_transcript_window(&lines, HydrationWindowRequest::latest()),
-            Err(model::DecodeFailure::TranscriptTooLarge)
-        );
+        let rejection = decode_transcript_window(&lines, HydrationWindowRequest::latest())
+            .expect_err("oversized transcript should be rejected");
+        assert_eq!(rejection.message_index(), None);
+        assert_eq!(rejection.field(), "transcript.lines");
+        assert_eq!(rejection.reason(), "transcript_too_large");
     }
 
     #[test]
@@ -311,18 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn close_failure_overrides_a_provisional_complete_snapshot() {
+    fn close_failure_does_not_replace_a_provisional_complete_snapshot() {
         let snapshot = HydrationSnapshot::new(
             vec![HydratedMessage::try_new(HydratedMessageRole::User, "visible".into()).unwrap()],
             HydrationWindow::new(1, 0, 1),
         );
-        assert_eq!(
-            close_outcome(
+        assert!(matches!(
+            crate::session::client::outcome_after_cleanup(
                 HydrationResult::Complete(snapshot),
                 Err(AppServerClientError::CloseFailed),
             ),
-            HydrationResult::Incomplete(HydrationIncomplete::ConnectionCloseFailed)
-        );
+            HydrationResult::Complete(_)
+        ));
     }
 
     #[test]

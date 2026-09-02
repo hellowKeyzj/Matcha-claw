@@ -99,6 +99,7 @@ export interface ModelCatalogEntry {
   providerLabel: string;
   modelLabel: string;
   displayLabel: string;
+  modelReferences?: string[];
   contextWindow?: number;
   maxTokens?: number;
 }

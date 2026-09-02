@@ -18,6 +18,9 @@ use foundation::process::TerminationOutcome;
 use foundation::process::supervision::SupervisorPhase;
 #[cfg(windows)]
 use foundation::process::supervision::{RestartOutcome, TerminationCompletion};
+use foundation::toolchain::{
+    NativeToolchainRuntime, ToolchainPlatform, UnsupportedToolchainCommandPort,
+};
 
 use super::*;
 use crate::{
@@ -66,6 +69,7 @@ fn input(root: &TestRoot) -> MatchaPeerInput {
         working_directory: absolute_path("runtime"),
         storage_root: root.0.join("storage"),
         port: 18_790,
+        toolchain: toolchain(),
         report_diagnostic: Arc::new(|_| {}),
         #[cfg(windows)]
         git_bash: absolute_path("bin/bash.exe"),
@@ -81,6 +85,16 @@ fn secret() -> Secret {
         .as_nanos()
         ^ u128::from(NEXT_ROOT.fetch_add(1, Ordering::Relaxed));
     Secret::new(entropy.to_string()).unwrap()
+}
+
+fn toolchain() -> Arc<NativeToolchainRuntime> {
+    Arc::new(NativeToolchainRuntime::new(
+        ToolchainPlatform::current(),
+        std::env::consts::ARCH,
+        absolute_path("runtime"),
+        None,
+        Arc::new(UnsupportedToolchainCommandPort),
+    ))
 }
 
 #[cfg(windows)]
@@ -125,6 +139,7 @@ fn packaged_input(root: &TestRoot, artifact: &PackagedMatchaArtifact) -> MatchaP
         working_directory: artifact.resources.clone(),
         storage_root: root.0.join("storage"),
         port: available_loopback_port(),
+        toolchain: toolchain(),
         report_diagnostic: Arc::new(|_| {}),
         git_bash: artifact.git_bash.clone(),
     }

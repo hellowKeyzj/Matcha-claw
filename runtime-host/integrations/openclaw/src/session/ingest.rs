@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::mpsc;
 
 use crate::gateway::{
-    ingress::{GatewayEpoch, Ingress, IngressEvent},
+    ingress::{GatewayEpoch, Ingress, IngressError, IngressEvent},
     wire::GatewayEvent,
 };
 
@@ -31,6 +31,7 @@ pub(crate) struct SessionEventIngest {
     ingress: Arc<Ingress>,
     next_epoch: AtomicU64,
     route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
+    canonical_events: mpsc::Sender<CanonicalIngressResult>,
 }
 
 impl SessionEventIngest {
@@ -43,13 +44,14 @@ impl SessionEventIngest {
         tokio::spawn(project_ingress(
             receiver,
             events,
-            canonical_events,
+            canonical_events.clone(),
             Arc::clone(&route_keys),
         ));
         Self {
             ingress: Arc::new(ingress),
             next_epoch: AtomicU64::new(0),
             route_keys,
+            canonical_events,
         }
     }
 
@@ -79,7 +81,15 @@ impl SessionEventIngest {
                 let Ok(Some(envelope)) = decode_session_event(event) else {
                     continue;
                 };
-                let _ = ingest.ingress.try_ingest(epoch, envelope);
+                let session_key = envelope.session_key.clone();
+                match ingest.ingress.try_ingest(epoch, envelope) {
+                    Ok(()) | Err(IngressError::StaleEpoch) => {}
+                    Err(error) => {
+                        ingest
+                            .publish_recovery(session_key, Some(epoch), error)
+                            .await
+                    }
+                }
             }
         });
     }
@@ -91,6 +101,26 @@ impl SessionEventIngest {
             .begin_epoch(epoch)
             .expect("epoch counter is monotonic");
         epoch
+    }
+
+    async fn publish_recovery(
+        &self,
+        session_key: SessionKey,
+        epoch: Option<GatewayEpoch>,
+        error: IngressError,
+    ) {
+        let route_key = self
+            .route_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session_key)
+            .cloned();
+        let recovery =
+            CanonicalSessionDeltaProducer::from_ingress_error(session_key, route_key, epoch, error);
+        let _ = self
+            .canonical_events
+            .send(CanonicalIngressResult::Produced(recovery))
+            .await;
     }
 }
 

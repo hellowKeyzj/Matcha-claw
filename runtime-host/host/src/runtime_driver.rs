@@ -6,6 +6,11 @@ use foundation::process::supervision::{
 use platform::{endpoint::runtime_address::RuntimeEndpoint, exchange::InvocationOutcome};
 use tokio::sync::watch;
 
+use matcha_agent::session::{
+    client::AppServerClientError as MatchaAppServerClientError,
+    model::{SessionId as MatchaSessionId, SessionRecord as MatchaSessionRecord},
+};
+
 use crate::{
     RuntimeSessionError,
     channel::{
@@ -34,7 +39,7 @@ use crate::{
     sessions::model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
     sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
     sessions::send::{SessionSendCommand, SessionSendOutcome},
-    sessions::timeline,
+    sessions::timeline::{self, ContentCommand, ContentOutcome},
     skill_bundle,
     skill_install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
     skill_management::{Command as SkillManagementCommand, Outcome as SkillManagementOutcome},
@@ -189,6 +194,13 @@ pub(crate) trait SessionOps: Send + Sync {
         Box::pin(async { matcha_session_catalog::Outcome::Unavailable })
     }
 
+    fn load_matcha_session<'a>(
+        &'a self,
+        _session_id: MatchaSessionId,
+    ) -> SessionFuture<'a, Result<MatchaSessionRecord, MatchaAppServerClientError>> {
+        Box::pin(async { Err(MatchaAppServerClientError::ConnectionClosed) })
+    }
+
     fn load_matcha_history<'a>(
         &'a self,
         _command: matcha_history::Command,
@@ -203,6 +215,15 @@ pub(crate) trait SessionOps: Send + Sync {
     ) -> SessionFuture<'a, timeline::Outcome> {
         Box::pin(async {
             timeline::Outcome::unavailable(timeline::UnavailableReason::RuntimeUnavailable)
+        })
+    }
+
+    fn load_session_content<'a>(
+        &'a self,
+        _command: ContentCommand,
+    ) -> SessionFuture<'a, ContentOutcome> {
+        Box::pin(async {
+            ContentOutcome::unavailable(timeline::UnavailableReason::RuntimeUnavailable)
         })
     }
 

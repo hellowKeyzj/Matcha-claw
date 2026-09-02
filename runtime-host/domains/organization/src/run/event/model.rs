@@ -1,6 +1,23 @@
 use std::{fmt, num::NonZeroU64};
 
+use sha2::{Digest, Sha256};
+
 use crate::{ApprovalDecision, ApprovalStatus};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TeamEventIdentityKind {
+    Command,
+    Approval,
+}
+
+impl TeamEventIdentityKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Approval => "approval",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct OpaqueId(String);
@@ -28,6 +45,7 @@ impl OpaqueId {
 pub enum InvalidEventInput {
     OpaqueId,
     EmptyGraphPatch,
+    GraphPatchIdentity,
 }
 
 impl fmt::Display for InvalidEventInput {
@@ -37,11 +55,42 @@ impl fmt::Display for InvalidEventInput {
                 formatter.write_str("event identifiers must be bounded opaque identifiers")
             }
             Self::EmptyGraphPatch => formatter.write_str("graph patches must contain an operation"),
+            Self::GraphPatchIdentity => {
+                formatter.write_str("graph patch audit identities must be graph-level identifiers")
+            }
         }
     }
 }
 
 impl std::error::Error for InvalidEventInput {}
+
+pub(crate) fn team_event_id(
+    kind: TeamEventIdentityKind,
+    run_id: &str,
+    causation_id: &str,
+    sequence: u64,
+) -> Result<OpaqueId, InvalidEventInput> {
+    let candidate = match kind {
+        TeamEventIdentityKind::Command => format!("team-event-{run_id}-{causation_id}-{sequence}"),
+        TeamEventIdentityKind::Approval => {
+            format!("team-event-{run_id}-approval-{causation_id}-{sequence}")
+        }
+    };
+    if let Ok(id) = OpaqueId::try_new(candidate.clone()) {
+        return Ok(id);
+    }
+
+    use fmt::Write as _;
+
+    let digest = Sha256::digest(candidate.as_bytes());
+    let mut value = String::with_capacity(80);
+    write!(&mut value, "team-event-{}:{sequence}:", kind.label())
+        .expect("writing to String cannot fail");
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    OpaqueId::try_new(value)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphNodeKind {
@@ -65,32 +114,32 @@ pub enum GraphEdgeAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GraphPatchOperation {
     AddNode {
-        node_id: OpaqueId,
+        node_id: String,
         kind: GraphNodeKind,
-        role_id: Option<OpaqueId>,
+        role_id: Option<String>,
     },
     ReplaceNode {
-        node_id: OpaqueId,
+        node_id: String,
         kind: GraphNodeKind,
-        role_id: Option<OpaqueId>,
+        role_id: Option<String>,
     },
     RemoveNode {
-        node_id: OpaqueId,
+        node_id: String,
     },
     AddEdge {
-        edge_id: OpaqueId,
-        source_node_id: OpaqueId,
-        target_node_id: OpaqueId,
+        edge_id: String,
+        source_node_id: String,
+        target_node_id: String,
         action: GraphEdgeAction,
     },
     ReplaceEdge {
-        edge_id: OpaqueId,
-        source_node_id: OpaqueId,
-        target_node_id: OpaqueId,
+        edge_id: String,
+        source_node_id: String,
+        target_node_id: String,
         action: GraphEdgeAction,
     },
     RemoveEdge {
-        edge_id: OpaqueId,
+        edge_id: String,
     },
     SetMetadata {
         key: OpaqueId,
@@ -107,19 +156,32 @@ pub enum MetadataValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphPatch {
-    base_graph_id: OpaqueId,
-    base_workflow_plan_id: OpaqueId,
+    base_graph_id: String,
+    base_workflow_plan_id: String,
     operations: Vec<GraphPatchOperation>,
 }
 
 impl GraphPatch {
     pub fn try_new(
-        base_graph_id: OpaqueId,
-        base_workflow_plan_id: OpaqueId,
+        base_graph_id: impl Into<String>,
+        base_workflow_plan_id: impl Into<String>,
         operations: Vec<GraphPatchOperation>,
     ) -> Result<Self, InvalidEventInput> {
+        let base_graph_id = base_graph_id.into();
+        let base_workflow_plan_id = base_workflow_plan_id.into();
+        if !is_graph_patch_identity(&base_graph_id)
+            || !is_graph_patch_identity(&base_workflow_plan_id)
+        {
+            return Err(InvalidEventInput::GraphPatchIdentity);
+        }
         if operations.is_empty() {
             return Err(InvalidEventInput::EmptyGraphPatch);
+        }
+        if !operations
+            .iter()
+            .all(graph_patch_operation_has_valid_identity)
+        {
+            return Err(InvalidEventInput::GraphPatchIdentity);
         }
         Ok(Self {
             base_graph_id,
@@ -128,16 +190,53 @@ impl GraphPatch {
         })
     }
 
-    pub fn base_graph_id(&self) -> &OpaqueId {
+    pub fn base_graph_id(&self) -> &str {
         &self.base_graph_id
     }
 
-    pub fn base_workflow_plan_id(&self) -> &OpaqueId {
+    pub fn base_workflow_plan_id(&self) -> &str {
         &self.base_workflow_plan_id
     }
 
     pub fn operations(&self) -> &[GraphPatchOperation] {
         &self.operations
+    }
+}
+
+fn is_graph_patch_identity(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 16 * 1024 && !value.chars().any(char::is_control)
+}
+
+fn graph_patch_operation_has_valid_identity(operation: &GraphPatchOperation) -> bool {
+    match operation {
+        GraphPatchOperation::AddNode {
+            node_id, role_id, ..
+        }
+        | GraphPatchOperation::ReplaceNode {
+            node_id, role_id, ..
+        } => {
+            is_graph_patch_identity(node_id)
+                && role_id.as_deref().is_none_or(is_graph_patch_identity)
+        }
+        GraphPatchOperation::RemoveNode { node_id } => is_graph_patch_identity(node_id),
+        GraphPatchOperation::AddEdge {
+            edge_id,
+            source_node_id,
+            target_node_id,
+            ..
+        }
+        | GraphPatchOperation::ReplaceEdge {
+            edge_id,
+            source_node_id,
+            target_node_id,
+            ..
+        } => {
+            is_graph_patch_identity(edge_id)
+                && is_graph_patch_identity(source_node_id)
+                && is_graph_patch_identity(target_node_id)
+        }
+        GraphPatchOperation::RemoveEdge { edge_id } => is_graph_patch_identity(edge_id),
+        GraphPatchOperation::SetMetadata { .. } => true,
     }
 }
 
@@ -453,13 +552,13 @@ pub enum TeamEventType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamEventPayload {
     GraphPatchAccepted {
-        base_graph_id: OpaqueId,
-        base_workflow_plan_id: OpaqueId,
+        base_graph_id: String,
+        base_workflow_plan_id: String,
         operation_count: NonZeroU64,
     },
     GraphReplaced {
-        graph_id: OpaqueId,
-        workflow_plan_id: OpaqueId,
+        graph_id: String,
+        workflow_plan_id: String,
     },
     NodeProgressed {
         node_execution_id: OpaqueId,
@@ -523,12 +622,12 @@ impl TeamEvent {
         idempotency_key: OpaqueId,
         created_at: u64,
     ) -> Result<Self, InvalidEventInput> {
-        let event_id = OpaqueId::try_new(format!(
-            "team-event-{}-approval-{}-{}",
+        let event_id = team_event_id(
+            TeamEventIdentityKind::Approval,
             run_id.as_str(),
             approval_id.as_str(),
-            sequence.get()
-        ))?;
+            sequence.get(),
+        )?;
         let status = decision.status();
         Ok(Self {
             event_id,
@@ -577,8 +676,8 @@ impl TeamEvent {
             CommandPayload::GraphPatch(patch) => (
                 TeamEventType::GraphPatchAccepted,
                 TeamEventPayload::GraphPatchAccepted {
-                    base_graph_id: patch.base_graph_id().clone(),
-                    base_workflow_plan_id: patch.base_workflow_plan_id().clone(),
+                    base_graph_id: patch.base_graph_id().to_owned(),
+                    base_workflow_plan_id: patch.base_workflow_plan_id().to_owned(),
                     operation_count: NonZeroU64::new(patch.operations().len() as u64)
                         .expect("validated graph patches contain one operation"),
                 },
@@ -586,8 +685,8 @@ impl TeamEvent {
             CommandPayload::GraphReplace(definition) => (
                 TeamEventType::GraphReplaced,
                 TeamEventPayload::GraphReplaced {
-                    graph_id: OpaqueId::try_new(definition.graph_id().to_owned())?,
-                    workflow_plan_id: OpaqueId::try_new(definition.workflow_plan_id().to_owned())?,
+                    graph_id: definition.graph_id().to_owned(),
+                    workflow_plan_id: definition.workflow_plan_id().to_owned(),
                 },
             ),
             CommandPayload::NodeProgress(progress) => (
@@ -606,12 +705,12 @@ impl TeamEvent {
                 },
             ),
         };
-        let event_id = OpaqueId::try_new(format!(
-            "team-event-{}-{}-{}",
+        let event_id = team_event_id(
+            TeamEventIdentityKind::Command,
             command.run_id().as_str(),
             command.command_id().as_str(),
-            sequence.get()
-        ))?;
+            sequence.get(),
+        )?;
         Ok(Self {
             event_id,
             run_id: command.run_id().clone(),

@@ -10,6 +10,8 @@ use tokio_util::sync::CancellationToken;
 use super::output::{OutputStream, StartupDiagnostic, StartupOutputClassifier};
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
+const FORWARDED_SESSION_TRACE_LINE_BYTES: usize = 8 * 1024;
+const SESSION_TRACE_PREFIX: &str = "\"prefix\":\"session-trace\"";
 type DiagnosticCallback = dyn Fn(StartupDiagnostic) + Send + Sync;
 type OwnedStdin = Box<dyn AsyncWrite + Send + Unpin>;
 
@@ -154,6 +156,7 @@ async fn drain_output(
     report_diagnostic: Arc<DiagnosticCallback>,
 ) -> std::io::Result<()> {
     let mut classifier = StartupOutputClassifier::new(stream);
+    let mut forwarder = SessionTraceForwarder::new();
     let mut chunk = [0; READ_CHUNK_BYTES];
 
     loop {
@@ -162,9 +165,68 @@ async fn drain_output(
             if let Some(diagnostic) = classifier.finish() {
                 report_diagnostic(diagnostic);
             }
+            forwarder.finish();
             return Ok(());
         }
-        classifier.push(&chunk[..read], |diagnostic| report_diagnostic(diagnostic));
+        let bytes = &chunk[..read];
+        forwarder.push(bytes);
+        classifier.push(bytes, |diagnostic| report_diagnostic(diagnostic));
+    }
+}
+
+struct SessionTraceForwarder {
+    line: Vec<u8>,
+    discarding: bool,
+}
+
+impl SessionTraceForwarder {
+    fn new() -> Self {
+        Self {
+            line: Vec::with_capacity(FORWARDED_SESSION_TRACE_LINE_BYTES),
+            discarding: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let mut remaining = bytes;
+        while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
+            self.consume(&remaining[..newline], true);
+            remaining = &remaining[newline + 1..];
+        }
+        self.consume(remaining, false);
+    }
+
+    fn finish(&mut self) {
+        self.emit_buffered();
+    }
+
+    fn consume(&mut self, bytes: &[u8], terminated: bool) {
+        if self.discarding {
+            if terminated {
+                self.line.clear();
+                self.discarding = false;
+            }
+            return;
+        }
+        if self.line.len().saturating_add(bytes.len()) > FORWARDED_SESSION_TRACE_LINE_BYTES {
+            self.line.clear();
+            self.discarding = !terminated;
+            return;
+        }
+        self.line.extend_from_slice(bytes);
+        if terminated {
+            self.emit_buffered();
+        }
+    }
+
+    fn emit_buffered(&mut self) {
+        let content_end = self.line.len() - usize::from(self.line.last() == Some(&b'\r'));
+        if let Ok(line) = std::str::from_utf8(&self.line[..content_end])
+            && line.contains(SESSION_TRACE_PREFIX)
+        {
+            eprintln!("{line}");
+        }
+        self.line.clear();
     }
 }
 

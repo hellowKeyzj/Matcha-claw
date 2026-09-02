@@ -2076,6 +2076,8 @@ async function* queryModel(
     try {
       // stream in and accumulate state
       let isFirstChunk = true
+      let hasContentDelta = false
+      let hasTextDelta = false
       let lastEventTime: number | null = null // Set after first chunk to avoid measuring TTFB as a stall
       const STALL_THRESHOLD_MS = 30_000 // 30 seconds
       let totalStallTime = 0
@@ -2147,6 +2149,12 @@ async function* queryModel(
             break
           }
           case 'content_block_start':
+            options.runTrace?.('api.stream.content_block_start', {
+              queryDepth: options.queryTracking?.depth,
+              requestId: streamRequestId,
+              blockIndex: part.index,
+              blockType: part.content_block.type,
+            })
             switch (part.content_block.type) {
               case 'tool_use':
                 contentBlocks[part.index] = {
@@ -2208,6 +2216,15 @@ async function* queryModel(
           case 'content_block_delta': {
             const contentBlock = contentBlocks[part.index]
             const delta = part.delta as typeof part.delta | ConnectorTextDelta
+            if (!hasContentDelta) {
+              hasContentDelta = true
+              options.runTrace?.('api.stream.first_content_delta', {
+                queryDepth: options.queryTracking?.depth,
+                requestId: streamRequestId,
+                blockIndex: part.index,
+                deltaType: delta.type,
+              })
+            }
             if (!contentBlock) {
               logEvent('tengu_streaming_error', {
                 error_type:
@@ -2267,6 +2284,15 @@ async function* queryModel(
                   contentBlock.input += delta.partial_json
                   break
                 case 'text_delta':
+                  if (!hasTextDelta) {
+                    hasTextDelta = true
+                    options.runTrace?.('api.stream.first_text_delta', {
+                      queryDepth: options.queryTracking?.depth,
+                      requestId: streamRequestId,
+                      blockIndex: part.index,
+                      textLength: delta.text?.length ?? 0,
+                    })
+                  }
                   if (contentBlock.type !== 'text') {
                     logEvent('tengu_streaming_error', {
                       error_type:
@@ -2326,6 +2352,11 @@ async function* queryModel(
             break
           }
           case 'content_block_stop': {
+            options.runTrace?.('api.stream.content_block_stop', {
+              queryDepth: options.queryTracking?.depth,
+              requestId: streamRequestId,
+              blockIndex: part.index,
+            })
             const contentBlock = contentBlocks[part.index]
             if (!contentBlock) {
               logEvent('tengu_streaming_error', {

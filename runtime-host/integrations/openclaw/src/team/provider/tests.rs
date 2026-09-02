@@ -291,7 +291,9 @@ async fn materialization_readback_confirms_only_matching_external_agent_and_mark
         MaterializationOperationOutcome::Confirmed { ref receipt }
             if receipt.roles()[0].agent().as_str() == "existing-reviewer"
                 && receipt.roles()[0].ownership() == organization::RoleMaterializationOwnership::External
+                && receipt.roles()[0].native_workspace().map(organization::NativeWorkspaceReceipt::as_str) == Some(workspace.to_string_lossy().as_ref())
     ));
+    assert!(!format!("{outcome:?}").contains(workspace.to_string_lossy().as_ref()));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -644,6 +646,12 @@ async fn managed_materialization_uses_team_and_role_projected_workspace() {
                 receipt.roles()[0].ownership(),
                 organization::RoleMaterializationOwnership::Managed
             );
+            let workspace = receipt.roles()[0]
+                .native_workspace()
+                .expect("managed materialization must record confirmed workspace")
+                .as_str();
+            assert!(workspace.contains("teambuddy"));
+            assert!(!format!("{receipt:?}").contains(workspace));
         }
         unexpected => panic!("expected confirmed materialization receipt, got {unexpected:?}"),
     }
@@ -1439,24 +1447,12 @@ async fn removal_port_never_deletes_external_receipt_agents() {
     let client = test_client(&listener, identity.fingerprint());
     let acceptor = identity.acceptor();
     let external_workspace = marker_workspace.to_string_lossy().into_owned();
+    let managed_workspace = team_workspace_path(&state_dir, "team-release", "reviewer")
+        .to_string_lossy()
+        .into_owned();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
-        let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], "agents.list");
-        let id = request["id"].as_str().unwrap();
-        send_json(
-            &mut socket,
-            json!({
-                "type": "res", "id": id, "ok": true,
-                "payload": {
-                    "defaultId": "agent-main", "mainKey": "main", "scope": "global",
-                    "agents": [{"id": "external-approver", "workspace": external_workspace}]
-                }
-            }),
-        )
-        .await;
-
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.delete");
         assert_eq!(request["params"]["agentId"], "managed-reviewer");
@@ -1475,17 +1471,19 @@ async fn removal_port_never_deletes_external_receipt_agents() {
         TeamId::try_new("team-release").unwrap(),
         RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
         vec![
-            organization::RoleMaterializationReceipt::with_ownership(
+            organization::RoleMaterializationReceipt::with_native_workspace(
                 organization::RoleId::try_new("reviewer").unwrap(),
                 organization::ManagedAgentReference::try_new("managed-reviewer").unwrap(),
                 organization::RoleMaterializationOwnership::Managed,
                 RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+                organization::NativeWorkspaceReceipt::try_new(managed_workspace).unwrap(),
             ),
-            organization::RoleMaterializationReceipt::with_ownership(
+            organization::RoleMaterializationReceipt::with_native_workspace(
                 organization::RoleId::try_new("approver").unwrap(),
                 organization::ManagedAgentReference::try_new("external-approver").unwrap(),
                 organization::RoleMaterializationOwnership::External,
                 RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+                organization::NativeWorkspaceReceipt::try_new(external_workspace).unwrap(),
             ),
         ],
     )
@@ -1506,6 +1504,234 @@ async fn removal_port_never_deletes_external_receipt_agents() {
         MaterializationOperationOutcome::Confirmed { .. }
     ));
     assert!(!marker.recover(&marker_workspace).unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn external_removal_uses_receipt_workspace_without_gateway_readback() {
+    let state_dir = test_state_dir();
+    let workspace = state_dir.as_path().join("receipt-external-workspace");
+    let marker = TeamBuddyMarker::new(
+        TeamId::try_new("team-release").unwrap(),
+        organization::RoleId::try_new("reviewer").unwrap(),
+    );
+    marker.write(&workspace).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity = TestTlsIdentity::generate();
+    let client = test_client(&listener, identity.fingerprint());
+    let receipt = materialization_receipt_with_workspace(
+        "reviewer",
+        "external-reviewer",
+        organization::RoleMaterializationOwnership::External,
+        workspace.to_string_lossy().into_owned(),
+    );
+
+    let outcome = TeamProvider::new(&client, state_dir)
+        .remove(organization::TeamMaterializationRemoval::new(
+            receipt,
+            IdempotencyKey::try_new("remove-external-only").unwrap(),
+        ))
+        .await;
+    drop(client);
+
+    assert!(matches!(
+        outcome,
+        MaterializationOperationOutcome::Confirmed { .. }
+    ));
+    assert!(!marker.recover(&workspace).unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_removal_uses_receipt_workspace_for_marker_cleanup() {
+    let state_dir = test_state_dir();
+    let receipt_workspace = state_dir.as_path().join("receipt-managed-workspace");
+    let projected_workspace = team_workspace_path(&state_dir, "team-release", "reviewer");
+    let marker = TeamBuddyMarker::new(
+        TeamId::try_new("team-release").unwrap(),
+        organization::RoleId::try_new("reviewer").unwrap(),
+    );
+    marker.write(&receipt_workspace).unwrap();
+    marker.write(&projected_workspace).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity = TestTlsIdentity::generate();
+    let client = test_client(&listener, identity.fingerprint());
+    let acceptor = identity.acceptor();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_websocket(&listener, &acceptor).await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        let request = read_json(&mut socket).await;
+        assert_eq!(request["method"], "agents.delete");
+        assert_eq!(
+            request["params"],
+            json!({"agentId": "managed-reviewer", "deleteFiles": true})
+        );
+        let id = request["id"].as_str().unwrap();
+        send_json(
+            &mut socket,
+            json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "managed-reviewer", "removedBindings": 0}}),
+        )
+        .await;
+        finish_control_exchange(&mut socket).await;
+    });
+    let receipt = materialization_receipt_with_workspace(
+        "reviewer",
+        "managed-reviewer",
+        organization::RoleMaterializationOwnership::Managed,
+        receipt_workspace.to_string_lossy().into_owned(),
+    );
+
+    let outcome = TeamProvider::new(&client, state_dir)
+        .remove(organization::TeamMaterializationRemoval::new(
+            receipt,
+            IdempotencyKey::try_new("remove-managed-receipt-workspace").unwrap(),
+        ))
+        .await;
+    drop(client);
+    server.await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        MaterializationOperationOutcome::Confirmed { .. }
+    ));
+    assert!(!marker.recover(&receipt_workspace).unwrap());
+    assert!(marker.recover(&projected_workspace).unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_removal_confirms_native_not_found_from_owned_receipt() {
+    let state_dir = test_state_dir();
+    let workspace = state_dir.as_path().join("not-found-managed-workspace");
+    let marker = TeamBuddyMarker::new(
+        TeamId::try_new("team-release").unwrap(),
+        organization::RoleId::try_new("reviewer").unwrap(),
+    );
+    marker.write(&workspace).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity = TestTlsIdentity::generate();
+    let client = test_client(&listener, identity.fingerprint());
+    let acceptor = identity.acceptor();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_websocket(&listener, &acceptor).await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        let request = read_json(&mut socket).await;
+        assert_eq!(request["params"]["agentId"], "managed-reviewer");
+        let id = request["id"].as_str().unwrap();
+        send_json(
+            &mut socket,
+            json!({"type": "res", "id": id, "ok": false, "error": {"code": "AGENT_NOT_FOUND", "message": "redacted"}}),
+        )
+        .await;
+        finish_control_exchange(&mut socket).await;
+    });
+    let receipt = materialization_receipt_with_workspace(
+        "reviewer",
+        "managed-reviewer",
+        organization::RoleMaterializationOwnership::Managed,
+        workspace.to_string_lossy().into_owned(),
+    );
+
+    let outcome = TeamProvider::new(&client, state_dir)
+        .remove(organization::TeamMaterializationRemoval::new(
+            receipt,
+            IdempotencyKey::try_new("remove-managed-not-found").unwrap(),
+        ))
+        .await;
+    drop(client);
+    server.await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        MaterializationOperationOutcome::Confirmed { .. }
+    ));
+    assert!(!marker.recover(&workspace).unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_removal_malformed_delete_response_remains_outcome_unknown() {
+    let state_dir = test_state_dir();
+    let workspace = state_dir.as_path().join("malformed-managed-workspace");
+    let marker = TeamBuddyMarker::new(
+        TeamId::try_new("team-release").unwrap(),
+        organization::RoleId::try_new("reviewer").unwrap(),
+    );
+    marker.write(&workspace).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity = TestTlsIdentity::generate();
+    let client = test_client(&listener, identity.fingerprint());
+    let acceptor = identity.acceptor();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_websocket(&listener, &acceptor).await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        let request = read_json(&mut socket).await;
+        let id = request["id"].as_str().unwrap();
+        send_json(
+            &mut socket,
+            json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "other-agent", "removedBindings": 0}}),
+        )
+        .await;
+        finish_control_exchange(&mut socket).await;
+    });
+    let receipt = materialization_receipt_with_workspace(
+        "reviewer",
+        "managed-reviewer",
+        organization::RoleMaterializationOwnership::Managed,
+        workspace.to_string_lossy().into_owned(),
+    );
+
+    let outcome = TeamProvider::new(&client, state_dir)
+        .remove(organization::TeamMaterializationRemoval::new(
+            receipt,
+            IdempotencyKey::try_new("remove-managed-malformed").unwrap(),
+        ))
+        .await;
+    drop(client);
+    server.await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        MaterializationOperationOutcome::OutcomeUnknown
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn removal_without_receipt_workspace_remains_outcome_unknown_without_gateway() {
+    let state_dir = test_state_dir();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let identity = TestTlsIdentity::generate();
+    let client = test_client(&listener, identity.fingerprint());
+    let receipt = organization::MaterializationReceipt::try_new(
+        TeamId::try_new("team-release").unwrap(),
+        RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+        vec![organization::RoleMaterializationReceipt::with_ownership(
+            organization::RoleId::try_new("reviewer").unwrap(),
+            organization::ManagedAgentReference::try_new("managed-reviewer").unwrap(),
+            organization::RoleMaterializationOwnership::Managed,
+            RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+        )],
+    )
+    .unwrap();
+
+    let outcome = TeamProvider::new(&client, state_dir)
+        .remove(organization::TeamMaterializationRemoval::new(
+            receipt,
+            IdempotencyKey::try_new("remove-missing-workspace").unwrap(),
+        ))
+        .await;
+    drop(client);
+
+    assert!(matches!(
+        outcome,
+        MaterializationOperationOutcome::OutcomeUnknown
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1577,8 +1803,10 @@ async fn manual_materialization_projects_only_gateway_confirmed_external_workspa
 
     assert!(matches!(
         outcome,
-        MaterializationOperationOutcome::Confirmed { .. }
+        MaterializationOperationOutcome::Confirmed { ref receipt }
+            if receipt.roles()[0].native_workspace().map(organization::NativeWorkspaceReceipt::as_str) == Some(workspace_wire.as_str())
     ));
+    assert!(!format!("{outcome:?}").contains(workspace_wire.as_str()));
     assert!(
         fs::read_to_string(workspace.join("AGENTS.md"))
             .unwrap()
@@ -1926,16 +2154,9 @@ async fn update_and_delete_issue_exact_scoped_requests_and_require_confirmed_ide
 #[tokio::test(flavor = "current_thread")]
 async fn local_pre_write_failure_is_rejected_without_a_team_request() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = listener.local_addr().unwrap();
-    drop(listener);
-
     let identity = TestTlsIdentity::generate();
-    let client = GatewayClient::new(
-        GatewayEndpoint::try_new(endpoint).unwrap(),
-        identity.fingerprint(),
-        Arc::new(GatewaySecret::new("fake-gateway-token".into()).unwrap()),
-        GatewayClientMetadata::try_new("1.2.3".into(), "windows".into()).unwrap(),
-    );
+    let client = test_client(&listener, identity.fingerprint());
+    client.close_control_connection().await;
     let encoded = wire::team::agents_delete_request("local-failure".into(), "team-agent".into())
         .unwrap()
         .encode()
@@ -1951,6 +2172,11 @@ async fn local_pre_write_failure_is_rejected_without_a_team_request() {
         .await;
 
     assert!(matches!(outcome, MutationOutcome::Rejected));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2347,6 +2573,28 @@ fn managed_materialization_request(idempotency_key: &str) -> TeamMaterialization
     )
     .unwrap();
     TeamMaterializationRequest::new(intent, IdempotencyKey::try_new(idempotency_key).unwrap())
+}
+
+fn materialization_receipt_with_workspace(
+    role: &str,
+    agent: &str,
+    ownership: organization::RoleMaterializationOwnership,
+    workspace: String,
+) -> organization::MaterializationReceipt {
+    organization::MaterializationReceipt::try_new(
+        TeamId::try_new("team-release").unwrap(),
+        RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+        vec![
+            organization::RoleMaterializationReceipt::with_native_workspace(
+                organization::RoleId::try_new(role).unwrap(),
+                organization::ManagedAgentReference::try_new(agent).unwrap(),
+                ownership,
+                RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
+                organization::NativeWorkspaceReceipt::try_new(workspace).unwrap(),
+            ),
+        ],
+    )
+    .unwrap()
 }
 
 fn materialization_config_snapshot_payload_with_raw(raw: String, hash: &str) -> Value {

@@ -5,6 +5,8 @@ import {
   CHAT_SEND_RPC_TIMEOUT_MS,
   sendChatTransport,
 } from './send-transport';
+import { selectCurrentChatSendGate } from './selectors';
+import { resolveChatSendGateForPayload } from './send-gate';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -24,14 +26,13 @@ import {
   getSessionItems,
   patchSessionRecord,
 } from './store-state-helpers';
-import { resolveSessionOperationTarget } from './session-identity';
 import {
   createSessionTraceId,
   logSessionTrace,
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import type { ChatSendAttachment, ChatSendResult, ChatStoreState } from './types';
+import type { ChatSendAttachment, ChatSendResult, ChatSessionRuntimeState, ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
 import type {
   SessionAssistantTurnItem,
@@ -266,9 +267,20 @@ function appendOptimisticSendItems(params: {
       createdAt,
       updatedAt: createdAt,
     };
+    const assistantItemKey = `renderer-assistant:${clientId}`;
     return {
       loadedSessions: patchSessionRecord(state, sessionKey, {
         items: [...current.items, userItem, assistantItem],
+        runtime: {
+          ...current.runtime,
+          runPhase: 'submitted',
+          pendingTurnKey: assistantItemKey,
+          pendingTurnLaneKey: 'main',
+          lastUserMessageAt: createdAt,
+          lastError: null,
+          lastIssue: null,
+          updatedAt: createdAt,
+        },
       }),
     };
   });
@@ -343,6 +355,26 @@ function confirmOptimisticSendItems(params: {
   });
 }
 
+function clearOptimisticRuntimeState(
+  runtime: ChatSessionRuntimeState,
+  optimisticAssistantItemKey: string,
+): ChatSessionRuntimeState {
+  const ownsPendingTurn = runtime.pendingTurnKey === optimisticAssistantItemKey;
+  const ownsActiveTurn = runtime.activeTurnItemKey === optimisticAssistantItemKey;
+  const ownsSubmittedPhase = runtime.runPhase === 'submitted' && runtime.activeRunId == null;
+  if (!ownsPendingTurn && !ownsActiveTurn && !ownsSubmittedPhase) {
+    return runtime;
+  }
+  return {
+    ...runtime,
+    ...(ownsSubmittedPhase ? { activeRunId: null, runPhase: 'idle' as const, lastError: null, lastIssue: null } : {}),
+    activeTurnItemKey: ownsActiveTurn ? null : runtime.activeTurnItemKey,
+    pendingTurnKey: ownsPendingTurn ? null : runtime.pendingTurnKey,
+    pendingTurnLaneKey: ownsPendingTurn ? null : runtime.pendingTurnLaneKey,
+    updatedAt: Date.now(),
+  };
+}
+
 function removeOptimisticAssistantPlaceholder(params: {
   set: ChatStoreSetFn;
   sessionKey: string;
@@ -354,8 +386,9 @@ function removeOptimisticAssistantPlaceholder(params: {
     if (!current) return state;
     const key = `renderer-assistant:${clientId}`;
     const items = current.items.filter((item) => !(item.kind === 'assistant-turn' && item.key === key));
-    return items.length === current.items.length ? state : {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+    const runtime = clearOptimisticRuntimeState(current.runtime, key);
+    return items.length === current.items.length && runtime === current.runtime ? state : {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
     };
   });
 }
@@ -369,12 +402,14 @@ function removeOptimisticSendItems(params: {
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
+    const assistantItemKey = `renderer-assistant:${clientId}`;
     const items = current.items.filter((item) => !(
       (item.kind === 'user-message' && item.clientId === clientId)
-      || (item.kind === 'assistant-turn' && item.key === `renderer-assistant:${clientId}`)
+      || (item.kind === 'assistant-turn' && item.key === assistantItemKey)
     ));
-    return items.length === current.items.length ? state : {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items }),
+    const runtime = clearOptimisticRuntimeState(current.runtime, assistantItemKey);
+    return items.length === current.items.length && runtime === current.runtime ? state : {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
     };
   });
 }
@@ -407,48 +442,46 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } = params;
   const trimmed = text.trim();
   const traceId = createSessionTraceId('send-boundary');
-  if (!trimmed && (!attachments || attachments.length === 0)) {
-    logSessionTrace('send.rejected', traceId, { reason: 'empty' });
-    return { accepted: false, reason: 'empty' };
-  }
-
+  const attachmentCount = attachments?.length ?? 0;
   const stateBeforeSend = get();
+  const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(stateBeforeSend), {
+    text,
+    attachmentCount,
+  });
   logSessionTrace('send.start', traceId, {
     currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
-    mutating: stateBeforeSend.mutating,
+    canSend: gate.canSend,
+    reason: gate.canSend ? null : gate.reason,
     messageLength: trimmed.length,
-    attachmentCount: attachments?.length ?? 0,
+    attachmentCount,
   });
-  if (stateBeforeSend.mutating === true) {
-    logSessionTrace('send.rejected', traceId, { reason: 'mutating' });
-    return { accepted: false, reason: 'mutating' };
+  if (!gate.canSend) {
+    logSessionTrace('send.rejected', traceId, {
+      reason: gate.reason,
+      currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
+      messageLength: trimmed.length,
+      attachmentCount,
+    });
+    return { accepted: false, reason: gate.reason, error: gate.error };
   }
-  const { currentSessionKey } = stateBeforeSend;
+  if (gate.kind !== 'session') {
+    logSessionTrace('send.rejected', traceId, {
+      reason: 'missing-session',
+      currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
+      gateKind: gate.kind,
+    });
+    return { accepted: false, reason: 'missing-session' };
+  }
+  const { sessionKey, endpointSessionId, sessionIdentity } = gate;
+  const currentSessionKey = sessionKey;
   const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
-  let target;
-  try {
-    target = resolveSessionOperationTarget(stateBeforeSend, currentSessionKey);
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const targetErrorReason = errorMessage.startsWith('SessionIdentity is required:')
-      ? 'missing-session-identity'
-      : 'unexpected';
-    logSessionTrace('send.target.error', traceId, { reason: targetErrorReason });
-    set({ error: errorMessage });
-    return { accepted: false, reason: 'missing-session', error: errorMessage };
-  }
   logSessionTrace('send.target.resolved', traceId, {
-    sessionKey: summarizeIdentifier(target.sessionKey),
-    endpointSessionId: summarizeIdentifier(target.endpointSessionId),
-    sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+    sessionKey: summarizeIdentifier(sessionKey),
+    endpointSessionId: summarizeIdentifier(endpointSessionId),
+    sessionIdentity: summarizeSessionIdentity(sessionIdentity),
     runPhase: runtimeBeforeSend.runPhase,
     activeRunId: summarizeIdentifier(runtimeBeforeSend.activeRunId),
   });
-  if (isRunActive(runtimeBeforeSend)) {
-    const reason = runtimeBeforeSend.runPhase === 'stopping' ? 'stopping' : 'active';
-    logSessionTrace('send.rejected', traceId, { reason, runPhase: runtimeBeforeSend.runPhase });
-    return { accepted: false, reason };
-  }
   const nowMs = Date.now();
   const clientMessageId = crypto.randomUUID();
   const sendGeneration = sessionRunCache.nextSendGeneration(currentSessionKey);
@@ -481,8 +514,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
 
     const sendResult = await sendChatTransport({
-      endpointSessionId: target.endpointSessionId,
-      sessionIdentity: target.sessionIdentity,
+      endpointSessionId,
+      sessionIdentity,
       message: trimmed,
       idempotencyKey: clientMessageId,
       attachments,

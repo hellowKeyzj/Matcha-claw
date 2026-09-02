@@ -101,9 +101,12 @@ pub(crate) use team_run::{
     TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunDeliveryTarget, TeamRunTriggerOutcome,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamMaterializationCommandOutcome {
-    Materialized,
+    Materialized {
+        team_id: organization::TeamId,
+        managed_agent_count: usize,
+    },
     OutcomeUnknown,
     Rejected,
     Unavailable,

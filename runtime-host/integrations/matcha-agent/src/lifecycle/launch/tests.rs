@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use foundation::toolchain::{ToolchainPlatform, UnsupportedToolchainCommandPort};
+
 const SECRET_CANARY: &str = "synthetic-launch-secret-canary";
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -40,13 +42,21 @@ fn absolute_path(name: &str) -> PathBuf {
 }
 
 fn input(root: &TestRoot) -> LaunchInput {
+    let working_directory = absolute_path("runtime");
     LaunchInput {
         bun_executable: absolute_path("bin/bun"),
         entry: absolute_path("matcha-agent/dist/cli-bun.js"),
-        working_directory: absolute_path("runtime"),
+        working_directory: working_directory.clone(),
         storage_root: root.0.clone(),
         port: 18_790,
         secret: Arc::new(Secret::new(SECRET_CANARY.to_owned()).unwrap()),
+        toolchain: Arc::new(NativeToolchainRuntime::new(
+            ToolchainPlatform::current(),
+            std::env::consts::ARCH,
+            working_directory,
+            None,
+            Arc::new(UnsupportedToolchainCommandPort),
+        )),
         #[cfg(windows)]
         git_bash: absolute_path("bin/bash.exe"),
     }
@@ -152,7 +162,7 @@ fn rejects_an_auth_token_that_cannot_be_exposed_as_an_argument() {
     );
     assert_eq!(
         error.to_string(),
-        "matcha-agent launch specification is invalid: argument contains NUL"
+        "matcha-agent launch specification is invalid: launch argument contains NUL"
     );
     assert!(!format!("{error:?} {error}").contains(SECRET_CANARY));
     assert!(!root.0.exists());
@@ -313,28 +323,26 @@ fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path) {
             SECRET_CANARY.into(),
         ]
     );
-    assert_eq!(
-        spec.public_environment(),
-        [
-            (FORCE_COLOR.into(), "0".into()),
-            (NO_COLOR.into(), "1".into()),
-            #[cfg(windows)]
-            (SYSTEM_ROOT.into(), windows_system_root().unwrap()),
-            #[cfg(windows)]
-            (
-                CLAUDE_CODE_GIT_BASH_PATH.into(),
-                absolute_path("bin/bash.exe").into_os_string(),
-            ),
-        ]
-    );
+    let environment = spec.public_environment();
+    assert_environment_value(environment, FORCE_COLOR, "0");
+    assert_environment_value(environment, NO_COLOR, "1");
+    if let Some(value) = std::env::var_os(CLAUDE_CONFIG_DIR) {
+        assert_environment_value(environment, CLAUDE_CONFIG_DIR, value);
+    }
+    assert_environment_omits(environment, SECRET_CANARY);
+    assert_environment_omits(environment, "ANTHROPIC_API_KEY");
+    assert_environment_omits(environment, "OPENAI_API_KEY");
+    assert_environment_omits(environment, "MATCHA_AUTH_TOKEN");
+    #[cfg(windows)]
+    {
+        assert_environment_value(environment, SYSTEM_ROOT, windows_system_root().unwrap());
+        assert_environment_value(
+            environment,
+            CLAUDE_CODE_GIT_BASH_PATH,
+            absolute_path("bin/bash.exe").into_os_string(),
+        );
+    }
     assert_eq!(spec.stdio(), APP_SERVER_STDIO);
-    assert!(
-        !spec
-            .arguments()
-            .iter()
-            .any(|argument| argument == SECRET_CANARY)
-    );
-
     for unsupported_option in [
         "--auth-token-file",
         "--tls-cert-file",
@@ -349,4 +357,21 @@ fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path) {
                 .any(|argument| argument == unsupported_option)
         );
     }
+}
+
+fn assert_environment_value(
+    environment: &[(OsString, OsString)],
+    key: &str,
+    expected: impl AsRef<OsStr>,
+) {
+    assert!(environment.iter().any(|(name, value)| {
+        environment_key_eq(name, OsStr::new(key)) && value == expected.as_ref()
+    }));
+}
+
+fn assert_environment_omits(environment: &[(OsString, OsString)], key_or_value: &str) {
+    assert!(environment.iter().all(|(key, value)| {
+        !key.to_string_lossy().contains(key_or_value)
+            && !value.to_string_lossy().contains(key_or_value)
+    }));
 }

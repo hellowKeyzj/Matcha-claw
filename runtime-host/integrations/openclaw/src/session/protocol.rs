@@ -24,6 +24,7 @@ const MAX_SESSION_UPDATE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_SESSION_UPDATE_STOP_REASON_BYTES: usize = 256;
 const MAX_SESSION_ACTIVITY_TEXT_BYTES: usize = 16 * 1024;
 const MAX_SESSION_ACTIVITY_ID_BYTES: usize = 256;
+const MAX_SESSION_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MAX_CHAT_ATTACHMENTS: usize = 16;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -1544,9 +1545,17 @@ fn activity_text(value: Option<&Value>) -> Result<Option<String>, ProtocolError>
     value
         .map(|value| {
             let text = value.as_str().ok_or(ProtocolError::InvalidSessionEvent)?;
+            if text.contains('\0') {
+                return Err(ProtocolError::InvalidSessionEvent);
+            }
             bounded_text_value(text, MAX_SESSION_ACTIVITY_TEXT_BYTES)
         })
         .transpose()
+}
+
+struct ProjectedSessionActivity {
+    kind: SessionActivityKind,
+    tool_payload: Option<ToolActivityPayload>,
 }
 
 fn activity_name(value: Option<&Value>) -> Result<Option<String>, ProtocolError> {
@@ -1565,11 +1574,78 @@ fn activity_name(value: Option<&Value>) -> Result<Option<String>, ProtocolError>
         .transpose()
 }
 
+fn optional_bool(object: &Map<String, Value>, key: &str) -> Result<Option<bool>, ProtocolError> {
+    object
+        .get(key)
+        .map(|value| value.as_bool().ok_or(ProtocolError::InvalidSessionEvent))
+        .transpose()
+}
+
+fn tool_payload_value(value: Option<&Value>) -> Result<Option<Value>, ProtocolError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if payload_contains_nul(value) {
+        return Err(ProtocolError::InvalidSessionEvent);
+    }
+    let encoded = serde_json::to_vec(value).map_err(|_| ProtocolError::InvalidSessionEvent)?;
+    if encoded.len() > MAX_SESSION_TOOL_PAYLOAD_BYTES {
+        return Err(ProtocolError::InvalidSessionEvent);
+    }
+    Ok(Some(value.clone()))
+}
+
+fn tool_payload_text(
+    input: Option<&Value>,
+    explicit: Option<&Value>,
+) -> Result<Option<String>, ProtocolError> {
+    if let Some(text) = tool_payload_text_value(explicit)? {
+        return Ok(Some(text));
+    }
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    match input {
+        Value::String(_) => tool_payload_text_value(Some(input)),
+        value => {
+            let text = serde_json::to_string_pretty(value)
+                .map_err(|_| ProtocolError::InvalidSessionEvent)?;
+            if text.len() > MAX_SESSION_TOOL_PAYLOAD_BYTES || text.contains('\0') {
+                return Err(ProtocolError::InvalidSessionEvent);
+            }
+            Ok(Some(text))
+        }
+    }
+}
+
+fn tool_payload_text_value(value: Option<&Value>) -> Result<Option<String>, ProtocolError> {
+    value
+        .map(|value| {
+            let text = value.as_str().ok_or(ProtocolError::InvalidSessionEvent)?;
+            if text.contains('\0') {
+                return Err(ProtocolError::InvalidSessionEvent);
+            }
+            bounded_text_value(text, MAX_SESSION_TOOL_PAYLOAD_BYTES)
+        })
+        .transpose()
+}
+
+fn payload_contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(values) => values.iter().any(payload_contains_nul),
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key.contains('\0') || payload_contains_nul(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
 fn project_message_activity(
     object: &Map<String, Value>,
     message_id: Option<&MessageId>,
     embedded_message_id: Option<&MessageId>,
-) -> Result<Option<SessionActivityKind>, ProtocolError> {
+) -> Result<Option<ProjectedSessionActivity>, ProtocolError> {
     let lifecycle = object
         .get("lifecycle")
         .and_then(Value::as_str)
@@ -1594,16 +1670,19 @@ fn project_message_activity(
         }
         MessageActivityLifecycle::Started | MessageActivityLifecycle::Completed => None,
     };
-    Ok(Some(SessionActivityKind::Message {
-        message_id,
-        lifecycle,
-        text,
+    Ok(Some(ProjectedSessionActivity {
+        kind: SessionActivityKind::Message {
+            message_id,
+            lifecycle,
+            text,
+        },
+        tool_payload: None,
     }))
 }
 
 fn project_tool_activity(
     object: &Map<String, Value>,
-) -> Result<Option<SessionActivityKind>, ProtocolError> {
+) -> Result<Option<ProjectedSessionActivity>, ProtocolError> {
     let phase = object
         .get("phase")
         .and_then(Value::as_str)
@@ -1612,25 +1691,49 @@ fn project_tool_activity(
         object.get("toolCallId").or_else(|| object.get("toolId")),
         ProtocolError::InvalidSessionEvent,
     )?;
+    let is_error = optional_bool(object, "isError")?;
     let phase = match phase {
-        "started" => ToolActivityPhase::Started,
-        "updated" => ToolActivityPhase::Updated,
-        "completed" => ToolActivityPhase::Completed,
+        "start" | "started" => ToolActivityPhase::Started,
+        "update" | "updated" => ToolActivityPhase::Updated,
+        "result" if is_error == Some(true) => ToolActivityPhase::Failed,
+        "result" | "completed" => ToolActivityPhase::Completed,
         "failed" => ToolActivityPhase::Failed,
         _ => return Err(ProtocolError::InvalidSessionEvent),
     };
     let tool_name = activity_name(object.get("name").or_else(|| object.get("toolName")))?;
-    let summary = activity_text(
+    let input = tool_payload_value(
         object
-            .get("summary")
-            .or_else(|| object.get("text"))
-            .or_else(|| object.get("result")),
+            .get("args")
+            .or_else(|| object.get("arguments"))
+            .or_else(|| object.get("input"))
+            .or_else(|| object.get("toolInput")),
     )?;
-    Ok(Some(SessionActivityKind::Tool {
-        tool_id,
-        tool_name,
-        phase,
-        summary,
+    let input_text = tool_payload_text(input.as_ref(), object.get("input_text"))?;
+    let output = tool_payload_value(match phase {
+        ToolActivityPhase::Updated => object
+            .get("partialResult")
+            .or_else(|| object.get("partial_result"))
+            .or_else(|| object.get("output")),
+        ToolActivityPhase::Completed | ToolActivityPhase::Failed => object
+            .get("result")
+            .or_else(|| object.get("content"))
+            .or_else(|| object.get("output")),
+        ToolActivityPhase::Started => None,
+    })?;
+    let summary = activity_text(object.get("summary").or_else(|| object.get("text")))?;
+    Ok(Some(ProjectedSessionActivity {
+        kind: SessionActivityKind::Tool {
+            tool_id,
+            tool_name,
+            phase,
+            summary,
+        },
+        tool_payload: Some(ToolActivityPayload {
+            input,
+            input_text,
+            output,
+            is_error,
+        }),
     }))
 }
 
@@ -1687,11 +1790,50 @@ pub enum SessionActivityKind {
 }
 
 #[derive(Clone, Eq, PartialEq)]
+pub struct ToolActivityPayload {
+    input: Option<Value>,
+    input_text: Option<String>,
+    output: Option<Value>,
+    is_error: Option<bool>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct SessionActivity {
     pub gateway_sequence: Option<u64>,
     pub session_key: SessionKey,
     pub run_id: RunId,
     pub kind: SessionActivityKind,
+    tool_payload: Option<ToolActivityPayload>,
+}
+
+impl ToolActivityPayload {
+    pub fn input(&self) -> Option<&Value> {
+        self.input.as_ref()
+    }
+    pub fn input_text(&self) -> Option<&str> {
+        self.input_text.as_deref()
+    }
+    pub fn output(&self) -> Option<&Value> {
+        self.output.as_ref()
+    }
+    pub fn is_error(&self) -> Option<bool> {
+        self.is_error
+    }
+}
+
+impl fmt::Debug for ToolActivityPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolActivityPayload")
+            .field("has_input", &self.input.is_some())
+            .field(
+                "input_text_bytes",
+                &self.input_text.as_ref().map_or(0, String::len),
+            )
+            .field("has_output", &self.output.is_some())
+            .field("is_error", &self.is_error)
+            .finish()
+    }
 }
 
 impl SessionActivity {
@@ -1706,6 +1848,29 @@ impl SessionActivity {
     }
     pub fn gateway_sequence(&self) -> Option<u64> {
         self.gateway_sequence
+    }
+    pub fn tool_payload(&self) -> Option<&ToolActivityPayload> {
+        self.tool_payload.as_ref()
+    }
+    pub fn input(&self) -> Option<&Value> {
+        self.tool_payload
+            .as_ref()
+            .and_then(ToolActivityPayload::input)
+    }
+    pub fn input_text(&self) -> Option<&str> {
+        self.tool_payload
+            .as_ref()
+            .and_then(ToolActivityPayload::input_text)
+    }
+    pub fn output(&self) -> Option<&Value> {
+        self.tool_payload
+            .as_ref()
+            .and_then(ToolActivityPayload::output)
+    }
+    pub fn is_error(&self) -> Option<bool> {
+        self.tool_payload
+            .as_ref()
+            .and_then(ToolActivityPayload::is_error)
     }
 }
 
@@ -1748,6 +1913,7 @@ impl fmt::Debug for SessionActivity {
             .debug_struct("SessionActivity")
             .field("has_gateway_sequence", &self.gateway_sequence.is_some())
             .field("kind", &self.kind)
+            .field("has_tool_payload", &self.tool_payload.is_some())
             .finish()
     }
 }
@@ -1843,7 +2009,8 @@ pub fn decode_session_event(
                 gateway_sequence: event.sequence,
                 session_key: session_key.clone(),
                 run_id: run_id.clone(),
-                kind: activity,
+                kind: activity.kind,
+                tool_payload: activity.tool_payload,
             })
         }
         (Some(_), None) => return Err(ProtocolError::InvalidSessionEvent),
@@ -2334,12 +2501,13 @@ mod tests {
 
         let tool = decode_session_event(event(
             "session.tool",
-            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"failed","toolCallId":"tool-9","name":"read","summary":"bounded summary","input":{"secret":"omit"},"output":{"secret":"omit"}}"#,
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"failed","toolCallId":"tool-9","name":"read","summary":"bounded summary","input":{"secret":"omit"},"output":{"secret":"omit"},"isError":true}"#,
         ))
         .unwrap()
         .unwrap();
+        let activity = tool.activity.as_ref().unwrap();
         assert!(matches!(
-            tool.activity.as_ref().unwrap().kind(),
+            activity.kind(),
             SessionActivityKind::Tool {
                 phase: ToolActivityPhase::Failed,
                 tool_name: Some(name),
@@ -2347,6 +2515,16 @@ mod tests {
                 ..
             } if name == "read" && summary == "bounded summary"
         ));
+        let payload = activity.tool_payload().unwrap();
+        assert_eq!(payload.input(), Some(&serde_json::json!({"secret":"omit"})));
+        assert_eq!(
+            payload.output(),
+            Some(&serde_json::json!({"secret":"omit"}))
+        );
+        assert_eq!(payload.is_error(), Some(true));
+        assert!(payload.input_text().unwrap().contains("secret"));
+        assert_debug_redacts(activity, &["secret", "omit"]);
+        assert_debug_redacts(payload, &["secret", "omit"]);
         assert!(decode_session_event(event(
             "session.tool",
             r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"completed","summary":"missing id"}"#,
@@ -2359,6 +2537,138 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(unassociated.activity.is_none());
+    }
+
+    #[test]
+    fn session_tool_native_payload_projection_is_semantic_and_safe() {
+        let started = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"start","toolId":"tool-9","toolName":"read","arguments":{"file_path":"secret.txt"}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        let started_activity = started.activity.as_ref().unwrap();
+        assert!(matches!(
+            started_activity.kind(),
+            SessionActivityKind::Tool {
+                phase: ToolActivityPhase::Started,
+                tool_name: Some(name),
+                summary: None,
+                ..
+            } if name == "read"
+        ));
+        let started_payload = started_activity.tool_payload().unwrap();
+        assert_eq!(
+            started_payload.input(),
+            Some(&serde_json::json!({"file_path":"secret.txt"}))
+        );
+        assert_eq!(
+            started_payload.input_text(),
+            Some("{\n  \"file_path\": \"secret.txt\"\n}")
+        );
+        assert_eq!(started_payload.output(), None);
+        assert_eq!(started_payload.is_error(), None);
+        assert_debug_redacts(started_activity, &["secret.txt", "file_path"]);
+        assert_debug_redacts(started_payload, &["secret.txt", "file_path"]);
+        assert_debug_redacts(&started, &["secret.txt", "file_path"]);
+
+        let updated = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"update","toolCallId":"tool-9","input":"raw input","input_text":"shown input","partial_result":{"rows":[1,2]}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        let updated_activity = updated.activity.as_ref().unwrap();
+        let updated_payload = updated_activity.tool_payload().unwrap();
+        assert_eq!(
+            updated_activity.kind().tool_phase(),
+            Some(ToolActivityPhase::Updated)
+        );
+        assert_eq!(
+            updated_payload.input(),
+            Some(&serde_json::json!("raw input"))
+        );
+        assert_eq!(updated_payload.input_text(), Some("shown input"));
+        assert_eq!(
+            updated_payload.output(),
+            Some(&serde_json::json!({"rows":[1,2]}))
+        );
+        assert_eq!(updated_payload.is_error(), None);
+
+        let completed = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","toolInput":{"q":"safe"},"content":[{"type":"text","text":"answer"}],"summary":"done","isError":false,"meta":{"raw":"omitted"}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        let completed_activity = completed.activity.as_ref().unwrap();
+        let completed_payload = completed_activity.tool_payload().unwrap();
+        assert!(matches!(
+            completed_activity.kind(),
+            SessionActivityKind::Tool {
+                phase: ToolActivityPhase::Completed,
+                summary: Some(summary),
+                ..
+            } if summary == "done"
+        ));
+        assert_eq!(
+            completed_payload.input(),
+            Some(&serde_json::json!({"q":"safe"}))
+        );
+        assert_eq!(
+            completed_payload.output(),
+            Some(&serde_json::json!([{ "type": "text", "text": "answer" }]))
+        );
+        assert_eq!(completed_payload.is_error(), Some(false));
+
+        let failed = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","output":{"error":"bad"},"isError":true}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            failed.activity.as_ref().unwrap().kind().tool_phase(),
+            Some(ToolActivityPhase::Failed)
+        );
+        assert_eq!(
+            failed
+                .activity
+                .as_ref()
+                .unwrap()
+                .tool_payload()
+                .unwrap()
+                .is_error(),
+            Some(true)
+        );
+
+        for raw in [
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"start","toolCallId":"tool-9","input":{"bad\u0000key":true}}"#,
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"start","toolCallId":"tool-9","input":{"bad":"nul\u0000value"}}"#,
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"start","toolCallId":"tool-9","input_text":"bad\u0000text"}"#,
+        ] {
+            assert!(decode_session_event(event("session.tool", raw)).is_err());
+        }
+
+        let oversized = serde_json::json!({"blob":"x".repeat(MAX_SESSION_TOOL_PAYLOAD_BYTES)});
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "sessionKey".into(),
+            serde_json::json!("agent:main:session-1"),
+        );
+        object.insert("runId".into(), serde_json::json!("run-7"));
+        object.insert("phase".into(), serde_json::json!("start"));
+        object.insert("toolCallId".into(), serde_json::json!("tool-9"));
+        object.insert("input".into(), oversized);
+        assert!(
+            decode_session_event(GatewayEvent {
+                name: "session.tool".into(),
+                payload: Some(Value::Object(object)),
+                sequence: Some(91),
+                state_version: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
 
 use crate::{RuntimeSessionError, transport::authorization::CapabilityDecisionVerifier};
 
+mod content;
 mod rename;
 pub(crate) mod server;
 mod timeline;

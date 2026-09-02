@@ -17,11 +17,6 @@ const runtimeEndpoint = {
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
 };
-const runtimeInstanceScope = {
-  kind: 'runtime-instance',
-  endpoint: runtimeEndpoint,
-};
-
 function displayConfigResult(input: {
   agents?: unknown[];
   defaults?: unknown;
@@ -1099,18 +1094,20 @@ describe('subagents store', () => {
       models: [
         {
           accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
-          selectionId: 'custom-dd749b2e/gpt-5.4',
+          selectionId: 'model-selection:v1:4444444444444444444444444444444444444444444444444444444444444444',
           label: '自定义',
           modelId: 'gpt-5.4',
           capabilities: ['chat'],
           contextWindow: 200000,
+          modelReferences: ['custom-dd749b2e/gpt-5.4'],
         },
         {
           accountId: 'ark',
-          selectionId: 'ark/ark-code-latest',
+          selectionId: 'model-selection:v1:5555555555555555555555555555555555555555555555555555555555555555',
           label: 'Ark Code',
           modelId: 'ark-code-latest',
           capabilities: ['chat'],
+          modelReferences: ['ark/ark-code-latest'],
         },
       ],
     });
@@ -1119,7 +1116,7 @@ describe('subagents store', () => {
 
     expect(useSubagentsStore.getState().availableModels).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        id: 'custom-dd749b2e/gpt-5.4',
+        id: 'model-selection:v1:4444444444444444444444444444444444444444444444444444444444444444',
         provider: '自定义',
         accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
         providerLabel: '自定义',
@@ -1127,9 +1124,10 @@ describe('subagents store', () => {
         displayLabel: '自定义 / gpt-5.4',
         contextWindow: 200000,
         maxTokens: undefined,
+        modelReferences: ['custom-dd749b2e/gpt-5.4'],
       }),
       expect.objectContaining({
-        id: 'ark/ark-code-latest',
+        id: 'model-selection:v1:5555555555555555555555555555555555555555555555555555555555555555',
         provider: 'Ark Code',
         accountId: 'ark',
         providerLabel: 'Ark Code',
@@ -1137,6 +1135,7 @@ describe('subagents store', () => {
         displayLabel: 'Ark Code / ark-code-latest',
         contextWindow: undefined,
         maxTokens: undefined,
+        modelReferences: ['ark/ark-code-latest'],
       }),
     ]));
     expect(useSubagentsStore.getState().availableModels).toHaveLength(2);

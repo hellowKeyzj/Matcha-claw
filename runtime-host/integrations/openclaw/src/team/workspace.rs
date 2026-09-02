@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use organization::{RoleId, TeamId, TeamMaterializationRemoval, TeamMaterializationRequest};
+use organization::{RoleId, TeamId, TeamMaterializationRequest};
 
 use super::agent::{TeamAgent, TeamInputError, TeamOwnedAgentId};
 
@@ -106,24 +106,6 @@ impl TeamWorkspaceProjection {
                 )
                 .then_some(role.role())
             }),
-        )
-    }
-
-    pub(crate) fn for_removal(
-        state_dir: &Path,
-        removal: &TeamMaterializationRemoval,
-    ) -> Result<Self, TeamInputError> {
-        Self::from_roles(
-            state_dir,
-            removal.receipt().team(),
-            removal
-                .receipt()
-                .roles()
-                .iter()
-                .filter(|role| {
-                    role.ownership() == organization::RoleMaterializationOwnership::Managed
-                })
-                .map(|role| role.role()),
         )
     }
 

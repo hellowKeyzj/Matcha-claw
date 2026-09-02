@@ -13,6 +13,7 @@ import {
 } from '@/lib/agent-avatar';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { resolveModelCatalogEntry } from '@/lib/provider-models';
 import {
   buildSubagentWorkspacePath,
   hasSubagentNameConflict,
@@ -214,11 +215,13 @@ export function SubagentFormDialog({
       ? (initialValues?.avatarSeed ?? buildAvatarPickerSeeds({ agentName: initialName, page: 0, count: 1 })[0] ?? '')
       : (initialValues?.avatarSeed ?? '');
     const initialAvatarStyle = initialValues?.avatarStyle ?? DEFAULT_AGENT_AVATAR_STYLE;
+    const initialModel = initialValues?.model ?? '';
+    const resolvedInitialModel = resolveModelCatalogEntry(modelOptions, initialModel)?.id;
     setValues({
       name: initialName,
       description: initialValues?.description ?? '',
       workspace: initialWorkspace,
-      model: initialValues?.model ?? (mode === 'create' ? (modelOptions[0]?.id ?? '') : ''),
+      model: resolvedInitialModel ?? (initialModel || (mode === 'create' ? (modelOptions[0]?.id ?? '') : '')),
       avatarSeed: initialAvatarSeed,
       avatarStyle: initialAvatarStyle,
       prompt: initialValues?.prompt ?? '',
@@ -313,11 +316,15 @@ export function SubagentFormDialog({
     if (!current) {
       return;
     }
-    const exists = resolvedModelOptions.some((entry) => entry.id === current);
-    if (!exists) {
+    const resolvedModel = resolveModelCatalogEntry(resolvedModelOptions, current);
+    if (resolvedModel?.id && resolvedModel.id !== current) {
+      setValues((prev) => ({ ...prev, model: resolvedModel.id }));
+      return;
+    }
+    if (!resolvedModel && mode === 'create') {
       setValues((prev) => ({ ...prev, model: modelOptions.length === 1 ? modelOptions[0].id : '' }));
     }
-  }, [modelOptions, open, resolvedModelOptions, values.model]);
+  }, [mode, modelOptions, open, resolvedModelOptions, values.model]);
 
   const toolProfileOptions = useMemo(() => {
     const catalogProfiles = toolConfigView?.toolProfiles ?? [];
@@ -358,6 +365,10 @@ export function SubagentFormDialog({
     : false;
   const missingModel = mode === 'create' && !values.model.trim();
   const hasModelOptions = resolvedModelOptions.length > 0;
+  const currentModel = values.model.trim();
+  const showCurrentModelOption = mode === 'edit'
+    && Boolean(currentModel)
+    && !resolveModelCatalogEntry(resolvedModelOptions, currentModel);
   const skillConfigChanged = mode === 'edit'
     && Boolean(skillConfigView)
     && skillConfigView?.support.supportType === 'supported'
@@ -443,6 +454,9 @@ export function SubagentFormDialog({
                   : t('form.selectModel')}
               </option>
             )}
+            {showCurrentModelOption ? (
+              <option value={currentModel}>{currentModel}</option>
+            ) : null}
             {resolvedModelOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.displayLabel}

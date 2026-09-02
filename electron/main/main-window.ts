@@ -1,6 +1,7 @@
 import { app, BrowserWindow, nativeImage, nativeTheme, shell } from 'electron';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import { getMacTrafficLightPosition } from './traffic-light-layout';
 import { getWindowThemeBackgroundColor } from './window';
 import { registerZoomShortcuts } from './zoom-shortcuts';
 
@@ -70,7 +71,7 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
       webviewTag: true,
     },
     titleBarStyle: isMac ? 'hiddenInset' : useCustomTitleBar ? 'hidden' : 'default',
-    trafficLightPosition: isMac ? { x: 16, y: 16 } : undefined,
+    trafficLightPosition: isMac ? getMacTrafficLightPosition(false) : undefined,
     frame: isMac || !useCustomTitleBar,
     show: false,
   });

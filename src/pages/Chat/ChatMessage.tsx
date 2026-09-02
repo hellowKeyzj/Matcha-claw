@@ -8,14 +8,17 @@ import {
   UserMessageMetaBar,
   type MessageLightboxState,
 } from './chat-message-parts';
+import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
 
 export const ChatMessage = memo(function ChatMessage({
   item,
   userAvatarImageUrl,
+  sessionIdentity,
+  endpointSessionId,
 }: ChatMessageProps) {
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
 
-  const hasText = item.text.trim().length > 0;
+  const hasText = !!item.largeText || item.text.trim().length > 0;
   if (!hasText && item.images.length === 0 && item.attachedFiles.length === 0) return null;
 
   return (
@@ -31,7 +34,12 @@ export const ChatMessage = memo(function ChatMessage({
         />
 
         {hasText && (
-          <UserMessageBody text={item.text} />
+          <UserMessageBody
+            text={item.text}
+            largeText={item.largeText}
+            sessionIdentity={sessionIdentity}
+            endpointSessionId={endpointSessionId}
+          />
         )}
 
         <UserMessageMetaBar timestamp={item.createdAt} />
@@ -52,4 +60,6 @@ export const ChatMessage = memo(function ChatMessage({
 interface ChatMessageProps {
   item: ChatUserMessageItem;
   userAvatarImageUrl?: string | null;
+  sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
 }

@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   selectAgentSessionsPaneState,
-  selectSessionRuntime,
+  selectCurrentChatSendGate,
   selectSidebarPendingBlockersState,
   selectSnapshotLayerState,
   selectViewLayerState,
 } from '@/stores/chat/selectors';
+import { resolveChatSendGateForPayload, type ChatSessionRuntimeState } from '@/stores/chat';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
@@ -16,10 +17,14 @@ function createSessionRecord(input?: {
   label?: string | null;
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
   lastActivityAt?: number | null;
+  sessionIdentity?: ReturnType<typeof createOpenClawTestSessionIdentity> | null;
+  runtime?: Partial<ChatSessionRuntimeState>;
   items?: ReturnType<typeof buildRenderItemsFromMessages>;
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:main:main';
-  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey, sessionKey.split(':')[1] ?? 'default');
+  const sessionIdentity = input && Object.prototype.hasOwnProperty.call(input, 'sessionIdentity')
+    ? input.sessionIdentity
+    : createOpenClawTestSessionIdentity(sessionKey, sessionKey.split(':')[1] ?? 'default');
   const items = input?.items ?? buildRenderItemsFromMessages(sessionKey, [
     { role: 'assistant', content: 'hello', id: 'm1' },
   ]);
@@ -28,8 +33,9 @@ function createSessionRecord(input?: {
     : 'Main';
   return {
     meta: {
-      runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
-      agentId: sessionIdentity.agentId,
+      endpointSessionId: null,
+      runtimeScopeKey: sessionIdentity ? buildRuntimeScopeKey(sessionIdentity.endpoint) : null,
+      agentId: sessionIdentity?.agentId ?? null,
       protocolId: null,
       runtimeEndpointId: 'local',
       sessionIdentity,
@@ -51,7 +57,12 @@ function createSessionRecord(input?: {
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
+      runtimeActivity: null,
       lastUserMessageAt: null,
+      lastError: null,
+      lastIssue: null,
+      updatedAt: null,
+      ...input?.runtime,
     },
     items,
     window: createViewportWindowState({
@@ -65,12 +76,33 @@ function createSessionRecord(input?: {
   };
 }
 
-function makeState(overrides: Record<string, unknown> = {}) {
+function buildCurrentConversation(sessionKey: string, record: ReturnType<typeof createSessionRecord> | undefined) {
+  const sessionIdentity = record?.meta.sessionIdentity;
+  if (!record || !sessionIdentity) {
+    return null;
+  }
   return {
-    loadedSessions: {
-      'agent:main:main': createSessionRecord(),
-    },
-    currentSessionKey: 'agent:main:main',
+    kind: 'session' as const,
+    runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+    endpoint: sessionIdentity.endpoint,
+    agentId: sessionIdentity.agentId,
+    sessionRecordKey: sessionKey,
+    endpointSessionId: record.meta.endpointSessionId,
+    sessionIdentity,
+  };
+}
+
+function makeState(overrides: Record<string, unknown> = {}) {
+  const loadedSessions = (overrides.loadedSessions as Record<string, ReturnType<typeof createSessionRecord>> | undefined) ?? {
+    'agent:main:main': createSessionRecord(),
+  };
+  const currentSessionKey = (overrides.currentSessionKey as string | undefined) ?? 'agent:main:main';
+  return {
+    loadedSessions,
+    currentSessionKey,
+    currentConversation: Object.prototype.hasOwnProperty.call(overrides, 'currentConversation')
+      ? overrides.currentConversation
+      : buildCurrentConversation(currentSessionKey, loadedSessions[currentSessionKey]),
     pendingApprovalsBySession: {},
     foregroundHistorySessionKey: null,
     sessionCatalogStatus: {
@@ -110,7 +142,6 @@ describe('chat selectors layering', () => {
     });
 
     const snapshot = selectSnapshotLayerState(state);
-    const runtime = selectSessionRuntime(state, state.currentSessionKey);
     const view = selectViewLayerState(state);
 
     expect(snapshot.sessions).toHaveLength(1);
@@ -154,6 +185,59 @@ describe('chat selectors layering', () => {
     expect(pane.sessionsError).toBeNull();
     expect(pane.currentSessionKey).toBe('agent:foo:main');
     expect(pane.currentAgentId).toBe('foo');
+  });
+
+  it('current send gate follows only the current session history and identity', () => {
+    const currentSessionKey = 'agent:main:main';
+    const otherSessionKey = 'agent:other:main';
+    const readyState = makeState({
+      currentSessionKey,
+      loadedSessions: {
+        [currentSessionKey]: createSessionRecord({ sessionKey: currentSessionKey }),
+        [otherSessionKey]: createSessionRecord({ sessionKey: otherSessionKey, historyStatus: 'loading' }),
+      },
+      mutating: true,
+    });
+
+    expect(resolveChatSendGateForPayload(selectCurrentChatSendGate(readyState), {
+      text: 'hello',
+      attachmentCount: 0,
+    })).toEqual(expect.objectContaining({
+      canSend: true,
+      sessionKey: currentSessionKey,
+    }));
+
+    const loadingState = makeState({
+      currentSessionKey,
+      loadedSessions: {
+        [currentSessionKey]: createSessionRecord({ sessionKey: currentSessionKey, historyStatus: 'loading' }),
+        [otherSessionKey]: createSessionRecord({ sessionKey: otherSessionKey }),
+      },
+    });
+    expect(selectCurrentChatSendGate(loadingState)).toEqual({
+      canSend: false,
+      reason: 'loading-history',
+      sessionKey: currentSessionKey,
+    });
+
+    const missingIdentityState = makeState({
+      currentSessionKey,
+      loadedSessions: {
+        [currentSessionKey]: createSessionRecord({ sessionKey: currentSessionKey, sessionIdentity: null }),
+      },
+      currentConversation: null,
+    });
+    expect(selectCurrentChatSendGate(missingIdentityState)).toEqual({
+      canSend: false,
+      reason: 'missing-session-identity',
+      sessionKey: currentSessionKey,
+    });
+  });
+
+  it('current send gate is stable for the same store snapshot', () => {
+    const state = makeState();
+
+    expect(selectCurrentChatSendGate(state)).toBe(selectCurrentChatSendGate(state));
   });
 
   it('session pane selector hides empty runtime placeholder sessions', () => {

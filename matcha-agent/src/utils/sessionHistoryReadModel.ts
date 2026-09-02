@@ -15,6 +15,12 @@ import { hasRealUserMessage } from './sessionConversationEligibility.js'
 import { resolveSessionFilePath } from './sessionStoragePortable.js'
 
 const EPOCH_ISO = new Date(0).toISOString()
+const TRANSCRIPT_IMAGE_MEDIA_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+])
 
 export type SessionHistorySummary = {
   sessionId: string
@@ -111,6 +117,8 @@ function transcriptReplayLineFromTranscriptMessage(
 ): string | null {
   const role = transcriptReplayRole(message)
   if (!role) return null
+  const content = transcriptReplayContent(message)
+  if (content === null) return null
   const messageId = readMessageId(message)
   const parentMessageId = readParentMessageId(message)
   const toolCallId =
@@ -121,7 +129,7 @@ function transcriptReplayLineFromTranscriptMessage(
     timestamp: message.timestamp,
     message: {
       role,
-      content: messageContent(message),
+      content,
       id: messageId,
       originMessageId: parentMessageId,
       ...(toolCallId ? { toolCallId } : {}),
@@ -161,6 +169,138 @@ function messageContent(message: SerializedMessage): unknown {
     return record.content
   }
   return ''
+}
+
+type TranscriptReplayContentBlock = Record<string, unknown>
+
+function transcriptReplayContent(
+  message: SerializedMessage,
+): string | TranscriptReplayContentBlock[] | null {
+  const content = messageContent(message)
+  if (typeof content === 'string') return content ? content : null
+  if (!Array.isArray(content)) return null
+  const blocks = content.flatMap(block => {
+    const replayBlock = transcriptReplayContentBlock(block)
+    return replayBlock ? [replayBlock] : []
+  })
+  return blocks.length > 0 ? blocks : null
+}
+
+function transcriptReplayContentBlock(
+  block: unknown,
+): TranscriptReplayContentBlock | null {
+  if (!isRecord(block) || typeof block.type !== 'string') return null
+  switch (block.type) {
+    case 'text':
+      return transcriptReplayTextBlock(block)
+    case 'thinking':
+      return transcriptReplayThinkingBlock(block)
+    case 'tool_use':
+      return transcriptReplayToolUseBlock(block)
+    case 'tool_result':
+    case 'tool_use_result':
+      return transcriptReplayToolResultBlock(block)
+    case 'image':
+      return transcriptReplayImageBlock(block)
+    default:
+      return null
+  }
+}
+
+function transcriptReplayTextBlock(
+  block: Record<string, unknown>,
+): TranscriptReplayContentBlock | null {
+  return typeof block.text === 'string' && block.text
+    ? { type: 'text', text: block.text }
+    : null
+}
+
+function transcriptReplayThinkingBlock(
+  block: Record<string, unknown>,
+): TranscriptReplayContentBlock | null {
+  const text =
+    typeof block.text === 'string'
+      ? block.text
+      : typeof block.thinking === 'string'
+        ? block.thinking
+        : ''
+  return text ? { type: 'thinking', thinking: text } : null
+}
+
+function transcriptReplayToolUseBlock(
+  block: Record<string, unknown>,
+): TranscriptReplayContentBlock | null {
+  if (typeof block.id !== 'string' || typeof block.name !== 'string') {
+    return null
+  }
+  return {
+    type: 'tool_use',
+    id: block.id,
+    name: block.name,
+    input: transcriptReplayToolInput(block.input),
+  }
+}
+
+function transcriptReplayToolInput(value: unknown): Record<string, null> {
+  if (!isRecord(value)) return {}
+  return Object.fromEntries(Object.keys(value).map(key => [key, null]))
+}
+
+function transcriptReplayToolResultBlock(
+  block: Record<string, unknown>,
+): TranscriptReplayContentBlock | null {
+  const replayBlock: TranscriptReplayContentBlock = { type: block.type }
+  for (const key of ['tool_use_id', 'toolUseId', 'id'] as const) {
+    if (typeof block[key] === 'string') replayBlock[key] = block[key]
+  }
+  const content = transcriptReplayToolResultContent(block.content)
+  if (content !== undefined) replayBlock.content = content
+  if (typeof block.is_error === 'boolean') replayBlock.is_error = block.is_error
+  if (typeof block.isError === 'boolean') replayBlock.isError = block.isError
+  return Object.keys(replayBlock).length > 1 ? replayBlock : null
+}
+
+function transcriptReplayToolResultContent(
+  content: unknown,
+): string | TranscriptReplayContentBlock[] | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  const blocks = content.flatMap(block => {
+    const replayBlock = isRecord(block)
+      ? transcriptReplayTextBlock(block)
+      : null
+    return replayBlock ? [replayBlock] : []
+  })
+  return blocks.length > 0 ? blocks : undefined
+}
+
+function transcriptReplayImageBlock(
+  block: Record<string, unknown>,
+): TranscriptReplayContentBlock | null {
+  const source = isRecord(block.source) ? block.source : null
+  if (!source || source.type !== 'url' || typeof source.url !== 'string') {
+    return null
+  }
+  const mediaType =
+    typeof source.media_type === 'string'
+      ? source.media_type
+      : typeof source.mediaType === 'string'
+        ? source.mediaType
+        : ''
+  if (!TRANSCRIPT_IMAGE_MEDIA_TYPES.has(mediaType)) {
+    return null
+  }
+  if (!source.url.startsWith('https://') && !source.url.startsWith('http://')) {
+    return null
+  }
+  return {
+    type: 'image',
+    source: {
+      type: 'url',
+      media_type: mediaType,
+      url: source.url,
+    },
+  }
 }
 
 function isToolResultMessage(message: SerializedMessage): boolean {

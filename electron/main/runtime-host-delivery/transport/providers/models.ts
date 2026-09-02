@@ -68,7 +68,10 @@ export type ProviderModel = Readonly<{
   quality?: string;
 }>;
 
-export type SelectableProviderModel = ProviderModel & Readonly<{ selectionId: string }>;
+export type SelectableProviderModel = ProviderModel & Readonly<{
+  selectionId: string;
+  modelReferences: string[];
+}>;
 
 type ListResponse = Readonly<{ models: ProviderModel[] }>;
 type SelectableResponse = Readonly<{ models: SelectableProviderModel[] }>;
@@ -260,9 +263,12 @@ function isSelectableProviderModel(value: unknown): value is SelectableProviderM
   if (!isRecord(value)
     || !Object.hasOwn(value, 'selectionId')
     || !hasOnlyKeys(value, [
-      'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality', 'selectionId',
+      'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality', 'selectionId', 'modelReferences',
     ])
-    || !isBoundedText(value.selectionId, 2048)) return false;
+    || !isBoundedText(value.selectionId, 2048)
+    || !Array.isArray(value.modelReferences)
+    || value.modelReferences.length === 0
+    || !value.modelReferences.every((item) => isBoundedText(item, 2048))) return false;
   return isProviderModel({
     accountId: value.accountId,
     label: value.label,

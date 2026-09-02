@@ -550,7 +550,20 @@ class QueryEngineWorkerSession implements WorkerSession {
       if (
         stage === 'query_engine.model.resolved' ||
         stage === 'query.api.loop.start' ||
-        stage === 'query.api.streaming.start'
+        stage === 'query.api.streaming.start' ||
+        stage === 'api.request.sent' ||
+        stage === 'api.response.headers' ||
+        stage === 'api.stream.first_chunk' ||
+        stage === 'api.stream.message_start' ||
+        stage === 'api.stream.content_block_start' ||
+        stage === 'api.stream.first_content_delta' ||
+        stage === 'api.stream.first_text_delta' ||
+        stage === 'api.stream.content_block_stop' ||
+        stage === 'api.stream.message_delta.stop_reason' ||
+        stage === 'api.stream.message_stop' ||
+        stage === 'api.stream.watchdog.timeout' ||
+        stage === 'api.stream.loop.end' ||
+        stage === 'api.stream.error'
       ) {
         logProcessSessionTrace('matcha-agent-worker', stage, {
           sessionIdLength: this.sessionId.length,

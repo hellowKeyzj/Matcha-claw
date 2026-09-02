@@ -58,6 +58,10 @@
     "activity": "Working",
     "compacting": "Compressing context, then the reply will continue"
   },
+  "imageGeneration": {
+    "previewLoading": "Загрузка предпросмотра изображения…",
+    "previewUnavailable": "Предпросмотр изображения временно недоступен"
+  },
   "errors": {
     "activeRunDisconnected": "The active run disconnected before a terminal event was received.",
     "abortStoppingTimeout": "Stopping is taking longer than expected. Start a new session to continue if needed.",

@@ -234,8 +234,8 @@ pub type CanonicalSnapshotAssembly<'facts> = SnapshotAssembly<'facts>;
 /// Reads native session, bounded transcript, snapshot, and replay facts.
 ///
 /// A successful result is only returned when the replay cursor reaches the
-/// snapshot's native `lastSeq`. Close failure always overrides a provisional
-/// success so callers cannot mistake an unconfirmed read for complete facts.
+/// snapshot's native `lastSeq`. Transport cleanup cannot downgrade facts that
+/// were already confirmed by the app-server response chain.
 pub async fn read(
     endpoint: AppServerEndpoint,
     secret: &Secret,
@@ -249,7 +249,7 @@ pub async fn read(
     };
 
     let result = read_connected(&client, session_id, request).await;
-    close_outcome(result, client.close().await)
+    client.finish_with_cleanup(result).await
 }
 
 async fn read_connected(
@@ -323,23 +323,14 @@ fn from_hydration_incomplete(reason: HydrationIncomplete) -> CanonicalSessionRea
     }
 }
 
-fn close_outcome(
-    result: CanonicalSessionReadResult,
-    close: Result<(), AppServerClientError>,
-) -> CanonicalSessionReadResult {
-    match close {
-        Ok(()) => result,
-        Err(_) => HistoryResult::Incomplete(HydrationIncomplete::ConnectionCloseFailed),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::model::{Sequence, SessionRecord, SessionSnapshot};
 
     #[test]
-    fn canonical_result_preserves_history_distinctions_and_close_failure() {
+    fn canonical_result_preserves_history_distinctions_and_close_failure_does_not_replace_read_result()
+     {
         assert_eq!(
             from_connect_error(AppServerClientError::HealthFailed),
             HistoryResult::Unavailable
@@ -356,13 +347,13 @@ mod tests {
             from_read_error(AppServerClientError::EventRecoveryRequired),
             HistoryResult::Incomplete(HydrationIncomplete::ReplayRecoveryRequired)
         );
-        assert_eq!(
-            close_outcome(
+        assert!(matches!(
+            crate::session::client::outcome_after_cleanup(
                 HistoryResult::Complete(test_facts()),
                 Err(AppServerClientError::CloseFailed),
             ),
-            HistoryResult::Incomplete(HydrationIncomplete::ConnectionCloseFailed)
-        );
+            HistoryResult::Complete(_)
+        ));
     }
 
     #[test]
@@ -419,6 +410,8 @@ mod tests {
             last_seq: Sequence::try_new(1).unwrap(),
             last_snapshot_version: 1,
             model: None,
+            model_selection_id: None,
+            provider_fingerprint: None,
             permission_mode: None,
             worker_state: super::super::model::WorkerRuntimeState::Unloaded {
                 reason: super::super::model::UnloadedReason::NotStarted,

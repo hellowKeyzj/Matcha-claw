@@ -52,7 +52,136 @@
         "pendingBlockerTaskId": "タスクID {{taskId}}",
         "pendingBlockerSourceChat": "チャット",
         "pendingBlockerApprovalId": "承認ID {{id}}",
-        "pendingBlockerApprovalHint": "ツール呼び出しが承認待ちです。"
+        "pendingBlockerApprovalHint": "ツール呼び出しが承認待ちです。",
+        "account": {
+            "signedOut": "未ログイン",
+            "syncing": "同期中",
+            "offline": "オフライン",
+            "signedIn": "ログイン中",
+            "checking": "ログイン状態を確認中",
+            "openMenu": "アカウントメニューを開く",
+            "loginAria": "MatchaClaw にログイン",
+            "quotaEmpty": "ログイン後に使用量を表示",
+            "subscription": "サブスクリプション",
+            "appearanceSettings": "外観 / 設定",
+            "about": "情報",
+            "logout": "ログアウト",
+            "login": "ログイン",
+            "register": "登録",
+            "upgradeSubscription": "アップグレード / 登録",
+            "plan": {
+                "trialing": "試用中",
+                "active": "契約中",
+                "pastDue": "要対応",
+                "cancelled": "キャンセル済み",
+                "expired": "期限切れ",
+                "free": "無料"
+            },
+            "quota": {
+                "usage": "使用量",
+                "usedAmount": "使用済み {{amount}}",
+                "usedOfLimit": "{{used}} / {{limit}}",
+                "subscriptionDaily": "日次プラン枠",
+                "subscriptionWeekly": "週次プラン枠",
+                "subscriptionMonthly": "月次プラン枠",
+                "platformMonthly": "{{platform}} 月次",
+                "totalUsage": "総使用量"
+            }
+        }
+    },
+    "subscriptionDialog": {
+        "title": "Matcha サブスクリプション",
+        "tabs": {
+            "current": "現在の契約",
+            "checkout": "プランを選択"
+        },
+        "loading": "Matcha プランと支払い方法を読み込み中...",
+        "units": {
+            "day": "日",
+            "week": "週",
+            "month": "月",
+            "year": "年",
+            "cycle": "期間"
+        },
+        "subscriptionStatus": {
+            "active": "契約中",
+            "trialing": "試用中",
+            "pastDue": "要対応",
+            "cancelled": "キャンセル済み",
+            "expired": "期限切れ",
+            "none": "未契約"
+        },
+        "current": {
+            "subscriptionCount": "{{count}} 件の Matcha 契約",
+            "noSubscription": "Matcha 契約なし",
+            "expiresAt": "有効期限: {{date}}",
+            "quotaTitle": "契約枠",
+            "emptyQuota": "現在の契約の枠詳細は返されていません。",
+            "platformQuotaTitle": "プラットフォーム枠"
+        },
+        "quota": {
+            "daily": "日次枠",
+            "weekly": "週次枠",
+            "monthly": "月次枠",
+            "platformMonthly": "{{platform}} 月次",
+            "unlimited": "無制限",
+            "usedOfLimit": "使用済み {{used}} / {{limit}}",
+            "remaining": "残り {{amount}}",
+            "resetsAt": "リセット: {{date}}"
+        },
+        "plan": {
+            "duration": "{{count}} {{unit}}",
+            "otherPlans": "その他のプラン",
+            "unitPlans": "{{unit}}プラン",
+            "allPlans": "すべてのプラン",
+            "empty": "購入できる Matcha プランはありません。",
+            "rateMultiplier": "倍率: ×{{value}}",
+            "validity": "有効期間: {{duration}}",
+            "quotaLimit": "{{label}}: {{amount}}",
+            "defaultFeature": "Matcha サブスクリプションの基本特典を含みます。"
+        },
+        "payment": {
+            "title": "支払い情報",
+            "method": "支払い方法",
+            "noMethod": "利用可能な支払い方法がありません。後でもう一度お試しください。",
+            "unlimited": "無制限",
+            "singleRange": "1回の支払い範囲: {{min}} - {{max}}",
+            "feeRate": "、手数料 {{rate}}%",
+            "agreement": "Matcha のサブスクリプション規約、プラン説明、支払いルールに同意します。",
+            "confirm": "支払いを確定",
+            "confirmWithAmount": "{{amount}} を支払う"
+        },
+        "order": {
+            "pending": "注文は支払い待ちです",
+            "statusLabel": "支払い状態",
+            "payAmount": "支払額",
+            "expiresAt": "有効期限",
+            "openPayUrl": "支払いページを開く",
+            "qrCode": "支払いQRコード",
+            "qrCodeAlt": "Matcha 支払いQRコード",
+            "copied": "コピー済み",
+            "tradeNo": "支払い注文番号",
+            "reload": "注文を更新",
+            "verify": "支払い結果を確認",
+            "polling": "自動確認中",
+            "status": {
+                "pending": "支払い待ち",
+                "recharging": "支払い処理中",
+                "paid": "支払い完了",
+                "expired": "期限切れ",
+                "failed": "支払い失敗",
+                "cancelled": "キャンセル済み",
+                "unknown": "不明な状態"
+            }
+        },
+        "errors": {
+            "loadPlansFailed": "プランの読み込みに失敗しました",
+            "verifyOrderFailed": "支払い状態の確認に失敗しました: {{message}}",
+            "createOrderFailed": "支払い注文の作成に失敗しました: {{message}}",
+            "reloadOrderFailed": "注文の更新に失敗しました: {{message}}",
+            "openPayUrlFailed": "支払いページを開けませんでした: {{message}}",
+            "copyFailed": "コピーに失敗しました: {{message}}"
+        }
     },
     "actions": {
         "save": "保存",

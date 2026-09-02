@@ -440,8 +440,25 @@ async fn localhost_transport_enforces_matcha_catalog_request_auth_endpoint_and_r
 }
 
 #[tokio::test]
-async fn localhost_transport_binds_timeline_operations_to_fixed_endpoints() {
+async fn localhost_transport_binds_session_read_operations_to_fixed_endpoints() {
     let server = RunningServer::start().await;
+
+    let content = server
+        .request(&http_request(
+            "POST",
+            "/api/sessions/content",
+            Some(&content_decision("/api/sessions/content")),
+            &content_request().to_string(),
+        ))
+        .await;
+    assert_eq!(content["status"], 503);
+    assert_eq!(
+        content["body"],
+        json!({
+            "success": false,
+            "error": "Session content is unavailable",
+        })
+    );
 
     for (path, operation) in [
         ("/api/sessions/load", "sessions.load"),
@@ -788,6 +805,31 @@ fn timeline_request(operation: &str) -> Value {
     })
 }
 
+fn content_request() -> Value {
+    let identity = json!({
+        "endpoint": {
+            "kind": "native-runtime",
+            "runtimeAdapterId": "openclaw",
+            "runtimeInstanceId": "local",
+        },
+        "agentId": "main",
+        "sessionKey": "session-1",
+    });
+    json!({
+        "id": "session.management",
+        "operationId": "sessions.content.load",
+        "scope": { "kind": "session", "identity": identity.clone() },
+        "target": { "kind": "session", "identity": identity.clone() },
+        "input": {
+            "sessionKey": "session-1",
+            "sessionIdentity": identity,
+            "contentRef": "matcha-local:chunk",
+            "offset": 0,
+            "limit": 65536,
+        },
+    })
+}
+
 fn delete_request() -> Value {
     let identity = json!({
         "endpoint": {
@@ -874,6 +916,24 @@ fn verification_key() -> String {
     ];
     bytes.extend_from_slice(signing_key().verifying_key().as_bytes());
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn content_decision(endpoint: &str) -> String {
+    let payload = json!({
+        "version": 1,
+        "principal": "localhost-test",
+        "endpoint": endpoint,
+        "scope": "sessions:read",
+        "capability": "session.management",
+        "subject": "session-content",
+        "expiresAt": now_millis() + 60_000,
+        "correlation": format!("test:content:{}", NEXT_ROOT.fetch_add(1, Ordering::Relaxed)),
+        "revision": "test",
+    });
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("serialize decision"));
+    let signed = format!("capability-decision.v1.{payload}");
+    let signature = URL_SAFE_NO_PAD.encode(signing_key().sign(signed.as_bytes()).to_bytes());
+    format!("{signed}.{signature}")
 }
 
 fn timeline_decision(endpoint: &str, capability: &str) -> String {

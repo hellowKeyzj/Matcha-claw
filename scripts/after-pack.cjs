@@ -430,57 +430,6 @@ function patchPluginIds(pluginDir, expectedId) {
   }
 }
 
-function resolveNsisExtractTemplate() {
-  const candidates = [];
-
-  try {
-    const electronBuilderPackage = require.resolve('electron-builder/package.json');
-    const pnpmNodeModulesDir = dirname(dirname(electronBuilderPackage));
-    candidates.push(join(
-      pnpmNodeModulesDir,
-      'app-builder-lib',
-      'templates',
-      'nsis',
-      'include',
-      'extractAppPackage.nsh',
-    ));
-  } catch {
-    // Fall through to filesystem candidates below.
-  }
-
-  candidates.push(join(
-    __dirname,
-    '..',
-    'node_modules',
-    'app-builder-lib',
-    'templates',
-    'nsis',
-    'include',
-    'extractAppPackage.nsh',
-  ));
-
-  const pnpmDir = join(__dirname, '..', 'node_modules', '.pnpm');
-  if (existsSync(pnpmDir)) {
-    for (const entry of readdirSync(pnpmDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith('app-builder-lib@')) {
-        continue;
-      }
-      candidates.push(join(
-        pnpmDir,
-        entry.name,
-        'node_modules',
-        'app-builder-lib',
-        'templates',
-        'nsis',
-        'include',
-        'extractAppPackage.nsh',
-      ));
-    }
-  }
-
-  return candidates.find((candidate) => existsSync(candidate)) || null;
-}
-
 // ── Plugin bundler ───────────────────────────────────────────────────────────
 // Bundles a single OpenClaw plugin (and its transitive deps) from node_modules
 // directly into the packaged resources directory.
@@ -895,47 +844,13 @@ exports.default = async function afterPack(context) {
     console.log(`[after-pack] ✅ Removed ${onnxRuntimeRemoved} non-target onnxruntime-node binary directories.`);
   }
 
-  // 5. [Windows only] Patch NSIS extraction to avoid the slow temp CopyFiles step.
-  //
-  // electron-builder's extractUsing7za macro extracts app-64.7z into a temp
-  // directory, then copies the whole tree to $INSTDIR. MatchaClaw's OpenClaw
-  // runtime contains more than 100k small files, so this second copy can take a
-  // very long time under Windows Defender or on slower disks.
-  //
-  // customCheckAppRunning in scripts/installer.nsh already renames the old
-  // $INSTDIR to a _stale_ directory and recreates an empty $INSTDIR before
-  // extraction. That makes direct extraction safe and removes the duplicate copy.
+  // 5. [Windows only] Ensure NSIS templates use the overwrite-upgrade path.
   if (platform === 'win32') {
-    const extractNsh = resolveNsisExtractTemplate();
-    if (extractNsh && existsSync(extractNsh)) {
-      const { readFileSync, writeFileSync } = require('fs');
-      const original = readFileSync(extractNsh, 'utf8');
-
-      if (original.includes('MatchaClaw-patched')) {
-        console.log('[after-pack] ⚡ extractAppPackage.nsh already patched; skipping.');
-      } else if (original.includes('CopyFiles')) {
-        const patched = original.replace(
-          /!macro extractUsing7za FILE[\s\S]*?!macroend/,
-          [
-            '!macro extractUsing7za FILE',
-            '  ; MatchaClaw-patched: extract directly to $INSTDIR.',
-            '  ; customCheckAppRunning moves the old $INSTDIR aside first,',
-            '  ; so the target directory is clean and does not need CopyFiles.',
-            '  Nsis7z::Extract "${FILE}"',
-            '!macroend',
-          ].join('\n'),
-        );
-
-        if (patched !== original) {
-          writeFileSync(extractNsh, patched, 'utf8');
-          console.log('[after-pack] ⚡ Patched extractAppPackage.nsh: using direct Nsis7z::Extract.');
-        } else {
-          console.warn('[after-pack] ⚠️  Failed to patch extractAppPackage.nsh; template shape changed.');
-        }
-      }
-    } else {
-      console.warn('[after-pack] ⚠️  Could not find extractAppPackage.nsh; NSIS CopyFiles optimization skipped.');
+    const { patchWindowsNsisTemplates } = await import('./patch-nsis-win.mjs');
+    if (!patchWindowsNsisTemplates()) {
+      throw new Error('Failed to patch NSIS install templates for overwrite upgrades.');
     }
+    console.log('[after-pack] ⚡ NSIS install templates ready (overwrite upgrade).');
   }
 };
 

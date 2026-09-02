@@ -53,6 +53,14 @@ fn credential(value: &str) -> CredentialReference {
 }
 
 fn account(id: &str, credential: CredentialReference) -> ProviderAccount {
+    account_with_updated_at(id, credential, "2026-07-30T10:00:00Z")
+}
+
+fn account_with_updated_at(
+    id: &str,
+    credential: CredentialReference,
+    updated_at: &str,
+) -> ProviderAccount {
     ProviderAccount::new(
         ProviderAccountId::try_new(id).unwrap(),
         ProviderReference::try_new("provider:openai").unwrap(),
@@ -67,7 +75,7 @@ fn account(id: &str, credential: CredentialReference) -> ProviderAccount {
             auth_mode: ProviderAccountAuthMode::ApiKey,
             credential: Some(credential),
             created_at: "2026-07-30T10:00:00Z".to_owned(),
-            updated_at: "2026-07-30T10:00:00Z".to_owned(),
+            updated_at: updated_at.to_owned(),
         })
         .unwrap(),
     )
@@ -193,7 +201,148 @@ fn account_deletion_cascades_models_and_routes_through_one_recoverable_journal()
             .collect::<Vec<_>>(),
         ["retained-model"]
     );
-    assert!(reopened.routing().unwrap().routes().is_empty());
+    let route = reopened
+        .routing()
+        .unwrap()
+        .route(ProviderRoutingCapability::Chat)
+        .unwrap();
+    assert_eq!(route.primary().account_id(), &retained_id);
+    assert_eq!(route.primary().model_id(), "retained-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(!paths.journal.exists());
+    paths.remove();
+}
+
+#[test]
+fn deleting_fallback_keeps_primary_route() {
+    let paths = Paths::new("delete-fallback");
+    let primary_id = ProviderAccountId::try_new("primary").unwrap();
+    let removed_id = ProviderAccountId::try_new("removed").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .persist_account(account("removed", credential("removed")))
+        .unwrap();
+    cascade
+        .models
+        .replace(
+            &primary_id,
+            vec![model(primary_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .models
+        .replace(
+            &removed_id,
+            vec![model(removed_id.clone(), "removed-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(primary_id.clone(), "primary-model"),
+                        vec![reference(removed_id.clone(), "removed-model")],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade
+        .delete_account(&removed_id, ProviderAccountRevision::try_new(1).unwrap())
+        .unwrap();
+
+    let route = cascade
+        .routing()
+        .unwrap()
+        .route(ProviderRoutingCapability::Chat)
+        .unwrap();
+    assert_eq!(route.primary().account_id(), &primary_id);
+    assert!(route.fallbacks().is_empty());
+    assert!(!paths.journal.exists());
+    paths.remove();
+}
+
+#[test]
+fn deleting_primary_without_fallback_promotes_best_remaining_account() {
+    let paths = Paths::new("delete-primary-replacement");
+    let removed_id = ProviderAccountId::try_new("removed").unwrap();
+    let older_id = ProviderAccountId::try_new("older").unwrap();
+    let newer_id = ProviderAccountId::try_new("newer").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("removed", credential("removed")))
+        .unwrap();
+    cascade
+        .persist_account(account_with_updated_at(
+            "older",
+            credential("older"),
+            "2026-07-30T10:00:00Z",
+        ))
+        .unwrap();
+    cascade
+        .persist_account(account_with_updated_at(
+            "newer",
+            credential("newer"),
+            "2026-07-31T10:00:00Z",
+        ))
+        .unwrap();
+    cascade
+        .models
+        .replace(
+            &removed_id,
+            vec![model(removed_id.clone(), "removed-model")],
+        )
+        .unwrap();
+    cascade
+        .models
+        .replace(&older_id, vec![model(older_id.clone(), "older-model")])
+        .unwrap();
+    cascade
+        .models
+        .replace(&newer_id, vec![model(newer_id.clone(), "newer-model")])
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(removed_id.clone(), "removed-model"),
+                        Vec::new(),
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade
+        .delete_account(&removed_id, ProviderAccountRevision::try_new(1).unwrap())
+        .unwrap();
+
+    let route = cascade
+        .routing()
+        .unwrap()
+        .route(ProviderRoutingCapability::Chat)
+        .unwrap();
+    assert_eq!(route.primary().account_id(), &newer_id);
+    assert_eq!(route.primary().model_id(), "newer-model");
+    assert!(route.fallbacks().is_empty());
     assert!(!paths.journal.exists());
     paths.remove();
 }

@@ -7,7 +7,8 @@ use tokio::sync::oneshot;
 
 use crate::{
     sessions::model_selection::{
-        ResolvedSessionModelSelection, SessionModelSelectionCommand, SessionModelSelectionOutcome,
+        MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
+        SessionModelSelectionCommand, SessionModelSelectionOutcome,
     },
     transport::provider_accounts::{
         AccountDraft, ProviderAccountsDelivery, private_auth::Resolver,
@@ -73,6 +74,10 @@ pub(crate) enum ProviderQuery {
         command: SessionModelSelectionCommand,
         reply: oneshot::Sender<Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome>>,
     },
+    ResolveMatchaSessionModelRuntime {
+        command: MatchaSessionModelRuntimeCommand,
+        reply: oneshot::Sender<Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome>>,
+    },
 }
 
 impl ProviderCommand {
@@ -89,7 +94,8 @@ impl ProviderQuery {
             | Self::ListModels { .. }
             | Self::SelectableModels { .. }
             | Self::ListRouting { .. } => QueryRoute::Direct,
-            Self::ResolveSessionModelSelection { .. } => QueryRoute::Global,
+            Self::ResolveSessionModelSelection { .. }
+            | Self::ResolveMatchaSessionModelRuntime { .. } => QueryRoute::Global,
         }
     }
 }

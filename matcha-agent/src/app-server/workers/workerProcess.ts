@@ -64,6 +64,45 @@ type PendingRequest = {
 
 const DEFAULT_STDERR_TAIL_BYTES = 64 * 1024
 const DEFAULT_STDOUT_MAX_FRAME_BYTES = 1024 * 1024
+const WORKER_PROCESS_ENV_KEYS = [
+  'PATH',
+  'Path',
+  'SystemRoot',
+  'ComSpec',
+  'PATHEXT',
+  'TEMP',
+  'TMP',
+  'SHELL',
+  'CLAUDE_CODE_GIT_BASH_PATH',
+] as const
+
+export function createWorkerProcessEnvironment(
+  options: { env?: NodeJS.ProcessEnv; workerId?: string } = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...options.env,
+  }
+  for (const key of WORKER_PROCESS_ENV_KEYS) {
+    copyEnvironmentKey(env, key)
+  }
+  if (options.workerId !== undefined) {
+    env.MATCHA_AGENT_WORKER_ID = options.workerId
+  }
+  return env
+}
+
+function copyEnvironmentKey(env: NodeJS.ProcessEnv, key: string): void {
+  if (env[key] !== undefined) return
+
+  const sourceKey = Object.keys(env).find(
+    candidate => candidate.toLowerCase() === key.toLowerCase(),
+  )
+  if (sourceKey === undefined) return
+
+  const value = env[sourceKey]
+  if (value !== undefined) env[key] = value
+}
 
 export class WorkerProcess {
   readonly workerId: string

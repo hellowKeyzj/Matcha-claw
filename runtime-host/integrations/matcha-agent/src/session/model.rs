@@ -146,6 +146,8 @@ pub struct SessionRecord {
     pub last_seq: Sequence,
     pub last_snapshot_version: u64,
     pub model: Option<String>,
+    pub model_selection_id: Option<String>,
+    pub provider_fingerprint: Option<String>,
     pub permission_mode: Option<String>,
     pub worker_state: WorkerRuntimeState,
 }
@@ -164,6 +166,11 @@ impl fmt::Debug for SessionRecord {
             .field("last_seq", &self.last_seq)
             .field("last_snapshot_version", &self.last_snapshot_version)
             .field("has_model", &self.model.is_some())
+            .field("has_model_selection_id", &self.model_selection_id.is_some())
+            .field(
+                "has_provider_fingerprint",
+                &self.provider_fingerprint.is_some(),
+            )
             .field("has_permission_mode", &self.permission_mode.is_some())
             .field("worker_state", &self.worker_state)
             .finish_non_exhaustive()
@@ -677,6 +684,8 @@ mod tests {
             last_seq: Sequence::try_new(7).unwrap(),
             last_snapshot_version: 3,
             model: Some("model-name-canary".into()),
+            model_selection_id: Some("model-selection-canary".into()),
+            provider_fingerprint: Some("provider-fingerprint-canary".into()),
             permission_mode: Some("permission-mode-canary".into()),
             worker_state: WorkerRuntimeState::Running {
                 worker_id: WorkerId::try_new("record-worker-canary").unwrap(),
@@ -691,6 +700,8 @@ mod tests {
             "session-title-canary",
             "transcript-ref-canary",
             "model-name-canary",
+            "model-selection-canary",
+            "provider-fingerprint-canary",
             "permission-mode-canary",
             "record-worker-canary",
             "record-run-canary",

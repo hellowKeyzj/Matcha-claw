@@ -6,6 +6,8 @@ use tokio::{
     net::TcpStream,
 };
 
+use crate::transport::session_trace;
+
 const MAX_REQUEST_BYTES: usize = 72 * 1024;
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -19,6 +21,7 @@ pub(crate) struct Request {
     pub(crate) method: String,
     pub(crate) path: String,
     pub(crate) authorization: Option<String>,
+    pub(crate) trace_id: Option<String>,
     pub(crate) body: Vec<u8>,
 }
 
@@ -38,7 +41,7 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> io::Result<Request> 
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
     };
-    let (method, path, length, authorization, content_type) = {
+    let (method, path, length, authorization, trace_id, content_type) = {
         let header = std::str::from_utf8(&bytes[..header_end])
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
         let mut lines = header.split("\r\n");
@@ -53,15 +56,26 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> io::Result<Request> 
         };
         let mut length = None;
         let mut authorization = None;
+        let mut trace_id = None;
         let mut content_type = false;
         for line in lines.filter(|line| !line.is_empty()) {
             let Some((name, value)) = line.split_once(':') else {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             };
-            match name.trim().to_ascii_lowercase().as_str() {
-                "content-length" => length = value.trim().parse::<usize>().ok(),
-                "authorization" => authorization = Some(value.trim().into()),
-                "content-type" => content_type = value.trim() == "application/json",
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match name.as_str() {
+                "content-length" => length = value.parse::<usize>().ok(),
+                "authorization" => authorization = Some(value.into()),
+                "content-type" => content_type = value == "application/json",
+                _ if name == session_trace::HEADER => {
+                    if !value.is_empty()
+                        && value.len() <= 256
+                        && !value.chars().any(char::is_control)
+                    {
+                        trace_id = Some(value.into());
+                    }
+                }
                 _ => {}
             }
         }
@@ -70,6 +84,7 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> io::Result<Request> 
             path.to_owned(),
             length,
             authorization,
+            trace_id,
             content_type,
         )
     };
@@ -81,6 +96,7 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> io::Result<Request> 
             method,
             path,
             authorization,
+            trace_id,
             body: Vec::new(),
         });
     }
@@ -104,6 +120,7 @@ pub(crate) async fn read_request(stream: &mut TcpStream) -> io::Result<Request> 
         method,
         path,
         authorization,
+        trace_id,
         body: bytes[header_end..].to_vec(),
     })
 }

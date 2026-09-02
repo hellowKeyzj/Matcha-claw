@@ -48,6 +48,7 @@ type ReplayLine = {
     originMessageId?: string
     role: string
     toolCallId?: string
+    content: unknown
     metadata: {
       sessionId: string
     }
@@ -227,6 +228,157 @@ describe('readSessionTranscriptReplayLines', () => {
     }
     expect(replay.map(line => line.id)).not.toContain(ABANDONED_MESSAGE_ID)
     expect(replay[2]!.message.toolCallId).toBe(TOOL_CALL_ID)
+  })
+
+  test('projects legacy transcript content into native-safe replay lines', async () => {
+    const sessionId = '10000000-0000-4000-8000-000000000020'
+    const sessionFile = join(
+      configDir,
+      'projects',
+      '-history-read-model-safety',
+      `${sessionId}.jsonl`,
+    )
+    const safeMessageId = '10000000-0000-4000-8000-000000000021'
+    const unsafeOnlyMessageId = '10000000-0000-4000-8000-000000000022'
+    const urlImageMessageId = '10000000-0000-4000-8000-000000000023'
+    const toolUseMessageId = '10000000-0000-4000-8000-000000000024'
+    const transcriptEntries = [
+      {
+        uuid: safeMessageId,
+        parentUuid: null,
+        isSidechain: false,
+        sessionId,
+        timestamp: '2026-07-11T12:20:00.000Z',
+        type: 'assistant',
+        cwd: '/workspace/history-read-model-safety',
+        userType: 'external',
+        version: '2.8.1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            { type: 'text', text: 'visible answer' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'raw-inline-bytes',
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: unsafeOnlyMessageId,
+        parentUuid: safeMessageId,
+        isSidechain: false,
+        sessionId,
+        timestamp: '2026-07-11T12:20:01.000Z',
+        type: 'assistant',
+        cwd: '/workspace/history-read-model-safety',
+        userType: 'external',
+        version: '2.8.1',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'redacted_thinking', data: 'opaque' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'raw-inline-bytes',
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: urlImageMessageId,
+        parentUuid: unsafeOnlyMessageId,
+        isSidechain: false,
+        sessionId,
+        timestamp: '2026-07-11T12:20:02.000Z',
+        type: 'assistant',
+        cwd: '/workspace/history-read-model-safety',
+        userType: 'external',
+        version: '2.8.1',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'image',
+              source: {
+                type: 'url',
+                media_type: 'image/png',
+                url: 'https://example.test/image.png',
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: toolUseMessageId,
+        parentUuid: urlImageMessageId,
+        isSidechain: false,
+        sessionId,
+        timestamp: '2026-07-11T12:20:03.000Z',
+        type: 'assistant',
+        cwd: '/workspace/history-read-model-safety',
+        userType: 'external',
+        version: '2.8.1',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: TOOL_CALL_ID,
+              name: 'Read',
+              input: { file_path: '/workspace/private.txt' },
+            },
+          ],
+        },
+      },
+    ]
+
+    await mkdir(dirname(sessionFile), { recursive: true })
+    await writeFile(
+      sessionFile,
+      `${transcriptEntries.map(entry => JSON.stringify(entry)).join('\n')}\n`,
+    )
+
+    const replayLines = await readSessionTranscriptReplayLines(sessionId, 10)
+    const replay = replayLines.map(line => JSON.parse(line) as ReplayLine)
+
+    expect(replay.map(line => line.id)).toEqual([
+      safeMessageId,
+      urlImageMessageId,
+      toolUseMessageId,
+    ])
+    expect(replay[0]!.message.content).toEqual([
+      { type: 'text', text: 'visible answer' },
+    ])
+    expect(JSON.stringify(replay)).not.toContain('redacted_thinking')
+    expect(JSON.stringify(replay)).not.toContain('raw-inline-bytes')
+    expect(replay[1]!.message.content).toEqual([
+      {
+        type: 'image',
+        source: {
+          type: 'url',
+          media_type: 'image/png',
+          url: 'https://example.test/image.png',
+        },
+      },
+    ])
+    expect(replay[2]!.message.content).toEqual([
+      {
+        type: 'tool_use',
+        id: TOOL_CALL_ID,
+        name: 'Read',
+        input: { file_path: null },
+      },
+    ])
   })
 
   test('marks only real user messages as conversations in history summaries', async () => {

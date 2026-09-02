@@ -12,6 +12,7 @@ import {
   CHAT_WORKSPACE_LAYOUT,
   resolveChatWorkspaceLayout,
 } from '@/pages/Chat/chat-workspace-layout';
+import { invokeIpc } from '@/lib/api-client';
 import { useLayoutStore } from '@/stores/layout';
 
 export function MainLayout() {
@@ -87,6 +88,13 @@ export function MainLayout() {
     }
     clearChatTakeoverMode();
   }, [clearChatTakeoverMode, isChatRoute]);
+
+  useEffect(() => {
+    if (window.electron?.platform !== 'darwin') {
+      return;
+    }
+    void invokeIpc('window:syncTrafficLightPosition', !sidebarVisible);
+  }, [sidebarVisible]);
 
   useEffect(() => {
     const applyResize = () => {

@@ -29,7 +29,15 @@ describe('ClawHub search host API route', () => {
       status: 200,
       body: {
         success: true,
-        results: [{ slug: 'web-search', name: 'Web Search', description: '', version: 'latest' }],
+        results: [{
+          slug: 'web-search',
+          name: 'Web Search',
+          description: '',
+          version: 'latest',
+          author: 'ClawHub',
+          downloads: 99,
+          stars: 7,
+        }],
       },
     });
     const result = response();
@@ -48,7 +56,15 @@ describe('ClawHub search host API route', () => {
       statusCode: 200,
       body: {
         success: true,
-        results: [{ slug: 'web-search', name: 'Web Search', description: '', version: 'latest' }],
+        results: [{
+          slug: 'web-search',
+          name: 'Web Search',
+          description: '',
+          version: 'latest',
+          author: 'ClawHub',
+          downloads: 99,
+          stars: 7,
+        }],
       },
     });
   });

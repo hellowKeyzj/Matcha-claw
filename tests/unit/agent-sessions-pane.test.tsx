@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
 import { useChatStore } from '@/stores/chat';
@@ -11,6 +11,10 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import {
+  buildCurrentConversationFromSessionRecord,
+  buildSessionRuntimeGraph,
+} from '@/stores/chat/session-runtime-graph';
 import {
   buildRuntimeEndpointKey,
   buildSessionIdentityKey,
@@ -106,6 +110,14 @@ function createSessionIdentity(sessionKey: string, agentId = readAgentIdFromSess
   return createOpenClawTestSessionIdentity(sessionKey, agentId);
 }
 
+function createMatchaAgentSessionIdentity(sessionKey = 'agent:matcha:main'): SessionIdentity {
+  return {
+    endpoint: matchaAgentTestRuntimeEndpoint,
+    agentId: 'matcha',
+    sessionKey,
+  };
+}
+
 function recordKeyForSession(sessionKey: string, identity = createSessionIdentity(sessionKey)): string {
   return buildSessionIdentityKey(identity);
 }
@@ -153,6 +165,16 @@ function createSessionRecord(input?: {
   };
 }
 
+function syncChatSessionRuntimeState(): void {
+  const state = useChatStore.getState();
+  const sessionRuntimeGraph = buildSessionRuntimeGraph(state.sessionRuntimeCatalog, state.loadedSessions);
+  const currentRecord = state.currentSessionKey ? state.loadedSessions[state.currentSessionKey] : null;
+  useChatStore.setState({
+    sessionRuntimeGraph,
+    currentConversation: currentRecord ? buildCurrentConversationFromSessionRecord(currentRecord) : null,
+  } as never);
+}
+
 function setupBaseState() {
   useTeamsStore.setState({
     teams: [],
@@ -181,12 +203,18 @@ function setupBaseState() {
     loadAgents: vi.fn().mockResolvedValue(undefined),
   } as never);
   useChatStore.setState({
+    currentSessionKey: '',
+    loadedSessions: {},
+    currentConversation: null,
+    sessionRuntimeGraph: { endpoints: [] },
     sessionCatalogStatus: readyResource,
     sessionRuntimeCatalog: buildReadySessionRuntimeCatalog(),
   } as never);
+  syncChatSessionRuntimeState();
 }
 
 function renderPane() {
+  syncChatSessionRuntimeState();
   render(
     <MemoryRouter>
       <AgentSessionsPane />
@@ -218,6 +246,7 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:designer-agent:main', roleIdentity)]: createSessionRecord({ sessionKey: 'agent:designer-agent:main', sessionIdentity: roleIdentity, historyStatus: 'ready' }),
       },
     } as never);
+    syncChatSessionRuntimeState();
     useTeamsStore.setState({
       teams: [
         {
@@ -343,6 +372,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -451,6 +481,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -490,6 +521,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -531,6 +563,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     render(
       <MemoryRouter>
@@ -573,6 +606,127 @@ describe('agent sessions pane', () => {
 
     fireEvent.click(screen.getByTestId('agent-new-session-test'));
     expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
+  });
+
+  it('runtime catalog 增加第二个 endpoint 后 selector 不需要 remount 就可用', () => {
+    useChatStore.setState({
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [buildReadySessionRuntimeCatalog().endpoints[1]!],
+        defaultSessionPromptScope: matchaAgentMatchaScope,
+      },
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane();
+
+    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
+    expect(runtimeSelector).toBeDisabled();
+    expect(screen.queryByRole('option', { name: 'OpenClaw' })).toBeNull();
+    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+
+    act(() => {
+      useChatStore.setState({
+        sessionRuntimeCatalog: buildReadySessionRuntimeCatalog(),
+      } as never);
+      syncChatSessionRuntimeState();
+    });
+
+    expect(runtimeSelector).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OpenClaw' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+  });
+
+  it('runtime selector 切回 OpenClaw 时优先恢复该 runtime 上次选中的 session', () => {
+    const openClawMainKey = recordKeyForSession('agent:main:main');
+    const openClawRecentKey = recordKeyForSession('agent:test:session-recent');
+    const matchaIdentity = createMatchaAgentSessionIdentity();
+    const matchaKey = recordKeyForSession('agent:matcha:main', matchaIdentity);
+    useChatStore.setState({
+      currentSessionKey: matchaKey,
+      lastSelectedSessionKeyByRuntimeScopeKey: {
+        [buildRuntimeEndpointKey(openClawTestRuntimeEndpoint)]: openClawRecentKey,
+        [buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint)]: matchaKey,
+      },
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:test:session-recent', displayName: '上次 OpenClaw 会话' },
+        { key: 'agent:matcha:main', displayName: 'agent:matcha:main' },
+      ]),
+      loadedSessions: {
+        [openClawMainKey]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [openClawRecentKey]: createSessionRecord({
+          sessionKey: 'agent:test:session-recent',
+          historyStatus: 'ready',
+          label: '上次 OpenClaw 会话',
+          lastActivityAt: Date.now(),
+        }),
+        [matchaKey]: createSessionRecord({
+          sessionKey: 'agent:matcha:main',
+          sessionIdentity: matchaIdentity,
+          historyStatus: 'ready',
+        }),
+      },
+      switchSession: vi.fn((sessionKey: string) => {
+        useChatStore.setState({
+          currentSessionKey: sessionKey,
+          currentConversation: buildCurrentConversationFromSessionRecord(useChatStore.getState().loadedSessions[sessionKey]!),
+        } as never);
+      }),
+      newSession: vi.fn(),
+      newSessionForScope: vi.fn().mockResolvedValue(undefined),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane();
+
+    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
+    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint));
+
+    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(openClawTestRuntimeEndpoint) } });
+
+    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(openClawTestRuntimeEndpoint));
+    expect(useChatStore.getState().currentSessionKey).toBe(openClawRecentKey);
+    expect(screen.getByText('上次 OpenClaw 会话').closest('div')?.className).toContain('bg-secondary');
+  });
+
+  it('runtime selector 切到没有缓存 session 的 runtime 时进入 draft 且不创建远端会话', () => {
+    const newSession = vi.fn();
+    const newSessionForScope = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: recordKeyForSession('agent:main:main'),
+      lastSelectedSessionKeyByRuntimeScopeKey: {},
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+      ]),
+      loadedSessions: {
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+      },
+      switchSession: vi.fn(),
+      newSession,
+      newSessionForScope,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane();
+
+    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
+    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
+
+    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint));
+    expect(useChatStore.getState().currentSessionKey).toBe('');
+    expect(useChatStore.getState().currentConversation).toMatchObject({
+      kind: 'draft',
+      runtimeScopeKey: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint),
+      agentId: 'matcha',
+    });
+    expect(newSession).not.toHaveBeenCalled();
+    expect(newSessionForScope).not.toHaveBeenCalled();
   });
 
   it('runtime selector 切到 Matcha Agent 后只显示 matcha endpoint agent，并用 matcha scope 新建会话', () => {
@@ -667,6 +821,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -746,6 +901,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -753,7 +909,7 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeTruthy();
   });
 
-  it('点击无历史会话的 agent 行，应按选中 runtime 中对应 agent scope 新建', () => {
+  it('点击无历史会话的 agent 行，应进入对应 agent draft，不创建会话', () => {
     const switchSession = vi.fn();
     const openAgentConversation = vi.fn();
     const newSessionForScope = vi.fn().mockResolvedValue(undefined);
@@ -777,8 +933,8 @@ describe('agent sessions pane', () => {
     renderPane();
     fireEvent.click(screen.getByTestId('agent-item-test'));
 
-    expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
-    expect(openAgentConversation).not.toHaveBeenCalled();
+    expect(openAgentConversation).toHaveBeenCalledWith('test');
+    expect(newSessionForScope).not.toHaveBeenCalled();
     expect(switchSession).not.toHaveBeenCalled();
   });
 
@@ -998,6 +1154,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1038,6 +1195,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1077,6 +1235,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1163,6 +1322,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1193,6 +1353,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1218,6 +1379,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1234,6 +1396,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1278,6 +1441,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1301,6 +1465,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 
@@ -1333,6 +1498,7 @@ describe('agent sessions pane', () => {
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
+    syncChatSessionRuntimeState();
 
     renderPane();
 

@@ -9,6 +9,49 @@ vi.mock('../../electron/main/launch-at-startup', () => ({
 import { createSettingsDesiredTransport } from '../../electron/main/runtime-host-delivery/products/settings/desired';
 import { createSecurityPolicyTransport } from '../../electron/main/runtime-host-delivery/transport/security/policy';
 
+function buildRustSecurityPolicy() {
+  return {
+    preset: 'balanced',
+    securityPolicyVersion: 1,
+    runtime: {
+      autoHarden: false,
+      auditOnGatewayStart: true,
+      runtimeGuardEnabled: true,
+      enablePromptInjectionGuard: true,
+      blockDestructive: true,
+      blockSecrets: true,
+      allowPathPrefixes: [],
+      allowDomains: [],
+      auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
+      auditDailyCostLimitUsd: 5,
+      auditFailureMode: null,
+      promptInjectionPatterns: [],
+      destructivePatterns: [],
+      secretPatterns: [],
+      monitors: { credentials: true, memory: true, cost: false },
+      logging: { logDetections: true },
+      allowlist: { tools: [], sessions: [] },
+      destructive: {
+        action: 'confirm',
+        severityActions: { critical: 'block', high: 'confirm', medium: 'confirm', low: 'warn' },
+        categories: {
+          fileDelete: true,
+          gitDestructive: true,
+          sqlDestructive: true,
+          systemDestructive: true,
+          processKill: true,
+          networkDestructive: true,
+          privilegeEscalation: true,
+        },
+      },
+      secrets: {
+        action: 'block',
+        severityActions: { critical: 'block', high: 'block', medium: 'redact', low: 'warn' },
+      },
+    },
+  };
+}
+
 describe('Settings and Security read transports', () => {
   beforeEach(() => {
     applyLaunchAtStartupSettingMock.mockReset();
@@ -180,6 +223,18 @@ describe('Settings and Security read transports', () => {
       );
       await expect(malformed.readAudit(1, 8)).resolves.toBeNull();
     }
+  });
+
+  it('accepts the Rust normalized security policy projection', async () => {
+    const policy = buildRustSecurityPolicy();
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => policy });
+    const transport = createSecurityPolicyTransport(
+      { verificationKey: 'public', signDecision: () => 'signed' },
+      34_137,
+      fetcher,
+    );
+
+    await expect(transport.read()).resolves.toEqual(policy);
   });
 
   it('does not leak native transport errors', async () => {

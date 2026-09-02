@@ -179,6 +179,33 @@ function createTestConfig(storageRoot: string): AppServerConfig {
   }
 }
 
+async function withProcessEnv<T>(
+  patch: Record<string, string | undefined>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map(
+    Object.keys(patch).map(key => [key, process.env[key]]),
+  )
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+  try {
+    return await run()
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+}
+
 function createHistoryStore(
   summaries: SessionHistorySummary[],
 ): AppServerSessionHistoryStore {
@@ -274,6 +301,73 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe('createDefaultAppServerServices', () => {
+  test('spawns workers with inherited process env plus trace, toolchain, and worker id', async () => {
+    const storageRoot = await createTempRoot()
+    const spawnedEnvs: NodeJS.ProcessEnv[] = []
+    await withProcessEnv(
+      {
+        MATCHACLAW_SESSION_TRACE: '1',
+        MATCHA_AGENT_RUN_TRACE: '1',
+        PATH: 'C:\\Python312;C:\\Windows\\System32',
+        Path: 'C:\\Python312;C:\\Windows\\System32',
+        SystemRoot: 'C:\\Windows',
+        ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+        PATHEXT: '.COM;.EXE;.BAT;.CMD',
+        TEMP: 'C:\\Temp',
+        TMP: 'C:\\Temp',
+        SHELL: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        CLAUDE_CODE_GIT_BASH_PATH: 'C:\\Program Files\\Git\\bin\\bash.exe',
+        MATCHACLAW_UV_BIN: 'C:\\toolchain\\uv.exe',
+        MATCHA_AGENT_WORKER_ID: 'parent-worker-id',
+      },
+      async () => {
+        const services = createDefaultAppServerServices({
+          config: createTestConfig(storageRoot),
+          clientHub: new ClientHub({ maxClientQueueSize: 16 }),
+          serverVersion: 'test-server',
+          spawnWorker: ((
+            _command,
+            _args,
+            options: SpawnOptionsWithoutStdio,
+          ) => {
+            spawnedEnvs.push(options.env ?? {})
+            return createFakeWorkerChild(
+              String(options.env?.MATCHA_AGENT_WORKER_ID ?? ''),
+            )
+          }) as WorkerProcessSpawn,
+          createWorkerRequestId: sequentialIds('worker-request'),
+        })
+
+        await services.ports.session.create({
+          cwd: storageRoot,
+          sessionId: 'session-env',
+        })
+        await services.ports.session.prompt({
+          sessionId: 'session-env',
+          prompt: 'hello',
+        })
+      },
+    )
+
+    expect(spawnedEnvs).toHaveLength(1)
+    const env = spawnedEnvs[0]!
+    expect(env.MATCHACLAW_SESSION_TRACE).toBe('1')
+    expect(env.MATCHA_AGENT_RUN_TRACE).toBe('1')
+    expect(env.PATH ?? env.Path).toContain('C:\\Python312')
+    expect(env.SystemRoot).toBe('C:\\Windows')
+    expect(env.ComSpec).toBe('C:\\Windows\\System32\\cmd.exe')
+    expect(env.PATHEXT).toContain('.EXE')
+    expect(env.TEMP).toBe('C:\\Temp')
+    expect(env.TMP).toBe('C:\\Temp')
+    expect(env.SHELL).toBe('C:\\Program Files\\Git\\bin\\bash.exe')
+    expect(env.CLAUDE_CODE_GIT_BASH_PATH).toBe(
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+    )
+    expect(env.MATCHACLAW_UV_BIN).toBe('C:\\toolchain\\uv.exe')
+    expect(env.MATCHA_AGENT_WORKER_ID).toBeString()
+    expect(env.MATCHA_AGENT_WORKER_ID).not.toBe('parent-worker-id')
+  })
+
   test('creates sessions, queues prompts, persists events, and drains worker runs', async () => {
     const storageRoot = await createTempRoot()
     const workerChildren: FakeWorkerChild[] = []
@@ -300,10 +394,13 @@ describe('createDefaultAppServerServices', () => {
       createWorkerRequestId: sequentialIds('worker-request'),
     })
 
-    expect(clientHub.subscribe(clientId, 'session-1')).toMatchObject({
+    expect(
+      clientHub.subscribe({ clientId, sessionId: 'session-1', lastSeq: 0 }),
+    ).toMatchObject({
       resultType: 'subscribed',
       clientId,
       sessionId: 'session-1',
+      lastSeq: 0,
     })
 
     const session = await services.ports.session.create({
@@ -319,6 +416,18 @@ describe('createDefaultAppServerServices', () => {
       workerState: { state: 'unloaded', reason: 'notStarted' },
     })
     expect(session.hasConversation).toBeUndefined()
+    const subscribeResult = await services.ports.events.subscribe(clientId, {
+      sessionId: 'session-1',
+      afterSeq: 0,
+    })
+    expect(subscribeResult).toEqual({
+      resultType: 'subscribed',
+      clientId,
+      sessionId: 'session-1',
+      afterSeq: 0,
+      lastSeq: session.lastSeq,
+    })
+    expect(subscribeResult).not.toHaveProperty('replayed')
 
     const promptPayload = {
       message: 'hello\n\n[media attached: image.png]',
@@ -720,10 +829,17 @@ describe('createDefaultAppServerServices', () => {
       }) as ClientHubSend,
       'recovery-client',
     )
-    expect(firstClientHub.subscribe(clientId, 'session-1')).toMatchObject({
+    expect(
+      firstClientHub.subscribe({
+        clientId,
+        sessionId: 'session-1',
+        lastSeq: 0,
+      }),
+    ).toMatchObject({
       resultType: 'subscribed',
       clientId,
       sessionId: 'session-1',
+      lastSeq: 0,
     })
     const firstServices = createDefaultAppServerServices({
       config: createTestConfig(storageRoot),
@@ -844,10 +960,29 @@ describe('createDefaultAppServerServices', () => {
       model: 'opus',
       permissionMode: 'acceptEdits',
     })
-    expect(firstClientHub.subscribe(clientId, 'session-1')).toMatchObject({
+    await expect(
+      firstServices.ports.session.setModel({
+        sessionId: 'session-1',
+        model: 'opus',
+        modelSelectionId: 'anthropic/opus',
+        providerFingerprint: 'matcha-provider:v1:opus',
+      }),
+    ).resolves.toMatchObject({
+      model: 'opus',
+      modelSelectionId: 'anthropic/opus',
+      providerFingerprint: 'matcha-provider:v1:opus',
+    })
+    expect(
+      firstClientHub.subscribe({
+        clientId,
+        sessionId: 'session-1',
+        lastSeq: 0,
+      }),
+    ).toMatchObject({
       resultType: 'subscribed',
       clientId,
       sessionId: 'session-1',
+      lastSeq: 0,
     })
     const prompted = await firstServices.ports.session.prompt({
       sessionId: 'session-1',
@@ -923,6 +1058,8 @@ describe('createDefaultAppServerServices', () => {
       sessionId: 'session-1',
       title: 'Persisted Session',
       model: 'opus',
+      modelSelectionId: 'anthropic/opus',
+      providerFingerprint: 'matcha-provider:v1:opus',
       permissionMode: 'acceptEdits',
       workerState: { state: 'unloaded', reason: 'notStarted' },
     })
@@ -939,6 +1076,11 @@ describe('createDefaultAppServerServices', () => {
 
     const snapshot = await recoveredServices.ports.session.snapshot({
       sessionId: 'session-1',
+    })
+    expect(snapshot.session).toMatchObject({
+      model: 'opus',
+      modelSelectionId: 'anthropic/opus',
+      providerFingerprint: 'matcha-provider:v1:opus',
     })
     expect(snapshot.runs).toContainEqual(
       expect.objectContaining({
@@ -1739,7 +1881,7 @@ describe('createDefaultAppServerServices', () => {
     })
   })
 
-  test('does not wait for a later worker event after a cancel ack', async () => {
+  test('returns after a cancel ack and waits for the worker terminal event', async () => {
     const storageRoot = await createTempRoot()
     const workerChildren: FakeWorkerChild[] = []
     const services = createDefaultAppServerServices({
@@ -1778,6 +1920,15 @@ describe('createDefaultAppServerServices', () => {
     })
     const promptCommand = await waitForWorkerCommand(worker, 'session.prompt')
     worker.emitFrame({ id: promptCommand.id, ok: true })
+    worker.emitFrame({
+      type: 'event',
+      runId: prompted.runId,
+      event: {
+        type: 'run.started',
+        runId: prompted.runId,
+        workerId: worker.assignedWorkerId,
+      },
+    })
 
     const cancelPromise = services.ports.session.cancel({
       sessionId: 'session-1',
@@ -1787,14 +1938,46 @@ describe('createDefaultAppServerServices', () => {
     const cancelCommand = await waitForWorkerCommand(worker, 'session.cancel')
     worker.emitFrame({ id: cancelCommand.id, ok: true })
     await expect(cancelPromise).resolves.toMatchObject({
-      cancelledRunIds: [prompted.runId],
+      cancelledRunIds: [],
       workerResponse: { ok: true },
     })
 
-    const snapshot = await services.ports.session.snapshot({
+    const stoppingSnapshot = await services.ports.session.snapshot({
       sessionId: 'session-1',
     })
-    expect(snapshot.runs).toContainEqual(
+    expect(stoppingSnapshot.runs).toContainEqual(
+      expect.objectContaining({
+        runId: prompted.runId,
+        status: expect.objectContaining({ type: 'running' }),
+      }),
+    )
+    expect(stoppingSnapshot.session.workerState).toMatchObject({
+      state: 'stopping',
+      workerId: worker.assignedWorkerId,
+      reason: 'cancel',
+    })
+
+    worker.emitFrame({
+      type: 'event',
+      runId: prompted.runId,
+      event: {
+        type: 'run.cancelled',
+        runId: prompted.runId,
+        reason: 'user stopped',
+      },
+    })
+
+    const terminalSnapshot = await waitFor(async () => {
+      const current = await services.ports.session.snapshot({
+        sessionId: 'session-1',
+      })
+      return current.runs.some(
+        run => run.runId === prompted.runId && run.status.type === 'cancelled',
+      )
+        ? current
+        : undefined
+    })
+    expect(terminalSnapshot.runs).toContainEqual(
       expect.objectContaining({
         runId: prompted.runId,
         status: expect.objectContaining({
@@ -1803,7 +1986,7 @@ describe('createDefaultAppServerServices', () => {
         }),
       }),
     )
-    expect(snapshot.session.workerState).toMatchObject({
+    expect(terminalSnapshot.session.workerState).toMatchObject({
       state: 'ready',
       workerId: worker.assignedWorkerId,
     })
@@ -2331,6 +2514,7 @@ describe('createDefaultAppServerServices', () => {
     const updated = await services.ports.session.setModel({
       sessionId: 'session-1',
       model: 'ark-code-latest',
+      modelSelectionId: 'ark/ark-code-latest',
       providerFingerprint: 'matcha-provider:v1:ark',
       providerRuntime: {
         kind: 'openAiChatCompletions',
@@ -2339,10 +2523,20 @@ describe('createDefaultAppServerServices', () => {
       },
     })
 
+    expect(updated).toMatchObject({
+      model: 'ark-code-latest',
+      modelSelectionId: 'ark/ark-code-latest',
+      providerFingerprint: 'matcha-provider:v1:ark',
+    })
     expect(JSON.stringify(updated)).not.toContain('ark-secret')
     expect(JSON.stringify(updated)).not.toContain('https://ark.example/v1')
     const snapshot = await services.ports.session.snapshot({
       sessionId: 'session-1',
+    })
+    expect(snapshot.session).toMatchObject({
+      model: 'ark-code-latest',
+      modelSelectionId: 'ark/ark-code-latest',
+      providerFingerprint: 'matcha-provider:v1:ark',
     })
     expect(JSON.stringify(snapshot)).not.toContain('ark-secret')
     expect(JSON.stringify(snapshot)).not.toContain('https://ark.example/v1')

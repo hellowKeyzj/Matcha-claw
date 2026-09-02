@@ -125,9 +125,6 @@ class WorkerEntryRunner {
           return
         case 'session.cancel':
           this.session?.cancel(command.runId, command.reason)
-          if (this.activePrompt) {
-            await this.activePrompt.catch(() => {})
-          }
           await this.emitSuccess(command.id)
           return
         case 'approval.response':

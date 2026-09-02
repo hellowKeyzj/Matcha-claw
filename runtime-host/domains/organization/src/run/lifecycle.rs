@@ -262,6 +262,16 @@ impl GraphRunLifecycle {
             } if existing == idempotency_key && outcome == RoleAbortOutcome::Confirmed => {
                 Ok(SettleCancellationOutcome::Replayed)
             }
+            GraphRunLifecycleState::OutcomeUnknown {
+                idempotency_key: existing,
+                ..
+            } if existing == idempotency_key && outcome == RoleAbortOutcome::Confirmed => {
+                self.state = GraphRunLifecycleState::Cancelled {
+                    idempotency_key: idempotency_key.to_owned(),
+                    cancelled_at: observed_at,
+                };
+                Ok(SettleCancellationOutcome::Cancelled)
+            }
             GraphRunLifecycleState::OutcomeUnknown { .. } => {
                 Ok(SettleCancellationOutcome::OutcomeUnknown)
             }

@@ -60,6 +60,12 @@ const workspaceScope: RuntimeScope = {
   kind: 'workspace',
   endpoint: runtimeEndpoint,
 };
+const OPENAI_GPT41_MINI_SELECTION_ID = 'model-selection:v1:1111111111111111111111111111111111111111111111111111111111111111';
+const OPENAI_GPT41_MINI_RUNTIME_REF = 'openai/gpt-4.1-mini';
+const ANTHROPIC_CLAUDE37_SELECTION_ID = 'model-selection:v1:2222222222222222222222222222222222222222222222222222222222222222';
+const ANTHROPIC_CLAUDE37_RUNTIME_REF = 'anthropic/claude-3-7-sonnet';
+const CUSTOM_GPT4O_SELECTION_ID = 'model-selection:v1:3333333333333333333333333333333333333333333333333333333333333333';
+const CUSTOM_GPT4O_RUNTIME_REF = 'custom-dd749b2e/gpt-4o-mini';
 
 function buildCapabilitiesListEnvelope() {
   return {
@@ -154,10 +160,19 @@ async function openCreateDialog(): Promise<void> {
   fireEvent.click(button);
 }
 
-async function openEditDialog(agentId: string): Promise<void> {
-  const button = await screen.findByRole('button', { name: `Edit ${agentId}` });
+async function openAgentActionMenu(agentId: string): Promise<void> {
+  const button = await screen.findByRole('button', { name: `More actions ${agentId}` });
   await waitFor(() => expect(button).toBeEnabled());
-  fireEvent.click(button);
+  fireEvent.pointerDown(button, { button: 0, ctrlKey: false });
+}
+
+async function clickAgentAction(agentId: string, action: 'Export' | 'Edit' | 'Delete'): Promise<void> {
+  await openAgentActionMenu(agentId);
+  fireEvent.click(await screen.findByRole('menuitem', { name: action }));
+}
+
+async function openEditDialog(agentId: string): Promise<void> {
+  await clickAgentAction(agentId, 'Edit');
   await screen.findByRole('dialog', { name: 'Edit Subagent' });
 }
 
@@ -281,18 +296,20 @@ describe('subagents page', () => {
       ],
       availableModels: [
         {
-          id: 'gpt-4.1-mini',
+          id: OPENAI_GPT41_MINI_SELECTION_ID,
           provider: 'openai',
           providerLabel: 'OpenAI',
           modelLabel: 'gpt-4.1-mini',
           displayLabel: 'OpenAI / gpt-4.1-mini',
+          modelReferences: [OPENAI_GPT41_MINI_RUNTIME_REF],
         },
         {
-          id: 'claude-3-7-sonnet',
+          id: ANTHROPIC_CLAUDE37_SELECTION_ID,
           provider: 'anthropic',
           providerLabel: 'Anthropic',
           modelLabel: 'claude-3-7-sonnet',
           displayLabel: 'Anthropic / claude-3-7-sonnet',
+          modelReferences: [ANTHROPIC_CLAUDE37_RUNTIME_REF],
         },
       ],
       modelsLoading: false,
@@ -523,7 +540,7 @@ describe('subagents page', () => {
     expect(screen.getByLabelText('Workspace')).toHaveValue(
       '/home/dev/.openclaw/workspace-subagents/writer'
     );
-    expect(screen.getByLabelText('Model')).toHaveValue('gpt-4.1-mini');
+    expect(screen.getByLabelText('Model')).toHaveValue(OPENAI_GPT41_MINI_SELECTION_ID);
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
@@ -531,7 +548,7 @@ describe('subagents page', () => {
         name: 'writer',
         description: 'Writes vendor briefs.',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
+        model: OPENAI_GPT41_MINI_RUNTIME_REF,
         avatarSeed: expect.any(String),
         avatarStyle: 'pixelArt',
       }));
@@ -550,7 +567,7 @@ describe('subagents page', () => {
       expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
+        model: OPENAI_GPT41_MINI_RUNTIME_REF,
         avatarSeed: expect.any(String),
         avatarStyle: 'pixelArt',
       }));
@@ -588,7 +605,7 @@ describe('subagents page', () => {
       expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
+        model: OPENAI_GPT41_MINI_RUNTIME_REF,
         avatarSeed: expect.stringContaining('picker:writer'),
         avatarStyle: 'bottts',
       }));
@@ -609,7 +626,7 @@ describe('subagents page', () => {
       expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
+        model: OPENAI_GPT41_MINI_RUNTIME_REF,
         avatarSeed: expect.any(String),
         avatarStyle: 'pixelArt',
       }));
@@ -634,7 +651,7 @@ describe('subagents page', () => {
       expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
+        model: OPENAI_GPT41_MINI_RUNTIME_REF,
       }));
     });
 
@@ -740,10 +757,10 @@ describe('subagents page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /pick-avatar-/ })[2]);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alpha v2' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Handles international sourcing.' } });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'claude-3-7-sonnet' } });
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: ANTHROPIC_CLAUDE37_SELECTION_ID } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete agent-alpha' }));
+    await clickAgentAction('agent-alpha', 'Delete');
     const dialog = screen.getByRole('dialog', { name: 'Delete agent-alpha' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
@@ -753,7 +770,7 @@ describe('subagents page', () => {
         name: 'Alpha v2',
         description: 'Handles international sourcing.',
         workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
-        model: 'claude-3-7-sonnet',
+        model: ANTHROPIC_CLAUDE37_RUNTIME_REF,
         avatarSeed: expect.stringContaining('picker:alpha'),
         avatarStyle: 'botttsNeutral',
       });
@@ -800,11 +817,12 @@ describe('subagents page', () => {
       runtimeHost: { lifecycle: 'running' },
     });
     renderSubagentsPage();
+    await openAgentActionMenu('agent-alpha');
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Export agent-alpha' })).toBeEnabled();
+      expect(screen.getByRole('menuitem', { name: 'Export' })).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Export agent-alpha' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export' }));
 
     await waitFor(() => {
       expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha');
@@ -913,7 +931,7 @@ describe('subagents page', () => {
     expect(screen.queryByText(/OpenClaw tool profile/i)).toBeNull();
   });
 
-  it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', async () => {
+  it('编辑时保留未解析模型，不自动替换为唯一可选模型', async () => {
     useSubagentsStore.setState({
       agents: [
         {
@@ -937,11 +955,12 @@ describe('subagents page', () => {
       ],
       availableModels: [
         {
-          id: 'openai/gpt-4.1-mini',
+          id: OPENAI_GPT41_MINI_SELECTION_ID,
           provider: 'openai',
           providerLabel: 'OpenAI',
           modelLabel: 'gpt-4.1-mini',
           displayLabel: 'OpenAI / gpt-4.1-mini',
+          modelReferences: [OPENAI_GPT41_MINI_RUNTIME_REF],
         },
       ],
       modelsLoading: false,
@@ -951,21 +970,33 @@ describe('subagents page', () => {
     await openEditDialog('agent-alpha');
 
     const modelSelect = screen.getByLabelText('Model');
-    expect(screen.queryByRole('option', { name: 'legacy/removed-model' })).toBeNull();
-    expect(modelSelect).toHaveValue('openai/gpt-4.1-mini');
+    expect(screen.getByRole('option', { name: 'legacy/removed-model' })).toBeInTheDocument();
+    expect(modelSelect).toHaveValue('legacy/removed-model');
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Keep legacy model.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(updateAgent).toHaveBeenCalledWith(expect.objectContaining({
+        agentId: 'agent-alpha',
+        description: 'Keep legacy model.',
+        model: 'legacy/removed-model',
+      }));
+    });
   });
 
   it('编辑子 Agent 时模型下拉优先显示 provider 自定义名称', async () => {
     useSubagentsStore.setState({
       availableModels: [
         {
-          id: 'custom-dd749b2e/gpt-4o-mini',
+          id: CUSTOM_GPT4O_SELECTION_ID,
           provider: 'custom-dd749b2e',
           accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '自定义',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '自定义 / gpt-4o-mini',
+          modelReferences: [CUSTOM_GPT4O_RUNTIME_REF],
         },
       ],
       modelsLoading: false,
@@ -979,14 +1010,14 @@ describe('subagents page', () => {
     ).toBeInTheDocument();
   });
 
-  it('Agent 卡片优先显示统一模型展示文案，找不到映射时回退原始模型 id', () => {
+  it('Agent 卡片按模型清单引用显示模型名，找不到映射时回退原始模型 id', () => {
     useSubagentsStore.setState({
       agents: [
         {
           id: 'main',
           name: 'Main',
           workspace: '/home/dev/.openclaw/workspace',
-          model: 'custom-dd749b2e/gpt-4o-mini',
+          model: CUSTOM_GPT4O_RUNTIME_REF,
           avatarSeed: 'agent:main',
           avatarStyle: 'pixelArt',
           isDefault: true,
@@ -1003,19 +1034,21 @@ describe('subagents page', () => {
       ],
       availableModels: [
         {
-          id: 'custom-dd749b2e/gpt-4o-mini',
+          id: CUSTOM_GPT4O_SELECTION_ID,
           provider: 'custom-dd749b2e',
           accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',
+          modelReferences: [CUSTOM_GPT4O_RUNTIME_REF],
         },
       ],
     });
 
     renderSubagentsPage();
 
-    expect(screen.getByText('前端专家 / gpt-4o-mini')).toBeInTheDocument();
+    expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
+    expect(screen.queryByText('custom-dd749b2e/gpt-4o-mini')).toBeNull();
     expect(screen.getByText('legacy/removed-model')).toBeInTheDocument();
   });
 
@@ -1023,12 +1056,13 @@ describe('subagents page', () => {
     useSubagentsStore.setState({
       availableModels: [
         {
-          id: 'custom-dd749b2e/gpt-4o-mini',
+          id: CUSTOM_GPT4O_SELECTION_ID,
           provider: 'custom-dd749b2e',
           accountId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',
+          modelReferences: [CUSTOM_GPT4O_RUNTIME_REF],
         },
       ],
       modelsLoading: false,
@@ -1138,13 +1172,14 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('keeps main editable but blocks delete for protected default agent', () => {
+  it('keeps main editable but blocks delete for protected default agent', async () => {
     renderSubagentsPage();
 
-    expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Manage main' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
+    await openAgentActionMenu('main');
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveAttribute('data-disabled');
   });
 
   it('keeps edit available and disables chat when model is missing', async () => {
@@ -1173,11 +1208,12 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    const editButton = screen.getByRole('button', { name: 'Edit agent-no-model' });
-    expect(editButton).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
+    await openAgentActionMenu('agent-no-model');
+    const editItem = screen.getByRole('menuitem', { name: 'Edit' });
+    expect(editItem).toBeEnabled();
 
-    fireEvent.click(editButton);
+    fireEvent.click(editItem);
     fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-no-model');
     expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
@@ -1254,11 +1290,12 @@ describe('subagents page', () => {
     useSubagentsStore.setState({
       availableModels: [
         {
-          id: 'gpt-4.1-mini',
+          id: OPENAI_GPT41_MINI_SELECTION_ID,
           provider: 'openai',
           providerLabel: 'OpenAI',
           modelLabel: 'gpt-4.1-mini',
           displayLabel: 'OpenAI / gpt-4.1-mini',
+          modelReferences: [OPENAI_GPT41_MINI_RUNTIME_REF],
         },
       ],
       modelsLoading: false,
@@ -1337,7 +1374,7 @@ describe('subagents page', () => {
     await waitFor(() => {
       expect(createAgentFromTemplate).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: 'gpt-4.1-mini',
+          model: OPENAI_GPT41_MINI_RUNTIME_REF,
           template: expect.objectContaining({
             id: 'brand-guardian',
             name: 'Brand Guardian',

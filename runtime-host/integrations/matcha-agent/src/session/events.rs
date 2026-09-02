@@ -4,6 +4,9 @@ use serde_json::{Map, Value};
 
 const MAX_PROJECTED_TEXT_DELTA_BYTES: usize = 16 * 1024;
 const MAX_PROJECTED_MESSAGE_TEXT_BYTES: usize = 256 * 1024;
+const MAX_PROJECTED_TOOL_NAME_BYTES: usize = 256;
+const MAX_PROJECTED_TOOL_SUMMARY_BYTES: usize = 128 * 1024;
+const MAX_PROJECTED_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_PROJECTED_MESSAGE_COUNT: usize = 64;
 
 use super::{
@@ -54,7 +57,9 @@ pub struct ProjectedMessageEvent {
     message_id: MessageId,
     lifecycle: MessageLifecycle,
     text_delta: Option<String>,
+    thinking_delta: Option<String>,
     message_text: Option<String>,
+    thinking_text: Option<String>,
 }
 
 impl ProjectedMessageEvent {
@@ -70,8 +75,16 @@ impl ProjectedMessageEvent {
         self.text_delta.as_deref()
     }
 
+    pub fn thinking_delta(&self) -> Option<&str> {
+        self.thinking_delta.as_deref()
+    }
+
     pub fn message_text(&self) -> Option<&str> {
         self.message_text.as_deref()
+    }
+
+    pub fn thinking_text(&self) -> Option<&str> {
+        self.thinking_text.as_deref()
     }
 }
 
@@ -178,7 +191,13 @@ pub enum ToolActivityPhase {
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProjectedToolActivity {
     tool_call_id: ToolCallId,
+    name: Option<String>,
     phase: ToolActivityPhase,
+    input: Option<Value>,
+    input_text: Option<String>,
+    summary: Option<String>,
+    output: Option<Value>,
+    is_error: Option<bool>,
 }
 
 impl ProjectedToolActivity {
@@ -186,8 +205,32 @@ impl ProjectedToolActivity {
         &self.tool_call_id
     }
 
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     pub fn phase(&self) -> ToolActivityPhase {
         self.phase
+    }
+
+    pub fn input(&self) -> Option<&Value> {
+        self.input.as_ref()
+    }
+
+    pub fn input_text(&self) -> Option<&str> {
+        self.input_text.as_deref()
+    }
+
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    pub fn output(&self) -> Option<&Value> {
+        self.output.as_ref()
+    }
+
+    pub fn is_error(&self) -> Option<bool> {
+        self.is_error
     }
 }
 
@@ -544,6 +587,22 @@ enum SdkFullTextPolicy {
     Suppress,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SdkToolBlock {
+    tool_call_id: ToolCallId,
+    name: Option<String>,
+    input: Option<Value>,
+    input_text: String,
+}
+
+impl SdkToolBlock {
+    fn update_input_from_text(&mut self) {
+        if let Some(input) = projected_tool_input_from_text(&self.input_text) {
+            self.input = Some(input);
+        }
+    }
+}
+
 impl SdkAssistantTextState {
     fn full_text_policy(self) -> SdkFullTextPolicy {
         match self {
@@ -579,7 +638,10 @@ pub struct SessionEventProjector {
     cursor: Sequence,
     terminal: bool,
     message_text: HashMap<MessageId, String>,
+    message_thinking: HashMap<MessageId, String>,
     current_sdk_assistant_message_id: Option<MessageId>,
+    current_sdk_tool_blocks: HashMap<u64, SdkToolBlock>,
+    sdk_tool_names: HashMap<ToolCallId, String>,
     sdk_text_state: SdkAssistantTextState,
 }
 
@@ -599,7 +661,10 @@ impl SessionEventProjector {
             cursor,
             terminal: false,
             message_text: HashMap::new(),
+            message_thinking: HashMap::new(),
             current_sdk_assistant_message_id: None,
+            current_sdk_tool_blocks: HashMap::new(),
+            sdk_tool_names: HashMap::new(),
             sdk_text_state: SdkAssistantTextState::AwaitingText,
         }
     }
@@ -652,6 +717,8 @@ impl SessionEventProjector {
             project_sdk_message(
                 envelope.event.as_value(),
                 &mut self.current_sdk_assistant_message_id,
+                &mut self.current_sdk_tool_blocks,
+                &mut self.sdk_tool_names,
                 self.sdk_text_state.full_text_policy(),
             )
         } else {
@@ -667,7 +734,9 @@ impl SessionEventProjector {
             Ok(mut activity) => {
                 if let EventActivity::Message(message) = &mut activity {
                     let message_id = message.message_id().clone();
-                    let message_text = match message.lifecycle() {
+                    let text_delta = message.text_delta().map(str::to_owned);
+                    let thinking_delta = message.thinking_delta().map(str::to_owned);
+                    let (message_text, thinking_text) = match message.lifecycle() {
                         MessageLifecycle::Started => {
                             if !self.message_text.contains_key(&message_id)
                                 && self.message_text.len() >= MAX_PROJECTED_MESSAGE_COUNT
@@ -678,40 +747,69 @@ impl SessionEventProjector {
                                 };
                             }
                             self.message_text.insert(message_id.clone(), String::new());
-                            Some(String::new())
+                            self.message_thinking
+                                .insert(message_id.clone(), String::new());
+                            (Some(String::new()), None)
                         }
                         MessageLifecycle::Delta => {
-                            let Some(delta) = message.text_delta() else {
+                            if text_delta.is_none() && thinking_delta.is_none() {
                                 return EventProjectionResult::Rejected {
                                     sequence: received,
                                     reason: EventRejection::Malformed,
                                 };
-                            };
-                            let text = self.message_text.entry(message_id.clone()).or_default();
-                            if text.len().saturating_add(delta.len())
-                                > MAX_PROJECTED_MESSAGE_TEXT_BYTES
+                            }
+                            if !self.message_text.contains_key(&message_id)
+                                && self.message_text.len() >= MAX_PROJECTED_MESSAGE_COUNT
                             {
                                 return EventProjectionResult::Rejected {
                                     sequence: received,
                                     reason: EventRejection::Malformed,
                                 };
                             }
-                            text.push_str(delta);
-                            Some(text.clone())
+                            let text = self.message_text.entry(message_id.clone()).or_default();
+                            if let Some(delta) = text_delta.as_deref() {
+                                if text.len().saturating_add(delta.len())
+                                    > MAX_PROJECTED_MESSAGE_TEXT_BYTES
+                                {
+                                    return EventProjectionResult::Rejected {
+                                        sequence: received,
+                                        reason: EventRejection::Malformed,
+                                    };
+                                }
+                                text.push_str(delta);
+                            }
+                            let thinking =
+                                self.message_thinking.entry(message_id.clone()).or_default();
+                            if let Some(delta) = thinking_delta.as_deref() {
+                                if thinking.len().saturating_add(delta.len())
+                                    > MAX_PROJECTED_MESSAGE_TEXT_BYTES
+                                {
+                                    return EventProjectionResult::Rejected {
+                                        sequence: received,
+                                        reason: EventRejection::Malformed,
+                                    };
+                                }
+                                thinking.push_str(delta);
+                            }
+                            let thinking_text = (!thinking.is_empty()).then(|| thinking.clone());
+                            (Some(text.clone()), thinking_text)
                         }
                         MessageLifecycle::Completed => {
-                            if let Some(completed) = message.message_text.take() {
-                                self.message_text.remove(&message_id);
-                                Some(completed)
-                            } else {
-                                let text = self.message_text.entry(message_id.clone()).or_default();
-                                let completed = text.clone();
-                                self.message_text.remove(&message_id);
-                                Some(completed)
-                            }
+                            let text = message.message_text.take().unwrap_or_else(|| {
+                                self.message_text.remove(&message_id).unwrap_or_default()
+                            });
+                            self.message_text.remove(&message_id);
+                            let thinking = message
+                                .thinking_text
+                                .take()
+                                .or_else(|| self.message_thinking.remove(&message_id))
+                                .filter(|text| !text.is_empty());
+                            self.message_thinking.remove(&message_id);
+                            (Some(text), thinking)
                         }
                     };
                     message.message_text = message_text;
+                    message.thinking_text = thinking_text;
                     if is_sdk_message {
                         self.sdk_text_state.observe_projected_message(message);
                     }
@@ -768,6 +866,16 @@ pub(crate) fn project_native_activity(
         "message.delta" => project_native_message(&envelope.event, MessageLifecycle::Delta),
         "message.completed" => project_native_message(&envelope.event, MessageLifecycle::Completed),
         "tool.activity" => project_tool_activity(envelope.event.as_value()),
+        "session.created"
+        | "session.loaded"
+        | "session.closed"
+        | "worker.spawning"
+        | "worker.ready"
+        | "worker.heartbeat"
+        | "worker.crashed"
+        | "usage.updated"
+        | "error.reported"
+        | "snapshot.invalidated" => Ok(EventActivity::Ignored),
         // sdk.message requires stateful projection (current_sdk_assistant_message_id);
         // the stateless snapshot/replay path cannot project it correctly.
         "sdk.message" => Ok(EventActivity::Ignored),
@@ -899,13 +1007,6 @@ fn project_run_trace(
     Ok(EventActivity::Ignored)
 }
 
-fn project_message(
-    event: &Event,
-    lifecycle: MessageLifecycle,
-) -> Result<EventActivity, EventRejection> {
-    project_message_with_field(event, lifecycle, "text")
-}
-
 fn project_native_message(
     event: &Event,
     lifecycle: MessageLifecycle,
@@ -938,16 +1039,14 @@ fn project_message_with_field(
         message_id,
         lifecycle,
         text_delta,
+        thinking_delta: None,
         message_text: None,
+        thinking_text: None,
     }))
 }
 
 fn project_tool_activity(value: &Value) -> Result<EventActivity, EventRejection> {
-    let tool_call_id = value
-        .get("toolCallId")
-        .and_then(Value::as_str)
-        .ok_or(EventRejection::Malformed)
-        .and_then(|value| ToolCallId::try_new(value).map_err(|_| EventRejection::Malformed))?;
+    let tool_call_id = project_tool_call_id(value.get("toolCallId"))?;
     let phase = match value.get("phase").and_then(Value::as_str) {
         Some("started") => ToolActivityPhase::Started,
         Some("updated") => ToolActivityPhase::Updated,
@@ -955,15 +1054,25 @@ fn project_tool_activity(value: &Value) -> Result<EventActivity, EventRejection>
         Some("failed") => ToolActivityPhase::Failed,
         _ => return Err(EventRejection::Malformed),
     };
-    Ok(EventActivity::Tool(ProjectedToolActivity {
+    let input = projected_tool_payload(value.get("input"));
+    let input_text = projected_tool_payload_text(value.get("inputText"));
+    Ok(project_tool_event(
         tool_call_id,
+        projected_tool_name(value.get("toolName")),
         phase,
-    }))
+        input.clone(),
+        projected_tool_input_text(input.as_ref(), input_text.as_deref()),
+        projected_tool_summary(value.get("summary")),
+        projected_tool_payload(value.get("output")),
+        matches!(phase, ToolActivityPhase::Failed).then_some(true),
+    ))
 }
 
 fn project_sdk_message(
     value: &Value,
     current_assistant_id: &mut Option<MessageId>,
+    current_tool_blocks: &mut HashMap<u64, SdkToolBlock>,
+    tool_names: &mut HashMap<ToolCallId, String>,
     full_text_policy: SdkFullTextPolicy,
 ) -> Result<EventActivity, EventRejection> {
     if value.get("sdkMessageVersion").and_then(Value::as_str) != Some("claude-code-sdk-message-v1")
@@ -978,212 +1087,488 @@ fn project_sdk_message(
     let uuid = sdk_message.get("uuid").and_then(Value::as_str);
     let sdk_type = sdk_message.get("type").and_then(Value::as_str);
 
-    // Stream event path: sdkMessage.event contains the raw SSE event
     if let Some(stream_event) = sdk_message.get("event").and_then(Value::as_object) {
-        let stream_event_type = stream_event.get("type").and_then(Value::as_str);
-        match stream_event_type {
+        match stream_event.get("type").and_then(Value::as_str) {
             Some("message_start") => {
                 let id = stream_event
                     .get("message")
                     .and_then(Value::as_object)
-                    .and_then(|m| m.get("id"))
+                    .and_then(|message| message.get("id"))
                     .and_then(Value::as_str)
                     .or(uuid)
                     .ok_or(EventRejection::Malformed)?;
                 let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
                 *current_assistant_id = Some(message_id.clone());
+                current_tool_blocks.clear();
                 return Ok(EventActivity::Message(ProjectedMessageEvent {
                     message_id,
                     lifecycle: MessageLifecycle::Started,
                     text_delta: None,
+                    thinking_delta: None,
                     message_text: None,
-                }));
-            }
-            Some("content_block_delta") => {
-                let delta = stream_event.get("delta").and_then(Value::as_object);
-                let is_text =
-                    delta.and_then(|d| d.get("type")).and_then(Value::as_str) == Some("text_delta");
-                if !is_text {
-                    return Ok(EventActivity::Ignored);
-                }
-                let text = delta
-                    .and_then(|d| d.get("text"))
-                    .and_then(Value::as_str)
-                    .ok_or(EventRejection::Malformed)?;
-                if text.len() > MAX_PROJECTED_TEXT_DELTA_BYTES {
-                    return Err(EventRejection::Malformed);
-                }
-                let id = current_assistant_id
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .or(uuid)
-                    .ok_or(EventRejection::Malformed)?;
-                let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
-                return Ok(EventActivity::Message(ProjectedMessageEvent {
-                    message_id,
-                    lifecycle: MessageLifecycle::Delta,
-                    text_delta: Some(text.to_owned()),
-                    message_text: None,
+                    thinking_text: None,
                 }));
             }
             Some("content_block_start") => {
-                let block = stream_event.get("content_block").and_then(Value::as_object);
-                let is_tool_use =
-                    block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use");
-                if !is_tool_use {
+                let Some(block) = stream_event.get("content_block").and_then(Value::as_object)
+                else {
+                    return Ok(EventActivity::Ignored);
+                };
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                     return Ok(EventActivity::Ignored);
                 }
-                let tool_call_id = block
-                    .and_then(|b| b.get("id"))
-                    .and_then(Value::as_str)
-                    .ok_or(EventRejection::Malformed)?;
-                let tool_call_id =
-                    ToolCallId::try_new(tool_call_id).map_err(|_| EventRejection::Malformed)?;
-                return Ok(EventActivity::Tool(ProjectedToolActivity {
+                let tool_call_id = project_tool_call_id(block.get("id"))?;
+                let name = projected_tool_name(block.get("name"));
+                let input = projected_tool_payload(block.get("input"));
+                let input_text = projected_tool_input_text(input.as_ref(), None);
+                if let Some(index) = stream_event.get("index").and_then(Value::as_u64) {
+                    current_tool_blocks.insert(
+                        index,
+                        SdkToolBlock {
+                            tool_call_id: tool_call_id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            input_text: String::new(),
+                        },
+                    );
+                }
+                if let Some(name) = name.as_ref() {
+                    tool_names.insert(tool_call_id.clone(), name.clone());
+                }
+                return Ok(project_tool_event(
                     tool_call_id,
-                    phase: ToolActivityPhase::Started,
-                }));
+                    name,
+                    ToolActivityPhase::Started,
+                    input,
+                    input_text,
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            Some("content_block_delta") => {
+                let Some(delta) = stream_event.get("delta").and_then(Value::as_object) else {
+                    return Ok(EventActivity::Ignored);
+                };
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        let text = projected_text_delta(delta.get("text"))?;
+                        let message_id = current_sdk_message_id(current_assistant_id, uuid)?;
+                        return Ok(EventActivity::Message(ProjectedMessageEvent {
+                            message_id,
+                            lifecycle: MessageLifecycle::Delta,
+                            text_delta: Some(text),
+                            thinking_delta: None,
+                            message_text: None,
+                            thinking_text: None,
+                        }));
+                    }
+                    Some("thinking_delta") => {
+                        let thinking = projected_text_delta(
+                            delta.get("thinking").or_else(|| delta.get("text")),
+                        )?;
+                        let message_id = current_sdk_message_id(current_assistant_id, uuid)?;
+                        return Ok(EventActivity::Message(ProjectedMessageEvent {
+                            message_id,
+                            lifecycle: MessageLifecycle::Delta,
+                            text_delta: None,
+                            thinking_delta: Some(thinking),
+                            message_text: None,
+                            thinking_text: None,
+                        }));
+                    }
+                    Some("input_json_delta") => {
+                        let Some(tool) = stream_event
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .and_then(|index| current_tool_blocks.get_mut(&index))
+                        else {
+                            return Ok(EventActivity::Ignored);
+                        };
+                        let partial_json = projected_tool_payload_text(delta.get("partial_json"));
+                        if let Some(partial_json) = partial_json.as_deref()
+                            && !append_projected_text(
+                                &mut tool.input_text,
+                                partial_json,
+                                MAX_PROJECTED_TOOL_PAYLOAD_BYTES,
+                            )
+                        {
+                            return Err(EventRejection::Malformed);
+                        }
+                        tool.update_input_from_text();
+                        return Ok(project_tool_event(
+                            tool.tool_call_id.clone(),
+                            tool.name.clone(),
+                            ToolActivityPhase::Updated,
+                            tool.input.clone(),
+                            projected_tool_input_text(None, Some(&tool.input_text)),
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                    _ => return Ok(EventActivity::Ignored),
+                }
+            }
+            Some("content_block_stop") => {
+                let Some(tool) = stream_event
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| current_tool_blocks.remove(&index))
+                else {
+                    return Ok(EventActivity::Ignored);
+                };
+                let mut tool = tool;
+                tool.update_input_from_text();
+                return Ok(project_tool_event(
+                    tool.tool_call_id,
+                    tool.name,
+                    ToolActivityPhase::Updated,
+                    tool.input,
+                    projected_tool_input_text(None, Some(&tool.input_text)),
+                    None,
+                    None,
+                    None,
+                ));
             }
             Some("message_stop") => {
-                let id = current_assistant_id
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .or(uuid)
-                    .ok_or(EventRejection::Malformed)?;
-                let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
+                let message_id = current_sdk_message_id(current_assistant_id, uuid)?;
                 *current_assistant_id = None;
+                current_tool_blocks.clear();
                 return Ok(EventActivity::Message(ProjectedMessageEvent {
                     message_id,
                     lifecycle: MessageLifecycle::Completed,
                     text_delta: None,
+                    thinking_delta: None,
                     message_text: None,
+                    thinking_text: None,
                 }));
             }
             _ => return Ok(EventActivity::Ignored),
         }
     }
 
-    // Non-stream sdk message types
     match sdk_type {
         Some("tool_progress") => {
-            let tool_call_id = sdk_message
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .ok_or(EventRejection::Malformed)?;
-            let tool_call_id =
-                ToolCallId::try_new(tool_call_id).map_err(|_| EventRejection::Malformed)?;
-            Ok(EventActivity::Tool(ProjectedToolActivity {
+            let tool_call_id = project_tool_call_id(sdk_message.get("tool_use_id"))?;
+            let name = projected_tool_name(sdk_message.get("tool_name"))
+                .or_else(|| tool_names.get(&tool_call_id).cloned());
+            if let Some(name) = name.as_ref() {
+                tool_names.insert(tool_call_id.clone(), name.clone());
+            }
+            Ok(project_tool_event(
                 tool_call_id,
-                phase: ToolActivityPhase::Updated,
-            }))
+                name,
+                ToolActivityPhase::Updated,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
         }
         Some("assistant") => {
-            // assistant message: first tool_use block in content → Tool Started
             let content = sdk_message
                 .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array);
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .or_else(|| sdk_message.get("content").and_then(Value::as_array));
             let Some(content) = content else {
                 return Ok(EventActivity::Ignored);
             };
             for block in content {
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let tool_call_id = block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .ok_or(EventRejection::Malformed)?;
-                    let tool_call_id =
-                        ToolCallId::try_new(tool_call_id).map_err(|_| EventRejection::Malformed)?;
-                    return Ok(EventActivity::Tool(ProjectedToolActivity {
-                        tool_call_id,
-                        phase: ToolActivityPhase::Started,
-                    }));
-                }
-            }
-            // No tool_use found — extract text from assistant message
-            let message_text = content
-                .iter()
-                .filter_map(|block| {
-                    if block.get("type").and_then(Value::as_str) == Some("text") {
-                        block.get("text").and_then(Value::as_str)
-                    } else {
-                        None
+                    let tool_call_id = project_tool_call_id(block.get("id"))?;
+                    let name = projected_tool_name(block.get("name"));
+                    if let Some(name) = name.as_ref() {
+                        tool_names.insert(tool_call_id.clone(), name.clone());
                     }
-                })
-                .collect::<Vec<_>>();
-
-            if !message_text.is_empty() {
-                if !full_text_policy.projects_fallback() {
-                    return Ok(EventActivity::Ignored);
+                    let input = projected_tool_payload(block.get("input"));
+                    return Ok(project_tool_event(
+                        tool_call_id,
+                        name,
+                        ToolActivityPhase::Started,
+                        input.clone(),
+                        projected_tool_input_text(input.as_ref(), None),
+                        None,
+                        None,
+                        None,
+                    ));
                 }
-                let id = uuid.ok_or(EventRejection::Malformed)?;
-                let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
-                return Ok(EventActivity::Message(ProjectedMessageEvent {
-                    message_id,
-                    lifecycle: MessageLifecycle::Completed,
-                    text_delta: None,
-                    message_text: Some(message_text.join("\n")),
-                }));
             }
-
-            Ok(EventActivity::Ignored)
+            if !full_text_policy.projects_fallback() {
+                return Ok(EventActivity::Ignored);
+            }
+            let message_text = projected_message_text(content, "text")?;
+            let thinking_text = projected_thinking_text(content)?;
+            if message_text.is_none() && thinking_text.is_none() {
+                return Ok(EventActivity::Ignored);
+            }
+            let id = uuid.ok_or(EventRejection::Malformed)?;
+            let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
+            Ok(EventActivity::Message(ProjectedMessageEvent {
+                message_id,
+                lifecycle: MessageLifecycle::Completed,
+                text_delta: None,
+                thinking_delta: None,
+                message_text,
+                thinking_text,
+            }))
         }
         Some("user") => {
-            // user message: first tool_result block → Tool Completed/Failed
             let content = sdk_message
                 .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array);
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .or_else(|| sdk_message.get("content").and_then(Value::as_array));
             let Some(content) = content else {
                 return Ok(EventActivity::Ignored);
             };
             for block in content {
                 let block_type = block.get("type").and_then(Value::as_str);
                 if block_type == Some("tool_result") || block_type == Some("tool_use_result") {
-                    let tool_call_id = block
-                        .get("tool_use_id")
-                        .or_else(|| block.get("toolUseId"))
-                        .and_then(Value::as_str)
-                        .ok_or(EventRejection::Malformed)?;
-                    let tool_call_id =
-                        ToolCallId::try_new(tool_call_id).map_err(|_| EventRejection::Malformed)?;
-                    let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
-                    return Ok(EventActivity::Tool(ProjectedToolActivity {
+                    let tool_call_id = project_tool_call_id(
+                        block
+                            .get("tool_use_id")
+                            .or_else(|| block.get("toolUseId"))
+                            .or_else(|| block.get("id")),
+                    )?;
+                    let name = tool_names.get(&tool_call_id).cloned();
+                    let is_error = block
+                        .get("is_error")
+                        .or_else(|| block.get("isError"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    let output = projected_tool_result_output(block);
+                    return Ok(project_tool_event(
                         tool_call_id,
-                        phase: if is_error {
+                        name,
+                        if is_error {
                             ToolActivityPhase::Failed
                         } else {
                             ToolActivityPhase::Completed
                         },
-                    }));
+                        None,
+                        None,
+                        projected_tool_result_summary(block),
+                        output,
+                        Some(is_error),
+                    ));
                 }
             }
             Ok(EventActivity::Ignored)
         }
         Some("result") => {
             *current_assistant_id = None;
+            current_tool_blocks.clear();
             if !full_text_policy.projects_fallback() {
                 return Ok(EventActivity::Ignored);
             }
-            let Some(message_text) = sdk_message
-                .get("result")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-            else {
+            let Some(message_text) = projected_non_empty_text(
+                sdk_message.get("result"),
+                MAX_PROJECTED_MESSAGE_TEXT_BYTES,
+            ) else {
                 return Ok(EventActivity::Ignored);
             };
             let id = uuid.ok_or(EventRejection::Malformed)?;
             let message_id = MessageId::try_new(id).map_err(|_| EventRejection::Malformed)?;
-
             Ok(EventActivity::Message(ProjectedMessageEvent {
                 message_id,
                 lifecycle: MessageLifecycle::Completed,
                 text_delta: None,
-                message_text: Some(message_text.to_owned()),
+                thinking_delta: None,
+                message_text: Some(message_text),
+                thinking_text: None,
             }))
         }
         _ => Ok(EventActivity::Ignored),
     }
+}
+
+fn project_tool_event(
+    tool_call_id: ToolCallId,
+    name: Option<String>,
+    phase: ToolActivityPhase,
+    input: Option<Value>,
+    input_text: Option<String>,
+    summary: Option<String>,
+    output: Option<Value>,
+    is_error: Option<bool>,
+) -> EventActivity {
+    EventActivity::Tool(ProjectedToolActivity {
+        tool_call_id,
+        name,
+        phase,
+        input,
+        input_text,
+        summary,
+        output,
+        is_error,
+    })
+}
+
+fn current_sdk_message_id(
+    current_assistant_id: &Option<MessageId>,
+    uuid: Option<&str>,
+) -> Result<MessageId, EventRejection> {
+    let id = current_assistant_id
+        .as_ref()
+        .map(|id| id.as_str())
+        .or(uuid)
+        .ok_or(EventRejection::Malformed)?;
+    MessageId::try_new(id).map_err(|_| EventRejection::Malformed)
+}
+
+fn project_tool_call_id(value: Option<&Value>) -> Result<ToolCallId, EventRejection> {
+    value
+        .and_then(Value::as_str)
+        .ok_or(EventRejection::Malformed)
+        .and_then(|value| ToolCallId::try_new(value).map_err(|_| EventRejection::Malformed))
+}
+
+fn projected_text_delta(value: Option<&Value>) -> Result<String, EventRejection> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| text.len() <= MAX_PROJECTED_TEXT_DELTA_BYTES && !text.contains('\0'))
+        .map(ToOwned::to_owned)
+        .ok_or(EventRejection::Malformed)
+}
+
+fn projected_message_text(
+    content: &[Value],
+    field: &str,
+) -> Result<Option<String>, EventRejection> {
+    let mut text = String::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        let part = block
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or(EventRejection::Malformed)?;
+        if !append_projected_text(&mut text, part, MAX_PROJECTED_MESSAGE_TEXT_BYTES) {
+            return Err(EventRejection::Malformed);
+        }
+    }
+    Ok((!text.is_empty()).then_some(text))
+}
+
+fn projected_thinking_text(content: &[Value]) -> Result<Option<String>, EventRejection> {
+    let mut text = String::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) != Some("thinking") {
+            continue;
+        }
+        let Some(part) = block
+            .get("thinking")
+            .or_else(|| block.get("text"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !append_projected_text(&mut text, part, MAX_PROJECTED_MESSAGE_TEXT_BYTES) {
+            return Err(EventRejection::Malformed);
+        }
+    }
+    Ok((!text.is_empty()).then_some(text))
+}
+
+fn projected_tool_name(value: Option<&Value>) -> Option<String> {
+    let name = value?.as_str()?;
+    (!name.is_empty()
+        && name.len() <= MAX_PROJECTED_TOOL_NAME_BYTES
+        && name.trim() == name
+        && !name.chars().any(char::is_control))
+    .then(|| name.to_owned())
+}
+
+fn projected_tool_summary(value: Option<&Value>) -> Option<String> {
+    projected_non_empty_text(value, MAX_PROJECTED_TOOL_SUMMARY_BYTES)
+}
+
+fn projected_tool_payload(value: Option<&Value>) -> Option<Value> {
+    let value = value?;
+    let text = serde_json::to_string(value).ok()?;
+    (text.len() <= MAX_PROJECTED_TOOL_PAYLOAD_BYTES && !payload_contains_nul(value))
+        .then(|| value.clone())
+}
+
+fn projected_tool_payload_text(value: Option<&Value>) -> Option<String> {
+    projected_non_empty_text(value, MAX_PROJECTED_TOOL_PAYLOAD_BYTES)
+}
+
+fn projected_tool_input_text(input: Option<&Value>, text: Option<&str>) -> Option<String> {
+    if let Some(text) = text.filter(|text| !text.is_empty()) {
+        return Some(text.to_owned());
+    }
+    match input? {
+        Value::String(_) => projected_non_empty_text(input, MAX_PROJECTED_TOOL_PAYLOAD_BYTES),
+        value => projected_json_payload_text(value),
+    }
+}
+
+fn projected_json_payload_text(value: &Value) -> Option<String> {
+    let text = serde_json::to_string_pretty(value).ok()?;
+    (text.len() <= MAX_PROJECTED_TOOL_PAYLOAD_BYTES && !payload_contains_nul(value)).then_some(text)
+}
+
+fn projected_tool_input_from_text(text: &str) -> Option<Value> {
+    let input: Value = serde_json::from_str(text).ok()?;
+    projected_tool_payload(Some(&input))
+}
+
+fn payload_contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(values) => values.iter().any(payload_contains_nul),
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key.contains('\0') || payload_contains_nul(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn projected_tool_result_output(block: &Value) -> Option<Value> {
+    block
+        .get("content")
+        .or_else(|| block.get("result"))
+        .and_then(|value| projected_tool_payload(Some(value)))
+}
+
+fn projected_tool_result_summary(block: &Value) -> Option<String> {
+    match block.get("content")? {
+        Value::String(_) => projected_tool_summary(block.get("content")),
+        Value::Array(blocks) => {
+            let mut text = String::new();
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                let Some(part) = block.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !append_projected_text(&mut text, part, MAX_PROJECTED_TOOL_SUMMARY_BYTES) {
+                    return None;
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn projected_non_empty_text(value: Option<&Value>, max_bytes: usize) -> Option<String> {
+    let text = value?.as_str()?;
+    (!text.is_empty() && text.len() <= max_bytes && !text.contains('\0')).then(|| text.to_owned())
+}
+
+fn append_projected_text(output: &mut String, text: &str, max_bytes: usize) -> bool {
+    if text.contains('\0') || output.len().saturating_add(text.len()) > max_bytes {
+        return false;
+    }
+    output.push_str(text);
+    true
 }
 
 fn project_approval(
@@ -1730,6 +2115,201 @@ mod tests {
                 if event.sequence() == sequence(1)
                     && matches!(event.activity(), EventActivity::Ignored)
         ));
+    }
+
+    #[test]
+    fn sdk_stream_projects_thinking_delta_as_bounded_message_activity() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_stream_start(1, "assistant-message-1")),
+            EventProjectionResult::Projected(_)
+        ));
+
+        let delta = projector.project(sdk_message(
+            2,
+            json!({
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "safe thinking",
+                        "signature": "private-signature"
+                    }
+                }
+            }),
+        ));
+
+        assert!(matches!(
+            delta,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Message(message)
+                    if message.lifecycle() == MessageLifecycle::Delta
+                        && message.text_delta().is_none()
+                        && message.thinking_delta() == Some("safe thinking")
+                        && message.message_text() == Some("")
+                        && message.thinking_text() == Some("safe thinking"))
+        ));
+        assert!(!format!("{delta:?}").contains("private-signature"));
+    }
+
+    #[test]
+    fn sdk_stream_tool_input_delta_projects_visible_tool_payload() {
+        let mut projector = projector(0);
+        let started = projector.project(sdk_message(
+            1,
+            json!({
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "tool-call-1",
+                        "name": "Read",
+                        "input": {"file_path":"private-path"}
+                    }
+                }
+            }),
+        ));
+        let input_delta = projector.project(sdk_message(
+            2,
+            json!({
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": "{\"secret\":true}"
+                    }
+                }
+            }),
+        ));
+
+        assert!(matches!(
+            started,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Tool(tool)
+                    if tool.tool_call_id().as_str() == "tool-call-1"
+                        && tool.name() == Some("Read")
+                        && tool.phase() == ToolActivityPhase::Started
+                        && tool.input() == Some(&json!({"file_path":"private-path"}))
+                        && tool.input_text() == Some("{\n  \"file_path\": \"private-path\"\n}")
+                        && tool.summary().is_none())
+        ));
+        assert!(matches!(
+            input_delta,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Tool(tool)
+                    if tool.tool_call_id().as_str() == "tool-call-1"
+                        && tool.name() == Some("Read")
+                        && tool.phase() == ToolActivityPhase::Updated
+                        && tool.input() == Some(&json!({"secret":true}))
+                        && tool.input_text() == Some("{\"secret\":true}")
+                        && tool.summary().is_none())
+        ));
+        let debug = format!("{started:?} {input_delta:?}");
+        assert!(!debug.contains("private-path"));
+        assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn sdk_user_tool_result_projects_visible_summary_and_output() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_message(
+                1,
+                json!({
+                    "event": {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": "tool-call-1",
+                            "name": "Read"
+                        }
+                    }
+                }),
+            )),
+            EventProjectionResult::Projected(_)
+        ));
+
+        let result = projector.project(sdk_message(
+            2,
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-call-1",
+                        "content": [
+                            {"type":"text", "text":"done"},
+                            {"type":"json", "value":{"secret":"raw-result"}}
+                        ],
+                        "is_error": false
+                    }]
+                }
+            }),
+        ));
+
+        assert!(matches!(
+            result,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Tool(tool)
+                    if tool.tool_call_id().as_str() == "tool-call-1"
+                        && tool.name() == Some("Read")
+                        && tool.phase() == ToolActivityPhase::Completed
+                        && tool.summary() == Some("done")
+                        && tool.output() == Some(&json!([
+                            {"type":"text", "text":"done"},
+                            {"type":"json", "value":{"secret":"raw-result"}}
+                        ]))
+                        && tool.is_error() == Some(false))
+        ));
+        let debug = format!("{result:?}");
+        assert!(!debug.contains("raw-result"));
+        assert!(!debug.contains("done"));
+    }
+
+    #[test]
+    fn sdk_private_stream_deltas_stay_ignored() {
+        let mut projector = projector(0);
+        assert!(matches!(
+            projector.project(sdk_stream_start(1, "assistant-message-1")),
+            EventProjectionResult::Projected(_)
+        ));
+
+        let signature = projector.project(sdk_message(
+            2,
+            json!({
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "signature_delta", "signature":"private-signature"}
+                }
+            }),
+        ));
+        let message_delta = projector.project(sdk_message(
+            3,
+            json!({
+                "event": {
+                    "type": "message_delta",
+                    "delta": {"stop_reason":"end_turn"},
+                    "usage": {"private":"usage"}
+                }
+            }),
+        ));
+
+        assert!(matches!(
+            signature,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Ignored)
+        ));
+        assert!(matches!(
+            message_delta,
+            EventProjectionResult::Projected(ref event)
+                if matches!(event.activity(), EventActivity::Ignored)
+        ));
+        let debug = format!("{signature:?} {message_delta:?}");
+        assert!(!debug.contains("private-signature"));
+        assert!(!debug.contains("usage"));
     }
 
     #[test]

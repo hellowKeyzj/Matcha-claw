@@ -92,6 +92,7 @@ export interface SessionRenderToolCard {
 export type SessionTimelineContentBlock =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; text: string }
+  | { kind: 'largeText'; text: string; contentRef: string; totalBytes: number; loadedBytes: number }
   | { kind: 'toolUse'; name: string; toolCallId?: string }
   | { kind: 'toolResult'; toolName?: string; toolCallId?: string; summary?: string; isError?: boolean }
   | { kind: 'media'; mediaType?: string; reference?: string }
@@ -113,11 +114,18 @@ export interface SessionAssistantToolSegment {
   firstSeenOrder?: number;
 }
 
+export interface SessionLargeTextMetadata {
+  contentRef: string;
+  totalBytes: number;
+  loadedBytes: number;
+}
+
 export interface SessionAssistantMessageSegment {
   kind: 'message';
   key: string;
   messageId?: string;
   text: string;
+  largeText?: SessionLargeTextMetadata;
   parentMessageId?: string;
   firstSeenOrder?: number;
 }

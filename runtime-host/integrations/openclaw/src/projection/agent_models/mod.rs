@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::{Map, Value};
 
@@ -134,7 +134,7 @@ impl ProviderModels {
         let mut models = object(document.get("models"));
         let mut providers = object(models.get("providers"));
         let mut provider = object(providers.get(self.provider.as_str()));
-        provider.insert("models".into(), Value::Array(self.models_json()));
+        provider.insert("models".into(), Value::Array(self.models_json(&provider)));
         providers.insert(self.provider.as_str().into(), Value::Object(provider));
         models.insert("providers".into(), Value::Object(providers));
         replace(document, "models", Value::Object(models))
@@ -159,11 +159,12 @@ impl ProviderModels {
         replace(document, "models", Value::Object(models))
     }
 
-    fn models_json(&self) -> Vec<Value> {
+    fn models_json(&self, provider: &Map<String, Value>) -> Vec<Value> {
+        let existing = existing_models_by_id(provider);
         self.models
             .iter()
             .map(|model| {
-                let mut value = Map::new();
+                let mut value = existing.get(model.id.as_str()).cloned().unwrap_or_default();
                 value.insert("id".into(), Value::String(model.id.as_str().to_owned()));
                 value.insert("name".into(), Value::String(model.id.as_str().to_owned()));
                 if !model.input.is_empty() {
@@ -197,6 +198,22 @@ impl InputModality {
             Self::Image => "image",
         }
     }
+}
+
+fn existing_models_by_id(provider: &Map<String, Value>) -> BTreeMap<String, Map<String, Value>> {
+    provider
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|model| {
+            model
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_owned(), model.clone()))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

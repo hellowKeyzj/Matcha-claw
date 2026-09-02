@@ -7,7 +7,8 @@ use tokio::sync::oneshot;
 
 use crate::{
     sessions::model_selection::{
-        ResolvedSessionModelSelection, SessionModelSelectionCommand, SessionModelSelectionOutcome,
+        MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
+        SessionModelSelectionCommand, SessionModelSelectionOutcome,
     },
     transport::provider_accounts::{
         AccountDraft, ProviderAccountsDelivery, private_auth::Resolver,
@@ -185,6 +186,19 @@ impl ProviderHandle {
         let (reply, rx) = oneshot::channel();
         self.owner
             .send_query(ProviderQuery::ResolveSessionModelSelection { command, reply })
+            .await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
+        rx.await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?
+    }
+
+    pub(crate) async fn resolve_matcha_session_model_runtime(
+        &self,
+        command: MatchaSessionModelRuntimeCommand,
+    ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::ResolveMatchaSessionModelRuntime { command, reply })
             .await
             .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
         rx.await

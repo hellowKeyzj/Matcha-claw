@@ -23,6 +23,7 @@ import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
+import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -121,6 +122,7 @@ interface ChatInputProps {
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
+  sendGate: ChatSendGate;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
   allowedSkillIds?: string[] | null;
@@ -374,6 +376,7 @@ export const ChatInput = memo(function ChatInput({
   disabled = false,
   reconnecting = false,
   sending = false,
+  sendGate,
   approvalWaiting = false,
   mentionCandidates = [],
   allowedSkillIds = null,
@@ -938,10 +941,14 @@ export const ChatInput = memo(function ChatInput({
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
-  const canSend = (input.trim() || attachments.length > 0 || selectedSkills.length > 0)
+  const payloadGate = resolveChatSendGateForPayload(sendGate, {
+    text: input,
+    attachmentCount: attachments.length,
+    selectedSkillCount: selectedSkills.length,
+  });
+  const canSend = payloadGate.canSend
     && allReady
     && !disabled
-    && !sending
     && !approvalWaiting;
   const canStop = sending && !stopping && !disabled && !!onStop;
   const modelPickerDisabled = !modelPicker

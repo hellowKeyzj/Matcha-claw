@@ -41,7 +41,7 @@ export type EventsSubscribeResult =
       clientId: string
       sessionId: string
       afterSeq?: number
-      replayed?: AppServerEventEnvelope[]
+      lastSeq: number
     }
   | { resultType: 'clientNotFound'; clientId: string }
   | { resultType: 'clientRequired' }

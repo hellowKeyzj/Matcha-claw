@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 
 vi.mock('react-i18next', () => ({
@@ -13,18 +14,38 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+const testSessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+  agentId: 'default',
+  sessionKey: 'test-session',
+};
+
+const readySendGate = {
+  canSend: true as const,
+  kind: 'session' as const,
+  sessionKey: testSessionIdentity.sessionKey,
+  endpointSessionId: undefined,
+  sessionIdentity: testSessionIdentity,
+};
+
 describe('chat input mention', () => {
   it('shows mention candidates and inserts selected mention', () => {
     const onSend = vi.fn();
 
     render(
-      <ChatInput
+      <MemoryRouter><ChatInput
         onSend={onSend}
+        sendGate={readySendGate}
+        sessionIdentity={testSessionIdentity}
         mentionCandidates={[
           { id: 'team-controller', label: 'Team Controller', insertText: '@team-controller ' },
           { id: 'coding-agent', label: 'Coding Agent', insertText: '@coding-agent ' },
         ]}
-      />,
+      /></MemoryRouter>,
     );
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
@@ -41,13 +62,15 @@ describe('chat input mention', () => {
     const onSend = vi.fn();
 
     render(
-      <ChatInput
+      <MemoryRouter><ChatInput
         onSend={onSend}
+        sendGate={readySendGate}
+        sessionIdentity={testSessionIdentity}
         mentionCandidates={[
           { id: 'a1', label: 'Agent A', insertText: '@a1 ' },
           { id: 'a2', label: 'Agent B', insertText: '@a2 ' },
         ]}
-      />,
+      /></MemoryRouter>,
     );
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;

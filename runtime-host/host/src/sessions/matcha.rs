@@ -1,11 +1,10 @@
-use matcha_agent::peer::{
-    RendererApprovalPhase, RendererEvent, RendererEventEnvelope, RendererMessageLifecycle,
-    RendererRunPhase, RendererToolPhase,
-};
-
 use super::state::{
     ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, SessionChange,
     SessionContent, SessionItem, ToolPhase, ToolView,
+};
+use matcha_agent::peer::{
+    RendererApprovalPhase, RendererEvent, RendererEventEnvelope, RendererMessageLifecycle,
+    RendererRunPhase, RendererToolPhase,
 };
 
 pub(crate) fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<SessionChange>> {
@@ -17,6 +16,7 @@ pub(crate) fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<S
             phase: match phase {
                 RendererRunPhase::Started => RunPhase::Started,
                 RendererRunPhase::WaitingForApproval => RunPhase::WaitingForApproval,
+                RendererRunPhase::CancellationRequested => RunPhase::CancellationRequested,
                 RendererRunPhase::Completed => RunPhase::Completed,
                 RendererRunPhase::Cancelled => RunPhase::Cancelled,
                 RendererRunPhase::Failed => RunPhase::Failed,
@@ -26,42 +26,46 @@ pub(crate) fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<S
         RendererEvent::Message {
             message_id,
             lifecycle,
-            message_text: Some(text),
+            text_delta,
+            thinking_delta,
+            message_text,
+            thinking_text,
             ..
-        } => Some(vec![SessionChange::MessageUpdated {
-            item: SessionItem::AssistantTurn {
-                item_id: message_id.clone(),
-                run_id: Some(run_id),
-                message_id: Some(message_id),
-                status: match lifecycle {
-                    RendererMessageLifecycle::Started => ItemStatus::Streaming,
-                    RendererMessageLifecycle::Delta => ItemStatus::Streaming,
-                    RendererMessageLifecycle::Completed => ItemStatus::Final,
-                },
-                segments: vec![SessionContent::Text { text: text.clone() }],
-                text,
-            },
-        }]),
-        RendererEvent::Message { .. } => Some(vec![SessionChange::RecoveryRequired {
-            reason: RecoveryReason::NativeUnknown,
-        }]),
+        } => matcha_message_changes(
+            run_id,
+            message_id,
+            lifecycle,
+            text_delta,
+            thinking_delta,
+            message_text,
+            thinking_text,
+        ),
         RendererEvent::Tool {
             tool_call_id,
+            name,
             phase,
+            input,
+            input_text,
+            summary,
+            output,
+            is_error,
             ..
         } => Some(vec![SessionChange::ToolUpdated {
             tool: ToolView {
                 tool_call_id,
                 run_id: Some(run_id),
-                name: None,
+                name,
                 phase: match phase {
                     RendererToolPhase::Started => ToolPhase::Started,
                     RendererToolPhase::Updated => ToolPhase::Updated,
                     RendererToolPhase::Completed => ToolPhase::Completed,
                     RendererToolPhase::Failed => ToolPhase::Failed,
                 },
-                summary: None,
-                is_error: None,
+                input,
+                input_text,
+                summary,
+                output,
+                is_error,
             },
         }]),
         RendererEvent::Approval {
@@ -80,5 +84,188 @@ pub(crate) fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<S
                 option_ids,
             },
         }]),
+    }
+}
+
+fn matcha_message_changes(
+    run_id: String,
+    message_id: String,
+    lifecycle: RendererMessageLifecycle,
+    text_delta: Option<String>,
+    thinking_delta: Option<String>,
+    message_text: Option<String>,
+    thinking_text: Option<String>,
+) -> Option<Vec<SessionChange>> {
+    let status = match lifecycle {
+        RendererMessageLifecycle::Started | RendererMessageLifecycle::Delta => {
+            ItemStatus::Streaming
+        }
+        RendererMessageLifecycle::Completed => ItemStatus::Final,
+    };
+    if thinking_delta.is_some() || thinking_text.is_some() {
+        let text = message_text.or(text_delta).unwrap_or_default();
+        let thinking = thinking_text.or(thinking_delta);
+        return Some(vec![SessionChange::MessageUpdated {
+            item: SessionItem::AssistantTurn {
+                item_id: message_id.clone(),
+                run_id: Some(run_id),
+                message_id: Some(message_id),
+                status,
+                segments: matcha_message_segments(&text, thinking),
+                text,
+            },
+        }]);
+    }
+    let (text, replace) = match lifecycle {
+        RendererMessageLifecycle::Started => (String::new(), false),
+        RendererMessageLifecycle::Delta => match text_delta {
+            Some(text) => (text, false),
+            None => {
+                return Some(vec![SessionChange::RecoveryRequired {
+                    reason: RecoveryReason::NativeUnknown,
+                }]);
+            }
+        },
+        RendererMessageLifecycle::Completed => match message_text {
+            Some(text) => (text, true),
+            None => (String::new(), false),
+        },
+    };
+    Some(vec![SessionChange::MessageDelta {
+        item_id: message_id.clone(),
+        run_id: Some(run_id),
+        message_id: Some(message_id),
+        text,
+        replace,
+        status,
+    }])
+}
+
+fn matcha_message_segments(
+    message_text: &str,
+    thinking_text: Option<String>,
+) -> Vec<SessionContent> {
+    let mut segments = Vec::with_capacity(
+        usize::from(thinking_text.is_some()) + usize::from(!message_text.is_empty()),
+    );
+    if let Some(thinking) = thinking_text {
+        segments.push(SessionContent::Thinking { text: thinking });
+    }
+    if !message_text.is_empty() {
+        segments.push(SessionContent::Text {
+            text: message_text.to_owned(),
+        });
+    }
+    segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn envelope(event: RendererEvent) -> RendererEventEnvelope {
+        RendererEventEnvelope::new(
+            "route-1".to_owned(),
+            "session-1".to_owned(),
+            "run-1".to_owned(),
+            1,
+            None,
+            event,
+        )
+    }
+
+    #[test]
+    fn plain_matcha_message_uses_delta_fast_path() {
+        let changes = matcha_event_changes(envelope(RendererEvent::Message {
+            sequence: 1,
+            message_id: "message-1".to_owned(),
+            lifecycle: RendererMessageLifecycle::Delta,
+            text_delta: Some("hello".to_owned()),
+            thinking_delta: None,
+            message_text: Some("hello".to_owned()),
+            thinking_text: None,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            changes,
+            vec![SessionChange::MessageDelta {
+                item_id: "message-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                message_id: Some("message-1".to_owned()),
+                text: "hello".to_owned(),
+                replace: false,
+                status: ItemStatus::Streaming,
+            }]
+        );
+    }
+
+    #[test]
+    fn thinking_matcha_message_projects_full_assistant_turn() {
+        let changes = matcha_event_changes(envelope(RendererEvent::Message {
+            sequence: 1,
+            message_id: "message-1".to_owned(),
+            lifecycle: RendererMessageLifecycle::Delta,
+            text_delta: None,
+            thinking_delta: Some("thinking".to_owned()),
+            message_text: Some("answer".to_owned()),
+            thinking_text: Some("thinking".to_owned()),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            changes,
+            vec![SessionChange::MessageUpdated {
+                item: SessionItem::AssistantTurn {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    status: ItemStatus::Streaming,
+                    segments: vec![
+                        SessionContent::Thinking {
+                            text: "thinking".to_owned(),
+                        },
+                        SessionContent::Text {
+                            text: "answer".to_owned(),
+                        },
+                    ],
+                    text: "answer".to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn tool_projection_preserves_payload_fields() {
+        let changes = matcha_event_changes(envelope(RendererEvent::Tool {
+            sequence: 1,
+            tool_call_id: "tool-call-1".to_owned(),
+            name: Some("Read".to_owned()),
+            phase: RendererToolPhase::Completed,
+            input: Some(json!({"file_path":"src/main.rs"})),
+            input_text: Some("{\n  \"file_path\": \"src/main.rs\"\n}".to_owned()),
+            summary: Some("done".to_owned()),
+            output: Some(json!({"ok":true})),
+            is_error: Some(false),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            changes,
+            vec![SessionChange::ToolUpdated {
+                tool: ToolView {
+                    tool_call_id: "tool-call-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    name: Some("Read".to_owned()),
+                    phase: ToolPhase::Completed,
+                    input: Some(json!({"file_path":"src/main.rs"})),
+                    input_text: Some("{\n  \"file_path\": \"src/main.rs\"\n}".to_owned()),
+                    summary: Some("done".to_owned()),
+                    output: Some(json!({"ok":true})),
+                    is_error: Some(false),
+                },
+            }]
+        );
     }
 }

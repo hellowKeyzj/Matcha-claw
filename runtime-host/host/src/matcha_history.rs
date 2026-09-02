@@ -1,4 +1,7 @@
-use matcha_agent::session::{canonical::CanonicalSessionAssembler, hydration::HydratedMessageRole};
+use matcha_agent::session::{
+    canonical::CanonicalSessionAssembler,
+    hydration::{HydratedMessageRole, HydrationSnapshot},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Command {
@@ -63,9 +66,13 @@ pub(crate) enum Outcome {
 
 pub(crate) fn project(facts: &matcha_agent::session::facts::NativeSessionFacts) -> History {
     let view = CanonicalSessionAssembler::project(facts);
+    project_hydration(view.transcript())
+}
+
+pub(crate) fn project_hydration(snapshot: &HydrationSnapshot) -> History {
     History {
-        messages: view
-            .transcript_messages()
+        messages: snapshot
+            .messages()
             .iter()
             .filter_map(|message| {
                 match message.role() {

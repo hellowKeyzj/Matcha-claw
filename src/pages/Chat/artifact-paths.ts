@@ -1,8 +1,9 @@
 import type { AttachedFileMeta } from '@/stores/chat';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
+import { fileNameFromMediaReference, isOpenClawGatewayMediaReference } from '@/stores/chat/media-projection';
 
 function previewMimeFromPath(filePath: string): string | null {
-  const lower = filePath.toLowerCase();
+  const lower = (filePath.split(/[?#]/, 1)[0] || filePath).toLowerCase();
   if (lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')) return 'text/markdown';
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
   if (lower.endsWith('.pdf')) return 'application/pdf';
@@ -13,6 +14,8 @@ function previewMimeFromPath(filePath: string): string | null {
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
   if (lower.endsWith('.webp')) return 'image/webp';
   if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.bmp')) return 'image/bmp';
   if (lower.endsWith('.ts')) return 'text/typescript';
   if (lower.endsWith('.tsx')) return 'text/typescript';
   if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'text/javascript';
@@ -41,6 +44,17 @@ function buildAttachedPathRef(filePath: string, mimeType: string): AttachedFileM
   };
 }
 
+function buildAttachedGatewayRef(gatewayUrl: string, mimeType: string): AttachedFileMeta {
+  return {
+    fileName: fileNameFromMediaReference(gatewayUrl),
+    mimeType,
+    fileSize: 0,
+    preview: null,
+    gatewayUrl,
+    source: 'message-ref',
+  };
+}
+
 export function extractArtifactRefsFromAssistantText(text: string): AttachedFileMeta[] {
   if (!text) {
     return [];
@@ -56,9 +70,17 @@ export function extractArtifactRefsFromAssistantText(text: string): AttachedFile
     seen.add(normalizedPath);
     refs.push(buildAttachedPathRef(normalizedPath, mimeType));
   };
+  const pushGatewayRef = (gatewayUrl: string, mimeType: string) => {
+    if (!gatewayUrl || seen.has(gatewayUrl)) {
+      return;
+    }
+    seen.add(gatewayUrl);
+    refs.push(buildAttachedGatewayRef(gatewayUrl, mimeType));
+  };
 
-  const exts = 'html?|pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|ts|tsx|js|jsx|json|txt|log|HTML?|PDF|XLSX?|CSV|MD|MDX|PNG|JPE?G|GIF|WEBP|TSX?|JSX?|JSON|TXT|LOG';
-  const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'g');
+  const exts = 'html?|pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|svg|bmp|ts|tsx|js|jsx|json|txt|log|HTML?|PDF|XLSX?|CSV|MD|MDX|PNG|JPE?G|GIF|WEBP|SVG|BMP|TSX?|JSX?|JSON|TXT|LOG';
+  const taggedGatewayRegex = /(?<![A-Za-z0-9/\\])(?:MEDIA|media):((?:https?:\/\/|\/api\/chat\/media\/outgoing\/)[^\s\n"'()[\],<>]+)/g;
+  const taggedRegex = new RegExp(`(?<![A-Za-z0-9/\\\\])(?:MEDIA|media):((?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>]|[，。；;,.!?])`, 'g');
   const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'g');
   const windowsRegex = new RegExp(`(?<![\\w/])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'g');
   const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`()<>，。；;,.!?])';
@@ -74,8 +96,36 @@ export function extractArtifactRefsFromAssistantText(text: string): AttachedFile
   );
 
   let workingText = text;
+  const markdownImageRegex = /!\[[^\]\n]*\]\(([^)\s]+)\)/g;
+  let markdownMatch: RegExpExecArray | null;
+  while ((markdownMatch = markdownImageRegex.exec(text)) !== null) {
+    const reference = markdownMatch[1];
+    if (isOpenClawGatewayMediaReference(reference)) {
+      pushGatewayRef(reference, previewMimeFromPath(reference) ?? 'image/png');
+    } else if (reference.startsWith('/') || reference.startsWith('~/') || /^[A-Za-z]:\\/.test(reference)) {
+      const mimeType = previewMimeFromPath(reference);
+      if (mimeType) {
+        pushRef(reference, mimeType);
+      }
+    }
+    const start = markdownMatch.index;
+    const end = start + markdownMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
+
+  let taggedGatewayMatch: RegExpExecArray | null;
+  while ((taggedGatewayMatch = taggedGatewayRegex.exec(text)) !== null) {
+    const reference = trimPathTerminators(taggedGatewayMatch[1]);
+    if (isOpenClawGatewayMediaReference(reference)) {
+      pushGatewayRef(reference, previewMimeFromPath(reference) ?? 'image/png');
+    }
+    const start = taggedGatewayMatch.index;
+    const end = start + taggedGatewayMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
+
   let taggedMatch: RegExpExecArray | null;
-  while ((taggedMatch = taggedRegex.exec(text)) !== null) {
+  while ((taggedMatch = taggedRegex.exec(workingText)) !== null) {
     const filePath = taggedMatch[1];
     const mimeType = previewMimeFromPath(filePath);
     if (mimeType) {

@@ -20,6 +20,9 @@ describe('ClawHub search delivery transport', () => {
           name: 'Web Search',
           description: 'Search the web',
           version: '1.2.3',
+          author: 'ClawHub',
+          downloads: 99,
+          stars: 7,
         }],
       }),
     });
@@ -33,6 +36,9 @@ describe('ClawHub search delivery transport', () => {
           name: 'Web Search',
           description: 'Search the web',
           version: '1.2.3',
+          author: 'ClawHub',
+          downloads: 99,
+          stars: 7,
         }],
       },
     });

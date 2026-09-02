@@ -17,7 +17,9 @@ use crate::{
     transport::authorization::CapabilityDecisionVerifier,
 };
 
-use super::{DecodeError, SessionListDelivery, SessionListRequest, map_native_outcome, timeline};
+use super::{
+    DecodeError, SessionListDelivery, SessionListRequest, content, map_native_outcome, timeline,
+};
 use crate::transport::{
     matcha_session_catalog, platform_tools, session_create, session_delete, session_trace,
     sessions::rename,
@@ -169,6 +171,9 @@ async fn handle(
     ) {
         return handle_timeline(request, verifier, session).await;
     }
+    if request.path == "/api/sessions/content" {
+        return handle_content(request, verifier, session).await;
+    }
     if request.path != "/api/sessions" {
         return Response::not_found();
     }
@@ -197,6 +202,73 @@ async fn handle(
         Err(_) => SessionListDelivery::Unavailable,
     };
     Response::from_delivery(delivery)
+}
+
+async fn handle_content(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    session: crate::sessions::SessionHandle,
+) -> Response {
+    let trace_id = session_trace::trace_id(&request.headers);
+    session_trace::log(
+        "runtime.content.request",
+        trace_id,
+        serde_json::json!({ "method": &request.method, "path": &request.path }),
+    );
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        return Response::content_unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => return Response::content_bad_request(),
+    };
+    let mut verifier = verifier.lock().await;
+    let request = match content::Request::decode(value, authorization, &mut verifier, now_millis())
+    {
+        Ok(request) => request,
+        Err(content::DecodeError::Unauthorized) => return Response::content_unauthorized(),
+        Err(content::DecodeError::Invalid) => return Response::content_bad_request(),
+    };
+    let Some(command) = request.into_command() else {
+        return Response::content_bad_request();
+    };
+    drop(verifier);
+    session_trace::log(
+        "runtime.content.command",
+        trace_id,
+        serde_json::json!({
+            "provider": command.provider().as_str(),
+            "sessionKey": session_trace::id_shape(Some(command.session_key())),
+            "endpointSessionId": session_trace::id_shape(command.endpoint_session_id()),
+            "agentId": session_trace::id_shape(command.agent_id()),
+            "contentRef": session_trace::id_shape(Some(command.content_ref())),
+            "offset": command.offset(),
+            "limit": command.limit(),
+        }),
+    );
+    let outcome = match session.load_content(command).await {
+        Ok(outcome) => outcome,
+        Err(_) => return Response::content_unavailable(),
+    };
+    let reason = match &outcome {
+        crate::sessions::timeline::ContentOutcome::Unavailable(reason) => Some(reason.as_str()),
+        crate::sessions::timeline::ContentOutcome::Complete(_) => None,
+    };
+    let delivery = content::Delivery::from_outcome(outcome);
+    session_trace::log(
+        "runtime.content.outcome",
+        trace_id,
+        serde_json::json!({
+            "status": delivery.status_code(),
+            "reason": reason,
+        }),
+    );
+    Response::from_content(delivery)
 }
 
 async fn handle_timeline(
@@ -293,6 +365,7 @@ async fn handle_timeline(
             "source": diagnostic.source(),
             "messageIndex": diagnostic.message_index(),
             "blockIndex": diagnostic.block_index(),
+            "blockType": diagnostic.block_type(),
             "field": diagnostic.field(),
             "reason": diagnostic.reason(),
             "actualType": diagnostic.actual(),
@@ -355,6 +428,7 @@ impl Response {
             Some("/api/sessions/load") | Some("/api/sessions/window") => {
                 Self::timeline_unavailable()
             }
+            Some("/api/sessions/content") => Self::content_unavailable(),
             Some("/api/platform/tools") => {
                 Self::fixed(503, "Platform tools catalog is unavailable")
             }
@@ -431,6 +505,25 @@ impl Response {
     }
 
     fn from_timeline(delivery: timeline::Delivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+
+    fn content_bad_request() -> Self {
+        Self::fixed(400, "Session content request is invalid")
+    }
+
+    fn content_unauthorized() -> Self {
+        Self::fixed(401, "Session content authorization is invalid")
+    }
+
+    fn content_unavailable() -> Self {
+        Self::from_content(content::Delivery::Unavailable)
+    }
+
+    fn from_content(delivery: content::Delivery) -> Self {
         Self {
             status: delivery.status_code(),
             body: delivery.body(),
@@ -590,6 +683,17 @@ mod timeout_tests {
                 })
             );
         }
+        assert_eq!(
+            Response::deadline(Some("/api/sessions/content")).status,
+            503
+        );
+        assert_eq!(
+            Response::deadline(Some("/api/sessions/content")).body,
+            json!({
+                "success": false,
+                "error": "Session content is unavailable",
+            })
+        );
         assert_eq!(Response::deadline(None).status, 400);
         assert_eq!(
             Response::deadline(None).body,

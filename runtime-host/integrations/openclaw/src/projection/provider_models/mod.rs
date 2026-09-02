@@ -12,7 +12,10 @@ use crate::{
         agent_models, auth,
         config_store::{OpenClawConfigDocument, OpenClawConfigMutation, OpenClawConfigStore},
         media_models,
-        provider::{ProviderEndpoint, ProviderKey, ProviderProjection, ProviderProtocol},
+        provider::{
+            OPENAI_CODEX_OAUTH_BASE_URL, ProviderEndpoint, ProviderKey, ProviderProjection,
+            ProviderProtocol,
+        },
     },
 };
 
@@ -317,7 +320,7 @@ impl<'a> ProjectionPlan<'a> {
     }
 
     fn apply_to_document(&self, document: &mut OpenClawConfigDocument) -> bool {
-        let mut changed = false;
+        let mut changed = super::provider::migrate_legacy_openai_codex_runtime(document);
         for (account_id, account) in &self.accounts {
             let key = self
                 .keys
@@ -402,19 +405,18 @@ fn apply_transport(
     if !matches!(configuration.kind(), ProviderAccountKind::Chat) {
         return false;
     }
-    let Some(endpoint) = configuration.endpoint() else {
+    let Some(protocol) = provider_protocol(account) else {
         return false;
     };
-    let Some(protocol) = provider_protocol(account) else {
+    let Some(endpoint) = provider_endpoint(account) else {
         return false;
     };
     ProviderProjection::new(
         key.clone(),
-        ProviderEndpoint::try_new(endpoint.as_str().to_owned())
-            .expect("environment endpoint is valid OpenClaw endpoint"),
+        endpoint,
         protocol,
         auth_header(account),
-        [],
+        legacy_transport_keys(account),
     )
     .apply_to_document(document)
 }
@@ -425,7 +427,7 @@ fn provider_protocol(account: &ProviderAccount) -> Option<ProviderProtocol> {
         ProviderAccountAuthMode::OAuthBrowser
     ) && account.provider().as_str() == "provider:openai"
     {
-        return Some(ProviderProtocol::OpenAiCodexResponses);
+        return Some(ProviderProtocol::OpenAiChatGptResponses);
     }
     match account.configuration().protocol()? {
         environment::ProviderApiProtocol::AnthropicMessages => {
@@ -443,6 +445,24 @@ fn provider_protocol(account: &ProviderAccount) -> Option<ProviderProtocol> {
     }
 }
 
+fn provider_endpoint(account: &ProviderAccount) -> Option<ProviderEndpoint> {
+    if account.provider().as_str() == "provider:openai"
+        && matches!(
+            account.configuration().auth_mode(),
+            ProviderAccountAuthMode::OAuthBrowser
+        )
+    {
+        return Some(
+            ProviderEndpoint::try_new(OPENAI_CODEX_OAUTH_BASE_URL.to_owned())
+                .expect("OpenAI Codex OAuth endpoint is valid"),
+        );
+    }
+    account.configuration().endpoint().map(|endpoint| {
+        ProviderEndpoint::try_new(endpoint.as_str().to_owned())
+            .expect("environment endpoint is valid OpenClaw endpoint")
+    })
+}
+
 fn auth_header(account: &ProviderAccount) -> Option<bool> {
     matches!(
         (
@@ -455,6 +475,19 @@ fn auth_header(account: &ProviderAccount) -> Option<bool> {
         )
     )
     .then_some(true)
+}
+
+fn legacy_transport_keys(account: &ProviderAccount) -> Vec<ProviderKey> {
+    if account.provider().as_str() == "provider:openai"
+        && matches!(
+            account.configuration().auth_mode(),
+            ProviderAccountAuthMode::OAuthBrowser
+        )
+    {
+        vec![ProviderKey::try_new("openai-codex".into()).expect("legacy provider key is valid")]
+    } else {
+        Vec::new()
+    }
 }
 
 fn text_models(
@@ -869,11 +902,11 @@ mod tests {
             .replace_auth_profiles(
                 &agent,
                 &PrivateAuthProfiles::try_new(
-                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
+                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
                 )
-                .expect("raw provider profile"),
+                .expect("legacy provider profile"),
             )
-            .expect("store raw provider profile");
+            .expect("store legacy provider profile");
 
         assert_eq!(
             ProviderModelProjection::apply(
@@ -891,11 +924,11 @@ mod tests {
             .replace_auth_profiles(
                 &agent,
                 &PrivateAuthProfiles::try_new(
-                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
+                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
                 )
-                .expect("projected provider profile"),
+                .expect("canonical provider profile"),
             )
-            .expect("store projected provider profile");
+            .expect("store canonical provider profile");
 
         let effect = ProviderModelProjection::apply(
             root.state_dir.clone(),
@@ -905,7 +938,7 @@ mod tests {
             &auth_accounts(&accounts),
             1_800_000_000_000,
         )
-        .expect("project with projected provider profile");
+        .expect("project with canonical provider profile");
 
         assert!(matches!(
             effect,
@@ -915,7 +948,7 @@ mod tests {
             serde_json::from_slice(&fs::read(root.config_path()).expect("read projected config"))
                 .expect("decode projected config");
         assert_eq!(
-            document.pointer("/models/providers/openai-codex/models/0/id"),
+            document.pointer("/models/providers/openai/models/0/id"),
             Some(&json!("gpt-5.6"))
         );
     }
@@ -1015,6 +1048,67 @@ mod tests {
     }
 
     #[test]
+    fn model_projection_migrates_legacy_openai_codex_refs() {
+        let account = account(
+            "openai-oauth",
+            "openai",
+            ProviderAccountAuthMode::OAuthBrowser,
+            true,
+        );
+        let catalog =
+            ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "models".into(),
+            json!({
+                "providers": {
+                    "openai-codex": {
+                        "baseUrl": "https://api.openai.com/v1",
+                        "api": "openai-codex-responses",
+                        "models": [{ "id": "gpt-5.6", "name": "Legacy" }]
+                    }
+                }
+            }),
+        );
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "model": {
+                        "primary": "openai-codex/gpt-5.6",
+                        "fallbacks": []
+                    },
+                    "models": {
+                        "openai-codex/gpt-5.6": { "alias": "legacy" }
+                    }
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/openai/baseUrl"),
+            Some(&json!(OPENAI_CODEX_OAUTH_BASE_URL))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/openai/models/0/id"),
+            Some(&json!("gpt-5.6"))
+        );
+        assert_eq!(value.pointer("/models/providers/openai-codex"), None);
+        assert_eq!(
+            value.pointer("/agents/defaults/model/primary"),
+            Some(&json!("openai/gpt-5.6"))
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/models/openai~1gpt-5.6/alias"),
+            Some(&json!("legacy"))
+        );
+    }
+
+    #[test]
     fn model_projection_updates_owned_allowlist_entries_without_clobbering_siblings() {
         let account = account(
             "openai-main",
@@ -1082,9 +1176,9 @@ mod tests {
                         "api": "openai-responses",
                         "authHeader": true
                     },
-                    "openai-codex": {
-                        "baseUrl": "https://api.example.com/v1",
-                        "api": "openai-codex-responses",
+                    "openai": {
+                        "baseUrl": OPENAI_CODEX_OAUTH_BASE_URL,
+                        "api": "openai-chatgpt-responses",
                         "agentRuntime": { "id": "pi" }
                     }
                 }
@@ -1195,16 +1289,16 @@ mod tests {
         let identities = public_provider_model_identities(&[openai, minimax, disabled])
             .expect("public identities");
 
-        assert_eq!(identities["openai-oauth"].provider_key(), "openai-codex");
+        assert_eq!(identities["openai-oauth"].provider_key(), "openai");
         assert_eq!(identities["minimax-oauth"].provider_key(), "minimax-portal");
         assert!(!identities.contains_key("openai-disabled"));
         assert_eq!(
             identities["openai-oauth"].runtime_model_ref(ProviderAccountKind::Chat, "gpt-5.6"),
-            "openai-codex/gpt-5.6"
+            "openai/gpt-5.6"
         );
         assert_eq!(
             identities["openai-oauth"].runtime_model_ref(ProviderAccountKind::Media, "image-1"),
-            "matchaclaw-media/openai-codex/image-1"
+            "matchaclaw-media/openai/image-1"
         );
     }
 

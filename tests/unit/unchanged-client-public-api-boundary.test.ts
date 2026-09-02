@@ -157,6 +157,7 @@ describe('unchanged renderer public API boundary', () => {
       'window:close',
       'window:isMaximized',
       'window:setRightDockWidth',
+      'window:syncTrafficLightPosition',
       'shell:openExternal',
       'shell:openResourcePath',
       'shell:openChromeExtensions',

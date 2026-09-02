@@ -160,6 +160,26 @@ fn valid_gateway_url(value: &str) -> bool {
         && !value
             .bytes()
             .any(|byte| byte == 0 || byte.is_ascii_control())
+        && outgoing_media_gateway_segments(value).is_some()
+}
+
+fn outgoing_media_gateway_segments(value: &str) -> Option<(&str, &str)> {
+    let marker = "/api/chat/media/outgoing/";
+    let tail = if let Some(value) = value.strip_prefix("/api/chat/media/outgoing/") {
+        value
+    } else if let Some(value) = value.strip_prefix("api/chat/media/outgoing/") {
+        value
+    } else {
+        value.split_once(marker)?.1
+    };
+    let mut segments = tail.split('/');
+    let owner = segments.next()?;
+    let attachment = segments.next()?;
+    segments.next()?;
+    if owner.is_empty() || attachment.is_empty() {
+        return None;
+    }
+    Some((owner, attachment))
 }
 
 fn valid_agent_id(value: &str) -> bool {
@@ -625,7 +645,7 @@ mod tests {
             },
             {
                 "key": "gateway.png",
-                "gatewayUrl": "http://127.0.0.1:34107/media/gateway.png",
+                "gatewayUrl": "https://gateway.local/api/chat/media/outgoing/agent%3Amain%3Ademo/attachment-1/full",
                 "mimeType": "image/png",
                 "agentId": "agent:main"
             }

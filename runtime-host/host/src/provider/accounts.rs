@@ -50,18 +50,20 @@ pub(super) struct ProviderAccountsMutation {
     pub(super) kind: Option<ProviderAccountMutationKind>,
     pub(super) account: Option<Value>,
     pub(super) retired: Vec<ProviderAccount>,
+    pub(super) required_auth_accounts: BTreeSet<ProviderAccountId>,
     pub(super) persisted: ProviderPersistedOutcome,
     pub(super) commit: ProviderCommitOutcome,
     pub(super) private: Result<(), PrivateProfileProjectionError>,
 }
 
 impl ProviderAccountsMutation {
-    const fn completed(desired: ProviderAccountsDesiredOutcome) -> Self {
+    fn completed(desired: ProviderAccountsDesiredOutcome) -> Self {
         Self {
             desired,
             kind: None,
             account: None,
             retired: Vec::new(),
+            required_auth_accounts: BTreeSet::new(),
             persisted: ProviderPersistedOutcome::Unknown,
             commit: ProviderCommitOutcome::CommitOutcomeUnknown,
             private: Ok(()),
@@ -74,20 +76,15 @@ impl ProviderAccountsMutation {
             kind: Some(kind),
             account: None,
             retired: Vec::new(),
+            required_auth_accounts: BTreeSet::new(),
             persisted: ProviderPersistedOutcome::Unknown,
             commit: ProviderCommitOutcome::CommitOutcomeUnknown,
             private: Ok(()),
         }
     }
 
-    pub(super) fn required_auth_accounts(&self) -> BTreeSet<ProviderAccountId> {
-        self.account
-            .as_ref()
-            .and_then(|account| account.get("id"))
-            .and_then(Value::as_str)
-            .and_then(|id| ProviderAccountId::try_new(id.to_owned()).ok())
-            .into_iter()
-            .collect()
+    pub(super) fn required_auth_accounts(&self) -> &BTreeSet<ProviderAccountId> {
+        &self.required_auth_accounts
     }
 }
 
@@ -205,6 +202,7 @@ impl ProviderAccountsOwner {
             .then_some(account.clone())
             .into_iter()
             .collect::<Vec<_>>();
+        let required_auth_accounts = BTreeSet::from([account.id().clone()]);
         let account = cascade.account(account.id()).map(account_json);
         ProviderAccountsMutation {
             desired: account
@@ -214,6 +212,7 @@ impl ProviderAccountsOwner {
             kind: Some(ProviderAccountMutationKind::Stored),
             account,
             retired,
+            required_auth_accounts,
             persisted: ProviderPersistedOutcome::Confirmed,
             commit: ProviderCommitOutcome::Committed,
             private,
@@ -256,11 +255,19 @@ impl ProviderAccountsOwner {
                 return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Deleted);
             }
         }
+        let required_auth_accounts = cascade
+            .routing()
+            .into_iter()
+            .flat_map(|routing| routing.routes())
+            .flat_map(|(_, route)| std::iter::once(route.primary()).chain(route.fallbacks()))
+            .map(|reference| reference.account_id().clone())
+            .collect();
         ProviderAccountsMutation {
             desired: ProviderAccountsDesiredOutcome::Deleted,
             kind: Some(ProviderAccountMutationKind::Deleted),
             account: None,
             retired: vec![account],
+            required_auth_accounts,
             persisted: ProviderPersistedOutcome::Confirmed,
             commit: ProviderCommitOutcome::Committed,
             private: Ok(()),

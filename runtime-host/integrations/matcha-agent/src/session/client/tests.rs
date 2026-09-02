@@ -957,9 +957,10 @@ async fn written_set_session_mode_with_malformed_success_is_unknown() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn subscribe_events_projects_live_and_returned_replay_with_one_cursor() {
+async fn subscribe_events_confirms_last_seq_then_projects_buffered_live_events() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = AppServerEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
+    let (release_socket, wait_for_release) = oneshot::channel();
     let server = tokio::spawn(async move {
         let mut socket = accept_app_server(&listener, Default::default()).await;
         initialize(&mut socket).await;
@@ -968,7 +969,7 @@ async fn subscribe_events_projects_live_and_returned_replay_with_one_cursor() {
         assert_eq!(request["params"]["sessionId"], "session-1");
         send_json(
             &mut socket,
-            json!({"jsonrpc":"2.0","method":"event","params":event_envelope(1, "live-event")}),
+            json!({"jsonrpc":"2.0","method":"event","params":event_envelope(2, "live-event")}),
         )
         .await;
         send_json(
@@ -981,11 +982,12 @@ async fn subscribe_events_projects_live_and_returned_replay_with_one_cursor() {
                     "clientId": "client-1",
                     "sessionId": "session-1",
                     "afterSeq": null,
-                    "replayed": [event_envelope(1, "returned-replay")]
+                    "lastSeq": 1
                 }
             }),
         )
         .await;
+        wait_for_release.await.unwrap();
     });
 
     let secret = Secret::new("subscribe-token".into()).unwrap();
@@ -1000,30 +1002,83 @@ async fn subscribe_events_projects_live_and_returned_replay_with_one_cursor() {
     else {
         panic!("expected subscribed response");
     };
-    assert_eq!(replay.event_count(), 1);
-    assert_eq!(replay.cursor(), sequence(1));
+    assert_eq!(replay.event_count(), 0);
+    assert_eq!(replay.cursor(), sequence(2));
 
     let accepted = receiver.recv().await.unwrap();
     assert_eq!(
         accepted.observation(),
         SessionEventObservation::Accepted {
-            sequence: sequence(1)
+            sequence: sequence(2)
         }
     );
-    assert_eq!(accepted.sequence(), Some(sequence(1)));
+    assert_eq!(accepted.sequence(), Some(sequence(2)));
     assert!(accepted.has_run());
     assert!(accepted.has_message());
 
-    let duplicate = receiver.recv().await.unwrap();
-    assert_eq!(
-        duplicate.observation(),
-        SessionEventObservation::Duplicate {
-            sequence: sequence(1)
-        }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+            .await
+            .is_err()
     );
-    assert_eq!(duplicate.sequence(), Some(sequence(1)));
-    assert!(duplicate.has_run());
-    assert!(duplicate.has_message());
+    release_socket.send(()).unwrap();
+    drop(client);
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscribe_events_sends_cursor_and_confirms_returned_last_seq() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = AppServerEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
+    let (release_socket, wait_for_release) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_app_server(&listener, Default::default()).await;
+        initialize(&mut socket).await;
+        let request = read_json(&mut socket).await;
+        assert_eq!(request["method"], "events.subscribe");
+        assert_eq!(
+            request["params"],
+            json!({"sessionId": "session-1", "afterSeq": 7})
+        );
+        send_json(
+            &mut socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "resultType": "subscribed",
+                    "clientId": "client-1",
+                    "sessionId": "session-1",
+                    "afterSeq": 7,
+                    "lastSeq": 9
+                }
+            }),
+        )
+        .await;
+        wait_for_release.await.unwrap();
+    });
+
+    let secret = Secret::new("subscribe-cursor-token".into()).unwrap();
+    let (updates, mut receiver) = mpsc::channel(1);
+    let (client, _) = AppServerClient::connect_and_initialize(endpoint, &secret, updates)
+        .await
+        .unwrap();
+    let EventSubscriptionCursor::Subscribed(replay) = client
+        .subscribe_events_with_cursor(session_id(), Some(sequence(7)))
+        .await
+        .unwrap()
+    else {
+        panic!("expected subscribed response");
+    };
+
+    assert_eq!(replay.event_count(), 0);
+    assert_eq!(replay.cursor(), sequence(9));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+            .await
+            .is_err()
+    );
+    release_socket.send(()).unwrap();
     drop(client);
     server.await.unwrap();
 }
@@ -1038,6 +1093,13 @@ async fn raw_only_subscription_consumes_consecutive_events_without_summary_recei
         initialize(&mut socket).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "events.subscribe");
+        for sequence in [1, 2] {
+            send_json(
+                &mut socket,
+                json!({"jsonrpc":"2.0","method":"event","params":event_envelope(sequence, "live-event")}),
+            )
+            .await;
+        }
         send_json(
             &mut socket,
             json!({
@@ -1047,18 +1109,12 @@ async fn raw_only_subscription_consumes_consecutive_events_without_summary_recei
                     "resultType": "subscribed",
                     "clientId": "client-1",
                     "sessionId": "session-1",
-                    "afterSeq": null
+                    "afterSeq": null,
+                    "lastSeq": 2
                 }
             }),
         )
         .await;
-        for sequence in [1, 2] {
-            send_json(
-                &mut socket,
-                json!({"jsonrpc":"2.0","method":"event","params":event_envelope(sequence, "live-event")}),
-            )
-            .await;
-        }
         wait_for_release.await.unwrap();
     });
 
@@ -1345,7 +1401,8 @@ async fn closing_a_subscribed_connection_emits_closed_update() {
                     "resultType": "subscribed",
                     "clientId": "client-1",
                     "sessionId": "session-1",
-                    "afterSeq": null
+                    "afterSeq": null,
+                    "lastSeq": 0
                 }
             }),
         )

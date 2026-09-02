@@ -260,7 +260,7 @@ pub enum EventsSubscribeResult {
         client_id: ClientId,
         session_id: SessionId,
         after_seq: Option<Sequence>,
-        replayed: Option<Vec<EventEnvelope>>,
+        last_seq: Sequence,
     },
     ClientNotFound {
         client_id: ClientId,
@@ -274,12 +274,12 @@ impl fmt::Debug for EventsSubscribeResult {
         match self {
             Self::Subscribed {
                 after_seq,
-                replayed,
+                last_seq,
                 ..
             } => result
                 .field("state", &"subscribed")
                 .field("has_after_seq", &after_seq.is_some())
-                .field("replayed_count", &replayed.as_ref().map_or(0, Vec::len))
+                .field("last_seq", &last_seq.get())
                 .finish(),
             Self::ClientNotFound { .. } => result.field("state", &"client_not_found").finish(),
             Self::ClientRequired => result.field("state", &"client_required").finish(),
@@ -416,6 +416,32 @@ mod tests {
         assert!(!replay_debug.contains("event-10"));
         assert!(!replay_debug.contains("session-1"));
 
+        let subscription = decode_events_subscribe_result(
+            &id("subscribe"),
+            match decode(r#"{"jsonrpc":"2.0","id":"subscribe","result":{"resultType":"subscribed","clientId":"client-1","sessionId":"session-1","afterSeq":7,"lastSeq":9}}"#).unwrap() {
+                JsonRpcMessage::Response(response) => response,
+                _ => panic!("expected response"),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            subscription,
+            EventsSubscribeResult::Subscribed { last_seq, .. } if last_seq.get() == 9
+        ));
+        assert_eq!(
+            decode_events_subscribe_result(
+                &id("subscribe"),
+                match decode(r#"{"jsonrpc":"2.0","id":"subscribe","result":{"resultType":"subscribed","clientId":"client-1","sessionId":"session-1","afterSeq":7}}"#).unwrap() {
+                    JsonRpcMessage::Response(response) => response,
+                    _ => panic!("expected response"),
+                },
+            )
+            .unwrap_err(),
+            ResponseError::InvalidResult {
+                method: "events.subscribe"
+            }
+        );
+
         let envelope = decode_event_notification(notification(
             r#"{"jsonrpc":"2.0","method":"event","params":{"eventId":"event-11","sessionId":"session-1","seq":11,"runId":"run-9","createdAt":"2026-01-01T00:00:00.000Z","event":{"type":"message.delta","messageId":"message-4","delta":"hi"}}}"#,
         ))
@@ -462,11 +488,11 @@ mod tests {
             client_id: ClientId::try_new("client-secret").unwrap(),
             session_id: SessionId::try_new("subscribe-session-secret").unwrap(),
             after_seq: Some(Sequence::try_new(40).unwrap()),
-            replayed: Some(vec![envelope]),
+            last_seq: Sequence::try_new(41).unwrap(),
         };
         assert_eq!(
             format!("{subscribed:?}"),
-            "EventsSubscribeResult { state: \"subscribed\", has_after_seq: true, replayed_count: 1 }"
+            "EventsSubscribeResult { state: \"subscribed\", has_after_seq: true, last_seq: 41 }"
         );
 
         let params =

@@ -3,15 +3,76 @@
 ; Install: enables long paths, adds resources\cli to user PATH for bundled CLIs.
 ; Uninstall: removes the PATH entry and optionally deletes user data.
 
+!include "LogicLib.nsh"
+
 !ifndef nsProcess::FindProcess
   !include "nsProcess.nsh"
 !endif
+
+Var /GLOBAL matchaclawRollbackDir
 
 !macro customHeader
   ; Show install details by default so users can see what stage is running.
   ShowInstDetails show
   ShowUninstDetails show
 !macroend
+
+!ifndef BUILD_UNINSTALLER
+Function MatchaClawMoveLegacyInstallDir
+  Exch $R6
+
+  ${if} $R6 == ""
+    Goto _matchaclaw_legacy_move_done
+  ${endIf}
+  ${if} $R6 == $INSTDIR
+    Goto _matchaclaw_legacy_move_done
+  ${endIf}
+
+  IfFileExists "$R6\" 0 _matchaclaw_legacy_move_done
+    DetailPrint "Moving previous MatchaClaw installation at $R6 out of the way..."
+    SetOutPath $TEMP
+    nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith('$R6', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+    Pop $0
+    Pop $1
+    Sleep 1000
+    StrCpy $R8 0
+
+  _matchaclaw_legacy_find_free_stale:
+    IfFileExists "$R6._stale_$R8\" 0 _matchaclaw_legacy_found_free_stale
+    IntOp $R8 $R8 + 1
+    Goto _matchaclaw_legacy_find_free_stale
+
+  _matchaclaw_legacy_found_free_stale:
+    ClearErrors
+    Rename "$R6" "$R6._stale_$R8"
+    IfErrors 0 _matchaclaw_legacy_stale_moved
+      DetailPrint "Waiting for file locks at $R6 to clear..."
+      nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith('$R6', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+      Pop $0
+      Pop $1
+      Sleep 2000
+      ClearErrors
+      Rename "$R6" "$R6._stale_$R8"
+      IfErrors 0 _matchaclaw_legacy_stale_moved
+      DetailPrint "Removing previous MatchaClaw installation at $R6..."
+      nsExec::ExecToStack 'cmd.exe /c rd /s /q "$R6"'
+      Pop $0
+      Pop $1
+      Goto _matchaclaw_legacy_move_done
+  _matchaclaw_legacy_stale_moved:
+    ExecShell "" "cmd.exe" `/c ping -n 61 127.0.0.1 >nul & rd /s /q "$R6._stale_$R8"` SW_HIDE
+
+  _matchaclaw_legacy_move_done:
+    ClearErrors
+    Pop $R6
+FunctionEnd
+
+!macro matchaclawMoveLegacyInstallDir ROOT_KEY
+  ReadRegStr $R6 ${ROOT_KEY} "${INSTALL_REGISTRY_KEY}" InstallLocation
+  Push $R6
+  Call MatchaClawMoveLegacyInstallDir
+!macroend
+!endif
 
 !macro customCheckAppRunning
   ; Make stage logs visible on assisted installers (defaults to hidden).
@@ -104,77 +165,115 @@
   Sleep 2000
   _existing_install_cleanup_done:
 
-  ; Prevent NSIS itself from holding $INSTDIR as current working directory before
-  ; the rename check. Windows refuses to rename a directory held as CWD.
-  SetOutPath $TEMP
-
-  ; Move the old install directory aside before extraction. electron-builder
-  ; extracts to a temp dir then CopyFiles into $INSTDIR; any locked file in the
-  ; old tree makes CopyFiles fail and triggers the misleading "app cannot close"
-  ; retry loop. Renaming the directory first gives extraction a clean target.
-  IfFileExists "$INSTDIR\" 0 _instdir_clean
-    StrCpy $R8 0
-  _find_free_stale:
-    IfFileExists "$INSTDIR._stale_$R8\" 0 _found_free_stale
-    IntOp $R8 $R8 + 1
-    Goto _find_free_stale
-
-  _found_free_stale:
-    ClearErrors
-    Rename "$INSTDIR" "$INSTDIR._stale_$R8"
-    IfErrors 0 _stale_moved
-      nsExec::ExecToStack 'cmd.exe /c rd /s /q "$INSTDIR"'
+  ; Do not continue while the old UI process is still alive. Continuing can leave
+  ; the old window/process in place after an otherwise successful extraction.
+  StrCpy $R7 0
+  _matchaclaw_verify_closed:
+    nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if (Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Name -ieq '${APP_EXECUTABLE_FILENAME}' }) { exit 0 } else { exit 1 }"`
+    Pop $R0
+    Pop $R1
+    ${if} $R0 != 0
+      nsExec::ExecToStack 'cmd.exe /c tasklist /FI "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" | find /I "${APP_EXECUTABLE_FILENAME}" >nul'
+      Pop $R0
+      Pop $R1
+    ${endIf}
+    ${if} $R0 == 0
+      IntOp $R7 $R7 + 1
+      DetailPrint `Waiting for "${PRODUCT_NAME}" to close (attempt $R7)...`
+      nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
+      Pop $0
+      Pop $1
+      nsExec::ExecToStack `cmd.exe /c wmic process where "name='${APP_EXECUTABLE_FILENAME}'" call terminate`
       Pop $0
       Pop $1
       Sleep 2000
+      ${if} $R7 < 5
+        Goto _matchaclaw_verify_closed
+      ${endIf}
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "MatchaClaw is still running and cannot be replaced safely. Please close MatchaClaw and retry installation." /SD IDCANCEL IDRETRY _matchaclaw_verify_closed
+      SetErrorLevel 2
+      Quit
+    ${endIf}
+
+  !ifndef BUILD_UNINSTALLER
+    StrCpy $matchaclawRollbackDir ""
+
+    ; Prevent NSIS itself from holding $INSTDIR as current working directory before
+    ; the rename check. Windows refuses to rename a directory held as CWD.
+    SetOutPath $TEMP
+
+    ; Cover per-user <-> per-machine migrations and custom old install locations.
+    !insertmacro matchaclawMoveLegacyInstallDir HKCU
+    !insertmacro matchaclawMoveLegacyInstallDir HKLM
+
+    ; Move the old install directory aside before extraction. electron-builder
+    ; extracts to a temp dir then CopyFiles into $INSTDIR; any locked file in the
+    ; old tree makes CopyFiles fail and triggers the misleading "app cannot close"
+    ; retry loop. Renaming the directory first gives extraction a clean target.
+    IfFileExists "$INSTDIR\" 0 _instdir_clean
+      StrCpy $R8 0
+    _find_free_stale:
+      IfFileExists "$INSTDIR._stale_$R8\" 0 _found_free_stale
+      IntOp $R8 $R8 + 1
+      Goto _find_free_stale
+
+    _found_free_stale:
+      ClearErrors
+      Rename "$INSTDIR" "$INSTDIR._stale_$R8"
+      IfErrors 0 _stale_moved
+        nsExec::ExecToStack 'cmd.exe /c rd /s /q "$INSTDIR"'
+        Pop $0
+        Pop $1
+        Sleep 2000
+        RMDir "$INSTDIR"
+        IfFileExists "$INSTDIR\" 0 _recreate_clean_instdir
+          DetailPrint "Failed to remove previous installation directory; aborting to avoid leaving the old version installed."
+          MessageBox MB_OK|MB_ICONEXCLAMATION "Unable to replace the previous MatchaClaw installation because files are still locked. Please close MatchaClaw and retry installation." /SD IDOK
+          SetErrorLevel 2
+          Quit
+      _recreate_clean_instdir:
+        CreateDirectory "$INSTDIR"
+        Goto _instdir_clean
+    _stale_moved:
+      StrCpy $matchaclawRollbackDir "$INSTDIR._stale_$R8"
       CreateDirectory "$INSTDIR"
-      Goto _instdir_clean
-  _stale_moved:
-    CreateDirectory "$INSTDIR"
-  _instdir_clean:
+    _instdir_clean:
 
-  ; If a fallback delete left old files behind, remove the legacy skills subtree
-  ; before extraction so stale bundled skills cannot survive an overwrite install.
-  IfFileExists "$INSTDIR\resources\openclaw\skills\" 0 _openclaw_skills_clean
-    DetailPrint "Removing stale bundled OpenClaw skills from previous install..."
-    RMDir /r "$INSTDIR\resources\openclaw\skills"
+    ; If a fallback delete left old files behind, remove the legacy skills subtree
+    ; before extraction so stale bundled skills cannot survive an overwrite install.
     IfFileExists "$INSTDIR\resources\openclaw\skills\" 0 _openclaw_skills_clean
-      nsExec::ExecToStack 'cmd.exe /c rd /s /q "$INSTDIR\resources\openclaw\skills"'
-      Pop $0
-      Pop $1
-  _openclaw_skills_clean:
+      DetailPrint "Removing stale bundled OpenClaw skills from previous install..."
+      RMDir /r "$INSTDIR\resources\openclaw\skills"
+      IfFileExists "$INSTDIR\resources\openclaw\skills\" 0 _openclaw_skills_clean
+        nsExec::ExecToStack 'cmd.exe /c rd /s /q "$INSTDIR\resources\openclaw\skills"'
+        Pop $0
+        Pop $1
+    _openclaw_skills_clean:
 
-  ; Make electron-builder skip uninstallOldVersion. Its old uninstaller path has
-  ; a hardcoded retry loop; when atomicRMDir hits an antivirus/indexer lock it
-  ; repeatedly runs old-uninstaller.exe and finally shows appCannotBeClosed.
-  ; The new installer writes fresh uninstall registry entries after extraction.
-  DeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  !ifdef UNINSTALL_REGISTRY_KEY_2
-    DeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY_2}" UninstallString
-    DeleteRegValue SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY_2}" QuietUninstallString
-    DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY_2}" UninstallString
-    DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY_2}" QuietUninstallString
+    ; Opposite-hive registry cleanup runs in customInstall after successful
+    ; extraction, so a failed update can still keep the old uninstall entries.
   !endif
 !macroend
 
-!macro customUnInstallCheck
-  ${if} $R0 != 0
-    DetailPrint "Old uninstaller exited with code $R0. Continuing with overwrite install..."
-  ${endIf}
-  ClearErrors
-!macroend
-
-!macro customUnInstallCheckCurrentUser
-  ${if} $R0 != 0
-    DetailPrint "Old uninstaller (current user) exited with code $R0. Continuing..."
-  ${endIf}
-  ClearErrors
-!macroend
-
 !macro customInstall
+  ; Now that new files and current-hive registry entries have been written, remove
+  ; stale entries from the opposite install scope.
+  DetailPrint "Clearing stale MatchaClaw registry entries from the opposite install scope..."
+  ${if} $installMode == "all"
+    DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
+    DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
+    !ifdef UNINSTALL_REGISTRY_KEY_2
+      DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY_2}"
+    !endif
+  ${else}
+    DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY}"
+    DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
+    !ifdef UNINSTALL_REGISTRY_KEY_2
+      DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY_2}"
+    !endif
+  ${endIf}
+  ClearErrors
+
   ; Async cleanup of old dirs left by the rename loop in customCheckAppRunning.
   ; Wait 60s before deletion to avoid I/O contention with first launch.
   IfFileExists "$INSTDIR._stale_0\" 0 _ci_stale_cleaned

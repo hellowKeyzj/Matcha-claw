@@ -40,6 +40,10 @@ fn test_matcha_runtime_instance_scope() -> Value {
     })
 }
 
+fn test_runtime_endpoint() -> organization::RuntimeEndpointReference {
+    organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap()
+}
+
 #[test]
 fn team_runtime_facade_accepts_peer_runtime_scopes_without_changing_other_native_capabilities() {
     assert!(is_team_runtime_facade_scope(&test_runtime_instance_scope()));
@@ -160,42 +164,242 @@ fn control_payload_decoders_keep_the_fixed_product_dtos() {
 }
 
 #[test]
-fn node_prompt_settled_decode_requires_team_run_target_and_preserves_run_id() {
+fn graph_context_decode_requires_node_execution_id_only_for_current_node_view() {
+    let target = json!({ "kind": "team-run", "teamId": "team:one", "runId": "run:one" });
+    let current = team_runtime_command(
+        "team.graphContext",
+        &target,
+        &json!({
+            "teamId": "team:one",
+            "runId": "run:one",
+            "view": "currentNode",
+            "nodeExecutionId": "node:attempt:1",
+        }),
+        test_runtime_endpoint(),
+    )
+    .unwrap();
+    assert!(matches!(
+        current,
+        TeamRuntimeCommand::GraphContext {
+            view: organization::TeamGraphContextView::CurrentNode,
+            node_execution_id: Some(node_execution_id),
+            ..
+        } if node_execution_id == "node:attempt:1"
+    ));
+
+    let summary = team_runtime_command(
+        "team.graphContext",
+        &target,
+        &json!({
+            "teamId": "team:one",
+            "runId": "run:one",
+            "view": "graph_summary",
+        }),
+        test_runtime_endpoint(),
+    )
+    .unwrap();
+    assert!(matches!(
+        summary,
+        TeamRuntimeCommand::GraphContext {
+            view: organization::TeamGraphContextView::GraphSummary,
+            node_execution_id: None,
+            ..
+        }
+    ));
+
+    for input in [
+        json!({
+            "teamId": "team:one",
+            "runId": "run:one",
+            "view": "current_node",
+        }),
+        json!({
+            "teamId": "team:one",
+            "runId": "run:one",
+            "view": "graphSummary",
+            "nodeExecutionId": "node:attempt:1",
+        }),
+    ] {
+        assert!(
+            team_runtime_command(
+                "team.graphContext",
+                &target,
+                &input,
+                test_runtime_endpoint()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn graph_patch_decode_bounds_command_identity_for_renderer_keys() {
+    let key = "graph-patch:0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz012345";
+    let command = team_runtime_command(
+        "team.graphPatch",
+        &json!({ "kind": "team-run", "runId": "run:one" }),
+        &json!({
+            "runId": "run:one",
+            "summary": "graph_patch",
+            "idempotencyKey": key,
+            "patch": {
+                "baseGraphId": "graph:one",
+                "baseWorkflowPlanId": "workflow:one",
+                "operations": [{ "op": "remove_node", "nodeId": "node:old" }],
+            },
+        }),
+        test_runtime_endpoint(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        command,
+        TeamRuntimeCommand::GraphPatch { patch }
+            if patch.command_id.as_str().starts_with("graph-patch:")
+                && patch.command_id.as_str() != format!("graph-patch:{key}")
+                && patch.command_id.as_str().len() <= 128
+    ));
+}
+
+#[test]
+fn graph_export_yaml_projection_includes_download_file_name() {
+    let outcome = team_runtime_outcome(
+        TeamRuntimeCommandOutcome::GraphExportYaml(Ok("nodes: []".to_owned())),
+        Some("team:one"),
+        Some("run:one"),
+    );
+    let value = to_value(outcome).unwrap();
+    assert_eq!(value["kind"], "succeeded");
+    assert_eq!(value["result"]["runId"], "run:one");
+    assert_eq!(value["result"]["fileName"], "run:one.yaml");
+    assert_eq!(value["result"]["yaml"], "nodes: []");
+}
+
+#[test]
+fn team_resume_unknown_projects_unknown_without_changing_legacy_result_payload() {
+    let outcome = team_runtime_outcome(
+        TeamRuntimeCommandOutcome::Resume {
+            team_id: organization::TeamId::try_new("team:one").unwrap(),
+            outcomes: vec![organization::ResumeOutcome::OutcomeUnknown(
+                organization::GraphRunId::new("run:one"),
+            )],
+            runs: vec![],
+        },
+        Some("team:one"),
+        None,
+    );
+
+    assert_eq!(
+        to_value(outcome).unwrap(),
+        json!({
+            "kind": "unknown",
+            "result": {
+                "success": true,
+                "teamId": "team:one",
+                "restoredRunIds": ["run:one"],
+                "activeRunIds": [],
+                "skippedTerminalRunIds": [],
+                "runs": [],
+            },
+        })
+    );
+}
+
+#[test]
+fn team_run_snapshot_unavailable_sections_use_legacy_camel_case_names() {
+    use organization::run::public_projection::TeamRunPublicUnavailableSection;
+
+    assert_eq!(
+        [
+            TeamRunPublicUnavailableSection::NodeInputStates,
+            TeamRunPublicUnavailableSection::Roles,
+            TeamRunPublicUnavailableSection::Stages,
+            TeamRunPublicUnavailableSection::WorkflowPlan,
+            TeamRunPublicUnavailableSection::DispatchGroups,
+            TeamRunPublicUnavailableSection::DispatchTasks,
+            TeamRunPublicUnavailableSection::Dispatches,
+            TeamRunPublicUnavailableSection::DispatchExecutions,
+            TeamRunPublicUnavailableSection::Messages,
+            TeamRunPublicUnavailableSection::NodePromptDeliveries,
+            TeamRunPublicUnavailableSection::Gates,
+            TeamRunPublicUnavailableSection::Kickbacks,
+        ]
+        .map(team_public_unavailable_section_name),
+        [
+            "nodeInputStates",
+            "roles",
+            "stages",
+            "workflowPlan",
+            "dispatchGroups",
+            "dispatchTasks",
+            "dispatches",
+            "dispatchExecutions",
+            "messages",
+            "nodePromptDeliveries",
+            "gates",
+            "kickbacks",
+        ]
+    );
+}
+
+#[test]
+fn node_prompt_settled_decode_requires_null_target_and_preserves_prompt_identity() {
     for phase in ["final", "error", "aborted"] {
         let command = team_runtime_command(
             "team.nodePromptSettled",
-            &json!({ "kind": "team-run", "runId": "run:one" }),
+            &Value::Null,
             &json!({
-                "runId": "run:one",
                 "sessionKey": "session:one",
                 "promptRunId": "prompt:one",
                 "phase": phase,
             }),
+            test_runtime_endpoint(),
         )
         .unwrap();
         assert!(matches!(
             command,
             TeamRuntimeCommand::NodePromptSettled {
-                run_id,
                 session_key,
                 prompt_run_id,
                 ..
-            } if run_id.as_str() == "run:one"
-                && session_key.as_str() == "session:one"
+            } if session_key.as_str() == "session:one"
                 && prompt_run_id.as_str() == "prompt:one"
         ));
     }
 
-    for target in [Value::Null, json!({ "kind": "none" })] {
+    for (target, input) in [
+        (
+            json!({ "kind": "team-run", "runId": "run:one" }),
+            json!({
+                "sessionKey": "session:one",
+                "promptRunId": "prompt:one",
+                "phase": "final",
+            }),
+        ),
+        (
+            json!({ "kind": "none" }),
+            json!({
+                "sessionKey": "session:one",
+                "promptRunId": "prompt:one",
+                "phase": "final",
+            }),
+        ),
+        (
+            Value::Null,
+            json!({
+                "runId": "run:one",
+                "sessionKey": "session:one",
+                "promptRunId": "prompt:one",
+                "phase": "final",
+            }),
+        ),
+    ] {
         assert!(
             team_runtime_command(
                 "team.nodePromptSettled",
                 &target,
-                &json!({
-                    "sessionKey": "session:one",
-                    "promptRunId": "prompt:one",
-                    "phase": "final",
-                }),
+                &input,
+                test_runtime_endpoint()
             )
             .is_err()
         );
@@ -220,6 +424,7 @@ fn team_run_decision_decode_accepts_supported_decisions() {
                 "decision": value,
                 "idempotencyKey": format!("decision:{value}"),
             }),
+            test_runtime_endpoint(),
         )
         .unwrap();
         assert!(matches!(

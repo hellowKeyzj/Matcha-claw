@@ -1,75 +1,126 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 
-// Test the pure fallback function directly — no mock.module needed,
+// Test pure functions directly — no mock.module needed,
 // so this test cannot pollute other tests in the same Bun process.
 // See CLAUDE.md "Mock 使用规范" for why we avoid business-module mocking.
-const { resolveBuiltinWithFallback } = await import('../ripgrep.js')
+const { getBuiltinRipgrepCandidates, resolveBuiltinWithFallback } =
+  await import('../ripgrep.js')
 
-// Real temp dir with a real (or removed) fake rg binary to control existsSync.
-const tmpDir = join(
-  globalThis.process.env.TMPDIR || '/tmp',
-  'ripgrep-config-test',
+const tmpDir = join(tmpdir(), `ripgrep-config-test-${process.pid}`)
+const archPlatform = 'x64-win32'
+const binaryName = 'rg.exe'
+const sourceVendorPath = join(
+  tmpDir,
+  'src',
+  'utils',
+  'vendor',
+  'ripgrep',
+  archPlatform,
+  binaryName,
 )
-const vendorDir = join(
+const distVendorPath = join(
+  tmpDir,
+  'dist',
+  'vendor',
+  'ripgrep',
+  archPlatform,
+  binaryName,
+)
+const legacyVendorPath = join(
   tmpDir,
   'vendor',
   'ripgrep',
-  `${process.arch}-${process.platform}`,
+  archPlatform,
+  binaryName,
 )
-const rgPath = join(vendorDir, process.platform === 'win32' ? 'rg.exe' : 'rg')
 
-describe('resolveBuiltinWithFallback', () => {
-  beforeAll(() => {
-    mkdirSync(vendorDir, { recursive: true })
-    writeFileSync(rgPath, '')
-  })
+function writeFakeRipgrep(rgPath: string) {
+  mkdirSync(join(rgPath, '..'), { recursive: true })
+  writeFileSync(rgPath, '')
+}
 
-  afterAll(() => {
+describe('getBuiltinRipgrepCandidates', () => {
+  afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test('builtin exists -> mode=builtin, no note', () => {
-    const result = resolveBuiltinWithFallback(rgPath)
+  test('win32 x64 source vendor is a builtin candidate', () => {
+    const candidates = getBuiltinRipgrepCandidates(tmpDir, 'x64', 'win32')
+
+    expect(candidates).toEqual([
+      distVendorPath,
+      sourceVendorPath,
+      legacyVendorPath,
+    ])
+  })
+
+  test('dist root still resolves dist vendor under project root', () => {
+    const candidates = getBuiltinRipgrepCandidates(
+      join(tmpDir, 'dist'),
+      'x64',
+      'win32',
+    )
+
+    expect(candidates[0]).toBe(distVendorPath)
+  })
+})
+
+describe('resolveBuiltinWithFallback', () => {
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test('source vendor exists -> mode=builtin', () => {
+    writeFakeRipgrep(sourceVendorPath)
+
+    const result = resolveBuiltinWithFallback(
+      getBuiltinRipgrepCandidates(tmpDir, 'x64', 'win32'),
+    )
+
     expect(result.mode).toBe('builtin')
-    expect(result.command).toBe(rgPath)
+    expect(result.command).toBe(sourceVendorPath)
     expect(result.note).toBeUndefined()
   })
 
-  test('builtin missing + system rg available -> mode=system, note set', () => {
-    rmSync(rgPath)
+  test('dist vendor exists -> mode=builtin before source vendor', () => {
+    writeFakeRipgrep(sourceVendorPath)
+    writeFakeRipgrep(distVendorPath)
+
     const result = resolveBuiltinWithFallback(
-      rgPath,
-      '/usr/local/bin/rg', // explicit system rg path
+      getBuiltinRipgrepCandidates(tmpDir, 'x64', 'win32'),
+    )
+
+    expect(result.mode).toBe('builtin')
+    expect(result.command).toBe(distVendorPath)
+    expect(result.note).toBeUndefined()
+  })
+
+  test('legacy miss + system rg available -> mode=system', () => {
+    const result = resolveBuiltinWithFallback(
+      getBuiltinRipgrepCandidates(tmpDir, 'x64', 'win32'),
+      '/usr/local/bin/rg',
       'testplatform',
     )
+
     expect(result.mode).toBe('system')
     expect(result.command).toBe('rg')
     expect(result.note).toContain('fallback')
     expect(result.note).toContain('testplatform')
-    // Restore for subsequent tests
-    writeFileSync(rgPath, '')
   })
 
-  test('builtin missing + system rg missing -> mode=builtin, note set', () => {
-    rmSync(rgPath)
+  test('no rg available -> most likely builtin path with note', () => {
     const result = resolveBuiltinWithFallback(
-      rgPath,
-      null, // no system rg
+      getBuiltinRipgrepCandidates(tmpDir, 'x64', 'win32'),
+      null,
       'testplatform',
     )
+
     expect(result.mode).toBe('builtin')
-    expect(result.command).toBe(rgPath)
+    expect(result.command).toBe(distVendorPath)
     expect(result.note).toContain('no ripgrep available')
     expect(result.note).toContain('testplatform')
-    writeFileSync(rgPath, '')
-  })
-
-  test('uses process.platform when platform param omitted', () => {
-    rmSync(rgPath)
-    const result = resolveBuiltinWithFallback(rgPath, null)
-    expect(result.note).toContain(process.platform)
-    writeFileSync(rgPath, '')
   })
 })

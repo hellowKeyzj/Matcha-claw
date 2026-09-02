@@ -28,9 +28,9 @@ const labels = {
   includeUpstreamResult: 'Include upstream result',
 } as const;
 
-function renderCanvas(graph: TeamGraphSnapshotRecord, onSaveGraph = vi.fn().mockResolvedValue(undefined)) {
-  render(<TeamRunGraphCanvas graph={graph} emptyLabel="Empty" titleLabel="Run graph" executorLabel="Executor" labels={labels} onSaveGraph={onSaveGraph} />);
-  return onSaveGraph;
+function renderCanvas(graph: TeamGraphSnapshotRecord, onPatchGraph = vi.fn().mockResolvedValue(undefined)) {
+  render(<TeamRunGraphCanvas graph={graph} emptyLabel="Empty" titleLabel="Run graph" executorLabel="Executor" labels={labels} onPatchGraph={onPatchGraph} />);
+  return onPatchGraph;
 }
 
 const workGraph: TeamGraphSnapshotRecord = {
@@ -40,28 +40,76 @@ const workGraph: TeamGraphSnapshotRecord = {
 };
 
 describe('TeamRunGraphCanvas typed graph fact editors', () => {
-  it('edits work prompt, executor role, artifact kind, and group without private projections', async () => {
-    const saveGraph = renderCanvas(workGraph);
+  it('edits work prompt, executor role, and artifact kind without private projections', async () => {
+    const patchGraph = renderCanvas(workGraph);
     fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('Role ID'), { target: { value: 'reviewer' } });
-    fireEvent.change(within(dialog).getByLabelText('Task ID'), { target: { value: 'task-review' } });
     fireEvent.change(within(dialog).getByLabelText('Work prompt'), { target: { value: 'Review the upstream result.' } });
     fireEvent.change(within(dialog).getByLabelText('Output artifact kind'), { target: { value: 'review-report' } });
-    fireEvent.change(within(dialog).getByLabelText('Group ID'), { target: { value: 'review-group' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
-    await waitFor(() => expect(saveGraph).toHaveBeenCalledWith(expect.objectContaining({
-      nodes: [expect.objectContaining({
-        roleId: 'reviewer', taskId: 'task-review', prompt: 'Review the upstream result.',
-        outputArtifactKind: 'review-report', groupId: 'review-group',
-        executor: { kind: 'team-role', roleId: 'reviewer' },
-      })],
-    })));
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'replace_node',
+        node: expect.objectContaining({
+          nodeId: 'work-1', kind: 'work', roleId: 'reviewer', taskId: 'task-1',
+          executor: { kind: 'team-role', roleId: 'reviewer' },
+          config: expect.objectContaining({ prompt: 'Review the upstream result.', outputArtifactKind: 'review-report' }),
+        }),
+      },
+    ]));
     expect(screen.queryByText('session-ref')).not.toBeInTheDocument();
   });
 
-  it('edits join group policy and edge payload policy', async () => {
+  it('adds nodes with bounded draft identifiers', async () => {
+    const patchGraph = renderCanvas(workGraph);
+
+    fireEvent.click(screen.getByRole('button', { name: /Role step/ }));
+
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'add_node',
+        node: expect.objectContaining({
+          nodeId: expect.stringMatching(/^draft-node:work:/),
+          kind: 'work',
+          roleId: 'leader',
+        }),
+      },
+    ]));
+    const nodeId = patchGraph.mock.calls[0]?.[0]?.[0]?.node?.nodeId;
+    expect(nodeId).toHaveLength(52);
+  });
+
+  it('adds edges with bounded draft identifiers', async () => {
+    const graph: TeamGraphSnapshotRecord = {
+      ...workGraph,
+      nodes: [
+        { nodeId: 'source-node-with-a-very-long-public-projection-id', kind: 'work', title: 'Source', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 },
+        { nodeId: 'target-node-with-a-very-long-public-projection-id', kind: 'review', title: 'Target', roleId: 'reviewer', maxAttempts: 1 },
+      ],
+      edges: [],
+    };
+    const patchGraph = renderCanvas(graph);
+
+    fireEvent.click(screen.getByLabelText('Connect from Source'));
+    fireEvent.click(screen.getByLabelText('Connect to Target'));
+
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'add_edge',
+        edge: expect.objectContaining({
+          edgeId: expect.stringMatching(/^draft-edge:projection:/),
+          sourceNodeId: 'source-node-with-a-very-long-public-projection-id',
+          targetNodeId: 'target-node-with-a-very-long-public-projection-id',
+        }),
+      },
+    ]));
+    const edgeId = patchGraph.mock.calls[0]?.[0]?.[0]?.edge?.edgeId;
+    expect(edgeId).toHaveLength(58);
+  });
+
+  it('edits join title and edge payload policy', async () => {
     const graph: TeamGraphSnapshotRecord = {
       ...workGraph,
       nodes: [
@@ -70,25 +118,28 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
       ],
       edges: [{ edgeId: 'edge-1', sourceNodeId: 'work-1', targetNodeId: 'join-1', sourcePort: 'completed', targetPort: 'input', action: 'activate', payload: { includeUpstreamResult: true } }],
     };
-    const saveGraph = renderCanvas(graph);
+    const patchGraph = renderCanvas(graph);
     fireEvent.click(screen.getAllByText('Join')[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('Group ID'), { target: { value: 'group-merged' } });
-    fireEvent.click(within(dialog).getByLabelText('Require completed upstream nodes'));
-    fireEvent.click(within(dialog).getByLabelText('Allow failed upstream nodes'));
-    fireEvent.change(within(dialog).getByLabelText('Join retry limit'), { target: { value: '3' } });
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'Merge' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
-    await waitFor(() => expect(saveGraph).toHaveBeenCalledWith(expect.objectContaining({
-      nodes: [expect.anything(), expect.objectContaining({ groupId: 'group-merged', join: { requireCompleted: false, allowFailed: true, retryLimit: 3 } })],
-    })));
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'replace_node',
+        node: expect.objectContaining({ nodeId: 'join-1', kind: 'join', title: 'Merge', groupId: 'group-1' }),
+      },
+    ]));
 
     fireEvent.click(screen.getByLabelText('Workflow edges').querySelector('g path')!);
     const edgeDialog = await screen.findByRole('dialog');
     fireEvent.click(within(edgeDialog).getByLabelText('Include upstream result'));
     fireEvent.click(within(edgeDialog).getByRole('button', { name: 'Save edge' }));
-    await waitFor(() => expect(saveGraph).toHaveBeenLastCalledWith(expect.objectContaining({
-      edges: [expect.objectContaining({ payload: { includeUpstreamResult: false } })],
-    })));
+    await waitFor(() => expect(patchGraph).toHaveBeenLastCalledWith([
+      {
+        op: 'replace_edge',
+        edge: expect.objectContaining({ edgeId: 'edge-1', payload: { includeUpstreamResult: false } }),
+      },
+    ]));
 
   });
 });

@@ -20,6 +20,7 @@ pub(super) enum Command {
         after: Option<Sequence>,
         replayed: Vec<EventEnvelope>,
         subscription: bool,
+        confirmed_cursor: Option<Sequence>,
         reply: oneshot::Sender<Result<EventReplayPayload, IngressError>>,
     },
     Abort,
@@ -46,6 +47,7 @@ struct SettleInput {
     after: Option<Sequence>,
     replayed: Vec<EventEnvelope>,
     subscription: bool,
+    confirmed_cursor: Option<Sequence>,
 }
 
 pub(super) async fn run(
@@ -111,6 +113,7 @@ async fn handle_command(
             after,
             replayed,
             subscription,
+            confirmed_cursor,
             reply,
         } => {
             let _ = reply.send(
@@ -124,6 +127,7 @@ async fn handle_command(
                         after,
                         replayed,
                         subscription,
+                        confirmed_cursor,
                     },
                 )
                 .await,
@@ -186,6 +190,7 @@ async fn settle(
         after,
         replayed,
         subscription,
+        confirmed_cursor,
     } = input;
     let previous = std::mem::replace(state, State::Idle);
     let State::Pending {
@@ -210,6 +215,13 @@ async fn settle(
     {
         *state = State::Recovery(cursor);
         return Err(IngressError::MismatchedSession);
+    }
+    if let Some(confirmed_cursor) = confirmed_cursor {
+        if confirmed_cursor.get() < cursor.sequence().get() {
+            *state = State::Recovery(cursor);
+            return Err(IngressError::MismatchedSession);
+        }
+        cursor = SessionEventCursor::resume_after(session_id.clone(), confirmed_cursor);
     }
     let event_count = replayed.len();
     for event in &replayed {

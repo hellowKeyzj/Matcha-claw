@@ -128,9 +128,16 @@ impl GatewayClientMetadata {
     }
 }
 
-const CONTROL_STARTUP_RETRY_LIMIT: u32 = 3;
-const CONTROL_BACKOFF_INITIAL: Duration = Duration::from_millis(20);
-const CONTROL_BACKOFF_MAX: Duration = Duration::from_secs(1);
+const CONTROL_TRANSIENT_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(20), Duration::from_millis(40)];
+const CONTROL_STARTING_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+];
 
 const CONTROL_SCOPES: [&str; 4] = [
     "operator.read",
@@ -252,24 +259,30 @@ impl GatewayControlConnectionState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct GatewayControlBackoff {
-    next_delay: Duration,
+struct GatewayControlAttempt {
+    index: usize,
 }
 
-impl GatewayControlBackoff {
-    fn first() -> Self {
-        Self {
-            next_delay: CONTROL_BACKOFF_INITIAL,
-        }
+impl GatewayControlAttempt {
+    fn transient() -> Self {
+        Self { index: 0 }
     }
 
-    fn delay(self) -> Duration {
-        self.next_delay
+    fn starting() -> Self {
+        Self { index: 0 }
     }
 
-    fn after_failure(self) -> Self {
+    fn transient_retry_delay(self) -> Option<Duration> {
+        CONTROL_TRANSIENT_RETRY_DELAYS.get(self.index).copied()
+    }
+
+    fn starting_retry_delay(self) -> Option<Duration> {
+        CONTROL_STARTING_RETRY_DELAYS.get(self.index).copied()
+    }
+
+    fn next(self) -> Self {
         Self {
-            next_delay: (self.next_delay * 2).min(CONTROL_BACKOFF_MAX),
+            index: self.index.saturating_add(1),
         }
     }
 }
@@ -454,6 +467,9 @@ impl GatewayClient {
                     let mut readiness = self.control_readiness();
                     let current = *readiness.borrow();
                     while *readiness.borrow() == current {
+                        if !self.control_supervisor_started.load(Ordering::Acquire) {
+                            return Err(GatewayClientError::Starting);
+                        }
                         if readiness.changed().await.is_err() {
                             return Err(GatewayClientError::Starting);
                         }
@@ -488,6 +504,13 @@ impl GatewayClient {
             client
                 .control_supervisor_started
                 .store(false, Ordering::Release);
+            let phase = client.control_state.lock().await.view().phase;
+            if !matches!(
+                phase,
+                GatewayControlPhase::Ready | GatewayControlPhase::Closed
+            ) {
+                client.bump_control_readiness();
+            }
         });
     }
 
@@ -523,11 +546,12 @@ impl GatewayClient {
     }
 
     async fn connect_control_until_ready(&self) {
-        let mut backoff = GatewayControlBackoff::first();
-        let mut last_error = GatewayClientError::Starting;
-        for attempt in 1..=CONTROL_STARTUP_RETRY_LIMIT {
+        let mut attempt_number = 1_u32;
+        let mut transient_attempt = GatewayControlAttempt::transient();
+        let mut starting_attempt = GatewayControlAttempt::starting();
+        let last_error = loop {
             eprintln!(
-                "[startup-trace] source=openclaw-control phase=connecting detail=control-connect-attempt attempt={attempt}"
+                "[startup-trace] source=openclaw-control phase=connecting detail=control-connect-attempt attempt={attempt_number}"
             );
             {
                 let mut state = self.control_state.lock().await;
@@ -561,32 +585,44 @@ impl GatewayClient {
                         instance_id: self.control_profile.instance_id().to_owned(),
                         control: Arc::new(ControlDispatcher { dispatcher }),
                     };
-                    self.trace_first_control_ready(attempt);
+                    self.trace_first_control_ready(attempt_number);
                     self.bump_control_readiness();
                     return;
                 }
                 Err(error) => {
-                    last_error = error;
                     eprintln!(
-                        "[startup-trace] source=openclaw-control phase=connect-failed detail=control-connect-attempt-failed attempt={attempt} retryable={} error={error}",
+                        "[startup-trace] source=openclaw-control phase=connect-failed detail=control-connect-attempt-failed attempt={attempt_number} retryable={} error={error}",
                         is_retryable_control_connection_error(error)
                     );
-                    if attempt == CONTROL_STARTUP_RETRY_LIMIT
-                        || !is_retryable_control_connection_error(error)
-                    {
-                        break;
+                    if !is_retryable_control_connection_error(error) {
+                        break error;
                     }
-                    let delay = backoff.delay();
+                    let delay = match error {
+                        GatewayClientError::Starting => {
+                            let Some(delay) = starting_attempt.starting_retry_delay() else {
+                                break error;
+                            };
+                            starting_attempt = starting_attempt.next();
+                            delay
+                        }
+                        _ => {
+                            let Some(delay) = transient_attempt.transient_retry_delay() else {
+                                break error;
+                            };
+                            transient_attempt = transient_attempt.next();
+                            delay
+                        }
+                    };
                     *self.control_state.lock().await =
                         GatewayControlConnectionState::Reconnecting {
                             instance_id: self.control_profile.instance_id().to_owned(),
                         };
                     self.bump_control_readiness();
                     sleep(delay).await;
-                    backoff = backoff.after_failure();
+                    attempt_number = attempt_number.saturating_add(1);
                 }
             }
-        }
+        };
 
         eprintln!(
             "[startup-trace] source=openclaw-control phase=unavailable detail=control-connect-exhausted error={last_error}"
@@ -789,7 +825,10 @@ impl GatewayClient {
 
     /// Observes whether the Gateway exposes the fixed Host control contract.
     pub async fn observe_control(&self) -> GatewayControlReadiness {
-        self.control_readiness_snapshot().await
+        match self.ensure_control_ready().await {
+            Ok(()) => GatewayControlReadiness::Ready,
+            Err(error) => GatewayControlReadiness::from_connection_error(error),
+        }
     }
 
     async fn run_operation<F>(&self, scope: &str, operation: F) -> Result<(), GatewayClientError>
@@ -1704,16 +1743,25 @@ mod tests {
     }
 
     #[test]
-    fn control_backoff_doubles_until_the_fixed_maximum() {
-        let first = GatewayControlBackoff::first();
-        assert_eq!(first.delay(), CONTROL_BACKOFF_INITIAL);
-        let second = first.after_failure();
-        assert_eq!(second.delay(), CONTROL_BACKOFF_INITIAL * 2);
-        let mut current = second;
-        for _ in 0..16 {
-            current = current.after_failure();
+    fn control_retry_delays_keep_transient_failures_short_and_starting_bounded() {
+        let mut transient = GatewayControlAttempt::transient();
+        let mut transient_delays = Vec::new();
+        while let Some(delay) = transient.transient_retry_delay() {
+            transient_delays.push(delay);
+            transient = transient.next();
         }
-        assert_eq!(current.delay(), CONTROL_BACKOFF_MAX);
+
+        let mut starting = GatewayControlAttempt::starting();
+        let mut starting_delays = Vec::new();
+        while let Some(delay) = starting.starting_retry_delay() {
+            starting_delays.push(delay);
+            starting = starting.next();
+        }
+
+        assert_eq!(transient_delays, CONTROL_TRANSIENT_RETRY_DELAYS);
+        assert_eq!(transient.transient_retry_delay(), None);
+        assert_eq!(starting_delays, CONTROL_STARTING_RETRY_DELAYS);
+        assert_eq!(starting.starting_retry_delay(), None);
     }
 
     #[test]
@@ -1747,7 +1795,7 @@ mod tests {
             client.observe_control().await,
             GatewayControlReadiness::Ready
         );
-        assert!(started_at.elapsed() >= CONTROL_BACKOFF_INITIAL);
+        assert!(started_at.elapsed() >= CONTROL_STARTING_RETRY_DELAYS[0]);
         assert_eq!(
             client.control_state_view().await.phase,
             GatewayControlPhase::Ready
@@ -1885,7 +1933,7 @@ mod tests {
             ));
         });
 
-        let readiness = client.observe_control().await;
+        let readiness = client.control_readiness_snapshot().await;
         server.await.unwrap();
         readiness
     }

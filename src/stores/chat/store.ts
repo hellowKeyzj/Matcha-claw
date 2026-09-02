@@ -32,10 +32,17 @@ import {
   executeOpenAgentConversation,
   executeOpenSessionIdentity,
   executeRenameSession,
+  executeSelectSessionRuntimeEndpoint,
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
 } from './session-actions';
 import { buildTaskBridgeState, normalizeTaskSessionKey } from './session-helpers';
+import {
+  EMPTY_SESSION_RUNTIME_GRAPH,
+  buildCurrentConversationFromSessionRecord,
+  buildSessionRuntimeGraph,
+  createDraftCurrentConversation,
+} from './session-runtime-graph';
 import { createChatStoreKernel } from './store-kernel';
 import {
   DEFAULT_SESSION_KEY,
@@ -170,8 +177,9 @@ function matchesCurrentSessionRuntime(
   target: ChatSessionRuntimeEndpointTarget,
   state: ChatStoreState,
 ): boolean {
-  const identity = getSessionMeta(state, state.currentSessionKey).sessionIdentity;
-  return Boolean(identity && sameRuntimeEndpointScope(target.endpoint, identity.endpoint));
+  const endpoint = state.currentConversation?.endpoint
+    ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint;
+  return Boolean(endpoint && sameRuntimeEndpointScope(target.endpoint, endpoint));
 }
 
 function selectDefaultSessionPromptScope(
@@ -185,6 +193,19 @@ function selectDefaultSessionPromptScope(
     ?? targets[0]!.defaultSessionPromptScope;
 }
 
+function syncSessionRuntimeProjectionAfterHistoryLoad(set: (partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState), replace?: false) => void, sessionKey: string): void {
+  set((state) => {
+    const sessionRuntimeGraph = buildSessionRuntimeGraph(state.sessionRuntimeCatalog, state.loadedSessions);
+    const currentConversation = sessionKey === state.currentSessionKey && state.loadedSessions[sessionKey]
+      ? buildCurrentConversationFromSessionRecord(state.loadedSessions[sessionKey]!)
+      : state.currentConversation;
+    return {
+      sessionRuntimeGraph,
+      currentConversation,
+    };
+  });
+}
+
 export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
   const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
@@ -194,18 +215,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     get,
     beginMutating,
     finishMutating,
-    defaultSessionKey: DEFAULT_SESSION_KEY,
     historyRuntime,
   } as const;
 
   return {
     currentSessionKey: '',
+    currentConversation: null,
+    lastSelectedSessionKeyByRuntimeScopeKey: {},
+    sessionRuntimeGraph: EMPTY_SESSION_RUNTIME_GRAPH,
     sessionRuntimeCatalog: {
       status: 'idle',
       error: null,
       endpoints: [],
       defaultSessionPromptScope: null,
     },
+    sessionCatalogLoadedAtByRuntimeScopeKey: {},
+    sessionCatalogLoadedRevisionByRuntimeScopeKey: {},
     loadedSessions: {},
     sessionRecordKeyByIdentityKey: {},
     pendingApprovalsBySession: {},
@@ -221,7 +246,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       set((state) => ({
         sessionRuntimeCatalog: {
           ...state.sessionRuntimeCatalog,
-          status: 'loading',
+          status: state.sessionRuntimeCatalog.endpoints.length > 0 ? state.sessionRuntimeCatalog.status : 'loading',
           error: null,
         },
       }));
@@ -232,9 +257,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
           return;
         }
+        const stateBeforeCatalogUpdate = get();
         const endpointSource = status === 'ready' ? endpoints : [];
         const targets = buildSessionRuntimeEndpointTargets(endpointSource);
-        const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, get());
+        const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, stateBeforeCatalogUpdate);
         if (!defaultSessionPromptScope) {
           const starting = status === 'loading' || endpoints.some(isSessionRuntimeEndpointStarting);
           const message = status === 'error' && error
@@ -242,28 +268,43 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
             : starting
               ? 'Session runtime endpoint is starting'
               : 'No session runtime endpoint is available';
-          set({
-            sessionRuntimeCatalog: {
+          set((state) => {
+            const hasExistingConversation = state.currentConversation != null;
+            const nextSessionRuntimeCatalog: ChatStoreState['sessionRuntimeCatalog'] = {
               status: starting ? 'loading' : 'error',
               error: starting ? null : message,
               endpoints: targets,
               defaultSessionPromptScope: null,
-            },
-            sessionCatalogStatus: createIdleResourceStatusState(),
-            error: starting ? null : message,
+            };
+            return {
+              currentConversation: hasExistingConversation ? state.currentConversation : null,
+              sessionRuntimeGraph: buildSessionRuntimeGraph(nextSessionRuntimeCatalog, state.loadedSessions),
+              sessionRuntimeCatalog: nextSessionRuntimeCatalog,
+              sessionCatalogStatus: createIdleResourceStatusState(),
+              error: starting ? null : message,
+            };
           });
           return;
         }
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
           return;
         }
-        set({
-          sessionRuntimeCatalog: {
-            status: 'ready',
+        set((state) => {
+          const sessionRuntimeCatalog = {
+            status: 'ready' as const,
             error: null,
             endpoints: targets,
             defaultSessionPromptScope,
-          },
+          };
+          const sessionRuntimeGraph = buildSessionRuntimeGraph(sessionRuntimeCatalog, state.loadedSessions);
+          const currentConversation = state.currentSessionKey && state.loadedSessions[state.currentSessionKey]
+            ? buildCurrentConversationFromSessionRecord(state.loadedSessions[state.currentSessionKey]!)
+            : createDraftCurrentConversation(defaultSessionPromptScope.endpoint, defaultSessionPromptScope.agentId);
+          return {
+            currentConversation,
+            sessionRuntimeGraph,
+            sessionRuntimeCatalog,
+          };
         });
       } catch (error) {
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
@@ -291,6 +332,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     switchSession: (key, traceId) => {
       executeSwitchSession(sessionInput, key, traceId);
+    },
+    selectSessionRuntimeEndpoint: (endpoint) => {
+      executeSelectSessionRuntimeEndpoint(sessionInput, endpoint);
     },
     newSession: async (agentId, traceId) => {
       await executeNewSession(sessionInput, agentId, traceId);
@@ -322,7 +366,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       });
       historyRuntime.setHistoryLoadInFlight(normalizedSessionKey, task);
       void task.then(
-        () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
+        () => {
+          historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task);
+          syncSessionRuntimeProjectionAfterHistoryLoad(set, normalizedSessionKey);
+        },
         () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
       );
       return task;
@@ -333,12 +380,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       executeSetViewportAnchorItemKey(sessionInput, itemKey, sessionKey);
     },
     sendMessage: async (text, attachments) => {
-      if (!get().currentSessionKey) {
+      if (get().currentConversation?.kind === 'draft') {
         await executeNewSession(sessionInput);
-        if (!get().currentSessionKey) {
-          const error = get().error ?? 'Session runtime is not ready';
-          return { accepted: false, reason: 'missing-session', error };
-        }
+      }
+      if (!get().currentSessionKey) {
+        const error = get().error ?? 'Session runtime is not ready';
+        return { accepted: false, reason: 'missing-session', error };
       }
       return executeStoreSend({
         set,
@@ -465,7 +512,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           ...endpointMeta,
           sessionIdentity,
         });
+        const runtimeTarget = state.sessionRuntimeCatalog.status === 'ready'
+          ? state.sessionRuntimeCatalog.endpoints.find((target) => sameRuntimeEndpointScope(target.endpoint, endpoint)) ?? null
+          : null;
+        const sessionRuntimeCatalog = runtimeTarget
+          ? {
+              ...state.sessionRuntimeCatalog,
+              defaultSessionPromptScope: runtimeTarget.defaultSessionPromptScope,
+            }
+          : state.sessionRuntimeCatalog;
+        const sessionRuntimeGraph = buildSessionRuntimeGraph(sessionRuntimeCatalog, loadedSessions);
         return {
+          ...(normalizedSessionKey === state.currentSessionKey ? {
+            currentConversation: buildCurrentConversationFromSessionRecord(loadedSessions[normalizedSessionKey]!),
+            sessionRuntimeCatalog,
+          } : {}),
+          sessionRuntimeGraph,
           loadedSessions,
           sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         };

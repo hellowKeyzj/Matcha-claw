@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -141,6 +141,7 @@ export function SecurityPage() {
   const gatewayProcessState = gatewayStatus.processState;
   const gatewayOperational = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
+  const lastGatewayOperationalRef = useRef(gatewayOperational);
 
   const policyReady = useSecurityPolicyStore((state) => state.policyReady);
   const initialLoading = useSecurityPolicyStore((state) => state.initialLoading);
@@ -184,6 +185,7 @@ export function SecurityPage() {
   const setRuleCatalogPlatform = useSecuritySupportStore((state) => state.setRuleCatalogPlatform);
   const setActiveSection = useSecuritySupportStore((state) => state.setActiveSection);
   const showPolicyRefreshingHint = useDelayedFlag(refreshing, 180);
+  const policyControlsDisabled = !policyReady || initialLoading || refreshing;
 
   const getActionLabel = useCallback((action: Action) => t(`matrix.action.${action}`), [t]);
   const getSeverityLabel = useCallback((severity: Severity) => t(`matrix.severity.${severity}`), [t]);
@@ -195,6 +197,18 @@ export function SecurityPage() {
   useEffect(() => {
     void loadPolicy({ silent: true });
   }, [loadPolicy]);
+
+  useEffect(() => {
+    const previousGatewayOperational = lastGatewayOperationalRef.current;
+    lastGatewayOperationalRef.current = gatewayOperational;
+    if (!previousGatewayOperational && gatewayOperational) {
+      const state = useSecurityPolicyStore.getState();
+      const hasUnsavedPolicyChange = JSON.stringify(state.policy) !== JSON.stringify(state.savedPolicySnapshot);
+      if (!state.policyReady || !hasUnsavedPolicyChange) {
+        void loadPolicy({ silent: true });
+      }
+    }
+  }, [gatewayOperational, loadPolicy]);
 
   const handleSavePolicy = useCallback(async () => {
     if (!gatewayOperational) {
@@ -410,7 +424,7 @@ export function SecurityPage() {
               {t('page.unsaved')}
             </Badge>
           )}
-          <Button onClick={() => void handleSavePolicy()} disabled={saving || !isDirty || !gatewayOperational}>
+          <Button onClick={() => void handleSavePolicy()} disabled={saving || !isDirty || !gatewayOperational || policyControlsDisabled}>
             {saving ? t('actions.saving') : t('actions.save')}
           </Button>
         </div>
@@ -462,6 +476,7 @@ export function SecurityPage() {
             <Select
               id="security-preset"
               value={policy.preset}
+              disabled={policyControlsDisabled}
               onChange={(e) => applyPresetTemplate(e.target.value as Preset)}
             >
               <option value="strict">{t('preset.strict')}</option>
@@ -470,13 +485,13 @@ export function SecurityPage() {
             </Select>
           </div>
           <div className="grid gap-2 md:grid-cols-2">
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.runtimeGuardEnabled')}</span><Switch checked={runtime.runtimeGuardEnabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, runtimeGuardEnabled: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.auditOnGatewayStart')}</span><Switch checked={runtime.auditOnGatewayStart} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, auditOnGatewayStart: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.autoHarden')}</span><Switch checked={runtime.autoHarden} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, autoHarden: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockDestructive')}</span><Switch checked={runtime.blockDestructive} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockDestructive: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockSecrets')}</span><Switch checked={runtime.blockSecrets} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockSecrets: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.enablePromptInjectionGuard')}</span><Switch checked={runtime.enablePromptInjectionGuard} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, enablePromptInjectionGuard: checked }))} /></label>
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.logDetections')}</span><Switch checked={runtime.logging.logDetections} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, logging: { ...current.logging, logDetections: checked } }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.runtimeGuardEnabled')}</span><Switch disabled={policyControlsDisabled} checked={runtime.runtimeGuardEnabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, runtimeGuardEnabled: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.auditOnGatewayStart')}</span><Switch disabled={policyControlsDisabled} checked={runtime.auditOnGatewayStart} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, auditOnGatewayStart: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.autoHarden')}</span><Switch disabled={policyControlsDisabled} checked={runtime.autoHarden} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, autoHarden: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockDestructive')}</span><Switch disabled={policyControlsDisabled} checked={runtime.blockDestructive} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockDestructive: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockSecrets')}</span><Switch disabled={policyControlsDisabled} checked={runtime.blockSecrets} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockSecrets: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.enablePromptInjectionGuard')}</span><Switch disabled={policyControlsDisabled} checked={runtime.enablePromptInjectionGuard} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, enablePromptInjectionGuard: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.logDetections')}</span><Switch disabled={policyControlsDisabled} checked={runtime.logging.logDetections} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, logging: { ...current.logging, logDetections: checked } }))} /></label>
           </div>
         </CardContent>
       </Card>
@@ -488,8 +503,8 @@ export function SecurityPage() {
         <CardHeader><CardTitle>{t('matrix.title')}</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 md:grid-cols-2">
-            <div><Label>{t('matrix.destructiveDefaultAction')}</Label><Select value={runtime.destructive.action} onChange={(e) => updateRuntime((current) => ({ ...current, destructive: { ...current.destructive, action: e.target.value as Action } }))}>{DESTRUCTIVE_ACTIONS.map((action) => <option key={`destructive-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
-            <div><Label>{t('matrix.secretsDefaultAction')}</Label><Select value={runtime.secrets.action} onChange={(e) => updateRuntime((current) => ({ ...current, secrets: { ...current.secrets, action: e.target.value as Action } }))}>{SECRET_ACTIONS.map((action) => <option key={`secrets-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
+            <div><Label>{t('matrix.destructiveDefaultAction')}</Label><Select disabled={policyControlsDisabled} value={runtime.destructive.action} onChange={(e) => updateRuntime((current) => ({ ...current, destructive: { ...current.destructive, action: e.target.value as Action } }))}>{DESTRUCTIVE_ACTIONS.map((action) => <option key={`destructive-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
+            <div><Label>{t('matrix.secretsDefaultAction')}</Label><Select disabled={policyControlsDisabled} value={runtime.secrets.action} onChange={(e) => updateRuntime((current) => ({ ...current, secrets: { ...current.secrets, action: e.target.value as Action } }))}>{SECRET_ACTIONS.map((action) => <option key={`secrets-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <div className="space-y-2">
@@ -499,6 +514,7 @@ export function SecurityPage() {
                   <Label className="min-w-0 truncate">{getSeverityLabel(severity)}</Label>
                   <Select
                     className="w-[120px]"
+                    disabled={policyControlsDisabled}
                     value={runtime.destructive.severityActions[severity]}
                     onChange={(e) => updateRuntime((current) => ({
                       ...current,
@@ -525,6 +541,7 @@ export function SecurityPage() {
                   <Label className="min-w-0 truncate">{getSeverityLabel(severity)}</Label>
                   <Select
                     className="w-[120px]"
+                    disabled={policyControlsDisabled}
                     value={runtime.secrets.severityActions[severity]}
                     onChange={(e) => updateRuntime((current) => ({
                       ...current,
@@ -551,13 +568,13 @@ export function SecurityPage() {
       <Card>
         <CardHeader><CardTitle>{t('matrix.destructiveCategoryTitle')}</CardTitle></CardHeader>
         <CardContent className="grid gap-2 md:grid-cols-2">
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('fileDelete')}</span><Switch checked={runtime.destructive.categories.fileDelete} onCheckedChange={(checked) => toggleCategory('fileDelete', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('gitDestructive')}</span><Switch checked={runtime.destructive.categories.gitDestructive} onCheckedChange={(checked) => toggleCategory('gitDestructive', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('sqlDestructive')}</span><Switch checked={runtime.destructive.categories.sqlDestructive} onCheckedChange={(checked) => toggleCategory('sqlDestructive', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('systemDestructive')}</span><Switch checked={runtime.destructive.categories.systemDestructive} onCheckedChange={(checked) => toggleCategory('systemDestructive', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('processKill')}</span><Switch checked={runtime.destructive.categories.processKill} onCheckedChange={(checked) => toggleCategory('processKill', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('networkDestructive')}</span><Switch checked={runtime.destructive.categories.networkDestructive} onCheckedChange={(checked) => toggleCategory('networkDestructive', checked)} /></label>
-          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('privilegeEscalation')}</span><Switch checked={runtime.destructive.categories.privilegeEscalation} onCheckedChange={(checked) => toggleCategory('privilegeEscalation', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('fileDelete')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.fileDelete} onCheckedChange={(checked) => toggleCategory('fileDelete', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('gitDestructive')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.gitDestructive} onCheckedChange={(checked) => toggleCategory('gitDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('sqlDestructive')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.sqlDestructive} onCheckedChange={(checked) => toggleCategory('sqlDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('systemDestructive')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.systemDestructive} onCheckedChange={(checked) => toggleCategory('systemDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('processKill')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.processKill} onCheckedChange={(checked) => toggleCategory('processKill', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('networkDestructive')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.networkDestructive} onCheckedChange={(checked) => toggleCategory('networkDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('privilegeEscalation')}</span><Switch disabled={policyControlsDisabled} checked={runtime.destructive.categories.privilegeEscalation} onCheckedChange={(checked) => toggleCategory('privilegeEscalation', checked)} /></label>
         </CardContent>
       </Card>
       </>
@@ -661,7 +678,7 @@ export function SecurityPage() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={enabledPlatformToolIds.length === 0}
+                  disabled={policyControlsDisabled || enabledPlatformToolIds.length === 0}
                   onClick={() => updateAllowlistTools(enabledPlatformToolIds)}
                 >
                   {t('allowlistRegex.writeEnabledTools')}
@@ -670,7 +687,7 @@ export function SecurityPage() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={selectedToolCount === 0}
+                  disabled={policyControlsDisabled || selectedToolCount === 0}
                   onClick={() => updateAllowlistTools([])}
                 >
                   {t('allowlistRegex.clearSelection')}
@@ -696,8 +713,9 @@ export function SecurityPage() {
                         <button
                           key={tool.id}
                           type="button"
+                          disabled={policyControlsDisabled}
                           onClick={() => toggleAllowlistTool(tool.id)}
-                          className={`h-full min-w-0 rounded-md border px-3 py-2 text-left transition ${
+                          className={`h-full min-w-0 rounded-md border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
                             selected
                               ? 'border-primary bg-primary/10'
                               : 'border-border hover:border-primary/40 hover:bg-muted/30'
@@ -724,17 +742,17 @@ export function SecurityPage() {
 
             <TabsContent value="allowlistSessions" className="space-y-1">
               <Label>{t('allowlistRegex.labels.allowlistSessions')}</Label>
-              <Textarea rows={8} value={text(runtime.allowlist.sessions)} onChange={(e) => updateRuntime((current) => ({ ...current, allowlist: { ...current.allowlist, sessions: list(e.target.value) } }))} />
+              <Textarea disabled={policyControlsDisabled} rows={8} value={text(runtime.allowlist.sessions)} onChange={(e) => updateRuntime((current) => ({ ...current, allowlist: { ...current.allowlist, sessions: list(e.target.value) } }))} />
             </TabsContent>
 
             <TabsContent value="destructivePatterns" className="space-y-1">
               <Label>{t('allowlistRegex.labels.destructivePatterns')}</Label>
-              <Textarea rows={8} value={text(runtime.destructivePatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, destructivePatterns: list(e.target.value) }))} />
+              <Textarea disabled={policyControlsDisabled} rows={8} value={text(runtime.destructivePatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, destructivePatterns: list(e.target.value) }))} />
             </TabsContent>
 
             <TabsContent value="secretPatterns" className="space-y-1">
               <Label>{t('allowlistRegex.labels.secretPatterns')}</Label>
-              <Textarea rows={8} value={text(runtime.secretPatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, secretPatterns: list(e.target.value) }))} />
+              <Textarea disabled={policyControlsDisabled} rows={8} value={text(runtime.secretPatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, secretPatterns: list(e.target.value) }))} />
             </TabsContent>
           </Tabs>
         </CardContent>
@@ -751,6 +769,7 @@ export function SecurityPage() {
           <div className="space-y-1">
             <Label>{t('policyGuards.labels.allowPathPrefixes')}</Label>
             <Textarea
+              disabled={policyControlsDisabled}
               rows={6}
               value={text(runtime.allowPathPrefixes)}
               onChange={(e) => updateRuntime((current) => ({ ...current, allowPathPrefixes: list(e.target.value) }))}
@@ -759,6 +778,7 @@ export function SecurityPage() {
           <div className="space-y-1">
             <Label>{t('policyGuards.labels.allowDomains')}</Label>
             <Textarea
+              disabled={policyControlsDisabled}
               rows={6}
               value={text(runtime.allowDomains)}
               onChange={(e) => updateRuntime((current) => ({ ...current, allowDomains: list(e.target.value) }))}
@@ -767,6 +787,7 @@ export function SecurityPage() {
           <div className="space-y-1 md:col-span-2">
             <Label>{t('policyGuards.labels.auditEgressAllowlist')}</Label>
             <Textarea
+              disabled={policyControlsDisabled}
               rows={4}
               value={text(runtime.auditEgressAllowlist)}
               onChange={(e) => updateRuntime((current) => ({ ...current, auditEgressAllowlist: list(e.target.value) }))}
@@ -780,6 +801,7 @@ export function SecurityPage() {
               min={0.01}
               step={0.01}
               value={runtime.auditDailyCostLimitUsd}
+              disabled={policyControlsDisabled}
               onChange={(e) => updateRuntime((current) => ({
                 ...current,
                 auditDailyCostLimitUsd: Number.isFinite(Number(e.target.value)) && Number(e.target.value) > 0
@@ -794,6 +816,7 @@ export function SecurityPage() {
             <Select
               id="auditFailureMode"
               value={runtime.auditFailureMode ?? ''}
+              disabled={policyControlsDisabled}
               onChange={(e) => updateRuntime((current) => ({
                 ...current,
                 auditFailureMode: e.target.value === '' ? null : e.target.value as Exclude<FailureMode, null>,
@@ -808,6 +831,7 @@ export function SecurityPage() {
           <div className="space-y-1">
             <Label>{t('policyGuards.labels.promptInjectionPatterns')}</Label>
             <Textarea
+              disabled={policyControlsDisabled}
               rows={6}
               value={text(runtime.promptInjectionPatterns)}
               onChange={(e) => updateRuntime((current) => ({ ...current, promptInjectionPatterns: list(e.target.value) }))}
@@ -880,7 +904,7 @@ export function SecurityPage() {
             <div className="space-y-2 rounded-md border p-3">
               {remediationActions.map((item) => (
                 <label key={item.id} className="flex items-start gap-2 text-sm">
-                  <input type="checkbox" className="mt-1" checked={selectedRemediationActions.includes(item.id)} onChange={(e) => setSelectedRemediationActions((prev) => (e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)))} />
+                  <input type="checkbox" className="mt-1" disabled={policyControlsDisabled} checked={selectedRemediationActions.includes(item.id)} onChange={(e) => setSelectedRemediationActions((prev) => (e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)))} />
                   <span><span className="font-medium">{item.title}</span><span className="ml-2 text-xs text-muted-foreground">[{item.risk}]</span><p className="text-xs text-muted-foreground">{item.description}</p></span>
                 </label>
               ))}

@@ -55,7 +55,136 @@
         "pendingBlockerTaskId": "Task ID {{taskId}}",
         "pendingBlockerSourceChat": "Chat",
         "pendingBlockerApprovalId": "Approval ID {{id}}",
-        "pendingBlockerApprovalHint": "A tool call is waiting for your approval."
+        "pendingBlockerApprovalHint": "A tool call is waiting for your approval.",
+        "account": {
+            "signedOut": "Signed out",
+            "syncing": "Syncing",
+            "offline": "Offline",
+            "signedIn": "Signed in",
+            "checking": "Checking sign-in status",
+            "openMenu": "Open account menu",
+            "loginAria": "Sign in to MatchaClaw",
+            "quotaEmpty": "Sign in to show usage",
+            "subscription": "Subscription",
+            "appearanceSettings": "Appearance / Settings",
+            "about": "About",
+            "logout": "Sign out",
+            "login": "Sign in",
+            "register": "Register",
+            "upgradeSubscription": "Upgrade / Subscribe",
+            "plan": {
+                "trialing": "Trialing",
+                "active": "Subscribed",
+                "pastDue": "Past due",
+                "cancelled": "Cancelled",
+                "expired": "Expired",
+                "free": "Free"
+            },
+            "quota": {
+                "usage": "Usage",
+                "usedAmount": "Used {{amount}}",
+                "usedOfLimit": "{{used}} / {{limit}}",
+                "subscriptionDaily": "Daily plan quota",
+                "subscriptionWeekly": "Weekly plan quota",
+                "subscriptionMonthly": "Monthly plan quota",
+                "platformMonthly": "{{platform}} monthly",
+                "totalUsage": "Total usage"
+            }
+        }
+    },
+    "subscriptionDialog": {
+        "title": "Matcha subscription",
+        "tabs": {
+            "current": "Current subscription",
+            "checkout": "Choose plan"
+        },
+        "loading": "Loading Matcha plans and payment methods...",
+        "units": {
+            "day": "day",
+            "week": "week",
+            "month": "month",
+            "year": "year",
+            "cycle": "cycle"
+        },
+        "subscriptionStatus": {
+            "active": "Subscribed",
+            "trialing": "Trialing",
+            "pastDue": "Past due",
+            "cancelled": "Cancelled",
+            "expired": "Expired",
+            "none": "Not subscribed"
+        },
+        "current": {
+            "subscriptionCount": "{{count}} Matcha subscriptions",
+            "noSubscription": "No Matcha subscription",
+            "expiresAt": "Expires: {{date}}",
+            "quotaTitle": "Subscription quota",
+            "emptyQuota": "No quota details were returned for the current subscription.",
+            "platformQuotaTitle": "Platform quota"
+        },
+        "quota": {
+            "daily": "Daily quota",
+            "weekly": "Weekly quota",
+            "monthly": "Monthly quota",
+            "platformMonthly": "{{platform}} monthly",
+            "unlimited": "Unlimited",
+            "usedOfLimit": "Used {{used}} / {{limit}}",
+            "remaining": "Remaining {{amount}}",
+            "resetsAt": "Resets: {{date}}"
+        },
+        "plan": {
+            "duration": "{{count}} {{unit}}",
+            "otherPlans": "Other plans",
+            "unitPlans": "{{unit}} plans",
+            "allPlans": "All plans",
+            "empty": "No Matcha plans are available.",
+            "rateMultiplier": "Multiplier: ×{{value}}",
+            "validity": "Validity: {{duration}}",
+            "quotaLimit": "{{label}}: {{amount}}",
+            "defaultFeature": "Includes core Matcha subscription benefits."
+        },
+        "payment": {
+            "title": "Payment",
+            "method": "Payment method",
+            "noMethod": "No payment methods are available. Try again later.",
+            "unlimited": "Unlimited",
+            "singleRange": "Single payment range: {{min}} - {{max}}",
+            "feeRate": ", fee {{rate}}%",
+            "agreement": "I agree to the Matcha subscription terms, plan details, and payment rules.",
+            "confirm": "Confirm payment",
+            "confirmWithAmount": "Confirm payment {{amount}}"
+        },
+        "order": {
+            "pending": "Order pending payment",
+            "statusLabel": "Payment status",
+            "payAmount": "Amount due",
+            "expiresAt": "Expires at",
+            "openPayUrl": "Open payment page",
+            "qrCode": "Payment QR code",
+            "qrCodeAlt": "Matcha payment QR code",
+            "copied": "Copied",
+            "tradeNo": "Payment order number",
+            "reload": "Refresh order",
+            "verify": "Check payment result",
+            "polling": "Polling automatically",
+            "status": {
+                "pending": "Pending payment",
+                "recharging": "Payment processing",
+                "paid": "Paid",
+                "expired": "Expired",
+                "failed": "Payment failed",
+                "cancelled": "Cancelled",
+                "unknown": "Unknown status"
+            }
+        },
+        "errors": {
+            "loadPlansFailed": "Plan loading failed",
+            "verifyOrderFailed": "Payment status check failed: {{message}}",
+            "createOrderFailed": "Payment order creation failed: {{message}}",
+            "reloadOrderFailed": "Order refresh failed: {{message}}",
+            "openPayUrlFailed": "Payment page failed to open: {{message}}",
+            "copyFailed": "Copy failed: {{message}}"
+        }
     },
     "actions": {
         "save": "Save",

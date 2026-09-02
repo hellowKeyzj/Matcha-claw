@@ -11,7 +11,7 @@ use organization::{
 use platform::exchange::InvocationOutcome;
 
 use crate::{
-    port::{OpenClawGateway, OpenClawSessionError},
+    port::{OpenClawGateway, OpenClawSessionError, OpenClawSessionMutationFailure},
     session::protocol::{
         AgentId, AgentScopedSessionKey, ChatAbortParams, ChatAbortResult, ChatHistoryParams,
         EndpointSessionId, RunId, SessionDeleteParams, SessionDeleteResult, SessionKey,
@@ -92,9 +92,14 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
             }
         };
         let gateway = &mut *self.gateway;
-        Box::pin(
-            async move { map_abort(gateway.abort_chat(ChatAbortParams::new(key)).await, session) },
-        )
+        Box::pin(async move {
+            map_abort(
+                gateway
+                    .abort_chat_diagnostic(ChatAbortParams::new(key))
+                    .await,
+                session,
+            )
+        })
     }
 
     fn delete(
@@ -111,7 +116,9 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         let gateway = &mut *self.gateway;
         Box::pin(async move {
             map_delete(
-                gateway.delete_session(SessionDeleteParams::new(key)).await,
+                gateway
+                    .delete_session_diagnostic(SessionDeleteParams::new(key))
+                    .await,
                 session,
             )
         })
@@ -217,20 +224,29 @@ fn agent_scoped_session_key(
 }
 
 fn map_abort(
-    result: Result<InvocationOutcome<ChatAbortResult, OpenClawSessionError>, OpenClawSessionError>,
+    result: Result<
+        InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    >,
     session: organization::ExternalSessionReference,
 ) -> RoleSessionAbortOutcome {
     match result {
-        Ok(InvocationOutcome::Succeeded(result)) if result.ok && result.aborted => {
+        Ok(InvocationOutcome::Succeeded(result)) if result.ok => {
             RoleSessionAbortOutcome::Confirmed {
                 receipt: RoleSessionAbortReceipt::new(session),
             }
         }
-        Ok(InvocationOutcome::Succeeded(_)) | Ok(InvocationOutcome::TargetRejected(_)) => {
-            RoleSessionAbortOutcome::Failed {
-                failure: NativeEffectFailure::Rejected,
+        Ok(InvocationOutcome::Succeeded(_)) => RoleSessionAbortOutcome::Failed {
+            failure: NativeEffectFailure::Rejected,
+        },
+        Ok(InvocationOutcome::TargetRejected(failure)) if is_not_found_rejection(&failure) => {
+            RoleSessionAbortOutcome::Confirmed {
+                receipt: RoleSessionAbortReceipt::new(session),
             }
         }
+        Ok(InvocationOutcome::TargetRejected(_)) => RoleSessionAbortOutcome::Failed {
+            failure: NativeEffectFailure::Rejected,
+        },
         Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => {
             RoleSessionAbortOutcome::OutcomeUnknown
         }
@@ -246,22 +262,23 @@ fn map_abort(
 
 fn map_delete(
     result: Result<
-        InvocationOutcome<SessionDeleteResult, OpenClawSessionError>,
+        InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
         OpenClawSessionError,
     >,
     session: organization::ExternalSessionReference,
 ) -> RoleSessionDeleteOutcome {
     match result {
-        Ok(InvocationOutcome::Succeeded(result)) if result.deleted => {
+        Ok(InvocationOutcome::Succeeded(_)) => RoleSessionDeleteOutcome::Confirmed {
+            receipt: RoleSessionDeleteReceipt::new(session),
+        },
+        Ok(InvocationOutcome::TargetRejected(failure)) if is_not_found_rejection(&failure) => {
             RoleSessionDeleteOutcome::Confirmed {
                 receipt: RoleSessionDeleteReceipt::new(session),
             }
         }
-        Ok(InvocationOutcome::Succeeded(_)) | Ok(InvocationOutcome::TargetRejected(_)) => {
-            RoleSessionDeleteOutcome::Failed {
-                failure: NativeEffectFailure::Rejected,
-            }
-        }
+        Ok(InvocationOutcome::TargetRejected(_)) => RoleSessionDeleteOutcome::Failed {
+            failure: NativeEffectFailure::Rejected,
+        },
         Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => {
             RoleSessionDeleteOutcome::OutcomeUnknown
         }
@@ -275,9 +292,68 @@ fn map_delete(
     }
 }
 
+fn is_not_found_rejection(failure: &OpenClawSessionMutationFailure) -> bool {
+    failure.peer_rejection().is_some_and(|rejection| {
+        matches!(
+            rejection.code(),
+            "NOT_FOUND" | "SESSION_NOT_FOUND" | "not_found" | "session_not_found"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_session_delete_confirms_absent_session_as_idempotent_cleanup() {
+        let session = organization::ExternalSessionReference::try_new("session:gone").unwrap();
+
+        assert!(matches!(
+            map_delete(
+                Ok(InvocationOutcome::Succeeded(SessionDeleteResult {
+                    deleted: false
+                })),
+                session.clone(),
+            ),
+            RoleSessionDeleteOutcome::Confirmed { .. }
+        ));
+        assert!(matches!(
+            map_delete(
+                Ok(InvocationOutcome::TargetRejected(
+                    OpenClawSessionMutationFailure::from_peer_rejection_for_test("NOT_FOUND")
+                )),
+                session,
+            ),
+            RoleSessionDeleteOutcome::Confirmed { .. }
+        ));
+    }
+
+    #[test]
+    fn role_session_abort_confirms_native_noop_as_idempotent_cleanup() {
+        let session = organization::ExternalSessionReference::try_new("session:gone").unwrap();
+
+        assert!(matches!(
+            map_abort(
+                Ok(InvocationOutcome::Succeeded(ChatAbortResult {
+                    ok: true,
+                    aborted: false,
+                    run_ids: Vec::new(),
+                })),
+                session.clone(),
+            ),
+            RoleSessionAbortOutcome::Confirmed { .. }
+        ));
+        assert!(matches!(
+            map_abort(
+                Ok(InvocationOutcome::TargetRejected(
+                    OpenClawSessionMutationFailure::from_peer_rejection_for_test("NOT_FOUND")
+                )),
+                session,
+            ),
+            RoleSessionAbortOutcome::Confirmed { .. }
+        ));
+    }
 
     #[test]
     fn native_receipts_redact_private_payloads() {

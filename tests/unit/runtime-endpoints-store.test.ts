@@ -4,6 +4,7 @@ import {
   runtimeEndpointStatusLabel,
   useRuntimeEndpointsStore,
 } from '@/stores/runtime-endpoints';
+import { buildRuntimeEndpointKey } from '../../electron/desktop-contract/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const hostRuntimeEndpointsListMock = vi.fn();
@@ -71,7 +72,58 @@ describe('runtime endpoints store', () => {
       error: null,
       endpoints: [],
       hasLoadedOnce: false,
+      revision: 0,
+      changedRuntimeScopeKeys: [],
+      revisionByRuntimeScopeKey: {},
     });
+  });
+
+  it('records changed endpoint revisions by runtime scope key', async () => {
+    const openClawDeclared = buildEndpoint({
+      id: 'openclaw-local',
+      protocolId: 'openclaw-v4',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      endpointRef: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      displayName: 'OpenClaw',
+      defaultAgentId: 'main',
+      agentIds: ['main'],
+      lifecycle: { phase: 'connecting', connected: true, ready: false, updatedAt: null },
+      controlState: {
+        connection: null,
+        readiness: { ready: false, phase: 'starting' },
+        capabilities: null,
+        updatedAt: null,
+      },
+    });
+    const openClawReady = {
+      ...openClawDeclared,
+      id: 'openclaw-local-renamed',
+      lifecycle: { phase: 'ready' as const, connected: true, ready: true, updatedAt: null },
+      controlState: {
+        connection: null,
+        readiness: { ready: true, phase: 'ready' },
+        capabilities: null,
+        updatedAt: null,
+      },
+    };
+    const matchaAgent = buildEndpoint();
+    hostRuntimeEndpointsListMock
+      .mockResolvedValueOnce({ endpoints: [openClawDeclared, matchaAgent] })
+      .mockResolvedValueOnce({ endpoints: [openClawReady, matchaAgent] });
+
+    await useRuntimeEndpointsStore.getState().refresh();
+    await useRuntimeEndpointsStore.getState().refresh();
+
+    const openClawScopeKey = buildRuntimeEndpointKey(openClawReady.endpointRef);
+    const matchaScopeKey = buildRuntimeEndpointKey(matchaAgent.endpointRef);
+    expect(useRuntimeEndpointsStore.getState().changedRuntimeScopeKeys).toEqual([openClawScopeKey]);
+    expect(useRuntimeEndpointsStore.getState().revisionByRuntimeScopeKey[openClawScopeKey]).toBe(2);
+    expect(useRuntimeEndpointsStore.getState().revisionByRuntimeScopeKey[matchaScopeKey]).toBe(1);
   });
 
   it('keeps previous endpoints while the directory is starting', async () => {
@@ -81,6 +133,11 @@ describe('runtime endpoints store', () => {
       error: null,
       endpoints: [endpoint],
       hasLoadedOnce: true,
+      revision: 1,
+      changedRuntimeScopeKeys: [buildRuntimeEndpointKey(endpoint.endpointRef)],
+      revisionByRuntimeScopeKey: {
+        [buildRuntimeEndpointKey(endpoint.endpointRef)]: 1,
+      },
     });
     hostRuntimeEndpointsListMock.mockRejectedValueOnce(new Error('Runtime endpoint directory is unavailable'));
 

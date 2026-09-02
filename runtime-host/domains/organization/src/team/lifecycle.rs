@@ -148,6 +148,16 @@ impl TeamMaterializationLifecycle {
                         | TeamMaterializationCleanup::OutcomeUnknown(current_removal),
                 }),
             ) => previous_receipt == current_receipt && previous_removal == current_removal,
+            (
+                Self::Tombstoned(TombstonedMaterialization::Confirmed {
+                    receipt: previous_receipt,
+                    cleanup: TeamMaterializationCleanup::OutcomeUnknown(previous_removal),
+                }),
+                Self::Tombstoned(TombstonedMaterialization::Confirmed {
+                    receipt: current_receipt,
+                    cleanup: TeamMaterializationCleanup::Confirmed(current_removal),
+                }),
+            ) => previous_receipt == current_receipt && previous_removal == current_removal,
             _ => false,
         }
     }
@@ -244,7 +254,15 @@ impl TeamMaterializationLifecycle {
         if *cleanup == next {
             return Ok(MaterializationRecordOutcome::Replayed);
         }
-        if !matches!(cleanup, TeamMaterializationCleanup::Pending(_)) {
+        if !matches!(cleanup, TeamMaterializationCleanup::Pending(_))
+            && !matches!(
+                (&*cleanup, &next),
+                (
+                    TeamMaterializationCleanup::OutcomeUnknown(_),
+                    TeamMaterializationCleanup::Confirmed(_),
+                )
+            )
+        {
             return Err(MaterializationLifecycleError::InvalidTransition);
         }
         *cleanup = next;
@@ -317,7 +335,7 @@ mod tests {
     use crate::{
         IdempotencyKey, ManagedAgentReference, MaterializationOperationReceipt,
         MaterializationSource, RoleAgentMaterialization, RoleId, RoleMaterializationReceipt,
-        RuntimeEndpointReference, TeamId,
+        RuntimeEndpointReference, TeamId, ports::materialization::NativeWorkspaceReceipt,
     };
 
     use super::*;
@@ -341,10 +359,12 @@ mod tests {
         MaterializationReceipt::try_new(
             TeamId::try_new("team:research").unwrap(),
             RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
-            vec![RoleMaterializationReceipt::new(
+            vec![RoleMaterializationReceipt::with_native_workspace(
                 RoleId::try_new("lead").unwrap(),
                 ManagedAgentReference::try_new("agent:lead").unwrap(),
+                RoleMaterializationOwnership::Managed,
                 RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+                NativeWorkspaceReceipt::try_new("workspace:lead").unwrap(),
             )],
         )
         .unwrap()
@@ -435,6 +455,31 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn cleanup_confirmed_replay_is_idempotent_after_unknown_readback() {
+        let removal_key = IdempotencyKey::try_new("remove-readback").unwrap();
+        let mut lifecycle =
+            TeamMaterializationLifecycle::Confirmed(receipt()).tombstone(|receipt| {
+                TeamMaterializationRemoval::new(receipt.clone(), removal_key.clone())
+            });
+
+        lifecycle
+            .record_cleanup_outcome(MaterializationOperationOutcome::OutcomeUnknown)
+            .unwrap();
+        assert_eq!(
+            lifecycle.record_cleanup_outcome(MaterializationOperationOutcome::Confirmed {
+                receipt: receipt(),
+            }),
+            Ok(MaterializationRecordOutcome::Recorded)
+        );
+        assert_eq!(
+            lifecycle.record_cleanup_outcome(MaterializationOperationOutcome::Confirmed {
+                receipt: receipt(),
+            }),
+            Ok(MaterializationRecordOutcome::Replayed)
+        );
     }
 
     #[test]

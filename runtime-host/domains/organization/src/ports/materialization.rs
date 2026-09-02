@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, future::Future};
+use std::{collections::BTreeSet, fmt, future::Future};
 
 use crate::{RoleId, TeamId};
 
@@ -122,12 +122,62 @@ pub enum RoleMaterializationOwnership {
     External,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeWorkspaceReceipt {
+    workspace: String,
+}
+
+impl NativeWorkspaceReceipt {
+    pub fn try_new(workspace: impl Into<String>) -> Result<Self, InvalidNativeWorkspaceReceipt> {
+        let workspace = workspace.into();
+        if workspace.trim().is_empty() {
+            return Err(InvalidNativeWorkspaceReceipt::BlankWorkspace);
+        }
+        Ok(Self { workspace })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.workspace
+    }
+}
+
+impl fmt::Debug for NativeWorkspaceReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeWorkspaceReceipt")
+            .field("workspace", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvalidNativeWorkspaceReceipt {
+    BlankWorkspace,
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct RoleMaterializationReceipt {
     role: RoleId,
     agent: ManagedAgentReference,
     ownership: RoleMaterializationOwnership,
     endpoint: RuntimeEndpointReference,
+    native_workspace: Option<NativeWorkspaceReceipt>,
+}
+
+impl fmt::Debug for RoleMaterializationReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleMaterializationReceipt")
+            .field("role", &self.role)
+            .field("agent", &self.agent)
+            .field("ownership", &self.ownership)
+            .field("endpoint", &self.endpoint)
+            .field(
+                "native_workspace",
+                &self.native_workspace.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl RoleMaterializationReceipt {
@@ -150,6 +200,23 @@ impl RoleMaterializationReceipt {
             agent,
             ownership,
             endpoint,
+            native_workspace: None,
+        }
+    }
+
+    pub fn with_native_workspace(
+        role: RoleId,
+        agent: ManagedAgentReference,
+        ownership: RoleMaterializationOwnership,
+        endpoint: RuntimeEndpointReference,
+        native_workspace: NativeWorkspaceReceipt,
+    ) -> Self {
+        Self {
+            role,
+            agent,
+            ownership,
+            endpoint,
+            native_workspace: Some(native_workspace),
         }
     }
 
@@ -167,6 +234,10 @@ impl RoleMaterializationReceipt {
 
     pub fn endpoint(&self) -> &RuntimeEndpointReference {
         &self.endpoint
+    }
+
+    pub fn native_workspace(&self) -> Option<&NativeWorkspaceReceipt> {
+        self.native_workspace.as_ref()
     }
 }
 

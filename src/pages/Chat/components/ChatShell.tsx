@@ -65,7 +65,10 @@ export function ChatShell({
   const composerOverlayRef = useRef<HTMLDivElement>(null);
   const resizePointerIdRef = useRef<number | null>(null);
   const lastSidePanelResizeWidthRef = useRef(sidePanelWidth);
-  lastSidePanelResizeWidthRef.current = sidePanelWidth;
+
+  useLayoutEffect(() => {
+    lastSidePanelResizeWidthRef.current = sidePanelWidth;
+  }, [sidePanelWidth]);
 
   const shouldLetNestedScrollableConsumeWheel = (event: WheelEvent<HTMLElement>): boolean => {
     const target = event.target;
@@ -270,17 +273,19 @@ export function ChatShell({
                       </div>
                     ) : null}
 
-                    {approvalDock ? (
-                      <div className="pointer-events-auto">
-                        {approvalDock}
-                      </div>
-                    ) : null}
+                    <div className="relative">
+                      {approvalDock ? (
+                        <div className="pointer-events-auto absolute inset-x-0 bottom-full mb-2">
+                          {approvalDock}
+                        </div>
+                      ) : null}
 
-                    <div
-                      className="pointer-events-auto chat-scroll-sync-input"
-                      onWheelCapture={handleComposerWheelCapture}
-                    >
-                      {input}
+                      <div
+                        className="pointer-events-auto chat-scroll-sync-input"
+                        onWheelCapture={handleComposerWheelCapture}
+                      >
+                        {input}
+                      </div>
                     </div>
                   </div>
                 </div>

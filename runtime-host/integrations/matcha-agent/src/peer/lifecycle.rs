@@ -5,9 +5,12 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::{broadcast, mpsc};
+
+use serde_json::{Map, Value};
 
 use foundation::process::{
     ShutdownOutcome,
@@ -32,7 +35,7 @@ use crate::{
             RunLifecycle, SessionEventObservation, SessionEventProjector, SessionEventUpdate,
             ToolActivityPhase,
         },
-        history::{HistoryListResult, HistoryLoadResult},
+        history::{HistoryContentResult, HistoryListResult, HistoryLoadResult},
         hydration::HydrationWindowRequest,
         model::{ApprovalId, OptionId, RunId, Sequence, SessionId},
         receipt::{TerminalRunReceipt, TerminalRunReceiptConsumer, TerminalRunStatus},
@@ -44,6 +47,9 @@ use crate::{
         watcher::{TerminalEventWatcher, TerminalWatchStep},
     },
 };
+
+const MATCHACLAW_SESSION_TRACE: &str = "MATCHACLAW_SESSION_TRACE";
+const MATCHA_AGENT_RUN_TRACE: &str = "MATCHA_AGENT_RUN_TRACE";
 
 pub struct MatchaPeer {
     pub(super) handle: SupervisorHandle,
@@ -83,7 +89,7 @@ pub struct RoleSessionNativeHandle {
     secret: Arc<Secret>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum RendererEvent {
     Run {
         sequence: u64,
@@ -94,12 +100,20 @@ pub enum RendererEvent {
         message_id: String,
         lifecycle: RendererMessageLifecycle,
         text_delta: Option<String>,
+        thinking_delta: Option<String>,
         message_text: Option<String>,
+        thinking_text: Option<String>,
     },
     Tool {
         sequence: u64,
         tool_call_id: String,
+        name: Option<String>,
         phase: RendererToolPhase,
+        input: Option<Value>,
+        input_text: Option<String>,
+        summary: Option<String>,
+        output: Option<Value>,
+        is_error: Option<bool>,
     },
     Approval {
         sequence: u64,
@@ -107,6 +121,76 @@ pub enum RendererEvent {
         phase: RendererApprovalPhase,
         option_ids: Vec<String>,
     },
+}
+
+impl fmt::Debug for RendererEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Run { sequence, phase } => formatter
+                .debug_struct("Run")
+                .field("sequence", sequence)
+                .field("phase", phase)
+                .finish(),
+            Self::Message {
+                sequence,
+                lifecycle,
+                text_delta,
+                thinking_delta,
+                message_text,
+                thinking_text,
+                ..
+            } => formatter
+                .debug_struct("Message")
+                .field("sequence", sequence)
+                .field("lifecycle", lifecycle)
+                .field("has_text_delta", &text_delta.is_some())
+                .field("has_thinking_delta", &thinking_delta.is_some())
+                .field(
+                    "message_text_len",
+                    &message_text.as_ref().map_or(0, String::len),
+                )
+                .field(
+                    "thinking_text_len",
+                    &thinking_text.as_ref().map_or(0, String::len),
+                )
+                .finish_non_exhaustive(),
+            Self::Tool {
+                sequence,
+                phase,
+                name,
+                input,
+                input_text,
+                summary,
+                output,
+                is_error,
+                ..
+            } => formatter
+                .debug_struct("Tool")
+                .field("sequence", sequence)
+                .field("phase", phase)
+                .field("has_name", &name.is_some())
+                .field("has_input", &input.is_some())
+                .field(
+                    "input_text_len",
+                    &input_text.as_ref().map_or(0, String::len),
+                )
+                .field("summary_len", &summary.as_ref().map_or(0, String::len))
+                .field("has_output", &output.is_some())
+                .field("is_error", is_error)
+                .finish_non_exhaustive(),
+            Self::Approval {
+                sequence,
+                phase,
+                option_ids,
+                ..
+            } => formatter
+                .debug_struct("Approval")
+                .field("sequence", sequence)
+                .field("phase", phase)
+                .field("option_count", &option_ids.len())
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// A renderer-safe event together with the native source identity that produced it.
@@ -128,6 +212,7 @@ pub enum SessionSubscriptionItem {
     Event(RendererEventEnvelope),
     Recovery {
         route_key: String,
+        session_key: String,
         run_id: String,
         recovery: SessionRecovery,
     },
@@ -199,6 +284,7 @@ impl fmt::Debug for RendererEventEnvelope {
 pub enum RendererRunPhase {
     Started,
     WaitingForApproval,
+    CancellationRequested,
     Completed,
     Cancelled,
     Failed,
@@ -241,17 +327,8 @@ impl RoleTerminalWatch {
             return None;
         };
         let terminal = watch_terminal(&client, self.session_id, self.run_id).await;
-        let close = client.close().await;
-        terminal_watch_outcome(terminal, close)
+        client.finish_with_cleanup(terminal).await
     }
-}
-
-fn terminal_watch_outcome(
-    terminal: Option<TerminalRunStatus>,
-    close: Result<(), AppServerClientError>,
-) -> Option<TerminalRunStatus> {
-    close.ok()?;
-    terminal
 }
 
 impl fmt::Debug for RoleTerminalWatch {
@@ -277,6 +354,20 @@ impl RendererEvent {
 
 fn receipt_reading_admitted(phase: foundation::process::supervision::SupervisorPhase) -> bool {
     phase == foundation::process::supervision::SupervisorPhase::Running
+}
+
+fn pending_approvals_from_snapshot(
+    approvals: Vec<crate::session::approval::ApprovalRecord>,
+) -> Vec<(ApprovalId, Vec<OptionId>)> {
+    approvals
+        .into_iter()
+        .map(|approval| {
+            (
+                approval.approval_id().clone(),
+                approval.option_ids().to_vec(),
+            )
+        })
+        .collect()
 }
 
 async fn load_or_create_role_session(
@@ -355,7 +446,6 @@ async fn watch_terminal_events(
 }
 
 struct RendererProjection {
-    session_key: String,
     run_id: String,
     source_cursor: u64,
     event: RendererEvent,
@@ -391,11 +481,11 @@ fn renderer_projection_step(
     projector: &mut SessionEventProjector,
     envelope: crate::session::protocol_event::EventEnvelope,
 ) -> Result<Option<RendererProjection>, RendererProjectionFailure> {
-    let session_key = envelope.session_id.as_str().to_owned();
     let run_id = envelope
         .run_id
         .as_ref()
         .map(|run_id| run_id.as_str().to_owned());
+    log_model_run_trace(&envelope);
     match projector.project(envelope) {
         EventProjectionResult::Projected(projected) => Ok(renderer_event(
             projected.sequence().get(),
@@ -403,7 +493,6 @@ fn renderer_projection_step(
         )
         .and_then(|event| {
             run_id.map(|run_id| RendererProjection {
-                session_key,
                 run_id,
                 source_cursor: projected.sequence().get(),
                 event,
@@ -434,6 +523,164 @@ fn renderer_projection_step(
                 reason: ProjectionRecoveryReason::OutOfSession,
             })
         }
+    }
+}
+
+fn log_model_run_trace(envelope: &crate::session::protocol_event::EventEnvelope) {
+    if !matcha_trace_enabled() || envelope.event.event_type() != "run.trace" {
+        return;
+    }
+
+    let value = envelope.event.as_value();
+    let Some(stage) = value.get("stage").and_then(Value::as_str) else {
+        return;
+    };
+    if !matches!(
+        stage,
+        "worker.session.initialize.model"
+            | "query_engine.model.resolved"
+            | "query.api.loop.start"
+            | "query.api.streaming.start"
+            | "api.request.sent"
+            | "api.response.headers"
+            | "api.stream.first_chunk"
+            | "api.stream.message_start"
+            | "api.stream.content_block_start"
+            | "api.stream.first_content_delta"
+            | "api.stream.first_text_delta"
+            | "api.stream.content_block_stop"
+            | "api.stream.message_delta.stop_reason"
+            | "api.stream.message_stop"
+            | "api.stream.watchdog.timeout"
+            | "api.stream.loop.end"
+            | "api.stream.error"
+    ) {
+        return;
+    }
+
+    let mut details = Map::new();
+    for key in [
+        "model",
+        "configuredModel",
+        "promptModelOverride",
+        "mainLoopModel",
+        "currentModel",
+        "queryDepth",
+        "attempt",
+        "requestId",
+        "eventType",
+        "blockIndex",
+        "blockType",
+        "deltaType",
+        "textLength",
+        "stopReason",
+        "timeoutMs",
+        "errorName",
+        "hasProviderRuntime",
+        "providerRuntimeKind",
+        "hasBaseUrl",
+        "hasApiKey",
+        "provider",
+        "wireProtocol",
+        "transport",
+        "phase",
+        "elapsedMs",
+        "rawEventType",
+        "adapterEventType",
+        "rawChunkBytes",
+        "rawFrameCount",
+        "bodyChunkCount",
+        "rawDone",
+        "deltaChars",
+        "emittedEventCount",
+    ] {
+        if let Some(value) = safe_trace_detail(value, key) {
+            details.insert(key.to_owned(), value);
+        }
+    }
+
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": stage,
+            "payload": {
+                "bridgeStage": "runtime.matcha.run-trace.model",
+                "sessionKey": bounded_renderer_id(envelope.session_id.as_str()),
+                "runId": envelope.run_id.as_ref().and_then(|run_id| bounded_renderer_id(run_id.as_str())),
+                "workerId": envelope.worker_id.as_ref().and_then(|worker_id| bounded_renderer_id(worker_id.as_str())),
+                "seq": envelope.seq.get(),
+                "nativeStage": stage,
+                "details": details,
+            }
+        })
+    );
+}
+
+fn matcha_trace_enabled() -> bool {
+    std::env::var(MATCHACLAW_SESSION_TRACE).as_deref() == Ok("1")
+        || std::env::var(MATCHA_AGENT_RUN_TRACE).as_deref() == Ok("1")
+}
+
+fn log_renderer_subscription_trace(trace_id: Option<&str>, stage: &str, payload: Value) {
+    if trace_id.is_none() || !matcha_trace_enabled() {
+        return;
+    }
+    let mut event = Map::new();
+    event.insert("prefix".into(), Value::String("session-trace".into()));
+    event.insert("source".into(), Value::String("runtime-host".into()));
+    event.insert(
+        "traceId".into(),
+        Value::String(trace_id.expect("checked trace id").to_owned()),
+    );
+    event.insert("stage".into(), Value::String(stage.to_owned()));
+    event.insert("at".into(), Value::Number(now_millis().into()));
+    if let Value::Object(fields) = payload {
+        event.extend(fields);
+    }
+    eprintln!("{}", Value::Object(event));
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn app_server_client_error_trace_kind(error: AppServerClientError) -> &'static str {
+    match error {
+        AppServerClientError::InvalidEndpoint => "invalid-endpoint",
+        AppServerClientError::HealthDeadline => "health-deadline",
+        AppServerClientError::HealthFailed => "health-failed",
+        AppServerClientError::UpgradeDeadline => "upgrade-deadline",
+        AppServerClientError::UpgradeFailed => "upgrade-failed",
+        AppServerClientError::InitializeFailed => "initialize-failed",
+        AppServerClientError::RequestDeadline => "request-deadline",
+        AppServerClientError::ConnectionClosed => "connection-closed",
+        AppServerClientError::UnknownResponse => "unknown-response",
+        AppServerClientError::Transport => "transport",
+        AppServerClientError::Protocol => "protocol",
+        AppServerClientError::PeerRejected => "peer-rejected",
+        AppServerClientError::SessionNotFound => "session-not-found",
+        AppServerClientError::EventRecoveryRequired => "event-recovery-required",
+        AppServerClientError::CloseFailed => "close-failed",
+    }
+}
+
+fn safe_trace_detail(event: &Value, key: &str) -> Option<Value> {
+    let value = event.get("details")?.get(key)?;
+    match value {
+        Value::String(text) if text.len() <= 256 && !text.chars().any(char::is_control) => {
+            Some(Value::String(text.clone()))
+        }
+        Value::Number(number) => Some(Value::Number(number.clone())),
+        Value::Bool(value) => Some(Value::Bool(*value)),
+        Value::Null => Some(Value::Null),
+        _ => None,
     }
 }
 
@@ -534,16 +781,20 @@ async fn send_renderer_event(
     source_epoch: u64,
 ) -> SubscriptionDelivery {
     let route_key = event.route_key().to_owned();
+    let session_key = event.session_key().to_owned();
     let run_id = event.run_id().to_owned();
     match events.try_send(SessionSubscriptionItem::Event(event)) {
         Ok(()) => SubscriptionDelivery::Sent,
         Err(mpsc::error::TrySendError::Closed(_)) => SubscriptionDelivery::Closed,
         Err(mpsc::error::TrySendError::Full(_)) => {
-            let recovery =
-                SessionRecovery::from_raw_event(session_id, native_cursor, &RawEvent::Overflow)
-                    .expect("overflow raw event always produces recovery")
-                    .with_source_epoch(source_epoch);
-            if send_recovery(events, &route_key, &run_id, recovery).await {
+            let recovery = SessionRecovery::from_raw_event(
+                session_id.clone(),
+                native_cursor,
+                &RawEvent::Overflow,
+            )
+            .expect("overflow raw event always produces recovery")
+            .with_source_epoch(source_epoch);
+            if send_recovery(events, &route_key, &session_key, &run_id, recovery).await {
                 SubscriptionDelivery::Recovering
             } else {
                 SubscriptionDelivery::Closed
@@ -555,11 +806,13 @@ async fn send_renderer_event(
 async fn send_recovery(
     events: &mpsc::Sender<SessionSubscriptionItem>,
     route_key: &str,
+    session_key: &str,
     run_id: &str,
     recovery: SessionRecovery,
 ) -> bool {
     match events.try_send(SessionSubscriptionItem::Recovery {
         route_key: route_key.to_owned(),
+        session_key: session_key.to_owned(),
         run_id: run_id.to_owned(),
         recovery,
     }) {
@@ -582,6 +835,10 @@ fn renderer_event(sequence: u64, activity: &EventActivity) -> Option<RendererEve
         EventActivity::Run(RunLifecycle::WaitingForApproval) => Some(RendererEvent::Run {
             sequence,
             phase: RendererRunPhase::WaitingForApproval,
+        }),
+        EventActivity::Run(RunLifecycle::CancellationRequested) => Some(RendererEvent::Run {
+            sequence,
+            phase: RendererRunPhase::CancellationRequested,
         }),
         EventActivity::Run(RunLifecycle::Completed) => Some(RendererEvent::Run {
             sequence,
@@ -608,17 +865,25 @@ fn renderer_event(sequence: u64, activity: &EventActivity) -> Option<RendererEve
                 MessageLifecycle::Completed => RendererMessageLifecycle::Completed,
             },
             text_delta: message.text_delta().map(ToOwned::to_owned),
+            thinking_delta: message.thinking_delta().map(ToOwned::to_owned),
             message_text: message.message_text().map(ToOwned::to_owned),
+            thinking_text: message.thinking_text().map(ToOwned::to_owned),
         }),
         EventActivity::Tool(tool) => Some(RendererEvent::Tool {
             sequence,
             tool_call_id: bounded_renderer_id(tool.tool_call_id().as_str())?,
+            name: tool.name().and_then(bounded_renderer_id),
             phase: match tool.phase() {
                 ToolActivityPhase::Started => RendererToolPhase::Started,
                 ToolActivityPhase::Updated => RendererToolPhase::Updated,
                 ToolActivityPhase::Completed => RendererToolPhase::Completed,
                 ToolActivityPhase::Failed => RendererToolPhase::Failed,
             },
+            input: tool.input().cloned(),
+            input_text: tool.input_text().map(ToOwned::to_owned),
+            summary: tool.summary().map(ToOwned::to_owned),
+            output: tool.output().cloned(),
+            is_error: tool.is_error(),
         }),
         EventActivity::Approval(approval) => {
             let (phase, option_ids) = match approval.phase() {
@@ -638,8 +903,7 @@ fn renderer_event(sequence: u64, activity: &EventActivity) -> Option<RendererEve
                 option_ids,
             })
         }
-        EventActivity::Run(RunLifecycle::Queued | RunLifecycle::CancellationRequested)
-        | EventActivity::Ignored => None,
+        EventActivity::Run(RunLifecycle::Queued) | EventActivity::Ignored => None,
     }
 }
 
@@ -665,8 +929,8 @@ impl MatchaPeer {
         self.handle.snapshot()
     }
 
-    fn next_source_epoch(&self) -> u64 {
-        self.source_epoch.fetch_add(1, Ordering::Relaxed)
+    fn current_source_epoch(&self) -> u64 {
+        self.source_epoch.load(Ordering::Relaxed)
     }
 
     pub fn advance_source_epoch(&self) -> u64 {
@@ -751,12 +1015,7 @@ impl MatchaPeer {
             .read(session_id, run_id)
             .await
             .map_err(TerminalReceiptReadError::Client);
-        let close = client.close().await;
-        match (receipt, close) {
-            (Ok(receipt), Ok(())) => Ok(receipt),
-            (Ok(_), Err(error)) => Err(TerminalReceiptReadError::Client(error)),
-            (Err(error), _) => Err(error),
-        }
+        client.finish_with_cleanup(receipt).await
     }
 
     pub async fn create_session(
@@ -792,18 +1051,17 @@ impl MatchaPeer {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = load_or_create_role_session(&client, session_id, cwd).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn subscribe_renderer_events(
         &self,
         session_id: SessionId,
+        renderer_session_key: String,
         run_id: RunId,
         route_key: String,
         events: mpsc::Sender<SessionSubscriptionItem>,
+        trace_id: Option<String>,
     ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
         if !receipt_reading_admitted(self.snapshot().phase()) {
             return Err(RendererSubscriptionError::RuntimeUnavailable);
@@ -811,11 +1069,13 @@ impl MatchaPeer {
         subscribe_renderer_events_raw(
             self.endpoint,
             &self.secret,
-            self.next_source_epoch(),
+            self.current_source_epoch(),
             session_id,
+            renderer_session_key,
             run_id,
             route_key,
             events,
+            trace_id,
         )
         .await
     }
@@ -836,10 +1096,7 @@ impl MatchaPeer {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.prompt_session(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn pending_approvals(
@@ -852,24 +1109,11 @@ impl MatchaPeer {
         let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
         let (client, _) =
             AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events).await?;
-        let snapshot = client
+        let approvals = client
             .snapshot_session(SessionSnapshotParams::new(session_id))
-            .await;
-        let close = client.close().await;
-        match (snapshot, close) {
-            (Ok(snapshot), Ok(())) => Ok(snapshot
-                .pending_approvals
-                .into_iter()
-                .map(|approval| {
-                    (
-                        approval.approval_id().clone(),
-                        approval.option_ids().to_vec(),
-                    )
-                })
-                .collect()),
-            (Ok(_), Err(error)) => Err(error),
-            (Err(error), _) => Err(error),
-        }
+            .await
+            .map(|snapshot| pending_approvals_from_snapshot(snapshot.pending_approvals));
+        client.finish_with_cleanup(approvals).await
     }
 
     pub async fn respond_to_approval(
@@ -891,10 +1135,7 @@ impl MatchaPeer {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.respond_to_approval(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn set_session_model(
@@ -916,10 +1157,7 @@ impl MatchaPeer {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.set_session_model(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn cancel_session(
@@ -941,10 +1179,7 @@ impl MatchaPeer {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.cancel_session(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn close_role_session(
@@ -966,10 +1201,7 @@ impl MatchaPeer {
             InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn prompt_role_session(
@@ -1006,10 +1238,7 @@ impl MatchaPeer {
             InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub fn watch_role_terminal(
@@ -1151,39 +1380,112 @@ async fn subscribe_renderer_events_raw(
     secret: &Arc<Secret>,
     source_epoch: u64,
     session_id: SessionId,
+    renderer_session_key: String,
     run_id: RunId,
     route_key: String,
     events: mpsc::Sender<SessionSubscriptionItem>,
+    trace_id: Option<String>,
 ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
-    let (client, _) = AppServerClient::connect_and_initialize_raw_only(endpoint, secret)
-        .await
-        .map_err(RendererSubscriptionError::Client)?;
+    log_renderer_subscription_trace(
+        trace_id.as_deref(),
+        "runtime.matcha.renderer-subscribe.connect-start",
+        serde_json::json!({
+            "sessionId": session_id.as_str(),
+            "runId": run_id.as_str(),
+            "routeKey": route_key.as_str(),
+            "sourceEpoch": source_epoch,
+        }),
+    );
+    let (client, _) = match AppServerClient::connect_and_initialize_raw_only(endpoint, secret).await
+    {
+        Ok(connected) => connected,
+        Err(error) => {
+            log_renderer_subscription_trace(
+                trace_id.as_deref(),
+                "runtime.matcha.renderer-subscribe.connect-failed",
+                serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
+            );
+            return Err(RendererSubscriptionError::Client(error));
+        }
+    };
+    log_renderer_subscription_trace(
+        trace_id.as_deref(),
+        "runtime.matcha.renderer-subscribe.connect-ready",
+        serde_json::json!({}),
+    );
     let mut raw_events = client.raw_events();
-    let subscription = client
+    log_renderer_subscription_trace(
+        trace_id.as_deref(),
+        "runtime.matcha.renderer-subscribe.request-start",
+        serde_json::json!({
+            "sessionId": session_id.as_str(),
+            "afterSeq": null,
+        }),
+    );
+    let subscription = match client
         .subscribe_events_with_cursor(session_id.clone(), None)
         .await
-        .map_err(RendererSubscriptionError::Client)?;
+    {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            log_renderer_subscription_trace(
+                trace_id.as_deref(),
+                "runtime.matcha.renderer-subscribe.request-failed",
+                serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
+            );
+            return Err(RendererSubscriptionError::Client(error));
+        }
+    };
     let cursor = match subscription {
-        EventSubscriptionCursor::Subscribed(replay) => replay.cursor(),
+        EventSubscriptionCursor::Subscribed(replay) => {
+            log_renderer_subscription_trace(
+                trace_id.as_deref(),
+                "runtime.matcha.renderer-subscribe.response",
+                serde_json::json!({
+                    "result": "subscribed",
+                    "cursor": replay.cursor().get(),
+                }),
+            );
+            replay.cursor()
+        }
         EventSubscriptionCursor::ClientNotFound => {
+            log_renderer_subscription_trace(
+                trace_id.as_deref(),
+                "runtime.matcha.renderer-subscribe.response",
+                serde_json::json!({ "result": "client-not-found" }),
+            );
             let _ = client.close().await;
             return Err(RendererSubscriptionError::Client(
                 AppServerClientError::SessionNotFound,
             ));
         }
         EventSubscriptionCursor::ClientRequired => {
+            log_renderer_subscription_trace(
+                trace_id.as_deref(),
+                "runtime.matcha.renderer-subscribe.response",
+                serde_json::json!({ "result": "client-required" }),
+            );
             let _ = client.close().await;
             return Err(RendererSubscriptionError::Client(
                 AppServerClientError::PeerRejected,
             ));
         }
     };
+    let task_trace_id = trace_id;
     Ok(tokio::spawn(async move {
         let mut replay_cursor = cursor;
         let mut projector =
             SessionEventProjector::resume_after(session_id.clone(), run_id.clone(), replay_cursor);
         loop {
             if client.is_closed() {
+                log_renderer_subscription_trace(
+                    task_trace_id.as_deref(),
+                    "runtime.matcha.renderer-subscribe.stream-closed",
+                    serde_json::json!({
+                        "reason": "client-closed",
+                        "cursor": projector.cursor().get(),
+                    }),
+                );
                 let recovery = SessionRecovery::from_raw_event(
                     session_id.clone(),
                     projector.cursor(),
@@ -1191,7 +1493,14 @@ async fn subscribe_renderer_events_raw(
                 )
                 .expect("closed raw event always produces recovery")
                 .with_source_epoch(source_epoch);
-                let _ = send_recovery(&events, &route_key, run_id.as_str(), recovery).await;
+                let _ = send_recovery(
+                    &events,
+                    &route_key,
+                    &renderer_session_key,
+                    run_id.as_str(),
+                    recovery,
+                )
+                .await;
                 break;
             }
             let recovery = match raw_events.recv().await {
@@ -1205,7 +1514,7 @@ async fn subscribe_renderer_events_raw(
                             let terminal = projection.event.is_terminal();
                             let event = RendererEventEnvelope::new(
                                 route_key.clone(),
-                                projection.session_key,
+                                renderer_session_key.clone(),
                                 projection.run_id,
                                 projection.source_cursor,
                                 Some(source_epoch),
@@ -1238,6 +1547,18 @@ async fn subscribe_renderer_events_raw(
                     }
                 }
                 Ok(raw @ (RawEvent::Overflow | RawEvent::Closed)) => {
+                    log_renderer_subscription_trace(
+                        task_trace_id.as_deref(),
+                        "runtime.matcha.renderer-subscribe.stream-closed",
+                        serde_json::json!({
+                            "reason": match &raw {
+                                RawEvent::Overflow => "overflow",
+                                RawEvent::Closed => "raw-closed",
+                                RawEvent::Envelope(_) => "envelope",
+                            },
+                            "cursor": projector.cursor().get(),
+                        }),
+                    );
                     let Some(recovery) = SessionRecovery::from_raw_event(
                         session_id.clone(),
                         projector.cursor(),
@@ -1248,6 +1569,15 @@ async fn subscribe_renderer_events_raw(
                     recovery.with_source_epoch(source_epoch)
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    log_renderer_subscription_trace(
+                        task_trace_id.as_deref(),
+                        "runtime.matcha.renderer-subscribe.stream-closed",
+                        serde_json::json!({
+                            "reason": "lagged",
+                            "skipped": skipped,
+                            "cursor": projector.cursor().get(),
+                        }),
+                    );
                     SessionRecovery::from_broadcast_lagged(
                         session_id.clone(),
                         projector.cursor(),
@@ -1255,16 +1585,34 @@ async fn subscribe_renderer_events_raw(
                     )
                     .with_source_epoch(source_epoch)
                 }
-                Err(broadcast::error::RecvError::Closed) => SessionRecovery::from_raw_event(
-                    session_id.clone(),
-                    projector.cursor(),
-                    &RawEvent::Closed,
-                )
-                .expect("closed raw event always produces recovery")
-                .with_source_epoch(source_epoch),
+                Err(broadcast::error::RecvError::Closed) => {
+                    log_renderer_subscription_trace(
+                        task_trace_id.as_deref(),
+                        "runtime.matcha.renderer-subscribe.stream-closed",
+                        serde_json::json!({
+                            "reason": "broadcast-closed",
+                            "cursor": projector.cursor().get(),
+                        }),
+                    );
+                    SessionRecovery::from_raw_event(
+                        session_id.clone(),
+                        projector.cursor(),
+                        &RawEvent::Closed,
+                    )
+                    .expect("closed raw event always produces recovery")
+                    .with_source_epoch(source_epoch)
+                }
             };
             let should_recover = matches!(recovery, SessionRecovery::RecoveryRequired { .. });
-            if !send_recovery(&events, &route_key, run_id.as_str(), recovery).await {
+            if !send_recovery(
+                &events,
+                &route_key,
+                &renderer_session_key,
+                run_id.as_str(),
+                recovery,
+            )
+            .await
+            {
                 break;
             }
             if !should_recover {
@@ -1288,7 +1636,14 @@ async fn subscribe_renderer_events_raw(
                         replay_cursor,
                     );
                 }
-                Err(_) => break,
+                Err(error) => {
+                    log_renderer_subscription_trace(
+                        task_trace_id.as_deref(),
+                        "runtime.matcha.renderer-subscribe.recover-failed",
+                        serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
+                    );
+                    break;
+                }
             }
         }
         let _ = client.close().await;
@@ -1299,9 +1654,11 @@ impl MatchaPeerSessionHandle {
     pub async fn subscribe_renderer_events(
         &self,
         session_id: SessionId,
+        renderer_session_key: String,
         run_id: RunId,
         route_key: String,
         events: mpsc::Sender<SessionSubscriptionItem>,
+        trace_id: Option<String>,
     ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return Err(RendererSubscriptionError::RuntimeUnavailable);
@@ -1309,11 +1666,13 @@ impl MatchaPeerSessionHandle {
         subscribe_renderer_events_raw(
             self.endpoint,
             &self.secret,
-            self.source_epoch.fetch_add(1, Ordering::Relaxed),
+            self.source_epoch.load(Ordering::Relaxed),
             session_id,
+            renderer_session_key,
             run_id,
             route_key,
             events,
+            trace_id,
         )
         .await
     }
@@ -1333,6 +1692,37 @@ impl MatchaPeerSessionHandle {
             return crate::session::history::HistoryResult::Unavailable;
         }
         crate::session::history::list(self.endpoint, &self.secret).await
+    }
+
+    pub async fn list_local_history(
+        &self,
+    ) -> crate::session::history::HistoryResult<crate::session::history::local::LocalHistoryCatalog>
+    {
+        crate::session::history::local::LocalHistoryReader::from_environment()
+            .list()
+            .await
+    }
+
+    pub async fn load_local_history(
+        &self,
+        session_id: SessionId,
+        request: HydrationWindowRequest,
+    ) -> HistoryLoadResult {
+        crate::session::history::local::LocalHistoryReader::from_environment()
+            .load(session_id, request)
+            .await
+    }
+
+    pub async fn load_local_history_content(
+        &self,
+        session_id: SessionId,
+        content_ref: String,
+        offset: u64,
+        limit: usize,
+    ) -> HistoryContentResult {
+        crate::session::history::local::LocalHistoryReader::from_environment()
+            .load_content(session_id, content_ref, offset, limit)
+            .await
     }
 
     pub async fn read_canonical_session(
@@ -1357,10 +1747,18 @@ impl MatchaPeerSessionHandle {
         let outcome =
             super::session_create::create_native(&client, &self.working_directory, session_id)
                 .await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
+    }
+
+    pub async fn load_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<crate::session::model::SessionRecord, AppServerClientError> {
+        let client = self.connect_client().await?;
+        let outcome = client
+            .load_session(SessionLoadParams::new(session_id))
+            .await;
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn prompt_session(
@@ -1372,10 +1770,7 @@ impl MatchaPeerSessionHandle {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.prompt_session(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn pending_approvals(
@@ -1383,24 +1778,11 @@ impl MatchaPeerSessionHandle {
         session_id: SessionId,
     ) -> Result<Vec<(ApprovalId, Vec<OptionId>)>, AppServerClientError> {
         let client = self.connect_client().await?;
-        let snapshot = client
+        let approvals = client
             .snapshot_session(SessionSnapshotParams::new(session_id))
-            .await;
-        let close = client.close().await;
-        match (snapshot, close) {
-            (Ok(snapshot), Ok(())) => Ok(snapshot
-                .pending_approvals
-                .into_iter()
-                .map(|approval| {
-                    (
-                        approval.approval_id().clone(),
-                        approval.option_ids().to_vec(),
-                    )
-                })
-                .collect()),
-            (Ok(_), Err(error)) => Err(error),
-            (Err(error), _) => Err(error),
-        }
+            .await
+            .map(|snapshot| pending_approvals_from_snapshot(snapshot.pending_approvals));
+        client.finish_with_cleanup(approvals).await
     }
 
     pub async fn respond_to_approval(
@@ -1412,10 +1794,7 @@ impl MatchaPeerSessionHandle {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.respond_to_approval(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn set_session_model(
@@ -1427,10 +1806,7 @@ impl MatchaPeerSessionHandle {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.set_session_model(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn cancel_session(
@@ -1442,10 +1818,7 @@ impl MatchaPeerSessionHandle {
             Err(error) => return InvocationOutcome::TargetRejected(error),
         };
         let outcome = client.cancel_session(params).await;
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 }
 
@@ -1480,10 +1853,7 @@ impl RoleSessionNativeHandle {
             InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn close_role_session(
@@ -1505,10 +1875,7 @@ impl RoleSessionNativeHandle {
             InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 
     pub async fn watch_role_terminal(
@@ -1566,10 +1933,7 @@ impl RoleSessionPromptHandle {
             InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
-        match client.close().await {
-            Ok(()) => outcome,
-            Err(_) => InvocationOutcome::Unknown,
-        }
+        client.finish_with_cleanup(outcome).await
     }
 }
 
@@ -2024,6 +2388,7 @@ mod receipt_tests {
 
     use super::*;
     use crate::session::{
+        approval::ApprovalRecord,
         model::EventId,
         protocol_event::{Event, EventEnvelope},
     };
@@ -2054,7 +2419,7 @@ mod receipt_tests {
     fn renderer_event_envelope_exposes_only_safe_provenance_and_projection() {
         let event = RendererEventEnvelope::new(
             "route-1".to_owned(),
-            "session-1".to_owned(),
+            "matcha-agent:matcha:native-session-1".to_owned(),
             "run-1".to_owned(),
             7,
             None,
@@ -2065,7 +2430,7 @@ mod receipt_tests {
         );
 
         assert_eq!(event.route_key(), "route-1");
-        assert_eq!(event.session_key(), "session-1");
+        assert_eq!(event.session_key(), "matcha-agent:matcha:native-session-1");
         assert_eq!(event.run_id(), "run-1");
         assert_eq!(event.source_cursor(), 7);
         assert_eq!(event.source_epoch(), None);
@@ -2074,7 +2439,7 @@ mod receipt_tests {
             RendererEvent::Run { sequence: 7, .. }
         ));
         let debug = format!("{event:?}");
-        assert!(!debug.contains("native"));
+        assert!(!debug.contains("raw"));
         assert!(!debug.contains("private"));
     }
 
@@ -2123,11 +2488,13 @@ mod receipt_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn full_renderer_channel_reports_recovery_without_dropping_silently() {
+        let public_session_key = "matcha-agent:matcha:native-session-1";
+        let native_session_id = "native-session-1";
         let (events, mut receiver) = mpsc::channel(1);
         events
             .try_send(SessionSubscriptionItem::Event(RendererEventEnvelope::new(
                 "route-1".to_owned(),
-                "session-1".to_owned(),
+                public_session_key.to_owned(),
                 "run-1".to_owned(),
                 1,
                 None,
@@ -2146,7 +2513,7 @@ mod receipt_tests {
             &events,
             RendererEventEnvelope::new(
                 "route-1".to_owned(),
-                "session-1".to_owned(),
+                public_session_key.to_owned(),
                 "run-1".to_owned(),
                 2,
                 None,
@@ -2155,7 +2522,7 @@ mod receipt_tests {
                     phase: RendererRunPhase::Completed,
                 },
             ),
-            SessionId::try_new("session-1").unwrap(),
+            SessionId::try_new(native_session_id).unwrap(),
             Sequence::try_new(2).unwrap(),
             7,
         )
@@ -2165,23 +2532,50 @@ mod receipt_tests {
         assert!(matches!(
             received.await.unwrap(),
             SessionSubscriptionItem::Recovery {
+                session_key,
                 recovery: SessionRecovery::RecoveryRequired {
                     reason: crate::session::recovery::RecoveryReason::EventOverflow,
                     ..
                 },
                 ..
-            }
+            } if session_key == public_session_key
         ));
     }
 
     #[test]
-    fn close_failure_overrides_an_observed_terminal_event() {
+    fn cleanup_close_failure_preserves_an_observed_terminal_event() {
         assert_eq!(
-            terminal_watch_outcome(
+            crate::session::client::outcome_after_cleanup(
                 Some(TerminalRunStatus::Completed),
                 Err(AppServerClientError::CloseFailed),
             ),
-            None
+            Some(TerminalRunStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn cleanup_close_failure_preserves_pending_approval_snapshot() {
+        let approvals = pending_approvals_from_snapshot(vec![approval_record()]);
+        assert_eq!(
+            crate::session::client::outcome_after_cleanup(
+                Ok::<_, AppServerClientError>(approvals),
+                Err(AppServerClientError::CloseFailed),
+            )
+            .unwrap()[0]
+                .1[0]
+                .as_str(),
+            "option-1"
+        );
+    }
+
+    #[test]
+    fn role_cleanup_close_failure_preserves_confirmed_outcome() {
+        assert_eq!(
+            crate::session::client::outcome_after_cleanup(
+                InvocationOutcome::<(), RoleSessionError>::Succeeded(()),
+                Err(AppServerClientError::CloseFailed),
+            ),
+            InvocationOutcome::Succeeded(())
         );
     }
 
@@ -2206,6 +2600,22 @@ mod receipt_tests {
         ] {
             assert!(!output.contains(canary));
         }
+    }
+
+    fn approval_record() -> ApprovalRecord {
+        serde_json::from_value(json!({
+            "approvalId": "approval-1",
+            "options": [{
+                "optionId": "option-1",
+                "label": "Allow",
+                "kind": "allow_once"
+            }],
+            "status": {
+                "type": "pending",
+                "requestedAt": "now"
+            }
+        }))
+        .unwrap()
     }
 
     fn renderer_envelope(sequence: u64, event: Value) -> EventEnvelope {
@@ -2247,7 +2657,9 @@ mod receipt_tests {
                 message_id: "message-1".to_owned(),
                 lifecycle: RendererMessageLifecycle::Delta,
                 text_delta: Some("safe delta".to_owned()),
+                thinking_delta: None,
                 message_text: Some("safe delta".to_owned()),
+                thinking_text: None,
             }
         );
         let debug = format!("{message:?}");
@@ -2276,7 +2688,13 @@ mod receipt_tests {
             RendererEvent::Tool {
                 sequence: 1,
                 tool_call_id: "tool-call-1".to_owned(),
+                name: None,
                 phase: RendererToolPhase::Failed,
+                input: Some(json!({"secret":"private"})),
+                input_text: Some("{\n  \"secret\": \"private\"\n}".to_owned()),
+                summary: None,
+                output: None,
+                is_error: Some(true),
             }
         );
 

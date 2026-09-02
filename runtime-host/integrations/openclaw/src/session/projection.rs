@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::fmt;
 
 use super::{
@@ -108,7 +109,11 @@ pub enum CanonicalSessionChange {
         tool_id: ToolId,
         tool_name: Option<String>,
         phase: ToolActivityPhase,
+        input: Option<Value>,
+        input_text: Option<String>,
         summary: Option<String>,
+        output: Option<Value>,
+        is_error: Option<bool>,
     },
     Terminal {
         run_id: RunId,
@@ -141,13 +146,24 @@ impl fmt::Debug for CanonicalSessionChange {
             Self::ToolActivity {
                 phase,
                 tool_name,
+                input,
+                input_text,
                 summary,
+                output,
+                is_error,
                 ..
             } => formatter
                 .debug_struct("ToolActivity")
                 .field("phase", phase)
                 .field("has_tool_name", &tool_name.is_some())
+                .field("has_input", &input.is_some())
+                .field(
+                    "input_text_bytes",
+                    &input_text.as_ref().map_or(0, String::len),
+                )
                 .field("has_summary", &summary.is_some())
+                .field("has_output", &output.is_some())
+                .field("is_error", is_error)
                 .finish(),
             Self::Terminal {
                 outcome,
@@ -276,7 +292,11 @@ impl CanonicalSessionDeltaProducer {
                         tool_id: tool_id.clone(),
                         tool_name: tool_name.clone(),
                         phase: *phase,
+                        input: activity.input().cloned(),
+                        input_text: activity.input_text().map(str::to_owned),
                         summary: summary.clone(),
+                        output: activity.output().cloned(),
+                        is_error: activity.is_error(),
                     },
                 }
             }
@@ -965,11 +985,19 @@ mod tests {
                 tool_id,
                 tool_name: Some(tool_name),
                 phase: ToolActivityPhase::Failed,
-                summary: Some(summary)
+                input,
+                input_text,
+                summary: Some(summary),
+                output,
+                is_error,
             }] if run_id.as_str() == "run-1"
                 && tool_id.as_str() == "tool-1"
                 && tool_name == "read"
+                && input.is_none()
+                && input_text.is_none()
                 && summary == "tool summary"
+                && output.is_none()
+                && is_error == &None
         ));
 
         let terminal = LiveSessionFacts::from_native_at_epoch(

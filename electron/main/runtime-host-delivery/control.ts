@@ -7,6 +7,7 @@ export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_ID_BYTES = 128;
+const MAX_SESSION_TRACE_ID_BYTES = 256;
 const DEFAULT_MAX_PENDING_COMMANDS = 64;
 
 type RuntimeHostJsonPrimitive = null | boolean | number | string;
@@ -51,6 +52,7 @@ export type RuntimeHostControlCommand =
         readonly scope: RuntimeHostJsonObject;
         readonly target: RuntimeHostJsonValue;
         readonly input: RuntimeHostJsonObject;
+        readonly traceId?: string;
       };
     }
   | { readonly name: 'matcha.lifecycle.status' }
@@ -646,14 +648,16 @@ function isTeamRuntimeExecuteCommand(value: Record<string, unknown>): boolean {
   if (!hasExactKeys(value, ['name', 'input'])
     || value.name !== 'team.runtime.execute'
     || !isRecord(value.input)
-    || !hasExactKeys(value.input, ['id', 'operationId', 'scope', 'target', 'input'])) {
+    || !hasOnlyKeys(value.input, ['id', 'operationId', 'scope', 'target', 'input', 'traceId'])
+    || !['id', 'operationId', 'scope', 'target', 'input'].every((key) => hasOwn(value.input as Record<string, unknown>, key))) {
     return false;
   }
   return value.input.id === 'team.runtime'
     && isCapabilityIdentity(value.input.operationId)
     && isJsonObject(value.input.scope)
     && isJsonValue(value.input.target)
-    && isJsonObject(value.input.input);
+    && isJsonObject(value.input.input)
+    && (value.input.traceId === undefined || isSessionTraceId(value.input.traceId));
 }
 
 function isFleetCredentialWriteCommand(value: Record<string, unknown>): boolean {
@@ -662,6 +666,13 @@ function isFleetCredentialWriteCommand(value: Record<string, unknown>): boolean 
     && typeof value.input.credentialId === 'string' && value.input.credentialId.length > 0 && value.input.credentialId.length <= 128
     && typeof value.input.credentialName === 'string' && ['sshPassword', 'sshPrivateKey', 'dockerBearerToken', 'kubeBearerToken'].includes(value.input.credentialName)
     && typeof value.input.plaintextValue === 'string' && value.input.plaintextValue.length > 0 && value.input.plaintextValue.length <= 256 * 1024;
+}
+
+function isSessionTraceId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_SESSION_TRACE_ID_BYTES
+    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
 }
 
 function isOpenClawControlReadyCommand(value: Record<string, unknown>): boolean {
@@ -714,6 +725,7 @@ function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
     || command.name === 'openclaw.toolchain.install-uv'
     || command.name === 'openclaw.cron.manual-trigger'
     || command.name === 'openclaw.sessions.patch-model'
+    || command.name === 'team.runtime.execute'
     || command.name === 'openclaw.chat.send'
     || command.name === 'openclaw.chat.abort'
     || command.name === 'openclaw.skills.execute'
@@ -985,6 +997,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => hasOwn(value, key));
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function hasOwn(value: object, key: string): boolean {

@@ -1,53 +1,8 @@
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use serde_json::json;
-
-use crate::lifecycle::state_dir::CanonicalStateDir;
+use serde_json::{Value, json};
 
 use super::*;
 
-static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
-
-struct TestRoot {
-    path: PathBuf,
-    state_dir: CanonicalStateDir,
-}
-
-impl TestRoot {
-    fn new() -> Self {
-        let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock must follow Unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "openclaw-provider-projection-{}-{nanos}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).expect("create test root");
-        let state_dir = CanonicalStateDir::provision(path.join("state")).expect("provision state");
-        Self { path, state_dir }
-    }
-
-    fn config_path(&self) -> PathBuf {
-        self.state_dir.as_path().join("openclaw.json")
-    }
-
-    fn store(&self) -> OpenClawConfigStore {
-        OpenClawConfigStore::new(self.state_dir.clone())
-    }
-}
-
-impl Drop for TestRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+const SECRET_CANARY: &str = "synthetic-provider-projection-secret-canary";
 
 fn provider(value: &str) -> ProviderKey {
     ProviderKey::try_new(value.into()).expect("valid provider key")
@@ -57,29 +12,27 @@ fn endpoint(value: &str) -> ProviderEndpoint {
     ProviderEndpoint::try_new(value.into()).expect("valid endpoint")
 }
 
+fn document(value: Value) -> OpenClawConfigDocument {
+    OpenClawConfigDocument::from_value(value).expect("valid config")
+}
+
 #[test]
 fn replaces_legacy_provider_entries_without_erasing_the_current_provider_fields() {
-    let root = TestRoot::new();
-    fs::write(
-        root.config_path(),
-        serde_json::to_vec(&json!({
-            "models": {
-                "providers": {
-                    "openai": {
-                        "baseUrl": "https://legacy.example.com/v1",
-                        "api": "openai-completions",
-                        "models": [{ "id": "gpt-5.6", "name": "GPT 5.6" }],
-                        "customProviderField": true
-                    },
-                    "openai-codex": {
-                        "models": [{ "id": "legacy", "name": "Legacy" }]
-                    }
+    let mut document = document(json!({
+        "models": {
+            "providers": {
+                "openai": {
+                    "baseUrl": "https://legacy.example.com/v1",
+                    "api": "openai-completions",
+                    "models": [{ "id": "gpt-5.6", "name": "GPT 5.6" }],
+                    "customProviderField": true
+                },
+                "openai-codex": {
+                    "models": [{ "id": "legacy", "name": "Legacy" }]
                 }
             }
-        }))
-        .expect("serialize seed"),
-    )
-    .expect("seed config");
+        }
+    }));
     let projection = ProviderProjection::new(
         provider("openai"),
         endpoint("https://api.openai.com/v1"),
@@ -88,8 +41,7 @@ fn replaces_legacy_provider_entries_without_erasing_the_current_provider_fields(
         [provider("openai-codex")],
     );
 
-    projection.apply(&root.store()).expect("apply projection");
-    let document = root.store().read().expect("read config");
+    assert!(projection.apply_to_document(&mut document));
 
     assert_eq!(
         document.get("models"),
@@ -108,22 +60,177 @@ fn replaces_legacy_provider_entries_without_erasing_the_current_provider_fields(
 }
 
 #[test]
-fn projects_moonshot_search_endpoint_without_an_inline_key() {
-    let root = TestRoot::new();
-    fs::write(
-        root.config_path(),
-        serde_json::to_vec(&json!({
-            "tools": {
-                "web": {
-                    "search": {
-                        "kimi": { "region": "legacy" }
-                    }
+fn pins_openai_provider_when_agent_runtime_id_is_empty() {
+    let mut document = document(json!({
+        "models": {
+            "providers": {
+                "openai": { "agentRuntime": { "id": "" } }
+            }
+        }
+    }));
+    let projection = ProviderProjection::new(
+        provider("openai"),
+        endpoint("https://api.openai.com/v1"),
+        ProviderProtocol::OpenAiResponses,
+        None,
+        [],
+    );
+
+    assert!(projection.apply_to_document(&mut document));
+    let value = document.as_value();
+
+    assert_eq!(
+        value.pointer("/models/providers/openai/agentRuntime"),
+        Some(&json!({ "id": "pi" }))
+    );
+}
+
+#[test]
+fn pins_openai_provider_when_agent_runtime_object_is_empty() {
+    let mut document = document(json!({
+        "models": {
+            "providers": {
+                "openai": { "agentRuntime": {} }
+            }
+        }
+    }));
+    let projection = ProviderProjection::new(
+        provider("openai"),
+        endpoint("https://api.openai.com/v1"),
+        ProviderProtocol::OpenAiChatGptResponses,
+        None,
+        [],
+    );
+
+    assert!(projection.apply_to_document(&mut document));
+    let value = document.as_value();
+
+    assert_eq!(
+        value.pointer("/models/providers/openai/agentRuntime"),
+        Some(&json!({ "id": "pi" }))
+    );
+    assert_eq!(
+        value.pointer("/models/providers/openai/baseUrl"),
+        Some(&json!(OPENAI_CODEX_OAUTH_BASE_URL))
+    );
+}
+
+#[test]
+fn preserves_user_supplied_openai_agent_runtime_id() {
+    let mut document = document(json!({
+        "models": {
+            "providers": {
+                "openai": { "agentRuntime": { "id": "custom-runtime" } }
+            }
+        }
+    }));
+    let projection = ProviderProjection::new(
+        provider("openai"),
+        endpoint("https://api.openai.com/v1"),
+        ProviderProtocol::OpenAiChatGptResponses,
+        None,
+        [],
+    );
+
+    assert!(projection.apply_to_document(&mut document));
+    let value = document.as_value();
+
+    assert_eq!(
+        value.pointer("/models/providers/openai/agentRuntime"),
+        Some(&json!({ "id": "custom-runtime" }))
+    );
+}
+
+#[test]
+fn migrates_legacy_openai_codex_response_protocols() {
+    let mut document = document(json!({
+        "models": {
+            "providers": {
+                "openai-codex": {
+                    "api": "openai-codex-responses",
+                    "baseUrl": "https://api.openai.com/v1"
+                },
+                "custom": { "api": "openai-codex-responses" },
+                "openai": { "api": "openai-responses", "agentRuntime": { "id": "pi" } }
+            }
+        }
+    }));
+
+    assert!(migrate_legacy_openai_codex_runtime(&mut document));
+    assert_eq!(
+        document.get("models"),
+        Some(&json!({
+            "providers": {
+                "custom": { "api": "openai-chatgpt-responses" },
+                "openai": {
+                    "api": "openai-chatgpt-responses",
+                    "baseUrl": OPENAI_CODEX_OAUTH_BASE_URL,
+                    "agentRuntime": { "id": "pi" }
                 }
             }
         }))
-        .expect("serialize seed"),
-    )
-    .expect("seed config");
+    );
+    assert!(!migrate_legacy_openai_codex_runtime(&mut document));
+}
+
+#[test]
+fn migrates_legacy_openai_codex_model_references() {
+    let mut document = document(json!({
+        "agents": {
+            "defaults": {
+                "model": {
+                    "primary": "openai-codex/gpt-5.6",
+                    "fallbacks": ["anthropic/claude", "openai-codex/gpt-4.1"]
+                },
+                "models": {
+                    "openai-codex/gpt-5.6": { "alias": "old" },
+                    "anthropic/claude": { "alias": "keep" }
+                }
+            },
+            "list": [{
+                "model": "openai-codex/gpt-5.6",
+                "models": {
+                    "openai-codex/gpt-5.6": { "agentRuntime": { "id": "pi" } }
+                }
+            }]
+        }
+    }));
+
+    assert!(migrate_legacy_openai_codex_runtime(&mut document));
+    assert_eq!(
+        document.get("agents"),
+        Some(&json!({
+            "defaults": {
+                "model": {
+                    "primary": "openai/gpt-5.6",
+                    "fallbacks": ["anthropic/claude", "openai/gpt-4.1"]
+                },
+                "models": {
+                    "openai/gpt-5.6": { "alias": "old" },
+                    "anthropic/claude": { "alias": "keep" }
+                }
+            },
+            "list": [{
+                "model": "openai/gpt-5.6",
+                "models": {
+                    "openai/gpt-5.6": { "agentRuntime": { "id": "pi" } }
+                }
+            }]
+        }))
+    );
+}
+
+#[test]
+fn projects_moonshot_search_endpoint_without_an_inline_key() {
+    let mut document = document(json!({
+        "tools": {
+            "web": {
+                "search": {
+                    "kimi": { "region": "legacy" }
+                }
+            }
+        }
+    }));
     let projection = ProviderProjection::new(
         provider("moonshot-global"),
         endpoint("https://api.moonshot.ai/v1"),
@@ -132,8 +239,7 @@ fn projects_moonshot_search_endpoint_without_an_inline_key() {
         [],
     );
 
-    projection.apply(&root.store()).expect("apply projection");
-    let document = root.store().read().expect("read config");
+    assert!(projection.apply_to_document(&mut document));
 
     assert_eq!(
         document.get("tools"),

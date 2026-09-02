@@ -29,6 +29,10 @@ impl OneShotContainment {
         Self(containment)
     }
 
+    pub(crate) fn into_process_containment(self) -> ProcessContainment {
+        self.0
+    }
+
     #[cfg(unix)]
     pub fn guardian(
         guardian_executable: std::path::PathBuf,

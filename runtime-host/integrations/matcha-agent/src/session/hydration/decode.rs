@@ -1,24 +1,104 @@
 use serde_json::{Map, Value};
 
 use super::model::{
-    DecodeFailure, HydratedContentBlock, HydratedImage, HydratedMessage, HydratedMessageRole,
-    HydratedToolMetadata, HydratedToolResult, HydratedToolUse, bounded_body, bounded_identifier,
-    bounded_media_reference, bounded_text, bounded_timestamp, bounded_tool_name, max_metadata_keys,
+    DecodeFailure, HydratedContentBlock, HydratedImage, HydratedLargeText, HydratedMessage,
+    HydratedMessageRole, HydratedToolMetadata, HydratedToolResult, HydratedToolUse, bounded_body,
+    bounded_identifier, bounded_media_reference, bounded_text, bounded_timestamp,
+    bounded_tool_input, bounded_tool_input_text, bounded_tool_name, max_metadata_keys,
 };
 
 const ALLOWED_IMAGE_MEDIA_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
-pub(crate) fn decode_transcript_line(line: &str) -> Result<Option<HydratedMessage>, DecodeFailure> {
-    let line: Value = serde_json::from_str(line).map_err(|_| DecodeFailure::InvalidJson)?;
-    let line = line.as_object().ok_or(DecodeFailure::InvalidShape)?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DecodeLineFailure {
+    reason: DecodeFailure,
+    field: &'static str,
+    block_index: Option<usize>,
+    block_type: Option<&'static str>,
+    actual: &'static str,
+}
+
+impl DecodeLineFailure {
+    const fn new(
+        reason: DecodeFailure,
+        field: &'static str,
+        block_index: Option<usize>,
+        block_type: Option<&'static str>,
+        actual: &'static str,
+    ) -> Self {
+        Self {
+            reason,
+            field,
+            block_index,
+            block_type,
+            actual,
+        }
+    }
+
+    pub(crate) const fn reason(self) -> DecodeFailure {
+        self.reason
+    }
+
+    pub(crate) const fn field(self) -> &'static str {
+        self.field
+    }
+
+    pub(crate) const fn block_index(self) -> Option<usize> {
+        self.block_index
+    }
+
+    pub(crate) const fn block_type(self) -> Option<&'static str> {
+        self.block_type
+    }
+
+    pub(crate) const fn actual(self) -> &'static str {
+        self.actual
+    }
+}
+
+pub(crate) fn decode_transcript_line(
+    line: &str,
+) -> Result<Option<HydratedMessage>, DecodeLineFailure> {
+    let line: Value = serde_json::from_str(line).map_err(|_| {
+        DecodeLineFailure::new(
+            DecodeFailure::InvalidJson,
+            "line",
+            None,
+            None,
+            "invalid_json",
+        )
+    })?;
+    let line = line.as_object().ok_or_else(|| {
+        DecodeLineFailure::new(
+            DecodeFailure::InvalidShape,
+            "line",
+            None,
+            None,
+            "non_object",
+        )
+    })?;
     if !only_keys(line, &["id", "parentId", "timestamp", "message"]) {
-        return Err(DecodeFailure::InvalidShape);
+        return Err(DecodeLineFailure::new(
+            DecodeFailure::InvalidShape,
+            "line.keys",
+            None,
+            None,
+            "unknown_key",
+        ));
     }
 
     let message = line
         .get("message")
         .and_then(Value::as_object)
-        .ok_or(DecodeFailure::InvalidShape)?;
+        .ok_or_else(|| {
+            DecodeLineFailure::new(
+                DecodeFailure::InvalidShape,
+                "message",
+                None,
+                None,
+                "missing_or_non_object",
+            )
+        })?;
     if !only_keys(
         message,
         &[
@@ -31,13 +111,24 @@ pub(crate) fn decode_transcript_line(line: &str) -> Result<Option<HydratedMessag
         ],
     ) || !valid_metadata(message.get("metadata"))
     {
-        return Err(DecodeFailure::InvalidShape);
+        return Err(DecodeLineFailure::new(
+            DecodeFailure::InvalidShape,
+            "message.keys",
+            None,
+            None,
+            "unknown_key_or_invalid_metadata",
+        ));
     }
 
-    let raw_role = message
-        .get("role")
-        .and_then(Value::as_str)
-        .ok_or(DecodeFailure::InvalidShape)?;
+    let raw_role = message.get("role").and_then(Value::as_str).ok_or_else(|| {
+        DecodeLineFailure::new(
+            DecodeFailure::InvalidShape,
+            "message.role",
+            None,
+            None,
+            "missing_or_non_string",
+        )
+    })?;
     let role = match raw_role {
         "user" => HydratedMessageRole::User,
         "assistant" => HydratedMessageRole::Assistant,
@@ -45,23 +136,64 @@ pub(crate) fn decode_transcript_line(line: &str) -> Result<Option<HydratedMessag
         // The legacy source labels a Claude user tool_result as toolresult. Keep
         // the source's three-role model while retaining the typed result block.
         "toolresult" | "tool_result" => HydratedMessageRole::User,
-        _ => return Err(DecodeFailure::UnsupportedRole),
+        _ => {
+            return Err(DecodeLineFailure::new(
+                DecodeFailure::UnsupportedRole,
+                "message.role",
+                None,
+                None,
+                "unsupported_value",
+            ));
+        }
     };
 
-    let content = message.get("content").ok_or(DecodeFailure::InvalidShape)?;
+    let content = message.get("content").ok_or_else(|| {
+        DecodeLineFailure::new(
+            DecodeFailure::InvalidShape,
+            "message.content",
+            None,
+            None,
+            "missing",
+        )
+    })?;
     let content = decode_content(content)?;
     if content.is_empty() {
         return Ok(None);
     }
 
-    let id = optional_identifier(line.get("id"))?;
-    let message_id = optional_identifier(message.get("id"))?;
+    let id = optional_identifier(line.get("id"))
+        .map_err(|reason| DecodeLineFailure::new(reason, "id", None, None, "invalid_identifier"))?;
+    let message_id = optional_identifier(message.get("id")).map_err(|reason| {
+        DecodeLineFailure::new(reason, "message.id", None, None, "invalid_identifier")
+    })?;
     let id = id.or(message_id);
-    let parent_id = optional_identifier(line.get("parentId"))?;
-    let origin_message_id =
-        optional_identifier(message.get("originMessageId"))?.or(parent_id.clone());
-    let timestamp = optional_timestamp(line.get("timestamp"))?;
-    let explicit_tool_call_id = optional_identifier(message.get("toolCallId"))?;
+    let parent_id = optional_identifier(line.get("parentId")).map_err(|reason| {
+        DecodeLineFailure::new(reason, "parentId", None, None, "invalid_identifier")
+    })?;
+    let origin_message_id = optional_identifier(message.get("originMessageId"))
+        .map_err(|reason| {
+            DecodeLineFailure::new(
+                reason,
+                "message.originMessageId",
+                None,
+                None,
+                "invalid_identifier",
+            )
+        })?
+        .or(parent_id.clone());
+    let timestamp = optional_timestamp(line.get("timestamp")).map_err(|reason| {
+        DecodeLineFailure::new(reason, "timestamp", None, None, "invalid_timestamp")
+    })?;
+    let explicit_tool_call_id =
+        optional_identifier(message.get("toolCallId")).map_err(|reason| {
+            DecodeLineFailure::new(
+                reason,
+                "message.toolCallId",
+                None,
+                None,
+                "invalid_identifier",
+            )
+        })?;
     let tool_call_id = explicit_tool_call_id.or_else(|| {
         content
             .iter()
@@ -79,6 +211,9 @@ pub(crate) fn decode_transcript_line(line: &str) -> Result<Option<HydratedMessag
         tool_call_id,
     )
     .map(Some)
+    .map_err(|reason| {
+        DecodeLineFailure::new(reason, "message.content", None, None, "empty_content")
+    })
 }
 
 fn only_keys(object: &Map<String, Value>, allowed: &[&str]) -> bool {
@@ -96,13 +231,82 @@ fn valid_metadata(metadata: Option<&Value>) -> bool {
     })
 }
 
-fn decode_content(content: &Value) -> Result<Vec<HydratedContentBlock>, DecodeFailure> {
+fn decode_content(content: &Value) -> Result<Vec<HydratedContentBlock>, DecodeLineFailure> {
     match content {
         Value::String(text) => bounded_text(text.clone())
             .map(|text| vec![HydratedContentBlock::Text { text }])
-            .ok_or(DecodeFailure::TextTooLarge),
-        Value::Array(blocks) => blocks.iter().map(decode_block).collect(),
-        _ => Err(DecodeFailure::UnsafeContent),
+            .ok_or_else(|| {
+                DecodeLineFailure::new(
+                    DecodeFailure::TextTooLarge,
+                    "message.content",
+                    None,
+                    None,
+                    "text_too_large",
+                )
+            }),
+        Value::Array(blocks) => blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                decode_block(block).map_err(|reason| {
+                    DecodeLineFailure::new(
+                        reason,
+                        "message.content.block",
+                        Some(index),
+                        block_type_name(block),
+                        decode_failure_actual(reason),
+                    )
+                })
+            })
+            .collect(),
+        _ => Err(DecodeLineFailure::new(
+            DecodeFailure::UnsafeContent,
+            "message.content",
+            None,
+            None,
+            value_kind(content),
+        )),
+    }
+}
+
+fn block_type_name(block: &Value) -> Option<&'static str> {
+    match block
+        .as_object()
+        .and_then(|block| block.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("text") => Some("text"),
+        Some("large_text") => Some("large_text"),
+        Some("thinking") => Some("thinking"),
+        Some("tool_use") => Some("tool_use"),
+        Some("tool_result") => Some("tool_result"),
+        Some("tool_use_result") => Some("tool_use_result"),
+        Some("image") => Some("image"),
+        Some(_) => Some("unknown"),
+        None => None,
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn decode_failure_actual(reason: DecodeFailure) -> &'static str {
+    match reason {
+        DecodeFailure::InvalidJson => "invalid_json",
+        DecodeFailure::InvalidShape => "invalid_shape",
+        DecodeFailure::UnsupportedRole => "unsupported_role",
+        DecodeFailure::UnsafeContent => "unsafe_content",
+        DecodeFailure::TextTooLarge => "text_too_large",
+        DecodeFailure::EmptyContent => "empty_content",
+        DecodeFailure::TranscriptTooLarge => "transcript_too_large",
     }
 }
 
@@ -126,12 +330,33 @@ fn decode_block(block: &Value) -> Result<HydratedContentBlock, DecodeFailure> {
                 .map(|text| HydratedContentBlock::Text { text })
                 .ok_or(DecodeFailure::TextTooLarge)
         }
+        "large_text" => decode_large_text(block),
         "thinking" => decode_thinking(block),
         "tool_use" => decode_tool_use(block),
         "tool_result" | "tool_use_result" => decode_tool_result(block),
         "image" => decode_image(block),
         _ => Err(DecodeFailure::UnsafeContent),
     }
+}
+
+fn decode_large_text(block: &Map<String, Value>) -> Result<HydratedContentBlock, DecodeFailure> {
+    if !only_keys(block, &["type", "text", "content_ref", "total_bytes"]) {
+        return Err(DecodeFailure::UnsafeContent);
+    }
+    let text = block
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or(DecodeFailure::UnsafeContent)?;
+    let content_ref = block
+        .get("content_ref")
+        .and_then(Value::as_str)
+        .ok_or(DecodeFailure::UnsafeContent)?;
+    let total_bytes = block
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .ok_or(DecodeFailure::UnsafeContent)?;
+    HydratedLargeText::try_new(text.to_owned(), content_ref.to_owned(), total_bytes)
+        .map(HydratedContentBlock::LargeText)
 }
 
 fn decode_thinking(block: &Map<String, Value>) -> Result<HydratedContentBlock, DecodeFailure> {
@@ -168,12 +393,25 @@ fn decode_tool_use(block: &Map<String, Value>) -> Result<HydratedContentBlock, D
             .ok_or(DecodeFailure::UnsafeContent)?,
     )
     .ok_or(DecodeFailure::UnsafeContent)?;
-    let metadata = decode_tool_metadata(block.get("input"))?;
+    let input = block.get("input");
+    let metadata = decode_tool_metadata(input)?;
+    let input = input.and_then(bounded_tool_input);
+    let input_text = input.as_ref().map(tool_input_text).transpose()?;
     Ok(HydratedContentBlock::ToolUse(HydratedToolUse::new(
         tool_call_id,
         name,
+        input,
+        input_text,
         metadata,
     )))
+}
+
+fn tool_input_text(input: &Value) -> Result<String, DecodeFailure> {
+    let text = match input {
+        Value::String(text) => text.clone(),
+        value => serde_json::to_string_pretty(value).map_err(|_| DecodeFailure::UnsafeContent)?,
+    };
+    bounded_tool_input_text(text).ok_or(DecodeFailure::UnsafeContent)
 }
 
 fn decode_tool_metadata(input: Option<&Value>) -> Result<HydratedToolMetadata, DecodeFailure> {
@@ -391,6 +629,30 @@ mod tests {
                 assert!(!result.body().unwrap().contains("aGVsbG9"));
             }
             _ => panic!("expected tool result"),
+        }
+    }
+
+    #[test]
+    fn retains_bounded_tool_use_input_and_visible_text() {
+        let message = decode_transcript_line(
+            r#"{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"cargo test","description":"Run tests"}}]}}"#,
+        )
+        .unwrap()
+        .unwrap();
+
+        match &message.content()[0] {
+            HydratedContentBlock::ToolUse(tool) => {
+                assert_eq!(
+                    tool.input(),
+                    Some(&serde_json::json!({"command":"cargo test","description":"Run tests"}))
+                );
+                assert_eq!(
+                    tool.input_text(),
+                    Some("{\n  \"command\": \"cargo test\",\n  \"description\": \"Run tests\"\n}")
+                );
+                assert_eq!(tool.metadata().input_keys(), &["command", "description"]);
+            }
+            _ => panic!("expected tool use"),
         }
     }
 

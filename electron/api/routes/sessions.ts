@@ -14,6 +14,7 @@ import type {
 } from '../../main/runtime-host-delivery/transport/sessions/approvals';
 import type { SessionCreateTransport } from '../../main/runtime-host-delivery/transport/sessions/create';
 import type { SessionDeleteTransport } from '../../main/runtime-host-delivery/transport/sessions/delete';
+import type { SessionContentLoadRequest, SessionContentTransport } from '../../main/runtime-host-delivery/transport/sessions/content';
 import type { SessionListTransport } from '../../main/runtime-host-delivery/transport/sessions/list';
 import type { SessionModelSelectionRequest, SessionModelSelectionTransport } from '../../main/runtime-host-delivery/transport/sessions/model-selection';
 import type { SessionRenameTransport } from '../../main/runtime-host-delivery/transport/sessions/rename';
@@ -33,10 +34,12 @@ const MAX_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const MAX_CONTENT_REF_BYTES = 512;
 
 export type SessionCapabilityRouteDeps = Readonly<{
   sessionListTransport: SessionListTransport;
   sessionTimelineTransport: SessionTimelineTransport;
+  sessionContentTransport: SessionContentTransport;
   matchaSessionListTransport: MatchaSessionListTransport;
   sessionAbortTransport: SessionAbortTransport;
   sessionCreateTransport: SessionCreateTransport;
@@ -87,6 +90,9 @@ export async function dispatchSessionCapability(
   if (body.id === 'session.management' && body.operationId === 'sessions.window') {
     return await dispatchSessionTimeline(deps, adaptSessionTimelineRequest(body, 'sessions.window', traceId), 'window', traceId);
   }
+  if (body.id === 'session.management' && body.operationId === 'sessions.content.load') {
+    return await dispatchSessionContent(deps, adaptSessionContentLoadRequest(body, traceId), traceId);
+  }
   if (body.id === 'session.management' && body.operationId === 'sessions.delete') {
     return await deps.sessionDeleteTransport.delete(adaptSessionDeleteRequest(body));
   }
@@ -114,7 +120,10 @@ export async function dispatchSessionCapability(
     return await deps.sessionApprovalTransport.respond(adaptSessionApprovalRespondRequest(body));
   }
   if (body.id === 'session.modelSelection' && body.operationId === 'sessions.patchModel') {
-    return await deps.sessionModelSelectionTransport.select(adaptSessionModelSelectionRequest(body, traceId), traceId);
+    const request = adaptSessionModelSelectionRequest(body, traceId);
+    return traceId === undefined
+      ? await deps.sessionModelSelectionTransport.select(request)
+      : await deps.sessionModelSelectionTransport.select(request, traceId);
   }
   if (body.id === 'session.prompt'
     && (body.operationId === 'sessions.prompt' || body.operationId === 'sessions.sendWithMedia')) {
@@ -144,6 +153,16 @@ async function dispatchSessionTimeline(
         ? await deps.sessionTimelineTransport[operation](request)
         : await deps.sessionTimelineTransport[operation](request, traceId);
   }
+}
+
+async function dispatchSessionContent(
+  deps: SessionCapabilityRouteDeps,
+  request: SessionContentLoadRequest,
+  traceId?: string | null,
+): Promise<PublicTransportResponse> {
+  return traceId === undefined
+    ? await deps.sessionContentTransport.load(request)
+    : await deps.sessionContentTransport.load(request, traceId);
 }
 
 async function dispatchSessionSend(
@@ -679,7 +698,7 @@ function isGatewayUrl(value: unknown): value is string {
     && value.length > 0
     && value.length <= 4096
     && !hasControlCharacter(value)
-    && /^\/?api\/chat\/media\/outgoing\/[^/]+\/[^/]+(?:\/[^/]*)?$/.test(value);
+    && /^(?:\/?api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*|https?:\/\/[^/\s]+\/api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*)$/.test(value);
 }
 
 function isMediaReference(value: unknown): value is string {
@@ -916,6 +935,60 @@ function adaptSessionTimelineRequest(
     limit: body.input.limit ?? null,
     offset: body.input.offset ?? null,
     includeCanonical: body.input.includeCanonical ?? null,
+  });
+  return request;
+}
+
+function adaptSessionContentLoadRequest(
+  body: Record<string, unknown>,
+  traceId?: string | null,
+): SessionContentLoadRequest {
+  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
+    || body.id !== 'session.management'
+    || body.operationId !== 'sessions.content.load'
+    || !isRecord(body.scope)
+    || !hasExactKeys(body.scope, ['kind', 'identity'])
+    || body.scope.kind !== 'session'
+    || !isSessionIdentity(body.scope.identity)
+    || !isRecord(body.target)
+    || !hasExactKeys(body.target, ['kind', 'identity'])
+    || body.target.kind !== 'session'
+    || !isSessionIdentity(body.target.identity)
+    || !sameIdentity(body.scope.identity, body.target.identity)
+    || !isRecord(body.input)
+    || !hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity', 'contentRef', 'offset'], ['endpointSessionId', 'limit'])
+    || !isSessionIdentity(body.input.sessionIdentity)
+    || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
+    || body.input.sessionKey !== body.scope.identity.sessionKey
+    || !isIdentifier(body.input.contentRef, MAX_CONTENT_REF_BYTES)
+    || !isSafeNonNegativeInteger(body.input.offset)
+    || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
+    || (body.input.limit !== undefined && !isContentLimit(body.input.limit))) {
+    logSessionTrace('electron.content.route.invalid', traceId, { envelope: summarizeTimelineBody(body) });
+    throw new Error('Session content request is invalid');
+  }
+  const request = {
+    id: 'session.management',
+    operationId: 'sessions.content.load',
+    scope: { kind: 'session', identity: body.scope.identity },
+    target: { kind: 'session', identity: body.target.identity },
+    input: {
+      sessionKey: body.input.sessionKey,
+      sessionIdentity: body.input.sessionIdentity,
+      ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId }),
+      contentRef: body.input.contentRef,
+      offset: body.input.offset,
+      ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
+    },
+  } satisfies SessionContentLoadRequest;
+  logSessionTrace('electron.content.route.adapted', traceId, {
+    adapter: body.scope.identity.endpoint.runtimeAdapterId,
+    instance: body.scope.identity.endpoint.runtimeInstanceId,
+    sessionKey: summarizeIdentifier(body.input.sessionKey as string),
+    endpointSessionId: summarizeIdentifier(body.input.endpointSessionId as string | undefined),
+    contentRef: summarizeIdentifier(body.input.contentRef as string),
+    offset: body.input.offset,
+    limit: body.input.limit ?? null,
   });
   return request;
 }
@@ -1565,8 +1638,8 @@ function hasControlCharacter(value: string): boolean {
   });
 }
 
-function isIdentifier(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
+function isIdentifier(value: unknown, maxBytes = 4096): value is string {
+  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= maxBytes && !value.includes('\0');
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
@@ -1600,4 +1673,8 @@ function hasAllowedKeys(
 
 function isTimelineLimit(value: unknown): value is number {
   return isSafeNonNegativeInteger(value) && value <= 200;
+}
+
+function isContentLimit(value: unknown): value is number {
+  return isSafeNonNegativeInteger(value) && value > 0 && value <= 64 * 1024;
 }

@@ -1,18 +1,9 @@
-use environment::{ProviderAccount, ProviderAccountAuthMode};
+use environment::ProviderAccount;
 
-const OPENAI_CODEX_PROVIDER_KEY: &str = "openai-codex";
 const MINIMAX_PORTAL_PROVIDER_KEY: &str = "minimax-portal";
 
 pub(crate) fn base_provider_key(account: &ProviderAccount) -> Option<String> {
     let provider = account.provider().as_str().strip_prefix("provider:")?;
-    if provider == "openai"
-        && matches!(
-            account.configuration().auth_mode(),
-            ProviderAccountAuthMode::OAuthBrowser
-        )
-    {
-        return Some(OPENAI_CODEX_PROVIDER_KEY.to_owned());
-    }
     Some(match provider {
         "minimax-portal-cn" => MINIMAX_PORTAL_PROVIDER_KEY.to_owned(),
         "custom" | "ollama" => multi_instance_provider_key(provider, account.id().as_str()),

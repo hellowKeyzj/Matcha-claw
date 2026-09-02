@@ -11,6 +11,6 @@ pub(crate) use coordinator::{
 };
 pub(crate) use handle::OrganizationHandle;
 pub(crate) use team_runtime::{
-    TeamNodeEventCommandOutcome, TeamRuntimeCommand, TeamRuntimeCommandOutcome,
-    TeamRuntimeCreateSource, TeamRuntimePromptPhase, TeamRuntimeStatus,
+    ManualTeamProvision, TeamGraphPatchDraft, TeamNodeEventCommandOutcome, TeamRuntimeCommand,
+    TeamRuntimeCommandOutcome, TeamRuntimeCreateSource, TeamRuntimePromptPhase, TeamRuntimeStatus,
 };

@@ -7,9 +7,12 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
+import { selectCurrentChatSendGate } from '@/stores/chat/selectors';
 import { useTeamsStore } from '@/stores/teams';
 import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
+import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
+import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useCapabilityRoutingStore } from '@/stores/capability-routing';
@@ -32,7 +35,7 @@ import {
   patchSessionMeta,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
-import { resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
+import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
 import {
   TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS,
   shouldShowRuntimeErrorBannerImmediately,
@@ -255,14 +258,20 @@ function localizeGatewayIssue(
 }
 
 function selectChatPageState(state: ChatStoreState) {
-  const currentSessionKey = state.currentSessionKey;
-  const currentSession = state.loadedSessions[currentSessionKey] ?? EMPTY_CHAT_PAGE_SESSION;
+  const currentConversation = state.currentConversation;
+  const currentSessionRecordKey = state.currentSessionKey
+    || (currentConversation?.kind === 'session' ? currentConversation.sessionRecordKey : '');
+  const currentSession = currentSessionRecordKey
+    ? state.loadedSessions[currentSessionRecordKey] ?? EMPTY_CHAT_PAGE_SESSION
+    : EMPTY_CHAT_PAGE_SESSION;
   return {
-    currentSessionKey,
+    currentConversation,
+    currentSessionRecordKey,
     currentSession,
-    dismissedRuntimeError: state.dismissedRuntimeErrorBySession[currentSessionKey],
-    approvalStatus: getSessionApprovalStatus(state, currentSessionKey),
-    currentPendingApprovals: getPendingApprovals(state, currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
+    currentSendGate: selectCurrentChatSendGate(state),
+    dismissedRuntimeError: currentSessionRecordKey ? state.dismissedRuntimeErrorBySession[currentSessionRecordKey] : undefined,
+    approvalStatus: currentSessionRecordKey ? getSessionApprovalStatus(state, currentSessionRecordKey) : 'idle',
+    currentPendingApprovals: currentSessionRecordKey ? getPendingApprovals(state, currentSessionRecordKey) ?? EMPTY_APPROVAL_ITEMS : EMPTY_APPROVAL_ITEMS,
     foregroundHistorySessionKey: state.foregroundHistorySessionKey,
     sessionsLoading: state.sessionCatalogStatus.status === 'loading',
     showThinking: state.showThinking,
@@ -280,6 +289,7 @@ function selectChatPageState(state: ChatStoreState) {
     loadHistory: state.loadHistory,
     loadSessions: state.loadSessions,
     cleanupEmptySession: state.cleanupEmptySession,
+    sessionRuntimeGraph: state.sessionRuntimeGraph,
     sessionRuntimeCatalog: state.sessionRuntimeCatalog,
   };
 }
@@ -441,8 +451,10 @@ export function Chat({ isActive = true }: ChatProps) {
       ?? null;
   }, [gatewayStatus.lastError, gatewayStatus.lastIssue, t]);
   const {
-    currentSessionKey,
+    currentConversation,
+    currentSessionRecordKey: selectedSessionRecordKey,
     currentSession,
+    currentSendGate,
     dismissedRuntimeError,
     approvalStatus,
     currentPendingApprovals,
@@ -463,16 +475,19 @@ export function Chat({ isActive = true }: ChatProps) {
     loadHistory,
     loadSessions,
     cleanupEmptySession,
+    sessionRuntimeGraph,
     sessionRuntimeCatalog,
   } = useChatStore(useShallow(selectChatPageState));
-  const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.sessionIdentity?.agentId ?? '';
+  const currentSessionConversation = currentConversation?.kind === 'session' ? currentConversation : null;
+  const currentSessionRecordKey = selectedSessionRecordKey;
+  const currentAgentId = currentConversation?.agentId ?? currentSession.meta.agentId ?? '';
   const submitTeamRoleMessageFromChat = useTeamsStore((state) => state.submitTeamRoleMessageFromChat);
   const resolveTeamRoleChatTargetBySession = useTeamsStore((state) => state.resolveTeamRoleChatTargetBySession);
   const isTeamRoleSession = useTeamsStore((state) => state.isTeamRoleSession);
   const currentTeamRoleSessionProbe = {
-    sessionIdentity: currentSession.meta.sessionIdentity,
-    sessionKey: currentSessionKey,
-    endpointSessionId: currentSession.meta.endpointSessionId,
+    sessionIdentity: currentSessionConversation?.sessionIdentity ?? currentSession.meta.sessionIdentity,
+    sessionKey: currentSessionRecordKey,
+    endpointSessionId: currentSessionConversation?.endpointSessionId ?? currentSession.meta.endpointSessionId,
   };
   const currentTeamChatTarget = resolveTeamRoleChatTargetBySession(currentTeamRoleSessionProbe);
   const isCurrentTeamRoleSession = isTeamRoleSession(currentTeamRoleSessionProbe);
@@ -506,24 +521,29 @@ export function Chat({ isActive = true }: ChatProps) {
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
   const workspaceActive = isActive;
-  const chatRuntimeEndpoints = sessionRuntimeCatalog.status === 'ready'
-    ? sessionRuntimeCatalog.endpoints
-    : [];
-  const currentSessionEndpoint = currentSession.meta.sessionIdentity?.endpoint ?? null;
-  const currentSessionEndpointAvailable = Boolean(
-    currentSessionEndpoint
-    && chatRuntimeEndpoints.some((target) => sameRuntimeEndpointScope(target.endpoint, currentSessionEndpoint)),
-  );
-  const chatRuntimeAvailable = sessionRuntimeCatalog.status === 'ready'
-    && chatRuntimeEndpoints.length > 0;
-  const currentChatRuntimeAvailable = chatRuntimeAvailable
-    && (!currentSessionEndpoint || currentSessionEndpointAvailable);
-  const sessionRuntimeInitializing = sessionRuntimeCatalog.status === 'idle'
-    || sessionRuntimeCatalog.status === 'loading';
-  const chatRuntimeBranch: ChatRuntimeBranch = chatRuntimeAvailable
+  const runtimeEndpointDirectory = useRuntimeEndpointsStore(useShallow((state) => ({
+    status: state.status,
+    error: state.error,
+    endpoints: state.endpoints,
+  })));
+  const currentRuntimeConversation = currentConversation
+    ?? buildCurrentConversationFromSessionRecord(currentSession);
+  const currentConversationRuntime = useMemo(() => resolveCurrentConversationRuntimeState({
+    currentConversation: currentRuntimeConversation,
+    graph: sessionRuntimeGraph,
+    directoryStatus: runtimeEndpointDirectory.status,
+    directoryError: runtimeEndpointDirectory.error,
+    directoryEndpoints: runtimeEndpointDirectory.endpoints,
+  }), [currentRuntimeConversation, runtimeEndpointDirectory.endpoints, runtimeEndpointDirectory.error, runtimeEndpointDirectory.status, sessionRuntimeGraph]);
+  const currentConversationEndpoint = currentConversation?.endpoint ?? null;
+  const currentChatRuntimeAvailable = currentConversationRuntime.state === 'ready';
+  const sessionRuntimeInitializing = (currentConversationRuntime.state === 'resolving' && (sessionRuntimeCatalog.status === 'idle' || sessionRuntimeCatalog.status === 'loading'))
+    || (currentConversationRuntime.state === 'starting' && currentSession.items.length === 0);
+  const currentRuntimeReconnecting = currentConversationRuntime.state === 'starting';
+  const chatRuntimeBranch: ChatRuntimeBranch = currentConversationRuntime.state === 'ready'
     ? 'ready'
-    : (sessionRuntimeInitializing ? 'starting' : 'unavailable');
-  const chatSideEffectsActive = workspaceActive && chatRuntimeAvailable;
+    : (currentConversationRuntime.state === 'unavailable' ? 'unavailable' : 'starting');
+  const chatSideEffectsActive = workspaceActive && currentChatRuntimeAvailable;
   useEffect(() => {
     console.info(JSON.stringify({
       prefix: STARTUP_TRACE_PREFIX,
@@ -567,7 +587,7 @@ export function Chat({ isActive = true }: ChatProps) {
     toggleArtifactWorkbenchFullscreen,
   } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef);
   const chatWindowDock = useChatWindowDockController({
-    enabled: workspaceActive && chatRuntimeAvailable,
+    enabled: workspaceActive && currentChatRuntimeAvailable,
     panelOpen: sidePanelIntentOpen,
     preferredWidth: sidePanelPreferredWidth,
     renderWidth: sidePanelRenderWidth,
@@ -600,11 +620,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
-    if (!chatRuntimeAvailable) {
+    if (!currentChatRuntimeAvailable) {
       return;
     }
     void loadAvailableModels();
-  }, [chatRuntimeAvailable, loadAvailableModels]);
+  }, [currentChatRuntimeAvailable, loadAvailableModels]);
 
   useEffect(() => {
     if (!isGatewayRunning) {
@@ -640,10 +660,10 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     prepareSkillConfig();
   }, [prepareSkillConfig, chatSideEffectsActive]);
-  const refreshing = foregroundHistorySessionKey === currentSessionKey;
+  const refreshing = Boolean(currentSessionRecordKey) && foregroundHistorySessionKey === currentSessionRecordKey;
   const viewportItems = currentSession.items;
   const liveView = useChatView({
-    currentSessionKey,
+    currentSessionKey: currentSessionRecordKey,
     currentSessionStatus: currentSession.meta.historyStatus,
     itemCount: viewportItems.length,
     runActive: isRunActive(currentSession.runtime),
@@ -659,7 +679,7 @@ export function Chat({ isActive = true }: ChatProps) {
   );
   const renderItems = useMemo(() => {
     const runtimePlaceholder = buildRuntimeAssistantPlaceholder({
-      sessionKey: currentSessionKey,
+      sessionKey: currentSessionRecordKey,
       runtime: currentSession.runtime,
       items: viewportItems,
     });
@@ -677,7 +697,7 @@ export function Chat({ isActive = true }: ChatProps) {
     });
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionKey, viewportItems]);
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionRecordKey, viewportItems]);
   const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
   const artifactFiles = useMemo(
     () => artifactGroups.flatMap((group) => group.files),
@@ -692,7 +712,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const artifactFocusedGroupFiles = artifactWorkbenchSelection.focusedGroupFiles;
   const artifactFocusedFile = artifactWorkbenchSelection.focusedFile;
   const defaultArtifactWorkspaceRoot = useMemo(() => {
-    const endpoint = currentSession.meta.sessionIdentity?.endpoint;
+    const endpoint = currentConversationEndpoint;
     const currentWorkspace = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw'
       ? currentAgent?.workspace
       : undefined;
@@ -701,7 +721,7 @@ export function Chat({ isActive = true }: ChatProps) {
       artifactFiles,
       artifactFocusedFile,
     });
-  }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace, currentSession.meta.sessionIdentity?.endpoint]);
+  }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace, currentConversationEndpoint]);
   const artifactWorkspaceRoot = defaultArtifactWorkspaceRoot;
   const artifactWorkspaceContext = useMemo(() => ({
     workspaceRoot: artifactWorkspaceRoot || undefined,
@@ -814,7 +834,7 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [artifactFiles, artifactGroups, artifactViewMode]);
   useEffect(() => {
     if (artifactGroups.length === 0) {
-      if (artifactAutoOpenedSessionKeyRef.current === currentSessionKey) {
+      if (artifactAutoOpenedSessionKeyRef.current === currentSessionRecordKey) {
         artifactAutoOpenedSessionKeyRef.current = null;
       }
       if (artifactFocusedGroupKey !== null) {
@@ -822,16 +842,16 @@ export function Chat({ isActive = true }: ChatProps) {
       }
       return;
     }
-    if (artifactAutoOpenedSessionKeyRef.current === currentSessionKey) {
+    if (!currentSessionRecordKey || artifactAutoOpenedSessionKeyRef.current === currentSessionRecordKey) {
       return;
     }
     const firstArtifactFile = resolveArtifactGroupFocusFile(artifactGroups[0] ?? null, null);
     if (!firstArtifactFile) {
       return;
     }
-    artifactAutoOpenedSessionKeyRef.current = currentSessionKey;
+    artifactAutoOpenedSessionKeyRef.current = currentSessionRecordKey;
     openGeneratedArtifact(firstArtifactFile);
-  }, [artifactFiles, artifactFocusedGroupKey, artifactGroups, currentSessionKey, openGeneratedArtifact]);
+  }, [artifactFiles, artifactFocusedGroupKey, artifactGroups, currentSessionRecordKey, openGeneratedArtifact]);
   useEffect(() => {
     if (!artifactFocusedFile && artifactActiveSection !== 'workspace') {
       setArtifactActiveSection('workspace');
@@ -964,9 +984,9 @@ export function Chat({ isActive = true }: ChatProps) {
       options,
       loading: modelsLoading,
       switching: false,
-      disabled: activeRun,
+      disabled: activeRun || !currentSessionRecordKey,
     };
-  }, [activeRun, availableModels, effectiveCurrentModelId, modelsLoading]);
+  }, [activeRun, availableModels, currentSessionRecordKey, effectiveCurrentModelId, modelsLoading]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -986,23 +1006,19 @@ export function Chat({ isActive = true }: ChatProps) {
     return sendMessage(text, attachments);
   }, [currentTeamChatTarget, isCurrentTeamRoleSession, sendMessage, submitTeamRoleMessageFromChat]);
   const handleExportMarkdown = useCallback(() => {
-    if (exportingMarkdown) {
+    if (exportingMarkdown || !currentSessionRecordKey || !currentSessionConversation) {
       return;
     }
     setExportingMarkdown(true);
     void (async () => {
       try {
-        const target = currentSession.meta.sessionIdentity
-          ? resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey)
-          : null;
-        const protocolItems = target
-          ? await fetchChatMarkdownExportItems({
-            ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
-            sessionIdentity: target.sessionIdentity,
-            currentItems: viewportItems,
-            currentWindow: currentSession.window,
-          })
-          : viewportItems;
+        const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionRecordKey);
+        const protocolItems = await fetchChatMarkdownExportItems({
+          ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
+          sessionIdentity: target.sessionIdentity,
+          currentItems: viewportItems,
+          currentWindow: currentSession.window,
+        });
         const items = applyAssistantPresentationToItems({
           items: [...protocolItems],
           agents: assistantCatalogAgents,
@@ -1014,8 +1030,8 @@ export function Chat({ isActive = true }: ChatProps) {
           },
         });
         const exportedSession = buildChatSessionMarkdownExport({
-          title: currentSession.meta.displayName || currentSession.meta.label || currentAgent?.name || currentSessionKey,
-          sessionKey: currentSession.meta.sessionIdentity?.sessionKey || currentSessionKey,
+          title: currentSession.meta.displayName || currentSession.meta.label || currentAgent?.name || currentSessionRecordKey,
+          sessionKey: currentSessionConversation.sessionIdentity.sessionKey || currentSessionRecordKey,
           agentName: currentAgent?.name || currentAgentId,
           items,
           exportedAt: new Date(),
@@ -1027,7 +1043,7 @@ export function Chat({ isActive = true }: ChatProps) {
         setExportingMarkdown(false);
       }
     })();
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.meta.sessionIdentity, currentSession.window, currentSessionKey, exportingMarkdown, t, viewportItems]);
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.window, currentSessionConversation, currentSessionRecordKey, exportingMarkdown, t, viewportItems]);
   const handleComposerWheel = useCallback((deltaY: number) => {
     viewportPaneRef.current?.scrollByWheelDelta(deltaY);
   }, []);
@@ -1039,12 +1055,12 @@ export function Chat({ isActive = true }: ChatProps) {
     const normalizedModelSelectionId = modelSelectionId.trim();
     const currentModelSelectionId = effectiveCurrentModelId;
     logSessionTrace('model-selection.enter', traceId, {
-      currentSessionKey: summarizeIdentifier(currentSessionKey),
+      currentSessionKey: summarizeIdentifier(currentSessionRecordKey),
       requestedModelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
       currentModelSelectionId: summarizeIdentifier(currentModelSelectionId),
       activeRun: Boolean(activeRun),
     });
-    if (!currentSessionKey) {
+    if (!currentSessionRecordKey || !currentSessionConversation) {
       logSessionTrace('model-selection.skipped', traceId, { reason: 'missing-current-session' });
       return;
     }
@@ -1059,9 +1075,9 @@ export function Chat({ isActive = true }: ChatProps) {
       return;
     }
     try {
-      const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
+      const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionRecordKey);
       logSessionTrace('model-selection.target', traceId, {
-        recordKey: summarizeIdentifier(currentSessionKey),
+        recordKey: summarizeIdentifier(currentSessionRecordKey),
         endpointSessionId: summarizeIdentifier(target.endpointSessionId),
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         modelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
@@ -1076,7 +1092,7 @@ export function Chat({ isActive = true }: ChatProps) {
         throw new Error(result.outcome);
       }
       useChatStore.setState((state) => ({
-        loadedSessions: patchSessionMeta(state, currentSessionKey, {
+        loadedSessions: patchSessionMeta(state, currentSessionRecordKey, {
           model: normalizedModelSelectionId,
         }),
       }));
@@ -1086,7 +1102,7 @@ export function Chat({ isActive = true }: ChatProps) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
-  }, [activeRun, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
+  }, [activeRun, currentSessionConversation, currentSessionRecordKey, effectiveCurrentModelId, loadSessions, t]);
 
   const handleSelectToolPermissionMode = useCallback(async (nextMode: OpenClawToolPermissionMode) => {
     if (nextMode === toolPermissionMode || toolPermissionModeSwitching || activeRun) {
@@ -1187,8 +1203,9 @@ export function Chat({ isActive = true }: ChatProps) {
       }}
       contextUsage={contextUsage}
       disabled={!currentChatRuntimeAvailable}
-      reconnecting={sessionRuntimeInitializing}
+      reconnecting={currentRuntimeReconnecting}
       sending={isRunActive(currentSession.runtime)}
+      sendGate={currentSendGate}
       stopping={currentSession.runtime.runPhase === 'stopping'}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIdsForChat}
@@ -1206,11 +1223,11 @@ export function Chat({ isActive = true }: ChatProps) {
     );
   }
 
-  if (!chatRuntimeAvailable) {
+  if (!currentChatRuntimeAvailable && currentSession.items.length === 0) {
     return (
       <ChatOffline
         title={t('runtimeUnavailable.title')}
-        description={sessionRuntimeCatalog.error || t('runtimeUnavailable.description')}
+        description={(currentConversationRuntime.state === 'unavailable' ? currentConversationRuntime.error : sessionRuntimeCatalog.error) || t('runtimeUnavailable.description')}
       />
     );
   }
@@ -1283,12 +1300,13 @@ export function Chat({ isActive = true }: ChatProps) {
         header={(
           <ChatHeaderBar
             onRefresh={() => {
+              if (!currentSessionRecordKey) return;
               void refresh();
             }}
-            refreshBusy={refreshing || sessionsLoading}
+            refreshBusy={refreshing || sessionsLoading || !currentSessionRecordKey}
             showThinking={showThinking}
             onToggleThinking={toggleThinking}
-            exportDisabled={exportingMarkdown}
+            exportDisabled={exportingMarkdown || !currentSessionRecordKey}
             onExportMarkdown={handleExportMarkdown}
             sidePanelOpen={chatWindowDock.sidePanelExpanded}
             unfinishedTaskCount={unfinishedTaskCount}
@@ -1299,7 +1317,7 @@ export function Chat({ isActive = true }: ChatProps) {
           <ChatList
             ref={viewportPaneRef}
             isActive={workspaceActive}
-            currentSessionKey={currentSessionKey}
+            currentSessionKey={currentSessionRecordKey}
             runtime={currentSession.runtime}
             viewport={currentSession.window}
             items={renderItems}
@@ -1308,6 +1326,7 @@ export function Chat({ isActive = true }: ChatProps) {
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
             sessionIdentity={currentSession.meta.sessionIdentity ?? undefined}
+            endpointSessionId={currentSession.meta.endpointSessionId}
             workspaceContext={artifactWorkspaceContext}
             artifactGroups={artifactGroups}
             onOpenArtifactFile={handleOpenArtifactFile}
@@ -1323,11 +1342,13 @@ export function Chat({ isActive = true }: ChatProps) {
               handleArtifactFocusTarget(target);
             }}
             onLoadOlder={() => {
-              void loadOlderViewportItems(currentSessionKey);
+              if (!currentSessionRecordKey) return;
+              void loadOlderViewportItems(currentSessionRecordKey);
             }}
             loadOlderLabel={t('liveThread.loadOlder')}
             onJumpToLatest={() => {
-              void jumpViewportToLatest(currentSessionKey);
+              if (!currentSessionRecordKey) return;
+              void jumpViewportToLatest(currentSessionRecordKey);
             }}
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />
@@ -1348,7 +1369,7 @@ export function Chat({ isActive = true }: ChatProps) {
             }}
           />
         ) : null}
-        todoPanel={<SessionTodoPanel sessionKey={currentSessionKey} />}
+        todoPanel={<SessionTodoPanel sessionKey={currentSessionRecordKey} />}
         input={inputNode}
       />
     </>

@@ -25,8 +25,9 @@ use crate::{
     runtime_directory::RuntimeDriverDirectory,
     runtime_driver::{LifecycleOps, ProviderNativeConfigurationCommand},
     sessions::model_selection::{
-        NativeEndpoint, ResolvedSessionModelSelection, SessionModelSelectionBinding,
-        SessionModelSelectionCommand, SessionModelSelectionOutcome, SessionModelSelectionRejection,
+        MatchaSessionModelRuntimeCommand, NativeEndpoint, ResolvedSessionModelSelection,
+        SessionModelSelectionBinding, SessionModelSelectionCommand, SessionModelSelectionOutcome,
+        SessionModelSelectionRejection,
     },
     transport::{provider_accounts::ProviderAccountsDelivery, session_trace},
 };
@@ -233,6 +234,10 @@ impl ProviderOwner {
                 let outcome = self.resolve_session_model_selection(command);
                 let _ = reply.send(outcome);
             }
+            ResolveMatchaSessionModelRuntime { command, reply } => {
+                let outcome = self.resolve_matcha_session_model_runtime(command);
+                let _ = reply.send(outcome);
+            }
         }
     }
 
@@ -252,7 +257,7 @@ impl ProviderOwner {
         let native = if mutation.private.is_err() {
             ProviderNativeConfigurationEffect::Unavailable
         } else if mutation.commit == super::accounts::ProviderCommitOutcome::Committed {
-            self.reconcile(&mutation.retired, &mutation.required_auth_accounts())
+            self.reconcile(&mutation.retired, mutation.required_auth_accounts())
                 .await
         } else {
             ProviderNativeConfigurationEffect::Unavailable
@@ -335,6 +340,67 @@ impl ProviderOwner {
         }
     }
 
+    fn resolve_matcha_session_model_runtime(
+        &self,
+        command: MatchaSessionModelRuntimeCommand,
+    ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        let selection = match self.models.resolve_matcha_runtime(
+            &self.cascade,
+            environment::ProviderModelCapability::Chat,
+            &command.model,
+            command.model_selection_id.as_deref(),
+            command.provider_fingerprint.as_deref(),
+        ) {
+            Ok(Some(selection)) => selection,
+            Ok(None) => {
+                return Err(SessionModelSelectionOutcome::target_rejected(
+                    SessionModelSelectionRejection::ModelSelectionNotFound,
+                ));
+            }
+            Err(()) => return Err(SessionModelSelectionOutcome::Unavailable),
+        };
+        let diagnostic = Some(selection.diagnostic());
+        if let Some(diagnostic) = diagnostic.as_ref() {
+            session_trace::log(
+                "runtime.model-selection.rehydrated",
+                command.trace_id.as_deref(),
+                serde_json::json!({
+                    "endpoint": format!("{:?}", NativeEndpoint::MatchaAgentLocal),
+                    "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+                    "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
+                    "modelSelectionId": command.model_selection_id.as_deref().map(|id| session_trace::id_shape(Some(id))),
+                    "providerFingerprint": command.provider_fingerprint.as_deref().map(|fingerprint| session_trace::id_shape(Some(fingerprint))),
+                    "accountId": diagnostic.account_id(),
+                    "modelId": diagnostic.model_id(),
+                    "protocol": diagnostic.protocol(),
+                    "authMode": diagnostic.auth_mode(),
+                }),
+            );
+        }
+        let binding = self
+            .models
+            .matcha_model_binding(&self.cascade, &selection)
+            .map_err(|_| {
+                SessionModelSelectionOutcome::target_rejected_with_diagnostic(
+                    SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
+                    diagnostic.clone(),
+                )
+            })?;
+        Ok(ResolvedSessionModelSelection {
+            endpoint: NativeEndpoint::MatchaAgentLocal,
+            session_key: command.session_key,
+            endpoint_session_id: command.endpoint_session_id,
+            model_selection_id: selection.selection_id,
+            binding: SessionModelSelectionBinding::Matcha {
+                model: binding.model,
+                provider_fingerprint: binding.provider_fingerprint,
+                provider_runtime: binding.provider_runtime,
+            },
+            diagnostic,
+            trace_id: command.trace_id,
+        })
+    }
+
     fn resolve_session_model_selection(
         &self,
         command: SessionModelSelectionCommand,
@@ -414,6 +480,7 @@ impl ProviderOwner {
             endpoint: command.endpoint,
             session_key: command.session_key,
             endpoint_session_id: command.endpoint_session_id,
+            model_selection_id: command.model_selection_id,
             binding,
             diagnostic,
             trace_id: command.trace_id,
@@ -512,7 +579,8 @@ async fn handle_provider_snapshot_query(
         ProviderQuery::ListRouting { reply } => {
             let _ = reply.send(list_provider_routing_for_snapshot(snapshot));
         }
-        ProviderQuery::ResolveSessionModelSelection { reply, .. } => {
+        ProviderQuery::ResolveSessionModelSelection { reply, .. }
+        | ProviderQuery::ResolveMatchaSessionModelRuntime { reply, .. } => {
             let _ = reply.send(Err(SessionModelSelectionOutcome::Unavailable));
         }
     }
@@ -565,11 +633,14 @@ fn selectable_provider_models_for_snapshot(
             .into_iter()
             .filter_map(|model| {
                 let account = account_for_snapshot(&snapshot, model.account_id())?;
-                let _identity = identities.get(account.id().as_str())?;
+                let identity = identities.get(account.id().as_str())?;
                 let view = model_view_for_snapshot(&snapshot, model)?;
+                let model_reference =
+                    identity.runtime_model_ref(account.configuration().kind(), &view.model_id);
                 Some(SelectableProviderModelView {
                     model: view,
                     selection_id: model.selection_id(),
+                    model_references: vec![model_reference],
                 })
             })
             .collect(),

@@ -20,6 +20,7 @@ import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
+import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
 import { SubagentCard } from './components/SubagentCard';
 import { SubagentDeleteDialog } from './components/SubagentDeleteDialog';
 import { SubagentFormDialog } from './components/SubagentFormDialog';
@@ -202,13 +203,6 @@ export function SubAgents() {
   const editingToolConfigLoading = editingAgentId ? Boolean(toolConfigLoadingByAgentId[editingAgentId]) : false;
   const editingToolConfigError = editingAgentId ? (toolConfigErrorByAgentId[editingAgentId] ?? null) : null;
   const hasAvailableModels = availableModels.length > 0;
-  const modelDisplayLabelById = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const model of availableModels) {
-      labels.set(model.id, model.displayLabel);
-    }
-    return labels;
-  }, [availableModels]);
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
   const gatewayPending = !gatewayInitialized || isGatewayRecovering(gatewayStatus);
@@ -798,7 +792,7 @@ export function SubAgents() {
       </section>
 
       {showSubagentGridSkeleton ? (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
           {Array.from({ length: 8 }).map((_, index) => (
             <div key={`subagents-card-placeholder-${index}`} className="rounded-lg border bg-card p-4">
               <div className="h-5 w-2/5 animate-pulse rounded bg-muted" />
@@ -809,12 +803,12 @@ export function SubAgents() {
           ))}
         </div>
       ) : (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
           {agents.map((agent) => (
             <SubagentCard
               key={agent.id}
               agent={agent}
-              modelLabel={agent.model?.trim() ? (modelDisplayLabelById.get(agent.model.trim()) ?? agent.model.trim()) : undefined}
+              modelLabel={resolveModelCatalogEntry(availableModels, agent.model)?.modelLabel ?? agent.model?.trim()}
               editLocked={false}
               deleteLocked={Boolean(agent.isDefault)}
               exportLocked={false}
@@ -929,7 +923,7 @@ export function SubAgents() {
                 name: values.name,
                 description: values.description,
                 workspace: values.workspace,
-                model: values.model,
+                model: resolveModelRuntimeReference(availableModels, values.model),
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
               });
@@ -969,7 +963,7 @@ export function SubAgents() {
             name: resolvedName,
             description: values.description,
             workspace: resolvedWorkspace,
-            model: values.model || undefined,
+            model: resolveModelRuntimeReference(availableModels, values.model),
             avatarSeed: values.avatarSeed,
             avatarStyle: values.avatarStyle,
           });
@@ -1014,7 +1008,7 @@ export function SubAgents() {
             });
             const createResult = await createAgentFromTemplate({
               template: activeTemplate,
-              model: modelId,
+              model: resolveModelRuntimeReference(availableModels, modelId) ?? modelId,
               localizedName: localizedTemplateName,
             });
             setManagedAgentId(createResult.agentId);

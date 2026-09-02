@@ -222,6 +222,8 @@ mod tests {
             last_seq: Sequence::try_new(7).unwrap(),
             last_snapshot_version: 3,
             model: Some("native-model".into()),
+            model_selection_id: Some("native-model-selection".into()),
+            provider_fingerprint: Some("native-provider-fingerprint".into()),
             permission_mode: Some("native-permission".into()),
             worker_state: WorkerRuntimeState::Unloaded {
                 reason: UnloadedReason::NotStarted,

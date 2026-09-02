@@ -6,7 +6,9 @@ import {
   projectSessionViewItems,
   reconcileSessionItems,
 } from '@/stores/chat/store-state-helpers';
+import { buildSessionIdentityKey } from '../../electron/desktop-contract/runtime-address';
 import type { SessionWireItem } from '@/types/session/snapshot';
+import type { SessionRenderItem } from '@/types/session/render-item';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { ChatStoreState } from '@/stores/chat/types';
@@ -59,8 +61,31 @@ function createHistoryWindow(
   };
 }
 
+function createSessionRecordKeyByIdentityKey(
+  loadedSessions: ChatStoreState['loadedSessions'],
+): Record<string, string> {
+  const index: Record<string, string> = {};
+  for (const recordKey of Object.keys(loadedSessions)) {
+    const sessionIdentity = loadedSessions[recordKey]?.meta.sessionIdentity ?? {
+      endpoint: {
+        kind: 'native-runtime' as const,
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      agentId: recordKey.split(':')[1] ?? 'main',
+      sessionKey: recordKey,
+    };
+    index[buildSessionIdentityKey(sessionIdentity)] = recordKey;
+  }
+  return index;
+}
+
 function createStateHarness(state: ChatStoreState) {
-  let currentState = state;
+  let currentState = {
+    ...state,
+    sessionRecordKeyByIdentityKey: state.sessionRecordKeyByIdentityKey
+      ?? createSessionRecordKeyByIdentityKey(state.loadedSessions ?? {}),
+  } as ChatStoreState;
   const set = (
     partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
   ) => {
@@ -235,6 +260,83 @@ describe('chat history apply pipeline', () => {
       expect.objectContaining({ key: 'item-user-server-2', text: 'hello' }),
     ]);
     expect(getSessionItems(harness.get(), sessionKey)).toHaveLength(2);
+  });
+
+  it('keeps a repeated same-text pending user when no new canonical user confirms it', () => {
+    const sessionKey = 'agent:main:main';
+    const pendingUser: SessionRenderItem = {
+      key: 'renderer-user:client-2',
+      kind: 'user-message',
+      role: 'user',
+      sessionKey,
+      text: '你好',
+      clientId: 'client-2',
+      status: 'pending',
+      createdAt: 3,
+      updatedAt: 3,
+      images: [],
+      attachedFiles: [],
+    };
+    const currentItems = [
+      ...projectSessionViewItems(sessionView(sessionKey, {
+        items: completeFact([
+          userItem('item-user-1', '你好'),
+          assistantItem('item-assistant-1', 'done'),
+        ]),
+      })),
+      pendingUser,
+    ];
+    const nextItems = projectSessionViewItems(sessionView(sessionKey, {
+      items: completeFact([
+        userItem('item-user-1', '你好'),
+        assistantItem('item-assistant-1', 'done'),
+      ]),
+    }));
+
+    expect(reconcileSessionItems(currentItems, nextItems)).toEqual([
+      currentItems[0],
+      currentItems[1],
+      pendingUser,
+    ]);
+  });
+
+  it('drops a pending user when the next canonical user confirms it by order', () => {
+    const sessionKey = 'agent:main:main';
+    const pendingUser: SessionRenderItem = {
+      key: 'renderer-user:client-2',
+      kind: 'user-message',
+      role: 'user',
+      sessionKey,
+      text: '你好',
+      clientId: 'client-2',
+      status: 'pending',
+      createdAt: 3,
+      updatedAt: 3,
+      images: [],
+      attachedFiles: [],
+    };
+    const currentItems = [
+      ...projectSessionViewItems(sessionView(sessionKey, {
+        items: completeFact([
+          userItem('item-user-1', '你好'),
+          assistantItem('item-assistant-1', 'done'),
+        ]),
+      })),
+      pendingUser,
+    ];
+    const nextItems = projectSessionViewItems(sessionView(sessionKey, {
+      items: completeFact([
+        userItem('item-user-1', '你好'),
+        assistantItem('item-assistant-1', 'done'),
+        userItem('item-user-2', '你好'),
+      ]),
+    }));
+
+    expect(reconcileSessionItems(currentItems, nextItems)).toEqual([
+      currentItems[0],
+      currentItems[1],
+      nextItems[2],
+    ]);
   });
 
   it('does not restore a renderer receipt when SessionView omits it', async () => {

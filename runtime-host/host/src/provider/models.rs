@@ -70,11 +70,13 @@ pub struct ProviderModelView {
 pub struct SelectableProviderModelView {
     pub model: ProviderModelView,
     pub selection_id: String,
+    pub model_references: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedProviderModelSelection {
     pub(crate) view: ProviderModelView,
+    pub(crate) selection_id: String,
     protocol: Option<&'static str>,
     auth_mode: &'static str,
 }
@@ -163,11 +165,14 @@ impl ProviderModelOwner {
                 .into_iter()
                 .filter_map(|model| {
                     let account = cascade.account(model.account_id())?;
-                    let _identity = identities.get(account.id().as_str())?;
+                    let identity = identities.get(account.id().as_str())?;
                     let view = view_for(cascade, model)?;
+                    let model_reference =
+                        identity.runtime_model_ref(account.configuration().kind(), &view.model_id);
                     Some(SelectableProviderModelView {
                         model: view,
                         selection_id: model.selection_id(),
+                        model_references: vec![model_reference],
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -180,18 +185,46 @@ impl ProviderModelOwner {
         capability: ProviderModelCapability,
         selection_id: &str,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
+        self.resolve_matching(cascade, capability, |model, _account, _view| {
+            model.selection_id() == selection_id
+        })
+    }
+
+    pub(crate) fn resolve_matcha_runtime(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderModelCapability,
+        model_id: &str,
+        model_selection_id: Option<&str>,
+        provider_fingerprint: Option<&str>,
+    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
+        self.resolve_matching(cascade, capability, |model, account, view| {
+            view.model_id == model_id
+                && model_selection_id.is_none_or(|id| model.selection_id() == id)
+                && provider_fingerprint
+                    .is_none_or(|fingerprint| matcha_provider_fingerprint(account) == fingerprint)
+        })
+    }
+
+    fn resolve_matching(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderModelCapability,
+        mut matches_selection: impl FnMut(&ProviderModel, &ProviderAccount, &ProviderModelView) -> bool,
+    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
         for model in cascade.catalog().selectable_for(capability) {
-            if model.selection_id() != selection_id {
-                continue;
-            }
             let Some(account) = cascade.account(model.account_id()) else {
                 continue;
             };
             let Some(view) = view_for(cascade, model) else {
                 continue;
             };
+            if !matches_selection(model, account, &view) {
+                continue;
+            }
             return Ok(Some(ResolvedProviderModelSelection {
                 view,
+                selection_id: model.selection_id(),
                 protocol: account
                     .configuration()
                     .protocol()

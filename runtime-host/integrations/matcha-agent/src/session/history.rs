@@ -1,3 +1,5 @@
+pub mod local;
+
 use std::fmt;
 
 use crate::{
@@ -33,7 +35,62 @@ pub enum HistoryResult<T> {
 
 pub type HistoryListResult = HistoryResult<HistoryCatalog>;
 pub type HistoryLoadResult = HistoryResult<HydrationSnapshot>;
+pub type HistoryContentResult = HistoryResult<HistoryContentChunk>;
 pub type HistoryRecoveryResult = HistoryResult<EventRecovery>;
+
+/// One bounded chunk of native transcript content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryContentChunk {
+    content_ref: String,
+    offset: u64,
+    text: String,
+    next_offset: u64,
+    total_bytes: u64,
+    complete: bool,
+}
+
+impl HistoryContentChunk {
+    pub(crate) fn new(
+        content_ref: String,
+        offset: u64,
+        text: String,
+        next_offset: u64,
+        total_bytes: u64,
+    ) -> Self {
+        Self {
+            content_ref,
+            offset,
+            text,
+            next_offset,
+            total_bytes,
+            complete: next_offset >= total_bytes,
+        }
+    }
+
+    pub fn content_ref(&self) -> &str {
+        &self.content_ref
+    }
+
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub const fn next_offset(&self) -> u64 {
+        self.next_offset
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+}
 
 /// A bounded catalog projection containing native session records.
 #[derive(Clone, Eq, PartialEq)]
@@ -108,7 +165,7 @@ pub async fn list(endpoint: AppServerEndpoint, secret: &Secret) -> HistoryListRe
         Ok(sessions) => HistoryResult::Complete(HistoryCatalog::from_native(sessions)),
         Err(error) => HistoryResult::from_read_error(error),
     };
-    close_outcome(result, client.close().await)
+    client.finish_with_cleanup(result).await
 }
 
 /// Loads a bounded, renderer-safe native transcript window.
@@ -148,7 +205,7 @@ pub async fn load(
         Err(AppServerClientError::SessionNotFound) => HistoryResult::NotFound,
         Err(error) => HistoryResult::from_read_error(error),
     };
-    close_outcome(result, client.close().await)
+    client.finish_with_cleanup(result).await
 }
 
 /// Recovers the native event cursor for one session without exposing event
@@ -169,7 +226,7 @@ pub async fn recover(
         Ok(recovery) => HistoryResult::Complete(recovery),
         Err(error) => HistoryResult::from_read_error(error),
     };
-    close_outcome(result, client.close().await)
+    client.finish_with_cleanup(result).await
 }
 
 impl<T> HistoryResult<T> {
@@ -211,16 +268,6 @@ impl<T> HistoryResult<T> {
                 Self::Incomplete(HydrationIncomplete::ConnectionCloseFailed)
             }
         }
-    }
-}
-
-fn close_outcome<T>(
-    result: HistoryResult<T>,
-    close: Result<(), AppServerClientError>,
-) -> HistoryResult<T> {
-    match close {
-        Ok(()) => result,
-        Err(_) => HistoryResult::Incomplete(HydrationIncomplete::ConnectionCloseFailed),
     }
 }
 
@@ -289,6 +336,13 @@ mod tests {
             HistoryResult::<()>::from_connect_error(AppServerClientError::HealthFailed),
             HistoryResult::Unavailable
         );
+        assert_eq!(
+            crate::session::client::outcome_after_cleanup(
+                HistoryResult::Complete(()),
+                Err(AppServerClientError::CloseFailed)
+            ),
+            HistoryResult::Complete(())
+        );
     }
 
     #[test]
@@ -353,6 +407,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn load_pages_replay_until_the_snapshot_cursor() {
+        let (endpoint, server) = test_server(TestServerScript::LoadPaged).await;
+        let result = load(
+            endpoint,
+            &Secret::new("history-load-token".into()).unwrap(),
+            SessionId::try_new("history-session").unwrap(),
+            HydrationWindowRequest::new(HydrationWindowMode::Latest, 20, None),
+        )
+        .await;
+
+        assert!(matches!(result, HistoryResult::Complete(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn load_preserves_native_session_not_found_without_retry_or_create() {
         let (endpoint, server) = test_server(TestServerScript::LoadNotFound).await;
         let result = load(
@@ -396,6 +465,7 @@ mod tests {
     enum TestServerScript {
         List,
         Load,
+        LoadPaged,
         LoadNotFound,
         Recover,
     }
@@ -433,6 +503,7 @@ mod tests {
             match script {
                 TestServerScript::List => serve_list(&mut socket).await,
                 TestServerScript::Load => serve_load(&mut socket).await,
+                TestServerScript::LoadPaged => serve_load_paged(&mut socket).await,
                 TestServerScript::LoadNotFound => serve_load_not_found(&mut socket).await,
                 TestServerScript::Recover => serve_recover(&mut socket).await,
             }
@@ -507,8 +578,10 @@ mod tests {
 
         let replay = read_json(socket).await;
         assert_eq!(replay["method"], "events.replay");
-        assert_eq!(replay["params"]["sessionId"], "history-session");
-        assert_eq!(replay["params"]["limit"], 10_000.0);
+        assert_eq!(
+            replay["params"],
+            json!({"sessionId": "history-session", "afterSeq": 0, "limit": 128.0})
+        );
         send_json(
             socket,
             json!({
@@ -520,6 +593,55 @@ mod tests {
         .await;
     }
 
+    async fn serve_load_paged(socket: &mut TestSocket) {
+        let load = read_json(socket).await;
+        assert_eq!(load["method"], "session.load");
+        send_json(
+            socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": load["id"],
+                "result": session_record_at("history-session", "private-model", 257)
+            }),
+        )
+        .await;
+
+        let transcript = read_json(socket).await;
+        assert_eq!(transcript["method"], "session.transcript");
+        send_json(
+            socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": transcript["id"],
+                "result": {"lines": [r#"{"message":{"role":"user","content":"visible-history"}}"#]}
+            }),
+        )
+        .await;
+
+        let snapshot = read_json(socket).await;
+        assert_eq!(snapshot["method"], "session.snapshot");
+        send_json(
+            socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": snapshot["id"],
+                "result": {
+                    "session": session_record_at("history-session", "private-model", 257),
+                    "version": 257,
+                    "updatedAt": "now",
+                    "runs": [],
+                    "messages": [],
+                    "pendingApprovals": []
+                }
+            }),
+        )
+        .await;
+
+        serve_replay_page(socket, 0, 128.0, 1, 128).await;
+        serve_replay_page(socket, 128, 128.0, 129, 256).await;
+        serve_replay_page(socket, 256, 128.0, 257, 257).await;
+    }
+
     async fn serve_load_not_found(socket: &mut TestSocket) {
         let load = read_json(socket).await;
         assert_eq!(load["method"], "session.load");
@@ -529,6 +651,30 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": load["id"],
                 "error": {"code": -32001, "message": "Session not found: missing-history-session"}
+            }),
+        )
+        .await;
+    }
+
+    async fn serve_replay_page(
+        socket: &mut TestSocket,
+        after_seq: u64,
+        limit: f64,
+        first_seq: u64,
+        last_seq: u64,
+    ) {
+        let replay = read_json(socket).await;
+        assert_eq!(replay["method"], "events.replay");
+        assert_eq!(
+            replay["params"],
+            json!({"sessionId": "history-session", "afterSeq": after_seq, "limit": limit})
+        );
+        send_json(
+            socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": replay["id"],
+                "result": {"events": (first_seq..=last_seq).map(|sequence| event_envelope(sequence, "history-event")).collect::<Vec<_>>()}
             }),
         )
         .await;

@@ -31,6 +31,7 @@ export type ClientHubSubscribeResult =
       clientId: string
       sessionId: string
       afterSeq?: number
+      lastSeq: number
     }
   | { resultType: 'clientNotFound'; clientId: string }
 
@@ -101,22 +102,28 @@ export class ClientHub {
     return clientId
   }
 
-  subscribe(
-    clientId: string,
-    sessionId: string,
-    afterSeq?: number,
-  ): ClientHubSubscribeResult {
-    const client = this.clients.get(clientId)
+  subscribe(params: {
+    clientId: string
+    sessionId: string
+    afterSeq?: number
+    lastSeq: number
+  }): ClientHubSubscribeResult {
+    const client = this.clients.get(params.clientId)
     if (client === undefined) {
-      return { resultType: 'clientNotFound', clientId }
+      return { resultType: 'clientNotFound', clientId: params.clientId }
     }
 
-    client.subscription = createClientSubscription(sessionId, afterSeq)
-    if (afterSeq === undefined) {
-      return { resultType: 'subscribed', clientId, sessionId }
+    client.subscription = createClientSubscription(
+      params.sessionId,
+      params.afterSeq ?? params.lastSeq,
+    )
+    return {
+      resultType: 'subscribed',
+      clientId: params.clientId,
+      sessionId: params.sessionId,
+      ...(params.afterSeq !== undefined ? { afterSeq: params.afterSeq } : {}),
+      lastSeq: params.lastSeq,
     }
-
-    return { resultType: 'subscribed', clientId, sessionId, afterSeq }
   }
 
   broadcast(envelope: AppServerEventEnvelope): ClientHubBroadcastResult {

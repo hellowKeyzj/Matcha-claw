@@ -4,7 +4,7 @@ use foundation::execution::OwnerRuntimeHandle;
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
     BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, GraphDefinition,
-    GraphPatch, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
+    GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
     PromptDeliveryRequest, ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand,
     StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
     TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunQuery,
@@ -133,6 +133,29 @@ impl OrganizationHandle {
             .send_command(OrganizationCommand::TeamSkillMaterialize {
                 selection_id,
                 team_id,
+                idempotency_key,
+                reply,
+            })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn manual_team_materialize(
+        &self,
+        team_id: TeamId,
+        team_name: String,
+        endpoint: organization::RuntimeEndpointReference,
+        roles: Vec<organization::ManualTeamRoleBinding>,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::ManualTeamMaterialize {
+                team_id,
+                team_name,
+                endpoint,
+                roles,
                 idempotency_key,
                 reply,
             })
@@ -459,16 +482,11 @@ impl OrganizationHandle {
 
     pub async fn graph_patch(
         &self,
-        command: RunCommand,
-        patch: GraphPatch,
+        patch: super::team_runtime::TeamGraphPatchDraft,
     ) -> Result<Result<TeamRunCommandOutcome, StoreFault>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
-            .send_command(OrganizationCommand::GraphPatch {
-                command,
-                patch,
-                reply,
-            })
+            .send_command(OrganizationCommand::GraphPatch { patch, reply })
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())
@@ -581,7 +599,6 @@ impl OrganizationHandle {
 
     pub async fn node_prompt_settled(
         &self,
-        run_id: GraphRunId,
         session_key: String,
         prompt_run_id: String,
         phase: TeamRuntimePromptPhase,
@@ -591,7 +608,6 @@ impl OrganizationHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::NodePromptSettled {
-                run_id,
                 session_key,
                 prompt_run_id,
                 phase,

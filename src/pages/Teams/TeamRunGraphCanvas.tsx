@@ -5,6 +5,7 @@ import type {
   TeamGraphEdgeAction,
   TeamGraphEdgeRecord,
   TeamGraphNodeRecord,
+  TeamGraphPatchOperation,
   TeamGraphSnapshotRecord,
   TeamRoleBindingRecord,
   TeamWebhookAuthProjection,
@@ -127,7 +128,7 @@ type TeamRunGraphCanvasProps = {
   executorLabel: string;
   webhookAuth?: TeamWebhookAuthProjection | null;
   labels: TeamRunGraphCanvasLabels;
-  onSaveGraph?: (graph: TeamGraphSnapshotRecord) => Promise<void> | void;
+  onPatchGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
 };
 
 type PositionedNode = TeamGraphNodeRecord & {
@@ -428,16 +429,49 @@ function writeOptionalString(record: Record<string, unknown>, field: string, val
   }
 }
 
-function createProjectionEdgeId(sourceNodeId: string, targetNodeId: string, sourcePort: string): string {
+function graphPatchRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+function graphPatchNode(node: TeamGraphNodeRecord): Record<string, unknown> {
+  const kind = visualKindForNodeKind(node.kind);
+  return graphPatchRecord({
+    nodeId: node.nodeId,
+    kind,
+    title: node.title?.trim() || node.nodeId,
+    roleId: kind === 'work' || kind === 'review' ? node.roleId : undefined,
+    groupId: kind === 'join' ? node.groupId : undefined,
+    taskId: kind === 'work' ? node.taskId : undefined,
+    maxAttempts: node.maxAttempts,
+    executor: kind === 'work' || kind === 'review' ? node.executor : undefined,
+    config: kind === 'start' || kind === 'work' || kind === 'review' ? node.config : undefined,
+  });
+}
+
+function graphPatchEdge(edge: TeamGraphEdgeRecord): Record<string, unknown> {
+  return graphPatchRecord({
+    edgeId: edge.edgeId,
+    sourceNodeId: edge.sourceNodeId,
+    targetNodeId: edge.targetNodeId,
+    sourcePort: edge.sourcePort,
+    targetPort: edge.targetPort,
+    action: edge.action,
+    payload: edge.payload,
+  });
+}
+
+function createDraftGraphId(kind: 'node' | 'edge', scope: string): string {
   const cryptoApi = globalThis.crypto as Crypto | undefined;
   const rawId = cryptoApi?.randomUUID?.() ?? Math.random().toString(36).slice(2);
-  return `projection-edge:${sourceNodeId}:${sourcePort || 'out'}:${targetNodeId}:${rawId}`;
+  return `draft-${kind}:${scope}:${rawId}`;
+}
+
+function createProjectionEdgeId(): string {
+  return createDraftGraphId('edge', 'projection');
 }
 
 function createProjectionNodeId(kind: TeamGraphCanvasNodeKind): string {
-  const cryptoApi = globalThis.crypto as Crypto | undefined;
-  const rawId = cryptoApi?.randomUUID?.() ?? Math.random().toString(36).slice(2);
-  return `canvas-node:${kind}:${rawId}`;
+  return createDraftGraphId('node', kind);
 }
 
 function hasRecordEntries(value: Record<string, unknown>): boolean {
@@ -539,16 +573,6 @@ function readNodePosition(node: TeamGraphNodeRecord): { x: number; y: number } |
   const x = (position as Record<string, unknown>).x;
   const y = (position as Record<string, unknown>).y;
   return typeof x === 'number' && typeof y === 'number' ? { x, y } : null;
-}
-
-function writeNodePosition(node: TeamGraphNodeRecord, x: number, y: number): TeamGraphNodeRecord {
-  return {
-    ...node,
-    metadata: {
-      ...(node.metadata ?? {}),
-      position: { x, y },
-    },
-  };
 }
 
 function defaultConfigForNode(kind: TeamGraphCanvasNodeKind, title: string): Record<string, unknown> | undefined {
@@ -778,7 +802,7 @@ export function TeamRunGraphCanvas({
   executorLabel,
   webhookAuth,
   labels,
-  onSaveGraph,
+  onPatchGraph,
 }: TeamRunGraphCanvasProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
@@ -962,17 +986,19 @@ export function TeamRunGraphCanvas({
     setFormError(null);
   }, [selectedEdge, selectedEdgeSourceNode]);
 
-  const saveGraphProjection = async (nextGraph: TeamGraphSnapshotRecord): Promise<void> => {
-    if (!onSaveGraph) {
+  const submitGraphPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
+    if (!onPatchGraph) {
       setFormError(labels.saveGraphUnavailable);
-      return;
+      return false;
     }
     setIsSaving(true);
     setFormError(null);
     try {
-      await onSaveGraph(nextGraph);
+      await onPatchGraph(operations);
+      return true;
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setIsSaving(false);
     }
@@ -984,7 +1010,7 @@ export function TeamRunGraphCanvas({
       return;
     }
     const nextEdge: TeamGraphEdgeRecord = {
-      edgeId: createProjectionEdgeId(input.sourceNodeId, input.targetNodeId, input.sourcePort),
+      edgeId: createProjectionEdgeId(),
       sourceNodeId: input.sourceNodeId,
       targetNodeId: input.targetNodeId,
       sourcePort: input.sourcePort,
@@ -995,13 +1021,10 @@ export function TeamRunGraphCanvas({
       payload: { includeUpstreamResult: true },
       kind: 'projection',
     };
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      edges: [...effectiveGraph.edges, nextEdge],
-    });
-    setSelectedEdgeId(nextEdge.edgeId);
-    setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
+    if (await submitGraphPatch([{ op: 'add_edge', edge: graphPatchEdge(nextEdge) }])) {
+      setSelectedEdgeId(nextEdge.edgeId);
+      setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
+    }
   };
 
   const copyTextToClipboard = async (value: string, onCopied: (copied: boolean) => void): Promise<void> => {
@@ -1051,18 +1074,14 @@ export function TeamRunGraphCanvas({
         path: normalizedWebhookPath,
         ...(normalizedPublicBaseUrl ? { publicBaseUrl: normalizedPublicBaseUrl } : {}),
       };
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      nodes: effectiveGraph.nodes.map((node) => node.nodeId === selectedNode.nodeId
-        ? {
-          ...node,
-          title: nodeTitle.trim() || undefined,
-          config: { ...(node.config ?? {}), trigger },
-        }
-        : node),
+    const nextNode = graphPatchNode({
+      ...selectedNode,
+      title: nodeTitle.trim() || undefined,
+      config: { ...(selectedNode.config ?? {}), trigger },
     });
-    setConfigurationSheet(null);
+    if (await submitGraphPatch([{ op: 'replace_node', node: nextNode }])) {
+      setConfigurationSheet(null);
+    }
   };
 
   const handleSaveNode = async (): Promise<void> => {
@@ -1132,65 +1151,50 @@ export function TeamRunGraphCanvas({
       }
     }
 
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      nodes: effectiveGraph.nodes.map((node) => node.nodeId === selectedNode.nodeId
-        ? {
-          ...node,
-          title: nodeTitle.trim() || undefined,
-          roleId: nextRoleId,
-          executor: hasRecordEntries(nextExecutor) ? nextExecutor : undefined,
-          config: hasRecordEntries(nextConfig) ? nextConfig : undefined,
-        }
-        : node),
+    const nextNode = graphPatchNode({
+      ...selectedNode,
+      title: nodeTitle.trim() || undefined,
+      roleId: nextRoleId,
+      executor: hasRecordEntries(nextExecutor) ? nextExecutor : undefined,
+      config: hasRecordEntries(nextConfig) ? nextConfig : undefined,
     });
-    setConfigurationSheet(null);
+    if (await submitGraphPatch([{ op: 'replace_node', node: nextNode }])) {
+      setConfigurationSheet(null);
+    }
   };
 
   const handleSaveEdge = async (): Promise<void> => {
     if (!selectedEdge) return;
     const nextSourcePort = edgeSourcePort.trim() || defaultSourcePortForNode(selectedEdgeSourceNode ?? { nodeId: selectedEdge.sourceNodeId, kind: 'work' });
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      edges: effectiveGraph.edges.map((edge) => edge.edgeId === selectedEdge.edgeId
-        ? {
-          ...edge,
-          sourcePort: nextSourcePort,
-          targetPort: edgeTargetPort.trim() || defaultTargetPortForNode(),
-          edgeType: edgeType.trim() || defaultEdgeTypeForSourcePort(nextSourcePort),
-          kind: edge.kind ?? 'projection',
-          label: edgeLabel.trim() || undefined,
-          action: edgeAction,
-          payload: { includeUpstreamResult: edgeIncludeUpstreamResult },
-        }
-        : edge),
+    const nextEdge = graphPatchEdge({
+      ...selectedEdge,
+      sourcePort: nextSourcePort,
+      targetPort: edgeTargetPort.trim() || defaultTargetPortForNode(),
+      edgeType: edgeType.trim() || defaultEdgeTypeForSourcePort(nextSourcePort),
+      kind: selectedEdge.kind ?? 'projection',
+      label: edgeLabel.trim() || undefined,
+      action: edgeAction,
+      payload: { includeUpstreamResult: edgeIncludeUpstreamResult },
     });
-    setConfigurationSheet(null);
+    if (await submitGraphPatch([{ op: 'replace_edge', edge: nextEdge }])) {
+      setConfigurationSheet(null);
+    }
   };
 
   const handleDeleteNode = async (): Promise<void> => {
     if (!selectedNode) return;
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      nodes: effectiveGraph.nodes.filter((node) => node.nodeId !== selectedNode.nodeId),
-      edges: effectiveGraph.edges.filter((edge) => edge.sourceNodeId !== selectedNode.nodeId && edge.targetNodeId !== selectedNode.nodeId),
-    });
-    setSelectedNodeId(null);
-    setConfigurationSheet(null);
+    if (await submitGraphPatch([{ op: 'remove_node', nodeId: selectedNode.nodeId }])) {
+      setSelectedNodeId(null);
+      setConfigurationSheet(null);
+    }
   };
 
   const handleDeleteEdge = async (): Promise<void> => {
     if (!selectedEdge) return;
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      edges: effectiveGraph.edges.filter((edge) => edge.edgeId !== selectedEdge.edgeId),
-    });
-    setSelectedEdgeId(null);
-    setConfigurationSheet(null);
+    if (await submitGraphPatch([{ op: 'remove_edge', edgeId: selectedEdge.edgeId }])) {
+      setSelectedEdgeId(null);
+      setConfigurationSheet(null);
+    }
   };
 
   const handleAddNode = async (kind: TeamGraphCanvasNodeKind): Promise<void> => {
@@ -1207,23 +1211,13 @@ export function TeamRunGraphCanvas({
       ...(kind === 'work' ? { taskId: nodeId } : {}),
       executor: defaultExecutorForNode(kind),
       config: defaultConfigForNode(kind, paletteItem.title),
-      metadata: { position },
     };
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      nodes: [...effectiveGraph.nodes, node],
-    });
-    setSelectedNodeId(nodeId);
+    if (await submitGraphPatch([{ op: 'add_node', node: graphPatchNode(node) }])) {
+      setDraftPositions((current) => ({ ...current, [nodeId]: position }));
+      setSelectedNodeId(nodeId);
+    }
   };
 
-  const persistNodePosition = async (nodeId: string, x: number, y: number): Promise<void> => {
-    await saveGraphProjection({
-      ...effectiveGraph,
-      updatedAt: Date.now(),
-      nodes: effectiveGraph.nodes.map((node) => node.nodeId === nodeId ? writeNodePosition(node, x, y) : node),
-    });
-  };
 
   const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
     if (event.button !== 0) return;
@@ -1260,7 +1254,6 @@ export function TeamRunGraphCanvas({
     if (finishedDrag.moved) {
       suppressClickNodeIdRef.current = finishedDrag.nodeId;
       window.setTimeout(() => { suppressClickNodeIdRef.current = null; }, 0);
-      void persistNodePosition(finishedDrag.nodeId, finishedDrag.currentX, finishedDrag.currentY);
     }
   };
 

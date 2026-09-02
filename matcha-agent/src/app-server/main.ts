@@ -36,13 +36,16 @@ import {
 import { ClientHub } from './transport/clientHub.js'
 import type { AppServerPorts } from './transport/ports.js'
 import { WsServer } from './transport/wsServer.js'
-import type { WorkerProcessSpawn } from './workers/workerProcess.js'
+import {
+  createWorkerProcessEnvironment,
+  type WorkerProcessSpawn,
+} from './workers/workerProcess.js'
 import {
   classifyWorkerInitializationError,
   workerError,
   WorkerSupervisor,
 } from './workers/workerSupervisor.js'
-import { logProcessSessionTrace } from '../query/runTrace.js'
+import { isRunTraceEnabled, logProcessSessionTrace } from '../query/runTrace.js'
 import {
   listSessionHistorySummaries,
   loadSessionHistorySummary,
@@ -53,6 +56,9 @@ import {
 const SESSION_HISTORY_LIST_LIMIT = 200
 const SESSION_TRANSCRIPT_MAX_LINES = 10_000
 const WORKER_SHUTDOWN_TIMEOUT_MS = 2_000
+function workerProcessEnvironment(): NodeJS.ProcessEnv {
+  return createWorkerProcessEnvironment()
+}
 
 function providerRuntimeTraceDetails(
   providerRuntime: ProviderRuntimeConfig | undefined,
@@ -203,6 +209,7 @@ export function createDefaultAppServerServices(options: {
   const workerSupervisor = new WorkerSupervisor({
     command: options.config.workerCommand,
     args: options.config.workerArgs,
+    env: workerProcessEnvironment(),
     requestTimeoutMs: options.config.workerReadyTimeoutMs,
     heartbeatTimeoutMs: options.config.workerHeartbeatTimeoutMs,
     shutdownTimeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
@@ -455,6 +462,8 @@ export function createDefaultAppServerServices(options: {
 
     let worker: Awaited<ReturnType<WorkerSupervisor['ensureWorker']>>
     const providerRuntime = providerRuntimeBySessionId.get(loaded.sessionId)
+    const workerAlreadyRunning =
+      workerSupervisor.getWorker(loaded.sessionId) !== undefined
     logProcessSessionTrace(
       'matcha-agent-app-server',
       'app-server.worker.ensure.start',
@@ -490,11 +499,28 @@ export function createDefaultAppServerServices(options: {
 
     const started = runCoordinator.startNext(sessionId, worker.workerId)
     if (started.resultType !== 'started') return
+    const runId = started.queuedRun.run.runId
+    if (!workerAlreadyRunning && isRunTraceEnabled()) {
+      await appendEvent(
+        sessionId,
+        {
+          type: 'run.trace',
+          runId,
+          workerId: worker.workerId,
+          stage: 'worker.session.initialize.model',
+          details: {
+            model: loaded.model ?? null,
+            ...providerRuntimeTraceDetails(providerRuntime),
+          },
+        },
+        { runId, workerId: worker.workerId },
+      )
+    }
 
     sessionRegistry.updateWorkerState(sessionId, {
       state: 'running',
       workerId: worker.workerId,
-      runId: started.queuedRun.run.runId,
+      runId,
       startedAt:
         started.queuedRun.run.status.type === 'running'
           ? started.queuedRun.run.status.startedAt
@@ -504,7 +530,7 @@ export function createDefaultAppServerServices(options: {
       const response = await workerSupervisor.send(sessionId, {
         id: crypto.randomUUID(),
         type: 'session.prompt',
-        runId: started.queuedRun.run.runId,
+        runId,
         prompt: started.queuedRun.prompt,
         ...(started.queuedRun.payload !== undefined
           ? { payload: started.queuedRun.payload }
@@ -519,7 +545,7 @@ export function createDefaultAppServerServices(options: {
       )
       await failWorkerOwnedRun(
         sessionId,
-        started.queuedRun.run.runId,
+        runId,
         worker.workerId,
         response.error,
       )
@@ -531,7 +557,7 @@ export function createDefaultAppServerServices(options: {
       )
       await failWorkerOwnedRun(
         sessionId,
-        started.queuedRun.run.runId,
+        runId,
         worker.workerId,
         workerError(error),
       )
@@ -642,6 +668,10 @@ export function createDefaultAppServerServices(options: {
     return sessionRegistry.upsert(historySessionRecord(historySession))
   }
 
+  function currentSessionLastSeq(sessionId: string): Promise<number> {
+    return eventStore.latestSeq(sessionId)
+  }
+
   async function ensureSessionExists(
     sessionId: string,
   ): Promise<SessionRecord> {
@@ -744,15 +774,6 @@ export function createDefaultAppServerServices(options: {
       load: async params => {
         const session = await loadSessionForRead(params.sessionId)
         if (!session) throw new Error(`Session not found: ${params.sessionId}`)
-        if (session.lastSeq > 0) {
-          await appendEvent(session.sessionId, {
-            type: 'session.loaded',
-            session,
-          })
-          return loadSessionRuntimeState(session.sessionId).then(
-            loaded => loaded ?? session,
-          )
-        }
         return session
       },
       list: async () => {
@@ -853,63 +874,40 @@ export function createDefaultAppServerServices(options: {
             workerId: worker.workerId,
             reason: 'cancel',
           })
-          await appendEvent(
-            params.sessionId,
-            { type: 'run.cancelRequested', runId: params.runId, reason },
-            { runId: params.runId, workerId: worker.workerId },
-          )
+          for (const runId of workerOwnedRunIds) {
+            await appendEvent(
+              params.sessionId,
+              { type: 'run.cancelRequested', runId, reason },
+              { runId, workerId: worker.workerId },
+            )
+          }
         }
 
         let workerResponse: WorkerResponse
         if (workerOwnedRunIds.length > 0 && worker) {
+          const workerCancelRunId =
+            params.runId ??
+            (workerOwnedRunIds.length === 1 ? workerOwnedRunIds[0] : undefined)
           try {
             workerResponse = await workerSupervisor.send(params.sessionId, {
               id: crypto.randomUUID(),
               type: 'session.cancel',
-              runId: params.runId,
+              runId: workerCancelRunId,
               reason,
             })
-            if (workerResponse.ok) {
-              cancelledRunIds.push(
-                ...(await cancelWorkerOwnedRuns(
-                  params.sessionId,
-                  workerOwnedRunIds,
-                  worker.workerId,
-                  reason,
-                )),
-              )
-              updateSessionWorkerReadyState(
-                sessionRegistry,
-                workerSupervisor,
-                params.sessionId,
-                worker.workerId,
-              )
-            } else {
-              markWorkerUnavailable(params.sessionId, worker.workerId)
-              workerSupervisor.killSession(
-                params.sessionId,
-                `worker cancel request failed for session ${params.sessionId}`,
-              )
-              cancelledRunIds.push(
-                ...(await cancelWorkerOwnedRuns(
-                  params.sessionId,
-                  workerOwnedRunIds,
-                  worker.workerId,
-                  reason,
-                )),
-              )
-            }
           } catch (error) {
-            markWorkerUnavailable(params.sessionId, worker.workerId)
-            workerSupervisor.killSession(
-              params.sessionId,
-              `worker cancel request failed for session ${params.sessionId}`,
-            )
             workerResponse = {
               id: '',
               ok: false as const,
               error: workerError(error),
             }
+          }
+          if (!workerResponse.ok) {
+            markWorkerUnavailable(params.sessionId, worker.workerId)
+            workerSupervisor.killSession(
+              params.sessionId,
+              `worker cancel request failed for session ${params.sessionId}`,
+            )
             cancelledRunIds.push(
               ...(await cancelWorkerOwnedRuns(
                 params.sessionId,
@@ -930,7 +928,9 @@ export function createDefaultAppServerServices(options: {
             },
           }
         }
-        scheduleDrain(params.sessionId)
+        if (!(workerOwnedRunIds.length > 0 && workerResponse.ok)) {
+          scheduleDrain(params.sessionId)
+        }
         return { cancelledRunIds, workerResponse }
       },
       snapshot: async params => {
@@ -948,20 +948,76 @@ export function createDefaultAppServerServices(options: {
       },
     },
     events: {
-      replay: params =>
-        eventStore
-          .replay(params.sessionId, {
-            afterSeq: params.afterSeq,
-            limit: params.limit,
-          })
-          .then(events => ({ events })),
-      subscribe: (clientId, params) => {
-        if (clientId === undefined) return { resultType: 'clientRequired' }
-        return options.clientHub.subscribe(
-          clientId,
-          params.sessionId,
-          params.afterSeq,
+      replay: async params => {
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'app-server.events.replay.start',
+          {
+            sessionIdLength: params.sessionId.length,
+            afterSeq: params.afterSeq ?? null,
+            limit: params.limit ?? null,
+          },
         )
+        const events = await eventStore.replay(params.sessionId, {
+          afterSeq: params.afterSeq,
+          limit: params.limit,
+        })
+        const lastEvent =
+          events.length > 0 ? events[events.length - 1] : undefined
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'app-server.events.replay.ready',
+          {
+            sessionIdLength: params.sessionId.length,
+            afterSeq: params.afterSeq ?? null,
+            eventCount: events.length,
+            lastSeq: lastEvent?.seq ?? null,
+          },
+        )
+        return { events }
+      },
+      subscribe: async (clientId, params) => {
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'app-server.events.subscribe.start',
+          {
+            sessionIdLength: params.sessionId.length,
+            clientPresent: clientId !== undefined,
+            clientIdLength: clientId?.length ?? 0,
+            afterSeq: params.afterSeq ?? null,
+          },
+        )
+        if (clientId === undefined) {
+          logProcessSessionTrace(
+            'matcha-agent-app-server',
+            'app-server.events.subscribe.ready',
+            {
+              resultType: 'clientRequired',
+            },
+          )
+          return { resultType: 'clientRequired' }
+        }
+        const lastSeq = await currentSessionLastSeq(params.sessionId)
+        const subscribed = options.clientHub.subscribe({
+          clientId,
+          sessionId: params.sessionId,
+          ...(params.afterSeq !== undefined
+            ? { afterSeq: params.afterSeq }
+            : {}),
+          lastSeq,
+        })
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'app-server.events.subscribe.ready',
+          {
+            resultType: subscribed.resultType,
+            lastSeq:
+              subscribed.resultType === 'subscribed'
+                ? subscribed.lastSeq
+                : null,
+          },
+        )
+        return subscribed
       },
     },
     approval: {
@@ -981,6 +1037,7 @@ export function createDefaultAppServerServices(options: {
       {
         sessionIdLength: params.sessionId.length,
         model: params.model,
+        modelSelectionIdLength: params.modelSelectionId?.length ?? 0,
         providerFingerprintLength: params.providerFingerprint?.length ?? 0,
         ...providerRuntimeTraceDetails(params.providerRuntime),
       },
@@ -1017,6 +1074,7 @@ export function createDefaultAppServerServices(options: {
       )
     }
 
+    const modelSelectionId = params.modelSelectionId?.trim() || undefined
     const providerFingerprint = params.providerFingerprint?.trim() || undefined
     const providerRuntime = params.providerRuntime
     const sameProvider = loaded.providerFingerprint === providerFingerprint
@@ -1036,6 +1094,7 @@ export function createDefaultAppServerServices(options: {
         sameProvider,
         sameProviderRuntime,
         action,
+        modelSelectionIdLength: modelSelectionId?.length ?? 0,
         providerFingerprintLength: providerFingerprint?.length ?? 0,
         ...providerRuntimeTraceDetails(providerRuntime),
       },
@@ -1043,6 +1102,7 @@ export function createDefaultAppServerServices(options: {
     const updated = sessionRegistry.update(params.sessionId, session => ({
       ...session,
       model: params.model,
+      modelSelectionId,
       providerFingerprint,
       updatedAt: new Date().toISOString(),
     }))
@@ -1079,6 +1139,7 @@ export function createDefaultAppServerServices(options: {
       {
         sessionIdLength: params.sessionId.length,
         model: updated.session.model ?? null,
+        modelSelectionIdLength: updated.session.modelSelectionId?.length ?? 0,
         action,
       },
     )

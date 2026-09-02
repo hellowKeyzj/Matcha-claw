@@ -4,12 +4,18 @@ import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { decodeFileHintHref } from './md-pipeline';
+import { useLargeTextContent } from './large-text-loader';
+import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionLargeTextMetadata } from '../../types/session/tool-card';
 
 interface AssistantMessageBodyProps {
   itemKey: string;
   createdAt?: number;
   text: string;
   isStreaming: boolean;
+  largeText?: SessionLargeTextMetadata;
+  sessionIdentity?: SessionIdentity;
+  endpointSessionId?: string | null;
   onBodyClick?: () => void;
 }
 
@@ -28,20 +34,24 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
   createdAt,
   text,
   isStreaming,
+  largeText,
+  sessionIdentity,
+  endpointSessionId,
   onBodyClick,
 }: AssistantMessageBodyProps) {
+  const largeTextContent = useLargeTextContent({ initialText: text, largeText, sessionIdentity, endpointSessionId });
   const markdownHtml = useMemo(() => {
-    if (!text.trim()) {
+    if (!largeTextContent.text.trim()) {
       return null;
     }
     return getOrBuildAssistantMarkdownBody({
       key: itemKey,
       role: 'assistant',
       createdAt,
-      text,
+      text: largeTextContent.text,
       attachedFiles: [],
     } as never)?.fullHtml ?? null;
-  }, [createdAt, itemKey, text]);
+  }, [createdAt, itemKey, largeTextContent.text]);
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
       return;
@@ -94,22 +104,23 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
         'relative',
       )}
     >
-      <div className="text-[14px] leading-[1.72] text-foreground">
+      <div className="chat-markdown text-[14px] leading-[1.68] text-foreground">
         {!markdownHtml && (
           <p
-            className="whitespace-pre-wrap break-words text-[14px] leading-[1.72] text-foreground"
+            className="m-0 whitespace-pre-wrap break-words"
             onClick={handleBodyClick}
           >
-            {text}
+            {largeTextContent.text}
           </p>
         )}
         {markdownHtml ? (
           <div
-            className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-[18px] prose-pre:border prose-pre:border-border/45 prose-pre:bg-background/88 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/60 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/75 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
+            className="chat-markdown max-w-none break-words"
             onClick={handleMarkdownBodyClick}
             dangerouslySetInnerHTML={{ __html: markdownHtml }}
           />
         ) : null}
+        {largeTextContent.loadMoreButton}
       </div>
     </div>
   );

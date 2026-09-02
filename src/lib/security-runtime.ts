@@ -40,8 +40,8 @@ export type SecurityPolicyReceipt = Readonly<{
   }>;
 }>;
 
-export async function hostSecurityReadPolicy<TPolicy = unknown>() {
-  return await hostApiFetch<TPolicy>('/api/security');
+export async function hostSecurityReadPolicy<TPolicy = unknown>(options?: { traceId?: string | null }) {
+  return await hostApiFetch<TPolicy>('/api/security', { traceId: options?.traceId });
 }
 
 export async function hostSecurityWritePolicy(policy: unknown): Promise<SecurityPolicyReceipt> {

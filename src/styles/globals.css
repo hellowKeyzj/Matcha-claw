@@ -189,72 +189,261 @@
 }
 
 /* Prose styling for markdown */
-.prose {
-  line-height: 1.6;
+.prose,
+.chat-markdown {
+  --chat-markdown-color: hsl(var(--foreground));
+  --chat-markdown-font-size: 0.875rem;
+  --chat-markdown-line-height: 1.68;
+  color: var(--chat-markdown-color);
+  font-size: var(--chat-markdown-font-size);
+  line-height: var(--chat-markdown-line-height);
 }
 
-.prose p {
-  margin-bottom: 0.75em;
+.chat-markdown-sm {
+  --chat-markdown-font-size: 0.75rem;
+  --chat-markdown-line-height: 1.55;
 }
 
-.prose p:last-child {
+.chat-markdown-muted {
+  --chat-markdown-color: hsl(var(--muted-foreground));
+}
+
+.prose > :first-child,
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+
+.prose > :last-child,
+.chat-markdown > :last-child {
   margin-bottom: 0;
 }
 
+.prose p,
+.chat-markdown p {
+  margin: 0.62em 0;
+  text-wrap: pretty;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6,
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 {
+  margin: 1.1em 0 0.45em;
+  color: var(--chat-markdown-color);
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.24;
+  text-wrap: balance;
+}
+
+.prose h1,
+.chat-markdown h1 {
+  font-size: 1.5rem;
+}
+
+.prose h2,
+.chat-markdown h2 {
+  font-size: 1.28rem;
+}
+
+.prose h3,
+.chat-markdown h3 {
+  font-size: 1.13rem;
+}
+
+.prose h4,
+.chat-markdown h4 {
+  font-size: 1rem;
+}
+
+.prose h5,
+.prose h6,
+.chat-markdown h5,
+.chat-markdown h6 {
+  font-size: 0.94rem;
+}
+
+.chat-markdown-sm h1 {
+  font-size: 0.95rem;
+}
+
+.chat-markdown-sm h2,
+.chat-markdown-sm h3,
+.chat-markdown-sm h4,
+.chat-markdown-sm h5,
+.chat-markdown-sm h6 {
+  font-size: 0.84rem;
+}
+
+.prose a,
+.chat-markdown a {
+  color: hsl(var(--ring));
+  font-weight: 500;
+  text-decoration-color: hsl(var(--ring) / 0.28);
+  text-underline-offset: 0.18em;
+}
+
+.prose a:hover,
+.chat-markdown a:hover {
+  text-decoration-color: hsl(var(--ring) / 0.68);
+}
+
 .prose ul,
-.prose ol {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
-  padding-left: 1.5em;
+.chat-markdown ul {
+  list-style: disc outside;
 }
 
-.prose li {
-  margin-bottom: 0.25em;
+.prose ol,
+.chat-markdown ol {
+  list-style: decimal outside;
 }
 
-.prose pre {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+.prose ul,
+.prose ol,
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.55em 0 0.8em;
+  padding-left: 1.35em;
+}
+
+.prose li,
+.chat-markdown li {
+  margin: 0.24em 0;
+  padding-left: 0.12em;
+}
+
+.prose li::marker,
+.chat-markdown li::marker {
+  color: var(--chat-markdown-color);
+}
+
+.prose li > p,
+.chat-markdown li > p {
+  margin: 0.24em 0;
+}
+
+.prose code,
+.chat-markdown code {
+  border: 1px solid hsl(var(--border) / 0.52);
+  border-radius: 0.42rem;
+  background: hsl(var(--muted) / 0.58);
+  padding: 0.08rem 0.32rem;
+  color: hsl(var(--foreground));
+  font-size: 0.92em;
+}
+
+.prose pre,
+.chat-markdown pre {
+  margin: 0.8em 0;
   max-width: 100%;
   overflow-x: auto;
+  border: 1px solid hsl(var(--border) / 0.58);
+  border-radius: 1rem;
+  background: hsl(var(--muted) / 0.42);
+  padding: 0.85rem 1rem;
+  color: hsl(var(--foreground) / 0.92);
+  font-size: 0.82rem;
+  line-height: 1.58;
   white-space: pre;
   overflow-wrap: normal;
   word-break: normal;
 }
 
-.prose pre code {
+.prose pre code,
+.chat-markdown pre code {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
   white-space: inherit;
   overflow-wrap: inherit;
   word-break: inherit;
 }
 
-.prose blockquote {
-  border-left: 3px solid hsl(var(--border));
-  padding-left: 1em;
-  margin: 0.5em 0;
-  color: hsl(var(--muted-foreground));
+.prose blockquote,
+.chat-markdown blockquote {
+  margin: 0.85em 0;
+  border: 1px solid hsl(var(--border) / 0.58);
+  border-radius: 0.95rem;
+  background: hsl(var(--muted) / 0.28);
+  padding: 0.72rem 0.9rem;
+  color: hsl(var(--foreground) / 0.82);
 }
 
-.prose table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.5em 0;
+.prose blockquote > :first-child,
+.chat-markdown blockquote > :first-child {
+  margin-top: 0;
+}
+
+.prose blockquote > :last-child,
+.chat-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.prose table,
+.chat-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0.85em 0;
+  border: 1px solid hsl(var(--border) / 0.64);
+  border-radius: 0.9rem;
 }
 
 .prose th,
-.prose td {
-  border: 1px solid hsl(var(--border));
-  padding: 0.5em;
+.prose td,
+.chat-markdown th,
+.chat-markdown td {
+  border-right: 1px solid hsl(var(--border) / 0.54);
+  border-bottom: 1px solid hsl(var(--border) / 0.54);
+  padding: 0.56rem 0.72rem;
   text-align: left;
+  vertical-align: top;
 }
 
-.prose th {
-  background: transparent;
-  font-weight: 700;
+.prose th:last-child,
+.prose td:last-child,
+.chat-markdown th:last-child,
+.chat-markdown td:last-child {
+  border-right: 0;
 }
 
-.dark .prose th {
-  background: hsl(var(--muted));
+.prose tr:last-child td,
+.chat-markdown tr:last-child td {
+  border-bottom: 0;
+}
+
+.prose th,
+.chat-markdown th {
+  background: hsl(var(--muted) / 0.42);
+  font-weight: 650;
+}
+
+.prose hr,
+.chat-markdown hr {
+  margin: 1rem 0;
+  border: 0;
+  border-top: 1px solid hsl(var(--border) / 0.64);
+}
+
+.prose .katex-display,
+.chat-markdown .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2rem 0;
 }
 
 /* Chat pending indicator animation */

@@ -3,6 +3,7 @@ import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta
 import { openaiAdapter } from 'src/services/providerUsage/adapters/openai.js'
 import { updateProviderBuckets } from 'src/services/providerUsage/store.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
+import type { RunTraceSink } from '../../../query/runTrace.js'
 import { getValidChatGPTAuth } from './chatgptAuth.js'
 
 type ResponsesInputItem = Record<string, unknown>
@@ -26,6 +27,18 @@ type AnthropicUsage = {
   output_tokens: number
   cache_creation_input_tokens: number
   cache_read_input_tokens: number
+}
+
+type ResponsesTraceContext = {
+  trace: RunTraceSink | undefined
+  startedAt: number
+  provider: 'openai'
+  wireProtocol: 'chatCompletions' | 'responses'
+  transport:
+    | 'openai-chat-completions'
+    | 'openai-responses'
+    | 'chatgpt-responses'
+  model: string
 }
 
 const DEFAULT_OPENAI_RESPONSES_BASE_URL = 'https://api.openai.com/v1'
@@ -201,15 +214,31 @@ export function buildResponsesRequest(params: {
 
 async function* parseSSE(
   response: Response,
+  traceContext?: ResponsesTraceContext,
 ): AsyncGenerator<Record<string, unknown>, void> {
   if (!response.body)
     throw new Error('OpenAI Responses API response did not include a body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let bodyChunkCount = 0
+  let rawFrameCount = 0
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
+    bodyChunkCount++
+    if (bodyChunkCount === 1) {
+      traceContext?.trace?.('api.stream.first_chunk', {
+        provider: traceContext.provider,
+        wireProtocol: traceContext.wireProtocol,
+        transport: traceContext.transport,
+        phase: 'raw-body',
+        model: traceContext.model,
+        elapsedMs: Date.now() - traceContext.startedAt,
+        rawChunkBytes: value.byteLength,
+        bodyChunkCount,
+      })
+    }
     buffer += decoder.decode(value, { stream: true })
     let splitAt = buffer.indexOf('\n\n')
     while (splitAt >= 0) {
@@ -223,12 +252,39 @@ async function* parseSSE(
       if (data && data !== '[DONE]') {
         const parsed = JSON.parse(data) as unknown
         if (parsed && typeof parsed === 'object') {
-          yield parsed as Record<string, unknown>
+          rawFrameCount++
+          const event = parsed as Record<string, unknown>
+          if (rawFrameCount === 1) {
+            traceContext?.trace?.('api.stream.first_chunk', {
+              provider: traceContext.provider,
+              wireProtocol: traceContext.wireProtocol,
+              transport: traceContext.transport,
+              phase: 'raw-frame',
+              model: traceContext.model,
+              elapsedMs: Date.now() - traceContext.startedAt,
+              rawEventType:
+                typeof event.type === 'string' ? event.type : 'unknown',
+              rawFrameCount,
+              bodyChunkCount,
+            })
+          }
+          yield event
         }
       }
       splitAt = buffer.indexOf('\n\n')
     }
   }
+  traceContext?.trace?.('api.stream.loop.end', {
+    provider: traceContext.provider,
+    wireProtocol: traceContext.wireProtocol,
+    transport: traceContext.transport,
+    phase: 'raw-body',
+    model: traceContext.model,
+    elapsedMs: Date.now() - traceContext.startedAt,
+    rawFrameCount,
+    bodyChunkCount,
+    rawDone: true,
+  })
 }
 
 function extractUsage(
@@ -456,6 +512,7 @@ export async function createOpenAIResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
+  traceContext?: ResponsesTraceContext
 }): Promise<AsyncIterable<Record<string, unknown>>> {
   const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
   const response = await fetchFn(
@@ -486,13 +543,14 @@ export async function createOpenAIResponsesStream(params: {
       `OpenAI Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
     )
   }
-  return parseSSE(response)
+  return parseSSE(response, params.traceContext)
 }
 
 export async function createChatGPTResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
+  traceContext?: ResponsesTraceContext
 }): Promise<AsyncIterable<Record<string, unknown>>> {
   const auth = await getValidChatGPTAuth()
   const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
@@ -523,5 +581,5 @@ export async function createChatGPTResponsesStream(params: {
       `ChatGPT Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
     )
   }
-  return parseSSE(response)
+  return parseSSE(response, params.traceContext)
 }

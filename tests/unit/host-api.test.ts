@@ -242,6 +242,25 @@ describe('host-api', () => {
     expect(invokeIpcMock).not.toHaveBeenCalled();
   });
 
+  it('hostWorkspaceMediaThumbnail accepts only outgoing Gateway media URLs', async () => {
+    mockWorkspaceCapabilityExecute({ preview: 'data:image/svg+xml;base64,PHN2Zw==', fileSize: 6 });
+
+    const { hostWorkspaceMediaThumbnail } = await import('@/lib/host-api');
+    await expect(hostWorkspaceMediaThumbnail({
+      gatewayUrl: 'https://gateway.local/api/chat/media/outgoing/agent%3Adefault%3Amain/attachment-1/full',
+      mimeType: 'image/svg+xml',
+      agentId: 'default',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: 'data:image/svg+xml;base64,PHN2Zw==', fileSize: 6 });
+    await expect(hostWorkspaceMediaThumbnail({
+      gatewayUrl: 'https://gateway.local/media/attachment-1.svg',
+      mimeType: 'image/svg+xml',
+      agentId: 'default',
+      sessionIdentity: testSessionIdentity,
+    })).resolves.toEqual({ preview: null, fileSize: 0, error: 'invalidPath' });
+    expect(invokeIpcMock).toHaveBeenCalledTimes(1);
+  });
+
   it('hostFileThumbnail converts an in-workspace absolute path without transporting it', async () => {
     mockWorkspaceCapabilityExecute({
       preview: 'data:image/png;base64,YWJj',

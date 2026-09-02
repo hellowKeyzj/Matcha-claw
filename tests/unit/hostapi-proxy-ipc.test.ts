@@ -10,6 +10,7 @@ const hoisted = vi.hoisted(() => {
     proxyAwareFetchMock: vi.fn(),
     getHostApiBaseUrlMock: vi.fn(() => 'http://127.0.0.1:13210'),
     getHostApiTokenMock: vi.fn(() => 'host-api-token'),
+    waitForHostApiReadyMock: vi.fn(async () => undefined),
     handleE2EHostApiFetchMock: vi.fn(),
   };
 });
@@ -25,6 +26,7 @@ vi.mock('../../electron/utils/proxy-fetch', () => ({
 vi.mock('../../electron/api/server', () => ({
   getHostApiBaseUrl: () => hoisted.getHostApiBaseUrlMock(),
   getHostApiToken: () => hoisted.getHostApiTokenMock(),
+  waitForHostApiReady: () => hoisted.waitForHostApiReadyMock(),
 }));
 vi.mock('../../electron/main/e2e-fixture-loader', () => ({
   handleE2EHostApiFetch: (...args: unknown[]) => hoisted.handleE2EHostApiFetchMock(...args),
@@ -36,6 +38,9 @@ describe('host API IPC boundary', () => {
     vi.resetModules();
     vi.clearAllMocks();
     hoisted.handlers.clear();
+    hoisted.getHostApiBaseUrlMock.mockReturnValue('http://127.0.0.1:13210');
+    hoisted.getHostApiTokenMock.mockReturnValue('host-api-token');
+    hoisted.waitForHostApiReadyMock.mockResolvedValue(undefined);
     hoisted.handleE2EHostApiFetchMock.mockResolvedValue(null);
   });
 
@@ -126,6 +131,90 @@ describe('host API IPC boundary', () => {
         },
       }),
     );
+  });
+
+  it('waits for Host API readiness before reading loopback credentials', async () => {
+    let resolveReady!: () => void;
+    hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>((resolve) => { resolveReady = resolve; }));
+    hoisted.proxyAwareFetchMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => ({ ready: true })),
+    });
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const resultPromise = handler?.({}, {
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+    });
+    await Promise.resolve();
+
+    expect(hoisted.waitForHostApiReadyMock).toHaveBeenCalledOnce();
+    expect(hoisted.getHostApiBaseUrlMock).not.toHaveBeenCalled();
+    expect(hoisted.getHostApiTokenMock).not.toHaveBeenCalled();
+    expect(hoisted.proxyAwareFetchMock).not.toHaveBeenCalled();
+
+    resolveReady();
+    const result = await resultPromise;
+
+    expect(result).toEqual({
+      ok: true,
+      data: { status: 200, ok: true, json: { ready: true } },
+    });
+    expect(hoisted.proxyAwareFetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:13210/api/diagnostics/memory',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('classifies renderer abort while waiting for Host API readiness', async () => {
+    hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const fetchHandler = hoisted.handlers.get('hostapi:fetch');
+    const abortHandler = hoisted.handlers.get('hostapi:abort');
+    const resultPromise = fetchHandler?.({}, {
+      requestId: 'request-before-ready',
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+    });
+    await Promise.resolve();
+
+    const abortResult = await abortHandler?.({}, { requestId: 'request-before-ready' });
+    const result = await resultPromise;
+
+    expect(abortResult).toEqual({ ok: true });
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'ABORTED' },
+    });
+    expect(hoisted.proxyAwareFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('classifies timeout while waiting for Host API readiness', async () => {
+    vi.useFakeTimers();
+    hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
+    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    registerHostApiProxyHandlers();
+
+    const handler = hoisted.handlers.get('hostapi:fetch');
+    const resultPromise = handler?.({}, {
+      path: '/api/diagnostics/memory',
+      method: 'GET',
+      timeoutMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await resultPromise;
+
+    expect(result).toEqual({
+      ok: false,
+      error: { message: 'Host API request is unavailable.', code: 'TIMEOUT' },
+    });
+    expect(hoisted.proxyAwareFetchMock).not.toHaveBeenCalled();
   });
 
   it('rejects unimplemented methods before the proxy request', async () => {

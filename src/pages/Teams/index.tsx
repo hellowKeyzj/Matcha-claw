@@ -14,7 +14,6 @@ import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource, readLocalSk
 import {
   planTeamDependencies,
   validateTeamSkillPackage,
-  type ManualTeamMemberProvisionRecord,
   type TeamDependencyPlanItem,
   type TeamDependencyPreparationPlan,
 } from '@/services/openclaw/team-runtime-client';
@@ -28,7 +27,7 @@ import {
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore, type ManualTeamCandidate, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
+import { useTeamsStore, type ManualTeamCandidate, type ManualTeamMemberProvisionRecord, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 
@@ -44,6 +43,41 @@ type ManualMemberDraft = {
   agentId: string;
   isLeader: boolean;
 };
+
+type SealedTeamSkillPackage = TeamSkillCandidate['teamSkillPackage'];
+
+type SealedTeamSkillPackageValidationResult =
+  | { status: 'valid'; package: SealedTeamSkillPackage }
+  | { status: 'invalid' | 'unavailable' };
+
+function readSealedTeamSkillPackageValidationResult(value: unknown): SealedTeamSkillPackageValidationResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'unavailable' };
+  }
+  const validation = value as { status?: unknown; package?: unknown };
+  if (validation.status === 'valid' && validation.package && typeof validation.package === 'object' && !Array.isArray(validation.package)) {
+    const teamSkillPackage = validation.package as Record<string, unknown>;
+    if (
+      typeof teamSkillPackage.selectionId === 'string'
+      && typeof teamSkillPackage.name === 'string'
+      && typeof teamSkillPackage.version === 'string'
+      && teamSkillPackage.kind === 'team-skill'
+      && typeof teamSkillPackage.description === 'string'
+    ) {
+      return {
+        status: 'valid',
+        package: {
+          selectionId: teamSkillPackage.selectionId,
+          name: teamSkillPackage.name,
+          version: teamSkillPackage.version,
+          kind: 'team-skill',
+          description: teamSkillPackage.description,
+        },
+      };
+    }
+  }
+  return validation.status === 'invalid' ? { status: 'invalid' } : { status: 'unavailable' };
+}
 
 type CreateDialogPhase =
   | { type: 'editing_source' }
@@ -141,12 +175,10 @@ export function TeamsPage() {
   }));
   const manualLeaderCount = manualMembers.filter((member) => member.isLeader).length;
   const creatingManual = createDialogPhase.type === 'creating_manual';
-  const manualMembersHaveWorkspace = manualMembers.every((member) => agents.find((agent) => agent.id === member.agentId)?.workspace?.trim());
   const canCreateManualTeam = gatewayOperational
     && !creatingManual
     && manualMembers.length > 0
-    && manualLeaderCount === 1
-    && manualMembersHaveWorkspace;
+    && manualLeaderCount === 1;
   const review = createDialogPhase.type === 'review_ready'
     || createDialogPhase.type === 'installing_dependency'
     || createDialogPhase.type === 'importing_dependency'
@@ -257,9 +289,9 @@ export function TeamsPage() {
   };
 
   const buildReview = async (): Promise<TeamSkillReview> => {
-    const validation = await validateTeamSkillPackage({ packagePath });
-    if (!validation.valid || !validation.package) {
-      throw new Error(validation.errors.map((issue) => issue.message).join('; ') || t('create.invalidPackage'));
+    const validation = readSealedTeamSkillPackageValidationResult(await validateTeamSkillPackage({ packagePath }));
+    if (validation.status !== 'valid') {
+      throw new Error(t('create.invalidPackage'));
     }
     const candidate: TeamSkillCandidate = {
       displayName: teamName.trim() || validation.package.name,
@@ -777,7 +809,6 @@ export function TeamsPage() {
                         ) : visibleAgents.map((agent) => {
                           const selected = selectedAgentIds.has(agent.id);
                           const agentName = displayAgentName(agent);
-                          const hasWorkspace = Boolean(agent.workspace?.trim());
                           const description = agent.description?.trim();
                           return (
                             <div key={agent.id} className="flex items-center gap-3 rounded-2xl border border-border/80 bg-card p-3 transition-colors hover:bg-secondary/40">
@@ -798,7 +829,7 @@ export function TeamsPage() {
                                 size="icon"
                                 variant={selected ? 'outline' : 'secondary'}
                                 aria-label={t('create.manualSelectAgentAriaLabel', { agentName })}
-                                disabled={!hasWorkspace || creatingManual}
+                                disabled={creatingManual}
                                 onClick={() => toggleManualMember(agent, !selected)}
                                 className={selected ? 'h-9 w-9 rounded-full border-emerald-500/40 text-emerald-600' : 'h-9 w-9 rounded-full bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15'}
                               >

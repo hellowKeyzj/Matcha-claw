@@ -291,7 +291,8 @@ fn resolving_an_unknown_approval_fails_closed_without_creating_a_placeholder() {
 }
 
 #[test]
-fn approval_resolution_replays_only_the_exact_idempotency_receipt() {
+fn approval_resolution_replays_the_same_decision_note_and_cause_without_requiring_the_same_resolved_at()
+ {
     let mut approvals = vec![Approval::request(request("approval-01"))];
     resolve_approval(
         &mut approvals,
@@ -315,7 +316,7 @@ fn approval_resolution_replays_only_the_exact_idempotency_receipt() {
             stage_id: "stage-review".to_owned(),
             role_id: "role-lead".to_owned(),
             decision: ApprovalDecision::Approve,
-            resolved_at: 2_000,
+            resolved_at: 3_000,
             note: Some("Approved.".to_owned()),
             idempotency_key: "resolution-key".to_owned(),
         },
@@ -324,6 +325,7 @@ fn approval_resolution_replays_only_the_exact_idempotency_receipt() {
 
     assert_eq!(approvals[0].status(), ApprovalStatus::Approved);
     assert_eq!(approvals[0].resolutions().len(), 1);
+    assert_eq!(approvals[0].resolution().unwrap().resolved_at, 2_000);
     assert_eq!(
         resolve_approval(
             &mut approvals,
@@ -334,7 +336,23 @@ fn approval_resolution_replays_only_the_exact_idempotency_receipt() {
                 role_id: "role-lead".to_owned(),
                 decision: ApprovalDecision::Deny,
                 resolved_at: 3_000,
-                note: None,
+                note: Some("Approved.".to_owned()),
+                idempotency_key: "resolution-key".to_owned(),
+            },
+        ),
+        Err(ResolveApprovalError::ConflictingIdempotencyKey)
+    );
+    assert_eq!(
+        resolve_approval(
+            &mut approvals,
+            ApprovalResolutionInput {
+                approval_id: "approval-01".to_owned(),
+                run_id: "run-01".to_owned(),
+                stage_id: "stage-review".to_owned(),
+                role_id: "role-lead".to_owned(),
+                decision: ApprovalDecision::Approve,
+                resolved_at: 4_000,
+                note: Some("Changed note.".to_owned()),
                 idempotency_key: "resolution-key".to_owned(),
             },
         ),

@@ -68,6 +68,10 @@ export class EventStore {
     return replayed
   }
 
+  latestSeq(sessionId: string): Promise<number> {
+    return this.getLatestSeq(sessionId)
+  }
+
   private async appendAfterPrevious(
     sessionId: string,
     event: AppServerEvent,

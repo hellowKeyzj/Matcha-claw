@@ -1,5 +1,11 @@
 import { extractMessageText, isRecord } from './message-content';
 
+const assistantArtifactExtensions = 'html?|pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|svg|bmp|ts|tsx|js|jsx|json|txt|log';
+const assistantMediaArtifactPattern = String.raw`(?<![A-Za-z0-9/\\])MEDIA:(?:(?:https?:\/\/|\/api\/chat\/media\/outgoing\/)[^\s\n"'()\[\],<>]+|(?:\/|~\/|[A-Za-z]:\\)[^\n"'()\[\],<>]*?\.(?:${assistantArtifactExtensions}))(?=$|[\s\n"'()\[\],<>]|[，。；;,.!?])`;
+const assistantMediaArtifactLineRegex = new RegExp(`^\\s*${assistantMediaArtifactPattern}\\s*$`, 'i');
+const assistantMediaArtifactRegex = new RegExp(assistantMediaArtifactPattern, 'gi');
+const assistantOpenClawMediaArtifactRegex = new RegExp(String.raw`(^|[\s([{>])(?:(?:\/|~\/|[A-Za-z]:\\)[^\n"'()\[\],<>]*?\.openclaw[\\/]media[\\/][^\n"'()\[\],<>]*?\.(?:${assistantArtifactExtensions}))(?=$|[\s\n"'()\[\],<>]|[，。；;,.!?])`, 'gi');
+
 function stripLeadingUntrustedMetadataBlocks(text: string): string {
   const fencedPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?```[a-z]*\n[\s\S]*?```\s*/i;
   const inlineJsonPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?\{[\s\S]*?\}\s*/i;
@@ -91,8 +97,23 @@ function stripLeadingDisplayEnvelopeArtifacts(text: string): string {
   return stripLeadingConversationEnvelopeArtifacts(stripLeadingInternalPromptArtifacts(text));
 }
 
+function stripInboundMediaVisionEnvelope(text: string): string {
+  const startsWithVisionEnvelope = /^\s*(?:\[Image\]\s*(?:\r?\n)?)?User text:/i.test(text);
+  const hasDescriptionBlock = /\r?\n\s*Description:\s*\r?\n/i.test(text);
+  if (!startsWithVisionEnvelope || !hasDescriptionBlock) {
+    return text;
+  }
+  const withoutHeader = text.replace(/^\s*\[Image\]\s*(?:\r?\n)?/i, '');
+  const userTextBlock = /^User text:\s*\r?\n([\s\S]*?)(?:\r?\n\s*Description:\s*\r?\n[\s\S]*)?\s*$/i.exec(withoutHeader);
+  if (!userTextBlock) {
+    return withoutHeader.replace(/\r?\n\s*Description:\s*\r?\n[\s\S]*$/i, '').trim();
+  }
+  const userText = userTextBlock[1].trim();
+  return /^Process the attached file\(s\)\.\s*$/i.test(userText) ? '' : userText;
+}
+
 export function sanitizeCanonicalUserText(text: string): string {
-  const cleaned = stripLeadingDisplayEnvelopeArtifacts(text)
+  const cleaned = stripInboundMediaVisionEnvelope(stripLeadingDisplayEnvelopeArtifacts(text))
     .replace(/\s*\[media attached:[^\]]*\]/gi, '');
   return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
 }
@@ -130,13 +151,74 @@ export function stripAssistantReplyDirectivePrefix(text: string): string {
     .trim();
 }
 
+export function isImageGenerationStatusNarration(text: string): boolean {
+  const value = text.trim();
+  if (!value) {
+    return false;
+  }
+  if (/^Background task started for image generation\s*\([0-9a-f-]{36}\)\.?/i.test(value)) {
+    return true;
+  }
+  if (value.length > 120) {
+    return false;
+  }
+  if (/^(?:图片(?:正在)?生成中|正在生成(?:图片|图像)|生成中)[，,。！!\s]*(?:请)?(?:稍候|稍等|等一下)?[，,。！!\s]*$/i.test(value)) {
+    return true;
+  }
+  return /(?:稍等|稍候|please wait|one moment)/i.test(value) && /(?:图片|图像|image|generat)/i.test(value);
+}
+
+export function isOpenClawRuntimeEventPrompt(text: string): boolean {
+  return text.trim().split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?$/i.test(line.trim()));
+}
+
+export function isInternalDeliveryPlanningText(text: string): boolean {
+  const value = text.trim();
+  if (!value) {
+    return false;
+  }
+  return /message tool isn't suitable/i.test(value)
+    || /visible-reply contract/i.test(value)
+    || /final-reply MEDIA lines/i.test(value)
+    || /writing the normal final reply with MEDIA directives/i.test(value)
+    || /webchat isn't a valid channel for the message tool/i.test(value)
+    || /fall back to writing the normal final reply/i.test(value);
+}
+
+function stripInternalDeliveryPlanning(text: string): string {
+  const paragraphs = text.split(/\n{2,}/);
+  const kept = paragraphs.filter((paragraph) => !isInternalDeliveryPlanningText(paragraph));
+  if (kept.length === paragraphs.length) {
+    return text;
+  }
+  return kept
+    .join('\n\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function isInternalAssistantLine(line: string): boolean {
+  const value = line.trim();
+  return /^(?:HEARTBEAT_OK|NO_REPLY)$/i.test(value)
+    || assistantMediaArtifactLineRegex.test(value)
+    || isInternalDeliveryPlanningText(value)
+    || /^\[Inter-session message\]/i.test(value)
+    || isOpenClawRuntimeEventPrompt(value)
+    || isImageGenerationStatusNarration(value);
+}
+
 function stripInternalAssistantArtifactLines(text: string): string {
   if (!text) {
     return text;
   }
-  return text
-    .replace(/(^|\n)[ \t]*(?:HEARTBEAT_OK|NO_REPLY)[ \t]*(?=\n|$)/gi, '$1')
-    .replace(/(^|\n)[ \t]*MEDIA:(?:\/|~\/|[A-Za-z]:\\)[^\n]+(?=\n|$)/gi, '$1')
+  return stripInternalDeliveryPlanning(text)
+    .split('\n')
+    .filter((line) => !isInternalAssistantLine(line))
+    .join('\n')
+    .replace(/!\[[^\]\n]*\]\((?:\/api\/chat\/media\/outgoing\/|https?:\/\/[^)]+\/api\/chat\/media\/outgoing\/)[^)]+\)/gi, '')
+    .replace(assistantMediaArtifactRegex, '')
+    .replace(assistantOpenClawMediaArtifactRegex, '$1')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{2,}/g, '\n')
     .trim();

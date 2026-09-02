@@ -65,6 +65,15 @@ export function textContent(text: string): SessionWireContent {
   return { kind: 'text', text };
 }
 
+export function largeTextContent(
+  text: string,
+  contentRef = 'content-ref-1',
+  totalBytes = 12,
+  loadedBytes = 7,
+): SessionWireContent {
+  return { kind: 'largeText', text, contentRef, totalBytes, loadedBytes };
+}
+
 export function thinkingContent(text: string): SessionWireContent {
   return { kind: 'thinking', text };
 }
@@ -139,7 +148,10 @@ export function toolView(
     runId: null,
     name: 'tool',
     phase: 'started',
+    input: null,
+    inputText: null,
     summary: null,
+    output: null,
     isError: null,
     ...options,
   };

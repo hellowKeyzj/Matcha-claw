@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    DeliveryPhase, GraphStatus, OrganizationFacts, TeamId, TeamRevision,
+    DeliveryPhase, GraphStatus, OrganizationFacts, RoleSessionReceipt, TeamId, TeamRevision,
     run::{
         GraphRunId, delivery::TerminalObservationResolution, lifecycle::GraphRunLifecycleState,
         project,
@@ -32,14 +32,18 @@ impl TeamRunQuery {
     }
 }
 
-/// A deliberately small TeamRun projection. Provider identities, workspace bindings, session
-/// references, delivery receipts, and payloads never cross this query boundary.
+/// Owner-internal TeamRun projection resolved only from durable Organization facts.
+///
+/// Runtime role sessions are exposed here only after the run has a confirmed runtime receipt;
+/// workspace bindings, delivery receipts, prompts, payloads, and native errors never cross this
+/// query boundary.
 #[derive(Clone, Eq, PartialEq)]
 pub struct TeamRunProjection {
     team: TeamId,
     run: GraphRunId,
     team_revision: TeamRevision,
     graph_status: GraphStatus,
+    role_sessions: Vec<RoleSessionReceipt>,
 }
 
 impl TeamRunProjection {
@@ -48,12 +52,14 @@ impl TeamRunProjection {
         run: GraphRunId,
         team_revision: TeamRevision,
         graph_status: GraphStatus,
+        role_sessions: Vec<RoleSessionReceipt>,
     ) -> Self {
         Self {
             team,
             run,
             team_revision,
             graph_status,
+            role_sessions,
         }
     }
 
@@ -72,6 +78,10 @@ impl TeamRunProjection {
     pub const fn graph_status(&self) -> GraphStatus {
         self.graph_status
     }
+
+    pub fn role_sessions(&self) -> &[RoleSessionReceipt] {
+        &self.role_sessions
+    }
 }
 
 impl fmt::Debug for TeamRunProjection {
@@ -82,6 +92,7 @@ impl fmt::Debug for TeamRunProjection {
             .field("run", &self.run)
             .field("team_revision", &self.team_revision)
             .field("graph_status", &self.graph_status)
+            .field("role_session_count", &self.role_sessions.len())
             .finish()
     }
 }
@@ -131,11 +142,13 @@ pub fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) -> TeamRu
     ) {
         return TeamRunQueryOutcome::Unavailable;
     }
+    let Some(runtime) = run.runtime() else {
+        return TeamRunQueryOutcome::OutcomeUnknown;
+    };
     if matches!(
         run.lifecycle().state(),
         GraphRunLifecycleState::Cancelling { .. } | GraphRunLifecycleState::OutcomeUnknown { .. }
-    ) || run.runtime().is_none()
-    {
+    ) {
         return TeamRunQueryOutcome::OutcomeUnknown;
     }
     if facts.deliveries().deliveries().any(|delivery| {
@@ -157,6 +170,7 @@ pub fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) -> TeamRu
         query.run().clone(),
         team.revision(),
         project(run.graph()).status,
+        runtime.bindings().to_vec(),
     ))
 }
 

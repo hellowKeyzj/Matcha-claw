@@ -8,7 +8,10 @@ import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
 import {
   assistantItem,
   completeFact,
+  largeTextContent,
   sessionView,
+  toolUseContent,
+  toolView,
   userItem,
   windowView,
 } from './helpers/session-fixtures';
@@ -59,6 +62,79 @@ describe('chat history fetch pipeline helpers', () => {
         thinking: null,
         tools: [],
         segments: [{ kind: 'message', text: 'hi' }],
+      },
+    ]);
+  });
+
+  it('projects canonical tool payload fields into ToolCard input and result', () => {
+    const sessionKey = 'agent:main:main';
+    const view = sessionView(sessionKey, {
+      items: completeFact([assistantItem('item-assistant-1', '', {
+        runId: 'run-1',
+        segments: [toolUseContent('Read', 'tool-call-1')],
+      })]),
+      tools: completeFact([toolView('tool-call-1', {
+        runId: 'run-1',
+        name: 'Read',
+        phase: 'completed',
+        input: { file_path: 'src/main.rs' },
+        inputText: '{"file_path":"src/main.rs"}',
+        summary: null,
+        output: [{ type: 'text', text: 'ok' }],
+        isError: false,
+      })]),
+    });
+
+    expect(projectSessionViewItems(view)).toMatchObject([{
+      kind: 'assistant-turn',
+      tools: [{
+        toolCallId: 'tool-call-1',
+        name: 'Read',
+        status: 'completed',
+        input: { file_path: 'src/main.rs' },
+        inputText: '{"file_path":"src/main.rs"}',
+        output: [{ type: 'text', text: 'ok' }],
+        result: {
+          kind: 'json',
+          bodyText: '[\n  {\n    "type": "text",\n    "text": "ok"\n  }\n]',
+          collapsedPreview: '[\n  {\n    "type": "text",\n    "text": "ok"\n  }\n]',
+        },
+      }],
+      segments: [{
+        kind: 'tool',
+        tool: {
+          toolCallId: 'tool-call-1',
+          inputText: '{"file_path":"src/main.rs"}',
+          result: { kind: 'json' },
+        },
+      }],
+    }]);
+  });
+
+  it('projects largeText previews into user text and assistant message segments', () => {
+    const sessionKey = 'agent:main:main';
+    const view = sessionView(sessionKey, {
+      items: completeFact([
+        userItem('item-user-1', '', { content: [largeTextContent('user preview', 'content-ref-1', 20, 12)] }),
+        assistantItem('item-assistant-1', '', {
+          segments: [largeTextContent('assistant preview', 'content-ref-2', 30, 17)],
+        }),
+      ]),
+    });
+
+    expect(projectSessionViewItems(view)).toMatchObject([
+      {
+        kind: 'user-message',
+        text: 'user preview',
+        largeText: { contentRef: 'content-ref-1', totalBytes: 20, loadedBytes: 12 },
+      },
+      {
+        kind: 'assistant-turn',
+        segments: [{
+          kind: 'message',
+          text: 'assistant preview',
+          largeText: { contentRef: 'content-ref-2', totalBytes: 30, loadedBytes: 17 },
+        }],
       },
     ]);
   });

@@ -173,6 +173,7 @@
     "approval": {
         "panelTitle": "审批待处理",
         "waitingLabel": "等待审批中...",
+        "requestLabel": "工具需要审批",
         "pendingRequest": "{{title}}",
         "allowOnce": "同意一次",
         "allowAlways": "始终同意",

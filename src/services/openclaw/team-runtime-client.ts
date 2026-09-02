@@ -1,4 +1,10 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeError,
+  summarizeIdentifier,
+} from '@/lib/session-trace';
 import type { RuntimeEndpointRef, SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
 import type { CapabilityTarget } from '../../../electron/desktop-contract/capability-target';
 
@@ -56,21 +62,19 @@ export interface TeamSkillValidationIssue {
   path?: string;
 }
 
+export type TeamSkillSelectionId = `teamskill:v1:${string}`;
+
 export interface TeamSkillPackage {
+  selectionId: TeamSkillSelectionId;
   name: string;
   version: string;
   kind: 'team-skill';
   description: string;
-  dependencies: TeamSkillDependencies;
-  sourcePath: string;
 }
 
-export interface TeamSkillPackageValidationResult {
-  valid: boolean;
-  package?: TeamSkillPackage;
-  errors: TeamSkillValidationIssue[];
-  warnings: TeamSkillValidationIssue[];
-}
+export type TeamSkillPackageValidationResult =
+  | { status: 'valid'; package: TeamSkillPackage }
+  | { status: 'invalid' | 'unavailable' };
 
 export type TeamSourceType = 'teamskill' | 'manual';
 
@@ -462,6 +466,7 @@ export interface TeamGraphEdgeRecord {
 
 export interface TeamGraphSnapshotRecord {
   runId?: string;
+  graphId?: string;
   workflowPlanId?: string;
   nodes: TeamGraphNodeRecord[];
   edges: TeamGraphEdgeRecord[];
@@ -575,6 +580,7 @@ export interface TeamRuntimeOperationReceipt {
   code?: string;
   operationId?: TeamRuntimeOperationId;
   message?: string;
+  outcome?: string;
 }
 
 export interface TeamRunDecisionSubmitResult extends TeamRuntimeOperationReceipt {
@@ -582,6 +588,8 @@ export interface TeamRunDecisionSubmitResult extends TeamRuntimeOperationReceipt
   stageId?: string;
   decisionId?: string;
   decision?: TeamDecisionType;
+  sequence?: number;
+  replayed?: boolean;
   run?: TeamRunSummary;
   snapshot?: TeamRunSnapshot;
 }
@@ -589,6 +597,8 @@ export interface TeamRunDecisionSubmitResult extends TeamRuntimeOperationReceipt
 export type TeamApprovalResolutionDecision = 'approve' | 'deny' | 'abort';
 
 export interface TeamApprovalResolveResult extends TeamRuntimeOperationReceipt {
+  success?: true;
+  outcome?: 'recorded' | 'replayed';
   runId?: string;
   approvalId?: string;
   decision?: TeamApprovalResolutionDecision;
@@ -600,19 +610,45 @@ export interface TeamApprovalResolveResult extends TeamRuntimeOperationReceipt {
 
 export type TeamTriggerSourceKind = 'cron' | 'webhook';
 
+export interface TeamTriggerRecord {
+  teamId: string;
+  runId: string;
+  startNodeId: string;
+  trigger: { kind: 'webhook' } | { kind: 'cron'; expression: string };
+}
+
+export interface TeamTriggerListResult {
+  triggers: TeamTriggerRecord[];
+}
+
+export interface TeamWebhookTriggerFireResult extends TeamRuntimeOperationReceipt {
+  success: true;
+  fired: boolean;
+  runId: string;
+  outcome: 'recorded' | 'replayed';
+}
+
 export interface TeamTriggerFireResult extends TeamRuntimeOperationReceipt {
+  success?: true;
   fired?: boolean;
+  runId?: string;
+  outcome?: 'recorded' | 'replayed';
   snapshot?: TeamRunSnapshot;
 }
 
 export interface TeamRoleMessageSubmitResult extends TeamRuntimeOperationReceipt {
+  success?: true;
   submitted?: boolean;
+  deliveryId?: string;
+  outcome?: 'accepted';
   snapshot?: TeamRunSnapshot;
 }
 
 export interface TeamGraphSaveResult extends TeamRuntimeOperationReceipt {
+  success?: true;
   runId?: string;
-  saved?: boolean;
+  saved?: true;
+  outcome?: 'available';
   snapshot?: TeamRunSnapshot;
 }
 
@@ -632,22 +668,80 @@ export interface TeamGraphPatchInput {
 }
 
 export interface TeamAgentCommandResult extends TeamRuntimeOperationReceipt {
+  success?: true;
   runId?: string;
   accepted?: boolean;
+  saved?: true;
   record?: Record<string, unknown>;
   snapshot?: TeamRunSnapshot;
 }
 
-export interface TeamGraphYamlExportResult extends TeamRuntimeOperationReceipt {
-  runId?: string;
+export interface TeamGraphContextNodeRecord {
+  nodeId: string;
+  nodeExecutionId?: string;
+  status: string;
+  outputPort?: string;
+}
+
+export interface TeamGraphContextEdgeRecord {
+  edgeId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+}
+
+export interface TeamGraphContextResult {
+  teamId: string;
+  runId: string;
+  graphStatus: string;
+  nodes: TeamGraphContextNodeRecord[];
+  edges: TeamGraphContextEdgeRecord[];
+  pendingApprovalIds: string[];
+  recentEventIds: string[];
+}
+
+export interface TeamNodePromptRetryDueItemResult {
+  deliveryId: string;
+  nodeId: string;
+  nodeExecutionId?: string;
+  resolution: Record<string, unknown>;
+}
+
+export interface TeamNodePromptRetryDueResult {
+  runId: string;
+  processedDeliveryRecordIds: string[];
+  nextRetryAt?: number | null;
+  items: TeamNodePromptRetryDueItemResult[];
+}
+
+export type TeamNodePromptSettledPhase = 'final' | 'error' | 'aborted';
+
+export interface TeamNodePromptSettledResult {
+  settled: boolean;
+  runId: string | null;
+  snapshot: TeamRunSnapshot | null;
+}
+
+export interface TeamGraphYamlExportResult {
+  runId: string;
   fileName: string;
   yaml: string;
 }
 
 export interface TeamGraphYamlImportResult extends TeamRuntimeOperationReceipt {
   runId?: string;
-  imported?: boolean;
+  imported: true;
   snapshot?: TeamRunSnapshot;
+}
+
+export interface TeamRunCancelResult {
+  success: true;
+  runId: string;
+  state: 'cancelling' | 'cancelled' | 'tombstoned';
+}
+
+export interface TeamRunDeleteResult {
+  runId: string;
+  state: 'purged';
 }
 
 export interface TeamWebhookAuthProjection {
@@ -666,22 +760,80 @@ export async function readTeamWebhookAuth(): Promise<TeamWebhookAuthProjection> 
   return await hostApiFetch<TeamWebhookAuthProjection>('/api/runtime-host/team-webhook-auth');
 }
 
+type TeamRuntimeResponseDecoder<T> = (payload: unknown) => T;
+
 async function teamRuntimeApi<T>(payload: {
   operationId: TeamRuntimeOperationId;
-  target: CapabilityTarget;
+  target: CapabilityTarget | null;
   input: Record<string, unknown>;
-}): Promise<T> {
-  return await hostApiFetch<T>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: TEAM_RUNTIME_CAPABILITY_ID,
+}, decode?: TeamRuntimeResponseDecoder<T>): Promise<T> {
+  const traceId = createSessionTraceId(`team-runtime:${payload.operationId}`);
+  let scope: Awaited<ReturnType<typeof resolveSingleCapabilityScope>>;
+  try {
+    scope = await resolveSingleCapabilityScope(TEAM_RUNTIME_CAPABILITY_ID);
+  } catch (error) {
+    logSessionTrace('renderer.team.runtime.scope-error', traceId, {
+      ...summarizeTeamRuntimeRequest(payload),
+      error: summarizeError(error),
+    });
+    throw error;
+  }
+
+  logSessionTrace('renderer.team.runtime.request', traceId, summarizeTeamRuntimeRequest(payload));
+  try {
+    const response = await hostApiFetch<unknown>('/api/capabilities/execute', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: TEAM_RUNTIME_CAPABILITY_ID,
+        operationId: payload.operationId,
+        scope,
+        target: payload.target,
+        input: payload.input,
+      }),
+      timeoutMs: 60_000,
+      traceId,
+    });
+    const result = decode ? decode(response) : response as T;
+    logSessionTrace('renderer.team.runtime.response', traceId, {
       operationId: payload.operationId,
-      scope: await resolveSingleCapabilityScope(TEAM_RUNTIME_CAPABILITY_ID),
-      target: payload.target,
-      input: payload.input,
-    }),
-    timeoutMs: 60_000,
-  });
+      contract: decode ? 'decoded' : 'raw',
+    });
+    return result;
+  } catch (error) {
+    logSessionTrace('renderer.team.runtime.error', traceId, {
+      ...summarizeTeamRuntimeRequest(payload),
+      error: summarizeError(error),
+    });
+    throw error;
+  }
+}
+
+function summarizeTeamRuntimeRequest(payload: {
+  operationId: TeamRuntimeOperationId;
+  target: CapabilityTarget | null;
+  input: Record<string, unknown>;
+}): Record<string, unknown> {
+  const target = isRecord(payload.target) ? payload.target : null;
+  return {
+    operationId: payload.operationId,
+    targetKind: readString(target, 'kind'),
+    teamId: summarizeIdentifier(readString(payload.input, 'teamId') ?? readString(target, 'teamId')),
+    runId: summarizeIdentifier(readString(payload.input, 'runId') ?? readString(target, 'runId')),
+    approvalId: summarizeIdentifier(readString(payload.input, 'approvalId') ?? readString(target, 'approvalId')),
+    packagePath: summarizeIdentifier(readString(payload.input, 'packagePath') ?? readString(target, 'packagePath')),
+    webhookPath: summarizeIdentifier(readString(payload.input, 'webhookPath')),
+    sessionKey: summarizeIdentifier(readString(payload.input, 'sessionKey')),
+    promptRunId: summarizeIdentifier(readString(payload.input, 'promptRunId')),
+    sourceType: readString(payload.input, 'sourceType'),
+    phase: readString(payload.input, 'phase'),
+    decision: readString(payload.input, 'decision'),
+    event: readString(payload.input, 'event'),
+  };
+}
+
+function readString(record: Record<string, unknown> | null, key: string): string | null {
+  const value = record?.[key];
+  return typeof value === 'string' ? value : null;
 }
 
 export async function validateTeamSkillPackage(payload: {
@@ -691,7 +843,7 @@ export async function validateTeamSkillPackage(payload: {
     operationId: 'team.packageValidate',
     target: { kind: 'team', packagePath: payload.packagePath },
     input: { packagePath: payload.packagePath },
-  });
+  }, decodeTeamSkillPackageValidation);
 }
 
 export async function planTeamDependencies(payload: {
@@ -719,19 +871,19 @@ export async function provisionTeamAgents(payload: {
       packagePath: payload.packagePath,
       idempotencyKey: payload.idempotencyKey,
       ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
-      ...(payload.manualTeam ? { manualTeam: payload.manualTeam } : {}),
+      ...(payload.manualTeam ? { manualTeam: toManualTeamProvisionInput(payload.manualTeam) } : {}),
     },
-  });
+  }, decodeTeamProvisionAgents);
 }
 
 export async function deleteTeamInstance(payload: {
   teamId: string;
-}): Promise<{ teamId: string; deleted: boolean; deletedRunIds: string[]; deletedAgentIds: string[] }> {
+}): Promise<{ teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] }> {
   return await teamRuntimeApi({
     operationId: 'team.delete',
     target: { kind: 'team', teamId: payload.teamId },
     input: { kind: 'team', teamId: payload.teamId },
-  });
+  }, decodeTeamDelete);
 }
 
 export async function createTeamRun(payload: {
@@ -751,7 +903,7 @@ export async function createTeamRun(payload: {
       idempotencyKey: payload.idempotencyKey,
       ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
     },
-  });
+  }, decodeTeamRunSummary);
 }
 
 export interface TeamRunListItem extends TeamRunRecord {
@@ -766,6 +918,30 @@ export async function listTeamRuns(payload: {
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId },
   });
+}
+
+export async function listTeamRunTriggers(payload?: {
+  teamId?: string;
+}): Promise<TeamTriggerListResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.triggerList',
+    target: payload?.teamId ? { kind: 'team', teamId: payload.teamId } : { kind: 'team' },
+    input: {},
+  });
+}
+
+export async function fireTeamWebhookTrigger(payload: {
+  webhookPath: string;
+  idempotencyKey: string;
+}): Promise<TeamWebhookTriggerFireResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.webhookTriggerFire',
+    target: { kind: 'team' },
+    input: {
+      webhookPath: payload.webhookPath,
+      idempotencyKey: payload.idempotencyKey,
+    },
+  }, decodeTeamWebhookTriggerFire);
 }
 
 export async function resumeTeam(payload: {
@@ -794,7 +970,7 @@ export async function submitTeamRunDecision(payload: {
       ...(payload.note ? { note: payload.note } : {}),
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamRunDecisionSubmit);
 }
 
 export async function resolveTeamApproval(payload: {
@@ -814,7 +990,7 @@ export async function resolveTeamApproval(payload: {
       ...(payload.note ? { note: payload.note } : {}),
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamApprovalResolve);
 }
 
 export async function readTeamRunSnapshot(payload: {
@@ -856,7 +1032,7 @@ export async function saveTeamRunGraphProjection(payload: {
       graph: payload.graph,
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamGraphSave);
 }
 
 export async function submitTeamRunGraphPatch(payload: {
@@ -876,6 +1052,24 @@ export async function submitTeamRunGraphPatch(payload: {
       idempotencyKey: payload.idempotencyKey,
       ...(payload.metadata ? { metadata: payload.metadata } : {}),
     },
+  }, decodeTeamAgentCommandAvailable);
+}
+
+export async function readTeamRunGraphContext(payload: {
+  teamId: string;
+  runId: string;
+  view: 'current_node' | 'currentNode' | 'graph_summary' | 'graphSummary';
+  nodeExecutionId?: string;
+}): Promise<TeamGraphContextResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.graphContext',
+    target: { kind: 'team-run', teamId: payload.teamId, runId: payload.runId },
+    input: {
+      teamId: payload.teamId,
+      runId: payload.runId,
+      view: payload.view,
+      ...(payload.nodeExecutionId ? { nodeExecutionId: payload.nodeExecutionId } : {}),
+    },
   });
 }
 
@@ -886,7 +1080,7 @@ export async function exportTeamRunGraphYaml(payload: {
     operationId: 'team.graphExportYaml',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
-  });
+  }, decodeTeamGraphYamlExport);
 }
 
 export async function importTeamRunGraphYaml(payload: {
@@ -902,7 +1096,7 @@ export async function importTeamRunGraphYaml(payload: {
       yaml: payload.yaml,
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamGraphYamlImport);
 }
 
 export async function fireTeamRunTrigger(payload: {
@@ -922,7 +1116,7 @@ export async function fireTeamRunTrigger(payload: {
       ...(payload.payloadSummary ? { payloadSummary: payload.payloadSummary } : {}),
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamTriggerFire);
 }
 
 export async function submitTeamRunRoleMessage(payload: {
@@ -940,7 +1134,33 @@ export async function submitTeamRunRoleMessage(payload: {
       text: payload.text,
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamRoleMessageSubmit);
+}
+
+export async function wakeDueTeamRunNodePromptRetries(payload: {
+  runId: string;
+}): Promise<TeamNodePromptRetryDueResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.nodePromptRetryDue',
+    target: { kind: 'team-run', runId: payload.runId },
+    input: { runId: payload.runId },
+  }, decodeTeamNodePromptRetryDue);
+}
+
+export async function settleTeamRunNodePrompt(payload: {
+  sessionKey: string;
+  promptRunId: string;
+  phase: TeamNodePromptSettledPhase;
+}): Promise<TeamNodePromptSettledResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.nodePromptSettled',
+    target: null,
+    input: {
+      sessionKey: payload.sessionKey,
+      promptRunId: payload.promptRunId,
+      phase: payload.phase,
+    },
+  }, decodeTeamNodePromptSettled);
 }
 
 export async function submitTeamRunNodeEvent(payload: {
@@ -955,6 +1175,11 @@ export async function submitTeamRunNodeEvent(payload: {
   requestedAction?: string;
   risk?: string;
   metadata?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  deliveryId?: string;
+  receipt?: string;
+  nodeId?: string;
+  attemptNumber?: number;
 }): Promise<TeamAgentCommandResult> {
   return await teamRuntimeApi({
     operationId: 'team.nodeEvent',
@@ -971,15 +1196,20 @@ export async function submitTeamRunNodeEvent(payload: {
       ...(payload.requestedAction ? { requestedAction: payload.requestedAction } : {}),
       ...(payload.risk ? { risk: payload.risk } : {}),
       ...(payload.metadata ? { metadata: payload.metadata } : {}),
+      ...(payload.result ? { result: payload.result } : {}),
+      ...(payload.deliveryId ? { deliveryId: payload.deliveryId } : {}),
+      ...(payload.receipt ? { receipt: payload.receipt } : {}),
+      ...(payload.nodeId ? { nodeId: payload.nodeId } : {}),
+      ...(payload.attemptNumber !== undefined ? { attemptNumber: payload.attemptNumber } : {}),
     },
-  });
+  }, decodeTeamNodeEvent);
 }
 
 export async function cancelTeamRun(payload: {
   runId: string;
   reason?: string;
   idempotencyKey: string;
-}): Promise<TeamRunSummary> {
+}): Promise<TeamRunCancelResult> {
   return await teamRuntimeApi({
     operationId: 'team.runCancel',
     target: { kind: 'team-run', runId: payload.runId },
@@ -988,15 +1218,306 @@ export async function cancelTeamRun(payload: {
       ...(payload.reason ? { reason: payload.reason } : {}),
       idempotencyKey: payload.idempotencyKey,
     },
-  });
+  }, decodeTeamRunCancel);
 }
 
 export async function deleteTeamRun(payload: {
   runId: string;
-}): Promise<{ runId: string; deleted: boolean }> {
+}): Promise<TeamRunDeleteResult> {
   return await teamRuntimeApi({
     operationId: 'team.runDelete',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
-  });
+  }, decodeTeamRunDelete);
+}
+
+function toManualTeamProvisionInput(manualTeam: ManualTeamProvisionRecord): ManualTeamProvisionRecord {
+  return {
+    name: manualTeam.name,
+    description: manualTeam.description,
+    version: manualTeam.version,
+    members: manualTeam.members.map((member) => ({
+      agentId: member.agentId,
+      agentName: member.agentName,
+      workspace: member.workspace,
+      roleId: member.roleId,
+      skills: member.skills,
+      tools: member.tools,
+      ...(member.model ? { model: member.model } : {}),
+      isLeader: member.isLeader,
+    })),
+  };
+}
+
+function decodeTeamSkillPackageValidation(payload: unknown): TeamSkillPackageValidationResult {
+  if (!isRecord(payload) || typeof payload.status !== 'string') return teamRuntimeDecodeFailure();
+  if ((payload.status === 'invalid' || payload.status === 'unavailable') && hasExactKeys(payload, ['status'])) {
+    return { status: payload.status };
+  }
+  if (payload.status === 'valid' && hasExactKeys(payload, ['status', 'package']) && isTeamSkillPackage(payload.package)) {
+    return payload as TeamSkillPackageValidationResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamProvisionAgents(payload: unknown): { teamId: string; managedAgentCount: number } {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['teamId', 'managedAgentCount'])
+    && isText(payload.teamId)
+    && isSafeNonNegativeInteger(payload.managedAgentCount)) {
+    return payload as { teamId: string; managedAgentCount: number };
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamDelete(payload: unknown): { teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] } {
+  if (isRecord(payload)
+    && hasOnlyKeys(payload, ['teamId', 'state', 'deleted', 'deletedRunIds', 'deletedAgentIds'])
+    && (payload.teamId === null || isText(payload.teamId))
+    && payload.state === 'tombstoned'
+    && (payload.deleted === undefined || typeof payload.deleted === 'boolean')
+    && (payload.deletedRunIds === undefined || isStringArray(payload.deletedRunIds))
+    && (payload.deletedAgentIds === undefined || isStringArray(payload.deletedAgentIds))) {
+    return payload as { teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] };
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamRunSummary(payload: unknown): TeamRunSummary {
+  if (isRecord(payload)
+    && hasOnlyKeys(payload, ['runId', 'status', 'revision', 'currentStageId', 'replayed'])
+    && isText(payload.runId)
+    && isTeamRunStatus(payload.status)
+    && isSafeNonNegativeInteger(payload.revision)
+    && (payload.currentStageId === undefined || isText(payload.currentStageId))
+    && (payload.replayed === undefined || typeof payload.replayed === 'boolean')) {
+    return payload as unknown as TeamRunSummary;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamRunDecisionSubmit(payload: unknown): TeamRunDecisionSubmitResult {
+  if (isRecord(payload)
+    && hasOnlyKeys(payload, ['runId', 'decisionId', 'stageId', 'decision', 'sequence', 'replayed'])
+    && isText(payload.runId)
+    && isText(payload.decisionId)
+    && isText(payload.stageId)
+    && isTeamDecisionType(payload.decision)
+    && isSafeNonNegativeInteger(payload.sequence)
+    && typeof payload.replayed === 'boolean') {
+    return payload as TeamRunDecisionSubmitResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamApprovalResolve(payload: unknown): TeamApprovalResolveResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['success', 'outcome'])
+    && payload.success === true
+    && (payload.outcome === 'recorded' || payload.outcome === 'replayed')) {
+    return payload as TeamApprovalResolveResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamWebhookTriggerFire(payload: unknown): TeamWebhookTriggerFireResult {
+  if (isRecordedTriggerFire(payload)) {
+    return payload as TeamWebhookTriggerFireResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamGraphSave(payload: unknown): TeamGraphSaveResult {
+  if (isAvailableGraphCommand(payload)) {
+    return payload as TeamGraphSaveResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamAgentCommandAvailable(payload: unknown): TeamAgentCommandResult {
+  if (isAvailableGraphCommand(payload)) {
+    return payload as TeamAgentCommandResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamGraphYamlExport(payload: unknown): TeamGraphYamlExportResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['runId', 'fileName', 'yaml'])
+    && isText(payload.runId)
+    && isText(payload.fileName)
+    && typeof payload.yaml === 'string') {
+    return payload as unknown as TeamGraphYamlExportResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamGraphYamlImport(payload: unknown): TeamGraphYamlImportResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['runId', 'imported'])
+    && isText(payload.runId)
+    && payload.imported === true) {
+    return payload as unknown as TeamGraphYamlImportResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamTriggerFire(payload: unknown): TeamTriggerFireResult {
+  if (isRecordedTriggerFire(payload)) {
+    return payload as TeamTriggerFireResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamRoleMessageSubmit(payload: unknown): TeamRoleMessageSubmitResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['success', 'outcome', 'deliveryId'])
+    && payload.success === true
+    && payload.outcome === 'accepted'
+    && isText(payload.deliveryId)) {
+    return payload as TeamRoleMessageSubmitResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamNodePromptRetryDue(payload: unknown): TeamNodePromptRetryDueResult {
+  if (isRecord(payload)
+    && hasOnlyKeys(payload, ['runId', 'processedDeliveryRecordIds', 'nextRetryAt', 'items'])
+    && isText(payload.runId)
+    && isStringArray(payload.processedDeliveryRecordIds)
+    && (payload.nextRetryAt === undefined || payload.nextRetryAt === null || isSafeNonNegativeInteger(payload.nextRetryAt))
+    && Array.isArray(payload.items)
+    && payload.items.every(isTeamNodePromptRetryDueItem)) {
+    return payload as unknown as TeamNodePromptRetryDueResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamNodePromptSettled(payload: unknown): TeamNodePromptSettledResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['settled', 'runId', 'snapshot'])
+    && typeof payload.settled === 'boolean'
+    && (payload.runId === null || isText(payload.runId))
+    && (payload.snapshot === null || isRecord(payload.snapshot))) {
+    return payload as unknown as TeamNodePromptSettledResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamNodeEvent(payload: unknown): TeamAgentCommandResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['success', 'runId', 'outcome'])
+    && payload.success === true
+    && isText(payload.runId)
+    && isText(payload.outcome)) {
+    return payload as TeamAgentCommandResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamRunCancel(payload: unknown): TeamRunCancelResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['success', 'runId', 'state'])
+    && payload.success === true
+    && isText(payload.runId)
+    && (payload.state === 'cancelling' || payload.state === 'cancelled' || payload.state === 'tombstoned')) {
+    return payload as unknown as TeamRunCancelResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamRunDelete(payload: unknown): TeamRunDeleteResult {
+  if (isRecord(payload)
+    && hasExactKeys(payload, ['runId', 'state'])
+    && isText(payload.runId)
+    && payload.state === 'purged') {
+    return payload as unknown as TeamRunDeleteResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function isRecordedTriggerFire(payload: unknown): boolean {
+  return isRecord(payload)
+    && hasExactKeys(payload, ['success', 'fired', 'runId', 'outcome'])
+    && payload.success === true
+    && typeof payload.fired === 'boolean'
+    && isText(payload.runId)
+    && (payload.outcome === 'recorded' || payload.outcome === 'replayed');
+}
+
+function isAvailableGraphCommand(payload: unknown): boolean {
+  return isRecord(payload)
+    && hasExactKeys(payload, ['success', 'runId', 'saved', 'outcome'])
+    && payload.success === true
+    && isText(payload.runId)
+    && payload.saved === true
+    && payload.outcome === 'available';
+}
+
+function isTeamNodePromptRetryDueItem(payload: unknown): boolean {
+  return isRecord(payload)
+    && hasExactKeys(payload, ['deliveryId', 'nodeId', 'nodeExecutionId', 'resolution'])
+    && isText(payload.deliveryId)
+    && isText(payload.nodeId)
+    && isText(payload.nodeExecutionId)
+    && isRecord(payload.resolution);
+}
+
+function isTeamRunStatus(value: unknown): value is TeamRunStatus {
+  return value === 'created'
+    || value === 'provisioning'
+    || value === 'waiting_for_user'
+    || value === 'running'
+    || value === 'paused'
+    || value === 'cancelling'
+    || value === 'completed'
+    || value === 'failed'
+    || value === 'cancelled';
+}
+
+function isTeamDecisionType(value: unknown): value is TeamDecisionType {
+  return value === 'retry' || value === 'proceed_degraded' || value === 'abort';
+}
+
+function isTeamSkillPackage(payload: unknown): payload is TeamSkillPackage {
+  return isRecord(payload)
+    && hasExactKeys(payload, ['selectionId', 'name', 'version', 'kind', 'description'])
+    && isTeamSkillSelectionId(payload.selectionId)
+    && isText(payload.name)
+    && isText(payload.version)
+    && payload.kind === 'team-skill'
+    && typeof payload.description === 'string';
+}
+
+function isTeamSkillSelectionId(value: unknown): value is TeamSkillSelectionId {
+  return typeof value === 'string' && /^teamskill:v1:[a-f0-9]{64}$/.test(value);
+}
+
+function isText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isText);
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function teamRuntimeDecodeFailure(): never {
+  throw new Error('Team runtime response is unavailable');
 }

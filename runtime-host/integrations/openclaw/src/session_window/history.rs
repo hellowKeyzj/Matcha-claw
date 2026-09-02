@@ -3,15 +3,20 @@ use serde_json::{Map, Value};
 use crate::session::protocol::{ChatHistoryResult, HistoryRole};
 
 use super::model::{
-    Direction, Message, MessageContent, MessageRole, OmittedContentKind, PageRequest,
-    SessionWindow, window_range,
+    Direction, Message, MessageContent, MessageRole, MessageToolDeliveryMedia, OmittedContentKind,
+    PageRequest, SessionWindow, window_range,
 };
 
 const MAX_TEXT_BYTES: usize = 64 * 1024;
+const MAX_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_METADATA_BYTES: usize = 8 * 1024;
 const MAX_MEDIA_REF_BYTES: usize = 512;
+const MAX_DELIVERY_MEDIA_REF_BYTES: usize = 256;
 const MAX_TOOL_NAME_BYTES: usize = 256;
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
+const MESSAGE_TOOL_NAME: &str = "message";
+const OUTGOING_MEDIA_PREFIX: &str = "/api/chat/media/outgoing/";
+const OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH: &str = "api/chat/media/outgoing/";
 const TOOL_CALL_BLOCK_TYPES: &[&str] = &[
     "toolCall",
     "toolUse",
@@ -38,6 +43,15 @@ const ROLE_TOOL_CALL_ID_FIELDS: &[&str] = &[
     "tool_use_id",
     "call_id",
 ];
+const TOOL_INPUT_FIELDS: &[&str] = &["args", "arguments", "input", "toolInput", "tool_input"];
+const TOOL_RESULT_OUTPUT_FIELDS: &[&str] = &[
+    "result",
+    "output",
+    "partialResult",
+    "partial_result",
+    "content",
+];
+const TOOL_RESULT_SUMMARY_FIELDS: &[&str] = &["summary", "content", "text"];
 const TOOL_ERROR_FIELDS: &[&str] = &["isError", "is_error"];
 const TOOL_NAME_FIELD: &str = "name|toolName";
 const TOOL_CALL_ID_FIELD: &str = "id|call_id|toolCallId|toolUseId|tool_call_id|tool_use_id";
@@ -312,6 +326,11 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
             &mut content,
         )?;
     }
+    if role == MessageRole::ToolResult {
+        if let Some(delivery) = decode_message_tool_delivery(message, &text, &content) {
+            content.push(delivery);
+        }
+    }
     let run_id = bounded_optional_string_message(message, index, "runId", MAX_METADATA_BYTES)?;
     let sequence = optional_alias_u64_pair_message(message, index, "seq", "sequence")?;
     if sequence.is_some_and(|value| value > MAX_SAFE_SEQUENCE) {
@@ -414,14 +433,22 @@ fn decode_content(
                     TOOL_CALL_ID_FIELDS,
                     MAX_METADATA_BYTES,
                 )?;
-                content.push(MessageContent::ToolUse { name, tool_call_id });
+                let input = tool_payload(block, TOOL_INPUT_FIELDS);
+                let input_text = tool_input_text(block, input.as_ref());
+                content.push(MessageContent::ToolUse {
+                    name,
+                    tool_call_id,
+                    input,
+                    input_text,
+                });
             }
             Some(block_type) if TOOL_RESULT_BLOCK_TYPES.contains(&block_type) => {
-                let summary = block
-                    .get("content")
-                    .or_else(|| block.get("result"))
+                let output_value = first_alias_value(block, TOOL_RESULT_OUTPUT_FIELDS);
+                let summary = first_alias_value(block, TOOL_RESULT_SUMMARY_FIELDS)
+                    .or(output_value)
                     .and_then(safe_summary)
                     .transpose()?;
+                let output = output_value.and_then(project_tool_payload);
                 let tool_name = bounded_optional_block_alias_string(
                     message_index,
                     block_index,
@@ -449,6 +476,7 @@ fn decode_content(
                     tool_name,
                     tool_call_id,
                     summary,
+                    output,
                     is_error,
                 });
             }
@@ -514,13 +542,284 @@ fn append_role_tool_result_content(
     )?;
     let is_error =
         optional_alias_bool_message(message, message_index, TOOL_ERROR_FIELD, TOOL_ERROR_FIELDS)?;
+    let output_value = first_alias_value(message, &["result", "output", "content"]);
+    let output = output_value.and_then(project_tool_payload);
     content.push(MessageContent::ToolResult {
         tool_name,
         tool_call_id: tool_call_id.map(str::to_owned),
         summary: non_empty_summary(text),
+        output,
         is_error,
     });
     Ok(())
+}
+
+fn decode_message_tool_delivery(
+    message: &Map<String, Value>,
+    text: &str,
+    content: &[MessageContent],
+) -> Option<MessageContent> {
+    if message_tool_result_is_error(message)
+        || content.iter().any(|content| {
+            matches!(
+                content,
+                MessageContent::ToolResult {
+                    is_error: Some(true),
+                    ..
+                }
+            )
+        })
+        || !is_message_tool_result(message, content)
+    {
+        return None;
+    }
+    if let Some(delivery) = message
+        .get("details")
+        .and_then(Value::as_object)
+        .and_then(extract_message_tool_delivery)
+    {
+        return Some(delivery);
+    }
+    if let Some(delivery) = message_content_delivery(message) {
+        return Some(delivery);
+    }
+    for block in content {
+        let MessageContent::ToolResult {
+            output: Some(output),
+            ..
+        } = block
+        else {
+            continue;
+        };
+        if let Some(delivery) =
+            tool_result_output_details(output).and_then(extract_message_tool_delivery)
+        {
+            return Some(delivery);
+        }
+    }
+    let parsed = parse_message_tool_delivery_text(text)?;
+    match parsed {
+        Value::Object(object) => {
+            tool_result_output_details_object(&object).and_then(extract_message_tool_delivery)
+        }
+        _ => None,
+    }
+}
+
+fn is_message_tool_result(message: &Map<String, Value>, content: &[MessageContent]) -> bool {
+    first_alias_value(message, ROLE_TOOL_NAME_FIELDS)
+        .and_then(Value::as_str)
+        .is_some_and(is_message_tool_name)
+        || content.iter().any(|content| {
+            matches!(content, MessageContent::ToolResult { tool_name: Some(tool_name), .. } if is_message_tool_name(tool_name))
+        })
+}
+
+fn message_content_delivery(message: &Map<String, Value>) -> Option<MessageContent> {
+    let content = message.get("content")?.as_array()?;
+    for block in content.iter().filter_map(Value::as_object) {
+        if !block
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|block_type| TOOL_RESULT_BLOCK_TYPES.contains(&block_type))
+        {
+            continue;
+        }
+        if let Some(delivery) = block
+            .get("details")
+            .and_then(Value::as_object)
+            .and_then(extract_message_tool_delivery)
+        {
+            return Some(delivery);
+        }
+        if let Some(delivery) = first_alias_value(block, TOOL_RESULT_OUTPUT_FIELDS)
+            .and_then(tool_result_output_details)
+            .and_then(extract_message_tool_delivery)
+        {
+            return Some(delivery);
+        }
+    }
+    None
+}
+
+fn is_message_tool_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case(MESSAGE_TOOL_NAME)
+}
+
+fn message_tool_result_is_error(message: &Map<String, Value>) -> bool {
+    TOOL_ERROR_FIELDS
+        .iter()
+        .find_map(|field| message.get(*field))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn tool_result_output_details(value: &Value) -> Option<&Map<String, Value>> {
+    let object = value.as_object()?;
+    tool_result_output_details_object(object)
+}
+
+fn tool_result_output_details_object(object: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    object
+        .get("details")
+        .and_then(Value::as_object)
+        .or(Some(object))
+}
+
+fn parse_message_tool_delivery_text(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.len() > MAX_TOOL_PAYLOAD_BYTES || text.contains('\0') || !text.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+fn extract_message_tool_delivery(details: &Map<String, Value>) -> Option<MessageContent> {
+    if details_status_is_error(details) || !is_internal_source_reply(details) {
+        return None;
+    }
+    let source_reply = details.get("sourceReply").and_then(Value::as_object);
+    let text = source_reply
+        .and_then(delivery_text)
+        .or_else(|| delivery_text(details));
+    let mut media = Vec::new();
+    if let Some(source_reply) = source_reply {
+        collect_delivery_media(source_reply, &mut media);
+    }
+    collect_delivery_media(details, &mut media);
+    details
+        .get("media")
+        .and_then(Value::as_object)
+        .map(|media_details| collect_delivery_media(media_details, &mut media));
+    if text.is_none() && media.is_empty() {
+        return None;
+    }
+    Some(MessageContent::MessageToolDelivery { text, media })
+}
+
+fn details_status_is_error(details: &Map<String, Value>) -> bool {
+    details
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+        || details
+            .get("isError")
+            .or_else(|| details.get("is_error"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn is_internal_source_reply(details: &Map<String, Value>) -> bool {
+    details
+        .get("sourceReplySink")
+        .and_then(Value::as_str)
+        .is_some_and(|sink| sink == "internal-ui")
+        || details
+            .get("sourceReplyDeliveryMode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode == "message_tool_only")
+}
+
+fn delivery_text(object: &Map<String, Value>) -> Option<String> {
+    ["text", "message"].into_iter().find_map(|field| {
+        let text = object.get(field)?.as_str()?.trim();
+        (!text.is_empty() && text.len() <= MAX_TEXT_BYTES && !text.contains('\0'))
+            .then(|| text.to_owned())
+    })
+}
+
+fn collect_delivery_media(object: &Map<String, Value>, media: &mut Vec<MessageToolDeliveryMedia>) {
+    for field in ["media", "mediaUrl", "url", "fileUrl", "filePath", "path"] {
+        if let Some(reference) = object.get(field).and_then(Value::as_str) {
+            push_delivery_media(media, object, reference);
+        }
+    }
+    if let Some(values) = object.get("mediaUrls").and_then(Value::as_array) {
+        for value in values {
+            if let Some(reference) = value.as_str() {
+                push_delivery_media(media, object, reference);
+            }
+        }
+    }
+    if let Some(attachments) = object.get("attachments").and_then(Value::as_array) {
+        for attachment in attachments.iter().filter_map(Value::as_object) {
+            collect_delivery_media(attachment, media);
+        }
+    }
+}
+
+fn push_delivery_media(
+    media: &mut Vec<MessageToolDeliveryMedia>,
+    object: &Map<String, Value>,
+    reference: &str,
+) {
+    let Some(reference) = safe_delivery_media_reference(reference) else {
+        return;
+    };
+    if media.iter().any(|media| media.reference() == reference) {
+        return;
+    }
+    let media_type = explicit_media_type(object).or_else(|| infer_media_type(&reference));
+    media.push(MessageToolDeliveryMedia::new(media_type, reference));
+}
+
+fn safe_delivery_media_reference(reference: &str) -> Option<String> {
+    let value = reference.trim();
+    if value.is_empty()
+        || value.len() > MAX_DELIVERY_MEDIA_REF_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return None;
+    }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX) {
+        return Some(value.to_owned());
+    }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH) {
+        return Some(format!("/{value}"));
+    }
+    (value.starts_with("https://") || value.starts_with("http://")).then(|| value.to_owned())
+}
+
+fn explicit_media_type(object: &Map<String, Value>) -> Option<String> {
+    ["mimeType", "mediaType"]
+        .into_iter()
+        .find_map(|field| object.get(field).and_then(Value::as_str))
+        .and_then(|value| {
+            let value = value.trim();
+            (!value.is_empty()
+                && value.len() <= MAX_TOOL_NAME_BYTES
+                && !value.chars().any(char::is_control))
+            .then(|| value.to_owned())
+        })
+}
+
+fn infer_media_type(reference: &str) -> Option<String> {
+    let path = reference.split(['?', '#']).next().unwrap_or(reference);
+    let lower = path.to_ascii_lowercase();
+    let media_type = if lower.ends_with(".svg") || lower.ends_with(".svgz") {
+        "image/svg+xml"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".avif") {
+        "image/avif"
+    } else if is_outgoing_media_reference(reference) {
+        "image/png"
+    } else {
+        return None;
+    };
+    Some(media_type.to_owned())
+}
+
+fn is_outgoing_media_reference(reference: &str) -> bool {
+    reference.starts_with(OUTGOING_MEDIA_PREFIX) || reference.contains(OUTGOING_MEDIA_PREFIX)
 }
 
 fn non_empty_summary(text: &str) -> Option<String> {
@@ -852,6 +1151,69 @@ fn bounded_optional_block_string(
         .transpose()
 }
 
+fn tool_payload(object: &Map<String, Value>, fields: &[&'static str]) -> Option<Value> {
+    first_alias_value(object, fields).and_then(project_tool_payload)
+}
+
+fn project_tool_payload(value: &Value) -> Option<Value> {
+    if !is_allowed_tool_payload(value) || tool_payload_contains_nul(value) {
+        return None;
+    }
+    let text = serde_json::to_string(value).ok()?;
+    (text.len() <= MAX_TOOL_PAYLOAD_BYTES).then(|| value.clone())
+}
+
+fn is_allowed_tool_payload(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
+        Value::Array(values) => values.iter().all(is_allowed_tool_payload),
+        Value::Object(object) => object.values().all(is_allowed_tool_payload),
+    }
+}
+
+fn tool_payload_contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(values) => values.iter().any(tool_payload_contains_nul),
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key.contains('\0') || tool_payload_contains_nul(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn tool_input_text(object: &Map<String, Value>, input: Option<&Value>) -> Option<String> {
+    if let Some(text) = first_alias_value(
+        object,
+        &[
+            "input_text",
+            "inputText",
+            "partialText",
+            "partial_text",
+            "partial_json",
+            "partialJson",
+        ],
+    )
+    .and_then(Value::as_str)
+    .filter(|text| !text.is_empty())
+    {
+        return bounded_tool_payload_text(text);
+    }
+    match input? {
+        Value::String(text) if !text.is_empty() => bounded_tool_payload_text(text),
+        value => {
+            let text = serde_json::to_string_pretty(value).ok()?;
+            (!text.is_empty())
+                .then(|| bounded_tool_payload_text(&text))
+                .flatten()
+        }
+    }
+}
+
+fn bounded_tool_payload_text(text: &str) -> Option<String> {
+    (text.len() <= MAX_TOOL_PAYLOAD_BYTES && !text.contains('\0')).then(|| text.to_owned())
+}
+
 fn safe_summary(value: &Value) -> Option<Result<String, HistoryError>> {
     match value {
         Value::String(text) => Some(bounded_text(text)),
@@ -861,7 +1223,7 @@ fn safe_summary(value: &Value) -> Option<Result<String, HistoryError>> {
                 .filter_map(|block| block.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("\\n");
-            Some(bounded_text(&text))
+            (!text.is_empty()).then(|| bounded_text(&text))
         }
         Value::Object(object)
             if object

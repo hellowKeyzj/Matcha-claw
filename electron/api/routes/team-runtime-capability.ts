@@ -87,26 +87,35 @@ function validateOperation(
     case 'team.runList':
       return matchingString(target, 'team', 'teamId', input, 'teamId');
     case 'team.triggerList':
-      return target === null || target === undefined || targetKind(target) === 'team';
+      return hasExactKeys(input, []) && isTriggerListTarget(target);
     case 'team.webhookTriggerFire':
-      return optionalTeamTarget(target) && isIdentifier(input.webhookPath);
+      return hasExactKeys(input, ['webhookPath', 'idempotencyKey'])
+        && isWebhookTriggerTarget(target)
+        && isText(input.webhookPath)
+        && isOpaque(input.idempotencyKey);
     case 'team.nodePromptSettled':
-      return optionalNoneTarget(target)
-        && isIdentifier(input.sessionKey)
-        && isIdentifier(input.promptRunId)
+      return hasExactKeys(input, ['sessionKey', 'promptRunId', 'phase'])
+        && target === null
+        && isOpaque(input.sessionKey)
+        && isOpaque(input.promptRunId)
         && (input.phase === 'final' || input.phase === 'error' || input.phase === 'aborted');
     case 'team.approvalResolve':
-      return matchingString(target, 'team-approval', 'runId', input, 'runId')
+      return hasOnlyKeys(input, ['runId', 'approvalId', 'decision', 'note', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'approvalId', 'decision', 'idempotencyKey'])
+        && matchingString(target, 'team-approval', 'runId', input, 'runId')
         && matchingField(target, 'approvalId', input, 'approvalId')
-        && isIdentifier(input.decision)
+        && (input.decision === 'approve' || input.decision === 'deny' || input.decision === 'abort')
+        && (input.note === undefined || isText(input.note))
         && isOpaque(input.idempotencyKey);
     case 'team.runSnapshot':
-    case 'team.graphContext':
     case 'team.graphExportYaml':
     case 'team.runDiagnostics':
     case 'team.nodePromptRetryDue':
-    case 'team.runDelete':
       return matchingRunTarget(target, input) && optionalRunReadFields(operation, input);
+    case 'team.runDelete':
+      return hasExactKeys(input, ['runId']) && matchingRunTarget(target, input);
+    case 'team.graphContext':
+      return isGraphContextRequest(target, input);
     case 'team.graphSave':
       return matchingRunTarget(target, input)
         && isOpaque(input.idempotencyKey)
@@ -119,34 +128,42 @@ function validateOperation(
         && input.patch.operations.length > 0
         && isOpaque(input.idempotencyKey);
     case 'team.graphImportYaml':
-      return matchingRunTarget(target, input)
-        && isIdentifier(input.yaml)
+      return hasExactKeys(input, ['runId', 'yaml', 'idempotencyKey'])
+        && matchingRunTarget(target, input)
+        && isNonEmptyString(input.yaml)
         && isOpaque(input.idempotencyKey);
     case 'team.triggerFire':
-      return matchingRunTarget(target, input)
+      return hasOnlyKeys(input, ['runId', 'teamId', 'startNodeId', 'triggerSource', 'payloadSummary', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'startNodeId', 'triggerSource', 'idempotencyKey'])
+        && matchingRunTarget(target, input)
         && isIdentifier(input.startNodeId)
         && (input.triggerSource === 'cron' || input.triggerSource === 'webhook')
+        && (input.payloadSummary === undefined || typeof input.payloadSummary === 'string')
         && isOpaque(input.idempotencyKey);
     case 'team.roleMessageSubmit':
-      return matchingRunTarget(target, input)
+      return hasOnlyKeys(input, ['runId', 'teamId', 'roleId', 'text', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'roleId', 'text', 'idempotencyKey'])
+        && matchingRunTarget(target, input)
         && isIdentifier(input.roleId)
         && isText(input.text)
         && isOpaque(input.idempotencyKey);
     case 'team.nodeEvent':
-      return matchingRunTarget(target, input)
-        && isIdentifier(input.nodeExecutionId)
-        && isIdentifier(input.event)
-        && isIdentifier(input.summary)
-        && isOpaque(input.idempotencyKey);
+      return isNodeEventRequest(target, input);
     case 'team.runDecisionSubmit':
-      return matchingRunTarget(target, input)
-        && isIdentifier(input.decision)
+      return hasOnlyKeys(input, ['runId', 'decision', 'note', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'decision', 'idempotencyKey'])
+        && matchingRunTarget(target, input)
+        && (input.decision === 'retry' || input.decision === 'proceed_degraded' || input.decision === 'abort')
+        && (input.note === undefined || isText(input.note))
         && isOpaque(input.idempotencyKey);
     case 'team.resume':
       return matchingString(target, 'team', 'teamId', input, 'teamId') && isOpaque(input.idempotencyKey);
     case 'team.runCancel':
-      return matchingRunTarget(target, input) && isOpaque(input.idempotencyKey)
-        && (input.reason === undefined || isText(input.reason));
+      return hasOnlyKeys(input, ['runId', 'teamId', 'reason', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'idempotencyKey'])
+        && matchingRunTarget(target, input)
+        && isOpaque(input.idempotencyKey)
+        && (input.reason === undefined || typeof input.reason === 'string');
   }
 }
 
@@ -155,10 +172,123 @@ function matchingRunTarget(target: unknown, input: Record<string, unknown>): boo
     && matchingOptionalString(target, 'teamId', input, 'teamId');
 }
 
+function matchingRequiredTeamRunTarget(target: unknown, input: Record<string, unknown>): boolean {
+  return isRecord(target)
+    && hasExactKeys(target, ['kind', 'runId', 'teamId'])
+    && target.kind === 'team-run'
+    && matchingField(target, 'runId', input, 'runId')
+    && matchingField(target, 'teamId', input, 'teamId');
+}
+
 function optionalRunReadFields(operation: TeamRuntimeOperationId, input: Record<string, unknown>): boolean {
   if (operation !== 'team.runSnapshot') return true;
   return (input.eventCursor === undefined || isNonNegativeInteger(input.eventCursor))
     && (input.eventLimit === undefined || isNonNegativeInteger(input.eventLimit));
+}
+
+function isTriggerListTarget(target: unknown): boolean {
+  return target === null
+    || (isRecord(target) && hasExactKeys(target, ['kind']) && target.kind === 'team')
+    || (isRecord(target) && hasExactKeys(target, ['kind', 'teamId']) && target.kind === 'team' && isIdentifier(target.teamId));
+}
+
+function isWebhookTriggerTarget(target: unknown): boolean {
+  return target === null
+    || (isRecord(target) && hasExactKeys(target, ['kind']) && target.kind === 'team');
+}
+
+function isGraphContextRequest(target: unknown, input: Record<string, unknown>): boolean {
+  if (!hasOnlyKeys(input, ['runId', 'teamId', 'view', 'nodeExecutionId'])
+    || !hasRequiredKeys(input, ['runId', 'teamId', 'view'])
+    || !matchingRequiredTeamRunTarget(target, input)) {
+    return false;
+  }
+
+  if (input.view === 'graph_summary' || input.view === 'graphSummary') {
+    return !Object.hasOwn(input, 'nodeExecutionId');
+  }
+  if (input.view === 'current_node' || input.view === 'currentNode') {
+    return isIdentifier(input.nodeExecutionId);
+  }
+  return false;
+}
+
+function isNodeEventRequest(target: unknown, input: Record<string, unknown>): boolean {
+  if (!hasOnlyKeys(input, [
+    'runId',
+    'nodeExecutionId',
+    'event',
+    'summary',
+    'idempotencyKey',
+    'roleId',
+    'outputPort',
+    'evidenceRefs',
+    'requestedAction',
+    'risk',
+    'metadata',
+    'result',
+    'deliveryId',
+    'receipt',
+    'nodeId',
+    'attemptNumber',
+  ]) || !matchingRunTarget(target, input)
+    || !isOpaque(input.nodeExecutionId)
+    || !isOpaque(input.idempotencyKey)
+    || !isText(input.summary)
+    || !areValidNodeEventOptionalFields(input)) {
+    return false;
+  }
+
+  switch (input.event) {
+    case 'progress':
+    case 'request_input':
+      return hasExactKeys(input, ['runId', 'nodeExecutionId', 'event', 'summary', 'idempotencyKey']);
+    case 'request_approval':
+      return hasRequiredKeys(input, ['runId', 'nodeExecutionId', 'event', 'summary', 'idempotencyKey', 'requestedAction'])
+        && isApprovalAction(input.requestedAction);
+    case 'complete':
+    case 'reject':
+      return hasRequiredKeys(input, [
+        'runId',
+        'nodeExecutionId',
+        'event',
+        'summary',
+        'idempotencyKey',
+        'deliveryId',
+        'receipt',
+        'nodeId',
+        'attemptNumber',
+        'outputPort',
+      ])
+        && isText(input.deliveryId)
+        && isText(input.receipt)
+        && isIdentifier(input.nodeId)
+        && isPositiveInteger(input.attemptNumber)
+        && isText(input.outputPort);
+    default:
+      return false;
+  }
+}
+
+function areValidNodeEventOptionalFields(input: Record<string, unknown>): boolean {
+  return (input.roleId === undefined || isOpaque(input.roleId))
+    && (input.outputPort === undefined || isText(input.outputPort))
+    && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs))
+    && (input.requestedAction === undefined || isApprovalAction(input.requestedAction))
+    && (input.risk === undefined || isText(input.risk))
+    && (input.metadata === undefined || isRecord(input.metadata))
+    && (input.result === undefined || isNodeEventResult(input.result));
+}
+
+function isNodeEventResult(value: unknown): boolean {
+  return isRecord(value) && (value.summary === undefined || isText(value.summary));
+}
+
+function isApprovalAction(value: unknown): boolean {
+  return value === 'continue_node'
+    || value === 'execute_tool'
+    || value === 'publish_result'
+    || value === 'external_action';
 }
 
 function matchingString(
@@ -195,14 +325,6 @@ function matchingOptionalString(
     || (isIdentifier(targetValue) && isIdentifier(inputValue) && targetValue === inputValue);
 }
 
-function optionalTeamTarget(target: unknown): boolean {
-  return target === null || target === undefined || targetKind(target) === 'team';
-}
-
-function optionalNoneTarget(target: unknown): boolean {
-  return target === null || target === undefined || targetKind(target) === 'none';
-}
-
 function targetKind(value: unknown): string | null {
   return isRecord(value) && typeof value.kind === 'string' ? value.kind : null;
 }
@@ -219,6 +341,19 @@ function readOperation(value: unknown): TeamRuntimeOperationId | null {
 
 function validSourceType(value: unknown): boolean {
   return value === undefined || value === 'teamskill' || value === 'manual';
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const allowed = new Set(expected);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function hasRequiredKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return expected.every((key) => Object.hasOwn(value, key));
 }
 
 function isRuntimeScope(value: unknown): value is RuntimeScope {
@@ -243,6 +378,10 @@ function isText(value: unknown): value is string {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -2,8 +2,8 @@ use std::fmt;
 
 use organization::{
     ManagedAgentReference, MaterializationOperationOutcome, MaterializationReceipt,
-    RoleMaterializationAgent, RoleMaterializationOwnership, RoleMaterializationReceipt,
-    TeamMaterializationRemoval, TeamMaterializationRequest,
+    NativeWorkspaceReceipt, RoleMaterializationAgent, RoleMaterializationOwnership,
+    RoleMaterializationReceipt, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
 use super::{
@@ -153,11 +153,15 @@ impl<'gateway> TeamProvider<'gateway> {
             }
             let agent = ManagedAgentReference::try_new(recovered.agent().as_str().to_owned())
                 .expect("native recovery agent ID must be a valid materialization reference");
-            roles.push(RoleMaterializationReceipt::with_ownership(
+            let workspace =
+                NativeWorkspaceReceipt::try_new(recovered.workspace().as_str().to_owned())
+                    .expect("native recovery workspace must be a valid workspace receipt");
+            roles.push(RoleMaterializationReceipt::with_native_workspace(
                 requested.role().clone(),
                 agent,
                 ownership,
                 request.intent().endpoint().clone(),
+                workspace,
             ));
         }
         let receipt = MaterializationReceipt::try_new(
@@ -333,11 +337,15 @@ impl<'gateway> TeamProvider<'gateway> {
             }
             let agent = ManagedAgentReference::try_new(verified.agent_id.0)
                 .expect("native readback agent ID must be a valid materialization reference");
-            confirmed_roles.push(RoleMaterializationReceipt::with_ownership(
+            let workspace_receipt =
+                NativeWorkspaceReceipt::try_new(verified.workspace.as_str().to_owned())
+                    .expect("native readback workspace must be a valid workspace receipt");
+            confirmed_roles.push(RoleMaterializationReceipt::with_native_workspace(
                 verified.role,
                 agent,
                 verified.ownership,
                 request.intent().endpoint().clone(),
+                workspace_receipt,
             ));
             progress.markers.push((
                 TeamBuddyMarker::new(
@@ -422,63 +430,32 @@ impl<'gateway> TeamProvider<'gateway> {
         &self,
         removal: TeamMaterializationRemoval,
     ) -> MaterializationOperationOutcome {
-        let workspaces = match self.workspace_projection_for_removal(&removal) {
-            Ok(workspaces) => workspaces,
-            Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
-            Err(WorkspaceProjectionError::Unknown) => {
-                return MaterializationOperationOutcome::OutcomeUnknown;
-            }
-        };
-        let external_workspaces = match self.external_workspaces_for_removal(&removal).await {
-            Ok(workspaces) => workspaces,
-            Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
-            Err(WorkspaceProjectionError::Unknown) => {
-                return MaterializationOperationOutcome::OutcomeUnknown;
-            }
-        };
-        self.remove_request(removal, workspaces, external_workspaces)
-            .await
+        self.remove_request(removal).await
     }
 
     async fn remove_request(
         &self,
         removal: TeamMaterializationRemoval,
-        workspaces: TeamWorkspaceProjection,
-        external_workspaces: TeamExternalWorkspaces,
     ) -> MaterializationOperationOutcome {
         for role in removal.receipt().roles().iter().rev() {
-            let workspace = match role.ownership() {
-                RoleMaterializationOwnership::Managed => {
-                    let Some(workspace) = workspaces.resolve(role.role()) else {
-                        return MaterializationOperationOutcome::OutcomeUnknown;
-                    };
-                    let agent = TeamOwnedAgentId::try_new(role.agent().as_str())
-                        .expect("validated materialization receipt must have a managed agent");
-                    match self.delete_agent(agent).await {
-                        MutationOutcome::Applied(()) => {}
-                        MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
-                            // A cleanup write can be rejected before dispatch or become
-                            // ambiguous after dispatch. The caller cannot prove the native
-                            // resource state in either case, so compensation remains unknown.
-                            return MaterializationOperationOutcome::OutcomeUnknown;
-                        }
-                    }
-                    workspace
-                }
-                RoleMaterializationOwnership::External => {
-                    let agent = TeamOwnedAgentId::try_new(role.agent().as_str())
-                        .expect("validated materialization receipt must have an external agent");
-                    let Some(workspace) = external_workspaces.resolve(&agent) else {
-                        return MaterializationOperationOutcome::OutcomeUnknown;
-                    };
-                    workspace
-                }
+            let Some(workspace) = role.native_workspace() else {
+                return MaterializationOperationOutcome::OutcomeUnknown;
             };
             if TeamBuddyMarker::new(removal.receipt().team().clone(), role.role().clone())
                 .remove(std::path::Path::new(workspace.as_str()))
                 .is_err()
             {
                 return MaterializationOperationOutcome::OutcomeUnknown;
+            }
+            if role.ownership() == RoleMaterializationOwnership::Managed {
+                let agent = TeamOwnedAgentId::try_new(role.agent().as_str())
+                    .expect("validated materialization receipt must have a managed agent");
+                match self.delete_agent(agent).await {
+                    MutationOutcome::Applied(()) => {}
+                    MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
+                        return MaterializationOperationOutcome::OutcomeUnknown;
+                    }
+                }
             }
         }
         MaterializationOperationOutcome::Confirmed {
@@ -524,45 +501,6 @@ impl<'gateway> TeamProvider<'gateway> {
             .map_err(|_| WorkspaceProjectionError::Unknown)?;
         let _ = canonical_config.get("agents");
         TeamWorkspaceProjection::for_request(self.config.state_dir_path(), request)
-            .map_err(|_| WorkspaceProjectionError::Rejected)
-    }
-
-    async fn external_workspaces_for_removal(
-        &self,
-        removal: &TeamMaterializationRemoval,
-    ) -> Result<TeamExternalWorkspaces, WorkspaceProjectionError> {
-        let requested = removal
-            .receipt()
-            .roles()
-            .iter()
-            .filter(|role| role.ownership() == RoleMaterializationOwnership::External)
-            .map(|role| {
-                TeamOwnedAgentId::try_new(role.agent().as_str())
-                    .expect("validated materialization receipt must have an external agent")
-            })
-            .collect::<Vec<_>>();
-        if requested.is_empty() {
-            return Ok(TeamAgents::new(Vec::new())
-                .resolve_external_workspaces(Vec::new())
-                .expect("an empty external agent request is valid"));
-        }
-        self.list_agents()
-            .await
-            .map_err(|_| WorkspaceProjectionError::Unknown)?
-            .resolve_external_workspaces(requested)
-            .map_err(|_| WorkspaceProjectionError::Unknown)
-    }
-
-    fn workspace_projection_for_removal(
-        &self,
-        removal: &TeamMaterializationRemoval,
-    ) -> Result<TeamWorkspaceProjection, WorkspaceProjectionError> {
-        let canonical_config = self
-            .config
-            .read()
-            .map_err(|_| WorkspaceProjectionError::Unknown)?;
-        let _ = canonical_config.get("agents");
-        TeamWorkspaceProjection::for_removal(self.config.state_dir_path(), removal)
             .map_err(|_| WorkspaceProjectionError::Rejected)
     }
 
@@ -626,14 +564,31 @@ impl<'gateway> TeamProvider<'gateway> {
                 Ok(request) => request,
                 Err(_) => return MutationOutcome::Rejected,
             };
-        self.write_request(request, move |response| {
-            wire::team::decode_agents_delete(response).and_then(|deleted| {
-                (deleted.agent_id == expected_agent_id)
-                    .then_some(())
-                    .ok_or(wire::WireError::InvalidAgentsDelete)
-            })
-        })
-        .await
+        let request_id = request.request_id().to_owned();
+        let encoded = match request.encode() {
+            Ok(encoded) => encoded,
+            Err(_) => return MutationOutcome::Rejected,
+        };
+        match self.gateway.rpc_encoded_mutation(request_id, encoded).await {
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. })
+                if is_agent_not_found_error(error.code()) =>
+            {
+                MutationOutcome::Applied(())
+            }
+            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
+                MutationOutcome::Rejected
+            }
+            MutationDelivery::Response(response) => {
+                match wire::team::decode_agents_delete(response) {
+                    Ok(deleted) if deleted.agent_id == expected_agent_id => {
+                        MutationOutcome::Applied(())
+                    }
+                    Ok(_) | Err(_) => MutationOutcome::OutcomeUnknown,
+                }
+            }
+            MutationDelivery::NotWritten(_) => MutationOutcome::Rejected,
+            MutationDelivery::MayHaveReached(_) => MutationOutcome::OutcomeUnknown,
+        }
     }
 
     pub(crate) async fn config_snapshot(&self) -> Result<TeamConfigSnapshot, ReadFailure> {
@@ -862,6 +817,13 @@ fn permanent_rejection() -> MaterializationOperationOutcome {
     MaterializationOperationOutcome::Rejected {
         rejection: organization::MaterializationRejection::Permanent,
     }
+}
+
+fn is_agent_not_found_error(code: &str) -> bool {
+    matches!(
+        code,
+        "NOT_FOUND" | "AGENT_NOT_FOUND" | "not_found" | "agent_not_found"
+    )
 }
 
 fn recovery_request(request: &TeamMaterializationRequest) -> Option<TeamRecoveryRequest> {

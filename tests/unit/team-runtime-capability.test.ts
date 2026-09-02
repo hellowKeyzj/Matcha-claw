@@ -17,26 +17,31 @@ import {
   deleteTeamRun,
   exportTeamRunGraphYaml,
   fireTeamRunTrigger,
+  fireTeamWebhookTrigger,
   importTeamRunGraphYaml,
   listTeamRuns,
+  listTeamRunTriggers,
   planTeamDependencies,
   provisionTeamAgents,
   readTeamRunDiagnostics,
+  readTeamRunGraphContext,
   readTeamRunSnapshot,
   resolveTeamApproval,
   resumeTeam,
   saveTeamRunGraphProjection,
+  settleTeamRunNodePrompt,
   submitTeamRunDecision,
   submitTeamRunGraphPatch,
   submitTeamRunNodeEvent,
   submitTeamRunRoleMessage,
   validateTeamSkillPackage,
+  wakeDueTeamRunNodePromptRetries,
 } from '@/services/openclaw/team-runtime-client';
 
 type ClientCase = {
   name: string;
   operationId: string;
-  target: Record<string, unknown>;
+  target: Record<string, unknown> | null;
   input: Record<string, unknown>;
   invoke: () => Promise<unknown>;
 };
@@ -45,8 +50,24 @@ const scope = { kind: 'global' };
 const packagePath = 'teams/one';
 const teamId = 'team:one';
 const runId = 'run:one';
+const selectionId = `teamskill:v1:${'a'.repeat(64)}`;
 
 const manualTeam = {
+  name: 'One',
+  description: 'verification team',
+  version: '1.0.0',
+  members: [{
+    agentId: 'agent:one',
+    agentName: 'Leader',
+    workspace: 'workspace:one',
+    roleId: 'leader',
+    skills: [],
+    tools: [],
+    isLeader: true,
+  }],
+};
+
+const manualTeamInput = {
   name: 'One',
   description: 'verification team',
   version: '1.0.0',
@@ -92,14 +113,6 @@ const LEGACY_OPERATION_IDS = [
   'team.runDelete',
 ] as const;
 
-const MISSING_CLIENT_OPERATION_IDS = [
-  'team.triggerList',
-  'team.webhookTriggerFire',
-  'team.graphContext',
-  'team.nodePromptRetryDue',
-  'team.nodePromptSettled',
-] as const;
-
 const cases: ClientCase[] = [
   {
     name: 'package validation',
@@ -119,7 +132,7 @@ const cases: ClientCase[] = [
     name: 'agent provisioning',
     operationId: 'team.provisionAgents',
     target: { kind: 'team', teamId, packagePath },
-    input: { teamId, packagePath, idempotencyKey: 'provision:one', sourceType: 'manual', manualTeam },
+    input: { teamId, packagePath, idempotencyKey: 'provision:one', sourceType: 'manual', manualTeam: manualTeamInput },
     invoke: () => provisionTeamAgents({
       teamId,
       packagePath,
@@ -150,31 +163,18 @@ const cases: ClientCase[] = [
     invoke: () => listTeamRuns({ teamId }),
   },
   {
-    name: 'team resume with idempotency',
-    operationId: 'team.resume',
+    name: 'trigger listing',
+    operationId: 'team.triggerList',
     target: { kind: 'team', teamId },
-    input: { teamId, idempotencyKey: 'resume:one' },
-    invoke: () => resumeTeam({ teamId, idempotencyKey: 'resume:one' }),
+    input: {},
+    invoke: () => listTeamRunTriggers({ teamId }),
   },
   {
-    name: 'run decision',
-    operationId: 'team.runDecisionSubmit',
-    target: { kind: 'team-run', runId },
-    input: { runId, decision: 'retry', note: 'retry once', idempotencyKey: 'decision:one' },
-    invoke: () => submitTeamRunDecision({ runId, decision: 'retry', note: 'retry once', idempotencyKey: 'decision:one' }),
-  },
-  {
-    name: 'approval decision',
-    operationId: 'team.approvalResolve',
-    target: { kind: 'team-approval', runId, approvalId: 'approval:one' },
-    input: { runId, approvalId: 'approval:one', decision: 'approve', note: 'approved', idempotencyKey: 'approval:one' },
-    invoke: () => resolveTeamApproval({
-      runId,
-      approvalId: 'approval:one',
-      decision: 'approve',
-      note: 'approved',
-      idempotencyKey: 'approval:one',
-    }),
+    name: 'webhook trigger fire',
+    operationId: 'team.webhookTriggerFire',
+    target: { kind: 'team' },
+    input: { webhookPath: '/webhooks/team-one', idempotencyKey: 'webhook:one' },
+    invoke: () => fireTeamWebhookTrigger({ webhookPath: '/webhooks/team-one', idempotencyKey: 'webhook:one' }),
   },
   {
     name: 'snapshot with event cursor projection',
@@ -182,13 +182,6 @@ const cases: ClientCase[] = [
     target: { kind: 'team-run', runId },
     input: { runId, eventCursor: 7, eventLimit: 20 },
     invoke: () => readTeamRunSnapshot({ runId, eventCursor: 7, eventLimit: 20 }),
-  },
-  {
-    name: 'diagnostics projection',
-    operationId: 'team.runDiagnostics',
-    target: { kind: 'team-run', runId },
-    input: { runId },
-    invoke: () => readTeamRunDiagnostics({ runId }),
   },
   {
     name: 'graph save',
@@ -203,6 +196,13 @@ const cases: ClientCase[] = [
     target: { kind: 'team-run', runId },
     input: { runId, summary: 'set metadata', patch, idempotencyKey: 'graph:patch:one' },
     invoke: () => submitTeamRunGraphPatch({ runId, summary: 'set metadata', patch, idempotencyKey: 'graph:patch:one' }),
+  },
+  {
+    name: 'graph context',
+    operationId: 'team.graphContext',
+    target: { kind: 'team-run', teamId, runId },
+    input: { teamId, runId, view: 'currentNode', nodeExecutionId: 'start:attempt:1' },
+    invoke: () => readTeamRunGraphContext({ teamId, runId, view: 'currentNode', nodeExecutionId: 'start:attempt:1' }),
   },
   {
     name: 'graph export',
@@ -239,6 +239,20 @@ const cases: ClientCase[] = [
     invoke: () => submitTeamRunRoleMessage({ runId, roleId: 'leader', text: 'hello', idempotencyKey: 'message:one' }),
   },
   {
+    name: 'node prompt retry due',
+    operationId: 'team.nodePromptRetryDue',
+    target: { kind: 'team-run', runId },
+    input: { runId },
+    invoke: () => wakeDueTeamRunNodePromptRetries({ runId }),
+  },
+  {
+    name: 'node prompt settled',
+    operationId: 'team.nodePromptSettled',
+    target: null,
+    input: { sessionKey: 'session:one', promptRunId: 'prompt:one', phase: 'final' },
+    invoke: () => settleTeamRunNodePrompt({ sessionKey: 'session:one', promptRunId: 'prompt:one', phase: 'final' }),
+  },
+  {
     name: 'node event',
     operationId: 'team.nodeEvent',
     target: { kind: 'team-run', runId },
@@ -249,6 +263,40 @@ const cases: ClientCase[] = [
       event: 'progress',
       summary: 'started',
       idempotencyKey: 'event:one',
+    }),
+  },
+  {
+    name: 'diagnostics projection',
+    operationId: 'team.runDiagnostics',
+    target: { kind: 'team-run', runId },
+    input: { runId },
+    invoke: () => readTeamRunDiagnostics({ runId }),
+  },
+  {
+    name: 'run decision',
+    operationId: 'team.runDecisionSubmit',
+    target: { kind: 'team-run', runId },
+    input: { runId, decision: 'retry', note: 'retry once', idempotencyKey: 'decision:one' },
+    invoke: () => submitTeamRunDecision({ runId, decision: 'retry', note: 'retry once', idempotencyKey: 'decision:one' }),
+  },
+  {
+    name: 'team resume with idempotency',
+    operationId: 'team.resume',
+    target: { kind: 'team', teamId },
+    input: { teamId, idempotencyKey: 'resume:one' },
+    invoke: () => resumeTeam({ teamId, idempotencyKey: 'resume:one' }),
+  },
+  {
+    name: 'approval decision',
+    operationId: 'team.approvalResolve',
+    target: { kind: 'team-approval', runId, approvalId: 'approval:one' },
+    input: { runId, approvalId: 'approval:one', decision: 'approve', note: 'approved', idempotencyKey: 'approval:one' },
+    invoke: () => resolveTeamApproval({
+      runId,
+      approvalId: 'approval:one',
+      decision: 'approve',
+      note: 'approved',
+      idempotencyKey: 'approval:one',
     }),
   },
   {
@@ -279,12 +327,12 @@ beforeEach(() => {
 });
 
 describe('Team runtime client compatibility verification', () => {
-  it('keeps the complete legacy 25-operation catalog and current client gap explicit', () => {
+  it('covers all 25 legacy operation ids through exported client wrappers', () => {
     const covered = new Set(cases.map(({ operationId }) => operationId));
     expect(LEGACY_OPERATION_IDS).toHaveLength(25);
-    expect(MISSING_CLIENT_OPERATION_IDS).toHaveLength(5);
-    expect(MISSING_CLIENT_OPERATION_IDS.every((operationId) => !covered.has(operationId))).toBe(true);
-    expect(new Set([...covered, ...MISSING_CLIENT_OPERATION_IDS])).toEqual(new Set(LEGACY_OPERATION_IDS));
+    expect(cases).toHaveLength(25);
+    expect(covered.size).toBe(25);
+    expect(covered).toEqual(new Set(LEGACY_OPERATION_IDS));
   });
 
   it.each(cases)('$name preserves the legacy capability request and does not fake success', async (fixture) => {
@@ -305,6 +353,82 @@ describe('Team runtime client compatibility verification', () => {
       scope,
       target: fixture.target,
       input: fixture.input,
+    });
+  });
+
+  it('decodes Rust sealed package validation DTOs', async () => {
+    const valid = {
+      status: 'valid',
+      package: {
+        selectionId,
+        name: 'One',
+        version: '1.0.0',
+        kind: 'team-skill',
+        description: 'verification team',
+      },
+    };
+    hostApiFetch.mockResolvedValueOnce(valid);
+    await expect(validateTeamSkillPackage({ packagePath })).resolves.toEqual(valid);
+
+    hostApiFetch.mockResolvedValueOnce({ status: 'invalid' });
+    await expect(validateTeamSkillPackage({ packagePath })).resolves.toEqual({ status: 'invalid' });
+
+    hostApiFetch.mockResolvedValueOnce({ status: 'unavailable' });
+    await expect(validateTeamSkillPackage({ packagePath })).resolves.toEqual({ status: 'unavailable' });
+  });
+
+  it('rejects old validation DTOs and outcome-unknown mutation projections', async () => {
+    hostApiFetch.mockResolvedValueOnce({ valid: true, package: {}, errors: [], warnings: [] });
+    await expect(validateTeamSkillPackage({ packagePath })).rejects.toThrow('Team runtime response is unavailable');
+
+    hostApiFetch.mockResolvedValueOnce({ runId, state: 'outcome_unknown' });
+    await expect(cancelTeamRun({ runId, idempotencyKey: 'cancel:unknown' })).rejects.toThrow('Team runtime response is unavailable');
+
+    hostApiFetch.mockResolvedValueOnce({ runId, state: 'outcome_unknown' });
+    await expect(deleteTeamRun({ runId })).rejects.toThrow('Team runtime response is unavailable');
+
+    hostApiFetch.mockResolvedValueOnce({ runId, outcome: 'outcome-unknown' });
+    await expect(exportTeamRunGraphYaml({ runId })).rejects.toThrow('Team runtime response is unavailable');
+  });
+
+  it('decodes Rust graph export projection without requiring the old success wrapper', async () => {
+    const projection = { runId, fileName: `${runId}.yaml`, yaml: 'version: 1\n' };
+    hostApiFetch.mockResolvedValueOnce(projection);
+    await expect(exportTeamRunGraphYaml({ runId })).resolves.toEqual(projection);
+  });
+
+  it('forwards terminal node event receipt fields', async () => {
+    hostApiFetch.mockRejectedValueOnce({
+      code: 'TEAM_RUNTIME_UNAVAILABLE',
+      status: 503,
+      message: 'Team runtime is unavailable',
+    });
+
+    await expect(submitTeamRunNodeEvent({
+      runId,
+      nodeExecutionId: 'start:attempt:1',
+      event: 'complete',
+      summary: 'done',
+      idempotencyKey: 'event:complete:one',
+      outputPort: 'done',
+      deliveryId: 'delivery:one',
+      receipt: 'receipt:one',
+      nodeId: 'start',
+      attemptNumber: 1,
+    })).rejects.toMatchObject({ status: 503 });
+
+    const [, init] = hostApiFetch.mock.calls[0] as [string, { body: string }];
+    expect(JSON.parse(init.body).input).toEqual({
+      runId,
+      nodeExecutionId: 'start:attempt:1',
+      event: 'complete',
+      summary: 'done',
+      idempotencyKey: 'event:complete:one',
+      outputPort: 'done',
+      deliveryId: 'delivery:one',
+      receipt: 'receipt:one',
+      nodeId: 'start',
+      attemptNumber: 1,
     });
   });
 });

@@ -7,8 +7,12 @@ import { useChatStore as realUseChatStore } from '@/stores/chat';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
+import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
+import type { RuntimeEndpointRef } from '../../electron/desktop-contract/runtime-address';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
@@ -234,6 +238,43 @@ function buildTeamRoleBinding(input: { runId: string; roleId: string; agentId: s
   };
 }
 
+function buildRuntimeEndpoint(endpoint: Extract<RuntimeEndpointRef, { kind: 'native-runtime' }>): RuntimeEndpointSummary {
+  return {
+    id: `${endpoint.runtimeAdapterId}-local`,
+    protocolId: endpoint.runtimeAdapterId === 'matcha-agent' ? 'matcha-agent-app-server' : 'openclaw-v4',
+    runtimeAdapterId: endpoint.runtimeAdapterId,
+    runtimeInstanceId: endpoint.runtimeInstanceId,
+    endpointRef: endpoint,
+    source: {
+      kind: 'runtime-adapter',
+      runtimeAdapterId: endpoint.runtimeAdapterId,
+      runtimeInstanceId: endpoint.runtimeInstanceId,
+    },
+    location: { kind: 'local' },
+    lifecycle: { phase: 'ready', connected: true, ready: true, updatedAt: null },
+    displayName: endpoint.runtimeAdapterId,
+    agentIds: [endpoint.runtimeAdapterId === 'matcha-agent' ? 'matcha' : 'main'],
+    defaultAgentId: endpoint.runtimeAdapterId === 'matcha-agent' ? 'matcha' : 'main',
+    agents: [],
+    acceptsDynamicAgents: true,
+    capabilities: {
+      chat: true,
+      streaming: true,
+      tools: true,
+      approvals: true,
+      replay: true,
+      modelSelection: true,
+    },
+    capabilityFamilies: [{ family: 'session', availability: 'supported' }],
+    controlState: {
+      connection: null,
+      readiness: { ready: true, phase: 'ready' },
+      capabilities: null,
+      updatedAt: null,
+    },
+  };
+}
+
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
   sessionKey?: string;
   messages?: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: unknown; timestamp?: number; streaming?: boolean }>;
@@ -313,50 +354,67 @@ describe('chat 顶层订阅收口', () => {
       submitTeamRoleMessageFromChat: vi.fn().mockResolvedValue(undefined),
     } as never);
 
+    useRuntimeEndpointsStore.setState({
+      status: 'ready',
+      error: null,
+      endpoints: [buildRuntimeEndpoint(openClawTestRuntimeEndpoint)],
+      hasLoadedOnce: true,
+      revision: 0,
+      changedRuntimeScopeKeys: [],
+      revisionByRuntimeScopeKey: {},
+    });
+
+    const mainRecord = buildSessionRecord({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'first chunk',
+          timestamp: 1,
+          streaming: true,
+        },
+      ],
+      runtime: {
+        updatedAt: null,
+      },
+      window: createViewportWindowState({
+        totalItemCount: 1,
+        windowStartOffset: 0,
+        windowEndOffset: 1,
+        isAtLatest: true,
+      }),
+    });
+    const mainSessionRuntimeCatalog = {
+      status: 'ready' as const,
+      error: null,
+      endpoints: [{
+        endpointId: 'openclaw-default',
+        protocolId: 'openclaw',
+        endpoint: openClawTestRuntimeEndpoint,
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'default',
+        displayName: 'OpenClaw',
+        agentIds: ['main'],
+        acceptsDynamicAgents: true,
+        agentCatalog: {
+          source: 'subagent-management' as const,
+          seedAgents: [{ id: 'main', name: 'main' }],
+        },
+        sessionPromptScopes: [{ kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' }],
+        defaultSessionPromptScope: { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
+      }],
+      defaultSessionPromptScope: { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
+    };
+    const loadedSessions = { 'agent:main:main': mainRecord };
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      loadedSessions: {
-        'agent:main:main': buildSessionRecord({
-          sessionKey: 'agent:main:main',
-          messages: [
-            {
-              id: 'assistant-1',
-              role: 'assistant',
-              content: 'first chunk',
-              timestamp: 1,
-              streaming: true,
-            },
-          ],
-          runtime: {
-            updatedAt: null,
-          },
-          window: createViewportWindowState({
-            totalItemCount: 1,
-            windowStartOffset: 0,
-            windowEndOffset: 1,
-            isAtLatest: true,
-          }),
-        }),
-      },
+      currentConversation: buildCurrentConversationFromSessionRecord(mainRecord),
+      loadedSessions,
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
-      sessionRuntimeCatalog: {
-        status: 'ready',
-        error: null,
-        endpoints: [{
-          endpointId: 'openclaw-default',
-          protocolId: 'openclaw',
-          endpoint: openClawTestRuntimeEndpoint,
-          runtimeAdapterId: 'openclaw',
-          runtimeInstanceId: 'default',
-          displayName: 'OpenClaw',
-          agentIds: ['main'],
-          acceptsDynamicAgents: true,
-          sessionPromptScopes: [{ kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' }],
-          defaultSessionPromptScope: { kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
-        }],
-        defaultSessionPromptScope: { kind: 'agent', endpoint: openClawTestRuntimeEndpoint, agentId: 'main' },
-      },
+      sessionRuntimeCatalog: mainSessionRuntimeCatalog,
+      sessionRuntimeGraph: buildSessionRuntimeGraph(mainSessionRuntimeCatalog, loadedSessions),
       sessionCatalogStatus: {
         status: 'ready',
         error: null,
@@ -443,6 +501,11 @@ describe('chat 顶层订阅收口', () => {
         defaultSessionPromptScope: matchaAgentScope,
       },
       bootstrapSessionRuntime,
+    } as never));
+    useRuntimeEndpointsStore.setState((state) => ({
+      ...state,
+      endpoints: [buildRuntimeEndpoint(matchaEndpoint)],
+      changedRuntimeScopeKeys: [],
     } as never));
 
     render(
@@ -902,6 +965,43 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.activeRunDisconnected');
   });
 
+  it('全局 catalog loading 时仍保留已有当前会话内容', () => {
+    useChatStore.setState((state) => {
+      const current = buildSessionRecord({
+        sessionKey: 'agent:main:main',
+        messages: [{ id: 'assistant-1', role: 'assistant', content: 'hi', timestamp: 1 }],
+        window: createViewportWindowState({
+          totalItemCount: 1,
+          windowStartOffset: 0,
+          windowEndOffset: 1,
+          isAtLatest: true,
+        }),
+      });
+      const catalog = {
+        ...state.sessionRuntimeCatalog,
+        status: 'loading' as const,
+      };
+      const loadedSessions = { 'agent:main:main': current };
+      return {
+        currentSessionKey: 'agent:main:main',
+        loadedSessions,
+        currentConversation: null,
+        sessionRuntimeCatalog: catalog,
+        sessionRuntimeGraph: buildSessionRuntimeGraph(catalog, loadedSessions),
+      };
+    });
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByTestId('chat-offline')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-viewport-pane')).toHaveTextContent('1');
+  });
+
   it('Runtime Host 恢复到 running 后保留 Chat 内容并启用输入框', () => {
     render(
       <MemoryRouter>
@@ -960,8 +1060,17 @@ describe('chat 顶层订阅收口', () => {
       isInitialized: true,
       runtimeHost: { lifecycle: 'stopped' },
     } as never);
+    useRuntimeEndpointsStore.setState((state) => ({
+      ...state,
+      endpoints: [],
+      changedRuntimeScopeKeys: [],
+    } as never));
     useChatStore.setState((state) => ({
       ...state,
+      currentSessionKey: '',
+      currentConversation: null,
+      loadedSessions: {},
+      sessionRuntimeGraph: { endpoints: [] },
       sessionRuntimeCatalog: {
         status: 'ready',
         error: null,
@@ -1000,8 +1109,17 @@ describe('chat 顶层订阅收口', () => {
       isInitialized: true,
       runtimeHost: { lifecycle: 'error' },
     } as never);
+    useRuntimeEndpointsStore.setState((state) => ({
+      ...state,
+      endpoints: [],
+      changedRuntimeScopeKeys: [],
+    } as never));
     useChatStore.setState((state) => ({
       ...state,
+      currentSessionKey: '',
+      currentConversation: null,
+      loadedSessions: {},
+      sessionRuntimeGraph: { endpoints: [] },
       sessionRuntimeCatalog: {
         status: 'ready',
         error: null,
@@ -1040,8 +1158,18 @@ describe('chat 顶层订阅收口', () => {
       isInitialized: false,
       runtimeHost: { lifecycle: 'starting' },
     } as never);
+    useRuntimeEndpointsStore.setState((state) => ({
+      ...state,
+      status: 'loading',
+      endpoints: [],
+      changedRuntimeScopeKeys: [],
+    } as never));
     useChatStore.setState((state) => ({
       ...state,
+      currentSessionKey: '',
+      currentConversation: null,
+      loadedSessions: {},
+      sessionRuntimeGraph: { endpoints: [] },
       sessionRuntimeCatalog: {
         status: 'loading',
         error: null,

@@ -1,8 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
-use foundation::process::{
-    ShutdownOutcome,
-    supervision::{RestartOutcome, StartOutcome, SupervisorSnapshot, TerminationCompletion},
+use foundation::{
+    process::{
+        ShutdownOutcome,
+        supervision::{RestartOutcome, StartOutcome, SupervisorSnapshot, TerminationCompletion},
+    },
+    toolchain::NativeToolchainRuntime,
 };
 use platform::exchange::InvocationOutcome;
 use tokio::sync::mpsc;
@@ -206,6 +209,17 @@ impl SessionOps for MatchaRuntimeDriver {
         Box::pin(async move { list_matcha_sessions(session).await })
     }
 
+    fn load_matcha_session<'a>(
+        &'a self,
+        session_id: SessionId,
+    ) -> crate::runtime_driver::SessionFuture<
+        'a,
+        Result<matcha_agent::session::model::SessionRecord, AppServerClientError>,
+    > {
+        let session = self.session.clone();
+        Box::pin(async move { session.load_session(session_id).await })
+    }
+
     fn load_matcha_history<'a>(
         &'a self,
         command: matcha_history::Command,
@@ -221,6 +235,14 @@ impl SessionOps for MatchaRuntimeDriver {
     ) -> crate::runtime_driver::SessionFuture<'a, timeline::Outcome> {
         let session = self.session.clone();
         Box::pin(async move { load_matcha_timeline(session, command, epoch).await })
+    }
+
+    fn load_session_content<'a>(
+        &'a self,
+        command: timeline::ContentCommand,
+    ) -> crate::runtime_driver::SessionFuture<'a, timeline::ContentOutcome> {
+        let session = self.session.clone();
+        Box::pin(async move { timeline::load_matcha_content(&session, command).await })
     }
 
     fn pending_approvals<'a>(
@@ -766,6 +788,7 @@ pub(super) async fn select_session_model_with_handle(
         serde_json::json!({
             "sessionId": session_id_shape.clone(),
             "model": &model,
+            "modelSelectionId": session_trace::id_shape(Some(&command.model_selection_id)),
             "providerFingerprint": session_trace::id_shape(Some(&provider_fingerprint)),
             "providerRuntime": matcha_provider_runtime_trace(&provider_runtime),
             "accountId": diagnostic.as_ref().map(|diagnostic| diagnostic.account_id()),
@@ -779,6 +802,7 @@ pub(super) async fn select_session_model_with_handle(
         model.clone(),
     ) {
         Ok(params) => params
+            .with_model_selection_id(command.model_selection_id)
             .with_provider_fingerprint(provider_fingerprint)
             .with_provider_runtime(matcha_provider_runtime(provider_runtime)),
         Err(_) => {
@@ -926,6 +950,17 @@ pub(super) async fn create_session(
 pub(super) async fn list_matcha_sessions(
     session: MatchaPeerSessionHandle,
 ) -> matcha_session_catalog::Outcome {
+    match session.list_local_history().await {
+        HistoryResult::Complete(catalog) => {
+            return matcha_session_catalog::Outcome::Listed(matcha_session_catalog::project_local(
+                catalog,
+            ));
+        }
+        HistoryResult::NotFound | HistoryResult::Unavailable => {}
+        HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
+            return matcha_session_catalog::Outcome::Unavailable;
+        }
+    }
     match session.list_history().await {
         HistoryResult::Complete(catalog) => {
             matcha_session_catalog::Outcome::Listed(matcha_session_catalog::project(catalog))
@@ -944,16 +979,24 @@ pub(super) async fn load_matcha_history(
     let Some(session_id) = SessionId::try_new(command.session_id).ok() else {
         return matcha_history::Outcome::Incomplete;
     };
-    let result = session
-        .read_canonical_session(
-            session_id,
-            HydrationWindowRequest::new(
-                HydrationWindowMode::Latest,
-                HydrationWindowRequest::MAX_LIMIT,
-                None,
-            ),
-        )
-        .await;
+    let request = HydrationWindowRequest::new(
+        HydrationWindowMode::Latest,
+        HydrationWindowRequest::MAX_LIMIT,
+        None,
+    );
+    match session
+        .load_local_history(session_id.clone(), request)
+        .await
+    {
+        HistoryResult::Complete(snapshot) => {
+            return matcha_history::Outcome::Complete(matcha_history::project_hydration(&snapshot));
+        }
+        HistoryResult::NotFound | HistoryResult::Unavailable => {}
+        HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
+            return matcha_history::Outcome::Incomplete;
+        }
+    }
+    let result = session.read_canonical_session(session_id, request).await;
     match result {
         HistoryResult::Complete(facts) => {
             matcha_history::Outcome::Complete(matcha_history::project(&facts))
@@ -1055,9 +1098,11 @@ pub(super) async fn send_session_with_handle(
     let subscription = match session
         .subscribe_renderer_events(
             session_id.clone(),
+            session_key.clone(),
             run_id.clone(),
             route_key,
             renderer_events,
+            trace_id.clone(),
         )
         .await
     {
@@ -1209,6 +1254,7 @@ pub struct MatchaAgentInput {
 pub(super) fn build_peer(
     input: MatchaAgentInput,
     secret: Secret,
+    toolchain: Arc<NativeToolchainRuntime>,
     report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
 ) -> Result<MatchaPeer, ConstructionError> {
     Ok(MatchaPeerFactory::try_new(
@@ -1218,6 +1264,7 @@ pub(super) fn build_peer(
             working_directory: input.working_directory,
             storage_root: input.storage_root,
             port: input.port,
+            toolchain,
             report_diagnostic,
             #[cfg(windows)]
             git_bash: input.git_bash,

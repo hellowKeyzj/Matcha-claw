@@ -8,6 +8,7 @@ interface SelectableProviderModel {
   selectionId: string;
   label?: string;
   modelId: string;
+  modelReferences: string[];
   capabilities: ModelCapability[];
   contextWindow?: number;
   maxTokens?: number;
@@ -50,8 +51,11 @@ function normalizeSelectableModel(value: unknown): SelectableProviderModel | nul
   const selectionId = typeof value.selectionId === 'string' ? value.selectionId.trim() : '';
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
   const label = typeof value.label === 'string' ? value.label.trim() : '';
+  const modelReferences = Array.isArray(value.modelReferences)
+    ? value.modelReferences.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)
+    : [];
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!accountId || !selectionId || !modelId || capabilities.length === 0) return null;
+  if (!accountId || !selectionId || !modelId || modelReferences.length === 0 || capabilities.length === 0) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   return {
@@ -59,6 +63,7 @@ function normalizeSelectableModel(value: unknown): SelectableProviderModel | nul
     selectionId,
     ...(label ? { label } : {}),
     modelId,
+    modelReferences,
     capabilities,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
@@ -79,11 +84,31 @@ export function buildSelectableProviderModels(models: readonly SelectableProvide
       providerLabel,
       modelLabel: model.modelId,
       displayLabel: `${providerLabel} / ${model.modelId}`,
+      modelReferences: model.modelReferences,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
     });
   }
   return out.sort((left, right) => left.displayLabel.localeCompare(right.displayLabel));
+}
+
+export function resolveModelCatalogEntry(
+  models: readonly ModelCatalogEntry[],
+  reference: string | null | undefined,
+): ModelCatalogEntry | undefined {
+  const normalized = reference?.trim();
+  if (!normalized) return undefined;
+  return models.find((model) => model.id === normalized || Boolean(model.modelReferences?.includes(normalized)));
+}
+
+export function resolveModelRuntimeReference(
+  models: readonly ModelCatalogEntry[],
+  reference: string | null | undefined,
+): string | undefined {
+  const normalized = reference?.trim();
+  if (!normalized) return undefined;
+  const model = resolveModelCatalogEntry(models, normalized);
+  return model?.modelReferences?.find((item) => item.trim())?.trim() ?? normalized;
 }
 
 export async function fetchSelectableProviderModels(

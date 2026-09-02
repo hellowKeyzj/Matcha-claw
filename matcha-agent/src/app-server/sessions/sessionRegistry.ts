@@ -14,6 +14,7 @@ export type SessionCreateInput = {
   sessionId?: string
   title?: string
   model?: string
+  modelSelectionId?: string
   permissionMode?: string
 }
 
@@ -123,6 +124,9 @@ export class SessionRegistry {
       lastSeq: 0,
       lastSnapshotVersion: 0,
       ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.modelSelectionId !== undefined
+        ? { modelSelectionId: input.modelSelectionId }
+        : {}),
       ...(input.permissionMode !== undefined
         ? { permissionMode: input.permissionMode }
         : {}),

@@ -5,6 +5,10 @@ import type {
 } from '../../main/runtime-host-delivery/transport/security/policy';
 import { isSecurityOperationRequest } from '../../main/runtime-host-delivery/transport/security/policy';
 import type { SecurityRuleCatalogTransport } from '../../main/runtime-host-delivery/transport/security/rule-catalog';
+import {
+  logSessionTrace,
+  readTraceHeader,
+} from '../../main/runtime-host-delivery/transport/sessions/trace';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const OPERATION_INVALID = {
@@ -69,10 +73,20 @@ export async function handleSecurityRoutes(
   if (req.method !== 'GET') return false;
 
   if (url.pathname === '/api/security') {
+    const traceId = readTraceHeader(req.headers);
+    logSessionTrace('electron.security.policy.request', traceId, {
+      method: req.method,
+      path: url.pathname,
+    });
     try {
-      const policy = await transport.read();
+      const policy = await transport.read(traceId);
+      logSessionTrace('electron.security.policy.response', traceId, {
+        status: policy ? 200 : 503,
+        contract: policy ? 'policy' : 'unavailable',
+      });
       sendJson(res, policy ? 200 : 503, policy ?? POLICY_UNAVAILABLE);
     } catch {
+      logSessionTrace('electron.security.policy.failure', traceId, {});
       sendJson(res, 503, POLICY_UNAVAILABLE);
     }
     return true;

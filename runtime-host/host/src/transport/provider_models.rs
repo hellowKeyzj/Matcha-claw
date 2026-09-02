@@ -367,6 +367,20 @@ fn selectable_model_json(model: &SelectableProviderModelView) -> Value {
             Value::String(model.selection_id.clone()),
         );
     value
+        .as_object_mut()
+        .expect("model JSON is an object")
+        .insert(
+            "modelReferences".into(),
+            Value::Array(
+                model
+                    .model_references
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    value
 }
 
 fn insert_optional_number(
@@ -545,7 +559,9 @@ mod tests {
                         resolution: None,
                         quality: None,
                     },
-                    selection_id: "post-selection".into(),
+                    selection_id:
+                        "model-selection:v1:6666666666666666666666666666666666666666666666666666666666666666".into(),
+                    model_references: vec!["openai/gpt-test".into()],
                 },
             ]));
 
@@ -557,7 +573,8 @@ mod tests {
                     "label": "Main provider",
                     "modelId": "gpt-test",
                     "capabilities": ["chat"],
-                    "selectionId": "post-selection",
+                    "selectionId": "model-selection:v1:6666666666666666666666666666666666666666666666666666666666666666",
+                    "modelReferences": ["openai/gpt-test"],
                 }],
             })
         );

@@ -1,9 +1,5 @@
-import { useLayoutEffect, useMemo, useRef, type RefObject } from 'react';
-import {
-  createChatScrollController,
-  type ChatScrollController,
-  type ChatScrollControllerConfig,
-} from './chat-scroll-controller';
+import { useLayoutEffect, useMemo, useState, type RefObject } from 'react';
+import { createChatScrollController } from './chat-scroll-controller';
 import type { ChatScrollPhase } from './chat-scroll-model';
 
 interface UseChatScrollInput {
@@ -24,26 +20,16 @@ export function useChatScroll({
   viewportRef,
   contentRef,
 }: UseChatScrollInput) {
-  const configRef = useRef<ChatScrollControllerConfig>({
-    enabled,
-    scrollScopeKey,
-    setChromePhase,
-    viewportRef,
-    contentRef,
-  });
-  configRef.current = {
-    enabled,
-    scrollScopeKey,
-    setChromePhase,
-    viewportRef,
-    contentRef,
-  };
+  const [controller] = useState(() => createChatScrollController());
 
-  const controllerRef = useRef<ChatScrollController | null>(null);
-  if (controllerRef.current == null) {
-    controllerRef.current = createChatScrollController(() => configRef.current);
-  }
-  const controller = controllerRef.current;
+  useLayoutEffect(() => {
+    controller.setConfig({
+      enabled,
+      scrollScopeKey,
+      setChromePhase,
+      viewportRef,
+    });
+  }, [controller, enabled, scrollScopeKey, setChromePhase, viewportRef]);
 
   // scope 变化时同步 phase + 触发过渡（首次加载贴底 / 锚点恢复 / 强制贴底）
   useLayoutEffect(() => {
@@ -87,7 +73,9 @@ export function useChatScroll({
     handleViewportPointerDown: controller.handleViewportPointerDown,
     handleViewportTouchMove: controller.handleViewportTouchMove,
     handleViewportWheel: controller.handleViewportWheel,
+    handleViewportClickCapture: controller.handleViewportClickCapture,
     scrollViewportByWheelDelta: controller.scrollViewportByWheelDelta,
+    prepareElementAnchorRestore: controller.prepareElementAnchorRestore,
     prepareScopeAnchorRestore: controller.prepareScopeAnchorRestore,
     prepareScopeBottomAlign: controller.prepareScopeBottomAlign,
     notifyViewportGeometryChanged: controller.onGeometryChanged,

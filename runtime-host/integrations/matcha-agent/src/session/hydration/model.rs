@@ -1,10 +1,14 @@
 use std::fmt;
 
+use serde_json::Value;
+
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 512;
+const MAX_CONTENT_REF_BYTES: usize = 512;
 const MAX_TIMESTAMP_BYTES: usize = 128;
 const MAX_TOOL_NAME_BYTES: usize = 256;
 const MAX_METADATA_KEYS: usize = 64;
+const MAX_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_MEDIA_REFERENCE_BYTES: usize = 2 * 1024;
 
@@ -109,6 +113,7 @@ pub enum HydratedMessageRole {
 #[derive(Clone, Eq, PartialEq)]
 pub enum HydratedContentBlock {
     Text { text: String },
+    LargeText(HydratedLargeText),
     Thinking { text: String },
     ToolUse(HydratedToolUse),
     ToolResult(HydratedToolResult),
@@ -116,17 +121,72 @@ pub enum HydratedContentBlock {
 }
 
 #[derive(Clone, Eq, PartialEq)]
+pub struct HydratedLargeText {
+    text: String,
+    content_ref: String,
+    total_bytes: u64,
+    loaded_bytes: u64,
+}
+
+impl HydratedLargeText {
+    pub(crate) fn try_new(
+        text: String,
+        content_ref: String,
+        total_bytes: u64,
+    ) -> Result<Self, DecodeFailure> {
+        let text = bounded_text(text).ok_or(DecodeFailure::TextTooLarge)?;
+        let content_ref = bounded_content_ref(&content_ref).ok_or(DecodeFailure::UnsafeContent)?;
+        let loaded_bytes = text.len() as u64;
+        if loaded_bytes > total_bytes {
+            return Err(DecodeFailure::UnsafeContent);
+        }
+        Ok(Self {
+            text,
+            content_ref,
+            total_bytes,
+            loaded_bytes,
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn content_ref(&self) -> &str {
+        &self.content_ref
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub const fn loaded_bytes(&self) -> u64 {
+        self.loaded_bytes
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct HydratedToolUse {
     tool_call_id: String,
     name: String,
+    input: Option<Value>,
+    input_text: Option<String>,
     metadata: HydratedToolMetadata,
 }
 
 impl HydratedToolUse {
-    pub(crate) fn new(tool_call_id: String, name: String, metadata: HydratedToolMetadata) -> Self {
+    pub(crate) fn new(
+        tool_call_id: String,
+        name: String,
+        input: Option<Value>,
+        input_text: Option<String>,
+        metadata: HydratedToolMetadata,
+    ) -> Self {
         Self {
             tool_call_id,
             name,
+            input,
+            input_text,
             metadata,
         }
     }
@@ -135,6 +195,12 @@ impl HydratedToolUse {
     }
     pub fn name(&self) -> &str {
         &self.name
+    }
+    pub fn input(&self) -> Option<&Value> {
+        self.input.as_ref()
+    }
+    pub fn input_text(&self) -> Option<&str> {
+        self.input_text.as_deref()
     }
     pub fn metadata(&self) -> &HydratedToolMetadata {
         &self.metadata
@@ -213,6 +279,12 @@ impl fmt::Debug for HydratedContentBlock {
             Self::Text { text } => debug
                 .field("kind", &"text")
                 .field("text_bytes", &text.len()),
+            Self::LargeText(text) => debug
+                .field("kind", &"large_text")
+                .field("text_bytes", &text.text.len())
+                .field("content_ref_bytes", &text.content_ref.len())
+                .field("total_bytes", &text.total_bytes)
+                .field("loaded_bytes", &text.loaded_bytes),
             Self::Thinking { text } => debug
                 .field("kind", &"thinking")
                 .field("text_bytes", &text.len()),
@@ -220,6 +292,11 @@ impl fmt::Debug for HydratedContentBlock {
                 .field("kind", &"tool_use")
                 .field("tool_call_id_bytes", &tool.tool_call_id.len())
                 .field("name_bytes", &tool.name.len())
+                .field("has_input", &tool.input.is_some())
+                .field(
+                    "input_text_bytes",
+                    &tool.input_text.as_ref().map_or(0, String::len),
+                )
                 .field("input_key_count", &tool.metadata.input_keys.len()),
             Self::ToolResult(result) => debug
                 .field("kind", &"tool_result")
@@ -241,6 +318,11 @@ impl fmt::Debug for HydratedToolUse {
             .debug_struct("HydratedToolUse")
             .field("has_tool_call_id", &true)
             .field("name_bytes", &self.name.len())
+            .field("has_input", &self.input.is_some())
+            .field(
+                "input_text_bytes",
+                &self.input_text.as_ref().map_or(0, String::len),
+            )
             .field("input_key_count", &self.metadata.input_keys.len())
             .finish()
     }
@@ -356,6 +438,7 @@ impl HydratedMessage {
             .iter()
             .filter_map(|block| match block {
                 HydratedContentBlock::Text { text } => Some(text.as_str()),
+                HydratedContentBlock::LargeText(text) => Some(text.text()),
                 _ => None,
             })
             .collect()
@@ -381,6 +464,10 @@ pub(crate) fn bounded_identifier(value: &str) -> Option<String> {
     bounded_string(value, MAX_IDENTIFIER_BYTES)
 }
 
+pub(crate) fn bounded_content_ref(value: &str) -> Option<String> {
+    bounded_string(value, MAX_CONTENT_REF_BYTES)
+}
+
 pub(crate) fn bounded_timestamp(value: &str) -> Option<String> {
     bounded_string(value, MAX_TIMESTAMP_BYTES)
 }
@@ -397,6 +484,16 @@ pub(crate) fn bounded_body(value: String) -> Option<String> {
     bounded_string(&value, MAX_BODY_BYTES).map(|_| value)
 }
 
+pub(crate) fn bounded_tool_input(value: &Value) -> Option<Value> {
+    (serde_json::to_string(value).is_ok_and(|text| text.len() <= MAX_TOOL_INPUT_BYTES)
+        && !payload_contains_nul(value))
+    .then(|| value.clone())
+}
+
+pub(crate) fn bounded_tool_input_text(value: String) -> Option<String> {
+    bounded_string(&value, MAX_TOOL_INPUT_BYTES).map(|_| value)
+}
+
 pub(crate) fn bounded_media_reference(value: &str) -> Option<String> {
     bounded_string(value, MAX_MEDIA_REFERENCE_BYTES)
 }
@@ -408,6 +505,17 @@ pub(crate) const fn max_metadata_keys() -> usize {
 fn bounded_string(value: &str, max_bytes: usize) -> Option<String> {
     (!value.is_empty() && value.len() <= max_bytes && value.is_char_boundary(value.len()))
         .then(|| value.to_owned())
+}
+
+fn payload_contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(values) => values.iter().any(payload_contains_nul),
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key.contains('\0') || payload_contains_nul(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -422,15 +530,90 @@ pub enum DecodeFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TranscriptRejection {
+    message_index: Option<usize>,
+    block_index: Option<usize>,
+    block_type: Option<&'static str>,
+    field: &'static str,
+    reason: DecodeFailure,
+    actual: &'static str,
+}
+
+impl TranscriptRejection {
+    pub(crate) const fn new(
+        message_index: Option<usize>,
+        block_index: Option<usize>,
+        block_type: Option<&'static str>,
+        field: &'static str,
+        reason: DecodeFailure,
+        actual: &'static str,
+    ) -> Self {
+        Self {
+            message_index,
+            block_index,
+            block_type,
+            field,
+            reason,
+            actual,
+        }
+    }
+
+    pub const fn message_index(self) -> Option<usize> {
+        self.message_index
+    }
+
+    pub const fn block_index(self) -> Option<usize> {
+        self.block_index
+    }
+
+    pub const fn block_type(self) -> Option<&'static str> {
+        self.block_type
+    }
+
+    pub const fn field(self) -> &'static str {
+        self.field
+    }
+
+    pub const fn reason(self) -> &'static str {
+        decode_failure_reason(self.reason)
+    }
+
+    pub const fn actual(self) -> &'static str {
+        self.actual
+    }
+}
+
+const fn decode_failure_reason(reason: DecodeFailure) -> &'static str {
+    match reason {
+        DecodeFailure::InvalidJson => "invalid_json",
+        DecodeFailure::InvalidShape => "invalid_shape",
+        DecodeFailure::UnsupportedRole => "unsupported_role",
+        DecodeFailure::UnsafeContent => "unsafe_content",
+        DecodeFailure::TextTooLarge => "text_too_large",
+        DecodeFailure::EmptyContent => "empty_content",
+        DecodeFailure::TranscriptTooLarge => "transcript_too_large",
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HydrationIncomplete {
     ReplayRecoveryRequired,
     ReplayIncomplete,
-    TranscriptRejected,
+    TranscriptRejected(TranscriptRejection),
     ConnectionInterrupted,
     SourceRejected,
     SourceUnavailable,
     ProtocolRejected,
     ConnectionCloseFailed,
+}
+
+impl HydrationIncomplete {
+    pub const fn transcript_rejection(self) -> Option<TranscriptRejection> {
+        match self {
+            Self::TranscriptRejected(rejection) => Some(rejection),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

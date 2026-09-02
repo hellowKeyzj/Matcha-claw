@@ -216,6 +216,12 @@ function withEnvelopeVersion(
     ...snapshot,
     version: envelope.seq,
     updatedAt: envelope.createdAt,
+    session: {
+      ...snapshot.session,
+      lastSeq: envelope.seq,
+      lastSnapshotVersion: envelope.seq,
+      updatedAt: envelope.createdAt,
+    },
   }
 }
 

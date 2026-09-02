@@ -6,9 +6,10 @@ use std::{
 
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderAccountRevision, ProviderAccountStore,
-    ProviderAccountStoreFault, ProviderModel, ProviderModelCatalog, ProviderModelStore,
-    ProviderModelStoreFault, ProviderRoute, ProviderRouting, ProviderRoutingRevision,
-    ProviderRoutingStore, ProviderRoutingStoreFault,
+    ProviderAccountStoreFault, ProviderModel, ProviderModelCapability, ProviderModelCatalog,
+    ProviderModelReference, ProviderModelStore, ProviderModelStoreFault, ProviderRoute,
+    ProviderRouting, ProviderRoutingCapability, ProviderRoutingRevision, ProviderRoutingStore,
+    ProviderRoutingStoreFault,
 };
 
 /// Coordinates the durable desired facts affected by an account removal.
@@ -183,7 +184,13 @@ impl ProviderCascade {
         };
         let current_revision = current.revision().get();
         if current_revision == expected_revision {
-            let next = prune_routing(&current, account_id).ok_or(ProviderCascadeFault::Recovery)?;
+            let next = prune_routing(
+                &current,
+                account_id,
+                self.accounts.accounts(),
+                self.models.catalog(),
+            )
+            .ok_or(ProviderCascadeFault::Recovery)?;
             self.routing
                 .replace(next)
                 .map_err(|_| ProviderCascadeFault::Apply)?;
@@ -360,22 +367,14 @@ fn routing_references(routing: &ProviderRouting, account_id: &ProviderAccountId)
 fn prune_routing(
     current: &ProviderRouting,
     account_id: &ProviderAccountId,
+    accounts: &[ProviderAccount],
+    catalog: &ProviderModelCatalog,
 ) -> Option<ProviderRouting> {
     let routes = current
         .routes()
         .iter()
         .filter_map(|(capability, route)| {
-            if route.primary().account_id() == account_id {
-                return None;
-            }
-            let fallbacks = route
-                .fallbacks()
-                .iter()
-                .filter(|reference| reference.account_id() != account_id)
-                .cloned()
-                .collect();
-            ProviderRoute::try_new(route.primary().clone(), fallbacks, route.timeout_ms())
-                .ok()
+            prune_route(*capability, route, account_id, accounts, catalog)
                 .map(|route| (*capability, route))
         })
         .collect();
@@ -384,6 +383,78 @@ fn prune_routing(
         routes,
     )
     .ok()
+}
+
+fn prune_route(
+    capability: ProviderRoutingCapability,
+    route: &ProviderRoute,
+    account_id: &ProviderAccountId,
+    accounts: &[ProviderAccount],
+    catalog: &ProviderModelCatalog,
+) -> Option<ProviderRoute> {
+    let mut fallbacks = route
+        .fallbacks()
+        .iter()
+        .filter(|reference| reference.account_id() != account_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if route.primary().account_id() != account_id {
+        return ProviderRoute::try_new(route.primary().clone(), fallbacks, route.timeout_ms()).ok();
+    }
+    let primary = fallbacks
+        .first()
+        .cloned()
+        .or_else(|| replacement_reference(capability, account_id, accounts, catalog))?;
+    fallbacks.retain(|reference| reference != &primary);
+    ProviderRoute::try_new(primary, fallbacks, route.timeout_ms()).ok()
+}
+
+fn replacement_reference(
+    capability: ProviderRoutingCapability,
+    account_id: &ProviderAccountId,
+    accounts: &[ProviderAccount],
+    catalog: &ProviderModelCatalog,
+) -> Option<ProviderModelReference> {
+    let capability = model_capability(capability);
+    accounts
+        .iter()
+        .filter(|account| account.id() != account_id && account.configuration().enabled())
+        .flat_map(|account| {
+            catalog
+                .models()
+                .iter()
+                .filter(|model| model.account_id() == account.id() && model.supports(capability))
+                .map(move |model| (account, model))
+        })
+        .min_by(|(left_account, left_model), (right_account, right_model)| {
+            provider_replacement_order(left_account, left_model)
+                .cmp(&provider_replacement_order(right_account, right_model))
+        })
+        .and_then(|(account, model)| {
+            ProviderModelReference::try_new(account.id().clone(), model.model_id()).ok()
+        })
+}
+
+fn provider_replacement_order<'a>(
+    account: &'a ProviderAccount,
+    model: &'a ProviderModel,
+) -> (std::cmp::Reverse<&'a str>, &'a str, &'a str) {
+    (
+        std::cmp::Reverse(account.configuration().updated_at()),
+        account.id().as_str(),
+        model.model_id(),
+    )
+}
+
+const fn model_capability(capability: ProviderRoutingCapability) -> ProviderModelCapability {
+    match capability {
+        ProviderRoutingCapability::Chat => ProviderModelCapability::Chat,
+        ProviderRoutingCapability::ImageUnderstand => ProviderModelCapability::ImageUnderstand,
+        ProviderRoutingCapability::ImageGenerate => ProviderModelCapability::ImageGenerate,
+        ProviderRoutingCapability::VideoGenerate => ProviderModelCapability::VideoGenerate,
+        ProviderRoutingCapability::MusicGenerate => ProviderModelCapability::MusicGenerate,
+        ProviderRoutingCapability::Tts => ProviderModelCapability::TextToSpeech,
+    }
 }
 
 #[cfg(test)]

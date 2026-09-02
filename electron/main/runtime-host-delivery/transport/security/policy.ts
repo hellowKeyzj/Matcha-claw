@@ -1,4 +1,8 @@
 import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import {
+  logSessionTrace,
+  traceHeader,
+} from '../sessions/trace';
 
 const DECISION_TTL_MS = 30_000;
 const POLICY_READ_ENDPOINT = '/api/security/policy/current';
@@ -16,6 +20,38 @@ const SECURITY_OPERATION_IDS = [
   'security.previewRemediation',
   'security.applyRemediation',
   'security.rollbackRemediation',
+] as const;
+const POLICY_PRESETS = ['strict', 'balanced', 'relaxed'] as const;
+const POLICY_ACTIONS = ['block', 'redact', 'confirm', 'warn', 'log'] as const;
+const POLICY_FAILURE_MODES = ['block_all', 'safe_mode', 'read_only'] as const;
+const POLICY_RUNTIME_BOOLEAN_FIELDS = [
+  'autoHarden',
+  'auditOnGatewayStart',
+  'runtimeGuardEnabled',
+  'enablePromptInjectionGuard',
+  'blockDestructive',
+  'blockSecrets',
+] as const;
+const POLICY_RUNTIME_LIST_FIELDS = [
+  'allowPathPrefixes',
+  'allowDomains',
+  'auditEgressAllowlist',
+  'promptInjectionPatterns',
+  'destructivePatterns',
+  'secretPatterns',
+] as const;
+const POLICY_MONITOR_FIELDS = ['credentials', 'memory', 'cost'] as const;
+const POLICY_LOGGING_FIELDS = ['logDetections'] as const;
+const POLICY_ALLOWLIST_FIELDS = ['tools', 'sessions'] as const;
+const POLICY_SEVERITY_FIELDS = ['critical', 'high', 'medium', 'low'] as const;
+const POLICY_DESTRUCTIVE_CATEGORY_FIELDS = [
+  'fileDelete',
+  'gitDestructive',
+  'sqlDestructive',
+  'systemDestructive',
+  'processKill',
+  'networkDestructive',
+  'privilegeEscalation',
 ] as const;
 
 const UNAVAILABLE = {
@@ -118,7 +154,7 @@ export type SecurityPolicyTransportResponse = Readonly<{
 
 export interface SecurityPolicyTransport {
   operate(request: SecurityOperationRequest): Promise<SecurityOperationResponse>;
-  read(): Promise<Record<string, unknown> | null>;
+  read(traceId?: string | null): Promise<Record<string, unknown> | null>;
   readAudit(page: number, pageSize: number): Promise<SecurityAuditResponse | null>;
   submit(request: SecurityPolicyRequest): Promise<SecurityPolicyTransportResponse>;
 }
@@ -174,7 +210,11 @@ export function createSecurityPolicyTransport(
       }
       return { status: 503, body: OPERATION_UNAVAILABLE };
     },
-    async read(): Promise<Record<string, unknown> | null> {
+    async read(traceId?: string | null): Promise<Record<string, unknown> | null> {
+      const startedAt = Date.now();
+      logSessionTrace('electron.security.policy.transport.request', traceId, {
+        endpoint: POLICY_READ_ENDPOINT,
+      });
       try {
         const response = await fetcher(`${baseUrl}${POLICY_READ_ENDPOINT}`, {
           headers: {
@@ -187,11 +227,22 @@ export function createSecurityPolicyTransport(
               expiresAt: Date.now() + DECISION_TTL_MS,
               revision: '1',
             })}`,
+            ...traceHeader(traceId),
           },
         });
         const body: unknown = await response.json();
-        return response.status === 200 && isPolicy(body) ? body : null;
+        const contract = response.status === 200 ? policyContract(body) : 'http-status';
+        const valid = contract === 'policy';
+        logSessionTrace('electron.security.policy.transport.response', traceId, {
+          status: response.status,
+          contract,
+          elapsedMs: Date.now() - startedAt,
+        });
+        return valid ? body : null;
       } catch {
+        logSessionTrace('electron.security.policy.transport.failure', traceId, {
+          elapsedMs: Date.now() - startedAt,
+        });
         return null;
       }
     },
@@ -464,31 +515,73 @@ function isPublicPathLike(value: string): boolean {
 }
 
 function isPolicy(value: unknown): value is Record<string, unknown> {
-  return isRecord(value)
-    && hasExactKeys(value, ['preset', 'securityPolicyVersion', 'runtime'])
-    && (value.preset === 'strict' || value.preset === 'balanced' || value.preset === 'relaxed')
-    && typeof value.securityPolicyVersion === 'number'
-    && Number.isSafeInteger(value.securityPolicyVersion)
-    && value.securityPolicyVersion > 0
-    && isSafePublicValue(value.runtime);
+  return policyContract(value) === 'policy';
 }
 
-function isSafePublicValue(value: unknown, depth = 0): boolean {
-  if (depth > 8) return false;
-  if (value === null || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
-  if (typeof value === 'string') {
-    return value.length <= 4096 && !value.includes('\0') && !/[\\r\\n]/.test(value);
-  }
-  if (Array.isArray(value)) {
-    return value.length <= 256 && value.every((item) => isSafePublicValue(item, depth + 1));
-  }
-  if (!isRecord(value) || Object.keys(value).length > 64) return false;
-  return Object.entries(value).every(([key, item]) =>
-    /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(key)
-    && !/^(authorization|accessToken|apiKey|credential|credentialReference|password|privateKey|rawError|stack)$/i.test(key)
-    && isSafePublicValue(item, depth + 1)
-  );
+function policyContract(value: unknown): string {
+  if (!isRecord(value)) return 'not-object';
+  if (!hasExactKeys(value, ['preset', 'securityPolicyVersion', 'runtime'])) return 'policy-keys';
+  if (!POLICY_PRESETS.includes(value.preset as never)) return 'preset';
+  if (!isPositiveInteger(value.securityPolicyVersion)) return 'version';
+  const runtimeContract = policyRuntimeContract(value.runtime);
+  if (runtimeContract !== 'runtime') return runtimeContract;
+  return 'policy';
+}
+
+function policyRuntimeContract(value: unknown): string {
+  if (!isExactRecord(value, [
+    ...POLICY_RUNTIME_BOOLEAN_FIELDS,
+    ...POLICY_RUNTIME_LIST_FIELDS,
+    'auditDailyCostLimitUsd',
+    'auditFailureMode',
+    'monitors',
+    'logging',
+    'allowlist',
+    'destructive',
+    'secrets',
+  ])) return 'runtime-keys';
+  if (!POLICY_RUNTIME_BOOLEAN_FIELDS.every((field) => typeof value[field] === 'boolean')) return 'runtime-booleans';
+  if (!POLICY_RUNTIME_LIST_FIELDS.every((field) => isPolicyStringList(value[field]))) return 'runtime-lists';
+  if (typeof value.auditDailyCostLimitUsd !== 'number'
+    || !Number.isFinite(value.auditDailyCostLimitUsd)
+    || value.auditDailyCostLimitUsd <= 0
+    || value.auditDailyCostLimitUsd > Number.MAX_SAFE_INTEGER) return 'runtime-cost-limit';
+  if (value.auditFailureMode !== null && !POLICY_FAILURE_MODES.includes(value.auditFailureMode as never)) return 'runtime-failure-mode';
+  if (!isBooleanRecord(value.monitors, POLICY_MONITOR_FIELDS)) return 'runtime-monitors';
+  if (!isBooleanRecord(value.logging, POLICY_LOGGING_FIELDS)) return 'runtime-logging';
+  if (!isStringListRecord(value.allowlist, POLICY_ALLOWLIST_FIELDS)) return 'runtime-allowlist';
+  if (!isActionPolicy(value.destructive, true)) return 'runtime-destructive';
+  if (!isActionPolicy(value.secrets, false)) return 'runtime-secrets';
+  return 'runtime';
+}
+
+function isActionPolicy(value: unknown, withCategories: boolean): boolean {
+  const keys = withCategories ? ['action', 'severityActions', 'categories'] : ['action', 'severityActions'];
+  if (!isExactRecord(value, keys)) return false;
+  return POLICY_ACTIONS.includes(value.action as never)
+    && isActionRecord(value.severityActions, POLICY_SEVERITY_FIELDS)
+    && (!withCategories || isBooleanRecord(value.categories, POLICY_DESTRUCTIVE_CATEGORY_FIELDS));
+}
+
+function isPolicyStringList(value: unknown): boolean {
+  return Array.isArray(value)
+    && value.length <= 256
+    && value.every((item) => typeof item === 'string'
+      && item.length > 0
+      && item.length <= 4096
+      && ![...item].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f));
+}
+
+function isBooleanRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isExactRecord(value, keys) && keys.every((key) => typeof value[key] === 'boolean');
+}
+
+function isStringListRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isExactRecord(value, keys) && keys.every((key) => isPolicyStringList(value[key]));
+}
+
+function isActionRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isExactRecord(value, keys) && keys.every((key) => POLICY_ACTIONS.includes(value[key] as never));
 }
 
 function isAuditResponse(value: unknown, page: number, pageSize: number): value is SecurityAuditResponse {
@@ -545,6 +638,10 @@ function isExact(value: unknown, expected: Record<string, unknown>): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isRecord(value) && hasExactKeys(value, keys);
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

@@ -17,6 +17,7 @@ import type { OpenClawHistoryTransport } from '../main/runtime-host-delivery/tra
 import type { SessionRenameTransport } from '../main/runtime-host-delivery/transport/sessions/rename';
 import type { SessionSendTransport } from '../main/runtime-host-delivery/transport/sessions/send';
 import type { SessionListTransport } from '../main/runtime-host-delivery/transport/sessions/list';
+import type { SessionContentTransport } from '../main/runtime-host-delivery/transport/sessions/content';
 import type { SessionTimelineTransport } from '../main/runtime-host-delivery/transport/sessions/timeline';
 import type { ChannelCatalogTransport } from '../main/runtime-host-delivery/transport/channels/catalog';
 import type { ChannelConfigReadTransport } from '../main/runtime-host-delivery/transport/channels/config-read';
@@ -61,6 +62,7 @@ import type { TaskManagerTransport } from '../main/runtime-host-delivery/transpo
 import type { PluginsTransport } from '../main/runtime-host-delivery/transport/plugins';
 import type { UsageTransport } from '../main/runtime-host-delivery/transport/usage';
 import type { RuntimeEndpointDirectoryTransport } from '../main/runtime-host-delivery/transport/runtime-directory';
+import type { CloudAccountService } from '../main/cloud-account/service';
 
 export type RuntimeHostLifecycle = DirectRuntimeHost & Readonly<{
   restart: () => Promise<void>;
@@ -68,6 +70,7 @@ export type RuntimeHostLifecycle = DirectRuntimeHost & Readonly<{
 
 export interface HostApiContext {
   licenseService: LicenseService;
+  cloudAccountService?: CloudAccountService;
   eventBus: HostEventBus;
   runtimeHost: RuntimeHostLifecycle;
   rendererEventRoutes: RendererEventRouteRegistry;
@@ -75,6 +78,7 @@ export interface HostApiContext {
   fleetTransport: FleetTransport;
   credentialWriteAdapter?: RemoteFleetCredentialWriteAdapter;
   sessionTimelineTransport: SessionTimelineTransport;
+  sessionContentTransport: SessionContentTransport;
   matchaSessionListTransport: MatchaSessionListTransport;
   sessionAbortTransport: SessionAbortTransport;
   sessionCreateTransport: SessionCreateTransport;
@@ -150,6 +154,7 @@ export type SessionApiContext = Pick<
   | 'rendererEventRoutes'
   | 'sessionListTransport'
   | 'sessionTimelineTransport'
+  | 'sessionContentTransport'
   | 'matchaSessionListTransport'
   | 'sessionAbortTransport'
   | 'sessionCreateTransport'
@@ -166,6 +171,7 @@ export type SessionApiContext = Pick<
 export type ProductApiContext = Pick<
   HostApiContext,
   | 'licenseService'
+  | 'cloudAccountService'
   | 'securityEmergencyTransport'
   | 'channelStatusTransport'
   | 'channelCatalogTransport'
@@ -193,6 +199,8 @@ export type ProductApiContext = Pick<
   | 'usageTransport'
   | 'runtimeDirectoryTransport'
 >;
+
+export type CloudAccountApiContext = Pick<HostApiContext, 'cloudAccountService'>;
 
 export type TeamApiContext = Pick<
   HostApiContext,

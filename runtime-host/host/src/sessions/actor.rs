@@ -16,21 +16,28 @@ use super::{
     },
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::SessionDeleteOutcome,
-    model_selection::{SessionModelSelectionOutcome, SessionModelSelectionRejection},
+    model_selection::{
+        MatchaSessionModelRuntimeCommand, SessionModelSelectionOutcome,
+        SessionModelSelectionRejection,
+    },
     query::SessionQuery,
     rename::SessionRenameOutcome,
-    send::SessionSendOutcome,
+    send::{SessionSendCommand, SessionSendOutcome},
     state::{
         RunPhase, RuntimeIssue, RuntimeView, SessionChange, SessionDelta, SessionFacts,
         SessionIdentity, SessionProvider, SessionSourceBinding, SessionState, SessionView,
     },
-    timeline,
+    timeline::{self, ContentCommand, ContentOutcome},
 };
 use crate::{
     RuntimeSessionError,
     provider::handle::ProviderHandle,
     runtime_directory::RuntimeDriverDirectory,
     runtime_driver::{LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure},
+};
+use matcha_agent::session::{
+    client::AppServerClientError as MatchaAppServerClientError,
+    model::WorkerRuntimeState as MatchaWorkerRuntimeState,
 };
 use openclaw::{
     port::OpenClawSessionError,
@@ -206,6 +213,23 @@ impl SessionShared {
         ops.load_session_timeline(command, self.epoch).await
     }
 
+    async fn handle_content(&self, command: ContentCommand) -> ContentOutcome {
+        let endpoint = match command.provider() {
+            timeline::Provider::OpenClaw => RuntimeDriverIdentity::open_claw().endpoint(),
+            timeline::Provider::Matcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
+        };
+        let driver = match self.running_session_driver(Some(endpoint)) {
+            Ok(driver) => driver,
+            Err(failure) => {
+                return ContentOutcome::unavailable(timeline_driver_failure(failure));
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return ContentOutcome::unavailable(timeline::UnavailableReason::SessionOpsUnavailable);
+        };
+        ops.load_session_content(command).await
+    }
+
     async fn handle_list_openclaw(
         &self,
     ) -> Result<
@@ -293,6 +317,59 @@ impl SessionShared {
             return crate::matcha_history::Outcome::Unavailable;
         };
         ops.load_matcha_history(command).await
+    }
+
+    async fn prepare_matcha_send_model_runtime(
+        &self,
+        command: &SessionSendCommand,
+    ) -> Result<(), SessionSendOutcome> {
+        if command.endpoint != super::send::NativeEndpoint::MatchaAgentLocal {
+            return Ok(());
+        }
+        let session_id = command
+            .matcha_session_id()
+            .map_err(|_| SessionSendOutcome::Rejected)?;
+        let driver = self
+            .running_session_driver(command.endpoint.runtime_endpoint())
+            .map_err(send_driver_failure)?;
+        let Some(ops) = driver.session_ops() else {
+            return Err(SessionSendOutcome::Unsupported);
+        };
+        let session = ops
+            .load_matcha_session(session_id)
+            .await
+            .map_err(load_matcha_session_failure)?;
+        if !matches!(
+            session.worker_state,
+            MatchaWorkerRuntimeState::Unloaded { .. }
+        ) {
+            return Ok(());
+        }
+        if session.model_selection_id.is_none() && session.provider_fingerprint.is_none() {
+            return Ok(());
+        }
+        let Some(model) = session.model else {
+            return Ok(());
+        };
+        let model_runtime = match MatchaSessionModelRuntimeCommand::try_new(
+            command.session_key.clone(),
+            command.endpoint_session_id.clone(),
+            model,
+            session.model_selection_id,
+            session.provider_fingerprint,
+        ) {
+            Ok(model_runtime) => model_runtime.with_trace_id(command.trace_id().map(str::to_owned)),
+            Err(_) => return Err(SessionSendOutcome::Rejected),
+        };
+        let model_runtime = self
+            .provider_handle
+            .resolve_matcha_session_model_runtime(model_runtime)
+            .await
+            .map_err(session_model_runtime_failure)?;
+        match ops.select_session_model(model_runtime).await {
+            SessionModelSelectionOutcome::Succeeded => Ok(()),
+            outcome => Err(session_model_runtime_failure(outcome)),
+        }
     }
 
     async fn handle_global_command(&self, command: SessionCommand) {
@@ -478,34 +555,11 @@ impl SessionLane {
                     reason: "Provider mismatch".to_owned(),
                 };
             }
-            if state.native_source_epoch_changed(&event.binding) {
-                let recovery_changes = vec![SessionChange::RecoveryRequired {
-                    reason: super::state::RecoveryReason::EpochChanged,
-                }];
-                let recovery_result = self
-                    .apply_changes_to_state(
-                        shared,
-                        &session_key,
-                        provider,
-                        &identity,
-                        event.binding.clone(),
-                        event.run_id.clone(),
-                        event.cursor,
-                        recovery_changes,
-                    )
-                    .await;
-                if !matches!(
-                    recovery_result,
-                    super::state::SessionApplyResult::Applied(_)
-                ) {
-                    return Self::map_apply_result(recovery_result);
-                }
-            }
         }
 
-        if let [SessionChange::RecoveryRequired { .. }] = event.changes.as_slice() {
+        if let [SessionChange::RecoveryRequired { reason }] = event.changes.as_slice() {
             let result = self
-                .apply_changes_to_state(
+                .apply_recovery_to_state(
                     shared,
                     &session_key,
                     provider,
@@ -513,10 +567,33 @@ impl SessionLane {
                     event.binding,
                     event.run_id,
                     event.cursor,
-                    event.changes,
+                    *reason,
                 )
                 .await;
             return Self::map_apply_result(result);
+        }
+
+        if let Some(state) = &self.state {
+            if state.native_source_epoch_changed(&event.binding) {
+                let recovery_result = self
+                    .apply_recovery_to_state(
+                        shared,
+                        &session_key,
+                        provider,
+                        &identity,
+                        event.binding.clone(),
+                        event.run_id.clone(),
+                        event.cursor,
+                        super::state::RecoveryReason::EpochChanged,
+                    )
+                    .await;
+                match recovery_result {
+                    super::state::SessionApplyResult::Applied(delta) => {
+                        shared.publish_session_delta(delta);
+                    }
+                    result => return Self::map_apply_result(result),
+                }
+            }
         }
 
         let result = self
@@ -545,26 +622,9 @@ impl SessionLane {
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
     ) -> super::state::SessionApplyResult {
-        let state = match &self.state {
-            Some(state) if state.identity().provider() == provider => state.clone(),
-            Some(_) => {
-                return super::state::SessionApplyResult::Rejected {
-                    reason: super::state::SessionApplyRejection::InvalidInput,
-                };
-            }
-            None => {
-                if identity.session_key() != session_key || identity.provider() != provider {
-                    return super::state::SessionApplyResult::Rejected {
-                        reason: super::state::SessionApplyRejection::InvalidInput,
-                    };
-                }
-                let Ok(state) = SessionState::new(identity.clone(), shared.epoch) else {
-                    return super::state::SessionApplyResult::Rejected {
-                        reason: super::state::SessionApplyRejection::InvalidInput,
-                    };
-                };
-                state
-            }
+        let state = match self.event_state(shared, session_key, provider, identity) {
+            Ok(state) => state,
+            Err(result) => return result,
         };
 
         let mut next = state;
@@ -576,6 +636,60 @@ impl SessionLane {
         }
 
         result
+    }
+
+    async fn apply_recovery_to_state(
+        &mut self,
+        shared: &SessionShared,
+        session_key: &str,
+        provider: SessionProvider,
+        identity: &SessionIdentity,
+        binding: SessionSourceBinding,
+        run_id: Option<String>,
+        native_cursor: Option<u64>,
+        reason: super::state::RecoveryReason,
+    ) -> super::state::SessionApplyResult {
+        let state = match self.event_state(shared, session_key, provider, identity) {
+            Ok(state) => state,
+            Err(result) => return result,
+        };
+
+        let mut next = state;
+        let result = next.apply_native_recovery_bound(binding, run_id, native_cursor, reason);
+
+        if matches!(result, super::state::SessionApplyResult::Applied(_)) {
+            self.state = Some(next.clone());
+            shared.store_snapshot_state(next).await;
+        }
+
+        result
+    }
+
+    fn event_state(
+        &self,
+        shared: &SessionShared,
+        session_key: &str,
+        provider: SessionProvider,
+        identity: &SessionIdentity,
+    ) -> Result<SessionState, super::state::SessionApplyResult> {
+        match &self.state {
+            Some(state) if state.identity().provider() == provider => Ok(state.clone()),
+            Some(_) => Err(super::state::SessionApplyResult::Rejected {
+                reason: super::state::SessionApplyRejection::InvalidInput,
+            }),
+            None => {
+                if identity.session_key() != session_key || identity.provider() != provider {
+                    return Err(super::state::SessionApplyResult::Rejected {
+                        reason: super::state::SessionApplyRejection::InvalidInput,
+                    });
+                }
+                SessionState::new(identity.clone(), shared.epoch).map_err(|_| {
+                    super::state::SessionApplyResult::Rejected {
+                        reason: super::state::SessionApplyRejection::InvalidInput,
+                    }
+                })
+            }
+        }
     }
 
     fn map_apply_result(result: super::state::SessionApplyResult) -> SessionIngestOutcome {
@@ -669,15 +783,18 @@ impl SessionLane {
         let identity = SessionIdentity::new(session_key.clone(), provider, None);
         let binding = SessionSourceBinding::new(session_key.clone(), Some(route_key), None);
 
-        let outcome = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
-            Ok(driver) => match driver.session_ops() {
-                Some(ops) => ops.send_session(command).await,
-                None => SessionSendOutcome::Unsupported,
+        let outcome = match shared.prepare_matcha_send_model_runtime(&command).await {
+            Ok(()) => match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
+                Ok(driver) => match driver.session_ops() {
+                    Some(ops) => ops.send_session(command).await,
+                    None => SessionSendOutcome::Unsupported,
+                },
+                Err(RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
+                Err(RuntimeOperationFailure::Unavailable) => SessionSendOutcome::Unavailable,
+                Err(RuntimeOperationFailure::TargetRejected) => SessionSendOutcome::Rejected,
+                Err(RuntimeOperationFailure::Unknown) => SessionSendOutcome::Unknown,
             },
-            Err(RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
-            Err(RuntimeOperationFailure::Unavailable) => SessionSendOutcome::Unavailable,
-            Err(RuntimeOperationFailure::TargetRejected) => SessionSendOutcome::Rejected,
-            Err(RuntimeOperationFailure::Unknown) => SessionSendOutcome::Unknown,
+            Err(outcome) => outcome,
         };
         self.apply_send_outcome(
             shared,
@@ -881,6 +998,10 @@ impl SessionLane {
                 let outcome = shared.handle_timeline(command).await;
                 let _ = reply.send(outcome);
             }
+            SessionQuery::Content { command, reply } => {
+                let outcome = shared.handle_content(command).await;
+                let _ = reply.send(outcome);
+            }
             SessionQuery::OpenClawHistory { params, reply } => {
                 let outcome = shared.handle_openclaw_history(params).await;
                 let _ = reply.send(outcome);
@@ -984,6 +1105,50 @@ impl OwnerSpec for SessionOwner {
                 shared.store_snapshot_state(state).await;
             }
         }
+    }
+}
+
+fn send_driver_failure(failure: RuntimeOperationFailure) -> SessionSendOutcome {
+    match failure {
+        RuntimeOperationFailure::Unsupported => SessionSendOutcome::Unsupported,
+        RuntimeOperationFailure::Unavailable => SessionSendOutcome::Unavailable,
+        RuntimeOperationFailure::TargetRejected => SessionSendOutcome::Rejected,
+        RuntimeOperationFailure::Unknown => SessionSendOutcome::Unknown,
+    }
+}
+
+fn load_matcha_session_failure(error: MatchaAppServerClientError) -> SessionSendOutcome {
+    match error {
+        MatchaAppServerClientError::SessionNotFound | MatchaAppServerClientError::PeerRejected => {
+            SessionSendOutcome::Rejected
+        }
+        MatchaAppServerClientError::HealthDeadline
+        | MatchaAppServerClientError::HealthFailed
+        | MatchaAppServerClientError::UpgradeDeadline
+        | MatchaAppServerClientError::UpgradeFailed
+        | MatchaAppServerClientError::InitializeFailed
+        | MatchaAppServerClientError::RequestDeadline
+        | MatchaAppServerClientError::ConnectionClosed
+        | MatchaAppServerClientError::Transport => SessionSendOutcome::Unavailable,
+        MatchaAppServerClientError::InvalidEndpoint
+        | MatchaAppServerClientError::UnknownResponse
+        | MatchaAppServerClientError::Protocol
+        | MatchaAppServerClientError::EventRecoveryRequired
+        | MatchaAppServerClientError::CloseFailed => SessionSendOutcome::Unknown,
+    }
+}
+
+fn session_model_runtime_failure(outcome: SessionModelSelectionOutcome) -> SessionSendOutcome {
+    match outcome {
+        SessionModelSelectionOutcome::Succeeded => SessionSendOutcome::Unknown,
+        SessionModelSelectionOutcome::TargetRejected {
+            reason: SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
+            ..
+        } => SessionSendOutcome::Unavailable,
+        SessionModelSelectionOutcome::TargetRejected { .. } => SessionSendOutcome::Rejected,
+        SessionModelSelectionOutcome::OutcomeUnknown => SessionSendOutcome::Unknown,
+        SessionModelSelectionOutcome::Unsupported => SessionSendOutcome::Unsupported,
+        SessionModelSelectionOutcome::Unavailable => SessionSendOutcome::Unavailable,
     }
 }
 

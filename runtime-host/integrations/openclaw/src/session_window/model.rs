@@ -114,6 +114,29 @@ pub enum OmittedContentKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageToolDeliveryMedia {
+    media_type: Option<String>,
+    reference: String,
+}
+
+impl MessageToolDeliveryMedia {
+    pub(crate) fn new(media_type: Option<String>, reference: String) -> Self {
+        Self {
+            media_type,
+            reference,
+        }
+    }
+
+    pub fn media_type(&self) -> Option<&str> {
+        self.media_type.as_deref()
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MessageContent {
     Text {
         text: String,
@@ -121,12 +144,19 @@ pub enum MessageContent {
     ToolUse {
         name: String,
         tool_call_id: Option<String>,
+        input: Option<serde_json::Value>,
+        input_text: Option<String>,
     },
     ToolResult {
         tool_name: Option<String>,
         tool_call_id: Option<String>,
         summary: Option<String>,
+        output: Option<serde_json::Value>,
         is_error: Option<bool>,
+    },
+    MessageToolDelivery {
+        text: Option<String>,
+        media: Vec<MessageToolDeliveryMedia>,
     },
     Media {
         media_type: Option<String>,

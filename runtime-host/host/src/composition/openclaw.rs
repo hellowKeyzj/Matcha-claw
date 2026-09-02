@@ -9,12 +9,15 @@ use std::{
 
 #[cfg(unix)]
 use foundation::process::InvalidGuardianExecutable;
-use foundation::process::{
-    ProcessContainment, supervise,
-    supervision::{
-        CommandReceipt, CompletionError, RestartOutcome, StartOutcome, SupervisorHandle,
-        SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
+use foundation::{
+    process::{
+        ProcessContainment, supervise,
+        supervision::{
+            CommandReceipt, CompletionError, RestartOutcome, StartOutcome, SupervisorHandle,
+            SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
+        },
     },
+    toolchain::NativeToolchainRuntime,
 };
 use openclaw::{
     gateway::{
@@ -143,6 +146,7 @@ pub(super) struct PreparedOpenClaw {
     client_metadata: GatewayClientMetadata,
     control_ui_url: PublicControlUiUrl,
     report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+    toolchain: Arc<NativeToolchainRuntime>,
     #[cfg(unix)]
     guardian_executable: PathBuf,
 }
@@ -340,6 +344,7 @@ impl OpenClawInstance {
     pub(super) fn prepare(
         input: OpenClawInput,
         secret: GatewaySecret,
+        toolchain: Arc<NativeToolchainRuntime>,
     ) -> Result<PreparedOpenClaw, ConstructionError> {
         let endpoint =
             GatewayEndpoint::try_new(SocketAddr::from((Ipv4Addr::LOCALHOST, input.port)))
@@ -445,6 +450,7 @@ impl OpenClawInstance {
             client_metadata: input.client_metadata,
             control_ui_url,
             report_diagnostic: input.report_diagnostic,
+            toolchain,
             #[cfg(unix)]
             guardian_executable: input.guardian_executable,
         })
@@ -1362,6 +1368,13 @@ impl SessionOps for OpenClawInstance {
         Box::pin(crate::sessions::timeline::load_openclaw(
             self, command, epoch,
         ))
+    }
+
+    fn load_session_content<'a>(
+        &'a self,
+        command: crate::sessions::timeline::ContentCommand,
+    ) -> crate::runtime_driver::SessionFuture<'a, crate::sessions::timeline::ContentOutcome> {
+        Box::pin(async move { crate::sessions::timeline::load_openclaw_content(command) })
     }
 
     fn send_open_claw_chat<'a>(
@@ -2716,26 +2729,8 @@ impl PreparedOpenClaw {
 
         let workspace = openclaw::workspace::OpenClawWorkspaceAccess::new(self.state_dir.clone());
         let usage = openclaw::usage::UsageHistory::new(self.state_dir.as_path());
-        #[cfg(windows)]
-        let toolchain_commands =
-            Arc::new(openclaw::toolchain::FoundationToolchainCommandPort::new(
-                self.working_directory.clone(),
-            ));
-        #[cfg(unix)]
-        let toolchain_commands =
-            Arc::new(openclaw::toolchain::FoundationToolchainCommandPort::new(
-                self.working_directory.clone(),
-                self.guardian_executable.clone(),
-            ));
-        let toolchain_runtime = openclaw::toolchain::NativeToolchainRuntime::new(
-            openclaw::toolchain::ToolchainPlatform::current(),
-            std::env::consts::ARCH,
-            self.working_directory.clone(),
-            std::env::var_os("MATCHACLAW_UV_BIN").map(PathBuf::from),
-            toolchain_commands,
-        );
         let toolchain =
-            openclaw::toolchain::OpenClawToolchain::new(self.state_dir.clone(), toolchain_runtime);
+            openclaw::toolchain::OpenClawToolchain::new(self.state_dir.clone(), self.toolchain);
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawInstance {
             owner: StdMutex::new(Some(SupervisorOwner::new(supervisor))),
@@ -2912,6 +2907,20 @@ mod tests {
         GatewaySecret::new(entropy.to_string()).unwrap()
     }
 
+    fn toolchain(state_root: &TestStateRoot) -> Arc<NativeToolchainRuntime> {
+        #[cfg(windows)]
+        {
+            NativeToolchainRuntime::local(state_root.path("runtime"))
+        }
+        #[cfg(unix)]
+        {
+            NativeToolchainRuntime::local(
+                state_root.path("runtime"),
+                state_root.path("bin/runtime-host-guardian"),
+            )
+        }
+    }
+
     #[test]
     fn prepare_materializes_each_configured_maintenance_workspace_except_teambuddy() {
         let state_root = TestStateRoot::new();
@@ -2936,7 +2945,7 @@ mod tests {
         .unwrap();
 
         let main_workspace = input.state_dir.as_path().join("workspace");
-        OpenClawInstance::prepare(input, secret()).unwrap();
+        OpenClawInstance::prepare(input, secret(), toolchain(&state_root)).unwrap();
 
         assert!(reviewer_workspace.join("IDENTITY.md").is_file());
         assert!(main_workspace.join("IDENTITY.md").is_file());
@@ -2953,8 +2962,11 @@ mod tests {
     #[test]
     fn prepare_generates_fresh_identity_and_retains_shared_launch_resources() {
         let state_root = TestStateRoot::new();
-        let first = OpenClawInstance::prepare(input(&state_root), secret()).unwrap();
-        let second = OpenClawInstance::prepare(input(&state_root), secret()).unwrap();
+        let first = OpenClawInstance::prepare(input(&state_root), secret(), toolchain(&state_root))
+            .unwrap();
+        let second =
+            OpenClawInstance::prepare(input(&state_root), secret(), toolchain(&state_root))
+                .unwrap();
 
         assert_ne!(
             first.listener_identity.fingerprint(),
@@ -2969,10 +2981,11 @@ mod tests {
         let state_root = TestStateRoot::new();
         let (events, _received) = mpsc::channel(1);
         let (canonical_events, _received_canonical) = mpsc::channel(1);
-        let instance = OpenClawInstance::prepare(input(&state_root), secret())
-            .unwrap()
-            .into_instance(events, canonical_events)
-            .unwrap();
+        let instance =
+            OpenClawInstance::prepare(input(&state_root), secret(), toolchain(&state_root))
+                .unwrap()
+                .into_instance(events, canonical_events)
+                .unwrap();
 
         assert_eq!(instance.owner().snapshot().phase(), SupervisorPhase::Idle);
         assert!(
@@ -3021,7 +3034,7 @@ mod tests {
         let mut input = input(&state_root);
         input.port = 0;
 
-        let error = match OpenClawInstance::prepare(input, secret()) {
+        let error = match OpenClawInstance::prepare(input, secret(), toolchain(&state_root)) {
             Ok(_) => panic!("invalid gateway endpoint was accepted"),
             Err(error) => error,
         };
@@ -3039,7 +3052,7 @@ mod tests {
         let mut input = input(&state_root);
         input.electron_image = PathBuf::from("relative-sensitive-artifact");
 
-        let error = match OpenClawInstance::prepare(input, secret()) {
+        let error = match OpenClawInstance::prepare(input, secret(), toolchain(&state_root)) {
             Ok(_) => panic!("invalid OpenClaw launch input was accepted"),
             Err(error) => error,
         };
@@ -3056,7 +3069,7 @@ mod tests {
         let mut input = input(&state_root);
         input.guardian_executable = PathBuf::from("relative-guardian");
 
-        let error = match OpenClawInstance::prepare(input, secret()) {
+        let error = match OpenClawInstance::prepare(input, secret(), toolchain(&state_root)) {
             Ok(_) => panic!("relative guardian executable was accepted"),
             Err(error) => error,
         };

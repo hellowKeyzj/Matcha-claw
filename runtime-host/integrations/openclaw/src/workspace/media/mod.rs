@@ -473,6 +473,7 @@ fn normalized_mime_type(
             Some("gif") => "image/gif".to_owned(),
             Some("webp") => "image/webp".to_owned(),
             Some("bmp") => "image/bmp".to_owned(),
+            Some("svg") => "image/svg+xml".to_owned(),
             _ => "application/octet-stream".to_owned(),
         }
     };
@@ -486,7 +487,7 @@ fn normalized_mime_type(
 fn is_supported_image_mime(mime_type: &str) -> bool {
     matches!(
         mime_type,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp"
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" | "image/svg+xml"
     )
 }
 
@@ -501,6 +502,8 @@ fn image_mime_type(content: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else if content.starts_with(b"BM") {
         Some("image/bmp")
+    } else if content.trim_ascii_start().starts_with(b"<svg") {
+        Some("image/svg+xml")
     } else {
         None
     }
@@ -514,6 +517,12 @@ fn image_preview(content: &[u8], mime_type: &str) -> Option<String> {
         || content.len() > MAX_THUMBNAIL_BYTES
     {
         return None;
+    }
+    if mime_type == "image/svg+xml" {
+        return Some(format!(
+            "data:{mime_type};base64,{}",
+            STANDARD.encode(content)
+        ));
     }
 
     let image = image::ImageReader::new(Cursor::new(content))

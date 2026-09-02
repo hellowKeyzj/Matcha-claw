@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
     BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, GraphDefinition,
-    GraphPatch, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
+    GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
     PromptDeliveryRequest, ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand,
     StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
     TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunQuery,
@@ -40,6 +40,14 @@ pub enum OrganizationCommand {
     TeamSkillMaterialize {
         selection_id: TeamSkillSelectionId,
         team_id: TeamId,
+        idempotency_key: IdempotencyKey,
+        reply: oneshot::Sender<crate::composition::TeamMaterializationCommandOutcome>,
+    },
+    ManualTeamMaterialize {
+        team_id: TeamId,
+        team_name: String,
+        endpoint: organization::RuntimeEndpointReference,
+        roles: Vec<organization::ManualTeamRoleBinding>,
         idempotency_key: IdempotencyKey,
         reply: oneshot::Sender<crate::composition::TeamMaterializationCommandOutcome>,
     },
@@ -115,8 +123,7 @@ pub enum OrganizationCommand {
         reply: oneshot::Sender<Result<TeamRunCommandOutcome, StoreFault>>,
     },
     GraphPatch {
-        command: RunCommand,
-        patch: GraphPatch,
+        patch: super::team_runtime::TeamGraphPatchDraft,
         reply: oneshot::Sender<Result<TeamRunCommandOutcome, StoreFault>>,
     },
     RoleMessageSubmit {
@@ -137,7 +144,6 @@ pub enum OrganizationCommand {
         reply: oneshot::Sender<Result<TeamNodeEventOutcome, StoreFault>>,
     },
     NodePromptSettled {
-        run_id: GraphRunId,
         session_key: String,
         prompt_run_id: String,
         phase: TeamRuntimePromptPhase,

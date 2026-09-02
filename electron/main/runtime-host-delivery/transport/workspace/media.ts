@@ -80,7 +80,9 @@ type Request = {
     endpoint: Endpoint;
     sessionKey: string;
     relativePath?: string;
+    gatewayUrl?: string;
     mimeType?: string;
+    agentId?: string;
     reference?: string;
     paths?: readonly WorkspaceMediaPath[];
     base64?: string;
@@ -254,7 +256,7 @@ function isGatewayUrl(value: unknown): value is string {
     && value.length <= 4096
     && !hasControlCharacter(value)
     && !value.includes('\\0')
-    && /^\/?api\/chat\/media\/outgoing\/[^/]+\/[^/]+(?:\/[^/]*)?$/.test(value);
+    && /^(?:\/?api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*|https?:\/\/[^/\s]+\/api\/chat\/media\/outgoing\/[^/\s]+\/[^/\s]+\/[^\s]*)$/.test(value);
 }
 
 function isIdentifier(value: unknown): value is string {

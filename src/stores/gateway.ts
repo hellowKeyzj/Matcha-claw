@@ -6,7 +6,11 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { TaskSnapshotEvent } from '../types/session/task-snapshot';
-import { decodeSessionDelta } from '../types/session/snapshot';
+import {
+  decodeSessionDelta,
+  type SessionDelta,
+  type SessionChange,
+} from '../types/session/snapshot';
 import type { GatewayStatus } from '../types/gateway';
 import { applySessionDelta } from './chat/store-state-helpers';
 import { useChatStore } from './chat';
@@ -40,6 +44,39 @@ interface GatewayHealth {
 interface GatewayErrorEventPayload {
   message?: string;
   issue?: GatewayTransportIssue;
+}
+
+function sessionDeltaTextLength(changes: readonly SessionChange[]): number {
+  return changes.reduce((total, change) => (
+    change.kind === 'messageDelta' ? total + change.text.length : total
+  ), 0);
+}
+
+function sessionDeltaRunId(delta: SessionDelta): string | undefined {
+  if (delta.runId) return delta.runId;
+  for (const change of delta.changes) {
+    if ('runId' in change && typeof change.runId === 'string') return change.runId;
+  }
+  return undefined;
+}
+
+function traceSessionDeltaBoundary(
+  stage: string,
+  traceId: string | null | undefined,
+  delta: SessionDelta,
+  extra: Record<string, unknown> = {},
+): void {
+  logSessionTrace(stage, traceId, {
+    sessionKey: summarizeIdentifier(delta.sessionKey),
+    runId: summarizeIdentifier(sessionDeltaRunId(delta)),
+    epoch: delta.epoch,
+    seq: delta.seq,
+    cursor: delta.cursor,
+    changeKinds: delta.changes.map((change) => change.kind),
+    changeCount: delta.changes.length,
+    textLength: sessionDeltaTextLength(delta.changes),
+    ...extra,
+  });
 }
 
 type RuntimeHostObservedStatus =
@@ -275,34 +312,14 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               });
               return;
             }
-            const before = useChatStore.getState().loadedSessions[delta.sessionKey];
-            logSessionTrace('session.delta.decode', traceId, {
-              decoded: true,
-              sessionKey: summarizeIdentifier(delta.sessionKey),
-              epoch: delta.epoch,
-              seq: delta.seq,
-              cursor: delta.cursor,
-              previousEpoch: before ? null : undefined,
-              previousSeq: before ? null : undefined,
-              previousCursor: before ? null : undefined,
-              changeKinds: delta.changes.map((change) => change.kind),
-              runtimePhase: before?.runtime.runPhase ?? null,
-              activeRunId: summarizeIdentifier(before?.runtime.activeRunId),
-            });
+            traceSessionDeltaBoundary('session.delta.decode', traceId, delta);
             const applyResult = applySessionDelta({
               set: useChatStore.setState,
               get: useChatStore.getState,
             }, delta);
-            logSessionTrace('session.delta.apply', traceId, {
+            traceSessionDeltaBoundary('session.delta.apply', traceId, delta, {
               status: applyResult.status,
               reason: 'reason' in applyResult ? applyResult.reason : null,
-              sessionKey: summarizeIdentifier(delta.sessionKey),
-              epoch: delta.epoch,
-              seq: delta.seq,
-              cursor: delta.cursor,
-              changeKinds: delta.changes.map((change) => change.kind),
-              runtimePhase: useChatStore.getState().loadedSessions[delta.sessionKey]?.runtime.runPhase ?? null,
-              activeRunId: summarizeIdentifier(useChatStore.getState().loadedSessions[delta.sessionKey]?.runtime.activeRunId),
             });
           }));
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
