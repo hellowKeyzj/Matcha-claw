@@ -16,7 +16,7 @@ use tokio::{
 
 use crate::{
     composition::PeerHandle,
-    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     owner,
     sessions::SessionHandle,
 };
@@ -57,6 +57,7 @@ pub(crate) struct Server {
     owner: owner::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
+    toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
     session: SessionHandle,
@@ -70,6 +71,7 @@ impl Server {
         owner: owner::Handle,
         peer: PeerHandle,
         platform_runtime: PlatformRuntimeHandle,
+        toolchain: ToolchainHandle,
         plugins: PluginsHandle,
         skills: SkillsHandle,
         session: SessionHandle,
@@ -79,6 +81,7 @@ impl Server {
             owner,
             peer,
             platform_runtime,
+            toolchain,
             plugins,
             skills,
             session,
@@ -101,6 +104,7 @@ impl Server {
             let owner = self.owner.clone();
             let peer = self.peer.clone();
             let platform_runtime = self.platform_runtime.clone();
+            let toolchain = self.toolchain.clone();
             let plugins = self.plugins.clone();
             let skills = self.skills.clone();
             let session = self.session.clone();
@@ -112,6 +116,7 @@ impl Server {
                     owner,
                     peer,
                     platform_runtime,
+                    toolchain,
                     plugins,
                     skills,
                     session,
@@ -129,6 +134,7 @@ async fn serve(
     owner: owner::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
+    toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
     session: SessionHandle,
@@ -142,6 +148,7 @@ async fn serve(
                 owner,
                 peer,
                 platform_runtime,
+                toolchain,
                 plugins,
                 skills,
                 session,
@@ -166,6 +173,7 @@ async fn handle(
     owner: owner::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
+    toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
     session: SessionHandle,
@@ -193,6 +201,7 @@ async fn handle(
                     &owner,
                     &peer,
                     &platform_runtime,
+                    &toolchain,
                     &plugins,
                     &skills,
                     &session,

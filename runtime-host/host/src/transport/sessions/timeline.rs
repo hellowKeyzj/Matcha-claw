@@ -365,6 +365,8 @@ mod tests {
                     phase: RunPhase::Completed,
                     active_run_id: None,
                     issue: None,
+                    runtime_activity: None,
+                    error_detail: None,
                 },
                 gaps: vec![MissingFact::PartialRuntime],
             },

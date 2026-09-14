@@ -15,6 +15,8 @@ import type { ChatStoreState } from '@/stores/chat/types';
 import {
   assistantItem,
   completeFact,
+  mediaContent,
+  omittedContent,
   sessionView,
   userItem,
 } from './helpers/session-fixtures';
@@ -337,6 +339,49 @@ describe('chat history apply pipeline', () => {
       currentItems[1],
       nextItems[2],
     ]);
+  });
+
+  it('projects attachment status from SessionView media facts without leaking unsafe references', () => {
+    const items = projectSessionViewItems(sessionView('agent:main:main', {
+      items: completeFact([
+        userItem('item-user-1', 'upload', {
+          content: [mediaContent('application/pdf', '/api/chat/media/outgoing/session-1/upload.pdf')],
+        }),
+        assistantItem('item-assistant-1', '', {
+          segments: [
+            mediaContent('image/png', 'file:///private/image.png'),
+            omittedContent('unsafe_media'),
+            omittedContent('thinking'),
+            omittedContent('unknown'),
+          ],
+        }),
+      ]),
+    }));
+
+    expect(items[0]).toMatchObject({
+      kind: 'user-message',
+      attachedFiles: [expect.objectContaining({
+        fileName: 'upload.pdf',
+        source: 'message-ref',
+      })],
+    });
+    expect(items[1]).toMatchObject({
+      kind: 'assistant-turn',
+      segments: [{
+        kind: 'media',
+        attachedFiles: [{ attachmentStatus: 'unsafe-media-omitted' }],
+      }, {
+        kind: 'media',
+        attachedFiles: [{ attachmentStatus: 'unsafe-media-omitted' }],
+      }, {
+        kind: 'media',
+        attachedFiles: [{ attachmentStatus: 'thinking-omitted' }],
+      }, {
+        kind: 'media',
+        attachedFiles: [{ attachmentStatus: 'unknown-omitted' }],
+      }],
+    });
+    expect(JSON.stringify(items)).not.toContain('file:///private/image.png');
   });
 
   it('does not restore a renderer receipt when SessionView omits it', async () => {

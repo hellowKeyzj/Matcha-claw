@@ -346,6 +346,26 @@ fn ledger_snapshot_restore_rejects_duplicate_idempotency_key() {
 }
 
 #[test]
+fn ledger_keeps_run_attempt_namespace_from_collapsing_into_delivery_id_replay() {
+    let first = request("delivery-01", 2);
+    let mut second = request("delivery-02", 2);
+    second.run_id = "run-02".to_owned();
+    second.node_execution_id = "node-review:attempt:1".to_owned();
+    second.idempotency_key = "team-run:run-02:node-review:attempt:1".to_owned();
+    let mut ledger = DeliveryLedger::default();
+
+    assert!(matches!(
+        ledger.register(first),
+        Ok(RegisterOutcome::Recorded(_))
+    ));
+    assert!(matches!(
+        ledger.register(second),
+        Ok(RegisterOutcome::Recorded(_))
+    ));
+    assert_eq!(ledger.deliveries().count(), 2);
+}
+
+#[test]
 fn ledger_snapshot_restore_rejects_duplicate_delivery_id() {
     let first = Delivery::request(request("delivery-01", 2)).unwrap();
     let duplicate = Delivery::request(request("delivery-01", 2)).unwrap();
@@ -681,6 +701,35 @@ fn dispatch_port_failure_is_outcome_unknown_and_never_retries_automatically() {
         begin_delivery(&mut delivery, 2_000),
         DeliveryStart::Terminal(DeliveryPhase::OutcomeUnknown { observed_at: 1_001 }),
     );
+}
+
+#[test]
+fn prompt_outcome_unknown_is_terminal_and_never_counts_as_delivered() {
+    let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
+    let active_claim = claim(&mut delivery, 1_000);
+    let mut port = RecordingDeliveryPort {
+        outcome: Ok(PromptDeliveryOutcome::OutcomeUnknown),
+        requests: Vec::new(),
+    };
+
+    assert_eq!(
+        dispatch_delivery(
+            &mut delivery,
+            &active_claim,
+            binding(),
+            PromptDispatchPayload::try_new("review the release").unwrap(),
+            1_001,
+            2_000,
+            &mut port,
+        ),
+        Ok(DeliveryResolution::OutcomeUnknown),
+    );
+    assert_eq!(port.requests.len(), 1);
+    assert_eq!(
+        begin_delivery(&mut delivery, 2_000),
+        DeliveryStart::Terminal(DeliveryPhase::OutcomeUnknown { observed_at: 1_001 }),
+    );
+    assert!(!matches!(delivery.phase(), DeliveryPhase::Delivered { .. }));
 }
 
 #[test]
@@ -1061,6 +1110,45 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
     );
     assert_eq!(cancelled_delivery, cancelled_before);
     assert_eq!(cancelled_graph, cancelled_graph_before);
+
+    let mut mismatched_delivery = delivered_delivery();
+    let mut mismatched_graph = running_graph();
+    observe_matcha_terminal(
+        &mut mismatched_delivery,
+        &mut mismatched_graph,
+        matcha_session(),
+        matcha_native_run(),
+        NativeTerminalStatus::Completed,
+        1_010,
+    )
+    .unwrap();
+    let mismatched_fence = mismatched_graph
+        .current_attempt(&NodeId::new("node-review"))
+        .unwrap()
+        .fence()
+        .clone();
+    let mismatched = AuthorizedGraphResolution::new(
+        AuthorizedGraphResolutionReceipt::try_new("executor-output:mismatch").unwrap(),
+        DeliveryId::new("delivery-other").unwrap(),
+        "run-01",
+        mismatched_fence,
+        AuthorizedGraphOutcome::Completed,
+        "approved",
+        1_011,
+    )
+    .unwrap();
+    let mismatched_delivery_before = mismatched_delivery.clone();
+    let mismatched_graph_before = mismatched_graph.clone();
+    assert_eq!(
+        resolve_authorized_graph_outcome(
+            &mut mismatched_delivery,
+            &mut mismatched_graph,
+            mismatched
+        ),
+        Err(AuthorizedGraphResolutionError::DeliveryMismatch),
+    );
+    assert_eq!(mismatched_delivery, mismatched_delivery_before);
+    assert_eq!(mismatched_graph, mismatched_graph_before);
 
     let mut unmatched_delivery = delivered_delivery();
     let mut unmatched_graph = graph_with_edge();

@@ -32,8 +32,22 @@ export interface ProviderModelsReplaceResult {
   warning?: string;
 }
 
+export interface ProviderModelsDiscoverResult {
+  models: ProviderModelDraft[];
+}
+
 const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
 const LEGACY_MODEL_FIELDS = ['credentialId', 'providerKey', 'runtimeModelRef'] as const;
+const DISCOVERY_MODEL_FIELDS = new Set([
+  'modelId',
+  'capabilities',
+  'contextWindow',
+  'maxTokens',
+  'timeoutMs',
+  'aspectRatio',
+  'resolution',
+  'quality',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -41,6 +55,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasLegacyModelFields(value: Record<string, unknown>): boolean {
   return LEGACY_MODEL_FIELDS.some((field) => Object.hasOwn(value, field));
+}
+
+function hasOnlyDiscoveryModelFields(value: Record<string, unknown>): boolean {
+  return Object.keys(value).every((field) => DISCOVERY_MODEL_FIELDS.has(field));
 }
 
 function normalizePositiveInteger(value: unknown): number | undefined {
@@ -69,13 +87,12 @@ function normalizeCapabilities(value: unknown): ModelCapability[] {
   return out;
 }
 
-function normalizeProviderModel(value: unknown): ProviderModel | null {
+function normalizeProviderModelDraft(value: unknown, options: { strictFields?: boolean } = {}): ProviderModelDraft | null {
   if (!isRecord(value) || hasLegacyModelFields(value)) return null;
-  const accountId = typeof value.accountId === 'string' ? value.accountId.trim() : '';
-  const label = typeof value.label === 'string' ? value.label.trim() : '';
+  if (options.strictFields && !hasOnlyDiscoveryModelFields(value)) return null;
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!accountId || !modelId || capabilities.length === 0) return null;
+  if (!modelId || capabilities.length === 0) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   const timeoutMs = normalizePositiveInteger(value.timeoutMs);
@@ -83,8 +100,6 @@ function normalizeProviderModel(value: unknown): ProviderModel | null {
   const resolution = normalizeOptionalString(value.resolution);
   const quality = normalizeOptionalString(value.quality);
   return {
-    accountId,
-    ...(label ? { label } : {}),
     modelId,
     capabilities,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
@@ -93,6 +108,19 @@ function normalizeProviderModel(value: unknown): ProviderModel | null {
     ...(aspectRatio !== undefined ? { aspectRatio } : {}),
     ...(resolution !== undefined ? { resolution } : {}),
     ...(quality !== undefined ? { quality } : {}),
+  };
+}
+
+function normalizeProviderModel(value: unknown): ProviderModel | null {
+  if (!isRecord(value)) return null;
+  const accountId = typeof value.accountId === 'string' ? value.accountId.trim() : '';
+  const label = typeof value.label === 'string' ? value.label.trim() : '';
+  const draft = normalizeProviderModelDraft(value);
+  if (!accountId || !draft) return null;
+  return {
+    accountId,
+    ...(label ? { label } : {}),
+    ...draft,
   };
 }
 
@@ -121,6 +149,24 @@ function decodeModelList(value: unknown): ProviderModel[] {
     throw new Error('Provider models are unavailable');
   }
   return models;
+}
+
+function decodeDiscoverResult(value: unknown): ProviderModelsDiscoverResult {
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !Array.isArray(value.models)) {
+    throw new Error('Provider model discovery is unavailable');
+  }
+  const models: ProviderModelDraft[] = [];
+  const seen = new Set<string>();
+  for (const raw of value.models) {
+    const model = normalizeProviderModelDraft(raw, { strictFields: true });
+    if (!model) {
+      throw new Error('Provider model discovery is unavailable');
+    }
+    if (seen.has(model.modelId)) continue;
+    seen.add(model.modelId);
+    models.push(model);
+  }
+  return { models };
 }
 
 function decodeReplaceResult(value: unknown): ProviderModelsReplaceResult {
@@ -175,6 +221,17 @@ function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<strin
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
   return decodeModelList(await hostApiFetch<unknown>('/api/provider-models'));
+}
+
+export async function discoverProviderModels(accountId: string): Promise<ProviderModelsDiscoverResult> {
+  const trimmedAccountId = accountId.trim();
+  if (!trimmedAccountId) {
+    throw new Error('Provider account is required');
+  }
+  return decodeDiscoverResult(await hostApiFetch<unknown>(
+    `/api/provider-models/discover?accountId=${encodeURIComponent(trimmedAccountId)}`,
+    { timeoutMs: 60_000 },
+  ));
 }
 
 export async function persistProviderModels(

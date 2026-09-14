@@ -291,33 +291,49 @@ describe('dialog ipc', () => {
       fileName: 'image.png',
     })).rejects.toThrow('invalid');
     await expect(handler?.({}, {
-      base64: Buffer.alloc(20 * 1024 * 1024 + 1).toString('base64'),
+      base64: 'A'.repeat(Math.ceil((50 * 1024 * 1024) / 3) * 4 + 4),
       fileName: 'image.png',
       mimeType: 'image/png',
     })).rejects.toThrow('invalid');
     expect(writeFileMock).not.toHaveBeenCalled();
   });
 
-  it('stages dropped paths only through the Main-owned dialog handler', async () => {
-    const sourcePath = '/tmp/dropped.txt';
+  it('stages dropped files and returns directory receipts without copying them', async () => {
+    const filePath = '/tmp/dropped.txt';
+    const directoryPath = '/tmp/project';
     const attachmentStagingDirectory = join('C:\\matcha\\user-data', 'attachments');
     const stagedPath = join(attachmentStagingDirectory, 'attachment-id.txt');
     mkdirMock.mockResolvedValue(undefined);
-    statMock.mockResolvedValue({ isFile: () => true, size: 4 });
+    statMock.mockImplementation(async (path: string) => {
+      if (path === directoryPath) {
+        return { isFile: () => false, isDirectory: () => true, size: 0 };
+      }
+      return { isFile: () => true, isDirectory: () => false, size: 4 };
+    });
     const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageDroppedAttachments');
-    await expect(handler?.({}, [sourcePath])).resolves.toEqual({
+    await expect(handler?.({}, [directoryPath, filePath])).resolves.toEqual({
       attachments: [{
+        entryKind: 'directory',
+        fileName: 'project',
+        mimeType: 'application/x-directory',
+        fileSize: 0,
+        preview: null,
+        sourcePath: directoryPath,
+      }, {
         stagedAttachmentId: 'attachment-id',
+        entryKind: 'file',
         fileName: 'dropped.txt',
         mimeType: 'text/plain',
         fileSize: 4,
         preview: null,
+        sourcePath: filePath,
       }],
     });
-    expect(copyFileMock).toHaveBeenCalledWith(sourcePath, stagedPath, expect.any(Number));
+    expect(copyFileMock).toHaveBeenCalledTimes(1);
+    expect(copyFileMock).toHaveBeenCalledWith(filePath, stagedPath, expect.any(Number));
   });
 
   it('opens the native dialog for general file selection', async () => {
@@ -385,10 +401,12 @@ describe('dialog ipc', () => {
       canceled: false,
       attachments: [{
         stagedAttachmentId: 'attachment-id',
+        entryKind: 'file',
         fileName: 'photo.png',
         mimeType: 'image/png',
         fileSize: previewBuffer.length,
         preview: `data:image/png;base64,${previewBuffer.toString('base64')}`,
+        sourcePath,
       }],
     });
   });

@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
     GatewayResponse, RpcRequest, WireError, rpc_request, success_payload, valid_optional_string,
-    valid_string,
+    valid_string, valid_strings,
 };
 
 pub(crate) const AGENTS_LIST_METHOD: &str = "agents.list";
@@ -209,6 +210,8 @@ pub struct AgentCreate {
     pub name: String,
     pub workspace: String,
     pub model: Option<String>,
+    pub emoji: Option<String>,
+    pub avatar: Option<String>,
 }
 
 impl AgentCreate {
@@ -217,13 +220,30 @@ impl AgentCreate {
         workspace: String,
         model: Option<String>,
     ) -> Result<Self, WireError> {
-        if !valid_string(&name) || !valid_string(&workspace) || !valid_optional_string(&model) {
+        Self::try_new_with_display(name, workspace, model, None, None)
+    }
+
+    pub fn try_new_with_display(
+        name: String,
+        workspace: String,
+        model: Option<String>,
+        emoji: Option<String>,
+        avatar: Option<String>,
+    ) -> Result<Self, WireError> {
+        if !valid_string(&name)
+            || !valid_string(&workspace)
+            || !valid_optional_string(&model)
+            || !valid_optional_string(&emoji)
+            || !valid_optional_string(&avatar)
+        {
             return Err(WireError::InvalidAgentsCreateRequest);
         }
         Ok(Self {
             name,
             workspace,
             model,
+            emoji,
+            avatar,
         })
     }
 }
@@ -233,7 +253,9 @@ pub struct AgentUpdate {
     pub agent_id: String,
     pub name: Option<String>,
     pub workspace: Option<String>,
-    pub model: Option<String>,
+    pub model: AgentModelUpdate,
+    pub emoji: Option<String>,
+    pub avatar: Option<String>,
 }
 
 impl AgentUpdate {
@@ -243,11 +265,62 @@ impl AgentUpdate {
         workspace: Option<String>,
         model: Option<String>,
     ) -> Result<Self, WireError> {
+        Self::try_new_with_display(
+            agent_id,
+            name,
+            workspace,
+            model.map_or(AgentModelUpdate::Unchanged, |model| {
+                AgentModelUpdate::Set(Some(model))
+            }),
+            None,
+            None,
+        )
+    }
+
+    pub fn try_new_clearing_model(
+        agent_id: String,
+        name: Option<String>,
+        workspace: Option<String>,
+    ) -> Result<Self, WireError> {
+        Self::try_new_clearing_model_with_display(agent_id, name, workspace, None, None)
+    }
+
+    pub fn try_new_clearing_model_with_display(
+        agent_id: String,
+        name: Option<String>,
+        workspace: Option<String>,
+        emoji: Option<String>,
+        avatar: Option<String>,
+    ) -> Result<Self, WireError> {
+        Self::try_new_with_display(
+            agent_id,
+            name,
+            workspace,
+            AgentModelUpdate::Set(None),
+            emoji,
+            avatar,
+        )
+    }
+
+    pub fn try_new_with_display(
+        agent_id: String,
+        name: Option<String>,
+        workspace: Option<String>,
+        model: AgentModelUpdate,
+        emoji: Option<String>,
+        avatar: Option<String>,
+    ) -> Result<Self, WireError> {
         if !valid_string(&agent_id)
             || !valid_optional_string(&name)
             || !valid_optional_string(&workspace)
-            || !valid_optional_string(&model)
-            || (name.is_none() && workspace.is_none() && model.is_none())
+            || !model.is_valid()
+            || !valid_optional_string(&emoji)
+            || !valid_optional_string(&avatar)
+            || (name.is_none()
+                && workspace.is_none()
+                && model == AgentModelUpdate::Unchanged
+                && emoji.is_none()
+                && avatar.is_none())
         {
             return Err(WireError::InvalidAgentsUpdateRequest);
         }
@@ -256,7 +329,24 @@ impl AgentUpdate {
             name,
             workspace,
             model,
+            emoji,
+            avatar,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentModelUpdate {
+    Unchanged,
+    Set(Option<String>),
+}
+
+impl AgentModelUpdate {
+    fn is_valid(&self) -> bool {
+        match self {
+            Self::Unchanged => true,
+            Self::Set(model) => valid_optional_string(model),
+        }
     }
 }
 
@@ -282,9 +372,8 @@ impl AgentDelete {
 pub enum AgentFileName {
     Agents,
     Soul,
-    Tools,
-    Identity,
     User,
+    Memory,
 }
 
 impl AgentFileName {
@@ -292,9 +381,8 @@ impl AgentFileName {
         match value {
             "AGENTS.md" => Ok(Self::Agents),
             "SOUL.md" => Ok(Self::Soul),
-            "TOOLS.md" => Ok(Self::Tools),
-            "IDENTITY.md" => Ok(Self::Identity),
             "USER.md" => Ok(Self::User),
+            "MEMORY.md" => Ok(Self::Memory),
             _ => Err(WireError::InvalidAgentsFileName),
         }
     }
@@ -303,9 +391,8 @@ impl AgentFileName {
         match self {
             Self::Agents => "AGENTS.md",
             Self::Soul => "SOUL.md",
-            Self::Tools => "TOOLS.md",
-            Self::Identity => "IDENTITY.md",
             Self::User => "USER.md",
+            Self::Memory => "MEMORY.md",
         }
     }
 }
@@ -360,17 +447,50 @@ pub struct AgentWaitResult {
     pub ended_at: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentKind {
+    System,
+    Agent,
+}
+
+impl AgentKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSummary {
     pub id: String,
     pub name: Option<String>,
     pub workspace: Option<String>,
     pub model: Option<String>,
+    pub kind: AgentKind,
+    pub default_permission_mode: Option<String>,
+    pub sealed: bool,
+}
+
+impl AgentSummary {
+    pub const fn kind(&self) -> AgentKind {
+        self.kind
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentsList {
     pub default_id: String,
+    pub selection_required: bool,
     pub agents: Vec<AgentSummary>,
 }
 
@@ -446,6 +566,10 @@ struct AgentCreateWire {
     workspace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emoji: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
 }
 
 impl From<AgentCreate> for AgentCreateWire {
@@ -454,6 +578,8 @@ impl From<AgentCreate> for AgentCreateWire {
             name: value.name,
             workspace: value.workspace,
             model: value.model,
+            emoji: value.emoji,
+            avatar: value.avatar,
         }
     }
 }
@@ -466,8 +592,15 @@ struct AgentUpdateWire {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<String>,
+    #[serde(
+        serialize_with = "serialize_agent_model_update",
+        skip_serializing_if = "AgentModelUpdate::is_unchanged"
+    )]
+    model: AgentModelUpdate,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
+    emoji: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
 }
 
 impl From<AgentUpdate> for AgentUpdateWire {
@@ -477,7 +610,28 @@ impl From<AgentUpdate> for AgentUpdateWire {
             name: value.name,
             workspace: value.workspace,
             model: value.model,
+            emoji: value.emoji,
+            avatar: value.avatar,
         }
+    }
+}
+
+impl AgentModelUpdate {
+    fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+fn serialize_agent_model_update<S>(
+    value: &AgentModelUpdate,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        AgentModelUpdate::Unchanged => serializer.serialize_none(),
+        AgentModelUpdate::Set(model) => model.serialize(serializer),
     }
 }
 
@@ -498,12 +652,12 @@ impl From<AgentDelete> for AgentDeleteWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentWaitWire {
     run_id: String,
     status: String,
-    started_at: WaitTimestampWire,
-    ended_at: WaitTimestampWire,
+    started_at: Option<WaitTimestampWire>,
+    ended_at: Option<WaitTimestampWire>,
 }
 
 #[derive(Deserialize)]
@@ -528,11 +682,10 @@ fn valid_wait_identifier(value: &str) -> bool {
 
 impl AgentWaitWire {
     fn into_public(self, expected_run_id: &str) -> Result<AgentWaitResult, WireError> {
-        let started_at = self.started_at.into_option();
-        let ended_at = self.ended_at.into_option();
+        let started_at = self.started_at.and_then(WaitTimestampWire::into_option);
+        let ended_at = self.ended_at.and_then(WaitTimestampWire::into_option);
         if self.run_id != expected_run_id
             || !valid_wait_identifier(&self.run_id)
-            || started_at.is_none()
             || ended_at
                 .zip(started_at)
                 .is_some_and(|(ended, started)| ended < started)
@@ -555,12 +708,21 @@ impl AgentWaitWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentsListWire {
     default_id: String,
     main_key: String,
     scope: String,
+    ownership: Option<Value>,
+    #[serde(default)]
+    selection_required: bool,
     agents: Vec<AgentSummaryWire>,
+    workspace_git: Option<Value>,
+    agent_runtime: Option<AgentRuntimeWire>,
+    thinking_levels: Option<Value>,
+    thinking_options: Option<Vec<String>>,
+    thinking_default: Option<String>,
+    default_permission_mode: Option<String>,
 }
 
 impl AgentsListWire {
@@ -568,11 +730,34 @@ impl AgentsListWire {
         if !valid_string(&self.default_id)
             || !valid_string(&self.main_key)
             || !matches!(self.scope.as_str(), "per-sender" | "global")
+            || self
+                .ownership
+                .as_ref()
+                .is_some_and(|ownership| !valid_ownership(ownership))
+            || self
+                .workspace_git
+                .as_ref()
+                .is_some_and(|workspace_git| !valid_workspace_git(workspace_git))
+            || self
+                .agent_runtime
+                .as_ref()
+                .is_some_and(|runtime| !runtime.is_valid())
+            || self
+                .thinking_levels
+                .as_ref()
+                .is_some_and(|levels| !valid_thinking_levels(levels))
+            || self
+                .thinking_options
+                .as_deref()
+                .is_some_and(|options| !valid_strings(options))
+            || !valid_optional_string(&self.thinking_default)
+            || !valid_permission_mode(&self.default_permission_mode)
         {
             return Err(WireError::InvalidAgentsList);
         }
         Ok(AgentsList {
             default_id: self.default_id,
+            selection_required: self.selection_required,
             agents: self
                 .agents
                 .into_iter()
@@ -583,25 +768,58 @@ impl AgentsListWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentSummaryWire {
     id: String,
     name: Option<String>,
     identity: Option<IdentityWire>,
     workspace: Option<String>,
     model: Option<ModelWire>,
+    kind: Option<String>,
+    created_via: Option<String>,
+    creator_agent_id: Option<String>,
+    created_at: Option<u64>,
+    workspace_git: Option<Value>,
     agent_runtime: Option<AgentRuntimeWire>,
+    thinking_levels: Option<Value>,
+    thinking_options: Option<Vec<String>>,
+    thinking_default: Option<String>,
+    default_permission_mode: Option<String>,
 }
 
 impl AgentSummaryWire {
     fn into_public(self) -> Result<AgentSummary, WireError> {
+        let kind = match self.kind.as_deref() {
+            Some(kind) => AgentKind::parse(kind).ok_or(WireError::InvalidAgentsList)?,
+            None => AgentKind::Agent,
+        };
         if !valid_string(&self.id)
             || !valid_optional_string(&self.name)
-            || self.identity.is_some_and(|identity| !identity.is_valid())
+            || self
+                .identity
+                .as_ref()
+                .is_some_and(|identity| !identity.is_valid())
             || !valid_optional_string(&self.workspace)
+            || !valid_optional_string(&self.created_via)
+            || !valid_optional_string(&self.creator_agent_id)
+            || self
+                .workspace_git
+                .as_ref()
+                .is_some_and(|workspace_git| !valid_workspace_git(workspace_git))
             || self
                 .agent_runtime
+                .as_ref()
                 .is_some_and(|runtime| !runtime.is_valid())
+            || self
+                .thinking_levels
+                .as_ref()
+                .is_some_and(|levels| !valid_thinking_levels(levels))
+            || self
+                .thinking_options
+                .as_deref()
+                .is_some_and(|options| !valid_strings(options))
+            || !valid_optional_string(&self.thinking_default)
+            || !valid_permission_mode(&self.default_permission_mode)
         {
             return Err(WireError::InvalidAgentsList);
         }
@@ -616,12 +834,15 @@ impl AgentSummaryWire {
             name: self.name,
             workspace: self.workspace,
             model,
+            kind,
+            default_permission_mode: self.default_permission_mode,
+            sealed: false,
         })
     }
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct IdentityWire {
     name: Option<String>,
     theme: Option<String>,
@@ -641,7 +862,7 @@ impl IdentityWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct ModelWire {
     primary: Option<String>,
     fallbacks: Option<Vec<String>>,
@@ -662,7 +883,7 @@ impl ModelWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentRuntimeWire {
     id: Option<String>,
     fallback: Option<String>,
@@ -672,13 +893,76 @@ struct AgentRuntimeWire {
 impl AgentRuntimeWire {
     fn is_valid(&self) -> bool {
         valid_optional_string(&self.id)
-            && valid_optional_string(&self.fallback)
-            && valid_optional_string(&self.source)
+            && self
+                .fallback
+                .as_deref()
+                .is_none_or(|fallback| matches!(fallback, "openclaw" | "none"))
+            && self.source.as_deref().is_none_or(|source| {
+                matches!(
+                    source,
+                    "env"
+                        | "agent"
+                        | "defaults"
+                        | "model"
+                        | "provider"
+                        | "implicit"
+                        | "session"
+                        | "session-key"
+                )
+            })
     }
 }
 
+fn valid_ownership(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|ownership| matches!(ownership, "sole" | "legacy" | "explicit"))
+}
+
+fn valid_thinking_levels(value: &Value) -> bool {
+    value.as_array().is_some_and(|levels| {
+        levels.iter().all(|level| {
+            let Some(level) = level.as_object() else {
+                return false;
+            };
+            level
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(valid_string)
+                && level
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_string)
+                && level.iter().all(|(key, value)| match key.as_str() {
+                    "id" | "label" => value.as_str().is_some_and(valid_string),
+                    _ => true,
+                })
+        })
+    })
+}
+
+fn valid_workspace_git(value: &Value) -> bool {
+    if value.is_boolean() {
+        return true;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.iter().all(|(key, value)| match key.as_str() {
+        "root" | "branch" | "head" | "remote" | "url" => value.as_str().is_some_and(valid_string),
+        "dirty" | "isDirty" => value.is_boolean(),
+        _ => true,
+    })
+}
+
+fn valid_permission_mode(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .is_none_or(|mode| matches!(mode, "read-only" | "guarded" | "workspace" | "full"))
+}
+
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentCreatedWire {
     ok: bool,
     agent_id: String,
@@ -706,7 +990,7 @@ impl AgentCreatedWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentUpdatedWire {
     ok: bool,
     agent_id: String,
@@ -724,7 +1008,7 @@ impl AgentUpdatedWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentDeletedWire {
     ok: bool,
     agent_id: String,
@@ -744,7 +1028,7 @@ impl AgentDeletedWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentFilesWire {
     agent_id: String,
     workspace: String,
@@ -776,7 +1060,7 @@ impl AgentFilesWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentFileResultWire {
     agent_id: String,
     workspace: String,
@@ -798,7 +1082,7 @@ impl AgentFileResultWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentFileSetResultWire {
     ok: bool,
     agent_id: String,
@@ -821,11 +1105,12 @@ impl AgentFileSetResultWire {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AgentFileWire {
     name: String,
     path: String,
     missing: bool,
+    expected_absent: Option<bool>,
     size: Option<u64>,
     updated_at_ms: Option<u64>,
     content: Option<String>,
@@ -855,6 +1140,9 @@ impl AgentFileWire {
             return Err(error);
         }
         if self.missing && (self.size.is_some() || self.updated_at_ms.is_some()) {
+            return Err(error);
+        }
+        if self.expected_absent == Some(true) && !self.missing {
             return Err(error);
         }
         Ok(AgentFile {
@@ -957,33 +1245,289 @@ mod tests {
                 ended_at: None,
             },
         );
+        assert_eq!(
+            decode_wait(
+                response(json!({
+                    "runId": "run-1",
+                    "status": "timeout",
+                })),
+                "run-1",
+            )
+            .unwrap(),
+            AgentWaitResult {
+                status: AgentWaitStatus::Timeout,
+                started_at: None,
+                ended_at: None,
+            },
+        );
+        assert_eq!(
+            decode_wait(
+                response(json!({
+                    "runId": "run-1",
+                    "status": "completed",
+                    "endedAt": 2,
+                })),
+                "run-1",
+            )
+            .unwrap(),
+            AgentWaitResult {
+                status: AgentWaitStatus::Completed,
+                started_at: None,
+                ended_at: Some(2),
+            },
+        );
 
         for payload in [
             json!({ "runId": "other", "status": "completed", "startedAt": 1, "endedAt": 2 }),
             json!({ "runId": "run-1", "status": "unknown", "startedAt": 1, "endedAt": 2 }),
             json!({ "runId": "run-1", "status": "completed", "startedAt": 2, "endedAt": 1 }),
-            json!({ "runId": "run-1", "status": "completed", "startedAt": 1 }),
-            json!({ "runId": "run-1", "status": "completed", "startedAt": null, "endedAt": null }),
-            json!({ "runId": "run-1", "status": "completed", "startedAt": null, "endedAt": 1 }),
-            json!({
-                "runId": "run-1",
-                "status": "completed",
-                "startedAt": 1,
-                "endedAt": 2,
-                "error": "private native detail",
-            }),
-            json!({
-                "runId": "run-1",
-                "status": "completed",
-                "startedAt": 1,
-                "endedAt": 2,
-                "futureNativeField": { "private": true },
-            }),
+            json!({ "runId": "run-1", "status": "completed", "startedAt": 2, "endedAt": 1 }),
         ] {
             assert_eq!(
                 decode_wait(response(payload), "run-1"),
                 Err(WireError::InvalidAgentsWait),
             );
         }
+    }
+
+    #[test]
+    fn wait_decode_accepts_additive_native_detail_without_projecting_it() {
+        let result = decode_wait(
+            response(json!({
+                "runId": "run-1",
+                "status": "timeout",
+                "error": "private native detail",
+                "futureNativeField": { "private": true },
+            })),
+            "run-1",
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            AgentWaitResult {
+                status: AgentWaitStatus::Timeout,
+                started_at: None,
+                ended_at: None,
+            },
+        );
+    }
+
+    #[test]
+    fn list_decode_accepts_openclaw_8_2_fields_and_projects_safe_summary() {
+        let result = decode_list(response(json!({
+            "defaultId": "main",
+            "mainKey": "main",
+            "scope": "global",
+            "ownership": "explicit",
+            "selectionRequired": true,
+            "workspaceGit": { "root": "/work", "branch": "main", "head": "abc", "dirty": false },
+            "agentRuntime": { "id": "runtime-1", "fallback": "openclaw", "source": "defaults" },
+            "thinkingLevels": [{ "id": "low", "label": "Low" }, { "id": "high", "label": "High" }],
+            "thinkingOptions": ["low", "high"],
+            "thinkingDefault": "low",
+            "defaultPermissionMode": "workspace",
+            "agents": [
+                {
+                    "id": "main",
+                    "name": "Main",
+                    "identity": {
+                        "name": "Main",
+                        "theme": "green",
+                        "emoji": "🍵",
+                        "avatar": "matcha",
+                        "avatarUrl": "file:///avatar.png",
+                        "nativeDetail": { "private": true }
+                    },
+                    "workspace": "/work/main",
+                    "model": { "primary": "provider/model", "fallbacks": ["provider/fallback"] },
+                    "kind": "system",
+                    "createdVia": "claw",
+                    "createdAt": 1,
+                    "workspaceGit": { "root": "/work/main" },
+                    "agentRuntime": { "id": "runtime-1", "fallback": "none", "source": "session-key" },
+                    "thinkingLevels": [{ "id": "low", "label": "Low" }],
+                    "thinkingOptions": ["low"],
+                    "thinkingDefault": "low",
+                    "defaultPermissionMode": "guarded",
+                    "nativeDetail": { "private": true }
+                },
+                {
+                    "id": "writer",
+                    "name": "Writer",
+                    "workspace": "/work/writer",
+                    "model": null,
+                    "kind": "agent",
+                    "createdVia": "operator",
+                    "creatorAgentId": "main",
+                    "createdAt": 2
+                }
+            ],
+            "futureNativeField": { "private": true }
+        })))
+        .unwrap();
+
+        assert_eq!(result.default_id, "main");
+        assert!(result.selection_required);
+        assert_eq!(result.agents.len(), 2);
+        assert_eq!(result.agents[0].id, "main");
+        assert_eq!(result.agents[0].kind, AgentKind::System);
+        assert_eq!(result.agents[0].model.as_deref(), Some("provider/model"));
+        assert_eq!(
+            result.agents[0].default_permission_mode.as_deref(),
+            Some("guarded")
+        );
+        assert_eq!(result.agents[1].id, "writer");
+        assert_eq!(result.agents[1].kind, AgentKind::Agent);
+        assert_eq!(result.agents[1].model, None);
+        assert_eq!(result.agents[1].default_permission_mode, None);
+    }
+
+    #[test]
+    fn list_decode_rejects_illegal_core_8_2_fields() {
+        for payload in [
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "selectionRequired": false,
+                "agents": [{ "id": "writer", "kind": "tool" }]
+            }),
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "selectionRequired": false,
+                "agentRuntime": { "id": "runtime-1", "fallback": "maybe", "source": "defaults" },
+                "agents": []
+            }),
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "selectionRequired": false,
+                "defaultPermissionMode": "root",
+                "agents": []
+            }),
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "selectionRequired": false,
+                "ownership": [{ "agentId": "" }],
+                "agents": []
+            }),
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "selectionRequired": false,
+                "workspaceGit": { "dirty": "no" },
+                "agents": []
+            }),
+        ] {
+            assert_eq!(
+                decode_list(response(payload)),
+                Err(WireError::InvalidAgentsList),
+            );
+        }
+    }
+
+    #[test]
+    fn create_and_update_encode_openclaw_8_2_display_and_model_clear() {
+        let create = AgentCreate::try_new_with_display(
+            "writer".into(),
+            "/work/writer".into(),
+            Some("provider/model".into()),
+            Some("🍵".into()),
+            Some("matcha".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &create_request("wait-1".into(), create)
+                    .unwrap()
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({
+                "type": "req",
+                "id": "wait-1",
+                "method": "agents.create",
+                "params": {
+                    "name": "writer",
+                    "workspace": "/work/writer",
+                    "model": "provider/model",
+                    "emoji": "🍵",
+                    "avatar": "matcha"
+                },
+            }),
+        );
+
+        let update = AgentUpdate::try_new_clearing_model_with_display(
+            "writer".into(),
+            None,
+            None,
+            Some("✍️".into()),
+            Some("pen".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &update_request("wait-1".into(), update)
+                    .unwrap()
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({
+                "type": "req",
+                "id": "wait-1",
+                "method": "agents.update",
+                "params": {
+                    "agentId": "writer",
+                    "model": null,
+                    "emoji": "✍️",
+                    "avatar": "pen"
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn delete_and_files_decode_openclaw_8_2_additive_fields() {
+        let deleted = decode_delete(response(json!({
+            "ok": true,
+            "agentId": "writer",
+            "removedBindings": 2,
+            "removed": ["writer"],
+            "failed": [],
+            "purgeFailed": [],
+            "futureNativeField": { "private": true }
+        })))
+        .unwrap();
+        assert_eq!(deleted.agent_id, "writer");
+        assert_eq!(deleted.removed_bindings, 2);
+
+        let file = decode_files_get(
+            response(json!({
+                "agentId": "writer",
+                "workspace": "/work/writer",
+                "file": {
+                    "name": "AGENTS.md",
+                    "path": "/work/writer/AGENTS.md",
+                    "missing": true,
+                    "expectedAbsent": true,
+                    "futureNativeField": { "private": true }
+                },
+                "futureNativeField": { "private": true }
+            })),
+            "writer",
+            AgentFileName::Agents,
+        )
+        .unwrap();
+        assert_eq!(file.name, AgentFileName::Agents);
+        assert!(file.missing);
+        assert_eq!(file.content, None);
     }
 }

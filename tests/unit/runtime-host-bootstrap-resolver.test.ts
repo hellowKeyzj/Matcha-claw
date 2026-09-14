@@ -80,7 +80,6 @@ function resolveBootstrap(input: {
       if (name === 'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT') return 32_136;
       if (name === 'MATCHACLAW_SECURITY_POLICY_TRANSPORT') return 32_137;
       if (name === 'MATCHACLAW_SESSION_APPROVAL_TRANSPORT') return 32_121;
-      if (name === 'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT') return 32_123;
       if (name === 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT') return 32_146;
       if (name === 'MATCHACLAW_USAGE_TRANSPORT') return 32_145;
       if (name === 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT') return 32_124;
@@ -161,6 +160,10 @@ function expectedFiles(input: {
       runtimeHostDirectory,
       input.platform === 'win32' ? 'runtime-host.exe' : 'runtime-host'
     ),
+    path.join(
+      runtimeHostDirectory,
+      input.platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
+    ),
     input.platform === 'win32'
       ? input.isPackaged
         ? path.join(modeRoot, 'bin', 'git-for-windows', 'bin', 'bash.exe')
@@ -204,6 +207,11 @@ describe('resolveRuntimeHostBootstrap', () => {
         appVersion: '1.2.3',
         appLogDir: path.join(userData, 'logs'),
         runtimeHostStateDir: path.join(userData, 'runtime-host'),
+        runtimeHostMcpExecutable: path.join(
+          modeRoot,
+          ...(isPackaged ? ['bin', target] : ['runtime-host', 'dist', target]),
+          platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
+        ),
         sessionTransportPort: 32_111,
         fleetTransportPort: 32_112,
         diagnosticsTransportPort: 32_113,
@@ -222,7 +230,6 @@ describe('resolveRuntimeHostBootstrap', () => {
         settingsDesiredTransportPort: 32_136,
         securityPolicyTransportPort: 32_137,
         sessionApprovalTransportPort: 32_121,
-        openclawHistoryTransportPort: 32_123,
         matchaHistoryTransportPort: 32_146,
         usageTransportPort: 32_145,
         sessionModelSelectionTransportPort: 32_124,
@@ -319,6 +326,22 @@ describe('resolveRuntimeHostBootstrap', () => {
       managedPluginRoot: win32.join(windowsProjectRoot, 'build', 'openclaw-plugins'),
       entry: win32.join(windowsProjectRoot, 'node_modules', 'openclaw', 'openclaw.mjs'),
     });
+  });
+
+  it('fails closed with a redacted typed error when runtime-host-mcp is absent', () => {
+    const files = expectedFiles({ isPackaged: true, platform: 'darwin', arch: 'arm64' });
+    const mcp = posix.join(resourcesRoot, 'bin', 'darwin-arm64', 'runtime-host-mcp');
+    const error = expectResolutionFailure(() =>
+      resolveBootstrap({
+        isPackaged: true,
+        platform: 'darwin',
+        arch: 'arm64',
+        files: files.filter((file) => file !== mcp),
+      })
+    );
+
+    expect(error.code).toBe('RUNTIME_HOST_BOOTSTRAP_ARTIFACT_NOT_FOUND');
+    expect(error.message).not.toContain(mcp);
   });
 
   it('fails closed with a redacted typed error when a Unix guardian is absent', () => {

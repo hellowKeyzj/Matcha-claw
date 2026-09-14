@@ -6,19 +6,38 @@
     "gatewayWarning": "Gateway is not running. Skills cannot be loaded without an active Gateway.",
     "gatewayStarting": "Gateway is starting. Skills will load automatically once it is ready.",
     "tabs": {
-        "installed": "Installed",
+        "installed": "Skills",
+        "sealed": "Skill Packages",
         "marketplace": "Marketplace"
     },
     "filter": {
+        "source": "Source",
+        "status": "Status",
+        "allStatuses": "All statuses",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "managed": "User-installed ({{count}})",
         "all": "All ({{count}})",
         "eligible": "Eligible ({{count}})",
         "builtIn": "Built-in ({{count}})",
         "marketplace": "Marketplace ({{count}})"
     },
+    "view": {
+        "grid": "Grid view",
+        "list": "List view",
+        "label": "View"
+    },
+    "count": "{{count}} skills",
     "search": "Search skills...",
     "searchMarketplace": "Search marketplace...",
     "searchButton": "Search",
     "actions": {
+        "details": "View details",
+        "install": "Install",
+        "uninstall": "Uninstall",
+        "close": "Close",
+        "clearSearch": "Clear search",
+        "removeVariable": "Remove variable",
         "enableVisible": "Enable Visible",
         "disableVisible": "Disable Visible",
         "installSkill": "Install Skills"
@@ -74,11 +93,45 @@
     },
     "availability": {
         "eligible": "Eligible",
-        "blocked": "Blocked",
         "missing": "Missing requirements",
         "unknown": "Unknown",
-        "blockedByAllowlist": "Blocked by allowlist",
+        "unselectable": "Not selectable",
         "missingPrefix": "Missing: {{items}}"
+    },
+    "sealed": {
+        "search": "Search skill packages",
+        "runtimeLabel": "Runtime: {{runtime}}",
+        "runtimeAny": "Any",
+        "noDescription": "No description",
+        "emptyTitle": "No skill packages yet",
+        "packageInstalled": "Installed",
+        "packageAvailable": "Not installed",
+        "cloudTitle": "Cloud skill packages",
+        "cloudEmpty": "No cloud skill packages yet.",
+        "cloudUnavailableTitle": "Cloud skill packages unavailable",
+        "cloudUnavailableDescription": "Cannot connect to the backend platform. Refresh later.",
+        "cloudAvailable": "Cloud available",
+        "cloudInstalled": "Installed",
+        "packageSize": "{{size}} bytes",
+        "uploadLocalPackage": "Upload package",
+        "installFromCloud": "Install",
+        "uploaded": "Skill package uploaded",
+        "uploadFailed": "Failed to upload skill package",
+        "installedFromCloud": "Skill package installed",
+        "installFromCloudFailed": "Failed to install cloud skill package",
+        "uploadDialog": {
+            "title": "Upload skill package",
+            "empty": "Drop a .matcha-skillpkg or click to choose",
+            "hint": "Only uploads a locally generated .matcha-skillpkg.",
+            "replace": "Click or drop another package to replace the current selection",
+            "confirm": "Upload to cloud",
+            "packageFilter": "Matcha Skill Package"
+        },
+        "exportTitle": "Generate skill packages",
+        "export": "Generate package",
+        "exported": "Read-only skill package generated",
+        "exportFailed": "Failed to generate skill package",
+        "noExportTargets": "No plaintext non-built-in skills can generate packages."
     },
     "toast": {
         "enabled": "Skill enabled",
@@ -111,6 +164,7 @@
         "batchPartial": "Updated {{success}} / {{total}} skills. Some items failed."
     },
     "marketplace": {
+        "discover": "Discover",
         "title": "Marketplace",
         "installDialogTitle": "Install Skills",
         "installDialogSubtitle": "Browse Explore by default, or enter keywords to search.",

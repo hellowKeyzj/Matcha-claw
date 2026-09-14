@@ -150,3 +150,9 @@ Use this agent when you need:
 - **Accuracy Tracking**: Prediction validation, error analysis, continuous improvement
 - **Feedback Integration**: Stakeholder input, usage analytics, value measurement
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -10,6 +10,7 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 
@@ -237,8 +238,56 @@ describe('chat model picker', () => {
       clearError: vi.fn(),
     } as never);
 
+    const loadedSessionRecord = {
+      ...createEmptySessionRecord(),
+      items: messages,
+      window: createViewportWindowState({
+        ...createEmptySessionViewportState(),
+        totalItemCount: messages.length,
+        windowStartOffset: 0,
+        windowEndOffset: messages.length,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      }),
+      meta: {
+        ...createEmptySessionRecord().meta,
+        endpointSessionId: 'main',
+        runtimeScopeKey: buildRuntimeScopeKey(TEST_SESSION_IDENTITY.endpoint),
+        agentId: 'test',
+        protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
+        runtimeEndpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
+        sessionIdentity: TEST_SESSION_IDENTITY,
+        kind: 'main',
+        preferred: true,
+        historyStatus: 'ready',
+        lastActivityAt: Date.now(),
+        model: 'openai/gpt-5.4',
+      },
+    };
+    const sessionRuntimeCatalog = {
+      status: 'ready' as const,
+      error: null,
+      endpoints: [{
+        endpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
+        protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
+        endpoint: TEST_SESSION_IDENTITY.endpoint,
+        runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
+        runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
+        displayName: 'OpenClaw Local',
+        agentIds: ['test'],
+        acceptsDynamicAgents: true,
+        agentCatalog: { source: 'runtime-endpoint' as const, agents: [{ id: 'test', name: 'Test Agent' }] },
+        sessionPromptScopes: [TEST_AGENT_SCOPE],
+        defaultSessionPromptScope: TEST_AGENT_SCOPE,
+      }],
+      defaultSessionPromptScope: TEST_AGENT_SCOPE,
+    };
+    const loadedSessions = { [TEST_RECORD_KEY]: loadedSessionRecord };
+
     useChatStore.setState({
       currentSessionKey: TEST_RECORD_KEY,
+      currentConversation: buildCurrentConversationFromSessionRecord(loadedSessionRecord),
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
       sessionsLoading: false,
@@ -265,52 +314,11 @@ describe('chat model picker', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
-      sessionRuntimeCatalog: {
-        status: 'ready',
-        error: null,
-        endpoints: [{
-          endpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
-          protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
-          endpoint: TEST_SESSION_IDENTITY.endpoint,
-          runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
-          runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
-          displayName: 'OpenClaw Local',
-          agentIds: ['test'],
-          acceptsDynamicAgents: true,
-          agentCatalog: { source: 'runtime-endpoint', agents: [{ id: 'test', name: 'Test Agent' }] },
-          sessionPromptScopes: [TEST_AGENT_SCOPE],
-          defaultSessionPromptScope: TEST_AGENT_SCOPE,
-        }],
-        defaultSessionPromptScope: TEST_AGENT_SCOPE,
-      },
-      loadedSessions: {
-        [TEST_RECORD_KEY]: {
-          ...createEmptySessionRecord(),
-          items: messages,
-          window: createViewportWindowState({
-            ...createEmptySessionViewportState(),
-            totalItemCount: messages.length,
-            windowStartOffset: 0,
-            windowEndOffset: messages.length,
-            hasMore: false,
-            hasNewer: false,
-            isAtLatest: true,
-          }),
-          meta: {
-            ...createEmptySessionRecord().meta,
-            endpointSessionId: 'main',
-            runtimeScopeKey: buildRuntimeScopeKey(TEST_SESSION_IDENTITY.endpoint),
-            agentId: 'test',
-            protocolId: OPENCLAW_TEST_RUNTIME_IDENTITY.protocolId,
-            runtimeEndpointId: OPENCLAW_TEST_RUNTIME_IDENTITY.runtimeEndpointId,
-            sessionIdentity: TEST_SESSION_IDENTITY,
-            kind: 'main',
-            preferred: true,
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-            model: 'openai/gpt-5.4',
-          },
-        },
+      sessionRuntimeCatalog,
+      sessionRuntimeGraph: buildSessionRuntimeGraph(sessionRuntimeCatalog, loadedSessions),
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: {
+        [TEST_RECORD_KEY]: TEST_RECORD_KEY,
       },
     } as never);
   });
@@ -319,12 +327,12 @@ describe('chat model picker', () => {
     renderChat();
 
     const picker = await screen.findByTestId('chat-model-picker');
-    expect(picker).toHaveTextContent('openai / gpt-5.4');
+    expect(picker).toHaveTextContent('gpt-5.4');
 
     fireEvent.click(picker);
-    fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+    fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
 
-    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
     expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
 
     await waitFor(() => {
@@ -336,7 +344,7 @@ describe('chat model picker', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
+      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('claude-opus-4-6');
     });
     expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
   });
@@ -349,12 +357,12 @@ describe('chat model picker', () => {
       renderChat();
 
       const picker = await screen.findByTestId('chat-model-picker');
-      expect(picker).toHaveTextContent('openai / gpt-5.4');
+      expect(picker).toHaveTextContent('gpt-5.4');
 
       fireEvent.click(picker);
-      fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+      fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
 
-      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
       expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
 
       await waitFor(() => {
@@ -374,7 +382,7 @@ describe('chat model picker', () => {
 
     const picker = await screen.findByTestId('chat-model-picker');
     fireEvent.click(picker);
-    fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+    fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
@@ -433,7 +441,7 @@ describe('chat model picker', () => {
 
     renderChat();
 
-    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
     expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 
@@ -484,7 +492,7 @@ describe('chat model picker', () => {
 
     renderChat();
 
-    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
     expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 

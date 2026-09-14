@@ -6,6 +6,7 @@ import { getAttachmentStagingDir } from '../../utils/paths';
 
 const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const IMAGE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
+const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
 const EXT_MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
@@ -44,11 +45,13 @@ const EXT_MIME_MAP: Record<string, string> = {
 };
 
 export interface StagedDialogAttachmentPayload {
-  stagedAttachmentId: string;
+  stagedAttachmentId?: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 }
 
 const stagedAttachmentPaths = new Map<string, string>();
@@ -167,7 +170,18 @@ function isStagingPath(root: string, candidate: string): boolean {
     && !pathWithinStaging.includes(':');
 }
 
-async function statSelectedFile(filePath: string): Promise<{ isFile(): boolean; size: number }> {
+async function realpathSelectedPath(filePath: string): Promise<string> {
+  try {
+    return await realpath(filePath);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      throw new Error('notFound', { cause: error });
+    }
+    throw error;
+  }
+}
+
+async function statSelectedPath(filePath: string): Promise<{ isFile(): boolean; isDirectory?: () => boolean; size: number }> {
   try {
     return await stat(filePath);
   } catch (error) {
@@ -243,13 +257,32 @@ export async function stageRendererBufferAttachment(input: {
 }
 
 export async function stageDialogSelectedAttachments(filePaths: string[]): Promise<StagedDialogAttachmentPayload[]> {
-  const attachmentStagingDirectory = getAttachmentStagingDir();
-  await mkdir(attachmentStagingDirectory, { recursive: true });
-  const root = await realpath(attachmentStagingDirectory);
+  let stagingRoot: string | null = null;
+  const ensureStagingRoot = async (): Promise<string> => {
+    if (stagingRoot) {
+      return stagingRoot;
+    }
+    const attachmentStagingDirectory = getAttachmentStagingDir();
+    await mkdir(attachmentStagingDirectory, { recursive: true });
+    stagingRoot = await realpath(attachmentStagingDirectory);
+    return stagingRoot;
+  };
 
   const attachments: StagedDialogAttachmentPayload[] = [];
   for (const filePath of filePaths) {
-    const fileStat = await statSelectedFile(filePath);
+    const sourcePath = await realpathSelectedPath(filePath);
+    const fileStat = await statSelectedPath(sourcePath);
+    if (fileStat.isDirectory?.() === true) {
+      attachments.push({
+        entryKind: 'directory',
+        fileName: basename(sourcePath) || 'folder',
+        mimeType: DIRECTORY_MIME_TYPE,
+        fileSize: 0,
+        preview: null,
+        sourcePath,
+      });
+      continue;
+    }
     if (!fileStat.isFile()) {
       throw new Error('notFound');
     }
@@ -257,13 +290,14 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
       throw new Error('tooLarge');
     }
 
-    const ext = extname(filePath);
+    const ext = extname(sourcePath);
     const mimeType = getMimeType(ext);
     const id = randomUUID();
+    const root = await ensureStagingRoot();
     const stagedPath = join(root, `${id}${ext}`);
     let copied = false;
     try {
-      await copyFile(filePath, stagedPath, constants.COPYFILE_EXCL);
+      await copyFile(sourcePath, stagedPath, constants.COPYFILE_EXCL);
       copied = true;
       const ownedPath = await realpath(stagedPath);
       if (!isStagingPath(root, ownedPath)) {
@@ -277,10 +311,12 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
       stagedAttachmentPaths.set(id, ownedPath);
       attachments.push({
         stagedAttachmentId: id,
-        fileName: basename(filePath) || 'file',
+        entryKind: 'file',
+        fileName: basename(sourcePath) || 'file',
         mimeType,
         fileSize: metadata.size,
         preview,
+        sourcePath,
       });
     } catch (error) {
       if (copied) {

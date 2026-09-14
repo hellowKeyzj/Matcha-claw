@@ -4,7 +4,7 @@ use organization::run::event::{
     NodeProgressCommand, OpaqueId, RunCommand,
 };
 use organization::run::{
-    control::AgentNodeEventResolution,
+    control::TeamNodeEventProducer,
     delivery::{
         AuthorizedGraphResolutionOutcome, AuthorizedGraphResolutionReceipt, DeliveryId,
         DeliveryPhase, NativeTerminalStatus,
@@ -166,35 +166,34 @@ impl TeamRunMcpFacade {
                 return Err(TeamRunMcpError::Invalid);
             }
             let resolution = match request.event {
-                TeamNodeEventCommandKind::Complete => {
-                    AgentNodeEventResolution::complete_with_summary(
-                        receipt,
-                        delivery_id,
-                        run_id.as_str(),
-                        fence,
-                        terminal.summary.clone(),
-                        command_id.as_str(),
-                        idempotency_key.as_str(),
-                        Some(terminal.output_port.clone()),
-                        occurred_at,
-                    )
-                }
-                TeamNodeEventCommandKind::Reject => AgentNodeEventResolution::reject_with_summary(
-                    receipt,
+                TeamNodeEventCommandKind::Complete => TeamNodeEventProducer::complete_activity(
                     delivery_id,
-                    run_id.as_str(),
+                    receipt,
+                    GraphRunId::new(run_id.as_str()),
                     fence,
+                    terminal.attempt_number,
                     terminal.summary.clone(),
-                    command_id.as_str(),
-                    idempotency_key.as_str(),
-                    Some(terminal.output_port.clone()),
+                    idempotency_key.as_str().to_owned(),
+                    terminal.output_port.clone(),
+                    occurred_at,
+                ),
+                TeamNodeEventCommandKind::Reject => TeamNodeEventProducer::reject_activity(
+                    delivery_id,
+                    receipt,
+                    GraphRunId::new(run_id.as_str()),
+                    fence,
+                    terminal.attempt_number,
+                    terminal.summary.clone(),
+                    idempotency_key.as_str().to_owned(),
+                    terminal.output_port.clone(),
                     occurred_at,
                 ),
                 TeamNodeEventCommandKind::Progress
                 | TeamNodeEventCommandKind::RequestInput
                 | TeamNodeEventCommandKind::RequestApproval(_) => unreachable!(),
             }
-            .map_err(|_| TeamRunMcpError::Invalid)?;
+            .map_err(|_| TeamRunMcpError::Invalid)?
+            .into_resolution();
             let outcome = self
                 .store
                 .apply_agent_node_event_resolution(resolution)

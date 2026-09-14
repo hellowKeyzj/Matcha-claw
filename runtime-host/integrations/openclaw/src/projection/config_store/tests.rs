@@ -64,6 +64,112 @@ fn missing_config_reads_as_an_empty_private_document() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn canonical_initialization_writes_required_owner_defaults() {
+    let root = TestRoot::new();
+
+    root.store()
+        .ensure_canonical_document()
+        .expect("initialize canonical config");
+
+    let document = root.store().read_private().expect("read canonical config");
+    let document = document.as_value();
+    assert_eq!(
+        document["agents"]["defaults"],
+        json!({
+            "systemAgent": { "agentId": "main" },
+            "sessionStore": { "agentId": "main" },
+            "bootstrapMaxChars": 32_000,
+            "bootstrapTotalMaxChars": 100_000,
+            "skipBootstrap": true,
+            "compaction": {
+                "mode": "safeguard",
+                "midTurnPrecheck": { "enabled": true }
+            },
+            "heartbeat": { "target": "none", "every": "0m" }
+        })
+    );
+    assert_eq!(
+        document["tools"],
+        json!({
+            "profile": "full",
+            "sessions": { "visibility": "all" },
+            "deny": [
+                "skill_workshop",
+                "gateway",
+                "nodes",
+                "progress_card",
+                "suggest_task",
+                "dismiss_task",
+                "create_goal",
+                "get_goal",
+                "update_goal"
+            ]
+        })
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn canonical_initialization_preserves_existing_agent_owner() {
+    let root = TestRoot::new();
+    fs::write(
+        root.config_path(),
+        serde_json::to_vec(&json!({
+            "agents": {
+                "entries": { "ops": { "default": true } },
+                "defaults": { "temperature": 0.2 }
+            },
+            "messages": { "locale": "zh" }
+        }))
+        .expect("serialize config"),
+    )
+    .expect("seed config");
+
+    root.store()
+        .ensure_canonical_document()
+        .expect("initialize canonical config");
+
+    let document = root.store().read_private().expect("read canonical config");
+    let document = document.as_value();
+    assert_eq!(document["messages"]["locale"], "zh");
+    assert_eq!(
+        document["agents"]["defaults"],
+        json!({
+            "temperature": 0.2,
+            "systemAgent": { "agentId": "ops" },
+            "sessionStore": { "agentId": "ops" },
+            "bootstrapMaxChars": 32_000,
+            "bootstrapTotalMaxChars": 100_000,
+            "skipBootstrap": true,
+            "compaction": {
+                "mode": "safeguard",
+                "midTurnPrecheck": { "enabled": true }
+            },
+            "heartbeat": { "target": "none", "every": "0m" }
+        })
+    );
+    assert_eq!(
+        document["tools"],
+        json!({
+            "profile": "full",
+            "sessions": { "visibility": "all" },
+            "deny": [
+                "skill_workshop",
+                "gateway",
+                "nodes",
+                "progress_card",
+                "suggest_task",
+                "dismiss_task",
+                "create_goal",
+                "get_goal",
+                "update_goal"
+            ]
+        })
+    );
+}
+
 #[test]
 fn workspace_selection_read_ignores_unrelated_secret_bearing_config() {
     let root = TestRoot::new();
@@ -98,6 +204,41 @@ fn workspace_selection_read_ignores_unrelated_secret_bearing_config() {
     );
     assert!(document["gateway"].is_null());
     assert!(document["agents"]["list"][0]["model"].is_null());
+}
+
+#[test]
+fn workspace_selection_read_supports_entries_roster() {
+    let root = TestRoot::new();
+    let workspace = root.path.join("workspace");
+    fs::write(
+        root.config_path(),
+        serde_json::to_vec(&json!({
+            "gateway": { "auth": { "token": SECRET_CANARY } },
+            "agents": {
+                "entries": {
+                    "writer": {
+                        "workspace": workspace,
+                        "model": { "apiKey": SECRET_CANARY }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("seed entries config");
+
+    let document = root
+        .store()
+        .read_workspace_selection()
+        .expect("read workspace selection");
+
+    let document = document.as_value();
+    assert_eq!(
+        document["agents"]["entries"]["writer"]["workspace"],
+        workspace.to_str().unwrap()
+    );
+    assert!(document["gateway"].is_null());
+    assert!(document["agents"]["entries"]["writer"]["model"].is_null());
 }
 
 #[test]

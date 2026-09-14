@@ -21,10 +21,12 @@
         "incomplete": "Incomplete"
     },
     "timeWindow": {
-        "title": "Statistics Time Window",
+        "title": "Time Range",
+        "selection": "Time range: {{range}}",
         "all": "All Time",
         "last7Days": "Last 7 Days",
-        "last30Days": "Last 30 Days"
+        "last30Days": "Last 30 Days",
+        "custom": "Custom"
     },
     "filters": {
         "dateRange": "Date Range",

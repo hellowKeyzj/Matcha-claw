@@ -137,10 +137,12 @@ describe('Electron Main cron transport', () => {
   });
 
   it.each([
+    { ...snapshot, snapshotRevision: 1 },
+    { ...snapshot, deliveryPreviews: {} },
     { ...snapshot, jobs: [{ ...job, private: 'secret' }] },
     { ...snapshot, jobs: [{ ...job, createdAt: '1970-01-01T00:00:00Z' }] },
     { ...snapshot, jobs: [{ ...job, updatedAt: 'not-a-timestamp' }] },
-  ])('fails closed when a listed job violates the public DTO', async (invalidSnapshot) => {
+  ])('fails closed when a Cron list body violates the public DTO', async (invalidSnapshot) => {
     const transport = createCronTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_116,

@@ -22,15 +22,6 @@ describe('Task Manager transport', () => {
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34138/api/tasks/list', expect.objectContaining({ method: 'POST', body: JSON.stringify(listRequest) }));
   });
 
-  it('uses task.control decision only for output', async () => {
-    const signDecision = vi.fn().mockReturnValue('signed');
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => ({ output: 'available' }) });
-    const transport = createTaskManagerTransport({ verificationKey: 'public', signDecision }, 34_138, fetcher);
-    const request = { id: 'task.control', operationId: 'tasks.output', scope: { kind: 'session', identity }, target: { kind: 'task', identity }, input: { sessionIdentity: identity, taskId: 'task-1' } };
-
-    await expect(transport.output(request)).resolves.toEqual({ status: 200, body: { output: 'available' } });
-    expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({ endpoint: '/api/tasks/output', scope: 'tasks:control', capability: 'task.control', subject: 'tasks-output' }));
-  });
 
   it.each([
     { ...listRequest, input: { ...listRequest.input, workspaceDir: 'C:/private' } },

@@ -279,3 +279,9 @@ You're successful when:
 - Design feature flags using a `ReplicatedStorage` configuration object: enable/disable features without code deployments
 - Build a developer admin panel using `ScreenGui` visible only to whitelisted UserIds for in-experience debugging tools
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

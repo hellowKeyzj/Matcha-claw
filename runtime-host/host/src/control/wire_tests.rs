@@ -66,14 +66,8 @@ fn command_round_trip_is_strict_and_has_no_http_shape() {
             "openclaw.tool-permission.get",
             Command::OpenClawToolPermissionGet {},
         ),
-        (
-            "openclaw.toolchain.status",
-            Command::OpenClawToolchainStatus {},
-        ),
-        (
-            "openclaw.toolchain.install-uv",
-            Command::OpenClawToolchainInstallUv {},
-        ),
+        ("host.toolchain.status", Command::HostToolchainStatus {}),
+        ("host.toolchain.prepare", Command::HostToolchainPrepare {}),
         ("openclaw.lifecycle.start", Command::OpenClawStart {}),
         ("openclaw.lifecycle.stop", Command::OpenClawStop {}),
         ("openclaw.lifecycle.restart", Command::OpenClawRestart {}),
@@ -204,6 +198,43 @@ fn command_round_trip_is_strict_and_has_no_http_shape() {
             Some(json!({ "mode": "fullAccess" })),
         )
     );
+
+    let browser = decode_command_request(
+        command(
+            "openclaw.browser.request",
+            Some(
+                json!({ "method": "GET", "path": "/session/view", "body": { "viewId": "view-1" } }),
+            ),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        browser.command,
+        Command::OpenClawBrowserRequest {
+            input: CommandInput(
+                json!({ "method": "GET", "path": "/session/view", "body": { "viewId": "view-1" } })
+            ),
+        }
+    );
+    let mcp = decode_command_request(
+        command(
+            "openclaw.mcp-app.request",
+            Some(json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "standalone": true })),
+        )
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        mcp.command,
+        Command::OpenClawMcpAppRequest {
+            input: CommandInput(
+                json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "standalone": true })
+            ),
+        }
+    );
 }
 
 #[test]
@@ -259,6 +290,13 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
             "id": "command-1",
             "timeoutMs": 1_000,
             "command": { "name": "host.runtime.execute", "input": {} },
+        }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "openclaw.toolchain.install-uv" },
         }),
         json!({
             "version": 1,
@@ -1004,7 +1042,6 @@ fn session_handle_separates_query_and_mutation_mailboxes() {
         "pub(crate) async fn pending_approvals",
         "pub(crate) async fn load_timeline",
         "pub(crate) async fn list_openclaw_sessions",
-        "pub(crate) async fn openclaw_history",
         "pub(crate) async fn list_matcha_sessions",
         "pub(crate) async fn load_matcha_history",
     ] {

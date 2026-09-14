@@ -16,14 +16,22 @@ export async function handleRuntimeHostUsageRoutes(
   url: URL,
   transport: UsageTransport,
 ): Promise<boolean> {
-  if (url.pathname !== '/api/runtime-host/usage/recent' || req.method !== 'GET') {
+  if (req.method !== 'GET') {
+    return false;
+  }
+  if (url.pathname !== '/api/runtime-host/usage/recent' && url.pathname !== '/api/runtime-host/usage/session-timeseries') {
     return false;
   }
 
   const rawLimit = url.searchParams.get('limit');
   const limit = rawLimit === null ? undefined : Number(rawLimit);
   try {
-    const response = await transport.read(limit);
+    const response = url.pathname === '/api/runtime-host/usage/recent'
+      ? await transport.read(limit)
+      : await transport.readSessionTimeseries({
+        sessionId: url.searchParams.get('sessionId') ?? '',
+        agentId: url.searchParams.get('agentId') ?? '',
+      });
     if (response.status === 200 && isUsageEntries(response.body)) {
       sendJson(res, 200, response.body.entries);
     } else {

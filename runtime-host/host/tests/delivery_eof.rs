@@ -207,7 +207,6 @@ fn bootstrap(root: &TestRoot) -> (Value, [u16; 40]) {
         "channelControlTransportPort": ports[8],
         "channelPairingTransportPort": ports[9],
         "sessionModelSelectionTransportPort": ports[10],
-        "openclawHistoryTransportPort": ports[11],
         "matchaHistoryTransportPort": ports[12],
         "usageTransportPort": ports[13],
         "diagnosticsTransportPort": ports[14],

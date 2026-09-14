@@ -1,6 +1,6 @@
-import { AlertCircle, Loader2, ShieldCheck } from 'lucide-react';
+import { AlertCircle, Loader2, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
+import type { ApprovalDecision, ApprovalItem, ChatSessionRuntimeErrorDetail, ChatSessionRuntimeNotice } from '@/stores/chat';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 
@@ -26,6 +26,75 @@ export function ChatErrorBanner({
         >
           {dismissLabel}
         </button>
+      </div>
+    </div>
+  );
+}
+
+function runtimeDetailParts(detail: ChatSessionRuntimeErrorDetail): string[] {
+  return [
+    detail.failoverReason,
+    detail.providerRuntimeFailureKind,
+    detail.providerErrorType,
+    detail.providerErrorMessagePreview,
+    detail.httpStatus ? `HTTP ${detail.httpStatus}` : null,
+  ].filter((part): part is string => Boolean(part));
+}
+
+function guardianTitle(notice: ChatSessionRuntimeNotice, translate: (key: string) => string): string {
+  switch (notice.kind) {
+    case 'guardian_reviewing':
+      return translate('runtimeStatus.guardian.reviewing');
+    case 'guardian_approved':
+      return translate('runtimeStatus.guardian.approved');
+    case 'guardian_denied':
+      return translate('runtimeStatus.guardian.denied');
+    case 'guardian_warning':
+      return translate('runtimeStatus.guardian.warning');
+    case 'guardian_strict_review_required':
+      return translate('runtimeStatus.guardian.strictReviewRequired');
+  }
+}
+
+function guardianDetail(notice: ChatSessionRuntimeNotice): string | null {
+  return notice.command || notice.riskLevel || notice.rationale || notice.message;
+}
+
+export function ChatRuntimeStatusDock({
+  compacting,
+  errorDetail,
+  runtimeNotice = null,
+}: {
+  compacting: boolean;
+  errorDetail: ChatSessionRuntimeErrorDetail | null;
+  runtimeNotice?: ChatSessionRuntimeNotice | null;
+}) {
+  const { t } = useTranslation('chat');
+  const detailParts = errorDetail ? runtimeDetailParts(errorDetail) : [];
+  const guardian = runtimeNotice;
+  if (!compacting && detailParts.length === 0 && !guardian) {
+    return null;
+  }
+
+  const title = compacting ? t('pending.compacting') : guardian ? guardianTitle(guardian, t) : t('runtimeStatus.providerFallback');
+  const detail = compacting ? null : guardian ? guardianDetail(guardian) : detailParts.join(' · ');
+
+  return (
+    <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail} data-testid="chat-runtime-status-dock">
+      <div className="flex min-h-11 items-center gap-3 rounded-[18px] border border-border/55 bg-background/94 px-3 py-2 shadow-[0_12px_34px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:shadow-[0_16px_44px_rgba(0,0,0,0.24)]">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border/55 bg-card text-muted-foreground shadow-sm">
+          {compacting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : guardian ? <ShieldCheck className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-medium leading-5 text-foreground">
+            {title}
+          </div>
+          {detail ? (
+            <div className="mt-0.5 truncate text-[11px] leading-4 text-muted-foreground/78" title={detail}>
+              {detail}
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );

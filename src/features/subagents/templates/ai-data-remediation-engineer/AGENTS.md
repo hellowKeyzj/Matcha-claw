@@ -159,3 +159,9 @@ def reconciliation_check(source: int, success: int, quarantine: int):
 
 **Instructions Reference**: This agent operates exclusively in the remediation layer — after deterministic validation, before staging promotion. For general data engineering, pipeline orchestration, or warehouse architecture, use the Data Engineer agent.
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -12,8 +12,12 @@ describe('provider accounts helper', () => {
         accounts: [{
           id: 'acc-1', provider: 'openai', label: 'OpenAI', enabled: true, kind: 'chat',
           authMode: 'apiKey', revision: 1,
+        }, {
+          id: 'zai', provider: 'zai-global', label: 'Z.AI Global', enabled: true, kind: 'chat',
+          authMode: 'apiKey', revision: 2,
         }],
       })
+      .mockResolvedValueOnce({ hasKey: true })
       .mockResolvedValueOnce({ hasKey: true });
 
     const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
@@ -21,9 +25,15 @@ describe('provider accounts helper', () => {
       credentials: [{
         id: 'acc-1', vendorId: 'openai', label: 'OpenAI', authMode: 'api_key', enabled: true,
         createdAt: '', updatedAt: '', providerKind: 'chat', apiProtocol: undefined,
+      }, {
+        id: 'zai', vendorId: 'zai-global', label: 'Z.AI Global', authMode: 'api_key', enabled: true,
+        createdAt: '', updatedAt: '', providerKind: 'chat', apiProtocol: undefined,
       }],
       statuses: [{
         id: 'acc-1', name: 'OpenAI', type: 'openai', providerKind: 'chat', enabled: true,
+        createdAt: '', updatedAt: '', hasKey: true, keyMasked: '****',
+      }, {
+        id: 'zai', name: 'Z.AI Global', type: 'zai-global', providerKind: 'chat', enabled: true,
         createdAt: '', updatedAt: '', hasKey: true, keyMasked: '****',
       }],
       vendors: expect.arrayContaining([
@@ -34,8 +44,24 @@ describe('provider accounts helper', () => {
           defaultAuthMode: 'api_key',
           supportsMultipleAccounts: true,
         }),
+        expect.objectContaining({
+          id: 'zai',
+          category: 'official',
+          envVar: 'ZAI_API_KEY',
+          supportedAuthModes: ['api_key'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: false,
+        }),
+        expect.objectContaining({
+          id: 'zai-global',
+          category: 'official',
+          envVar: 'ZAI_API_KEY',
+          supportedAuthModes: ['api_key'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: false,
+        }),
       ]),
-      revisions: { 'acc-1': 1 },
+      revisions: { 'acc-1': 1, zai: 2 },
     });
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/provider-accounts', undefined);
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/provider-accounts/acc-1/has-api-key', undefined);
@@ -74,6 +100,23 @@ describe('provider accounts helper', () => {
         { ...validVendor, modelCapabilities: ['not-a-capability'] },
       ],
     }).vendors).toEqual([validVendor]);
+  });
+
+  it('buildProviderCredentialId keeps Z.AI global on the OpenClaw zai key alias', async () => {
+    const { buildProviderCredentialId } = await import('../../src/lib/provider-accounts');
+    expect(buildProviderCredentialId('zai-global', null, [])).toBe('zai');
+    expect(buildProviderCredentialId('zai', null, [{
+      id: 'zai' as never,
+      name: 'Z.AI (CN)',
+      icon: 'Z',
+      placeholder: 'zai-...',
+      requiresApiKey: true,
+      category: 'official',
+      envVar: 'ZAI_API_KEY',
+      supportedAuthModes: ['api_key'],
+      defaultAuthMode: 'api_key',
+      supportsMultipleAccounts: false,
+    }])).toBe('zai');
   });
 
   it('public provider account projection keeps account mutations on the revision contract', async () => {

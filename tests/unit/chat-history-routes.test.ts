@@ -10,41 +10,13 @@ vi.mock('../../electron/api/route-utils', () => ({
 }));
 
 describe('peer chat history routes', () => {
-  const openClawHistoryTransport = { read: vi.fn() };
   const matchaAgentHistoryTransport = { read: vi.fn() };
-  const deps = { openClawHistoryTransport, matchaAgentHistoryTransport };
+  const deps = { matchaAgentHistoryTransport };
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('forwards the OpenClaw-only request to its dedicated transport', async () => {
-    const request = {
-      id: 'openclaw.chat.history',
-      operationId: 'openclaw.chat.history',
-      sessionKey: 'agent:main:demo',
-    };
-    parseJsonBodyMock.mockResolvedValue(request);
-    openClawHistoryTransport.read.mockResolvedValue({
-      status: 200,
-      body: { messages: [{ role: 'assistant', text: 'Reply' }] },
-    });
-    const { handleChatHistoryRoutes } = await import('../../electron/api/routes/chat-history');
-    const response = {} as ServerResponse;
-
-    await expect(handleChatHistoryRoutes(
-      { method: 'POST' } as IncomingMessage,
-      response,
-      new URL('http://127.0.0.1:3210/api/openclaw/chat/history'),
-      deps,
-    )).resolves.toBe(true);
-
-    expect(openClawHistoryTransport.read).toHaveBeenCalledWith(request);
-    expect(matchaAgentHistoryTransport.read).not.toHaveBeenCalled();
-    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, {
-      messages: [{ role: 'assistant', text: 'Reply' }],
-    });
-  });
 
   it('forwards malformed Matcha input only to its dedicated transport', async () => {
     parseJsonBodyMock.mockRejectedValue(new Error('invalid JSON'));
@@ -63,7 +35,6 @@ describe('peer chat history routes', () => {
     )).resolves.toBe(true);
 
     expect(matchaAgentHistoryTransport.read).toHaveBeenCalledWith(undefined);
-    expect(openClawHistoryTransport.read).not.toHaveBeenCalled();
     expect(sendJsonMock).toHaveBeenCalledWith(response, 400, {
       success: false,
       error: 'Matcha Agent chat history is unavailable',
@@ -76,7 +47,7 @@ describe('peer chat history routes', () => {
     await expect(handleChatHistoryRoutes(
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/openclaw/chat/history'),
+      new URL('http://127.0.0.1:3210/api/other'),
       deps,
     )).resolves.toBe(false);
     await expect(handleChatHistoryRoutes(
@@ -86,7 +57,6 @@ describe('peer chat history routes', () => {
       deps,
     )).resolves.toBe(false);
 
-    expect(openClawHistoryTransport.read).not.toHaveBeenCalled();
     expect(matchaAgentHistoryTransport.read).not.toHaveBeenCalled();
   });
 });

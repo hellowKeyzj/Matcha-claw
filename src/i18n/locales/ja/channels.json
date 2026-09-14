@@ -55,16 +55,24 @@
         "existingDesc": "既存の設定を更新します",
         "selectDesc": "設定するチャンネルタイプを選択してください",
         "qrCode": "QRコード",
-        "token": "トークン",
+        "token": "認証情報",
+        "authorization": "認可",
+        "webhook": "Webhook",
         "scanQR": "{{name}} でこのQRコードをスキャンしてください",
+        "openAuthorization": "{{name}} の認可リンクを開く",
+        "openAuthorizationLink": "認可リンクを開く",
         "qrImageAlt": "{{name}} ログインQRコード",
-        "refreshCode": "コードを更新",
+        "waitingForScan": "スキャンまたは認可の完了を待機中...",
+        "refreshCode": "QRコードを更新",
         "loadingConfig": "設定を読み込み中...",
         "existingHint": "このチャンネルの設定はすでに存在します",
         "howToConnect": "接続方法",
         "viewDocs": "ドキュメントを表示",
         "channelName": "チャンネル名",
         "channelNamePlaceholder": "マイ {{name}}",
+        "agent": "エージェント",
+        "agentDefault": "デフォルト（main）/ 既存を保持",
+        "mainAgent": "メインエージェント",
         "enableChannel": "チャンネルを有効化",
         "enableChannelDesc": "オフの場合、設定のみ保存しチャンネルは起動しません",
         "credentialsVerified": "認証情報が確認されました",
@@ -74,9 +82,13 @@
         "validating": "検証中...",
         "validateConfig": "設定を検証",
         "generatingQR": "QRコードを生成中...",
+        "startingAuthorization": "認可を開始中...",
         "validatingAndSaving": "検証して保存中...",
         "advancedSettings": "詳細設定（任意）",
+        "setupModeGuided": "スキャン/認可で接続",
+        "setupModeCredential": "設定で接続",
         "generateQRCode": "QRコードを生成",
+        "startAuthorization": "認可を開始",
         "updateAndReconnect": "更新して再接続",
         "saveAndConnect": "保存して接続",
         "envVar": "環境変数: {{var}}"
@@ -233,21 +245,21 @@
             ]
         },
         "wecom": {
-            "description": "プラグイン経由で WeCom Bot (企業微信) に接続します",
+            "description": "公式プラグインで WeCom Bot に接続します（Bot ID と Bot Secret を使用）。",
             "fields": {
                 "botId": {
-                    "label": "ボット ID",
-                    "placeholder": "ww_xxxxxx"
+                    "label": "Bot ID",
+                    "placeholder": "WeCom Bot ID を入力"
                 },
                 "secret": {
-                    "label": "アプリシークレット",
-                    "placeholder": "WeCom Bot のシークレット"
+                    "label": "Bot Secret",
+                    "placeholder": "WeCom Bot Secret を入力"
                 }
             },
             "instructions": [
-                "WeCom 管理コンソールでアプリケーションを作成し、設定情報を取得します",
-                "メッセージ受信サーバー設定が有効になっていることを確認します",
-                "ボット ID (または 企業 ID) とシークレットを入力して接続を確立します"
+                "WeCom 管理コンソールで Bot を作成または開き、Bot ID と Bot Secret をコピーします。",
+                "この画面は既定の WebSocket Bot モードを使用します。QRコード、OAuth、コールバック URL は不要です。",
+                "認証情報を保存すると、ゲートウェイが非対話で認可を完了しチャンネルを起動します。"
             ]
         },
         "imessage": {

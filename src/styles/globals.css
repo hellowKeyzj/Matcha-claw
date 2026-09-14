@@ -154,6 +154,24 @@
   @apply bg-muted-foreground/30;
 }
 
+.chat-model-picker-viewport {
+  scrollbar-width: thin !important;
+  scrollbar-color: hsl(var(--border)) transparent !important;
+}
+
+.chat-model-picker-viewport::-webkit-scrollbar {
+  display: block !important;
+  width: var(--scrollbar-size);
+}
+
+.chat-model-picker-viewport::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-border;
+}
+
+.chat-model-picker-viewport::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/30;
+}
+
 :root:not(.dark) .matchaclaw-diff-editor .monaco-diff-editor,
 :root:not(.dark) .matchaclaw-diff-editor .monaco-editor,
 :root:not(.dark) .matchaclaw-diff-editor .monaco-editor-background,
@@ -193,7 +211,7 @@
 .chat-markdown {
   --chat-markdown-color: hsl(var(--foreground));
   --chat-markdown-font-size: 0.875rem;
-  --chat-markdown-line-height: 1.68;
+  --chat-markdown-line-height: 1.62;
   color: var(--chat-markdown-color);
   font-size: var(--chat-markdown-font-size);
   line-height: var(--chat-markdown-line-height);
@@ -201,7 +219,7 @@
 
 .chat-markdown-sm {
   --chat-markdown-font-size: 0.75rem;
-  --chat-markdown-line-height: 1.55;
+  --chat-markdown-line-height: 1.48;
 }
 
 .chat-markdown-muted {
@@ -220,7 +238,7 @@
 
 .prose p,
 .chat-markdown p {
-  margin: 0.62em 0;
+  margin: 0.5em 0;
   text-wrap: pretty;
 }
 
@@ -236,27 +254,27 @@
 .chat-markdown h4,
 .chat-markdown h5,
 .chat-markdown h6 {
-  margin: 1.1em 0 0.45em;
-  color: var(--chat-markdown-color);
-  font-weight: 650;
-  letter-spacing: -0.025em;
-  line-height: 1.24;
+  margin: 1.45em 0 0.48em;
+  color: hsl(var(--foreground));
+  font-weight: 760;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
   text-wrap: balance;
 }
 
 .prose h1,
 .chat-markdown h1 {
-  font-size: 1.5rem;
+  font-size: 1.42rem;
 }
 
 .prose h2,
 .chat-markdown h2 {
-  font-size: 1.28rem;
+  font-size: 1.24rem;
 }
 
 .prose h3,
 .chat-markdown h3 {
-  font-size: 1.13rem;
+  font-size: 1.1rem;
 }
 
 .prose h4,
@@ -269,18 +287,30 @@
 .chat-markdown h5,
 .chat-markdown h6 {
   font-size: 0.94rem;
+  font-weight: 680;
 }
 
 .chat-markdown-sm h1 {
-  font-size: 0.95rem;
+  font-size: 1rem;
 }
 
-.chat-markdown-sm h2,
+.chat-markdown-sm h2 {
+  font-size: 0.92rem;
+}
+
 .chat-markdown-sm h3,
 .chat-markdown-sm h4,
 .chat-markdown-sm h5,
 .chat-markdown-sm h6 {
   font-size: 0.84rem;
+}
+
+.prose strong,
+.prose b,
+.chat-markdown strong,
+.chat-markdown b {
+  color: inherit;
+  font-weight: 600;
 }
 
 .prose a,
@@ -301,33 +331,60 @@
   list-style: disc outside;
 }
 
+.prose ul ul,
+.chat-markdown ul ul {
+  list-style-type: circle;
+}
+
+.prose ul ul ul,
+.chat-markdown ul ul ul {
+  list-style-type: square;
+}
+
 .prose ol,
 .chat-markdown ol {
   list-style: decimal outside;
+}
+
+.prose ol ol,
+.chat-markdown ol ol {
+  list-style-type: lower-alpha;
+}
+
+.prose ol ol ol,
+.chat-markdown ol ol ol {
+  list-style-type: lower-roman;
 }
 
 .prose ul,
 .prose ol,
 .chat-markdown ul,
 .chat-markdown ol {
-  margin: 0.55em 0 0.8em;
-  padding-left: 1.35em;
+  margin: 0.45em 0 0.65em;
+  padding-left: 1.28em;
 }
 
 .prose li,
 .chat-markdown li {
-  margin: 0.24em 0;
-  padding-left: 0.12em;
+  margin: 0.18em 0;
+  padding-left: 0.08em;
 }
 
 .prose li::marker,
 .chat-markdown li::marker {
-  color: var(--chat-markdown-color);
+  color: hsl(var(--muted-foreground));
 }
 
 .prose li > p,
 .chat-markdown li > p {
-  margin: 0.24em 0;
+  margin: 0.18em 0;
+}
+
+.prose li > ul,
+.prose li > ol,
+.chat-markdown li > ul,
+.chat-markdown li > ol {
+  margin: 0.22em 0 0.34em;
 }
 
 .prose code,
@@ -346,12 +403,12 @@
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid hsl(var(--border) / 0.58);
-  border-radius: 1rem;
-  background: hsl(var(--muted) / 0.42);
+  border-radius: 0.95rem;
+  background: hsl(var(--muted) / 0.38);
   padding: 0.85rem 1rem;
   color: hsl(var(--foreground) / 0.92);
   font-size: 0.82rem;
-  line-height: 1.58;
+  line-height: 1.56;
   white-space: pre;
   overflow-wrap: normal;
   word-break: normal;
@@ -370,13 +427,119 @@
   word-break: inherit;
 }
 
+.prose .chat-code-block,
+.chat-markdown .chat-code-block {
+  margin: 0.82em 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border) / 0.68);
+  border-radius: 0.95rem;
+  background: hsl(var(--muted) / 0.32);
+}
+
+.prose .chat-code-header,
+.chat-markdown .chat-code-header {
+  display: flex;
+  min-height: 2.08rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid hsl(var(--border) / 0.56);
+  background: hsl(var(--muted) / 0.5);
+  padding: 0.36rem 0.42rem 0.36rem 0.78rem;
+}
+
+.prose .chat-code-language,
+.chat-markdown .chat-code-language {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prose .chat-code-copy,
+.chat-markdown .chat-code-copy {
+  display: inline-flex;
+  min-height: 1.42rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 0.52rem;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0.28rem 0.48rem;
+}
+
+.prose .chat-code-copy:hover,
+.chat-markdown .chat-code-copy:hover {
+  border-color: hsl(var(--border) / 0.72);
+  background: hsl(var(--accent) / 0.58);
+  color: hsl(var(--foreground));
+}
+
+.prose .chat-code-copy:focus-visible,
+.chat-markdown .chat-code-copy:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.7);
+  outline-offset: 2px;
+}
+
+.prose .chat-code-copy-default,
+.prose .chat-code-copy-done,
+.chat-markdown .chat-code-copy-default,
+.chat-markdown .chat-code-copy-done {
+  pointer-events: none;
+}
+
+.prose .chat-code-copy-done,
+.chat-markdown .chat-code-copy-done {
+  display: none;
+  color: hsl(var(--ring));
+}
+
+.prose .chat-code-copy[data-copied="true"] .chat-code-copy-default,
+.prose .chat-code-copy[aria-pressed="true"] .chat-code-copy-default,
+.chat-markdown .chat-code-copy[data-copied="true"] .chat-code-copy-default,
+.chat-markdown .chat-code-copy[aria-pressed="true"] .chat-code-copy-default {
+  display: none;
+}
+
+.prose .chat-code-copy[data-copied="true"] .chat-code-copy-done,
+.prose .chat-code-copy[aria-pressed="true"] .chat-code-copy-done,
+.chat-markdown .chat-code-copy[data-copied="true"] .chat-code-copy-done,
+.chat-markdown .chat-code-copy[aria-pressed="true"] .chat-code-copy-done {
+  display: inline;
+}
+
+.prose .chat-code-block pre,
+.chat-markdown .chat-code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.88rem 1rem 0.95rem;
+}
+
+.prose .chat-code-block pre code,
+.chat-markdown .chat-code-block pre code {
+  display: block;
+  min-width: 100%;
+}
+
 .prose blockquote,
 .chat-markdown blockquote {
-  margin: 0.85em 0;
+  margin: 0.78em 0;
   border: 1px solid hsl(var(--border) / 0.58);
-  border-radius: 0.95rem;
-  background: hsl(var(--muted) / 0.28);
-  padding: 0.72rem 0.9rem;
+  border-radius: 0.9rem;
+  background: hsl(var(--muted) / 0.26);
+  padding: 0.66rem 0.85rem;
   color: hsl(var(--foreground) / 0.82);
 }
 
@@ -398,7 +561,7 @@
   overflow-x: auto;
   border-collapse: separate;
   border-spacing: 0;
-  margin: 0.85em 0;
+  margin: 0.78em 0;
   border: 1px solid hsl(var(--border) / 0.64);
   border-radius: 0.9rem;
 }
@@ -409,7 +572,7 @@
 .chat-markdown td {
   border-right: 1px solid hsl(var(--border) / 0.54);
   border-bottom: 1px solid hsl(var(--border) / 0.54);
-  padding: 0.56rem 0.72rem;
+  padding: 0.5rem 0.68rem;
   text-align: left;
   vertical-align: top;
 }
@@ -434,7 +597,7 @@
 
 .prose hr,
 .chat-markdown hr {
-  margin: 1rem 0;
+  margin: 0.95rem 0;
   border: 0;
   border-top: 1px solid hsl(var(--border) / 0.64);
 }

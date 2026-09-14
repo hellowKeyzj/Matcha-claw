@@ -9,6 +9,7 @@ mod handle;
 pub(crate) mod login;
 mod operations;
 pub(crate) mod status;
+pub(crate) mod trace;
 
 pub(crate) use actor::{ChannelOwner, ChannelOwnerInput};
 pub(crate) use handle::ChannelHandle;

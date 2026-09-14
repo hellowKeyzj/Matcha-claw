@@ -1,21 +1,54 @@
 {
   "title": "Agent",
   "subtitle": "管理 Agent 与模型",
-  "newSubagent": "新增Agent",
+  "newSubagent": "新增 Agent",
+  "tabs": {
+    "agents": "我的 Agent",
+    "templates": "模板库"
+  },
+  "search": {
+    "agents": "搜索 Agent...",
+    "templates": "搜索模板...",
+    "empty": "没有找到匹配的结果。"
+  },
+  "view": {
+    "label": "显示方式",
+    "grid": "网格视图",
+    "list": "列表视图"
+  },
+  "results": {
+    "agents": "{{total}} 个 Agent",
+    "templates": "{{total}} 个模板"
+  },
+  "filters": {
+    "category": "分类"
+  },
   "transfer": {
     "import": "导入Agent",
     "importDialogTitle": "导入 Agent 配置",
     "exportDialogTitle": "导出 Agent 配置",
     "importSuccess": "Agent 配置已导入。",
     "exportSuccess": "Agent 配置已导出。",
+    "exportPackageSuccess": "Agent Package 已导出：{{fileName}}",
+    "uploadPackageSuccess": "Agent Package 已上传：{{fileName}}",
+    "downloadPackageSuccess": "Agent Package 已下载：{{fileName}}",
+    "installPackageSuccess": "Agent Package 已安装：{{agentId}}",
     "importFailed": "导入 Agent 配置失败：{{message}}",
-    "exportFailed": "导出 Agent 配置失败：{{message}}"
+    "exportFailed": "导出 Agent 配置失败：{{message}}",
+    "exportPackageFailed": "导出 Agent Package 失败：{{message}}",
+    "uploadPackageFailed": "上传 Agent Package 失败：{{message}}",
+    "downloadPackageFailed": "下载 Agent Package 失败：{{message}}",
+    "installPackageFailed": "安装 Agent Package 失败：{{message}}"
   },
   "status": {
     "refreshing": "正在刷新...",
     "mutating": "正在保存变更..."
   },
   "empty": "暂无智能体",
+  "startup": {
+    "title": "OpenClaw 正在启动",
+    "description": "Agent 会在服务就绪后自动显示。"
+  },
   "modelGuide": {
     "description": "请先前往「模型」添加模型",
     "action": "前往模型"
@@ -28,6 +61,8 @@
     "loading": "模板加载中...",
     "loadingButton": "加载中...",
     "load": "加载模板",
+    "modelSelection": "加载时选择模型",
+    "view": "查看模板",
     "empty": "未发现可用模板。",
     "error": "模板加载失败：{{message}}",
     "badge": "模板",
@@ -64,7 +99,7 @@
   "manageTitle": "配置人设：{{agentId}}",
   "manage": {
     "promptLabel": "提示词",
-    "promptPlaceholder": "描述这个子Agent要为 AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md 生成什么内容",
+    "promptPlaceholder": "描述这个子Agent要为 AGENTS.md / SOUL.md / USER.md / MEMORY.md 生成什么内容",
     "includeCurrentFilesLabel": "带当前文件",
     "generateDraft": "生成草稿",
     "generatingDraft": "生成中...",
@@ -87,6 +122,10 @@
     "deleting": "删除中..."
   },
   "close": "关闭",
+  "sealed": {
+    "editDisabled": "加密 Agent 不可编辑。",
+    "configExportDisabled": "加密 Agent 不可导出可编辑 JSON 配置，请使用导出包。"
+  },
   "form": {
     "basicInfo": "基本信息",
     "aiConfig": "AI 配置",
@@ -164,8 +203,18 @@
       }
     }
   },
+  "cloudPackages": {
+    "title": "云端 Agent Package",
+    "empty": "暂无云端 Agent Package。",
+    "download": "下载",
+    "install": "安装"
+  },
   "card": {
+    "system": "系统 Agent",
+    "agent": "Agent",
     "default": "默认",
+    "sealed": "加密",
+    "package": "Package",
     "modelFallback": "未配置模型",
     "modelMissingHint": "未配置模型，暂不可会话或运行。",
     "lockedHint": "main agent 为系统保留，禁止操作。",
@@ -173,6 +222,9 @@
       "edit": "编辑",
       "delete": "删除",
       "export": "导出",
+      "exportPackage": "导出包",
+      "uploadPackageToCloud": "上传云端",
+      "cloudPackages": "云端包",
       "manage": "人设配置",
       "chat": "会话",
       "more": "更多操作"

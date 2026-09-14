@@ -3,7 +3,10 @@ import type {
   ProviderModelCapability,
   ProviderModelsTransport,
 } from '../../main/runtime-host-delivery/transport/providers/models';
-import { isProviderModelCapability } from '../../main/runtime-host-delivery/transport/providers/models';
+import {
+  isProviderModelAccountIdentifier,
+  isProviderModelCapability,
+} from '../../main/runtime-host-delivery/transport/providers/models';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
@@ -40,6 +43,16 @@ export async function handleProviderModelsRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/provider-models/discover' && req.method === 'GET') {
+    const accountId = parseAccountId(url);
+    if (!accountId) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(res, transport.discover(accountId), UNAVAILABLE);
+    return true;
+  }
+
   if (url.pathname !== '/api/provider-models' || req.method !== 'POST') return false;
 
   let body: unknown;
@@ -58,6 +71,13 @@ function parseCapability(url: URL): ProviderModelCapability | null {
   if (entries.length !== 1 || entries[0]?.[0] !== 'capability') return null;
   const capability = entries[0][1];
   return isProviderModelCapability(capability) ? capability : null;
+}
+
+function parseAccountId(url: URL): string | null {
+  const entries = [...url.searchParams];
+  if (entries.length !== 1 || entries[0]?.[0] !== 'accountId') return null;
+  const accountId = entries[0][1];
+  return isProviderModelAccountIdentifier(accountId) ? accountId : null;
 }
 
 async function deliver(

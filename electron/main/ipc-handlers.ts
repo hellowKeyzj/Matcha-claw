@@ -12,7 +12,6 @@ import { registerGatewayHandlers } from './ipc/gateway-ipc';
 import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
 import { registerSettingsPrivateProxyHandlers } from './ipc/settings-private-proxy';
 import { registerProviderPrivateAuthHandlers } from './ipc/provider-private-auth';
-import { registerProviderValidationHandlers } from './ipc/provider-validation';
 import { registerFleetPrivateHandlers } from './ipc/fleet-private';
 import type { ProviderAccountsTransport } from './runtime-host-delivery/transport/providers/accounts';
 import { registerDiagnosticsExportHandler } from './ipc/diagnostics-export-ipc';
@@ -26,7 +25,6 @@ export function registerStaticIpcHandlers(
 ): void {
   registerHostApiProxyHandlers();
   registerSettingsPrivateProxyHandlers();
-  registerProviderValidationHandlers();
   registerShellHandlers();
   registerDialogHandlers();
   registerAppHandlers();

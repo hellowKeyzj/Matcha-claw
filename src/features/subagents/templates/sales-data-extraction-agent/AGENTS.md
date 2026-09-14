@@ -41,3 +41,9 @@ Monitor designated Excel file directories for new or updated sales reports. Extr
 - < 5 second processing time per file
 - Complete audit trail for every import
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

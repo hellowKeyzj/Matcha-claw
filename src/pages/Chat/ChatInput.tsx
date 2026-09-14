@@ -6,9 +6,10 @@
  * Files are staged to disk via IPC — only opaque staged IDs
  * are sent with the message (no base64 over WebSocket).
  */
-import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import { memo, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck } from 'lucide-react';
+import * as SelectPrimitive from '@radix-ui/react-select';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type {
@@ -19,31 +20,40 @@ import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
+import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
+import { AgentSkillManagerDialog, type AgentSkillPreviewState } from './components/AgentSkillManagerDialog';
+import type { AgentSkillOption } from './components/AgentSkillConfigPanel';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
+import type { ComposerDraftSelection } from '@/stores/composer-drafts';
+import type { SessionRunPhase } from '@/types/session/runtime-state';
 
 // ── Types ────────────────────────────────────────────────────────
 
 export interface FileAttachment {
   stagedAttachmentId: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;    // data URL for images, null for others
+  sourcePath?: string;
   status: 'staging' | 'ready' | 'error';
   error?: string;
 }
 
 interface DialogStagedAttachmentPayload {
-  stagedAttachmentId: string;
+  stagedAttachmentId?: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 }
 
 interface StageOpenAttachmentsResult {
@@ -85,20 +95,48 @@ interface ModelPickerState {
   onSelect: (modelId: string) => void;
 }
 
-type PermissionMode = 'default' | 'fullAccess';
+type PermissionMode = 'read-only' | 'guarded' | 'workspace' | 'full';
+type PermissionSelection = PermissionMode | null;
 
-interface PermissionPickerState {
-  currentMode: PermissionMode;
-  loading: boolean;
-  switching: boolean;
+interface PermissionPickerOption {
+  mode: PermissionSelection;
+  labelKey: string;
+  descriptionKey: string;
   disabled?: boolean;
-  onSelect: (mode: PermissionMode) => void;
 }
 
-const PERMISSION_PICKER_OPTIONS: Array<{ mode: PermissionMode; labelKey: string }> = [
-  { mode: 'default', labelKey: 'input.permissionDefault' },
-  { mode: 'fullAccess', labelKey: 'input.permissionFullAccess' },
-];
+interface PermissionPickerState {
+  mode: PermissionSelection;
+  defaultMode: PermissionMode | null;
+  loading: boolean;
+  switching: boolean;
+  supported: boolean;
+  pending: boolean;
+  canSelectFull: boolean;
+  options: PermissionPickerOption[];
+  disabled?: boolean;
+  onSelect: (mode: PermissionSelection) => void;
+}
+
+interface SkillManagerState {
+  label: string;
+  title: string;
+  options: AgentSkillOption[];
+  loading: boolean;
+  selectedSkillIds: string[];
+  skillPreview: AgentSkillPreviewState | null;
+  onToggleSkill: (skillId: string, checked: boolean) => void;
+  onPreviewSkill: (skill: SelectedSkill) => void;
+  onClearSkillPreview: () => void;
+  onClose?: () => void;
+}
+
+const PERMISSION_MODE_LABEL_KEYS: Record<PermissionMode, string> = {
+  'read-only': 'input.permissionReadOnly',
+  guarded: 'input.permissionGuarded',
+  workspace: 'input.permissionWorkspace',
+  full: 'input.permissionFull',
+};
 
 const STAGE_BUFFER_CONCURRENCY = 3;
 const STAGE_BUFFER_MAX_BYTES = 20 * 1024 * 1024;
@@ -114,19 +152,28 @@ const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
 interface ChatInputProps {
   onSend: (text: string, attachments?: ChatSendAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
   onStop?: () => void;
+  draft?: string;
+  draftKey?: string;
+  onDraftChange?: (update: SetStateAction<string>) => void;
+  onDraftSelectionChange?: (selection: ComposerDraftSelection) => void;
+  draftSelection?: ComposerDraftSelection | null;
   stopping?: boolean;
-  onPreviewSkill?: (skill: SelectedSkill) => void;
+  skillManager?: SkillManagerState | null;
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
+  imageGenerationActive?: boolean;
   sendGate: ChatSendGate;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
   allowedSkillIds?: string[] | null;
   sessionIdentity: SessionIdentity | null;
+  endpointSessionId?: string | null;
+  activeRunId?: string | null;
+  runPhase?: SessionRunPhase | null;
 }
 
 function resolveInputPlaceholder(
@@ -352,8 +399,13 @@ function buildStagingAttachment(
   };
 }
 
+function isDirectoryAttachment(attachment: Pick<FileAttachment, 'entryKind' | 'mimeType'>): boolean {
+  return attachment.entryKind === 'directory' || attachment.mimeType === DIRECTORY_MIME_TYPE;
+}
+
 function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
   return attachment.status === 'ready'
+    && !isDirectoryAttachment(attachment)
     && attachment.mimeType.startsWith('image/')
     && typeof attachment.preview === 'string'
     && attachment.preview.length > 0;
@@ -368,22 +420,35 @@ function waitForAttachmentPlaceholderFrame(): Promise<void> {
 export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
+  draft,
+  draftKey,
+  onDraftChange,
+  onDraftSelectionChange,
+  draftSelection,
   stopping = false,
-  onPreviewSkill,
+  skillManager = null,
   modelPicker = null,
   permissionPicker = null,
   contextUsage = null,
   disabled = false,
   reconnecting = false,
   sending = false,
+  imageGenerationActive = false,
   sendGate,
   approvalWaiting = false,
   mentionCandidates = [],
   allowedSkillIds = null,
   sessionIdentity,
+  activeRunId = null,
+  runPhase = null,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
-  const [input, setInput] = useState('');
+  const [uncontrolledInput, setUncontrolledInput] = useState('');
+  const input = onDraftChange ? (draft ?? '') : uncontrolledInput;
+  const setInput = useCallback((update: SetStateAction<string>) => {
+    if (onDraftChange) onDraftChange(update);
+    else setUncontrolledInput(update);
+  }, [onDraftChange]);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const ownedStagedAttachmentIdsRef = useRef(new Set<string>());
   const canceledStagingKeysRef = useRef(new Set<string>());
@@ -405,15 +470,19 @@ export const ChatInput = memo(function ChatInput({
   const [quickPhraseDraft, setQuickPhraseDraft] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [permissionPickerOpen, setPermissionPickerOpen] = useState(false);
+  const [skillManagerOpen, setSkillManagerOpen] = useState(false);
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     src: string;
     fileName: string;
+    filePath?: string;
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const modelPickerRef = useRef<HTMLDivElement>(null);
   const permissionPickerRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
+  const draftSelectionRef = useRef<ComposerDraftSelection | null>(null);
+  const lastRestoredDraftKeyRef = useRef<string | null>(null);
+  draftSelectionRef.current = draftSelection ?? null;
   const skills = useSkillsStore((state) => state.skills);
   const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
@@ -425,6 +494,20 @@ export const ChatInput = memo(function ChatInput({
     return new Set(allowedSkillIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()));
   }, [allowedSkillIds]);
 
+  const rememberDraftSelection = useCallback((textarea = textareaRef.current) => {
+    if (!onDraftSelectionChange || !textarea || !textarea.value) return;
+    onDraftSelectionChange({
+      start: textarea.selectionStart ?? 0,
+      end: textarea.selectionEnd ?? 0,
+      direction: textarea.selectionDirection ?? 'none',
+    });
+  }, [onDraftSelectionChange]);
+
+  const setInputAndSelection = useCallback((nextValue: string, selection: ComposerDraftSelection) => {
+    setInput(nextValue);
+    if (nextValue) onDraftSelectionChange?.(selection);
+  }, [onDraftSelectionChange, setInput]);
+
   // Auto-resize textarea
   useEffect(() => {
     if (textareaRef.current) {
@@ -433,12 +516,18 @@ export const ChatInput = memo(function ChatInput({
     }
   }, [input]);
 
-  // Focus textarea on mount (avoids Windows focus loss after session delete + native dialog)
-  useEffect(() => {
-    if (!disabled && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [disabled]);
+  useLayoutEffect(() => {
+    if (disabled || !textareaRef.current) return;
+    const textarea = textareaRef.current;
+    textarea.focus();
+    if (lastRestoredDraftKeyRef.current === (draftKey ?? null)) return;
+    lastRestoredDraftKeyRef.current = draftKey ?? null;
+    const savedSelection = draftSelectionRef.current;
+    const fallbackPosition = savedSelection ? 0 : textarea.value.length;
+    const start = Math.max(0, Math.min(savedSelection?.start ?? fallbackPosition, textarea.value.length));
+    const end = Math.max(start, Math.min(savedSelection?.end ?? start, textarea.value.length));
+    textarea.setSelectionRange(start, end, savedSelection?.direction ?? 'none');
+  }, [disabled, draftKey]);
 
   useEffect(() => {
     if (!slashOpen || skillsSnapshotReady || skillsInitialLoading) {
@@ -477,13 +566,19 @@ export const ChatInput = memo(function ChatInput({
   }, [modelPicker]);
 
   useEffect(() => {
-    if (!permissionPicker || permissionPicker.disabled || permissionPicker.loading || permissionPicker.switching) {
+    if (!permissionPicker || permissionPicker.disabled || permissionPicker.loading || permissionPicker.switching || permissionPicker.pending || !permissionPicker.supported) {
       setPermissionPickerOpen(false);
     }
   }, [permissionPicker]);
 
   useEffect(() => {
-    if (!modelPickerOpen && !permissionPickerOpen) {
+    if (!skillManager) {
+      setSkillManagerOpen(false);
+    }
+  }, [skillManager]);
+
+  useEffect(() => {
+    if (!permissionPickerOpen) {
       return;
     }
 
@@ -492,16 +587,14 @@ export const ChatInput = memo(function ChatInput({
       if (!(target instanceof Node)) {
         return;
       }
-      if (modelPickerRef.current?.contains(target) || permissionPickerRef.current?.contains(target)) {
+      if (permissionPickerRef.current?.contains(target)) {
         return;
       }
-      setModelPickerOpen(false);
       setPermissionPickerOpen(false);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setModelPickerOpen(false);
         setPermissionPickerOpen(false);
       }
     };
@@ -512,7 +605,7 @@ export const ChatInput = memo(function ChatInput({
       window.removeEventListener('mousedown', handlePointerDown);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [modelPickerOpen, permissionPickerOpen]);
+  }, [permissionPickerOpen]);
 
   const closeMention = useCallback(() => {
     setMentionOpen(false);
@@ -535,6 +628,19 @@ export const ChatInput = memo(function ChatInput({
     setQuickPhraseAddOpen(false);
     setQuickPhraseDraft('');
   }, []);
+
+  const closeSkillManager = useCallback(() => {
+    setSkillManagerOpen(false);
+    skillManager?.onClose?.();
+  }, [skillManager]);
+
+  const closeComposerPopovers = useCallback(() => {
+    closeMention();
+    closeSlash();
+    closeQuickPhrase();
+    setModelPickerOpen(false);
+    setPermissionPickerOpen(false);
+  }, [closeMention, closeQuickPhrase, closeSlash]);
 
   const refreshMentionCandidates = useCallback((nextInput: string, cursor: number) => {
     if (mentionCandidates.length === 0) {
@@ -572,13 +678,13 @@ export const ChatInput = memo(function ChatInput({
     const insertion = candidate.insertText ?? `@${candidate.id} `;
     const nextValue = `${input.slice(0, mentionStart)}${insertion}${input.slice(mentionEnd)}`;
     const caret = mentionStart + insertion.length;
-    setInput(nextValue);
+    setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
     closeMention();
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeMention, input, mentionEnd, mentionStart]);
+  }, [closeMention, input, mentionEnd, mentionStart, setInputAndSelection]);
 
   const refreshSlashCandidates = useCallback((nextInput: string, cursor: number) => {
     const range = detectSlashRange(nextInput, cursor);
@@ -630,35 +736,54 @@ export const ChatInput = memo(function ChatInput({
     }
     nextValue = nextValue.replace(/\s{2,}/g, ' ');
     const caret = before.length;
-    setInput(nextValue);
+    setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
     setSelectedSkills((prev) => (prev.some((item) => item.id === candidate.id) ? prev : [...prev, candidate]));
     closeSlash();
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeSlash, input, slashEnd, slashStart]);
+  }, [closeSlash, input, setInputAndSelection, slashEnd, slashStart]);
 
   const toggleQuickPhrase = useCallback(() => {
     setQuickPhraseOpen((open) => !open);
     setQuickPhraseAddOpen(false);
     setQuickPhraseDraft('');
+    setSkillManagerOpen(false);
     closeMention();
     closeSlash();
   }, [closeMention, closeSlash]);
+
+  const openSkillManager = useCallback(() => {
+    if (!skillManager) {
+      return;
+    }
+    closeComposerPopovers();
+    skillManager.onClearSkillPreview();
+    setSkillManagerOpen(true);
+  }, [closeComposerPopovers, skillManager]);
+
+  const previewSelectedSkill = useCallback((skill: SelectedSkill) => {
+    if (!skillManager) {
+      return;
+    }
+    closeComposerPopovers();
+    setSkillManagerOpen(true);
+    skillManager.onPreviewSkill(skill);
+  }, [closeComposerPopovers, skillManager]);
 
   const applyQuickPhrase = useCallback((phrase: string) => {
     const textarea = textareaRef.current;
     const selectionStart = textarea?.selectionStart ?? input.length;
     const selectionEnd = textarea?.selectionEnd ?? selectionStart;
     const { nextValue, caret } = insertQuickPhraseText(input, phrase, selectionStart, selectionEnd);
-    setInput(nextValue);
+    setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
     closeQuickPhrase();
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeQuickPhrase, input]);
+  }, [closeQuickPhrase, input, setInputAndSelection]);
 
   const commitQuickPhraseList = useCallback((nextPhrases: QuickPhrase[]) => {
     setQuickPhrases(nextPhrases);
@@ -737,12 +862,14 @@ export const ChatInput = memo(function ChatInput({
 
     try {
       const result = await invokeIpc<StageOpenAttachmentsResult>('dialog:stageOpenAttachments', {
-        properties: ['openFile', 'multiSelections'],
+        properties: ['openFile', 'openDirectory', 'multiSelections'],
       });
       if (result.canceled || !result.attachments || result.attachments.length === 0) {
         return;
       }
-      stagedAttachmentIdsFromResult = result.attachments.map((attachment) => attachment.stagedAttachmentId);
+      stagedAttachmentIdsFromResult = result.attachments
+        .map((attachment) => attachment.stagedAttachmentId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
 
       stagingAttachments = result.attachments.map((attachment) => {
         const tempId = crypto.randomUUID();
@@ -761,9 +888,11 @@ export const ChatInput = memo(function ChatInput({
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
         const attachment = result.attachments[i];
-        const registered = registerStagedAttachment(attachment.stagedAttachmentId, tempId);
+        const registered = attachment.stagedAttachmentId
+          ? registerStagedAttachment(attachment.stagedAttachmentId, tempId)
+          : !canceledStagingKeysRef.current.has(tempId);
         updatesByTempId.set(tempId, registered
-          ? { ...attachment, status: 'ready' }
+          ? { ...attachment, stagedAttachmentId: attachment.stagedAttachmentId ?? tempId, status: 'ready' }
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
       if (mountedRef.current) {
@@ -808,7 +937,9 @@ export const ChatInput = memo(function ChatInput({
         filePaths,
       );
       const stagedAttachments = result.attachments ?? [];
-      stagedAttachmentIdsFromResult = stagedAttachments.map((attachment) => attachment.stagedAttachmentId);
+      stagedAttachmentIdsFromResult = stagedAttachments
+        .map((attachment) => attachment.stagedAttachmentId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
@@ -817,9 +948,11 @@ export const ChatInput = memo(function ChatInput({
           updatesByTempId.set(tempId, { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
           continue;
         }
-        const registered = registerStagedAttachment(data.stagedAttachmentId, tempId);
+        const registered = data.stagedAttachmentId
+          ? registerStagedAttachment(data.stagedAttachmentId, tempId)
+          : !canceledStagingKeysRef.current.has(tempId);
         updatesByTempId.set(tempId, registered
-          ? { ...data, status: 'ready' }
+          ? { ...data, stagedAttachmentId: data.stagedAttachmentId ?? tempId, status: 'ready' }
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
       if (mountedRef.current) {
@@ -883,7 +1016,11 @@ export const ChatInput = memo(function ChatInput({
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
           });
-          if (!registerStagedAttachment(staged.stagedAttachmentId, tempId)) {
+          const stagedAttachmentId = staged.stagedAttachmentId;
+          if (!stagedAttachmentId) {
+            throw new Error('Missing staged attachment id');
+          }
+          if (!registerStagedAttachment(stagedAttachmentId, tempId)) {
             return {
               tempId,
               attachment: {
@@ -894,7 +1031,7 @@ export const ChatInput = memo(function ChatInput({
               },
             };
           }
-          return { tempId, attachment: { ...staged, status: 'ready' as const } };
+          return { tempId, attachment: { ...staged, stagedAttachmentId, status: 'ready' as const } };
         } catch (err) {
           return {
             tempId,
@@ -936,20 +1073,23 @@ export const ChatInput = memo(function ChatInput({
     setLightboxAttachment({
       src: attachment.preview!,
       fileName: attachment.fileName,
+      filePath: attachment.sourcePath,
     });
   }, []);
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
+  const materializableAttachmentCount = attachments.filter((attachment) => !isDirectoryAttachment(attachment)).length;
   const payloadGate = resolveChatSendGateForPayload(sendGate, {
     text: input,
-    attachmentCount: attachments.length,
+    attachmentCount: materializableAttachmentCount,
     selectedSkillCount: selectedSkills.length,
   });
   const canSend = payloadGate.canSend
     && allReady
     && !disabled
-    && !approvalWaiting;
+    && !approvalWaiting
+    && !imageGenerationActive;
   const canStop = sending && !stopping && !disabled && !!onStop;
   const modelPickerDisabled = !modelPicker
     || modelPicker.disabled
@@ -959,9 +1099,20 @@ export const ChatInput = memo(function ChatInput({
   const permissionPickerDisabled = !permissionPicker
     || permissionPicker.disabled
     || permissionPicker.loading
-    || permissionPicker.switching;
+    || permissionPicker.switching
+    || permissionPicker.pending
+    || !permissionPicker.supported;
+  const permissionPickerDefaultLabel = permissionPicker?.defaultMode
+    ? t('input.permissionDefaultWithMode', { mode: t(PERMISSION_MODE_LABEL_KEYS[permissionPicker.defaultMode]) })
+    : t('input.permissionDefault');
   const permissionPickerLabel = permissionPicker
-    ? t(PERMISSION_PICKER_OPTIONS.find((option) => option.mode === permissionPicker.currentMode)?.labelKey ?? 'input.permissionFullAccess')
+    ? permissionPicker.loading
+      ? t('input.permissionLoading')
+      : permissionPicker.pending
+        ? t('input.permissionPending')
+        : permissionPicker.mode
+          ? t(PERMISSION_MODE_LABEL_KEYS[permissionPicker.mode])
+          : permissionPickerDefaultLabel
     : '';
 
   const handleSend = useCallback(async () => {
@@ -970,14 +1121,19 @@ export const ChatInput = memo(function ChatInput({
     const rawText = input.trim();
     const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
     const attachmentsToSend = readyAttachments.length > 0
-      ? readyAttachments.map(({ stagedAttachmentId, fileName, mimeType, fileSize }) => ({
+      ? readyAttachments.map(({ stagedAttachmentId, entryKind, fileName, mimeType, fileSize, preview, sourcePath }) => ({
           stagedAttachmentId,
+          ...(entryKind ? { entryKind } : {}),
           fileName,
           mimeType,
           fileSize,
+          preview,
+          ...(sourcePath ? { sourcePath } : {}),
         })) as ChatSendAttachment[]
       : undefined;
-    const stagedIdsToSend = readyAttachments.map((attachment) => attachment.stagedAttachmentId);
+    const stagedIdsToSend = readyAttachments
+      .map((attachment) => attachment.stagedAttachmentId)
+      .filter((id) => ownedStagedAttachmentIdsRef.current.has(id));
     let result: ChatSendResult;
     try {
       result = await onSend(textToSend, attachmentsToSend);
@@ -994,7 +1150,7 @@ export const ChatInput = memo(function ChatInput({
     stagedIdsToSend.forEach((stagedAttachmentId) => {
       ownedStagedAttachmentIdsRef.current.delete(stagedAttachmentId);
     });
-    setInput('');
+    setInputAndSelection('', { start: 0, end: 0, direction: 'none' });
     closeMention();
     closeSlash();
     closeQuickPhrase();
@@ -1003,7 +1159,7 @@ export const ChatInput = memo(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, releaseStagedAttachmentIds, selectedSkills]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, releaseStagedAttachmentIds, selectedSkills, setInputAndSelection]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -1218,14 +1374,14 @@ export const ChatInput = memo(function ChatInput({
                       key={skill.id}
                       className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/60 bg-background/80 px-2.5 py-1 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm"
                     >
-                      {onPreviewSkill ? (
+                      {skillManager ? (
                         <button
                           type="button"
                           className="inline-flex min-w-0 items-center gap-1 rounded-full text-left transition-colors hover:text-primary"
                           onMouseDown={(event) => {
                             event.preventDefault();
                           }}
-                          onClick={() => onPreviewSkill(skill)}
+                          onClick={() => previewSelectedSkill(skill)}
                           title={t('skillPreviewTooltip')}
                           aria-label={t('skillPreviewTooltip')}
                           data-testid="chat-selected-skill-preview"
@@ -1261,9 +1417,13 @@ export const ChatInput = memo(function ChatInput({
                   const nextValue = e.target.value;
                   const cursor = e.target.selectionStart ?? nextValue.length;
                   setInput(nextValue);
+                  rememberDraftSelection(e.currentTarget);
                   refreshMentionCandidates(nextValue, cursor);
                   refreshSlashCandidates(nextValue, cursor);
                 }}
+                onSelect={(e) => rememberDraftSelection(e.currentTarget)}
+                onClick={(e) => rememberDraftSelection(e.currentTarget)}
+                onBlur={(e) => rememberDraftSelection(e.currentTarget)}
                 onKeyDown={handleKeyDown}
                 onCompositionStart={() => {
                   isComposingRef.current = true;
@@ -1279,6 +1439,7 @@ export const ChatInput = memo(function ChatInput({
                   'placeholder:text-muted-foreground/70',
                 )}
                 rows={1}
+                data-testid="chat-composer-input"
               />
             </div>
             {mentionOpen && mentionItems.length > 0 && (
@@ -1357,25 +1518,41 @@ export const ChatInput = memo(function ChatInput({
               <ChatSessionConnectorStatus
                 sessionIdentity={sessionIdentity}
                 disabled={disabled}
+                activeRunId={activeRunId}
+                runPhase={runPhase}
               />
+              {!sending && imageGenerationActive ? (
+                <div
+                  data-testid="chat-composer-image-generation-indicator"
+                  role="status"
+                  aria-live="polite"
+                  aria-label={t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}
+                  className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-border/45 bg-background/74 px-3 text-[12px] font-medium text-muted-foreground shadow-sm"
+                >
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span className="max-sm:hidden">{t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}</span>
+                </div>
+              ) : null}
               {permissionPicker ? (
                 <div ref={permissionPickerRef} className="relative shrink-0">
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size={permissionPicker.supported || permissionPicker.loading ? 'icon' : 'sm'}
                     aria-label={t('input.pickPermissionMode')}
                     aria-haspopup="listbox"
                     aria-expanded={permissionPickerOpen}
-                    title={`${t('input.permissionPickerTitle')} · ${permissionPickerLabel}`}
+                    title={permissionPicker.supported || permissionPicker.loading
+                      ? `${t('input.permissionPickerTitle')} · ${permissionPickerLabel}`
+                      : t('input.permissionUnsupported')}
                     data-testid="chat-permission-picker"
                     data-state={permissionPickerOpen ? 'open' : 'closed'}
                     disabled={permissionPickerDisabled}
                     className={cn(
-                      CHAT_LAYOUT_TOKENS.inputAttachButton,
-                      'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                      permissionPicker.currentMode === 'default' && 'text-emerald-700 dark:text-emerald-300',
-                      permissionPicker.currentMode === 'fullAccess' && 'text-amber-700 dark:text-amber-300',
+                      permissionPicker.supported || permissionPicker.loading ? CHAT_LAYOUT_TOKENS.inputAttachButton : 'h-9 max-w-[11rem] rounded-full px-3 text-[12px] font-medium',
+                      'border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+                      permissionPicker.mode === null && permissionPicker.supported && 'text-emerald-700 dark:text-emerald-300',
+                      (permissionPicker.mode ?? permissionPicker.defaultMode) === 'full' && permissionPicker.supported && 'text-amber-700 dark:text-amber-300',
                       permissionPickerOpen && 'bg-background/90 text-foreground',
                       permissionPickerDisabled && 'cursor-not-allowed opacity-55',
                     )}
@@ -1384,36 +1561,49 @@ export const ChatInput = memo(function ChatInput({
                         return;
                       }
                       setModelPickerOpen(false);
+                      setSkillManagerOpen(false);
                       setPermissionPickerOpen((open) => !open);
                     }}
                   >
-                    {permissionPicker.switching ? (
+                    {permissionPicker.loading || permissionPicker.pending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
-                      <ShieldCheck className="h-4 w-4" />
+                      <ShieldCheck className="h-4 w-4 shrink-0" />
                     )}
+                    {!permissionPicker.supported && !permissionPicker.loading ? (
+                      <span className="truncate">{t('input.permissionUnsupported')}</span>
+                    ) : null}
                   </Button>
                   {permissionPickerOpen ? (
                     <div
                       role="listbox"
                       aria-label={t('input.pickPermissionMode')}
-                      className="absolute bottom-full left-0 z-50 mb-2 w-32 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
+                      className="absolute bottom-full left-0 z-50 mb-2 w-64 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
                     >
-                      {PERMISSION_PICKER_OPTIONS.map((option) => {
-                        const selected = option.mode === permissionPicker.currentMode;
+                      {permissionPicker.options.map((option) => {
+                        const selected = option.mode === permissionPicker.mode;
+                        const optionDisabled = permissionPicker.pending || option.disabled === true;
+                        const label = option.mode === null
+                          ? permissionPickerDefaultLabel
+                          : t(option.labelKey);
                         return (
                           <button
-                            key={option.mode}
+                            key={option.mode ?? 'default'}
                             type="button"
                             role="option"
                             aria-selected={selected}
+                            disabled={optionDisabled}
+                            title={optionDisabled && option.mode === 'full' ? t('input.permissionFullRequiresAccess') : label}
                             className={cn(
-                              'flex w-full items-center gap-1.5 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors',
+                              'flex w-full items-center gap-2 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45',
                               selected
                                 ? 'bg-secondary text-foreground'
                                 : 'text-foreground/88 hover:bg-muted/70',
                             )}
                             onClick={() => {
+                              if (optionDisabled) {
+                                return;
+                              }
                               setPermissionPickerOpen(false);
                               if (!selected) {
                                 permissionPicker.onSelect(option.mode);
@@ -1421,7 +1611,8 @@ export const ChatInput = memo(function ChatInput({
                             }}
                           >
                             <div className="min-w-0 flex-1">
-                              <div className="truncate text-[12px] font-medium leading-5">{t(option.labelKey)}</div>
+                              <div className="truncate text-[12px] font-medium leading-5">{label}</div>
+                              <div className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{t(option.descriptionKey)}</div>
                             </div>
                             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                               {selected ? <Check className="h-3.5 w-3.5" /> : null}
@@ -1468,80 +1659,108 @@ export const ChatInput = memo(function ChatInput({
                   </div>
                 </div>
               )}
+              {skillManager ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    CHAT_LAYOUT_TOKENS.inputAttachButton,
+                    'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+                    skillManagerOpen && 'bg-background/90 text-foreground',
+                  )}
+                  onClick={openSkillManager}
+                  disabled={disabled || sending || approvalWaiting}
+                  aria-label={skillManager.label}
+                  title={skillManager.label}
+                  aria-haspopup="dialog"
+                  aria-expanded={skillManagerOpen}
+                  data-testid="chat-skill-manager-button"
+                >
+                  <Settings2 className="h-4 w-4" />
+                </Button>
+              ) : null}
               {modelPicker ? (
-                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-16rem),148px)] max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]">
-                  <button
-                    type="button"
-                    aria-label={t('input.pickModel')}
-                    aria-haspopup="listbox"
-                    aria-expanded={modelPickerOpen}
-                    title={t('input.modelPickerTitle')}
-                    data-testid="chat-model-picker"
-                    data-state={modelPickerOpen ? 'open' : 'closed'}
-                    disabled={modelPickerDisabled}
-                    className={cn(
-                      CHAT_LAYOUT_TOKENS.inputModelPickerTrigger,
-                      'min-w-0',
-                      modelPickerDisabled && 'cursor-not-allowed opacity-55',
-                    )}
-                    onClick={() => {
-                      if (modelPickerDisabled) {
-                        return;
+                <div className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-16rem),148px)] max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]">
+                  <SelectPrimitive.Root
+                    open={modelPickerOpen}
+                    onOpenChange={(open) => {
+                      if (open) {
+                        setPermissionPickerOpen(false);
+                        setSkillManagerOpen(false);
                       }
-                      setPermissionPickerOpen(false);
-                      setModelPickerOpen((open) => !open);
+                      setModelPickerOpen(open);
                     }}
+                    value={modelPicker.currentModelId}
+                    onValueChange={modelPicker.onSelect}
+                    disabled={modelPickerDisabled}
                   >
-                    <span className="truncate leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
-                    {modelPicker.switching ? (
-                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
-                    ) : (
-                      <ChevronDown
-                        className={cn(
-                          'mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180',
-                          modelPickerOpen && 'rotate-180',
-                        )}
-                      />
-                    )}
-                  </button>
-                  {modelPickerOpen ? (
-                    <div
-                      role="listbox"
+                    <SelectPrimitive.Trigger
                       aria-label={t('input.pickModel')}
-                      className={CHAT_LAYOUT_TOKENS.inputModelPickerMenu}
+                      title={t('input.modelPickerTitle')}
+                      data-testid="chat-model-picker"
+                      data-state={modelPickerOpen ? 'open' : 'closed'}
+                      disabled={modelPickerDisabled}
+                      className={cn(
+                        CHAT_LAYOUT_TOKENS.inputModelPickerTrigger,
+                        'min-w-0',
+                        modelPickerDisabled && 'cursor-not-allowed opacity-55',
+                      )}
                     >
-                      {modelPicker.options.map((option) => {
-                        const selected = option.id === modelPicker.currentModelId;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            role="option"
-                            aria-selected={selected}
-                            className={cn(
-                              'flex w-full items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left transition-colors',
-                              selected
-                                ? 'bg-secondary text-foreground'
-                                : 'text-foreground/88 hover:bg-muted/70',
-                            )}
-                            onClick={() => {
-                              setModelPickerOpen(false);
-                              if (!selected) {
-                                modelPicker.onSelect(option.id);
-                              }
-                            }}
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate text-[12px] font-medium leading-5">{option.label}</div>
-                            </div>
-                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                              {selected ? <Check className="h-3.5 w-3.5" /> : null}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
+                      <span className="truncate leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
+                      {modelPicker.switching ? (
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+                      ) : (
+                        <ChevronDown
+                          className={cn(
+                            'mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180',
+                            modelPickerOpen && 'rotate-180',
+                          )}
+                        />
+                      )}
+                    </SelectPrimitive.Trigger>
+                    <SelectPrimitive.Portal>
+                      <SelectPrimitive.Content
+                        position="popper"
+                        side="top"
+                        align="end"
+                        sideOffset={8}
+                        collisionPadding={12}
+                        aria-label={t('input.pickModel')}
+                        className={CHAT_LAYOUT_TOKENS.inputModelPickerMenu}
+                      >
+                        <SelectPrimitive.Viewport
+                          data-chat-model-picker-viewport="true"
+                          className="chat-model-picker-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1.5"
+                        >
+                          {modelPicker.options.map((option) => {
+                            const selected = option.id === modelPicker.currentModelId;
+                            return (
+                              <SelectPrimitive.Item
+                                key={option.id}
+                                value={option.id}
+                                className={cn(
+                                  'flex w-full cursor-default items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left outline-none transition-colors data-[highlighted]:bg-muted/70',
+                                  selected
+                                    ? 'bg-secondary text-foreground'
+                                    : 'text-foreground/88 hover:bg-muted/70',
+                                )}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <SelectPrimitive.ItemText>
+                                    <span className="block truncate text-[12px] font-medium leading-5">{option.label}</span>
+                                  </SelectPrimitive.ItemText>
+                                </div>
+                                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                                  {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                                </span>
+                              </SelectPrimitive.Item>
+                            );
+                          })}
+                        </SelectPrimitive.Viewport>
+                      </SelectPrimitive.Content>
+                    </SelectPrimitive.Portal>
+                  </SelectPrimitive.Root>
                 </div>
               ) : null}
               <Button
@@ -1605,6 +1824,19 @@ export const ChatInput = memo(function ChatInput({
             ) : null}
           </div>
         </div>
+        {skillManagerOpen && skillManager && typeof document !== 'undefined' ? createPortal((
+          <AgentSkillManagerDialog
+            label={skillManager.label}
+            title={skillManager.title}
+            skillOptions={skillManager.options}
+            skillsLoading={skillManager.loading}
+            selectedSkillIds={skillManager.selectedSkillIds}
+            skillPreview={skillManager.skillPreview}
+            onToggleSkill={skillManager.onToggleSkill}
+            onClearSkillPreview={skillManager.onClearSkillPreview}
+            onClose={closeSkillManager}
+          />
+        ), document.body) : null}
         {quickPhraseOpen && typeof document !== 'undefined' ? createPortal((
           <div
             className="fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-6"
@@ -1778,6 +2010,7 @@ export const ChatInput = memo(function ChatInput({
           <ChatImageLightbox
             src={lightboxAttachment.src}
             fileName={lightboxAttachment.fileName}
+            filePath={lightboxAttachment.filePath}
             onClose={() => setLightboxAttachment(null)}
           />
         )}

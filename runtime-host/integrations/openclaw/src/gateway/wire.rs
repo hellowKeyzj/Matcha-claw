@@ -6,6 +6,7 @@ use serde_json::Value;
 pub mod agents;
 pub(crate) mod channel;
 pub(crate) mod cron;
+pub(crate) mod models;
 pub(crate) mod team;
 
 pub use cron::{
@@ -33,6 +34,7 @@ pub const GATEWAY_HEALTH_METHOD: &str = "health";
 pub const GATEWAY_STATUS_METHOD: &str = "status";
 pub const GATEWAY_LOGS_TAIL_METHOD: &str = "logs.tail";
 pub const MCP_SERVER_STATUS_LIST_METHOD: &str = "mcpServerStatus/list";
+pub const MCP_SESSION_SERVERS_UPDATE_METHOD: &str = "mcpSessionServers/update";
 pub const SYSTEM_PRESENCE_SCOPE: &str = "operator.read";
 pub const GATEWAY_SESSION_SCOPES: &[&str] = &["operator.read", "operator.write", "operator.admin"];
 #[cfg(test)]
@@ -47,9 +49,11 @@ pub(crate) const GATEWAY_SKILL_ADMIN_SCOPE: &str = "operator.admin";
 #[cfg(test)]
 pub(crate) const GATEWAY_SKILL_READ_SCOPE: &str = "operator.read";
 pub const SESSIONS_SUBSCRIBE_METHOD: &str = "sessions.subscribe";
+pub(crate) const SESSIONS_MESSAGES_SUBSCRIBE_METHOD: &str = "sessions.messages.subscribe";
 #[cfg(test)]
 pub(crate) const GATEWAY_OPERATIONS_SCOPE: &str = "operator.write";
-pub(crate) const OPENCLAW_GATEWAY_VERSION: &str = "2026.5.20";
+#[cfg(test)]
+pub(crate) const OPENCLAW_GATEWAY_VERSION: &str = "2026.9.3";
 
 pub struct GatewayToken(Vec<u8>);
 
@@ -321,7 +325,7 @@ fn encode_connect_request(request: &ConnectRequest) -> Result<String, WireError>
 #[derive(Clone, Eq, PartialEq)]
 pub struct RpcRequest {
     request_id: String,
-    method: &'static str,
+    method: String,
     params: Option<Value>,
 }
 
@@ -330,8 +334,13 @@ impl RpcRequest {
         &self.request_id
     }
 
-    pub fn method(&self) -> &'static str {
-        self.method
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    #[cfg(test)]
+    pub fn params(&self) -> Option<&Value> {
+        self.params.as_ref()
     }
 
     pub fn encode(&self) -> Result<String, WireError> {
@@ -339,14 +348,14 @@ impl RpcRequest {
         struct Frame<'a> {
             r#type: &'static str,
             id: &'a str,
-            method: &'static str,
+            method: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             params: Option<&'a Value>,
         }
         serde_json::to_string(&Frame {
             r#type: "req",
             id: &self.request_id,
-            method: self.method,
+            method: &self.method,
             params: self.params.as_ref(),
         })
         .map_err(|_| WireError::EncodeRequest)
@@ -417,6 +426,20 @@ pub(crate) fn sessions_subscribe_request(request_id: String) -> Result<RpcReques
     )
 }
 
+pub(crate) fn sessions_messages_subscribe_request(
+    request_id: String,
+    session_key: String,
+) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&session_key, MAX_NATIVE_SESSION_KEY_BYTES) {
+        return Err(WireError::InvalidRequest);
+    }
+    rpc_request(
+        request_id,
+        SESSIONS_MESSAGES_SUBSCRIBE_METHOD,
+        Some(serde_json::json!({ "key": session_key })),
+    )
+}
+
 pub(crate) fn mcp_server_status_list_request(
     request_id: String,
     session_key: String,
@@ -446,9 +469,31 @@ pub(crate) fn mcp_server_status_list_request(
     )
 }
 
+pub(crate) fn mcp_session_servers_update_request(
+    request_id: String,
+    session_key: String,
+    server_name: String,
+    enabled: bool,
+) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&session_key, MAX_NATIVE_SESSION_KEY_BYTES)
+        || !valid_native_string(&server_name, MAX_MCP_SERVER_NAME_BYTES)
+    {
+        return Err(WireError::InvalidRequest);
+    }
+    rpc_request(
+        request_id,
+        MCP_SESSION_SERVERS_UPDATE_METHOD,
+        Some(serde_json::json!({
+            "sessionKey": session_key,
+            "serverName": server_name,
+            "enabled": enabled,
+        })),
+    )
+}
+
 pub(crate) fn operations_request(
     request_id: String,
-    method: &'static str,
+    method: impl Into<String>,
     params: Value,
 ) -> Result<RpcRequest, WireError> {
     if !params.is_object() {
@@ -459,7 +504,7 @@ pub(crate) fn operations_request(
 
 pub(crate) fn session_request(
     request_id: String,
-    method: &'static str,
+    method: impl Into<String>,
     params: Value,
 ) -> Result<RpcRequest, WireError> {
     if !params.is_object() {
@@ -468,12 +513,81 @@ pub(crate) fn session_request(
     rpc_request(request_id, method, Some(params))
 }
 
+pub(crate) fn browser_request(
+    request_id: String,
+    method: String,
+    path: String,
+    query: Option<Value>,
+    body: Option<Value>,
+    timeout_ms: Option<u64>,
+    target: Option<String>,
+    node: Option<String>,
+) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&method, 4_096) || !valid_native_string(&path, 4_096) {
+        return Err(WireError::InvalidRequest);
+    }
+    let mut params = serde_json::Map::new();
+    params.insert("method".into(), Value::String(method));
+    params.insert("path".into(), Value::String(path));
+    if let Some(query) = query {
+        if !query.is_object() {
+            return Err(WireError::InvalidRequest);
+        }
+        params.insert("query".into(), query);
+    }
+    if let Some(body) = body {
+        params.insert("body".into(), body);
+    }
+    if let Some(timeout_ms) = timeout_ms {
+        params.insert("timeoutMs".into(), Value::from(timeout_ms));
+    }
+    if let Some(target) = target {
+        if target != "host" && target != "node" {
+            return Err(WireError::InvalidRequest);
+        }
+        params.insert("target".into(), Value::String(target));
+    }
+    if let Some(node) = node {
+        if params.get("target").and_then(Value::as_str) != Some("node")
+            || !valid_native_string(&node, 4_096)
+        {
+            return Err(WireError::InvalidRequest);
+        }
+        params.insert("node".into(), Value::String(node));
+    }
+    rpc_request(request_id, "browser.request", Some(Value::Object(params)))
+}
+
+pub(crate) fn mcp_app_request(
+    request_id: String,
+    operation_id: String,
+    session_key: String,
+    view_id: String,
+    standalone: Option<bool>,
+) -> Result<RpcRequest, WireError> {
+    if !operation_id.starts_with("mcp.app.")
+        || !valid_native_string(&operation_id, 4_096)
+        || !valid_native_string(&session_key, 4_096)
+        || !valid_native_string(&view_id, 4_096)
+    {
+        return Err(WireError::InvalidRequest);
+    }
+    let mut params = serde_json::Map::new();
+    params.insert("sessionKey".into(), Value::String(session_key));
+    params.insert("viewId".into(), Value::String(view_id));
+    if let Some(standalone) = standalone {
+        params.insert("standalone".into(), Value::Bool(standalone));
+    }
+    rpc_request(request_id, operation_id, Some(Value::Object(params)))
+}
+
 fn rpc_request(
     request_id: String,
-    method: &'static str,
+    method: impl Into<String>,
     params: Option<Value>,
 ) -> Result<RpcRequest, WireError> {
-    if !valid_string(&request_id) || !valid_string(method) {
+    let method = method.into();
+    if !valid_string(&request_id) || !valid_string(&method) {
         return Err(WireError::InvalidRequest);
     }
     Ok(RpcRequest {
@@ -486,6 +600,7 @@ fn rpc_request(
 pub struct GatewayError {
     pub(crate) retryable: Option<bool>,
     pub(crate) startup_sidecars: bool,
+    pub(crate) restart_required: bool,
     pub(crate) code: String,
     pub(crate) message: String,
     #[cfg(test)]
@@ -501,6 +616,10 @@ impl GatewayError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn restart_required(&self) -> bool {
+        self.restart_required
     }
 }
 
@@ -659,7 +778,6 @@ pub struct GatewaySnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct StateVersion {
     pub presence: u64,
     pub health: u64,
@@ -747,6 +865,11 @@ pub fn decode_mcp_server_status_list(
     payload.into_public()
 }
 
+pub fn decode_mcp_session_servers_update(response: GatewayResponse) -> Result<(), WireError> {
+    let _ = success_payload(response, WireError::InvalidMcpServerStatus)?;
+    Ok(())
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct McpServerStatusList {
     pub servers: Vec<McpServerStatusEntry>,
@@ -768,6 +891,8 @@ pub struct McpServerStatusEntry {
     pub launch_summary: Option<String>,
     pub tool_count: Option<u64>,
     pub available: Option<bool>,
+    pub enabled: Option<bool>,
+    pub state: Option<String>,
 }
 
 impl fmt::Debug for McpServerStatusEntry {
@@ -778,6 +903,8 @@ impl fmt::Debug for McpServerStatusEntry {
             .field("has_launch_summary", &self.launch_summary.is_some())
             .field("tool_count", &self.tool_count)
             .field("available", &self.available)
+            .field("enabled", &self.enabled)
+            .field("state", &self.state)
             .finish()
     }
 }
@@ -796,14 +923,23 @@ fn project_gateway_health(payload: Value) -> Result<GatewayHealthSnapshot, WireE
         .get("durationMs")
         .and_then(Value::as_u64)
         .ok_or(WireError::InvalidGatewayHealth)?;
-    let channel_count = object
+    let channels = object
         .get("channels")
         .and_then(Value::as_object)
-        .map_or(0, serde_json::Map::len);
-    let agent_count = object
+        .ok_or(WireError::InvalidGatewayHealth)?;
+    let agents = object
         .get("agents")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+        .ok_or(WireError::InvalidGatewayHealth)?;
+    if !object.get("channelOrder").is_some_and(Value::is_array)
+        || !object.get("channelLabels").is_some_and(Value::is_object)
+        || object
+            .get("heartbeatSeconds")
+            .and_then(Value::as_u64)
+            .is_none()
+    {
+        return Err(WireError::InvalidGatewayHealth);
+    }
     let session_count = object
         .get("sessions")
         .and_then(Value::as_object)
@@ -815,14 +951,34 @@ fn project_gateway_health(payload: Value) -> Result<GatewayHealthSnapshot, WireE
         ok,
         timestamp_ms,
         duration_ms,
-        channel_count,
-        agent_count,
+        channel_count: channels.len(),
+        agent_count: agents.len(),
         session_count,
     })
 }
 
 fn project_gateway_status(payload: Value) -> Result<GatewayStatusSnapshot, WireError> {
     let object = payload.as_object().ok_or(WireError::InvalidGatewayStatus)?;
+    let heartbeat = object
+        .get("heartbeat")
+        .and_then(Value::as_object)
+        .ok_or(WireError::InvalidGatewayStatus)?;
+    if !heartbeat
+        .get("defaultAgentId")
+        .and_then(Value::as_str)
+        .is_some_and(valid_string)
+        || !object
+            .get("queuedSystemEvents")
+            .is_some_and(Value::is_array)
+        || !object.get("tasks").is_some_and(Value::is_object)
+        || !object.get("taskAudit").is_some_and(Value::is_object)
+    {
+        return Err(WireError::InvalidGatewayStatus);
+    }
+    let agents = heartbeat
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or(WireError::InvalidGatewayStatus)?;
     let session_count = object
         .get("sessions")
         .and_then(Value::as_object)
@@ -833,21 +989,15 @@ fn project_gateway_status(payload: Value) -> Result<GatewayStatusSnapshot, WireE
     let channel_count = object
         .get("channelSummary")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let heartbeat_enabled = object
-        .get("heartbeat")
-        .and_then(Value::as_object)
-        .and_then(|heartbeat| heartbeat.get("agents"))
-        .and_then(Value::as_array)
-        .is_some_and(|agents| {
-            agents.iter().any(|agent| {
-                agent
-                    .as_object()
-                    .and_then(|agent| agent.get("enabled"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-            })
-        });
+        .ok_or(WireError::InvalidGatewayStatus)?
+        .len();
+    let heartbeat_enabled = agents.iter().any(|agent| {
+        agent
+            .as_object()
+            .and_then(|agent| agent.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    });
     Ok(GatewayStatusSnapshot {
         session_count,
         channel_count,
@@ -887,6 +1037,18 @@ pub(crate) fn decode_sessions_subscribe(response: GatewayResponse) -> Result<(),
     let payload: SessionSubscriptionWire =
         serde_json::from_value(payload).map_err(|_| WireError::InvalidSessionSubscription)?;
     if !payload.subscribed {
+        return Err(WireError::InvalidSessionSubscription);
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_sessions_messages_subscribe(
+    response: GatewayResponse,
+) -> Result<(), WireError> {
+    let payload = success_payload(response, WireError::InvalidSessionSubscription)?;
+    let payload: SessionMessagesSubscriptionWire =
+        serde_json::from_value(payload).map_err(|_| WireError::InvalidSessionSubscription)?;
+    if !payload.subscribed || !valid_native_string(&payload.key, MAX_NATIVE_SESSION_KEY_BYTES) {
         return Err(WireError::InvalidSessionSubscription);
     }
     Ok(())
@@ -1028,14 +1190,13 @@ impl fmt::Display for WireError {
 impl std::error::Error for WireError {}
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ChallengeWire {
     nonce: String,
     ts: u64,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct EventWire {
     r#type: String,
     event: String,
@@ -1058,7 +1219,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Field<T> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ResponseWire {
     r#type: String,
     id: String,
@@ -1070,7 +1230,7 @@ struct ResponseWire {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ErrorWire {
     code: String,
     message: String,
@@ -1099,11 +1259,18 @@ impl ErrorWire {
                 .and_then(|details| details.get("reason"))
                 .and_then(Value::as_str)
                 == Some("startup-sidecars");
+        let restart_required = code == "UNAVAILABLE"
+            && details
+                .as_ref()
+                .and_then(|details| details.get("restartRequired"))
+                .and_then(Value::as_bool)
+                == Some(true);
         #[cfg(not(test))]
         let _ = (details, retry_after_ms);
         GatewayError {
             retryable,
             startup_sidecars,
+            restart_required,
             code,
             message,
             #[cfg(test)]
@@ -1115,13 +1282,15 @@ impl ErrorWire {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct HelloWire {
     r#type: String,
     protocol: u32,
     server: ServerWire,
     features: FeaturesWire,
     snapshot: SnapshotWire,
+    control_ui_tabs: Option<Vec<ControlUiTabWire>>,
+    control_ui_widget_kinds: Option<Vec<ControlUiWidgetKindWire>>,
     plugin_surface_urls: Option<BTreeMap<String, String>>,
     auth: AuthWire,
     policy: PolicyWire,
@@ -1134,14 +1303,20 @@ impl HelloWire {
             && self.server.is_valid()
             && self.features.is_valid()
             && self.snapshot.is_valid()
+            && self
+                .control_ui_tabs
+                .as_ref()
+                .is_none_or(|tabs| tabs.iter().all(ControlUiTabWire::is_valid))
+            && self
+                .control_ui_widget_kinds
+                .as_ref()
+                .is_none_or(|kinds| kinds.iter().all(ControlUiWidgetKindWire::is_valid))
             && self.plugin_surface_urls.as_ref().is_none_or(|urls| {
                 urls.iter()
                     .all(|(name, url)| valid_string(name) && valid_string(url))
             })
             && self.auth.is_valid()
-            && self.policy.max_payload > 0
-            && self.policy.max_buffered_bytes > 0
-            && self.policy.tick_interval_ms > 0
+            && self.policy.is_valid()
     }
 
     fn into_public(self) -> HelloOk {
@@ -1169,16 +1344,78 @@ impl HelloWire {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+struct ControlUiTabWire {
+    plugin_id: String,
+    id: String,
+    label: String,
+    description: Option<String>,
+    icon: Option<String>,
+    path: Option<String>,
+    placement: Option<String>,
+    requires_gateway_auth: Option<bool>,
+    group: Option<ControlUiTabGroupWire>,
+    order: Option<f64>,
+}
+
+impl ControlUiTabWire {
+    fn is_valid(&self) -> bool {
+        let _ = (self.group, self.requires_gateway_auth, self.order);
+        valid_string(&self.plugin_id)
+            && valid_string(&self.id)
+            && valid_string(&self.label)
+            && [&self.description, &self.icon, &self.path, &self.placement]
+                .into_iter()
+                .all(valid_optional_string)
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ControlUiTabGroupWire {
+    Control,
+    Agent,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlUiWidgetKindWire {
+    plugin_id: String,
+    kind: String,
+    label: String,
+}
+
+impl ControlUiWidgetKindWire {
+    fn is_valid(&self) -> bool {
+        valid_string(&self.plugin_id) && valid_string(&self.kind) && valid_string(&self.label)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ServerWire {
     version: String,
+    build_id: Option<String>,
+    boot_id: Option<String>,
+    control_ui_build_source: Option<ControlUiBuildSourceWire>,
     conn_id: String,
 }
 
 impl ServerWire {
     fn is_valid(&self) -> bool {
-        valid_string(&self.version) && valid_string(&self.conn_id)
+        let _ = self.control_ui_build_source;
+        valid_string(&self.version)
+            && self.build_id.as_deref().is_none_or(valid_string)
+            && self.boot_id.as_deref().is_none_or(valid_string)
+            && valid_string(&self.conn_id)
     }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ControlUiBuildSourceWire {
+    Bundled,
+    Configured,
 }
 
 #[derive(Deserialize)]
@@ -1186,17 +1423,24 @@ impl ServerWire {
 struct FeaturesWire {
     methods: Vec<String>,
     events: Vec<String>,
+    capabilities: Option<Vec<String>>,
 }
 
 impl FeaturesWire {
     fn is_valid(&self) -> bool {
-        valid_strings(&self.methods) && valid_strings(&self.events)
+        valid_strings(&self.methods)
+            && valid_strings(&self.events)
+            && self
+                .capabilities
+                .as_ref()
+                .is_none_or(|capabilities| valid_strings(capabilities))
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SnapshotWire {
+    suspension: Option<Value>,
     presence: Vec<PresenceWire>,
     health: Value,
     state_version: StateVersion,
@@ -1206,21 +1450,29 @@ struct SnapshotWire {
     session_defaults: Option<SessionDefaultsWire>,
     auth_mode: Option<AuthModeWire>,
     update_available: Option<UpdateAvailableWire>,
+    applied_config_hash: Option<Option<String>>,
+    update_schedule: Option<Value>,
 }
 
 impl SnapshotWire {
     fn is_valid(&self) -> bool {
         let _ = (
+            &self.suspension,
             &self.health,
             &self.config_path,
             &self.state_dir,
             &self.session_defaults,
             &self.auth_mode,
             &self.update_available,
+            &self.update_schedule,
         );
         self.presence.iter().all(PresenceWire::is_valid)
             && self.config_path.as_deref().is_none_or(valid_string)
             && self.state_dir.as_deref().is_none_or(valid_string)
+            && self
+                .applied_config_hash
+                .as_ref()
+                .is_none_or(|hash| hash.as_deref().is_none_or(valid_string))
             && self
                 .session_defaults
                 .as_ref()
@@ -1250,6 +1502,9 @@ impl SnapshotWire {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SessionDefaultsWire {
     default_agent_id: String,
+    model_configured: Option<bool>,
+    ownership: Option<SessionDefaultsOwnershipWire>,
+    selection_required: Option<bool>,
     main_key: String,
     main_session_key: String,
     scope: Option<String>,
@@ -1257,11 +1512,24 @@ struct SessionDefaultsWire {
 
 impl SessionDefaultsWire {
     fn is_valid(&self) -> bool {
+        let _ = (
+            self.model_configured,
+            self.ownership,
+            self.selection_required,
+        );
         valid_string(&self.default_agent_id)
             && valid_string(&self.main_key)
             && valid_string(&self.main_session_key)
             && self.scope.as_deref().is_none_or(valid_string)
     }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SessionDefaultsOwnershipWire {
+    Sole,
+    Legacy,
+    Explicit,
 }
 
 #[derive(Deserialize)]
@@ -1279,18 +1547,27 @@ struct UpdateAvailableWire {
     current_version: String,
     latest_version: String,
     channel: String,
+    current_sha: Option<String>,
+    upstream_ref: Option<String>,
+    upstream_sha: Option<String>,
+    commits_behind: Option<u64>,
+    commits: Option<Value>,
 }
 
 impl UpdateAvailableWire {
     fn is_valid(&self) -> bool {
+        let _ = (self.commits_behind, &self.commits);
         valid_string(&self.current_version)
             && valid_string(&self.latest_version)
             && valid_string(&self.channel)
+            && self.current_sha.as_deref().is_none_or(valid_string)
+            && self.upstream_ref.as_deref().is_none_or(valid_string)
+            && self.upstream_sha.as_deref().is_none_or(valid_string)
     }
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct PresenceWire {
     host: Option<String>,
     ip: Option<String>,
@@ -1298,21 +1575,32 @@ struct PresenceWire {
     platform: Option<String>,
     device_family: Option<String>,
     model_identifier: Option<String>,
+    time_zone: Option<String>,
     mode: Option<String>,
     last_input_seconds: Option<u64>,
     reason: Option<String>,
     tags: Option<Vec<String>>,
     text: Option<String>,
     ts: u64,
+    online_since: Option<u64>,
+    last_activity_at: Option<u64>,
     device_id: Option<String>,
     roles: Option<Vec<String>>,
     scopes: Option<Vec<String>>,
     instance_id: Option<String>,
+    user: Option<Value>,
+    watched_sessions: Option<Vec<String>>,
 }
 
 impl PresenceWire {
     fn is_valid(&self) -> bool {
-        let _ = (&self.last_input_seconds, &self.text);
+        let _ = (
+            &self.last_input_seconds,
+            &self.text,
+            self.online_since,
+            self.last_activity_at,
+            &self.user,
+        );
         [
             &self.host,
             &self.ip,
@@ -1320,6 +1608,7 @@ impl PresenceWire {
             &self.platform,
             &self.device_family,
             &self.model_identifier,
+            &self.time_zone,
             &self.mode,
             &self.reason,
             &self.device_id,
@@ -1327,9 +1616,14 @@ impl PresenceWire {
         ]
         .into_iter()
         .all(valid_optional_string)
-            && [&self.tags, &self.roles, &self.scopes]
-                .into_iter()
-                .all(|values| values.as_ref().is_none_or(|values| valid_strings(values)))
+            && [
+                &self.tags,
+                &self.roles,
+                &self.scopes,
+                &self.watched_sessions,
+            ]
+            .into_iter()
+            .all(|values| values.as_ref().is_none_or(|values| valid_strings(values)))
     }
 }
 
@@ -1365,6 +1659,8 @@ impl DeviceTokenWire {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AuthWire {
     device_token: Option<SecretWire>,
+    recovery_migration_allowed: Option<bool>,
+    recovery_scope: Option<String>,
     role: String,
     scopes: Vec<String>,
     issued_at_ms: Option<u64>,
@@ -1377,6 +1673,10 @@ impl AuthWire {
         self.device_token
             .as_ref()
             .is_none_or(|token| valid_string(&token.0))
+            && self
+                .recovery_migration_allowed
+                .is_none_or(|allowed| allowed)
+            && self.recovery_scope.as_deref().is_none_or(valid_string)
             && valid_string(&self.role)
             && valid_strings(&self.scopes)
             && self
@@ -1392,10 +1692,43 @@ struct PolicyWire {
     max_payload: u64,
     max_buffered_bytes: u64,
     tick_interval_ms: u64,
+    attachments: Option<PolicyAttachmentsWire>,
+    allowed_session_visibilities: Option<Vec<String>>,
+    has_multiple_session_sharing_identities: Option<bool>,
+}
+
+impl PolicyWire {
+    fn is_valid(&self) -> bool {
+        let _ = self.has_multiple_session_sharing_identities;
+        self.max_payload > 0
+            && self.max_buffered_bytes > 0
+            && self.tick_interval_ms > 0
+            && self
+                .attachments
+                .as_ref()
+                .is_none_or(PolicyAttachmentsWire::is_valid)
+            && self
+                .allowed_session_visibilities
+                .as_ref()
+                .is_none_or(|visibilities| valid_strings(visibilities))
+    }
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct PolicyAttachmentsWire {
+    max_bytes: u64,
+    max_image_bytes: u64,
+}
+
+impl PolicyAttachmentsWire {
+    fn is_valid(&self) -> bool {
+        self.max_bytes > 0 && self.max_image_bytes > 0
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GatewayLogsTailWire {
     file: String,
     cursor: u64,
@@ -1403,10 +1736,12 @@ struct GatewayLogsTailWire {
     lines: Vec<String>,
     truncated: Option<bool>,
     reset: Option<bool>,
+    skipped_bytes: Option<u64>,
 }
 
 impl GatewayLogsTailWire {
     fn into_public(self) -> Result<GatewayLogsTail, WireError> {
+        let _ = self.skipped_bytes;
         if !valid_string(&self.file)
             || self.lines.iter().any(|line| {
                 line.is_empty() || line.len() > MAX_LOG_LINE_BYTES || line.contains(['\r', '\0'])
@@ -1425,7 +1760,7 @@ impl GatewayLogsTailWire {
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct McpServerStatusListWire {
     data: Vec<McpServerStatusEntryWire>,
     next_cursor: Option<String>,
@@ -1453,42 +1788,68 @@ impl McpServerStatusListWire {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct McpServerStatusEntryWire {
-    name: String,
-    server_name: String,
+    name: Option<String>,
+    server_name: Option<String>,
     launch_summary: Option<String>,
     tool_count: Option<u64>,
     available: Option<bool>,
+    enabled: Option<bool>,
+    state: Option<String>,
+    tools: Option<Value>,
+    auth: Option<Value>,
+    status: Option<Value>,
+    error: Option<Value>,
 }
 
 impl McpServerStatusEntryWire {
     fn into_public(self) -> Result<McpServerStatusEntry, WireError> {
-        if self.name != self.server_name
-            || !valid_native_string(&self.name, MAX_MCP_SERVER_NAME_BYTES)
+        let _ = (&self.auth, &self.status, &self.error);
+        let Some(name) = self.name.or(self.server_name) else {
+            return Err(WireError::InvalidMcpServerStatus);
+        };
+        let tool_count = match self.tool_count {
+            Some(count) => Some(count),
+            None => self
+                .tools
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|tools| u64::try_from(tools.len()).ok()),
+        };
+        if !valid_native_string(&name, MAX_MCP_SERVER_NAME_BYTES)
             || self
                 .launch_summary
                 .as_deref()
                 .is_some_and(|value| !valid_native_string(value, MAX_MCP_LAUNCH_SUMMARY_BYTES))
             || self
-                .tool_count
-                .is_some_and(|count| count > MAX_MCP_TOOL_COUNT)
+                .state
+                .as_deref()
+                .is_some_and(|value| !valid_native_string(value, MAX_MCP_SERVER_NAME_BYTES))
+            || tool_count.is_some_and(|count| count > MAX_MCP_TOOL_COUNT)
         {
             return Err(WireError::InvalidMcpServerStatus);
         }
         Ok(McpServerStatusEntry {
-            name: self.name,
+            name,
             launch_summary: self.launch_summary,
-            tool_count: self.tool_count,
+            tool_count,
             available: self.available,
+            enabled: self.enabled,
+            state: self.state,
         })
     }
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SessionSubscriptionWire {
     subscribed: bool,
+}
+
+#[derive(Deserialize)]
+struct SessionMessagesSubscriptionWire {
+    subscribed: bool,
+    key: String,
 }
 
 fn valid_string(value: &str) -> bool {
@@ -1554,6 +1915,12 @@ mod tests {
         let frame =
             r#"{"type":"event","event":"connect.challenge","payload":{"nonce":"nonce-1","ts":42}}"#;
         assert_eq!(decode_event(frame).unwrap().name, "connect.challenge");
+        let event = decode_event(
+            r#"{"type":"event","event":"tick","seq":7,"stateVersion":{"presence":1,"health":2,"future":true},"future":true}"#,
+        )
+        .unwrap();
+        assert_eq!(event.sequence, Some(7));
+        assert_eq!(event.state_version.unwrap().presence, 1);
         let challenge = decode_challenge(frame).unwrap();
         assert_eq!(challenge.timestamp_ms, 42);
         let request = build_backend_connect_request(
@@ -1636,8 +2003,16 @@ mod tests {
             .unwrap()
             .is_none()
         );
+        assert!(
+            decode_response(
+                r#"{"type":"res","id":"wanted","ok":true,"payload":{"ok":true},"future":true}"#,
+                "wanted",
+            )
+            .unwrap()
+            .is_some()
+        );
         let failure = decode_response(
-            r#"{"type":"res","id":"wanted","ok":false,"error":{"code":"UNAVAILABLE","message":"starting","retryable":true,"retryAfterMs":250}}"#,
+            r#"{"type":"res","id":"wanted","ok":false,"error":{"code":"UNAVAILABLE","message":"starting","retryable":true,"retryAfterMs":250,"future":true},"future":true}"#,
             "wanted",
         )
         .unwrap()
@@ -1661,6 +2036,112 @@ mod tests {
             panic!("expected failure response");
         };
         assert!(error.startup_sidecars);
+    }
+
+    #[test]
+    fn browser_and_mcp_app_requests_encode_safe_dynamic_gateway_methods() {
+        let browser = browser_request(
+            "browser-1".into(),
+            "GET".into(),
+            "/session/view".into(),
+            Some(json!({ "profile": "chrome" })),
+            Some(json!({ "viewId": "view-1" })),
+            Some(1000),
+            Some("node".into()),
+            Some("browser-node-1".into()),
+        )
+        .unwrap();
+        assert_eq!(browser.method(), "browser.request");
+        assert_eq!(
+            serde_json::from_str::<Value>(&browser.encode().unwrap()).unwrap(),
+            json!({
+                "type": "req",
+                "id": "browser-1",
+                "method": "browser.request",
+                "params": {
+                    "method": "GET",
+                    "path": "/session/view",
+                    "query": { "profile": "chrome" },
+                    "body": { "viewId": "view-1" },
+                    "timeoutMs": 1000,
+                    "target": "node",
+                    "node": "browser-node-1"
+                }
+            })
+        );
+
+        let mcp = mcp_app_request(
+            "mcp-app-1".into(),
+            "mcp.app.open".into(),
+            "agent:main:session-1".into(),
+            "view-1".into(),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(mcp.method(), "mcp.app.open");
+        assert_eq!(
+            serde_json::from_str::<Value>(&mcp.encode().unwrap()).unwrap(),
+            json!({
+                "type": "req",
+                "id": "mcp-app-1",
+                "method": "mcp.app.open",
+                "params": {
+                    "sessionKey": "agent:main:session-1",
+                    "viewId": "view-1",
+                    "standalone": true
+                }
+            })
+        );
+
+        assert!(
+            mcp_app_request(
+                "id".into(),
+                "mcp.other".into(),
+                "session".into(),
+                "view".into(),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            browser_request(
+                "id".into(),
+                "GET\n".into(),
+                "/view".into(),
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            browser_request(
+                "id".into(),
+                "GET".into(),
+                "/view".into(),
+                Some(json!([])),
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            browser_request(
+                "id".into(),
+                "GET".into(),
+                "/view".into(),
+                None,
+                None,
+                None,
+                Some("worker".into()),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1695,27 +2176,71 @@ mod tests {
             json!({
                 "data": [{
                     "name": "remote",
-                    "serverName": "remote",
+                    "serverName": "codex-remote",
                     "launchSummary": "ready",
                     "toolCount": 3,
-                    "available": true
+                    "available": true,
+                    "enabled": true,
+                    "state": "connected",
+                    "tools": [{"name": "tool-canary"}],
+                    "auth": {"status": "ready", "token": "auth-canary"},
+                    "status": "ready",
+                    "error": {"message": "error-canary"},
+                    "future": true
                 }]
             }),
         ))
         .unwrap();
         assert_eq!(status.servers.len(), 1);
         assert_eq!(status.servers[0].name, "remote");
+        assert_eq!(status.servers[0].launch_summary.as_deref(), Some("ready"));
         assert_eq!(status.servers[0].tool_count, Some(3));
         assert_eq!(status.servers[0].available, Some(true));
+        assert_eq!(status.servers[0].enabled, Some(true));
+        assert_eq!(status.servers[0].state.as_deref(), Some("connected"));
         assert_eq!(status.next_cursor, None);
         assert!(!format!("{status:?}").contains("remote"));
+        assert!(!format!("{status:?}").contains("tool-canary"));
+        assert!(!format!("{status:?}").contains("auth-canary"));
+        assert!(!format!("{status:?}").contains("error-canary"));
+
+        let status = decode_mcp_server_status_list(response(
+            "mcp-status-1",
+            json!({ "data": [{ "serverName": "codex-remote", "tools": {"read": {}, "write": {}} }] }),
+        ))
+        .unwrap();
+        assert_eq!(status.servers[0].name, "codex-remote");
+        assert_eq!(status.servers[0].tool_count, Some(2));
+
+        let request = mcp_session_servers_update_request(
+            "mcp-update-1".into(),
+            "agent:main:session-1".into(),
+            "remote".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap(),
+            json!({
+                "type": "req",
+                "id": "mcp-update-1",
+                "method": MCP_SESSION_SERVERS_UPDATE_METHOD,
+                "params": {
+                    "sessionKey": "agent:main:session-1",
+                    "serverName": "remote",
+                    "enabled": false
+                }
+            })
+        );
+        assert!(mcp_session_servers_update_request("id".into(), " ".into(), "remote".into(), true).is_err());
+        assert!(mcp_session_servers_update_request("id".into(), "agent:main:session-1".into(), " ".into(), true).is_err());
+        assert_eq!(decode_mcp_session_servers_update(response("mcp-update-1", json!({ "success": true }))), Ok(()));
 
         for payload in [
             json!({ "data": [], "nextCursor": " " }),
-            json!({ "data": [{ "name": "remote", "serverName": "other" }] }),
-            json!({ "data": [{ "name": "remote", "serverName": "remote", "future": true }] }),
             json!({ "data": [{ "name": "remote", "serverName": "remote", "toolCount": 100_001 }] }),
             json!({ "data": [{ "name": " ", "serverName": " " }] }),
+            json!({ "data": [{}] }),
         ] {
             assert_eq!(
                 decode_mcp_server_status_list(response("mcp-status-1", payload)),
@@ -1736,6 +2261,116 @@ mod tests {
     }
 
     #[test]
+    fn gateway_logs_tail_accepts_skipped_bytes_without_exposing_file() {
+        let request = gateway_logs_tail_request("logs-1".into(), Some(7), 2, 512).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap(),
+            json!({
+                "type": "req",
+                "id": "logs-1",
+                "method": GATEWAY_LOGS_TAIL_METHOD,
+                "params": {"cursor": 7, "limit": 2, "maxBytes": 512}
+            })
+        );
+
+        let tail = decode_gateway_logs_tail(response(
+            "logs-1",
+            json!({
+                "file": "C:\\Users\\agent\\secret.log",
+                "cursor": 9,
+                "size": 42,
+                "lines": ["line-1"],
+                "truncated": true,
+                "reset": false,
+                "skippedBytes": 1024,
+                "future": true
+            }),
+        ))
+        .unwrap();
+        assert_eq!(tail.file, "[REDACTED]");
+        assert_eq!(tail.cursor, 9);
+        assert_eq!(tail.size, 42);
+        assert_eq!(tail.lines, ["line-1"]);
+        assert!(tail.truncated);
+        assert!(!tail.reset);
+        assert!(!format!("{tail:?}").contains("secret.log"));
+        assert!(!format!("{tail:?}").contains("skippedBytes"));
+    }
+
+    #[test]
+    fn health_and_status_accept_native_additions_but_keep_core_fields_required() {
+        let health = decode_gateway_health(response(
+            "health-1",
+            json!({
+                "ok": true,
+                "ts": 42,
+                "durationMs": 5,
+                "channels": {"discord": {"connected": true, "accountSecret": "secret-canary"}},
+                "channelOrder": ["discord"],
+                "channelLabels": {"discord": "Discord"},
+                "heartbeatSeconds": 30,
+                "agents": [{
+                    "agentId": "main",
+                    "isDefault": true,
+                    "heartbeat": {"enabled": true, "every": "5m", "everyMs": 300000, "prompt": "hi", "target": "last", "session": "session-canary", "model": "model-canary", "ackMaxChars": 100},
+                    "sessions": {"path": "path-canary", "count": 1, "recent": []}
+                }],
+                "sessions": {"path": "path-canary", "count": 2, "recent": []},
+                "eventLoop": {"degraded": false, "reasons": [], "intervalMs": 1000, "delayP99Ms": 1, "delayMaxMs": 2, "utilization": 0.1, "cpuCoreRatio": 0.2},
+                "plugins": {"loaded": ["plugin-canary"], "errors": []},
+                "deliveryQueues": {"failed": []},
+                "future": true
+            }),
+        ))
+        .unwrap();
+        assert_eq!(health.session_count, 2);
+        assert_eq!(health.channel_count, 1);
+        assert_eq!(health.agent_count, 1);
+        assert!(!format!("{health:?}").contains("secret-canary"));
+        assert!(!format!("{health:?}").contains("path-canary"));
+
+        let status = decode_gateway_status(response(
+            "status-1",
+            json!({
+                "heartbeat": {"defaultAgentId": "main", "agents": [{"agentId": "main", "enabled": true, "every": "5m", "everyMs": 300000}]},
+                "channelSummary": ["discord connected"],
+                "queuedSystemEvents": ["event-canary"],
+                "tasks": {"future": true},
+                "taskAudit": {"future": true},
+                "sessions": {"paths": ["path-canary"], "count": 3, "defaults": {"model": "model-canary", "contextTokens": 1000}, "recent": [], "byAgent": []},
+                "eventLoop": {"degraded": false},
+                "processMemory": {"rssBytes": 1, "heapUsedBytes": 2, "heapTotalBytes": 3},
+                "future": true
+            }),
+        ))
+        .unwrap();
+        assert_eq!(status.session_count, 3);
+        assert_eq!(status.channel_count, 1);
+        assert!(status.heartbeat_enabled);
+        assert!(!format!("{status:?}").contains("path-canary"));
+        assert!(!format!("{status:?}").contains("event-canary"));
+
+        for invalid_health in [
+            json!({"ok": true, "durationMs": 5, "sessions": {"count": 1}}),
+            json!({"ok": true, "ts": 42, "durationMs": 5, "sessions": {"count": "1"}}),
+        ] {
+            assert_eq!(
+                decode_gateway_health(response("health-1", invalid_health)),
+                Err(WireError::InvalidGatewayHealth)
+            );
+        }
+        for invalid_status in [
+            json!({"heartbeat": {"agents": []}, "sessions": {"count": 1}}),
+            json!({"heartbeat": {"agents": []}, "sessions": {"count": "3"}}),
+        ] {
+            assert_eq!(
+                decode_gateway_status(response("status-1", invalid_status)),
+                Err(WireError::InvalidGatewayStatus)
+            );
+        }
+    }
+
+    #[test]
     fn presence_matches_golden_frames() {
         let presence = system_presence_request("presence-1".into()).unwrap();
         assert_eq!(
@@ -1743,7 +2378,19 @@ mod tests {
             json!({"type": "req", "id": "presence-1", "method": "system-presence"})
         );
         assert_eq!(
-            decode_system_presence(response("presence-1", json!([{"ts": 41}]))).unwrap(),
+            decode_system_presence(response(
+                "presence-1",
+                json!([{
+                    "ts": 41,
+                    "host": "host-canary",
+                    "deviceId": "device-canary",
+                    "roles": ["operator"],
+                    "scopes": ["operator.read"],
+                    "user": {"name": "user-canary"},
+                    "future": true
+                }])
+            ))
+            .unwrap(),
             [PresenceEntry { timestamp_ms: 41 }]
         );
     }
@@ -1767,6 +2414,29 @@ mod tests {
                 "subscribe-1",
                 json!({"subscribed": true, "future": true})
             ))
+            .is_ok()
+        );
+        let messages = sessions_messages_subscribe_request(
+            "messages-subscribe-1".into(),
+            "agent:main:session-1".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&messages.encode().unwrap()).unwrap(),
+            json!({"type": "req", "id": "messages-subscribe-1", "method": "sessions.messages.subscribe", "params": {"key": "agent:main:session-1"}})
+        );
+        assert!(
+            decode_sessions_messages_subscribe(response(
+                "messages-subscribe-1",
+                json!({"subscribed": true, "key": "agent:main:session-1", "future": true})
+            ))
+            .is_ok()
+        );
+        assert!(
+            decode_sessions_messages_subscribe(response(
+                "messages-subscribe-1",
+                json!({"subscribed": false, "key": "agent:main:session-1"})
+            ))
             .is_err()
         );
     }
@@ -1781,31 +2451,61 @@ mod tests {
             "main-session-key-canary",
             "scope-canary",
             "device-token-canary",
+            "build-id-canary",
+            "boot-id-canary",
+            "applied-config-hash-canary",
+            "plugin-canary",
+            "tab-canary",
+            "description-canary",
+            "icon-canary",
+            "widget-kind-canary",
+            "recovery-scope-canary",
         ];
         let payload = json!({
             "type": "hello-ok", "protocol": 4,
-            "server": {"version": "2026.5.20", "connId": "conn-1"},
-            "features": {"methods": ["system-presence"], "events": ["tick"]},
+            "server": {
+                "version": "2026.9.3", "buildId": "build-id-canary", "bootId": "boot-id-canary",
+                "controlUiBuildSource": "bundled", "connId": "conn-1"
+            },
+            "features": {"methods": ["system-presence"], "events": ["tick"], "capabilities": ["tool-events"]},
             "snapshot": {
                 "presence": [{"ts": 40}], "health": {"ok": true}, "stateVersion": {"presence": 2, "health": 3}, "uptimeMs": 100,
                 "configPath": "config-path-canary", "stateDir": "state-dir-canary",
                 "sessionDefaults": {"defaultAgentId": "default-agent-canary", "mainKey": "main-key-canary", "mainSessionKey": "main-session-key-canary", "scope": "scope-canary"},
                 "authMode": "trusted-proxy",
-                "updateAvailable": {"currentVersion": "1.0.0", "latestVersion": "1.1.0", "channel": "stable"}
+                "updateAvailable": {"currentVersion": "1.0.0", "latestVersion": "1.1.0", "channel": "stable"},
+                "appliedConfigHash": "applied-config-hash-canary", "updateSchedule": {"enabled": true}
             },
-            "auth": {"deviceToken": "device-token-canary", "role": "operator", "scopes": ["operator.read"]},
-            "policy": {"maxPayload": 26214400, "maxBufferedBytes": 52428800, "tickIntervalMs": 15000}
+            "controlUiTabs": [{
+                "pluginId": "plugin-canary", "id": "tab-canary", "label": "Tab Canary",
+                "description": "description-canary", "icon": "icon-canary", "path": "/tab-canary",
+                "placement": "sidebar", "requiresGatewayAuth": true, "group": "control", "order": 1
+            }],
+            "controlUiWidgetKinds": [{"pluginId": "plugin-canary", "kind": "widget-kind-canary", "label": "Widget Canary"}],
+            "auth": {
+                "deviceToken": "device-token-canary", "recoveryMigrationAllowed": true, "recoveryScope": "recovery-scope-canary",
+                "role": "operator", "scopes": ["operator.read"]
+            },
+            "policy": {
+                "maxPayload": 26214400, "maxBufferedBytes": 52428800, "tickIntervalMs": 15000,
+                "attachments": {"maxBytes": 1000, "maxImageBytes": 512}, "allowedSessionVisibilities": ["private"], "hasMultipleSessionSharingIdentities": false
+            }
         });
         let hello = decode_hello_ok(response("connect-1", payload.clone())).unwrap();
+        assert_eq!(hello.server.version, "2026.9.3");
         assert_debug_redacts(&hello, &canaries);
 
-        let mut unknown_session_default = payload.clone();
-        unknown_session_default["snapshot"]["sessionDefaults"]["future"] = json!(true);
+        let mut invalid_session_default = payload.clone();
+        invalid_session_default["snapshot"]["sessionDefaults"]["mainKey"] = json!("");
         let mut unknown_auth_mode = payload.clone();
         unknown_auth_mode["snapshot"]["authMode"] = json!("future");
-        let mut empty_path = payload;
-        empty_path["snapshot"]["configPath"] = json!("");
-        for invalid in [unknown_session_default, unknown_auth_mode, empty_path] {
+        let mut invalid_attachments = payload;
+        invalid_attachments["policy"]["attachments"]["maxImageBytes"] = json!(0);
+        for invalid in [
+            invalid_session_default,
+            unknown_auth_mode,
+            invalid_attachments,
+        ] {
             let error = decode_hello_ok(response("connect-1", invalid)).unwrap_err();
             assert_eq!(error, WireError::InvalidHello);
             for canary in canaries {
@@ -1825,15 +2525,19 @@ mod tests {
             format!(
                 r#"{{"type":"event","event":"wrong","payload":{{"nonce":"{canary}","ts":1}}}}"#
             ),
-            format!(
-                r#"{{"type":"event","event":"connect.challenge","payload":{{"nonce":"{canary}","ts":1,"extra":true}}}}"#
-            ),
         ] {
             let error = decode_challenge(&frame).unwrap_err();
             assert_eq!(error, WireError::InvalidChallenge);
             assert!(!error.to_string().contains(canary));
             assert!(!format!("{error:?}").contains(canary));
         }
+        let challenge = decode_challenge(&format!(
+            r#"{{"type":"event","event":"connect.challenge","payload":{{"nonce":"{canary}","ts":1,"future":true}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(challenge.timestamp_ms, 1);
+        assert_debug_redacts(&challenge, &[canary]);
+
         assert!(
             decode_response(
                 r#"{"type":"res","id":"id","ok":true,"error":{"code":"BAD","message":"bad"}}"#,

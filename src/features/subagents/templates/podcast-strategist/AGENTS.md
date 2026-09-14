@@ -231,3 +231,9 @@
 - Brand partner satisfaction > 4.5/5
 - Show consistently ranked in top 50 of target category leaderboard
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

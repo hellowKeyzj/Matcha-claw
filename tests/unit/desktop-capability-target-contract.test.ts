@@ -5,16 +5,9 @@ import {
   buildSessionIdentityKey,
   connectorRuntimeEndpoint,
   nativeRuntimeEndpoint,
-  runtimeInstanceScope,
   teamRunScope,
   workspaceScope,
 } from '../../electron/desktop-contract/runtime-address';
-import {
-  buildCapabilityTargetKey,
-  targetBelongsToScope,
-  validateCapabilityTarget,
-} from '../../electron/desktop-contract/capability-target';
-
 const endpoint = nativeRuntimeEndpoint({ runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' });
 const identity = { endpoint, agentId: 'agent:primary', sessionKey: 'session:primary' };
 
@@ -28,9 +21,6 @@ describe('desktop runtime address contract', () => {
     );
     expect(buildCapabilityScopeKey(workspaceScope(endpoint, 'workspace:primary', 'source:primary'))).toBe(
       '{"type":"runtime-scope","kind":"workspace","endpoint":{"type":"runtime-endpoint","kind":"native-runtime","runtimeAdapterId":"openclaw","runtimeInstanceId":"local"},"workspaceId":"workspace:primary","sourceId":"source:primary"}',
-    );
-    expect(buildCapabilityTargetKey({ kind: 'license', subject: 'key' })).toBe(
-      '{"type":"capability-target","kind":"license","subject":"key"}',
     );
   });
 
@@ -51,8 +41,7 @@ describe('desktop runtime address contract', () => {
     );
   });
 
-  it('rejects unsupported dynamic target grammars and malformed identities', () => {
-    expect(validateCapabilityTarget({ kind: 'skill', skillId: 'skill-1' })).toBe('CapabilityTarget is invalid');
+  it('rejects malformed identities', () => {
     expect(() => nativeRuntimeEndpoint({ runtimeAdapterId: 'secret\0adapter', runtimeInstanceId: 'local' })).toThrow(
       'RuntimeEndpointRef is invalid',
     );
@@ -61,8 +50,4 @@ describe('desktop runtime address contract', () => {
     );
   });
 
-  it('keeps the single shared target app-scoped', () => {
-    expect(targetBelongsToScope({ kind: 'license', subject: 'key' }, { kind: 'app' })).toBe(true);
-    expect(targetBelongsToScope({ kind: 'license', subject: 'key' }, runtimeInstanceScope(endpoint))).toBe(false);
-  });
 });

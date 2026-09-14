@@ -733,29 +733,29 @@ describe('runtime-host framed control client', () => {
     await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });
   });
 
-  it('encodes the direct toolchain install command without rebuilding job state', async () => {
+  it('encodes the direct toolchain prepare command without rebuilding job state', async () => {
     const { client, streams } = createClient();
-    const install = client.command({ name: 'openclaw.toolchain.install-uv' });
+    const prepare = client.command({ name: 'host.toolchain.prepare' });
     const [outbound] = streams.writes.map(outboundCommand);
 
-    expect(outbound.command).toEqual({ name: 'openclaw.toolchain.install-uv' });
+    expect(outbound.command).toEqual({ name: 'host.toolchain.prepare' });
     expect(Object.keys(outbound.command as Record<string, unknown>)).toEqual(['name']);
     expect(JSON.stringify(outbound)).not.toMatch(/method|route|payload|native/);
 
     streams.output.emit('data', readyFrame());
     streams.output.emit('data', succeededOutcome(outbound.id, { result: { outcome: 'installed' } }));
 
-    await expect(install).resolves.toEqual({
+    await expect(prepare).resolves.toEqual({
       kind: 'succeeded',
       result: { result: { outcome: 'installed' } },
     });
   });
 
-  it('rejects toolchain install-uv input and extra fields before writing', async () => {
+  it('rejects toolchain prepare input and extra fields before writing', async () => {
     const { client, streams } = createClient();
     const invalidCommands = [
-      { name: 'openclaw.toolchain.install-uv', input: {} },
-      { name: 'openclaw.toolchain.install-uv', extra: true },
+      { name: 'host.toolchain.prepare', input: {} },
+      { name: 'host.toolchain.prepare', extra: true },
     ];
 
     for (const command of invalidCommands) {
@@ -767,7 +767,7 @@ describe('runtime-host framed control client', () => {
     expect(streams.writes).toHaveLength(0);
   });
 
-  it('classifies toolchain install-uv write failure, timeout, and disconnect as unknown delivery', async () => {
+  it('classifies toolchain prepare write failure, timeout, and disconnect as unknown delivery', async () => {
     const failedWrite = new ControlStreams();
     failedWrite.input.write = (chunk, callback) => {
       failedWrite.writes.push(Buffer.from(chunk));
@@ -779,7 +779,7 @@ describe('runtime-host framed control client', () => {
       stdout: failedWrite.output,
     });
 
-    await expect(failedWriteClient.command({ name: 'openclaw.toolchain.install-uv' })).rejects.toMatchObject({
+    await expect(failedWriteClient.command({ name: 'host.toolchain.prepare' })).rejects.toMatchObject({
       kind: 'write-failed',
       delivery: 'unknown-delivery',
       retryable: false,
@@ -788,8 +788,8 @@ describe('runtime-host framed control client', () => {
     vi.useFakeTimers();
     try {
       const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const install = timedOut.client.command({ name: 'openclaw.toolchain.install-uv' });
-      const assertion = expect(install).rejects.toMatchObject({
+      const prepare = timedOut.client.command({ name: 'host.toolchain.prepare' });
+      const assertion = expect(prepare).rejects.toMatchObject({
         kind: 'timeout-exceeded',
         delivery: 'unknown-delivery',
       } satisfies Partial<RuntimeHostControlError>);
@@ -800,9 +800,9 @@ describe('runtime-host framed control client', () => {
     }
 
     const disconnected = createClient();
-    const install = disconnected.client.command({ name: 'openclaw.toolchain.install-uv' });
+    const prepare = disconnected.client.command({ name: 'host.toolchain.prepare' });
     disconnected.streams.output.emit('close');
-    await expect(install).rejects.toMatchObject({
+    await expect(prepare).rejects.toMatchObject({
       kind: 'disconnected',
       delivery: 'unknown-delivery',
     } satisfies Partial<RuntimeHostControlError>);

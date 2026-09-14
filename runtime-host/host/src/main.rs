@@ -46,7 +46,6 @@ async fn run() -> Result<(), Error> {
         channel_control_transport_port: parts.channel_control_transport_port,
         channel_pairing_transport_port: parts.channel_pairing_transport_port,
         session_model_selection_transport_port: parts.session_model_selection_transport_port,
-        openclaw_history_transport_port: parts.openclaw_history_transport_port,
         matcha_history_transport_port: parts.matcha_history_transport_port,
         usage_transport_port: parts.usage_transport_port,
         diagnostics_transport_port: parts.diagnostics_transport_port,

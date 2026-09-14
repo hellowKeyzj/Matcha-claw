@@ -10,6 +10,7 @@ import {
 } from './store-state-helpers';
 
 const EMPTY_CHAT_SESSIONS: ChatSession[] = [];
+const WORKING_DIRECTORY_TITLE_PREFIX = '[Working directory:';
 
 let cachedReadSessionsLoadedSessions: ChatStoreState['loadedSessions'] | null = null;
 let cachedReadSessionsResult: ChatSession[] = EMPTY_CHAT_SESSIONS;
@@ -21,6 +22,29 @@ function normalizeSessionLabel(value: string | null | undefined): string | null 
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+export function stripAutomaticWorkingDirectoryTitlePrefix(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(WORKING_DIRECTORY_TITLE_PREFIX)) {
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  const envelopeEnd = trimmed.indexOf(']');
+  if (envelopeEnd < 0) {
+    return null;
+  }
+
+  const rest = trimmed.slice(envelopeEnd + 1).trim();
+  if (!rest || rest === '…' || rest === '...') {
+    return null;
+  }
+  return rest;
+}
+
+export function normalizeAutomaticSessionTitle(value: string | null | undefined): string | null {
+  const normalized = normalizeSessionLabel(value);
+  return normalized ? stripAutomaticWorkingDirectoryTitlePrefix(normalized) : null;
 }
 
 export interface SessionCatalogStatusShell {
@@ -51,19 +75,26 @@ export function resolveSessionListLabel(
   fallbackLabel?: string | null,
 ): string | null {
   const meta = getSessionMeta(state, sessionKey);
-  const explicit = normalizeSessionLabel(meta.label ?? fallbackLabel);
+  const explicit = meta.manualLabel === true || meta.titleSource === 'user'
+    ? normalizeSessionLabel(meta.label ?? fallbackLabel)
+    : null;
   if (explicit) {
     return explicit;
   }
-  const displayName = normalizeSessionLabel(meta.displayName);
+  const automaticLabel = normalizeAutomaticSessionTitle(meta.label ?? fallbackLabel);
+  if (automaticLabel) {
+    return automaticLabel;
+  }
+  const displayName = normalizeAutomaticSessionTitle(meta.displayName);
   if (displayName && displayName !== sessionKey) {
     return displayName;
   }
   const items = getSessionItems(state, sessionKey);
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (item?.kind === 'user-message' && normalizeSessionLabel(item.text)) {
-      return normalizeSessionLabel(item.text);
+    const title = item?.kind === 'user-message' ? normalizeAutomaticSessionTitle(item.text) : null;
+    if (title) {
+      return title;
     }
   }
   return null;
@@ -119,6 +150,9 @@ export function readSessionsFromState(
       continue;
     }
     const agentId = meta.agentId ?? meta.sessionIdentity.agentId;
+    const label = meta.manualLabel === true || meta.titleSource === 'user'
+      ? normalizeSessionLabel(meta.label)
+      : normalizeAutomaticSessionTitle(meta.label);
     const nextSession = {
       key: sessionKey,
       ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
@@ -128,9 +162,9 @@ export function readSessionsFromState(
       sessionIdentity: meta.sessionIdentity,
       kind: meta.kind ?? undefined,
       preferred: meta.preferred,
-      label: normalizeSessionLabel(meta.label) ?? undefined,
+      label: label ?? undefined,
       titleSource: meta.titleSource,
-      displayName: normalizeSessionLabel(meta.displayName) ?? sessionKey,
+      displayName: normalizeAutomaticSessionTitle(meta.displayName) ?? sessionKey,
       thinkingLevel: meta.thinkingLevel ?? undefined,
       model: normalizeSessionLabel(meta.model) ?? undefined,
       contextTokens: state.loadedSessions[sessionKey]?.contextTokens,

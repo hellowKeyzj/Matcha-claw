@@ -10,10 +10,10 @@ use environment::{ProviderCascade, migrate_provider_legacy_stores};
 use foundation::{
     execution::{ObservationSink, OwnedTask, OwnerRuntimeSystem},
     process::supervision::SupervisorSnapshot,
-    toolchain::NativeToolchainRuntime,
 };
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::gateway::auth::GatewaySecret;
+use toolchain::NativeToolchain;
 
 use crate::diagnostics::{
     DiagnosticsArchiveError, DiagnosticsArchiveProducer, DiagnosticsArchiveRoot, HostState,
@@ -78,6 +78,7 @@ pub struct HostHandles {
     pub fleet: FleetHandle,
     pub organization: crate::organization::OrganizationHandle,
     pub platform_runtime: crate::facade::PlatformRuntimeHandle,
+    pub toolchain: crate::facade::ToolchainHandle,
     pub platform_tools: crate::facade::PlatformToolsHandle,
     pub plugins: crate::facade::PluginsHandle,
     pub skills: crate::facade::SkillsHandle,
@@ -193,13 +194,16 @@ impl Host {
         let runtime_state_dir = input.runtime_state_dir;
         let runtime_observation = RuntimeFlightRecorder::new(input.runtime_observation);
         #[cfg(windows)]
-        let toolchain = NativeToolchainRuntime::local(input.open_claw.working_directory.clone());
+        let toolchain = NativeToolchain::local(input.open_claw.working_directory.clone());
         #[cfg(unix)]
-        let toolchain = NativeToolchainRuntime::local(
+        let toolchain = NativeToolchain::local(
             input.open_claw.working_directory.clone(),
             input.open_claw.guardian_executable.clone(),
         );
         let mut openclaw_input = input.open_claw;
+        let runtime_host_mcp_executable = openclaw_input.team_run_mcp_executable.clone();
+        let team_run_mcp_state_dir = openclaw_input.team_run_mcp_state_dir.clone();
+        let sealed_runtime_token = openclaw_input.sealed_token.clone().map(Arc::<str>::from);
         openclaw_input.report_diagnostic = report_openclaw_diagnostic;
         let open_claw = OpenClawInstance::prepare(
             openclaw_input,
@@ -208,11 +212,33 @@ impl Host {
         )
         .map_err(ConstructionError::OpenClaw)?;
         fs::create_dir_all(&runtime_state_dir).map_err(|_| ConstructionError::RuntimeState)?;
+        let sealed_skill_private_root = runtime_state_dir
+            .parent()
+            .map(|root| root.join("runtime-local").join("sealed-skills"))
+            .ok_or(ConstructionError::SealedSkills)?;
+        let sealed_skill_store = Arc::new(
+            crate::sealed_resource::SealedSkillStore::openclaw(
+                diagnostics_state_root.clone(),
+                sealed_skill_private_root,
+            )
+            .map_err(|_| ConstructionError::SealedSkills)?,
+        );
+        let sealed_agent_private_root = runtime_state_dir
+            .parent()
+            .map(|root| root.join("runtime-local").join("sealed-agents"))
+            .ok_or(ConstructionError::SealedAgents)?;
+        let sealed_agent_store = Arc::new(
+            crate::sealed_resource::SealedAgentStore::openclaw(
+                diagnostics_state_root.clone(),
+                sealed_agent_private_root,
+            )
+            .map_err(|_| ConstructionError::SealedAgents)?,
+        );
         let fleet_private_root_path = runtime_state_dir.join("fleet-private");
         let matcha = build_peer(
             input.matcha,
             input.matcha_secret,
-            toolchain,
+            Arc::clone(&toolchain),
             report_matcha_diagnostic,
         )
         .map_err(ConstructionError::Matcha)?;
@@ -277,7 +303,11 @@ impl Host {
             .open_claw_canonical()
             .expect("OpenClaw canonical event sink must be available during construction");
         let open_claw = open_claw
-            .into_instance(open_claw_event_sink, open_claw_canonical_sink)
+            .into_instance(
+                open_claw_event_sink,
+                open_claw_canonical_sink,
+                parent_callback.handle(),
+            )
             .map_err(ConstructionError::OpenClaw)?;
         let mut runtime_directory = crate::runtime_directory::RuntimeDriverDirectory::new();
         let open_claw = Arc::new(open_claw);
@@ -326,6 +356,8 @@ impl Host {
         let connector_owner = ConnectorOwner::new(ConnectorOwnerInput {
             state_dir: diagnostics_state_root.clone(),
             runtime_directory: Arc::clone(&runtime_directory),
+            runtime_host_mcp_executable,
+            team_run_mcp_state_dir,
         })
         .map_err(|_| ConstructionError::ExternalConnectors)?;
         let (connector_owner_handle, connector_task) = owner_runtime_system.spawn_owner(
@@ -358,7 +390,7 @@ impl Host {
             crate::provider::accounts::ProviderAccountsOwner::new(
                 crate::transport::provider_accounts::private_auth::Resolver::disabled(),
             ),
-            crate::provider::models::ProviderModelOwner::new(),
+            crate::provider::models::ProviderModelOwner::with_openclaw(Arc::clone(&open_claw)),
             crate::provider::routing::ProviderRoutingOwner::new(),
             Arc::clone(&runtime_directory),
         );
@@ -464,6 +496,8 @@ impl Host {
             Arc::clone(&admission),
             Arc::clone(&open_claw),
         );
+        let toolchain_handle =
+            crate::facade::ToolchainHandle::new(Arc::clone(&admission), Arc::clone(&toolchain));
         let platform_tools_handle =
             crate::facade::PlatformToolsHandle::new(Arc::clone(&admission), Arc::clone(&open_claw));
         let plugins_handle = crate::facade::PluginsHandle::new(
@@ -474,6 +508,8 @@ impl Host {
         let skills_handle = crate::facade::SkillsHandle::new(
             Arc::clone(&admission),
             Arc::clone(&runtime_directory),
+            sealed_skill_store,
+            sealed_runtime_token.clone(),
         );
         let cron_handle = crate::facade::CronHandle::new(
             Arc::clone(&admission),
@@ -485,6 +521,8 @@ impl Host {
         let agents_handle = crate::facade::AgentsHandle::new(
             Arc::clone(&admission),
             Arc::clone(&runtime_directory),
+            sealed_agent_store,
+            sealed_runtime_token,
         );
         let task_manager_handle = crate::facade::TaskManagerHandle::new(
             Arc::clone(&admission),
@@ -551,6 +589,7 @@ impl Host {
                 fleet: fleet_handle,
                 organization: handles_organization,
                 platform_runtime: platform_runtime_handle,
+                toolchain: toolchain_handle,
                 platform_tools: platform_tools_handle,
                 plugins: plugins_handle,
                 skills: skills_handle,
@@ -1066,6 +1105,8 @@ pub enum ConstructionError {
     Settings,
     Security,
     RuntimeState,
+    SealedSkills,
+    SealedAgents,
     Matcha(MatchaConstructionError),
     OpenClaw(OpenClawConstructionError),
 }
@@ -1099,6 +1140,12 @@ impl fmt::Display for ConstructionError {
             Self::RuntimeState => {
                 formatter.write_str("runtime state directory could not be provisioned")
             }
+            Self::SealedSkills => {
+                formatter.write_str("sealed skill store could not be constructed")
+            }
+            Self::SealedAgents => {
+                formatter.write_str("sealed agent store could not be constructed")
+            }
             Self::Matcha(error) => error.fmt(formatter),
             Self::OpenClaw(error) => error.fmt(formatter),
         }
@@ -1119,7 +1166,9 @@ impl std::error::Error for ConstructionError {
             | Self::Fleet
             | Self::Settings
             | Self::Security
-            | Self::RuntimeState => None,
+            | Self::RuntimeState
+            | Self::SealedSkills
+            | Self::SealedAgents => None,
             Self::Matcha(error) => Some(error),
             Self::OpenClaw(error) => Some(error),
         }

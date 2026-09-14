@@ -104,6 +104,17 @@ impl SessionAbortCommand {
             approval_ids,
         })
     }
+
+    pub(crate) fn with_endpoint_session_id(
+        mut self,
+        session_id: String,
+    ) -> Result<Self, InvalidCommand> {
+        if !valid_identity(&session_id, MAX_ENDPOINT_SESSION_ID_BYTES) {
+            return Err(InvalidCommand);
+        }
+        self.endpoint_session_id = Some(session_id);
+        Ok(self)
+    }
 }
 
 fn valid_identity(value: &str, max_bytes: usize) -> bool {

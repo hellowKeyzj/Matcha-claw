@@ -375,7 +375,7 @@ pub(super) mod tests {
             "runtime/agents/reviewer/sessions/sessions.json",
             "runtime/agents/reviewer/sessions/session-1.jsonl",
             "runtime/workspace/AGENTS.md",
-            "runtime/workspace-subagents/child/TOOLS.md",
+            "runtime/workspace-subagents/child/MEMORY.md",
             "runtime/executions/run-1/package-path.txt",
             "runtime/packages/team-reviewer/team.skill.json",
             "runtime/packages/team-reviewer/README.md",
@@ -758,8 +758,8 @@ pub(super) mod tests {
         write(&state_root.join("workspace/AGENTS.md"), b"agent charter");
         write(&state_root.join("workspace/notes.txt"), b"workspace-canary");
         write(
-            &state_root.join("workspace-subagents/child/TOOLS.md"),
-            b"subagent tools",
+            &state_root.join("workspace-subagents/child/MEMORY.md"),
+            b"subagent memory",
         );
         write(
             &state_root.join("executions/run-1/package-path.txt"),

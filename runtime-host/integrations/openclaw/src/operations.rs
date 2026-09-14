@@ -15,7 +15,10 @@ mod channel_identity;
 pub mod channel_login;
 pub mod channel_pairing;
 pub mod channel_status;
+pub mod plugin_refresh;
+pub mod provider_models;
 pub mod provider_native_config;
+pub mod weixin_login;
 
 use crate::gateway::{
     client::{GatewayClient, GatewayClientError},
@@ -26,6 +29,7 @@ use crate::gateway::{
 mod security_actions;
 pub mod security_audit;
 mod security_policy;
+pub mod settings_config;
 
 pub use security_actions::{SecurityActionEffect, SecurityActionsOperation};
 pub use security_policy::{

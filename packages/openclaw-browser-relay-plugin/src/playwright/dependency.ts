@@ -19,7 +19,7 @@ type PlaywrightPackageJson = {
 
 function resolveOpenClawRequire() {
   const entryCandidates = [
-    'openclaw/plugin-sdk',
+    'openclaw/plugin-sdk/plugin-entry',
     'openclaw',
   ]
 

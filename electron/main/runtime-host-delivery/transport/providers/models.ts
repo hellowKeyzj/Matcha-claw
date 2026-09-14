@@ -1,3 +1,4 @@
+import { logger } from '../../../../utils/logger';
 import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
 import {
   decodeProviderMutationCommittedResponse,
@@ -47,6 +48,14 @@ type ModelDraft = Readonly<{
   quality?: string;
 }>;
 
+type DiscoverRequest = Readonly<{
+  id: 'provider.models';
+  operationId: 'providerModels.discover';
+  scope: Readonly<{ kind: 'provider-model-catalog' }>;
+  target: Readonly<{ kind: 'provider-models' }>;
+  input: Readonly<{ kind: 'discover'; accountId: string }>;
+}>;
+
 type ReplaceRequest = Readonly<{
   id: 'provider.models';
   operationId: 'providerModels.replace';
@@ -74,16 +83,18 @@ export type SelectableProviderModel = ProviderModel & Readonly<{
 }>;
 
 type ListResponse = Readonly<{ models: ProviderModel[] }>;
+type DiscoverResponse = Readonly<{ models: ModelDraft[] }>;
 type SelectableResponse = Readonly<{ models: SelectableProviderModel[] }>;
 type ReplaceResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
 
 export type ProviderModelsTransportResponse = Readonly<{
   status: 200 | 400 | 409 | 422 | 503;
-  body: ListResponse | SelectableResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE;
+  body: ListResponse | DiscoverResponse | SelectableResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE;
 }>;
 
 export interface ProviderModelsTransport {
   read(): Promise<ProviderModelsTransportResponse>;
+  discover(accountId: string): Promise<ProviderModelsTransportResponse>;
   readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse>;
   execute(request: unknown): Promise<ProviderModelsTransportResponse>;
 }
@@ -120,6 +131,58 @@ export function createProviderModelsTransport(
         if (response.status === 422) return { status: 422, body: REJECTED };
       } catch {
         // Public delivery deliberately redacts loopback and host failures.
+      }
+      return { status: 503, body: UNAVAILABLE };
+    },
+
+    async discover(accountId: string): Promise<ProviderModelsTransportResponse> {
+      const request: DiscoverRequest = {
+        id: 'provider.models',
+        operationId: 'providerModels.discover',
+        scope: { kind: 'provider-model-catalog' },
+        target: { kind: 'provider-models' },
+        input: { kind: 'discover', accountId },
+      };
+      if (!isDiscoverRequest(request)) return { status: 400, body: INVALID_REQUEST };
+      const startedAt = Date.now();
+      let stage: 'request' | 'response-json' | 'response-validation' = 'request';
+      let status: number | null = null;
+      logger.info('[ProviderModels] discover start');
+      try {
+        const response = await fetcher(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${issuer.signDecision({
+              principal: 'electron-main-local',
+              endpoint: ENDPOINT,
+              scope: 'providers:models',
+              capability: 'providerModels.discover',
+              subject: 'provider-models',
+              expiresAt: Date.now() + DECISION_TTL_MS,
+              revision: '1',
+            })}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(request),
+        });
+        status = response.status;
+        stage = 'response-json';
+        const body: unknown = await response.json();
+        stage = 'response-validation';
+        if (response.status === 200 && isDiscoverResponse(body)) {
+          logger.info('[ProviderModels] discover result', { status, elapsedMs: Date.now() - startedAt });
+          return { status: 200, body };
+        }
+        logger.warn('[ProviderModels] discover result', {
+          stage,
+          status,
+          elapsedMs: Date.now() - startedAt,
+          reason: response.status === 200 ? 'invalid-response' : 'http-error',
+        });
+        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
+        if (response.status === 422) return { status: 422, body: REJECTED };
+      } catch {
+        logger.warn('[ProviderModels] discover error', { stage, status, elapsedMs: Date.now() - startedAt });
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -209,17 +272,8 @@ export function createProviderModelsTransport(
 }
 
 function isRequest(value: unknown): value is ReplaceRequest {
-  return isRecord(value)
-    && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
-    && value.id === 'provider.models'
+  return isProviderModelsRequestBase(value)
     && value.operationId === 'providerModels.replace'
-    && isRecord(value.scope)
-    && hasExactKeys(value.scope, ['kind'])
-    && value.scope.kind === 'provider-model-catalog'
-    && isRecord(value.target)
-    && hasExactKeys(value.target, ['kind'])
-    && value.target.kind === 'provider-models'
-    && isRecord(value.input)
     && hasExactKeys(value.input, ['kind', 'accountId', 'models'])
     && value.input.kind === 'replace'
     && isIdentifier(value.input.accountId)
@@ -227,11 +281,49 @@ function isRequest(value: unknown): value is ReplaceRequest {
     && value.input.models.every(isModelDraft);
 }
 
+function isDiscoverRequest(value: unknown): value is DiscoverRequest {
+  return isProviderModelsRequestBase(value)
+    && value.operationId === 'providerModels.discover'
+    && isDiscoverInput(value.input);
+}
+
+function isProviderModelsRequestBase(value: unknown): value is Readonly<{
+  id: 'provider.models';
+  operationId: unknown;
+  scope: Record<string, unknown>;
+  target: Record<string, unknown>;
+  input: Record<string, unknown>;
+}> {
+  return isRecord(value)
+    && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    && value.id === 'provider.models'
+    && isRecord(value.scope)
+    && hasExactKeys(value.scope, ['kind'])
+    && value.scope.kind === 'provider-model-catalog'
+    && isRecord(value.target)
+    && hasExactKeys(value.target, ['kind'])
+    && value.target.kind === 'provider-models'
+    && isRecord(value.input);
+}
+
+function isDiscoverInput(value: Record<string, unknown>): value is DiscoverRequest['input'] {
+  return hasExactKeys(value, ['kind', 'accountId'])
+    && value.kind === 'discover'
+    && isIdentifier(value.accountId);
+}
+
 function isListResponse(value: unknown): value is ListResponse {
   return isRecord(value)
     && hasExactKeys(value, ['models'])
     && Array.isArray(value.models)
     && value.models.every(isProviderModel);
+}
+
+function isDiscoverResponse(value: unknown): value is DiscoverResponse {
+  return isRecord(value)
+    && hasExactKeys(value, ['models'])
+    && Array.isArray(value.models)
+    && value.models.every(isModelDraft);
 }
 
 function isSelectableResponse(value: unknown): value is SelectableResponse {
@@ -296,6 +388,10 @@ function isModelDraft(value: unknown): value is ModelDraft {
     && optionalText(value.aspectRatio)
     && optionalText(value.resolution)
     && optionalText(value.quality);
+}
+
+export function isProviderModelAccountIdentifier(value: unknown): value is string {
+  return isIdentifier(value);
 }
 
 export function isProviderModelCapability(value: unknown): value is ProviderModelCapability {

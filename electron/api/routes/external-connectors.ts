@@ -16,6 +16,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.catalog'
   | 'externalConnectors.status'
   | 'externalConnectors.sessionStatus'
+  | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.probe'
   | 'externalConnectors.get'
   | 'externalConnectors.upsert'
@@ -37,6 +38,25 @@ export async function handleExternalConnectorsRoutes(
     await deliver(transport, res, createRequest('externalConnectors.sessionStatus', {
       kind: 'sessionStatus',
       sessionIdentity: body.sessionIdentity,
+    }));
+    return true;
+  }
+
+  if (url.pathname === '/api/external-connectors/session-mcp-server-enabled' && req.method === 'POST') {
+    const body = await parseLegacyBody(req, res);
+    if (!body) return true;
+    if (!hasExactKeys(body, ['sessionIdentity', 'serverId', 'enabled'])
+      || validateSessionIdentity(body.sessionIdentity)
+      || !isConnectorId(body.serverId)
+      || typeof body.enabled !== 'boolean') {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(transport, res, createRequest('externalConnectors.sessionMcpServerEnabled', {
+      kind: 'sessionMcpServerEnabled',
+      sessionIdentity: body.sessionIdentity,
+      serverId: body.serverId,
+      enabled: body.enabled,
     }));
     return true;
   }

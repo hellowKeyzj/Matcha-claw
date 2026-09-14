@@ -48,7 +48,7 @@ describe('channel credentials Host API route', () => {
     expect(validate).toHaveBeenCalledWith({
       channelType: 'discord',
       config: { token: SYNTHETIC_TOKEN },
-    });
+    }, undefined);
     expect(result.state).toEqual({
       statusCode: 200,
       body: {
@@ -72,7 +72,7 @@ describe('channel credentials Host API route', () => {
       { validate },
     )).resolves.toBe(true);
 
-    expect(validate).toHaveBeenCalledWith({ channelType: 'discord', config: { token: SYNTHETIC_TOKEN } });
+    expect(validate).toHaveBeenCalledWith({ channelType: 'discord', config: { token: SYNTHETIC_TOKEN } }, undefined);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true, valid: true, errors: [], warnings: [] } });
   });
 

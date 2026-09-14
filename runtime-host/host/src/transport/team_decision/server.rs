@@ -268,20 +268,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deadline_is_an_explicit_unknown_success() {
+    fn deadline_is_an_explicit_unknown_failure() {
         let response = Response::deadline();
 
-        assert_eq!(response.status, 200);
+        assert_eq!(response.status, 409);
         assert_eq!(
             response.body,
             serde_json::json!({
-                "success": true,
+                "success": false,
                 "outcome": "outcome-unknown",
+                "error": "Team human decision outcome is unknown",
             })
         );
         assert_eq!(Delivery::Recorded.status_code(), 200);
         assert_eq!(Delivery::Replayed.status_code(), 200);
-        assert_eq!(Delivery::OutcomeUnknown.status_code(), 200);
+        assert_eq!(Delivery::OutcomeUnknown.status_code(), 409);
         assert_eq!(Delivery::Rejected.status_code(), 409);
     }
 

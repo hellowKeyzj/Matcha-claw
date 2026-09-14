@@ -14,6 +14,10 @@ export interface SkillMissingRequirements {
   os?: string[];
 }
 
+export type SkillMissingCategory = 'binaries' | 'anyBinaries' | 'environment' | 'configuration' | 'operatingSystem';
+
+export type SkillUnavailableReason = 'disabled' | 'missingRequirements' | 'ineligible';
+
 export interface Skill {
   id: string;
   slug?: string;
@@ -28,9 +32,10 @@ export interface Skill {
   isCore?: boolean;
   isBundled?: boolean;
   dependencies?: string[];
-  installed: boolean;
+  selectable?: boolean;
   eligible?: boolean;
-  blockedByAllowlist?: boolean;
+  unavailableReason?: SkillUnavailableReason | null;
+  missingCategories?: SkillMissingCategory[];
   missing?: SkillMissingRequirements;
   source?: string;
   baseDir?: string;
@@ -63,6 +68,32 @@ export interface MarketplaceSkill {
   author?: string;
   downloads?: number;
   stars?: number;
+}
+
+export interface SealedSkillMetadata {
+  skillKey: string;
+  name: string;
+  description: string;
+  enabled?: boolean;
+  installed?: boolean;
+  version?: string;
+  source?: string;
+  runtimes?: string[];
+}
+
+export interface SealedSkillCloudPackage {
+  packageId?: string;
+  packageVersionId?: string;
+  packageType?: string;
+  skillKey?: string;
+  name?: string;
+  description?: string;
+  version?: string;
+  fileName?: string;
+  size?: number;
+  uploadedAtMs?: number;
+  installed?: boolean;
+  downloadable?: boolean;
 }
 
 /**

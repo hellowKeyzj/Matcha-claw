@@ -398,9 +398,20 @@ export class PlaywrightActions {
     return await evaluateFunctionOnPage(page, fnBody, timeoutMs)
   }
 
-  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; selector?: string; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[] }): Promise<void> {
+  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; selector?: string; x?: number; y?: number; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[]; delayMs?: number }): Promise<void> {
     const page = await this.session.getPageForTargetId(input)
     this.session.ensurePageState(page)
+
+    const x = typeof input.x === 'number' && Number.isFinite(input.x) ? input.x : undefined
+    const y = typeof input.y === 'number' && Number.isFinite(input.y) ? input.y : undefined
+    if (x !== undefined && y !== undefined) {
+      if (input.doubleClick) {
+        await page.mouse.dblclick(x, y, { button: input.button, delay: input.delayMs })
+      } else {
+        await page.mouse.click(x, y, { button: input.button, delay: input.delayMs })
+      }
+      return
+    }
 
     const selector = input.selector?.trim()
     const ref = input.ref?.trim()

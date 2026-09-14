@@ -3,7 +3,8 @@ import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery
 import type { RuntimeHostApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
-const TOOLCHAIN_UNAVAILABLE = 'Toolchain status is unavailable';
+const TOOLCHAIN_UNAVAILABLE = { success: false, error: 'Toolchain is unavailable' } as const;
+const TOOLCHAIN_PREPARE_TIMEOUT_MS = 120_000;
 
 export async function handleToolchainRoutes(
   req: IncomingMessage,
@@ -11,35 +12,69 @@ export async function handleToolchainRoutes(
   url: URL,
   ctx: RuntimeHostApiContext,
 ): Promise<boolean> {
-  if (url.pathname !== '/api/toolchain/uv/check' || req.method !== 'GET') {
-    return false;
+  if (url.pathname === '/api/toolchain/uv/check' && req.method === 'GET') {
+    try {
+      const response = projectToolchainStatusOutcome(
+        await ctx.runtimeHost.command({ name: 'host.toolchain.status' }),
+      );
+      sendJson(res, response.status, response.body);
+    } catch {
+      sendJson(res, 503, TOOLCHAIN_UNAVAILABLE);
+    }
+    return true;
   }
 
-  try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.toolchain.status' });
-    const installed = readUvAvailability(outcome);
-    if (installed === null) {
-      sendJson(res, 503, { success: false, error: TOOLCHAIN_UNAVAILABLE });
-      return true;
+  if (url.pathname === '/api/toolchain/uv/prepare' && req.method === 'POST') {
+    try {
+      const response = projectToolchainPrepareOutcome(
+        await ctx.runtimeHost.command({ name: 'host.toolchain.prepare' }, { timeoutMs: TOOLCHAIN_PREPARE_TIMEOUT_MS }),
+      );
+      sendJson(res, response.status, response.body);
+    } catch {
+      sendJson(res, 503, TOOLCHAIN_UNAVAILABLE);
     }
-    sendJson(res, 200, installed);
-  } catch {
-    sendJson(res, 503, { success: false, error: TOOLCHAIN_UNAVAILABLE });
+    return true;
   }
-  return true;
+
+  return false;
 }
 
-function readUvAvailability(outcome: RuntimeHostControlOutcome): boolean | null {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) return null;
+function projectToolchainStatusOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
+  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
   const result = outcome.result.result;
-  if (!isRecord(result) || !hasExactKeys(result, ['uv', 'python'])) return null;
+  if (!isRecord(result) || !hasExactKeys(result, ['uv', 'python'])) {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
   if (!['available', 'unavailable'].includes(String(result.uv))) {
-    return null;
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
   if (!['ready', 'notReady', 'unknown', 'unavailable', 'unsupported'].includes(String(result.python))) {
-    return null;
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-  return result.uv === 'available';
+  return { status: 200, body: { installed: result.uv === 'available' } };
+}
+
+function projectToolchainPrepareOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
+  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
+  const result = outcome.result.result;
+  if (!isRecord(result) || !hasExactKeys(result, ['outcome'])) {
+    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
+  switch (result.outcome) {
+    case 'ready':
+    case 'installed':
+      return { status: 200, body: { success: true, outcome: result.outcome } };
+    case 'rejected':
+      return { status: 409, body: { success: false, error: 'Toolchain preparation was rejected' } };
+    case 'unknown':
+      return { status: 503, body: { success: false, error: 'Toolchain preparation outcome is unknown' } };
+    default:
+      return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

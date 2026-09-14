@@ -433,7 +433,6 @@ enum ChannelCredentialsExecution {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ValidationWire {
     status: ValidationWireStatus,
 }
@@ -608,20 +607,42 @@ mod tests {
     fn wire_projection_distinguishes_valid_invalid_rejected_and_unknown() {
         let valid = NativeOutput {
             status: exit_status(0),
-            stdout: serde_json::to_vec(&json!({"status":"valid"})).unwrap(),
+            stdout: serde_json::to_vec(&json!({
+                "status": "valid",
+                "native": {"token": "native-secret"},
+                "private": "private-secret",
+                "raw": "raw-secret"
+            }))
+            .unwrap(),
         };
-        assert!(matches!(
+        assert_eq!(
             decode_output(valid),
-            ChannelCredentialsEffect::Validated(ChannelCredentialsValidation { valid: true, .. })
-        ));
+            ChannelCredentialsEffect::Validated(ChannelCredentialsValidation {
+                valid: true,
+                errors: Vec::new(),
+                warnings: Vec::new(),
+                details: None,
+            })
+        );
         let invalid = NativeOutput {
             status: exit_status(0),
-            stdout: serde_json::to_vec(&json!({"status":"invalid"})).unwrap(),
+            stdout: serde_json::to_vec(&json!({
+                "status": "invalid",
+                "native": {"token": "native-secret"},
+                "private": "private-secret",
+                "raw": "raw-secret"
+            }))
+            .unwrap(),
         };
-        assert!(matches!(
+        assert_eq!(
             decode_output(invalid),
-            ChannelCredentialsEffect::Validated(ChannelCredentialsValidation { valid: false, .. })
-        ));
+            ChannelCredentialsEffect::Validated(ChannelCredentialsValidation {
+                valid: false,
+                errors: vec![String::from("The provider rejected these credentials.")],
+                warnings: Vec::new(),
+                details: None,
+            })
+        );
         let rejected = NativeOutput {
             status: exit_status(2),
             stdout: serde_json::to_vec(&json!({"status":"rejected"})).unwrap(),
@@ -641,12 +662,13 @@ mod tests {
     fn malformed_or_ambiguous_wire_is_unknown() {
         for stdout in [
             br#"{}"#.to_vec(),
-            br#"{"status":"valid","secret":"leak"}"#.to_vec(),
+            br#"{"status":"valid"}"#.to_vec(),
+            br#"{"status":"unexpected"}"#.to_vec(),
             br#"not-json"#.to_vec(),
         ] {
             assert_eq!(
                 decode_output(NativeOutput {
-                    status: exit_status(0),
+                    status: exit_status(1),
                     stdout,
                 }),
                 ChannelCredentialsEffect::OutcomeUnknown

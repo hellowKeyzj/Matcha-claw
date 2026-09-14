@@ -52,17 +52,34 @@ describe('Electron Main Team role-chat transport', () => {
     });
   });
 
-  it('preserves rejected and unknown outcomes without private receipts or retries', async () => {
-    for (const outcome of ['rejected', 'outcome-unknown'] as const) {
-      const fetcher = vi.fn().mockResolvedValue(response(200, { success: true, outcome }));
-      const transport = createTeamRoleChatTransport(issuer(), 32_138, fetcher as never);
+  it('preserves rejected without private receipts or retries', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response(200, { success: true, outcome: 'rejected' }));
+    const transport = createTeamRoleChatTransport(issuer(), 32_138, fetcher as never);
 
-      await expect(transport.submit(request)).resolves.toEqual({
-        status: 200,
-        body: { success: true, outcome },
-      });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-    }
+    await expect(transport.submit(request)).resolves.toEqual({
+      status: 200,
+      body: { success: true, outcome: 'rejected' },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves unknown as a non-success outcome without retrying', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response(409, {
+      success: false,
+      outcome: 'outcome-unknown',
+      error: 'Team role chat outcome is unknown',
+    }));
+    const transport = createTeamRoleChatTransport(issuer(), 32_138, fetcher as never);
+
+    await expect(transport.submit(request)).resolves.toEqual({
+      status: 409,
+      body: {
+        success: false,
+        outcome: 'outcome-unknown',
+        error: 'Team role chat outcome is unknown',
+      },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('rejects unknown fields and oversized messages before Rust delivery', async () => {

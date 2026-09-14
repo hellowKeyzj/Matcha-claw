@@ -8,6 +8,9 @@ const UNAVAILABLE = {
 
 type PairingRequest = Readonly<{
   id: string;
+  createdAt?: string;
+  lastSeenAt?: string;
+  meta?: Readonly<{ accountId: string }>;
   status: 'pending' | 'unknown';
 }>;
 
@@ -22,7 +25,7 @@ export type ChannelPairingTransportResponse = Readonly<{
 }>;
 
 export interface ChannelPairingTransport {
-  list(channel: string): Promise<ChannelPairingTransportResponse>;
+  list(channel: string, accountId?: string): Promise<ChannelPairingTransportResponse>;
   approve(input: Readonly<{ channel: string; accountId?: string; code: string }>): Promise<ChannelPairingApprovalResponse>;
 }
 
@@ -33,13 +36,16 @@ export function createChannelPairingTransport(
 ): ChannelPairingTransport {
   const url = `http://127.0.0.1:${port}/api/channels/pairing`;
   return {
-    async list(channel: string): Promise<ChannelPairingTransportResponse> {
-      if (!isIdentity(channel)) return { status: 400, body: UNAVAILABLE };
+    async list(channel: string, accountId?: string): Promise<ChannelPairingTransportResponse> {
+      if (!isIdentity(channel) || (accountId !== undefined && !isIdentity(accountId))) return { status: 400, body: UNAVAILABLE };
       try {
         const response = await fetcher(url, {
           method: 'POST',
           headers: signedHeaders(issuer, 'channels:read', 'channels.pairing.list'),
-          body: JSON.stringify({ channel }),
+          body: JSON.stringify({
+            channel,
+            ...(accountId ? { accountId } : {}),
+          }),
         });
         const body: unknown = await response.json();
         if (response.status === 200 && isPairingList(body)) return { status: 200, body };
@@ -118,10 +124,21 @@ function isPairingList(value: unknown): value is Readonly<{ requests: readonly P
 function isPairingRequest(value: unknown): value is PairingRequest {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const request = value as Record<string, unknown>;
-  return Object.keys(request).length === 2
+  return Object.keys(request).every((key) => key === 'id' || key === 'createdAt' || key === 'lastSeenAt' || key === 'meta' || key === 'status')
     && typeof request.id === 'string'
     && request.id.length > 0
+    && (request.createdAt === undefined || typeof request.createdAt === 'string')
+    && (request.lastSeenAt === undefined || typeof request.lastSeenAt === 'string')
+    && (request.meta === undefined || isPairingRequestMeta(request.meta))
     && (request.status === 'pending' || request.status === 'unknown');
+}
+
+function isPairingRequestMeta(value: unknown): value is Readonly<{ accountId: string }> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const meta = value as Record<string, unknown>;
+  return Object.keys(meta).length === 1
+    && typeof meta.accountId === 'string'
+    && meta.accountId.length > 0;
 }
 
 function isApprovalResponse(value: unknown): value is Readonly<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }> {

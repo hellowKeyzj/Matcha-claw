@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -145,7 +145,7 @@ const CONTROL_SCOPES: [&str; 4] = [
     "operator.admin",
     "operator.approvals",
 ];
-const CONTROL_CAPS: [&str; 1] = ["tool-events"];
+const CONTROL_CAPS: [&str; 2] = ["agent-kind", "tool-events"];
 const CONTROL_EVENTS: [&str; 1] = ["tick"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,7 +153,6 @@ struct GatewayControlProfile {
     instance_id: String,
     scopes: Vec<&'static str>,
     capabilities: Vec<&'static str>,
-    device_connect: GatewayDeviceConnectSupport,
 }
 
 impl GatewayControlProfile {
@@ -162,7 +161,6 @@ impl GatewayControlProfile {
             instance_id,
             scopes: CONTROL_SCOPES.to_vec(),
             capabilities: CONTROL_METHODS.to_vec(),
-            device_connect: GatewayDeviceConnectSupport::AcceptsDeviceTokens,
         }
     }
 
@@ -181,15 +179,6 @@ impl GatewayControlProfile {
     fn caps(&self) -> &[&str] {
         &CONTROL_CAPS
     }
-
-    fn device_connect(&self) -> GatewayDeviceConnectSupport {
-        self.device_connect
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GatewayDeviceConnectSupport {
-    AcceptsDeviceTokens,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -647,12 +636,9 @@ impl GatewayClient {
         let (socket, hello) = self
             .connect_with_hello(self.control_profile.scopes())
             .await?;
-        if hello.server.version == wire::OPENCLAW_GATEWAY_VERSION
-            && has_methods(&hello.features.methods, self.control_profile.capabilities())
+        if has_methods(&hello.features.methods, self.control_profile.capabilities())
             && has_events(&hello.features.events, &CONTROL_EVENTS)
             && grants_requested_scopes(&hello.auth.scopes, self.control_profile.scopes())
-            && self.control_profile.device_connect()
-                == GatewayDeviceConnectSupport::AcceptsDeviceTokens
         {
             Ok((socket, hello))
         } else {
@@ -726,9 +712,7 @@ impl GatewayClient {
     pub(crate) async fn observe_mcp_server_status(
         &self,
         session_key: String,
-        endpoint_session_id: Option<String>,
     ) -> Result<wire::McpServerStatusList, GatewayClientError> {
-        let session_key = resolve_mcp_status_session_key(session_key, endpoint_session_id)?;
         let mut cursor = None;
         let mut seen_cursors = HashSet::new();
         let mut servers = Vec::new();
@@ -755,6 +739,25 @@ impl GatewayClient {
             servers,
             next_cursor: None,
         })
+    }
+
+    pub(crate) async fn set_mcp_session_server_enabled(
+        &self,
+        session_key: String,
+        server_name: String,
+        enabled: bool,
+    ) -> Result<(), GatewayClientError> {
+        self.run_gateway_query(
+            wire::mcp_session_servers_update_request(
+                next_request_id("mcp-update"),
+                session_key,
+                server_name,
+                enabled,
+            )
+            .map_err(|_| GatewayClientError::Protocol)?,
+            wire::decode_mcp_session_servers_update,
+        )
+        .await
     }
 
     pub(crate) async fn tail_logs(
@@ -864,8 +867,7 @@ impl GatewayClient {
         events: &[&str],
     ) -> Result<GatewaySocket, GatewayClientError> {
         let (socket, hello) = self.connect_with_hello(scopes).await?;
-        if hello.server.version == wire::OPENCLAW_GATEWAY_VERSION
-            && has_methods(&hello.features.methods, methods)
+        if has_methods(&hello.features.methods, methods)
             && has_events(&hello.features.events, events)
         {
             Ok(socket)
@@ -1013,7 +1015,7 @@ impl GatewayClient {
             .map(|scope| (*scope).to_owned())
             .collect::<Vec<_>>();
         let device = if let Some(state_dir) = &self.state_dir {
-            let signed_at_ms = now_millis();
+            let signed_at_ms = challenge.timestamp_ms;
             let identity = load_or_create_device_identity(state_dir, signed_at_ms)
                 .map_err(|_| GatewayClientError::Authentication)?;
             let signed = self
@@ -1110,13 +1112,15 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 7] = [
+const CONTROL_METHODS: [&str; 9] = [
     "status",
     "config.get",
     "config.patch",
     "config.apply",
+    "plugins.refresh",
     "agents.list",
     "skills.status",
+    "channels.pairing.list",
     wire::SYSTEM_PRESENCE_METHOD,
 ];
 
@@ -1196,14 +1200,6 @@ async fn http_status(url: String) -> Option<u16> {
 
 fn handshake_deadline(started_at: Instant) -> Instant {
     started_at + HANDSHAKE_DEADLINE
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-        .unwrap_or(u64::MAX)
 }
 
 impl fmt::Debug for GatewayClient {
@@ -1361,16 +1357,6 @@ async fn close_quietly(socket: &mut GatewaySocket) {
 
 async fn close_with_deadline(close: impl Future) {
     let _ = timeout(CLOSE_DEADLINE, close).await;
-}
-
-fn resolve_mcp_status_session_key(
-    session_key: String,
-    _endpoint_session_id: Option<String>,
-) -> Result<String, GatewayClientError> {
-    if session_key.trim().is_empty() {
-        return Err(GatewayClientError::Protocol);
-    }
-    Ok(session_key)
 }
 
 fn next_request_id(operation: &str) -> String {
@@ -1657,8 +1643,10 @@ mod tests {
                 "config.get",
                 "config.patch",
                 "config.apply",
+                "plugins.refresh",
                 "agents.list",
                 "skills.status",
+                "channels.pairing.list",
             ]);
             hello["payload"]["auth"]["scopes"] = json!(CONTROL_SCOPES);
             hello["payload"]["features"]["events"] = json!(CONTROL_EVENTS);
@@ -1695,7 +1683,7 @@ mod tests {
         });
 
         let status = client
-            .observe_mcp_server_status("agent:main:session-1".into(), None)
+            .observe_mcp_server_status("agent:main:session-1".into())
             .await
             .unwrap();
         assert_eq!(status.servers.len(), 1);
@@ -1703,18 +1691,6 @@ mod tests {
         assert_eq!(status.servers[0].available, Some(true));
         client.close_control_connection().await;
         server.await.unwrap();
-    }
-
-    #[test]
-    fn mcp_server_status_key_ignores_endpoint_session_metadata() {
-        assert_eq!(
-            resolve_mcp_status_session_key(
-                "agent:main:session-1".into(),
-                Some("session-1".into()),
-            )
-            .unwrap(),
-            "agent:main:session-1"
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2140,21 +2116,12 @@ mod tests {
     }
 
     fn hello_with_methods(id: &str, methods: &[&str], scope: &str) -> Value {
-        hello_with_version_and_methods_and_scope(id, wire::OPENCLAW_GATEWAY_VERSION, methods, scope)
-    }
-
-    fn hello_with_version_and_methods_and_scope(
-        id: &str,
-        version: &str,
-        methods: &[&str],
-        scope: &str,
-    ) -> Value {
         json!({
             "type": "res", "id": id, "ok": true,
             "payload": {
                 "type": "hello-ok", "protocol": 4,
-                "server": {"version": version, "connId": "fake-connection"},
-                "features": {"methods": methods, "events": ["tick"]},
+                "server": {"version": "2026.9.3", "connId": "fake-connection"},
+                "features": {"methods": methods, "events": ["tick"], "capabilities": CONTROL_CAPS},
                 "snapshot": {
                     "presence": [{"ts": 41}], "health": {"ok": true},
                     "stateVersion": {"presence": 1, "health": 1}, "uptimeMs": 100

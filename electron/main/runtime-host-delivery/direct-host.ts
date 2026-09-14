@@ -406,7 +406,12 @@ function streamRuntimeHostStartupTrace(output: RuntimeHostControlOutput): void {
     const lines = buffered.split(/\r?\n/);
     buffered = lines.pop() ?? '';
     for (const line of lines) {
-      if (line.includes('[startup-trace]') || line.includes('"prefix":"session-trace"')) console.info(redactLaunchStderr(line));
+      if (line.includes('[startup-trace]') || line.includes('"prefix":"session-trace"')) {
+        const trace = /^\[startup-trace\] source=openclaw-channel traceId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?= )/i.exec(line);
+        console.info(trace
+          ? `${trace[0]}${redactLaunchStderr(line.slice(trace[0].length))}`
+          : redactLaunchStderr(line));
+      }
     }
   });
 }

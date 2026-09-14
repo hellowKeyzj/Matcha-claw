@@ -244,7 +244,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
             </div>
             <div className="space-y-2">
               {artifactFiles.map((file) => {
-                const openAsDiff = file.sourceTool === 'edit' && supportsInlineDiff(file);
+                const openAsDiff = file.action !== 'deleted' && file.sourceTool === 'edit' && supportsInlineDiff(file);
                 return (
                   <button
                     key={file.toolId}

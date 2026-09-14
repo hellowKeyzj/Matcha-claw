@@ -21,6 +21,12 @@ const REJECTED = {
   error: 'Team human decision was rejected',
 } as const;
 
+const UNKNOWN = {
+  success: false,
+  outcome: 'outcome-unknown',
+  error: 'Team human decision outcome is unknown',
+} as const;
+
 export type TeamHumanDecision = 'approve' | 'deny' | 'abort';
 
 export type TeamHumanDecisionRequest = Readonly<{
@@ -34,8 +40,9 @@ export type TeamHumanDecisionRequest = Readonly<{
 export type TeamHumanDecisionTransportResponse = Readonly<{
   status: 200 | 400 | 409 | 503;
   body:
-    | Readonly<{ success: true; outcome: 'recorded' | 'replayed' | 'outcome-unknown' }>
+    | Readonly<{ success: true; outcome: 'recorded' | 'replayed' }>
     | typeof INVALID
+    | typeof UNKNOWN
     | typeof REJECTED
     | typeof UNAVAILABLE;
 }>;
@@ -72,7 +79,7 @@ export function createTeamHumanDecisionTransport(
         });
         const body: unknown = await response.json();
         if (response.status === 200 && isSuccess(body)) return { status: 200, body };
-        if (response.status === 409 && isRejected(body)) return { status: 409, body };
+        if (response.status === 409 && (isUnknown(body) || isRejected(body))) return { status: 409, body };
       } catch {
         // Native transport details do not cross the Electron delivery boundary.
       }
@@ -96,14 +103,20 @@ function isRequest(value: unknown): value is TeamHumanDecisionRequest {
 
 function isSuccess(value: unknown): value is Readonly<{
   success: true;
-  outcome: 'recorded' | 'replayed' | 'outcome-unknown';
+  outcome: 'recorded' | 'replayed';
 }> {
   return isRecord(value)
     && hasExactKeys(value, ['success', 'outcome'])
     && value.success === true
-    && (value.outcome === 'recorded'
-      || value.outcome === 'replayed'
-      || value.outcome === 'outcome-unknown');
+    && (value.outcome === 'recorded' || value.outcome === 'replayed');
+}
+
+function isUnknown(value: unknown): value is typeof UNKNOWN {
+  return isRecord(value)
+    && hasExactKeys(value, ['success', 'outcome', 'error'])
+    && value.success === false
+    && value.outcome === UNKNOWN.outcome
+    && value.error === UNKNOWN.error;
 }
 
 function isRejected(value: unknown): value is typeof REJECTED {

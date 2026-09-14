@@ -1,6 +1,7 @@
 import {
   fetchWithTimeoutGuarded,
-} from 'openclaw/plugin-sdk/provider-http'
+  type FetchGuardOptions,
+} from './http-runtime.js'
 import { isRecord, normalizeString } from './config.js'
 import { MatchaClawMediaError, protocolError, timeoutError, upstreamError } from './errors.js'
 
@@ -9,7 +10,6 @@ const REMOTE_IMAGE_FETCH_MAX_ATTEMPTS = 3
 const REMOTE_IMAGE_FETCH_RETRY_DELAY_MS = 750
 
 type FetchFn = typeof fetch
-type FetchGuardOptions = NonNullable<Parameters<typeof fetchWithTimeoutGuarded>[4]>
 
 export type RequestNetworkPolicy = {
   allowPrivateNetwork: boolean
@@ -133,7 +133,7 @@ export function collectGoogleImageSources(payload: unknown): ImageSource[] {
           ? part.inline_data
           : undefined
       const data = isRecord(inline) ? normalizeString(inline.data) : undefined
-      if (data) {
+      if (data && isRecord(inline)) {
         const mimeType = normalizeString(inline.mimeType) ?? normalizeString(inline.mime_type) ?? DEFAULT_OUTPUT_MIME
         sources.push({ type: 'base64', data, mimeType })
       }

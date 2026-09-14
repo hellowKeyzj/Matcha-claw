@@ -1,14 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hostApiFetchMock = vi.fn();
-vi.mock('@/lib/host-api', () => ({ hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args) }));
+const { hostApiFetchMock, hostCapabilityDescribeMock } = vi.hoisted(() => ({
+  hostApiFetchMock: vi.fn(),
+  hostCapabilityDescribeMock: vi.fn(),
+}));
+vi.mock('@/lib/host-api', () => ({
+  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityDescribe: (...args: unknown[]) => hostCapabilityDescribeMock(...args),
+}));
 
 function expectTaskRequest(payload: unknown, timeoutMs = 60_000) {
   expect(hostApiFetchMock).toHaveBeenCalledWith('/api/capabilities/execute', { method: 'POST', body: JSON.stringify(payload), timeoutMs });
 }
 
 describe('task manager client', () => {
-  beforeEach(() => hostApiFetchMock.mockReset());
+  beforeEach(() => {
+    vi.resetModules();
+    hostApiFetchMock.mockReset();
+    hostCapabilityDescribeMock.mockReset();
+    hostCapabilityDescribeMock.mockResolvedValue({ capability: { availability: 'available', operations: [{ id: 'tasks.list' }] } });
+  });
 
   it('lists through task.management without legacy tool invocation', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ tasks: [{ id: '1', subject: 'task', status: 'pending', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 1 }], todos: [] });
@@ -55,6 +66,15 @@ describe('task manager client', () => {
     await expect(updateTask({ sessionKey: 'agent:main:main', sessionIdentity, taskId: '2', status: 'completed' })).resolves.toEqual({ outcome });
   });
 
+  it('returns an empty snapshot without execute when task.management is unavailable', async () => {
+    hostCapabilityDescribeMock.mockRejectedValueOnce(new Error('Capability is not available'));
+    const { listTaskSnapshot } = await import('@/services/openclaw/task-manager-client');
+    const sessionIdentity = { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' }, agentId: 'matcha', sessionKey: 'matcha-session' };
+    await expect(listTaskSnapshot({ sessionKey: 'matcha-session', sessionIdentity })).resolves.toEqual({ tasks: [], todos: [] });
+    expect(hostCapabilityDescribeMock).toHaveBeenCalledWith({ id: 'task.management', scope: { kind: 'session', identity: sessionIdentity } });
+    expect(hostApiFetchMock).not.toHaveBeenCalled();
+  });
+
   it('rejects a session key that disagrees with the complete identity before network dispatch', async () => {
     const { updateTask } = await import('@/services/openclaw/task-manager-client');
     const sessionIdentity = { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'main', sessionKey: 'agent:main:main' };
@@ -62,16 +82,16 @@ describe('task manager client', () => {
     expect(hostApiFetchMock).not.toHaveBeenCalled();
   });
 
-  it('keeps historical task helpers out of the renderer client without a current caller', async () => {
+  it('keeps background task control helpers out of the renderer client', async () => {
     const client = await import('@/services/openclaw/task-manager-client') as Record<string, unknown>;
     expect(client).toEqual(expect.objectContaining({
       listTaskSnapshot: expect.any(Function),
+      getTask: expect.any(Function),
       createTask: expect.any(Function),
       updateTask: expect.any(Function),
+      writeTodos: expect.any(Function),
+      getTodos: expect.any(Function),
     }));
-    expect(client.getTask).toBeUndefined();
-    expect(client.writeTodos).toBeUndefined();
-    expect(client.getTodos).toBeUndefined();
     expect(client.getTaskOutput).toBeUndefined();
     expect(client.stopTask).toBeUndefined();
   });

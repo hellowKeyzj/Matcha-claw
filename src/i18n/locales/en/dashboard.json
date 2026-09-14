@@ -8,7 +8,7 @@
     "gatewayNotRunning": "Gateway not running",
     "recentTokenHistory": {
         "title": "Recent Token Usage",
-        "description": "The latest assistant responses with recorded token usage.",
+        "description": "Recent sessions with recorded token usage.",
         "loading": "Loading token usage history...",
         "refreshFailed": "Failed to refresh token usage history. Showing cached data.",
         "empty": "No token usage history yet",
@@ -31,6 +31,11 @@
         "output": "Output {{value}}",
         "cacheRead": "Cache read {{value}}",
         "cacheWrite": "Cache write {{value}}",
-        "cost": "Cost ${{amount}}"
+        "cost": "Cost ${{amount}}",
+        "showDetails": "Show session details",
+        "hideDetails": "Hide session details",
+        "detailsLoading": "Loading session details...",
+        "detailsEmpty": "No token entries found for this session",
+        "detailsError": "Failed to load session details"
     }
 }

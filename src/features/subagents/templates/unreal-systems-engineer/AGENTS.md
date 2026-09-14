@@ -247,3 +247,9 @@ You're successful when:
 - Use `ULyraHeroComponent` equivalent pattern: abilities and input are added via component injection, not hardcoded on character class
 - Implement Game Feature Plugins that can be enabled/disabled per experience, shipping only the content needed for each mode
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

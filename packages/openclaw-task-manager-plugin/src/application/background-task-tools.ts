@@ -10,10 +10,9 @@ type ToolContext = {
 type TaskRunsRuntime = ReturnType<OpenClawPluginApi['runtime']['tasks']['runs']['fromToolContext']>
 type TaskRunDetail = NonNullable<ReturnType<TaskRunsRuntime['resolve']>>
 type TaskRunCancelResult = Awaited<ReturnType<TaskRunsRuntime['cancel']>>
-
-function asJsonText(value: unknown): string {
-  return JSON.stringify(value, null, 2)
-}
+type TaskOutputGatewayPayload =
+  | { success: true; taskId: string; task: TaskRunDetail; message?: string }
+  | { success: false; taskId: string; status: 'not_found'; message: string }
 
 function bindTaskRuns(api: OpenClawPluginApi, toolCtx: ToolContext): TaskRunsRuntime {
   if (!toolCtx.sessionKey) {
@@ -25,10 +24,25 @@ function bindTaskRuns(api: OpenClawPluginApi, toolCtx: ToolContext): TaskRunsRun
   })
 }
 
-function renderTaskOutput(task: TaskRunDetail | undefined, taskId: string): string {
+function buildTaskOutputGatewayPayload(task: TaskRunDetail | undefined, taskId: string): TaskOutputGatewayPayload {
   if (!task) {
-    return `Background task not found: ${taskId}`
+    return { success: false, taskId, status: 'not_found', message: `Background task not found: ${taskId}` }
   }
+  return {
+    success: true,
+    taskId,
+    task,
+    ...(task.status === 'queued' || task.status === 'running'
+      ? { message: 'Task is still running. Call TaskOutput again to read later output.' }
+      : {}),
+  }
+}
+
+function renderTaskOutput(payload: TaskOutputGatewayPayload): string {
+  if (!payload.success) {
+    return payload.message
+  }
+  const { task } = payload
   const lines = [
     `Task ID: ${task.id}`,
     `Status: ${task.status}`,
@@ -38,10 +52,18 @@ function renderTaskOutput(task: TaskRunDetail | undefined, taskId: string): stri
   if (task.progressSummary) lines.push(`Progress: ${task.progressSummary}`)
   if (task.terminalSummary) lines.push(`Result: ${task.terminalSummary}`)
   if (task.error) lines.push(`Error: ${task.error}`)
-  if (task.status === 'queued' || task.status === 'running') {
-    lines.push('Task is still running. Call TaskOutput again to read later output.')
-  }
+  if (payload.message) lines.push(payload.message)
   return lines.join('\n')
+}
+
+export async function readTaskOutputGatewayPayload(
+  api: OpenClawPluginApi,
+  toolCtx: ToolContext,
+  params: ToolParams,
+) {
+  const taskId = toNonEmptyString(params.taskId, 'taskId')
+  const task = bindTaskRuns(api, toolCtx).resolve(taskId)
+  return buildTaskOutputGatewayPayload(task, taskId)
 }
 
 export async function executeTaskOutput(
@@ -49,25 +71,14 @@ export async function executeTaskOutput(
   toolCtx: ToolContext,
   params: ToolParams,
 ) {
-  const taskId = toNonEmptyString(params.taskId, 'taskId')
-  const task = bindTaskRuns(api, toolCtx).resolve(taskId)
-  const payload = {
-    success: Boolean(task),
-    taskId,
-    ...(task ? { task } : { status: 'not_found', message: `Background task not found: ${taskId}` }),
-    ...(task && (task.status === 'queued' || task.status === 'running')
-      ? { message: 'Task is still running. Call TaskOutput again to read later output.' }
-      : {}),
-  }
+  const payload = await readTaskOutputGatewayPayload(api, toolCtx, params)
   return {
-    content: [{ type: 'text' as const, text: renderTaskOutput(task, taskId) }],
-    rawResponse: payload,
+    content: [{ type: 'text' as const, text: renderTaskOutput(payload) }],
     details: payload,
-    renderer: { type: 'text' },
   }
 }
 
-export async function executeTaskStop(
+export async function readTaskStopGatewayPayload(
   api: OpenClawPluginApi,
   toolCtx: ToolContext,
   params: ToolParams,
@@ -81,7 +92,7 @@ export async function executeTaskStop(
       cfg: api.config,
     })
     : { found: false, cancelled: false, reason: 'Task not found.' }
-  const payload = {
+  return {
     success: result.cancelled,
     taskId,
     found: result.found,
@@ -89,13 +100,19 @@ export async function executeTaskStop(
     ...(result.reason ? { message: result.reason } : {}),
     ...(result.task ? { task: result.task } : {}),
   }
+}
+
+export async function executeTaskStop(
+  api: OpenClawPluginApi,
+  toolCtx: ToolContext,
+  params: ToolParams,
+) {
+  const payload = await readTaskStopGatewayPayload(api, toolCtx, params)
   return {
-    content: [{ type: 'text' as const, text: result.cancelled
-      ? `Stop requested for task ${taskId}`
-      : `Background task cannot be stopped or was not found: ${taskId}` }],
-    rawResponse: payload,
+    content: [{ type: 'text' as const, text: payload.cancelled
+      ? `Stop requested for task ${payload.taskId}`
+      : `Background task cannot be stopped or was not found: ${payload.taskId}` }],
     details: payload,
-    renderer: { type: 'text' },
   }
 }
 

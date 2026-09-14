@@ -130,7 +130,7 @@ describe('rich renderer message model', () => {
           },
           runtime: {
             activeRunId: null, runPhase: 'idle', activeTurnItemKey: null, pendingTurnKey: null,
-            pendingTurnLaneKey: null, lastUserMessageAt: null, runtimeActivity: null,
+            pendingTurnLaneKey: null, lastUserMessageAt: null, runtimeActivity: null, errorDetail: null,
             lastError: null, lastIssue: null, updatedAt: null,
           },
           items: [],
@@ -146,7 +146,7 @@ describe('rich renderer message model', () => {
         kind: 'session', preferred: false, titleSource: 'none',
       },
       items: [richItem], usage: [], artifacts: [], replayComplete: true,
-      runtime: { activeRunId: null, runPhase: 'idle', activeTurnItemKey: null, pendingTurnKey: null, pendingTurnLaneKey: null, runtimeActivity: null, lastUserMessageAt: null, lastError: null, lastIssue: null, updatedAt: null },
+      runtime: { activeRunId: null, runPhase: 'idle', activeTurnItemKey: null, pendingTurnKey: null, pendingTurnLaneKey: null, runtimeActivity: null, errorDetail: null, lastUserMessageAt: null, lastError: null, lastIssue: null, updatedAt: null },
       window: { totalItemCount: 1, windowStartOffset: 0, windowEndOffset: 1, hasMore: false, hasNewer: false, isAtLatest: true },
     } as SessionStateSnapshot;
 

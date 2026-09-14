@@ -19,7 +19,7 @@ import {
 } from '@/lib/providers';
 
 type AccountKind = 'chat' | 'media';
-type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local';
+type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse' | 'local';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
 type MediaProtocol = 'google' | 'openAi' | 'openRouter';
 
@@ -59,7 +59,7 @@ function isIdentifier(value: unknown): value is string {
 }
 
 function isAuthMode(value: unknown): value is AuthMode {
-  return value === 'apiKey' || value === 'oauthBrowser' || value === 'oauthDevice' || value === 'local';
+  return value === 'apiKey' || value === 'oauthBrowser' || value === 'oauthDevice' || value === 'token' || value === 'cliReuse' || value === 'local';
 }
 
 function isProviderType(value: string): value is ProviderType {
@@ -98,6 +98,8 @@ function authMode(value: AuthMode): ProviderCredential['authMode'] {
     case 'apiKey': return 'api_key';
     case 'oauthBrowser': return 'oauth_browser';
     case 'oauthDevice': return 'oauth_device';
+    case 'token': return 'token';
+    case 'cliReuse': return 'cli_reuse';
     case 'local': return 'local';
   }
 }
@@ -121,11 +123,15 @@ function mediaProtocol(value: MediaProtocol | undefined): ProviderCredential['me
   }
 }
 
+function toProviderType(provider: string): ProviderType {
+  return (isProviderVendorId(provider) ? provider : 'custom') as ProviderType;
+}
+
 function toCredential(account: PublicProviderAccount): ProviderCredential {
   const kind = account.kind ?? 'chat';
   return {
     id: account.id,
-    vendorId: account.provider as ProviderType,
+    vendorId: toProviderType(account.provider),
     providerKind: kind,
     label: account.label,
     authMode: authMode(account.authMode),
@@ -151,9 +157,12 @@ function normalizeModelCapabilities(value: unknown): ModelCapability[] | null | 
 }
 
 const VENDOR_CATEGORIES = new Set<ProviderVendorCategory>(['official', 'compatible', 'local', 'custom']);
-const AUTH_MODES = new Set<ProviderAuthMode>(['api_key', 'oauth_device', 'oauth_browser', 'local']);
+const AUTH_MODES = new Set<ProviderAuthMode>(['api_key', 'oauth_device', 'oauth_browser', 'token', 'cli_reuse', 'local']);
 const VENDOR_KEYS = [
   'id',
+  'brandId',
+  'apiProtocol',
+  'endpointPresets',
   'name',
   'icon',
   'placeholder',
@@ -167,6 +176,8 @@ const VENDOR_KEYS = [
   'apiKeyUrl',
   'docsUrl',
   'docsUrlZh',
+  'codePlan',
+  'runtimeProviderKey',
   'category',
   'envVar',
   'supportedAuthModes',
@@ -183,6 +194,30 @@ function optionalBoolean(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean';
 }
 
+function normalizeCodePlan(value: unknown): ProviderTypeInfo['codePlan'] | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return null;
+  const modelId = value.modelId;
+  const baseUrl = value.baseUrl;
+  if (typeof modelId !== 'string' || modelId.length === 0 || !optionalString(baseUrl)) return null;
+  return {
+    modelId,
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+  };
+}
+
+function isProviderVendorId(value: string): boolean {
+  return isProviderType(value) || value === 'zai' || value === 'zai-global';
+}
+
+function isEndpointPresets(value: unknown): value is NonNullable<ProviderTypeInfo['endpointPresets']> {
+  return Array.isArray(value) && value.length > 0 && value.every((preset) => isRecord(preset)
+    && hasOnlyKeys(preset, ['id', 'label', 'baseUrl'])
+    && typeof preset.id === 'string' && preset.id.length > 0
+    && typeof preset.label === 'string' && preset.label.length > 0
+    && typeof preset.baseUrl === 'string' && preset.baseUrl.length > 0);
+}
+
 function normalizeVendor(value: unknown): ProviderVendorInfo | null {
   if (!isRecord(value) || Object.keys(value).some((key) => !VENDOR_KEYS.includes(key as typeof VENDOR_KEYS[number]))) {
     return null;
@@ -190,7 +225,11 @@ function normalizeVendor(value: unknown): ProviderVendorInfo | null {
   const id = value.id;
   const supportedAuthModes = value.supportedAuthModes;
   const defaultAuthMode = value.defaultAuthMode;
-  if (!isProviderType(typeof id === 'string' ? id : '')
+  const codePlan = normalizeCodePlan(value.codePlan);
+  if (!isProviderVendorId(typeof id === 'string' ? id : '')
+    || (value.brandId !== undefined && (typeof value.brandId !== 'string' || !isProviderType(value.brandId)))
+    || (value.apiProtocol !== undefined && !['anthropic-messages', 'google-generative-ai', 'openai-completions', 'openai-responses'].includes(value.apiProtocol as string))
+    || (value.endpointPresets !== undefined && !isEndpointPresets(value.endpointPresets))
     || typeof value.name !== 'string' || value.name.length === 0
     || typeof value.icon !== 'string' || value.icon.length === 0
     || typeof value.placeholder !== 'string' || value.placeholder.length === 0
@@ -204,6 +243,8 @@ function normalizeVendor(value: unknown): ProviderVendorInfo | null {
     || !optionalString(value.apiKeyUrl)
     || !optionalString(value.docsUrl)
     || !optionalString(value.docsUrlZh)
+    || codePlan === null
+    || !optionalString(value.runtimeProviderKey)
     || !optionalString(value.envVar)
     || !VENDOR_CATEGORIES.has(value.category as ProviderVendorCategory)
     || !Array.isArray(supportedAuthModes)
@@ -219,6 +260,9 @@ function normalizeVendor(value: unknown): ProviderVendorInfo | null {
   if (modelCapabilities === null) return null;
   return {
     id: id as ProviderType,
+    ...(value.brandId !== undefined ? { brandId: value.brandId as ProviderType } : {}),
+    ...(value.apiProtocol !== undefined ? { apiProtocol: value.apiProtocol as ProviderTypeInfo['apiProtocol'] } : {}),
+    ...(isEndpointPresets(value.endpointPresets) ? { endpointPresets: value.endpointPresets } : {}),
     name: value.name,
     icon: value.icon,
     placeholder: value.placeholder,
@@ -233,6 +277,8 @@ function normalizeVendor(value: unknown): ProviderVendorInfo | null {
     ...(value.apiKeyUrl !== undefined ? { apiKeyUrl: value.apiKeyUrl } : {}),
     ...(value.docsUrl !== undefined ? { docsUrl: value.docsUrl } : {}),
     ...(value.docsUrlZh !== undefined ? { docsUrlZh: value.docsUrlZh } : {}),
+    ...(codePlan ? { codePlan } : {}),
+    ...(value.runtimeProviderKey !== undefined ? { runtimeProviderKey: value.runtimeProviderKey } : {}),
     category: value.category as ProviderVendorCategory,
     ...(value.envVar !== undefined ? { envVar: value.envVar } : {}),
     supportedAuthModes: [...supportedAuthModes] as ProviderAuthMode[],
@@ -254,7 +300,10 @@ function providerVendorAuth(info: ProviderTypeInfo): Pick<ProviderVendorInfo, 's
     return { supportedAuthModes: ['oauth_device', 'api_key'], defaultAuthMode: 'oauth_device' };
   }
   if (info.id === 'qwen-portal') return { supportedAuthModes: ['oauth_device'], defaultAuthMode: 'oauth_device' };
-  if (info.id === 'openai') return { supportedAuthModes: ['api_key', 'oauth_browser'], defaultAuthMode: 'api_key' };
+  if (info.id === 'openai') return { supportedAuthModes: ['api_key', 'oauth_browser', 'oauth_device'], defaultAuthMode: 'api_key' };
+  if (info.id === 'openrouter') return { supportedAuthModes: ['api_key', 'oauth_browser'], defaultAuthMode: 'api_key' };
+  if (info.id === 'anthropic') return { supportedAuthModes: ['api_key', 'token', 'cli_reuse'], defaultAuthMode: 'api_key' };
+  if (info.id === 'github-copilot') return { supportedAuthModes: ['oauth_device'], defaultAuthMode: 'oauth_device' };
   return { supportedAuthModes: ['api_key'], defaultAuthMode: 'api_key' };
 }
 
@@ -265,7 +314,8 @@ function staticVendorProjection(): ProviderVendorInfo[] {
       ...info,
       category: providerVendorCategory(info),
       ...auth,
-      supportsMultipleAccounts: true,
+      envVar: info.id === 'zai' || info.id === 'zai-global' ? 'ZAI_API_KEY' : undefined,
+      supportsMultipleAccounts: info.id === 'zai' || info.id === 'zai-global' ? false : true,
     });
   }).filter((vendor): vendor is ProviderVendorInfo => vendor !== null);
 }
@@ -309,8 +359,8 @@ export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
   }
 
   const statuses = await Promise.all(accounts.map(async (account) => {
-    let hasKey = account.authMode !== 'apiKey';
-    if (account.authMode === 'apiKey') {
+    let hasKey = account.authMode !== 'apiKey' && account.authMode !== 'token';
+    if (account.authMode === 'apiKey' || account.authMode === 'token') {
       try {
         const result = await hostApiFetch<unknown>(
           `/api/provider-accounts/${encodeURIComponent(account.id)}/has-api-key`,
@@ -323,7 +373,7 @@ export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
     return {
       id: account.id,
       name: account.label,
-      type: isProviderType(account.provider) ? account.provider : 'custom',
+      type: toProviderType(account.provider),
       providerKind: account.kind ?? 'chat',
       enabled: account.enabled,
       createdAt: '',
@@ -345,19 +395,20 @@ export function hasConfiguredCredentials(
   account: ProviderCredential,
   status?: ProviderWithKeyInfo,
 ): boolean {
-  if (account.authMode === 'oauth_device' || account.authMode === 'oauth_browser' || account.authMode === 'local') {
+  if (account.authMode === 'oauth_device' || account.authMode === 'oauth_browser' || account.authMode === 'cli_reuse' || account.authMode === 'local') {
     return true;
   }
   return status?.hasKey ?? false;
 }
 
 export function buildProviderCredentialId(
-  vendorId: ProviderType,
+  vendorId: ProviderType | string,
   existingAccountId: string | null,
   vendors: ProviderVendorInfo[],
 ): string {
   if (existingAccountId) return existingAccountId;
   const vendor = vendors.find((candidate) => candidate.id === vendorId);
+  if (vendorId === 'zai-global') return 'zai';
   if (vendor?.supportsMultipleAccounts === false) return vendorId;
   return `${vendorId}-${crypto.randomUUID()}`;
 }

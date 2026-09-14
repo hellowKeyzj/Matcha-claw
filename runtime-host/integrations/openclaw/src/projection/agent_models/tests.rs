@@ -253,7 +253,7 @@ fn new_model_rows_do_not_inherit_metadata_from_previous_ids() {
         ProviderId::try_new("custom".into()).unwrap(),
         vec![
             Model::try_new(
-                ModelId::try_new("new-model".into()).unwrap(),
+                ModelId::try_new("gpt-5.6".into()).unwrap(),
                 None,
                 None,
                 vec![InputModality::Text],
@@ -280,9 +280,78 @@ fn new_model_rows_do_not_inherit_metadata_from_previous_ids() {
             "providers": {
                 "custom": {
                     "models": [{
-                        "id": "new-model",
-                        "name": "new-model",
+                        "id": "gpt-5.6",
+                        "name": "gpt-5.6",
                         "input": ["text"]
+                    }]
+                }
+            }
+        }))
+    );
+}
+
+#[test]
+fn existing_same_id_model_budget_and_user_fields_survive_missing_explicit_limits() {
+    let root = TestRoot::new();
+    fs::write(
+        root.config_path(),
+        serde_json::to_vec(&json!({
+            "models": {
+                "providers": {
+                    "custom": {
+                        "models": [{
+                            "id": "gpt-5.6",
+                            "name": "User Name",
+                            "contextWindow": 123_000,
+                            "contextTokens": 120_000,
+                            "maxTokens": 8_000,
+                            "customField": "keep-me"
+                        }]
+                    }
+                }
+            }
+        }))
+        .expect("serialize seed"),
+    )
+    .expect("seed config");
+    let models = ProviderModels::try_new(
+        ProviderId::try_new("custom".into()).unwrap(),
+        vec![
+            Model::try_new(
+                ModelId::try_new("gpt-5.6".into()).unwrap(),
+                None,
+                None,
+                vec![InputModality::Text],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+
+    root.store()
+        .update(|document| {
+            if models.apply_to_document(document) {
+                OpenClawConfigMutation::changed()
+            } else {
+                OpenClawConfigMutation::unchanged()
+            }
+        })
+        .expect("apply models");
+    let document = root.store().read().expect("read config");
+
+    assert_eq!(
+        document.get("models"),
+        Some(&json!({
+            "providers": {
+                "custom": {
+                    "models": [{
+                        "id": "gpt-5.6",
+                        "name": "gpt-5.6",
+                        "input": ["text"],
+                        "contextWindow": 123_000,
+                        "contextTokens": 120_000,
+                        "maxTokens": 8_000,
+                        "customField": "keep-me"
                     }]
                 }
             }

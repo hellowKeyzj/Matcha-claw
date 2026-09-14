@@ -152,6 +152,7 @@ export function toolView(
     inputText: null,
     summary: null,
     output: null,
+    details: null,
     isError: null,
     ...options,
   };
@@ -175,6 +176,8 @@ export function runtimeView(options: Partial<SessionWireRuntime> = {}): SessionW
     phase: 'completed',
     activeRunId: null,
     issue: null,
+    runtimeActivity: null,
+    errorDetail: null,
     ...options,
   };
 }

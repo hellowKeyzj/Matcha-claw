@@ -27,4 +27,9 @@ Generate professional documents using the right tool for each format:
 - **Node.js**: `docx`
 - **Approach**: Template-based with styles, headers, TOC, and consistent formatting
 
+## Tools
 
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -1,18 +1,18 @@
-use std::fmt;
+use std::{fmt, path::Path, time::Duration};
 
-use serde::{
-    Deserialize,
-    de::{self, IgnoredAny, MapAccess, Visitor},
-};
-use zeroize::Zeroizing;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde_json::Value;
 
 use environment::CredentialReference;
 
-use crate::lifecycle::state_dir::{AgentId, CanonicalStateDir, PrivateAuthProfiles, StateDirError};
+use crate::lifecycle::state_dir::{CanonicalStateDir, StateDirError};
 
 const AUTH_PROFILE_STORE_VERSION: u8 = 1;
+const AUTH_PROFILES_STATE_KEY: &str = "authProfiles.store";
+const AUTH_PROFILES_STATE_STATE_KEY: &str = "authProfiles.state";
+const AUTH_SHARED_STORE_STATE_KEY: &str = "auth.sharedStore";
 const CREDENTIAL_REFERENCE_PREFIX: &str = "credential:v1:";
-const REDACTED: &str = "[REDACTED]";
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialKind {
@@ -88,187 +88,6 @@ impl AuthProfile {
     }
 }
 
-pub struct PrivateCredential(Zeroizing<Vec<u8>>);
-
-impl PrivateCredential {
-    pub fn try_new(value: String) -> Result<Self, AuthProjectionError> {
-        (!value.trim().is_empty())
-            .then_some(Self(Zeroizing::new(value.into_bytes())))
-            .ok_or(AuthProjectionError::EmptyCredential)
-    }
-
-    fn is_present(&self) -> bool {
-        !self.0.is_empty()
-    }
-}
-
-impl fmt::Debug for PrivateCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("PrivateCredential")
-            .field(&REDACTED)
-            .finish()
-    }
-}
-
-impl<'de> Deserialize<'de> for PrivateCredential {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Self::try_new(String::deserialize(deserializer)?)
-            .map_err(|_| de::Error::custom("invalid credential"))
-    }
-}
-
-pub struct PrivateAuthProfile {
-    profile: AuthProfile,
-    credential: PrivateAuthCredential,
-}
-
-impl PrivateAuthProfile {
-    pub fn api_key(id: ProfileId, provider: ProviderId, key: PrivateCredential) -> Self {
-        Self::api_key_secret(id, provider, PrivateAuthSecret::Inline(key))
-    }
-
-    pub fn token(id: ProfileId, provider: ProviderId, token: PrivateCredential) -> Self {
-        Self::token_secret(id, provider, PrivateAuthSecret::Inline(token))
-    }
-
-    fn api_key_secret(id: ProfileId, provider: ProviderId, key: PrivateAuthSecret) -> Self {
-        Self::new(id, provider, PrivateAuthCredential::ApiKey(key))
-    }
-
-    fn token_secret(id: ProfileId, provider: ProviderId, token: PrivateAuthSecret) -> Self {
-        Self::new(id, provider, PrivateAuthCredential::Token(token))
-    }
-
-    pub fn oauth(
-        id: ProfileId,
-        provider: ProviderId,
-        access: PrivateCredential,
-        refresh: PrivateCredential,
-        expires: u64,
-    ) -> Self {
-        Self::new(
-            id,
-            provider,
-            PrivateAuthCredential::OAuth {
-                access,
-                refresh,
-                expires,
-            },
-        )
-    }
-
-    fn new(id: ProfileId, provider: ProviderId, credential: PrivateAuthCredential) -> Self {
-        let kind = credential.kind();
-        Self {
-            profile: AuthProfile::new(id, provider, kind),
-            credential,
-        }
-    }
-
-    fn profile(&self) -> &AuthProfile {
-        &self.profile
-    }
-}
-
-impl fmt::Debug for PrivateAuthProfile {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PrivateAuthProfile")
-            .field("profile", &self.profile)
-            .field("credential", &REDACTED)
-            .finish()
-    }
-}
-
-enum PrivateAuthCredential {
-    ApiKey(PrivateAuthSecret),
-    OAuth {
-        access: PrivateCredential,
-        refresh: PrivateCredential,
-        expires: u64,
-    },
-    Token(PrivateAuthSecret),
-}
-
-impl PrivateAuthCredential {
-    fn kind(&self) -> CredentialKind {
-        match self {
-            Self::ApiKey(_) => CredentialKind::ApiKey,
-            Self::OAuth { .. } => CredentialKind::OAuth,
-            Self::Token(_) => CredentialKind::Token,
-        }
-    }
-}
-
-enum PrivateAuthSecret {
-    Inline(PrivateCredential),
-    Reference(SecretReference),
-}
-
-impl PrivateAuthSecret {
-    fn is_present(&self) -> bool {
-        match self {
-            Self::Inline(credential) => credential.is_present(),
-            Self::Reference(_) => true,
-        }
-    }
-}
-
-struct SecretReference;
-
-impl<'de> Deserialize<'de> for SecretReference {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(SecretReferenceVisitor)
-    }
-}
-
-struct SecretReferenceVisitor;
-
-impl<'de> Visitor<'de> for SecretReferenceVisitor {
-    type Value = SecretReference;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OpenClaw secret reference")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut source = None;
-        let mut provider = None;
-        let mut id = None;
-        while let Some(field) = map.next_key::<String>()? {
-            match field.as_str() {
-                "source" if source.is_none() => source = Some(map.next_value::<String>()?),
-                "provider" if provider.is_none() => provider = Some(map.next_value::<String>()?),
-                "id" if id.is_none() => id = Some(map.next_value::<String>()?),
-                _ => return Err(de::Error::custom("invalid secret reference field")),
-            }
-        }
-        let source = source.ok_or_else(|| de::Error::missing_field("source"))?;
-        if !matches!(source.as_str(), "env" | "file" | "exec") {
-            return Err(de::Error::custom("invalid secret reference source"));
-        }
-        let provider = provider.ok_or_else(|| de::Error::missing_field("provider"))?;
-        if !valid_identifier(&provider) {
-            return Err(de::Error::custom("invalid secret reference provider"));
-        }
-        let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
-        if !valid_identifier(&id) {
-            return Err(de::Error::custom("invalid secret reference id"));
-        }
-        Ok(SecretReference)
-    }
-}
-
 /// Verifies a private credential/profile association without exposing credential material.
 pub(crate) fn credential_is_available(
     state_dir: &CanonicalStateDir,
@@ -276,14 +95,12 @@ pub(crate) fn credential_is_available(
     reference: &CredentialReference,
     now_millis: u64,
 ) -> Result<bool, AuthProjectionError> {
-    let agent = AgentId::try_new("main".into()).map_err(|_| AuthProjectionError::StateDirectory)?;
-    let profiles = match state_dir.read_auth_profiles(&agent) {
-        Ok(Some(contents)) => parse_auth_profiles(&contents)?,
+    let profiles = match read_shared_auth_profiles(state_dir) {
+        Ok(Some(profiles)) => profiles,
         Ok(None) => Vec::new(),
-        Err(_) => {
+        Err(error) => {
             trace_auth_profile_check(
                 state_dir,
-                &agent,
                 provider_key,
                 reference,
                 "read-failed",
@@ -291,13 +108,12 @@ pub(crate) fn credential_is_available(
                 String::new(),
                 false,
             );
-            return Err(AuthProjectionError::StateDirectory);
+            return Err(error);
         }
     };
-    let available = has_credential_for(&profiles, provider_key, reference, now_millis);
+    let available = has_credential_for(&profiles, provider_key, now_millis);
     trace_auth_profile_check(
         state_dir,
-        &agent,
         provider_key,
         reference,
         "read-success",
@@ -308,25 +124,255 @@ pub(crate) fn credential_is_available(
     Ok(available)
 }
 
-fn has_credential_for(
-    profiles: &[PrivateAuthProfile],
-    provider_key: &str,
-    reference: &CredentialReference,
-    now_millis: u64,
-) -> bool {
-    if !reference.as_str().starts_with(CREDENTIAL_REFERENCE_PREFIX) {
-        return false;
+fn read_shared_auth_profiles(
+    state_dir: &CanonicalStateDir,
+) -> Result<Option<Vec<StateDbAuthProfile>>, AuthProjectionError> {
+    let database_path = state_dir.as_path().join("state").join("openclaw.sqlite");
+    let values = read_auth_state_values(&database_path)?;
+    let Some(shared_store) = values.shared_store else {
+        return Ok(None);
+    };
+    if !is_state_db_shared_store(&shared_store) {
+        return Ok(None);
     }
-    profiles.iter().any(|profile| {
-        profile.profile().provider().as_str() == provider_key
-            && credential_is_usable(&profile.credential, now_millis)
+    let Some(store) = values.store else {
+        return Ok(None);
+    };
+    parse_state_db_auth_profiles(&store, values.state.as_ref()).map(Some)
+}
+
+struct AuthStateValues {
+    shared_store: Option<Value>,
+    store: Option<Value>,
+    state: Option<Value>,
+}
+
+fn read_auth_state_values(database_path: &Path) -> Result<AuthStateValues, AuthProjectionError> {
+    if !database_path
+        .try_exists()
+        .map_err(|_| AuthProjectionError::StateDirectory)?
+    {
+        return Ok(AuthStateValues {
+            shared_store: None,
+            store: None,
+            state: None,
+        });
+    }
+
+    let connection = Connection::open_with_flags(
+        database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| AuthProjectionError::StateDirectory)?;
+    connection
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .map_err(|_| AuthProjectionError::StateDirectory)?;
+    if !has_config_machine_state_table(&connection)? {
+        return Ok(AuthStateValues {
+            shared_store: None,
+            store: None,
+            state: None,
+        });
+    }
+    Ok(AuthStateValues {
+        shared_store: read_config_machine_state_value(&connection, AUTH_SHARED_STORE_STATE_KEY)?,
+        store: read_config_machine_state_value(&connection, AUTH_PROFILES_STATE_KEY)?,
+        state: read_config_machine_state_value(&connection, AUTH_PROFILES_STATE_STATE_KEY)?,
     })
 }
 
-fn auth_profile_provider_summary(profiles: &[PrivateAuthProfile]) -> String {
+fn has_config_machine_state_table(connection: &Connection) -> Result<bool, AuthProjectionError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|_| AuthProjectionError::StateDirectory)
+}
+
+fn read_config_machine_state_value(
+    connection: &Connection,
+    state_key: &str,
+) -> Result<Option<Value>, AuthProjectionError> {
+    let value_json = connection
+        .query_row(
+            "SELECT value_json FROM config_machine_state WHERE state_key = ?1",
+            [state_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| AuthProjectionError::StateDirectory)?;
+    value_json
+        .map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|_| AuthProjectionError::InvalidPersistedAuthProfiles)
+        })
+        .transpose()
+}
+
+fn is_state_db_shared_store(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("location"))
+        .and_then(Value::as_str)
+        == Some("state-db")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StateDbAuthProfile {
+    id: ProfileId,
+    provider: ProviderId,
+    kind: CredentialKind,
+    expires: Option<u64>,
+}
+
+fn parse_state_db_auth_profiles(
+    store: &Value,
+    state: Option<&Value>,
+) -> Result<Vec<StateDbAuthProfile>, AuthProjectionError> {
+    let store_profiles = auth_profiles_store_object(store)?;
+    if let Some(state) = state {
+        validate_auth_profiles_state(state)?;
+    }
+    let mut profiles = Vec::new();
+    for (id, profile) in store_profiles {
+        let kind = auth_profile_kind(profile)?;
+        let Some(expires) = auth_profile_credential_expires(profile, kind)? else {
+            continue;
+        };
+        profiles.push(StateDbAuthProfile {
+            id: ProfileId::try_new(id.to_owned())?,
+            provider: auth_profile_provider(profile)?,
+            kind,
+            expires,
+        });
+    }
+    Ok(profiles)
+}
+
+fn auth_profiles_store_object(
+    value: &Value,
+) -> Result<&serde_json::Map<String, Value>, AuthProjectionError> {
+    let object = value
+        .as_object()
+        .ok_or(AuthProjectionError::InvalidPersistedAuthProfiles)?;
+    if object.get("version").and_then(Value::as_u64) != Some(u64::from(AUTH_PROFILE_STORE_VERSION))
+    {
+        return Err(AuthProjectionError::InvalidPersistedAuthProfiles);
+    }
+    object
+        .get("profiles")
+        .and_then(Value::as_object)
+        .ok_or(AuthProjectionError::InvalidPersistedAuthProfiles)
+}
+
+fn validate_auth_profiles_state(value: &Value) -> Result<(), AuthProjectionError> {
+    let object = value
+        .as_object()
+        .ok_or(AuthProjectionError::InvalidPersistedAuthProfiles)?;
+    if object.get("version").and_then(Value::as_u64) != Some(u64::from(AUTH_PROFILE_STORE_VERSION))
+    {
+        return Err(AuthProjectionError::InvalidPersistedAuthProfiles);
+    }
+    Ok(())
+}
+
+fn auth_profile_provider(value: &Value) -> Result<ProviderId, AuthProjectionError> {
+    value
+        .as_object()
+        .and_then(|object| object.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(AuthProjectionError::InvalidPersistedAuthProfiles)
+        .and_then(ProviderId::try_new)
+}
+
+fn auth_profile_kind(value: &Value) -> Result<CredentialKind, AuthProjectionError> {
+    match value
+        .as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("api_key") => Ok(CredentialKind::ApiKey),
+        Some("oauth") => Ok(CredentialKind::OAuth),
+        Some("token") => Ok(CredentialKind::Token),
+        _ => Err(AuthProjectionError::InvalidPersistedAuthProfiles),
+    }
+}
+
+fn auth_profile_credential_expires(
+    value: &Value,
+    kind: CredentialKind,
+) -> Result<Option<Option<u64>>, AuthProjectionError> {
+    let Some(profile) = value.as_object() else {
+        return Ok(None);
+    };
+    match kind {
+        CredentialKind::ApiKey => Ok((has_present_field(profile, "key")
+            || has_present_field(profile, "keyRef"))
+        .then_some(None)),
+        CredentialKind::OAuth => Ok((has_present_field(profile, "access")
+            || has_present_field(profile, "refresh"))
+        .then_some(None)),
+        CredentialKind::Token => {
+            if !(has_present_field(profile, "token") || has_present_field(profile, "tokenRef")) {
+                return Ok(None);
+            }
+            profile
+                .get("expires")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .ok_or(AuthProjectionError::InvalidPersistedAuthProfiles)
+                })
+                .transpose()
+                .map(Some)
+        }
+    }
+}
+
+fn has_present_field(profile: &serde_json::Map<String, Value>, field: &str) -> bool {
+    match profile.get(field) {
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
+}
+
+fn has_credential_for(
+    profiles: &[StateDbAuthProfile],
+    provider_key: &str,
+    now_millis: u64,
+) -> bool {
+    profiles
+        .iter()
+        .any(|profile| auth_profile_is_available(profile, provider_key, now_millis))
+}
+
+fn auth_profile_is_available(
+    profile: &StateDbAuthProfile,
+    provider_key: &str,
+    now_millis: u64,
+) -> bool {
+    if profile.provider.as_str() != provider_key {
+        return false;
+    }
+    match profile.kind {
+        CredentialKind::ApiKey | CredentialKind::OAuth => true,
+        CredentialKind::Token => match profile.expires {
+            Some(expires) => expires > now_millis,
+            None => true,
+        },
+    }
+}
+
+fn auth_profile_provider_summary(profiles: &[StateDbAuthProfile]) -> String {
     let mut providers = profiles
         .iter()
-        .map(|profile| profile.profile().provider().as_str())
+        .map(|profile| profile.provider.as_str())
         .collect::<Vec<_>>();
     providers.sort_unstable();
     providers.dedup();
@@ -335,7 +381,6 @@ fn auth_profile_provider_summary(profiles: &[PrivateAuthProfile]) -> String {
 
 fn trace_auth_profile_check(
     state_dir: &CanonicalStateDir,
-    agent: &AgentId,
     provider_key: &str,
     reference: &CredentialReference,
     phase: &'static str,
@@ -344,10 +389,9 @@ fn trace_auth_profile_check(
     available: bool,
 ) {
     eprintln!(
-        "[startup-trace] source=openclaw-auth-profiles phase={} state_dir={} agent={} required_provider={} credential_ref={} profile_count={} profile_providers={} available={}",
+        "[startup-trace] source=openclaw-auth-state-db phase={} state_dir={} required_provider={} credential_ref={} profile_count={} profile_providers={} available={}",
         phase,
         state_dir.as_path().display(),
-        agent.as_str(),
         provider_key,
         summarize_reference(reference.as_str()),
         profile_count,
@@ -367,265 +411,8 @@ fn summarize_reference(reference: &str) -> String {
     )
 }
 
-fn credential_is_usable(credential: &PrivateAuthCredential, now_millis: u64) -> bool {
-    match credential {
-        PrivateAuthCredential::ApiKey(key) | PrivateAuthCredential::Token(key) => key.is_present(),
-        PrivateAuthCredential::OAuth {
-            access,
-            refresh,
-            expires,
-        } => access.is_present() && refresh.is_present() && *expires > now_millis,
-    }
-}
-
-fn parse_auth_profiles(
-    contents: &PrivateAuthProfiles,
-) -> Result<Vec<PrivateAuthProfile>, AuthProjectionError> {
-    let document = serde_json::from_slice::<PersistedAuthProfileStoreDocument>(contents.as_bytes())
-        .map_err(|_| AuthProjectionError::InvalidPersistedAuthProfiles)?;
-    if document.version != AUTH_PROFILE_STORE_VERSION {
-        return Err(AuthProjectionError::InvalidPersistedAuthProfiles);
-    }
-    Ok(document.profiles)
-}
-
-struct PersistedAuthProfileStoreDocument {
-    version: u8,
-    profiles: Vec<PrivateAuthProfile>,
-}
-
-impl<'de> Deserialize<'de> for PersistedAuthProfileStoreDocument {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(PersistedAuthProfileStoreVisitor)
-    }
-}
-
-struct PersistedAuthProfileStoreVisitor;
-
-impl<'de> Visitor<'de> for PersistedAuthProfileStoreVisitor {
-    type Value = PersistedAuthProfileStoreDocument;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OpenClaw auth profile document")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut version = None;
-        let mut profiles = None;
-        while let Some(field) = map.next_key::<String>()? {
-            match field.as_str() {
-                "version" if version.is_none() => version = Some(map.next_value()?),
-                "profiles" if profiles.is_none() => {
-                    profiles = Some(map.next_value::<PersistedAuthProfilesDocument>()?.0)
-                }
-                "order" | "lastGood" | "usageStats" => {
-                    let _ = map.next_value::<IgnoredAny>()?;
-                }
-                _ => return Err(de::Error::custom("invalid auth profile document")),
-            }
-        }
-        Ok(PersistedAuthProfileStoreDocument {
-            version: version.ok_or_else(|| de::Error::missing_field("version"))?,
-            profiles: profiles.ok_or_else(|| de::Error::missing_field("profiles"))?,
-        })
-    }
-}
-
-struct PersistedAuthProfilesDocument(Vec<PrivateAuthProfile>);
-
-impl<'de> Deserialize<'de> for PersistedAuthProfilesDocument {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(PersistedAuthProfilesVisitor)
-    }
-}
-
-struct PersistedAuthProfilesVisitor;
-
-impl<'de> Visitor<'de> for PersistedAuthProfilesVisitor {
-    type Value = PersistedAuthProfilesDocument;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OpenClaw auth profile map")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut profiles = Vec::new();
-        while let Some(id) = map.next_key::<String>()? {
-            let id = ProfileId::try_new(id)
-                .map_err(|_| de::Error::custom("invalid auth profile identifier"))?;
-            if profiles
-                .iter()
-                .any(|profile: &PrivateAuthProfile| profile.profile().id() == &id)
-            {
-                return Err(de::Error::custom("invalid auth profile identifier"));
-            }
-            let profile = map.next_value::<PersistedAuthProfileDocument>()?;
-            profiles.push(profile.into_private(id));
-        }
-        Ok(PersistedAuthProfilesDocument(profiles))
-    }
-}
-
-struct PersistedAuthProfileDocument {
-    kind: PersistedAuthProfileKind,
-    provider: ProviderId,
-}
-
-enum PersistedAuthProfileKind {
-    ApiKey(PrivateAuthSecret),
-    OAuth {
-        access: PrivateCredential,
-        refresh: PrivateCredential,
-        expires: u64,
-    },
-    Token(PrivateAuthSecret),
-}
-
-impl PersistedAuthProfileDocument {
-    fn into_private(self, id: ProfileId) -> PrivateAuthProfile {
-        match self.kind {
-            PersistedAuthProfileKind::ApiKey(key) => {
-                PrivateAuthProfile::api_key_secret(id, self.provider, key)
-            }
-            PersistedAuthProfileKind::OAuth {
-                access,
-                refresh,
-                expires,
-            } => PrivateAuthProfile::oauth(id, self.provider, access, refresh, expires),
-            PersistedAuthProfileKind::Token(token) => {
-                PrivateAuthProfile::token_secret(id, self.provider, token)
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PersistedAuthProfileDocument {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(PersistedAuthProfileVisitor)
-    }
-}
-
-struct PersistedAuthProfileVisitor;
-
-impl<'de> Visitor<'de> for PersistedAuthProfileVisitor {
-    type Value = PersistedAuthProfileDocument;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OpenClaw auth profile")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut kind = None;
-        let mut provider = None;
-        let mut key = None;
-        let mut token = None;
-        let mut access = None;
-        let mut refresh = None;
-        let mut expires = None;
-        while let Some(field) = map.next_key::<String>()? {
-            match field.as_str() {
-                "type" if kind.is_none() => kind = Some(map.next_value::<String>()?),
-                "provider" if provider.is_none() => provider = Some(map.next_value::<String>()?),
-                "key" if key.is_none() => {
-                    key = Some(PrivateAuthSecret::Inline(
-                        map.next_value::<PrivateCredential>()?,
-                    ))
-                }
-                "keyRef" if key.is_none() => {
-                    key = Some(PrivateAuthSecret::Reference(
-                        map.next_value::<SecretReference>()?,
-                    ))
-                }
-                "token" if token.is_none() => {
-                    token = Some(PrivateAuthSecret::Inline(
-                        map.next_value::<PrivateCredential>()?,
-                    ))
-                }
-                "tokenRef" if token.is_none() => {
-                    token = Some(PrivateAuthSecret::Reference(
-                        map.next_value::<SecretReference>()?,
-                    ))
-                }
-                "access" if access.is_none() => {
-                    access = Some(map.next_value::<PrivateCredential>()?)
-                }
-                "refresh" if refresh.is_none() => {
-                    refresh = Some(map.next_value::<PrivateCredential>()?)
-                }
-                "expires" if expires.is_none() => expires = Some(map.next_value::<u64>()?),
-                "copyToAgents" | "email" | "displayName" | "metadata" | "clientId"
-                | "enterpriseUrl" | "projectId" | "accountId" | "chatgptPlanType" | "idToken" => {
-                    let _ = map.next_value::<IgnoredAny>()?;
-                }
-                _ => return Err(de::Error::custom("invalid auth profile field")),
-            }
-        }
-        let provider = provider
-            .ok_or_else(|| de::Error::missing_field("provider"))
-            .and_then(|provider| {
-                ProviderId::try_new(provider).map_err(|_| de::Error::custom("invalid provider"))
-            })?;
-        match kind.as_deref() {
-            Some("api_key")
-                if token.is_none()
-                    && access.is_none()
-                    && refresh.is_none()
-                    && expires.is_none() =>
-            {
-                let key = key.ok_or_else(|| de::Error::missing_field("key"))?;
-                Ok(PersistedAuthProfileDocument {
-                    kind: PersistedAuthProfileKind::ApiKey(key),
-                    provider,
-                })
-            }
-            Some("token")
-                if key.is_none() && access.is_none() && refresh.is_none() && expires.is_none() =>
-            {
-                let token = token.ok_or_else(|| de::Error::missing_field("token"))?;
-                Ok(PersistedAuthProfileDocument {
-                    kind: PersistedAuthProfileKind::Token(token),
-                    provider,
-                })
-            }
-            Some("oauth") if key.is_none() && token.is_none() => {
-                let access = access.ok_or_else(|| de::Error::missing_field("access"))?;
-                let refresh = refresh.ok_or_else(|| de::Error::missing_field("refresh"))?;
-                let expires = expires.ok_or_else(|| de::Error::missing_field("expires"))?;
-                Ok(PersistedAuthProfileDocument {
-                    kind: PersistedAuthProfileKind::OAuth {
-                        access,
-                        refresh,
-                        expires,
-                    },
-                    provider,
-                })
-            }
-            _ => Err(de::Error::custom("invalid auth profile type")),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthProjectionError {
-    EmptyCredential,
     InvalidProfileId,
     InvalidPersistedAuthProfiles,
     InvalidProviderId,
@@ -635,7 +422,6 @@ pub enum AuthProjectionError {
 impl fmt::Display for AuthProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyCredential => formatter.write_str("OpenClaw credential is invalid"),
             Self::InvalidProfileId => {
                 formatter.write_str("OpenClaw auth profile identifier is invalid")
             }
@@ -655,8 +441,7 @@ impl fmt::Display for AuthProjectionError {
 impl std::error::Error for AuthProjectionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::EmptyCredential
-            | Self::InvalidProfileId
+            Self::InvalidProfileId
             | Self::InvalidPersistedAuthProfiles
             | Self::InvalidProviderId
             | Self::StateDirectory => None,

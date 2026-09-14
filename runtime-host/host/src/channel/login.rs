@@ -12,6 +12,7 @@ pub(crate) enum ChannelLoginAction {
         force: bool,
         timeout_ms: Option<u64>,
         account_id: Option<String>,
+        agent_id: Option<String>,
         config: Zeroizing<Vec<u8>>,
     },
     Wait {
@@ -64,6 +65,25 @@ pub(crate) enum DeliveryOutcome {
     Confirmed,
     TargetRejected,
     Unknown,
+}
+
+impl Outcome {
+    pub(crate) fn trace_outcome(&self) -> &'static str {
+        match self {
+            Self::Progress(progress) => match progress.status {
+                LoginProgressStatus::Connected => "connected",
+                LoginProgressStatus::Qr => "qr",
+                LoginProgressStatus::Pending => "pending",
+                LoginProgressStatus::Rejected => "rejected",
+                LoginProgressStatus::Unknown => "unknown",
+            },
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::Unsupported => "unsupported",
+            Self::Cancelled => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 impl LoginProgress {

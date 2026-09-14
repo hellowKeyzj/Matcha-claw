@@ -7,8 +7,6 @@ import plugin from '../../packages/openclaw-task-manager-plugin/src/index'
 type ToolResult = {
   content?: Array<{ type: string; text?: string }>
   details?: unknown
-  rawResponse?: unknown
-  renderer?: unknown
 }
 
 type ToolDefinition = {
@@ -28,6 +26,7 @@ type GatewayHandler = (options: {
   params: Record<string, unknown>
   respond: (success: boolean, data?: unknown, error?: { code: string; message: string }) => void
 }) => Promise<void> | void
+type PluginApiLike = Parameters<NonNullable<typeof plugin.register>>[0]
 
 function createPluginHarness() {
   const debugLogs: string[] = []
@@ -97,7 +96,7 @@ function createPluginHarness() {
     on: (name: string, handler: HookHandler) => {
       hooks.set(name, handler)
     },
-  } as any)
+  } as unknown as PluginApiLike)
 
   const getTool = (name: string, ctx: { workspaceDir?: string; sessionKey?: string }): ToolDefinition => {
     for (const registration of toolRegistrations) {
@@ -632,7 +631,8 @@ describe('task-manager semantics', () => {
         { id: 'b', content: '写实现', status: 'pending' },
       ],
     })
-    expect(result.renderer).toEqual({ type: 'todo' })
+    expect(result).not.toHaveProperty('rawResponse')
+    expect(result).not.toHaveProperty('renderer')
 
     const listed = await harness.callGateway('TaskList', { workspaceDir, sessionKey: 'session-todo' })
     expect((listed.data as { todos: unknown[] }).todos).toEqual([

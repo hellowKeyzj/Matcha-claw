@@ -62,14 +62,17 @@ impl TeamNodeCompletionEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamNodeCompletionReceipt {
     receipt: AuthorizedGraphResolutionReceipt,
+    delivery_id: DeliveryId,
     graph_run_id: GraphRunId,
     fence: ExecutionFence,
+    idempotency_key: String,
     evidence: Vec<TeamNodeCompletionEvidence>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamNodeCompletionReceiptError {
     BlankGraphRunId,
+    BlankIdempotencyKey,
     TooManyReferences,
     DuplicateReference,
     EvidenceGraphRunMismatch,
@@ -79,13 +82,19 @@ pub enum TeamNodeCompletionReceiptError {
 impl TeamNodeCompletionReceipt {
     pub fn try_new(
         receipt: AuthorizedGraphResolutionReceipt,
+        delivery_id: DeliveryId,
         graph_run_id: impl Into<String>,
         fence: ExecutionFence,
+        idempotency_key: impl Into<String>,
         evidence: impl IntoIterator<Item = TeamNodeCompletionEvidence>,
     ) -> Result<Self, TeamNodeCompletionReceiptError> {
         let graph_run_id = graph_run_id.into();
         if graph_run_id.trim().is_empty() {
             return Err(TeamNodeCompletionReceiptError::BlankGraphRunId);
+        }
+        let idempotency_key = idempotency_key.into();
+        if idempotency_key.trim().is_empty() {
+            return Err(TeamNodeCompletionReceiptError::BlankIdempotencyKey);
         }
         let graph_run_id = GraphRunId::new(graph_run_id);
         let evidence: Vec<_> = evidence.into_iter().collect();
@@ -109,8 +118,10 @@ impl TeamNodeCompletionReceipt {
         }
         Ok(Self {
             receipt,
+            delivery_id,
             graph_run_id,
             fence,
+            idempotency_key,
             evidence,
         })
     }
@@ -119,12 +130,20 @@ impl TeamNodeCompletionReceipt {
         &self.receipt
     }
 
+    pub fn delivery_id(&self) -> &DeliveryId {
+        &self.delivery_id
+    }
+
     pub fn graph_run_id(&self) -> &GraphRunId {
         &self.graph_run_id
     }
 
     pub fn fence(&self) -> &ExecutionFence {
         &self.fence
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
     }
 
     pub fn evidence(&self) -> &[TeamNodeCompletionEvidence] {
@@ -192,14 +211,18 @@ mod tests {
             TeamNodeCompletionEvidence::try_new("run:one", fence.clone(), artifact()).unwrap();
         let receipt = TeamNodeCompletionReceipt::try_new(
             AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:one").unwrap(),
             "run:one",
             fence.clone(),
+            "node-event:one",
             [evidence],
         )
         .unwrap();
 
         assert_eq!(receipt.graph_run_id().as_str(), "run:one");
+        assert_eq!(receipt.delivery_id().as_str(), "delivery:one");
         assert_eq!(receipt.fence(), &fence);
+        assert_eq!(receipt.idempotency_key(), "node-event:one");
         assert_eq!(receipt.artifact_evidence().count(), 1);
         assert_eq!(
             receipt.evidence()[0].reference().reference(),
@@ -210,13 +233,27 @@ mod tests {
     #[test]
     fn completion_receipt_rejects_mismatched_evidence_and_duplicates() {
         let fence = fence();
+        assert_eq!(
+            TeamNodeCompletionReceipt::try_new(
+                AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+                DeliveryId::new("delivery:one").unwrap(),
+                "run:one",
+                fence.clone(),
+                " ",
+                [],
+            ),
+            Err(TeamNodeCompletionReceiptError::BlankIdempotencyKey)
+        );
+
         let mismatched =
             TeamNodeCompletionEvidence::try_new("run:other", fence.clone(), artifact()).unwrap();
         assert_eq!(
             TeamNodeCompletionReceipt::try_new(
                 AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+                DeliveryId::new("delivery:one").unwrap(),
                 "run:one",
                 fence.clone(),
+                "node-event:one",
                 [mismatched],
             ),
             Err(TeamNodeCompletionReceiptError::EvidenceGraphRunMismatch)
@@ -229,8 +266,10 @@ mod tests {
         assert_eq!(
             TeamNodeCompletionReceipt::try_new(
                 AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+                DeliveryId::new("delivery:one").unwrap(),
                 "run:one",
                 fence,
+                "node-event:one",
                 [first, second],
             ),
             Err(TeamNodeCompletionReceiptError::DuplicateReference)
@@ -244,8 +283,10 @@ mod tests {
             TeamNodeCompletionEvidence::try_new("run:one", fence.clone(), artifact()).unwrap();
         let receipt = TeamNodeCompletionReceipt::try_new(
             AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:one").unwrap(),
             "run:one",
             fence,
+            "node-event:one",
             [evidence],
         )
         .unwrap();
@@ -485,6 +526,31 @@ impl TeamNodeEventProducer {
         )
     }
 
+    pub fn complete_activity(
+        delivery_id: DeliveryId,
+        receipt: AuthorizedGraphResolutionReceipt,
+        graph_run_id: GraphRunId,
+        fence: ExecutionFence,
+        attempt: NonZeroU32,
+        summary: String,
+        idempotency_key: String,
+        output_port: String,
+        resolved_at: u64,
+    ) -> Result<TeamNodeTerminalEvent, TeamNodeEventProducerError> {
+        Self::activity_terminal(
+            AgentNodeEvent::Complete,
+            delivery_id,
+            receipt,
+            graph_run_id,
+            fence,
+            attempt,
+            summary,
+            idempotency_key,
+            output_port,
+            resolved_at,
+        )
+    }
+
     pub fn reject(
         delivery_id: Option<DeliveryId>,
         receipt: Option<AuthorizedGraphResolutionReceipt>,
@@ -512,6 +578,31 @@ impl TeamNodeEventProducer {
         )
     }
 
+    pub fn reject_activity(
+        delivery_id: DeliveryId,
+        receipt: AuthorizedGraphResolutionReceipt,
+        graph_run_id: GraphRunId,
+        fence: ExecutionFence,
+        attempt: NonZeroU32,
+        summary: String,
+        idempotency_key: String,
+        output_port: String,
+        resolved_at: u64,
+    ) -> Result<TeamNodeTerminalEvent, TeamNodeEventProducerError> {
+        Self::activity_terminal(
+            AgentNodeEvent::Reject,
+            delivery_id,
+            receipt,
+            graph_run_id,
+            fence,
+            attempt,
+            summary,
+            idempotency_key,
+            output_port,
+            resolved_at,
+        )
+    }
+
     fn terminal(
         event: AgentNodeEvent,
         delivery_id: Option<DeliveryId>,
@@ -520,7 +611,7 @@ impl TeamNodeEventProducer {
         fence: Option<ExecutionFence>,
         attempt: Option<NonZeroU32>,
         summary: String,
-        source_envelope_id: String,
+        _source_envelope_id: String,
         idempotency_key: String,
         output_port: Option<String>,
         resolved_at: u64,
@@ -532,25 +623,60 @@ impl TeamNodeEventProducer {
         let fence = fence.ok_or(TeamNodeEventProducerError::TerminalReceiptRequired)?;
         let attempt = attempt.ok_or(TeamNodeEventProducerError::TerminalReceiptRequired)?;
         let output_port = output_port.ok_or(TeamNodeEventProducerError::TerminalReceiptRequired)?;
+        Self::activity_terminal(
+            event,
+            delivery_id,
+            receipt,
+            graph_run_id,
+            fence,
+            attempt,
+            summary,
+            idempotency_key,
+            output_port,
+            resolved_at,
+        )
+    }
+
+    fn activity_terminal(
+        event: AgentNodeEvent,
+        delivery_id: DeliveryId,
+        receipt: AuthorizedGraphResolutionReceipt,
+        graph_run_id: GraphRunId,
+        fence: ExecutionFence,
+        attempt: NonZeroU32,
+        summary: String,
+        idempotency_key: String,
+        output_port: String,
+        resolved_at: u64,
+    ) -> Result<TeamNodeTerminalEvent, TeamNodeEventProducerError> {
+        let completion = TeamNodeCompletionReceipt::try_new(
+            receipt.clone(),
+            delivery_id.clone(),
+            graph_run_id.as_str(),
+            fence.clone(),
+            idempotency_key.clone(),
+            [],
+        )
+        .map_err(|_| TeamNodeEventProducerError::Invalid)?;
         let resolution = match event {
-            AgentNodeEvent::Complete => AgentNodeEventResolution::complete_with_summary(
+            AgentNodeEvent::Complete => AgentNodeEventResolution::complete_activity(
                 receipt,
                 delivery_id,
                 graph_run_id.as_str(),
                 fence,
+                completion,
                 summary,
-                source_envelope_id,
                 idempotency_key,
                 Some(output_port),
                 resolved_at,
             ),
-            AgentNodeEvent::Reject => AgentNodeEventResolution::reject_with_summary(
+            AgentNodeEvent::Reject => AgentNodeEventResolution::reject_activity(
                 receipt,
                 delivery_id,
                 graph_run_id.as_str(),
                 fence,
+                completion,
                 summary,
-                source_envelope_id,
                 idempotency_key,
                 Some(output_port),
                 resolved_at,

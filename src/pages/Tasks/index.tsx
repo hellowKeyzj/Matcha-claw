@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  Calendar,
-  CheckCircle2,
   Loader2,
-  PauseCircle,
-  PlayCircle,
+  ListTodo,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
@@ -18,8 +15,9 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
-import { TaskCenterStatCard } from '@/components/task-center/stat-card';
-import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
+import { TaskCenterEmptyState, TaskCenterStatusFilter, TaskCenterSurface, TaskCenterToolbar } from '@/components/task-center/surface';
+import { Select } from '@/components/ui/select';
+import { DatePicker } from '@/components/ui/date-picker';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
@@ -46,13 +44,19 @@ function statusDotClass(status: string): string {
 }
 
 type TaskCenterTab = 'long' | 'scheduled';
-type TaskStatsWindow = 'all' | '7d' | '30d';
+type TaskStatsWindow = 'all' | '7d' | '30d' | 'custom';
 type TaskCenterScopeFilter =
   | { type: 'agent'; agentId: string }
   | { type: 'team'; teamId: string };
 
 type TaskStatusFilter = 'all' | 'running' | 'waiting' | 'completed' | 'incomplete';
 type ScopedTask = Task & { scopeKey?: string; scopeType?: 'agent' | 'team'; sourceSessionKey?: string; sourceTeamKey?: string };
+type TaskDeleteTarget = {
+  id: string;
+  viewKey: string;
+  sourceSessionKey: string;
+  sourceTeamKey: string | null;
+};
 
 const TASK_POLLING_FAST_MS = 5_000;
 const TASK_POLLING_NORMAL_MS = 20_000;
@@ -85,19 +89,13 @@ function resolveTaskTimestampMs(task: Task): number | null {
 }
 
 function resolveDateRangeMs(dateFrom: string, dateTo: string): { startMs: number | null; endMs: number | null } {
-  const startMs = dateFrom ? Date.parse(`${dateFrom}T00:00:00`) : NaN;
-  const endMs = dateTo ? Date.parse(`${dateTo}T23:59:59.999`) : NaN;
-  const safeStartMs = Number.isFinite(startMs) ? startMs : null;
-  const safeEndMs = Number.isFinite(endMs) ? endMs : null;
-  if (safeStartMs != null && safeEndMs != null && safeStartMs > safeEndMs) {
-    return {
-      startMs: safeEndMs,
-      endMs: safeStartMs,
-    };
-  }
+  const orderedFrom = dateFrom && dateTo && dateFrom > dateTo ? dateTo : dateFrom;
+  const orderedTo = dateFrom && dateTo && dateFrom > dateTo ? dateFrom : dateTo;
+  const startMs = orderedFrom ? Date.parse(`${orderedFrom}T00:00:00`) : NaN;
+  const endMs = orderedTo ? Date.parse(`${orderedTo}T23:59:59.999`) : NaN;
   return {
-    startMs: safeStartMs,
-    endMs: safeEndMs,
+    startMs: Number.isFinite(startMs) ? startMs : null,
+    endMs: Number.isFinite(endMs) ? endMs : null,
   };
 }
 
@@ -149,7 +147,7 @@ function formatDateTime(value: number | undefined): string {
 }
 
 export function TasksPage() {
-  const { t } = useTranslation('tasks');
+  const { t, i18n } = useTranslation('tasks');
   const [searchParams, setSearchParams] = useSearchParams();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
@@ -193,7 +191,7 @@ export function TasksPage() {
   }, [currentAgentId, sessions]);
   const tasks = scopedTasks;
   const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || initialized);
-  const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
+  const [taskToDelete, setTaskToDelete] = useState<TaskDeleteTarget | null>(null);
 
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
@@ -232,50 +230,61 @@ export function TasksPage() {
   const loadScopedTasks = useCallback(async () => {
     const requestSeq = scopedTasksRequestSeqRef.current + 1;
     scopedTasksRequestSeqRef.current = requestSeq;
-    const chatState = useChatStore.getState();
-    const activeSessionKey = chatState.currentSessionKey;
-    const activeSessions = readSessionsFromState(chatState);
-    if (!activeSessionKey) {
-      setScopedTasks([]);
-      return;
-    }
-    const activeSession = resolveTaskSession(activeSessions, activeSessionKey);
-    if (!activeSession) {
-      setScopedTasks([]);
-      return;
-    }
-    if (scopeFilter.type === 'team') {
-      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
+    const clearScopedTasksIfCurrent = () => {
+      if (scopedTasksRequestSeqRef.current === requestSeq) {
+        setScopedTasks([]);
+      }
+    };
+
+    try {
+      const chatState = useChatStore.getState();
+      const activeSessionKey = chatState.currentSessionKey;
+      const activeSessions = readSessionsFromState(chatState);
+      if (!activeSessionKey) {
+        clearScopedTasksIfCurrent();
+        return;
+      }
+      const activeSession = resolveTaskSession(activeSessions, activeSessionKey);
+      if (!activeSession) {
+        clearScopedTasksIfCurrent();
+        return;
+      }
+      if (scopeFilter.type === 'team') {
+        const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
+        if (scopedTasksRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setScopedTasks(snapshot.tasks.map((task) => ({
+          ...task,
+          scopeKey: snapshot.scope?.key ?? `team:${scopeFilter.teamId}`,
+          scopeType: 'team',
+          sourceSessionKey: activeSession.key,
+          sourceTeamKey: scopeFilter.teamId,
+        })));
+        return;
+      }
+      const scopedSessions = activeSessions.filter((session) => session.agentId === scopeFilter.agentId);
+      const uniqueSessionKeys = uniqueSorted(scopedSessions.map((session) => session.key));
+      const sessionByKey = new Map(scopedSessions.map((session) => [session.key, session]));
+      const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => {
+        const session = sessionByKey.get(sessionKey)!;
+        return {
+          sessionKey,
+          snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
+        };
+      }));
       if (scopedTasksRequestSeqRef.current !== requestSeq) {
         return;
       }
-      setScopedTasks(snapshot.tasks.map((task) => ({
+      setScopedTasks(snapshots.flatMap(({ sessionKey, snapshot }) => snapshot.tasks.map((task) => ({
         ...task,
-        scopeKey: snapshot.scope?.key ?? `team:${scopeFilter.teamId}`,
-        scopeType: 'team',
-        sourceTeamKey: scopeFilter.teamId,
-      })));
-      return;
+        scopeKey: snapshot.scope?.key ?? sessionKey,
+        scopeType: 'agent' as const,
+        sourceSessionKey: sessionKey,
+      }))));
+    } catch {
+      clearScopedTasksIfCurrent();
     }
-    const scopedSessions = activeSessions.filter((session) => session.agentId === scopeFilter.agentId);
-    const uniqueSessionKeys = uniqueSorted(scopedSessions.map((session) => session.key));
-    const sessionByKey = new Map(scopedSessions.map((session) => [session.key, session]));
-    const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => {
-      const session = sessionByKey.get(sessionKey)!;
-      return {
-        sessionKey,
-        snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
-      };
-    }));
-    if (scopedTasksRequestSeqRef.current !== requestSeq) {
-      return;
-    }
-    setScopedTasks(snapshots.flatMap(({ sessionKey, snapshot }) => snapshot.tasks.map((task) => ({
-      ...task,
-      scopeKey: snapshot.scope?.key ?? sessionKey,
-      scopeType: 'agent' as const,
-      sourceSessionKey: sessionKey,
-    }))));
   }, [scopeFilter]);
 
   useEffect(() => {
@@ -288,27 +297,13 @@ export function TasksPage() {
     if (!sessionsLoadedOnce) {
       return;
     }
-    void loadScopedTasks().catch(() => {
-      setScopedTasks([]);
+    const rafId = window.requestAnimationFrame(() => {
+      void loadScopedTasks();
     });
-  }, [loadScopedTasks, sessions, sessionsLoadedOnce]);
-
-  useEffect(() => {
-    let disposed = false;
-    const refreshVisibleTasks = async () => {
-      try {
-        await loadScopedTasks();
-      } catch {
-        if (!disposed) {
-          setScopedTasks([]);
-        }
-      }
-    };
-    void refreshVisibleTasks();
     return () => {
-      disposed = true;
+      window.cancelAnimationFrame(rafId);
     };
-  }, [loadScopedTasks]);
+  }, [loadScopedTasks, sessions, sessionsLoadedOnce]);
 
   useEffect(() => {
     const updateNow = () => {
@@ -341,8 +336,12 @@ export function TasksPage() {
       return;
     }
     if (initialized && tasks.length <= TASK_LIST_VIRTUAL_THRESHOLD) {
-      setTaskHeavyContentReady(true);
-      return;
+      const rafId = window.requestAnimationFrame(() => {
+        setTaskHeavyContentReady(true);
+      });
+      return () => {
+        window.cancelAnimationFrame(rafId);
+      };
     }
     const cancel = scheduleIdleReady(() => {
       setTaskHeavyContentReady(true);
@@ -360,7 +359,7 @@ export function TasksPage() {
   );
 
   useEffect(() => {
-    if (!gatewayOperational) {
+    if (!gatewayOperational || activeTab === 'scheduled') {
       return;
     }
 
@@ -418,7 +417,7 @@ export function TasksPage() {
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [gatewayOperational, hasActiveTasks, loadScopedTasks, refreshTasks]);
+  }, [activeTab, gatewayOperational, hasActiveTasks, loadScopedTasks, refreshTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
@@ -440,7 +439,7 @@ export function TasksPage() {
     });
   }, [dateRange.endMs, dateRange.startMs, tasksForView]);
   const statsTasks = useMemo(() => {
-    if (statsWindow === 'all') {
+    if (statsWindow === 'all' || statsWindow === 'custom') {
       return longTasks;
     }
     const days = statsWindow === '7d' ? 7 : 30;
@@ -455,8 +454,37 @@ export function TasksPage() {
     [statsTasks, statusFilter],
   );
   const shouldUseVirtualTaskList = taskHeavyContentReady && filteredTasks.length > TASK_LIST_VIRTUAL_THRESHOLD;
+  const showTaskContent = !showInitialLoading && taskHeavyContentReady;
+  const taskListResetKey = `${formatFilterValue(scopeFilter)}:${statsWindow}:${dateFrom}:${dateTo}:${statusFilter}:${filteredTasks.length === 0 ? 'empty' : 'filled'}`;
   useEffect(() => {
-    if (!shouldUseVirtualTaskList) {
+    const rafId = window.requestAnimationFrame(() => {
+      setTaskListScrollTop(0);
+      const scroller = taskListScrollRef.current;
+      if (scroller) {
+        scroller.scrollTop = 0;
+      }
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [taskListResetKey]);
+
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      if (!shouldUseVirtualTaskList) {
+        setTaskListScrollTop(0);
+        return;
+      }
+      const maxScrollTop = Math.max(0, filteredTasks.length * TASK_LIST_ESTIMATED_ROW_HEIGHT - taskListViewportHeight);
+      setTaskListScrollTop((prev) => Math.min(prev, maxScrollTop));
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [filteredTasks.length, shouldUseVirtualTaskList, taskListViewportHeight]);
+
+  useEffect(() => {
+    if (!shouldUseVirtualTaskList || !showTaskContent || activeTab !== 'long') {
       const rafId = window.requestAnimationFrame(() => {
         setTaskListViewportHeight((prev) => (prev === 0 ? prev : 0));
       });
@@ -494,7 +522,7 @@ export function TasksPage() {
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [shouldUseVirtualTaskList]);
+  }, [activeTab, shouldUseVirtualTaskList, showTaskContent]);
 
   const visibleTasks = useMemo(
     () => filteredTasks.slice(0, visibleTaskCount),
@@ -512,8 +540,8 @@ export function TasksPage() {
 
   const handleTaskListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const target = event.currentTarget;
-    setTaskListScrollTop((prev) => (prev === target.scrollTop ? prev : target.scrollTop));
     if (shouldUseVirtualTaskList) {
+      setTaskListScrollTop((prev) => (prev === target.scrollTop ? prev : target.scrollTop));
       return;
     }
     if (visibleTaskCount >= filteredTasks.length) {
@@ -563,10 +591,14 @@ export function TasksPage() {
       };
     }
     const safeViewportHeight = Math.max(taskListViewportHeight, TASK_LIST_ESTIMATED_ROW_HEIGHT);
+    const safeScrollTop = Math.min(
+      taskListScrollTop,
+      Math.max(0, filteredTasks.length * TASK_LIST_ESTIMATED_ROW_HEIGHT - safeViewportHeight),
+    );
     const visibleCount = Math.max(1, Math.ceil(safeViewportHeight / TASK_LIST_ESTIMATED_ROW_HEIGHT));
     const startIndex = Math.max(
       0,
-      Math.floor(taskListScrollTop / TASK_LIST_ESTIMATED_ROW_HEIGHT) - TASK_LIST_VIRTUAL_OVERSCAN,
+      Math.floor(safeScrollTop / TASK_LIST_ESTIMATED_ROW_HEIGHT) - TASK_LIST_VIRTUAL_OVERSCAN,
     );
     const endIndex = Math.min(
       filteredTasks.length,
@@ -620,30 +652,31 @@ export function TasksPage() {
   const incompleteCount = taskStatusSummary.incomplete;
 
   const handleDeleteTask = (task: ScopedTask) => {
-    if (!task.id) {
+    if (!task.id || !task.sourceSessionKey) {
       return;
     }
-    setTaskToDelete({ id: task.id });
+    setTaskToDelete({
+      id: task.id,
+      viewKey: taskViewKey(task),
+      sourceSessionKey: task.sourceSessionKey,
+      sourceTeamKey: task.sourceTeamKey ?? null,
+    });
   };
 
   const confirmDeleteTask = async () => {
-    const deletingTaskId = taskToDelete?.id;
-    if (!deletingTaskId) {
+    const deleteTarget = taskToDelete;
+    if (!deleteTarget) {
       return;
     }
-    const selected = selectedTask;
-    const selectedSessionKey = selected?.sourceSessionKey;
-    const selectedSession = selectedSessionKey
-      ? resolveTaskSession(sessions, selectedSessionKey)
-      : resolveTaskSession(sessions, currentSessionKey);
-    if (!selectedSession) {
+    const sourceSession = resolveTaskSession(sessions, deleteTarget.sourceSessionKey);
+    if (!sourceSession) {
       return;
     }
     await deleteTaskById({
-      taskId: deletingTaskId,
-      sessionKey: selectedSession.key,
-      sessionIdentity: selectedSession.sessionIdentity,
-      ...(selected?.sourceTeamKey ? { teamKey: selected.sourceTeamKey } : {}),
+      taskId: deleteTarget.id,
+      sessionKey: sourceSession.key,
+      sessionIdentity: sourceSession.sessionIdentity,
+      ...(deleteTarget.sourceTeamKey ? { teamKey: deleteTarget.sourceTeamKey } : {}),
     });
     const next = useTaskCenterStore.getState();
     if (next.error) {
@@ -651,7 +684,8 @@ export function TasksPage() {
       return;
     }
     toast.success(t('toast.deleted'));
-    if (selectedTaskId === (selected ? taskViewKey(selected) : deletingTaskId)) {
+    setScopedTasks((prev) => prev.filter((task) => taskViewKey(task) !== deleteTarget.viewKey));
+    if (selectedTaskId === deleteTarget.viewKey) {
       setSelectedTaskId(null);
     }
     setTaskToDelete(null);
@@ -686,101 +720,132 @@ export function TasksPage() {
           <TabsTrigger value="scheduled">{t('tabs.scheduled')}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="long" className="mt-0 space-y-6">
-          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-3">
-            <div className="flex rounded-md border bg-background p-1">
-              <Button
-                type="button"
-                size="sm"
-                variant={statsWindow === 'all' ? 'secondary' : 'ghost'}
-                onClick={() => {
-                  setStatsWindow('all');
-                  setStatusFilter('all');
-                }}
-              >
-                {t('timeWindow.all')}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={statsWindow === '7d' ? 'secondary' : 'ghost'}
-                onClick={() => {
-                  setStatsWindow('7d');
-                  setStatusFilter('all');
-                }}
-              >
-                {t('timeWindow.last7Days')}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={statsWindow === '30d' ? 'secondary' : 'ghost'}
-                onClick={() => {
-                  setStatsWindow('30d');
-                  setStatusFilter('all');
-                }}
-              >
-                {t('timeWindow.last30Days')}
-              </Button>
+        <TabsContent value="long" className="mt-0 space-y-5">
+          <TaskCenterToolbar
+            actions={(
+              <>
+                <Select
+                  value={formatFilterValue(scopeFilter)}
+                  onChange={(event) => {
+                    const next = parseFilterValue(event.target.value);
+                    if (next) {
+                      setScopeFilter(next);
+                      setSelectedTaskId(null);
+                    }
+                  }}
+                  className="h-9 w-auto max-w-44 py-1 pl-3 pr-9 text-sm"
+                  aria-label={t('scope.label', { defaultValue: 'Scope' })}
+                >
+                  {agentIds.map((agentId) => (
+                    <option key={`agent:${agentId}`} value={`agent:${agentId}`}>
+                      Agent: {agentId}
+                    </option>
+                  ))}
+                  {teams.map((team) => (
+                    <option key={`team:${team.id}`} value={`team:${team.id}`}>
+                      Team: {team.name || team.id}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={statsWindow}
+                  onChange={(event) => {
+                    const next = event.target.value as TaskStatsWindow;
+                    setStatsWindow(next);
+                    setStatusFilter('all');
+                    if (next !== 'custom') {
+                      setDateFrom('');
+                      setDateTo('');
+                    }
+                  }}
+                  className="h-9 w-auto py-1 pl-3 pr-9 text-sm"
+                  aria-label={t('timeWindow.title')}
+                >
+                  <option value="all">{t('timeWindow.selection', { range: t('timeWindow.all') })}</option>
+                  <option value="7d">{t('timeWindow.selection', { range: t('timeWindow.last7Days') })}</option>
+                  <option value="30d">{t('timeWindow.selection', { range: t('timeWindow.last30Days') })}</option>
+                  <option value="custom">{t('timeWindow.selection', { range: t('timeWindow.custom') })}</option>
+                </Select>
+                {(statsWindow !== 'all' || statusFilter !== 'all' || dateFrom || dateTo) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-9 px-2 text-muted-foreground"
+                    onClick={clearFilters}
+                  >
+                    {t('filters.clear')}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-9 w-9 shrink-0 text-muted-foreground"
+                  aria-label={t('refresh')}
+                  title={t('refresh')}
+                  onClick={() => {
+                    void loadSessions().then(() => loadScopedTasks());
+                  }}
+                  disabled={manualRefreshBusy}
+                >
+                  <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} aria-hidden="true" />
+                </Button>
+              </>
+            )}
+          >
+            <TaskCenterStatusFilter
+              count={statsTasks.length}
+              label={t('cron:filters.all')}
+              active={statusFilter === 'all'}
+              onClick={() => setStatusFilter('all')}
+            />
+            <TaskCenterStatusFilter
+              count={runningCount}
+              label={t('stats.running')}
+              active={statusFilter === 'running'}
+              onClick={() => setStatusFilter((prev) => (prev === 'running' ? 'all' : 'running'))}
+            />
+            <TaskCenterStatusFilter
+              count={waitingCount}
+              label={t('stats.waiting')}
+              active={statusFilter === 'waiting'}
+              onClick={() => setStatusFilter((prev) => (prev === 'waiting' ? 'all' : 'waiting'))}
+            />
+            <TaskCenterStatusFilter
+              count={completedCount}
+              label={t('stats.completed')}
+              active={statusFilter === 'completed'}
+              onClick={() => setStatusFilter((prev) => (prev === 'completed' ? 'all' : 'completed'))}
+            />
+            <TaskCenterStatusFilter
+              count={incompleteCount}
+              label={t('stats.incomplete')}
+              active={statusFilter === 'incomplete'}
+              onClick={() => setStatusFilter((prev) => (prev === 'incomplete' ? 'all' : 'incomplete'))}
+            />
+          </TaskCenterToolbar>
+
+          {statsWindow === 'custom' && (
+            <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
+              <DatePicker
+                id="tasks-date-from"
+                label={t('filters.from')}
+                placeholder={t('filters.isoDatePlaceholder')}
+                value={dateFrom}
+                onChange={setDateFrom}
+                locale={i18n.language}
+              />
+              <DatePicker
+                id="tasks-date-to"
+                label={t('filters.to')}
+                placeholder={t('filters.isoDatePlaceholder')}
+                value={dateTo}
+                onChange={setDateTo}
+                locale={i18n.language}
+              />
             </div>
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              <label htmlFor="tasks-date-from" className="relative h-9 w-40 cursor-pointer">
-                <div className="flex h-9 items-center justify-between rounded-md border border-input bg-background px-3 text-sm">
-                  <span className={cn('truncate', !dateFrom && 'text-muted-foreground')}>
-                    {dateFrom || t('filters.isoDatePlaceholder')}
-                  </span>
-                  <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
-                </div>
-                <input
-                  id="tasks-date-from"
-                  aria-label={t('filters.from')}
-                  type="date"
-                  value={dateFrom}
-                  onChange={(event) => setDateFrom(event.target.value)}
-                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
-                />
-              </label>
-              <label htmlFor="tasks-date-to" className="relative h-9 w-40 cursor-pointer">
-                <div className="flex h-9 items-center justify-between rounded-md border border-input bg-background px-3 text-sm">
-                  <span className={cn('truncate', !dateTo && 'text-muted-foreground')}>
-                    {dateTo || t('filters.isoDatePlaceholder')}
-                  </span>
-                  <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
-                </div>
-                <input
-                  id="tasks-date-to"
-                  aria-label={t('filters.to')}
-                  type="date"
-                  value={dateTo}
-                  onChange={(event) => setDateTo(event.target.value)}
-                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
-                />
-              </label>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={clearFilters}
-                disabled={!dateFrom && !dateTo && statsWindow === 'all' && statusFilter === 'all'}
-              >
-                {t('filters.clear')}
-              </Button>
-              <Button
-                type="button"
-                size="icon"
-                variant="outline"
-                className="h-9 w-9"
-                aria-label={t('refresh')}
-                title={t('refresh')}
-                onClick={() => {
-                  void loadSessions().then(() => loadScopedTasks());
-                }}
-                disabled={manualRefreshBusy}
-              >
-                <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
-              </Button>
-            </div>
-          </div>
+          )}
 
           {!gatewayOperational && (
             <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
@@ -801,261 +866,172 @@ export function TasksPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-            <TaskCenterStatCard
-              value={runningCount}
-              label={t('stats.running')}
-              icon={PlayCircle}
-              iconWrapClassName="bg-green-100 dark:bg-green-900/30"
-              iconClassName="text-green-600"
-              active={statusFilter === 'running'}
-              ariaLabel={t('stats.running')}
-              onClick={() => setStatusFilter((prev) => (prev === 'running' ? 'all' : 'running'))}
-            />
-            <TaskCenterStatCard
-              value={waitingCount}
-              label={t('stats.waiting')}
-              icon={PauseCircle}
-              iconWrapClassName="bg-yellow-100 dark:bg-yellow-900/30"
-              iconClassName="text-yellow-600"
-              active={statusFilter === 'waiting'}
-              ariaLabel={t('stats.waiting')}
-              onClick={() => setStatusFilter((prev) => (prev === 'waiting' ? 'all' : 'waiting'))}
-            />
-            <TaskCenterStatCard
-              value={completedCount}
-              label={t('stats.completed')}
-              icon={CheckCircle2}
-              iconWrapClassName="bg-emerald-100 dark:bg-emerald-900/30"
-              iconClassName="text-emerald-600"
-              active={statusFilter === 'completed'}
-              ariaLabel={t('stats.completed')}
-              onClick={() => setStatusFilter((prev) => (prev === 'completed' ? 'all' : 'completed'))}
-            />
-            <TaskCenterStatCard
-              value={incompleteCount}
-              label={t('stats.incomplete')}
-              icon={AlertCircle}
-              iconWrapClassName="bg-red-100 dark:bg-red-900/30"
-              iconClassName="text-red-600"
-              active={statusFilter === 'incomplete'}
-              ariaLabel={t('stats.incomplete')}
-              onClick={() => setStatusFilter((prev) => (prev === 'incomplete' ? 'all' : 'incomplete'))}
-            />
-          </div>
-
           {error && (
             <Card className="border-destructive">
               <CardContent className="py-4 text-destructive">{error}</CardContent>
             </Card>
           )}
 
-          {showInitialLoading ? (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
-              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
-                <CardContent className="space-y-3 p-6">
+          <TaskCenterSurface>
+            {!showTaskContent ? (
+              <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
+                <div className="h-[70vh] overflow-hidden border-b lg:border-b-0 lg:border-r">
                   {Array.from({ length: 6 }).map((_, index) => (
-                    <div key={`task-initial-placeholder-${index}`} className="rounded-lg border p-3">
+                    <div key={`task-initial-placeholder-${index}`} className="h-24 border-b px-4 py-3">
                       <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
                       <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" />
                       <div className="mt-2 h-2 w-16 animate-pulse rounded bg-muted" />
                     </div>
                   ))}
-                </CardContent>
-              </Card>
-              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
-                <CardContent className="space-y-3 p-6">
+                </div>
+                <div className="h-[70vh] space-y-3 p-5">
                   <div className="h-4 w-40 animate-pulse rounded bg-muted" />
                   <div className="h-16 w-full animate-pulse rounded bg-muted" />
                   <div className="h-20 w-full animate-pulse rounded bg-muted" />
-                </CardContent>
-              </Card>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
-              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
-                <CardHeader className="shrink-0">
-                  <div className="flex items-center justify-between gap-3">
-                    <CardTitle>{t('listTitle')}</CardTitle>
-                    <select
-                      value={formatFilterValue(scopeFilter)}
-                      onChange={(event) => {
-                        const next = parseFilterValue(event.target.value);
-                        if (next) {
-                          setScopeFilter(next);
-                          setSelectedTaskId(null);
-                        }
-                      }}
-                      className="h-8 max-w-[220px] shrink-0 rounded-md border border-input bg-background px-2 text-sm"
-                      aria-label={t('scope.label', { defaultValue: 'Scope' })}
-                    >
-                      {agentIds.map((agentId) => (
-                        <option key={`agent:${agentId}`} value={`agent:${agentId}`}>
-                          Agent: {agentId}
-                        </option>
-                      ))}
-                      {teams.map((team) => (
-                        <option key={`team:${team.id}`} value={`team:${team.id}`}>
-                          Team: {team.name || team.id}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </CardHeader>
-                <CardContent ref={taskListScrollRef} className="min-h-0 flex-1 overflow-y-auto pb-6" onScroll={handleTaskListScroll}>
-                  {!taskHeavyContentReady ? (
-                    <div className="space-y-3">
-                      {Array.from({ length: 6 }).map((_, index) => (
-                        <div key={`task-placeholder-${index}`} className="rounded-lg border p-3">
-                          <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
-                          <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" />
-                          <div className="mt-2 h-2 w-16 animate-pulse rounded bg-muted" />
-                        </div>
-                      ))}
-                    </div>
-                  ) : filteredTasks.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">{t('empty')}</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {shouldUseVirtualTaskList && virtualWindow.topSpacerHeight > 0 ? (
-                        <div aria-hidden style={{ height: virtualWindow.topSpacerHeight }} />
-                      ) : null}
-                      {virtualWindow.tasks.map((task) => (
-                        <button
-                          key={taskViewKey(task)}
-                          type="button"
-                          className={cn(
-                            'w-full rounded-lg border p-3 text-left transition-colors',
-                            effectiveSelectedTaskId === taskViewKey(task) ? 'border-primary bg-primary/5' : 'hover:bg-accent/40',
-                          )}
-                          onClick={() => setSelectedTaskId(taskViewKey(task))}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="line-clamp-2 text-sm font-medium">{task.subject}</p>
-                            <span
-                              className={cn('mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full', statusDotClass(task.status))}
-                              title={task.status}
-                              aria-label={task.status}
-                            />
-                          </div>
-                          <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                            <span>{task.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}</span>
-                            <span>
-                              {t('detail.blockedByCount', { count: task.blockedBy.length, defaultValue: '{{count}} blockers' })}
-                            </span>
-                          </div>
-                        </button>
-                      ))}
-                      {shouldUseVirtualTaskList && virtualWindow.bottomSpacerHeight > 0 ? (
-                        <div aria-hidden style={{ height: virtualWindow.bottomSpacerHeight }} />
-                      ) : null}
-                      {!shouldUseVirtualTaskList && visibleTaskCount < filteredTasks.length && (
-                        <div className="space-y-2 rounded-md border border-dashed px-3 py-3 text-center">
-                          <p className="text-xs text-muted-foreground">
-                            {t('pagination.showing', { shown: visibleTaskCount, total: filteredTasks.length })}
-                          </p>
-                          <Button variant="outline" size="sm" onClick={appendVisibleTasks}>
-                            {t('pagination.loadMore')}
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
-                <CardHeader className="shrink-0">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <CardTitle>{selectedTask ? selectedTask.subject : t('detailTitle')}</CardTitle>
-                      <CardDescription>{selectedTask?.id || '-'}</CardDescription>
-                    </div>
-                    {selectedTask ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="shrink-0"
-                        onClick={() => void handleDeleteTask(selectedTask)}
-                        disabled={mutating}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                        <span className="ml-1 text-destructive">{t('actions.delete')}</span>
-                      </Button>
+                </div>
+              </div>
+            ) : filteredTasks.length === 0 ? (
+              <TaskCenterEmptyState icon={ListTodo} title={t('empty')} />
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
+                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden border-b lg:border-b-0 lg:border-r">
+                  <CardHeader className="shrink-0 border-b px-4 py-4">
+                    <CardTitle className="text-sm">{t('listTitle')}</CardTitle>
+                  </CardHeader>
+                  <div ref={taskListScrollRef} className="min-h-0 flex-1 overflow-y-auto" onScroll={handleTaskListScroll}>
+                    {shouldUseVirtualTaskList && virtualWindow.topSpacerHeight > 0 ? (
+                      <div aria-hidden style={{ height: virtualWindow.topSpacerHeight }} />
                     ) : null}
+                    {virtualWindow.tasks.map((task) => (
+                      <button
+                        key={taskViewKey(task)}
+                        type="button"
+                        className={cn(
+                          'flex w-full flex-col justify-between overflow-hidden border-b px-4 py-3 text-left transition-colors',
+                          effectiveSelectedTaskId === taskViewKey(task) ? 'bg-primary/5' : 'hover:bg-accent/40',
+                        )}
+                        style={{ height: TASK_LIST_ESTIMATED_ROW_HEIGHT }}
+                        onClick={() => setSelectedTaskId(taskViewKey(task))}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="line-clamp-2 text-sm font-medium">{task.subject}</p>
+                          <span
+                            className={cn('mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full', statusDotClass(task.status))}
+                            title={task.status}
+                            aria-label={task.status}
+                          />
+                        </div>
+                        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                          <span className="truncate">{task.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}</span>
+                          <span className="shrink-0">
+                            {t('detail.blockedByCount', { count: task.blockedBy.length, defaultValue: '{{count}} blockers' })}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                    {shouldUseVirtualTaskList && virtualWindow.bottomSpacerHeight > 0 ? (
+                      <div aria-hidden style={{ height: virtualWindow.bottomSpacerHeight }} />
+                    ) : null}
+                    {!shouldUseVirtualTaskList && visibleTaskCount < filteredTasks.length && (
+                      <div className="space-y-2 px-4 py-3 text-center">
+                        <p className="text-xs text-muted-foreground">
+                          {t('pagination.showing', { shown: visibleTaskCount, total: filteredTasks.length })}
+                        </p>
+                        <Button variant="outline" size="sm" onClick={appendVisibleTasks}>
+                          {t('pagination.loadMore')}
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                </CardHeader>
-                <CardContent className="min-h-0 flex-1 overflow-y-auto">
-                  {!taskHeavyContentReady ? (
-                    <div className="space-y-3">
-                      <div className="h-4 w-40 animate-pulse rounded bg-muted" />
-                      <div className="h-16 w-full animate-pulse rounded bg-muted" />
-                      <div className="h-20 w-full animate-pulse rounded bg-muted" />
+                </div>
+
+                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden">
+                  <CardHeader className="shrink-0 p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <CardTitle className="break-words text-[15px] leading-6">{selectedTask ? selectedTask.subject : t('detailTitle')}</CardTitle>
+                        {selectedTask && <CardDescription className="break-all">{selectedTask.id}</CardDescription>}
+                      </div>
+                      {selectedTask ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0"
+                          onClick={() => void handleDeleteTask(selectedTask)}
+                          disabled={mutating}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                          <span className="ml-1 text-destructive">{t('actions.delete')}</span>
+                        </Button>
+                      ) : null}
                     </div>
-                  ) : !selectedTask ? (
-                    <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-2">
-                        <Badge variant={statusVariant(selectedTask.status)}>{selectedTask.status}</Badge>
-                        <span className="text-sm text-muted-foreground">
-                          {selectedTask.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}
-                        </span>
-                      </div>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
+                    {!selectedTask ? (
+                      <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
+                    ) : (
+                      <div className="space-y-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={statusVariant(selectedTask.status)}>{selectedTask.status}</Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {selectedTask.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}
+                          </span>
+                        </div>
 
-                      <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
-                        <p className="text-sm font-medium text-muted-foreground">
-                          {t('detail.description', { defaultValue: 'Description' })}
-                        </p>
-                        <p className="whitespace-pre-wrap text-sm text-foreground">
-                          {selectedTask.description || '-'}
-                        </p>
-                      </div>
-
-                      <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
-                        <div className="flex items-center justify-between">
+                        <div className="space-y-3 border-t pt-4">
                           <p className="text-sm font-medium text-muted-foreground">
-                            {t('detail.dependencies', { defaultValue: 'Dependencies' })}
+                            {t('detail.description', { defaultValue: 'Description' })}
+                          </p>
+                          <p className="whitespace-pre-wrap text-sm text-foreground">
+                            {selectedTask.description || '-'}
                           </p>
                         </div>
-                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                          <div className="rounded-md border bg-background/80 p-3">
-                            <p className="text-xs text-muted-foreground">
-                              {t('detail.blockedBy', { defaultValue: 'Blocked By' })}
-                            </p>
-                            <p className="mt-1 break-all text-sm">
-                              {selectedTask.blockedBy.length > 0 ? selectedTask.blockedBy.join(', ') : '-'}
+
+                        <div className="space-y-3 border-t pt-4">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium text-muted-foreground">
+                              {t('detail.dependencies', { defaultValue: 'Dependencies' })}
                             </p>
                           </div>
-                          <div className="rounded-md border bg-background/80 p-3">
-                            <p className="text-xs text-muted-foreground">
-                              {t('detail.blocks', { defaultValue: 'Blocks' })}
-                            </p>
-                            <p className="mt-1 break-all text-sm">
-                              {selectedTask.blocks.length > 0 ? selectedTask.blocks.join(', ') : '-'}
-                            </p>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            <div>
+                              <p className="text-xs text-muted-foreground">
+                                {t('detail.blockedBy', { defaultValue: 'Blocked By' })}
+                              </p>
+                              <p className="mt-1 break-all text-sm">
+                                {selectedTask.blockedBy.length > 0 ? selectedTask.blockedBy.join(', ') : '-'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-muted-foreground">
+                                {t('detail.blocks', { defaultValue: 'Blocks' })}
+                              </p>
+                              <p className="mt-1 break-all text-sm">
+                                {selectedTask.blocks.length > 0 ? selectedTask.blocks.join(', ') : '-'}
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                          <div className="rounded-md border bg-background/80 p-3">
-                            <p className="text-xs text-muted-foreground">{t('createdAt')}</p>
-                            <p className="mt-1 text-sm">{formatDateTime(selectedTask.createdAt)}</p>
-                          </div>
-                          <div className="rounded-md border bg-background/80 p-3">
-                            <p className="text-xs text-muted-foreground">
-                              {t('detail.updatedAt', { defaultValue: 'Updated' })}
-                            </p>
-                            <p className="mt-1 text-sm">{formatDateTime(selectedTask.updatedAt)}</p>
+                          <div className="grid grid-cols-1 gap-3 border-t pt-3 md:grid-cols-2">
+                            <div>
+                              <p className="text-xs text-muted-foreground">{t('createdAt')}</p>
+                              <p className="mt-1 text-sm">{formatDateTime(selectedTask.createdAt)}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-muted-foreground">
+                                {t('detail.updatedAt', { defaultValue: 'Updated' })}
+                              </p>
+                              <p className="mt-1 text-sm">{formatDateTime(selectedTask.updatedAt)}</p>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          )}
+                    )}
+                  </CardContent>
+                </div>
+              </div>
+            )}
+          </TaskCenterSurface>
         </TabsContent>
 
         <TabsContent value="scheduled" className="mt-0">
@@ -1070,9 +1046,7 @@ export function TasksPage() {
         confirmLabel={t('common:actions.delete', 'Delete')}
         cancelLabel={t('common:actions.cancel', 'Cancel')}
         variant="destructive"
-        onConfirm={() => {
-          void confirmDeleteTask();
-        }}
+        onConfirm={confirmDeleteTask}
         onCancel={() => setTaskToDelete(null)}
       />
     </section>

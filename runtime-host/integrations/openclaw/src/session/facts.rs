@@ -406,15 +406,26 @@ impl LiveSessionFacts {
         let kind = match event.kind {
             SessionEventKind::Chat => match event.chat.as_ref() {
                 Some(chat) if chat.state == ChatState::Delta => LiveFactKind::Update,
+                Some(chat) if chat.state == ChatState::Status => LiveFactKind::Runtime,
                 Some(_) => LiveFactKind::Terminal,
                 None => LiveFactKind::Runtime,
             },
-            SessionEventKind::Message | SessionEventKind::Tool if event.activity.is_some() => {
+            SessionEventKind::Message | SessionEventKind::Tool | SessionEventKind::Agent
+                if event.activity.is_some() =>
+            {
                 LiveFactKind::Update
             }
-            SessionEventKind::Message | SessionEventKind::Tool | SessionEventKind::Changed => {
-                LiveFactKind::Runtime
+            SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved
+                if event.approval.is_some() =>
+            {
+                LiveFactKind::Update
             }
+            SessionEventKind::Message
+            | SessionEventKind::Tool
+            | SessionEventKind::Agent
+            | SessionEventKind::ApprovalRequested
+            | SessionEventKind::ApprovalResolved
+            | SessionEventKind::Changed => LiveFactKind::Runtime,
         };
         let cursor = NativeCursor::from_event(&event, source_epoch);
         let is_tool = event.kind == SessionEventKind::Tool;
@@ -520,6 +531,8 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(false),
             model: Some("provider/model".into()),
+            permission_mode: None,
+            permission_mode_pending: None,
         }
     }
 

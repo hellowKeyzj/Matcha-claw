@@ -24,11 +24,13 @@ type HostApiProxyEnvelope =
   };
 
 export type E2EDialogStagedAttachmentPayload = {
-  stagedAttachmentId: string;
+  stagedAttachmentId?: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 };
 
 export async function handleE2EHostApiFetch(

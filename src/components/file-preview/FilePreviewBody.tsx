@@ -38,6 +38,7 @@ interface FilePreviewBodyProps {
   mode: FilePreviewMode;
   className?: string;
   showHeader?: boolean;
+  headerLeadingAccessory?: ReactNode;
   headerAccessory?: ReactNode;
   headerTrailingAccessory?: ReactNode;
   sessionIdentity?: ArtifactPreviewTarget['sessionIdentity'];
@@ -141,6 +142,7 @@ export function FilePreviewBody({
   mode,
   className,
   showHeader = true,
+  headerLeadingAccessory,
   headerAccessory,
   headerTrailingAccessory,
   sessionIdentity,
@@ -582,7 +584,8 @@ export function FilePreviewBody({
     <div className={cn('flex h-full min-h-0 flex-col overflow-hidden', className)}>
       {showHeader ? (
         <div className="flex items-center justify-between gap-3 border-b border-border/40 px-3 py-2">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            {headerLeadingAccessory}
             <p className="truncate text-sm font-medium text-foreground">{file.fileName}</p>
           </div>
           <div className="flex shrink-0 items-center gap-1">

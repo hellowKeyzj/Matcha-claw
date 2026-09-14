@@ -85,6 +85,8 @@ const browserRelayToolParameters = {
         kind: { type: 'string', enum: [...browserRequestKinds] },
         targetId: { type: 'string' },
         ref: { type: 'string' },
+        x: { type: 'number' },
+        y: { type: 'number' },
         doubleClick: { type: 'boolean' },
         button: { type: 'string' },
         modifiers: { type: 'array', items: { type: 'string' } },

@@ -31,53 +31,29 @@ impl fmt::Debug for AgentWorkspaceDirectory {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct WorkspaceTemplateDirectory(PathBuf);
+pub struct MatchaWorkspaceTemplateDirectory(PathBuf);
 
-impl WorkspaceTemplateDirectory {
-    pub fn from_openclaw_installation(
+impl MatchaWorkspaceTemplateDirectory {
+    pub fn from_runtime_layout(
+        working_directory: &Path,
         openclaw_dir: &Path,
     ) -> Result<Self, WorkspaceProjectionError> {
-        Self::try_new(
-            openclaw_dir
-                .join("docs")
-                .join("reference")
-                .join("templates"),
-        )
-    }
-
-    pub fn try_new(path: PathBuf) -> Result<Self, WorkspaceProjectionError> {
-        identity::absolute_path(&path)
-            .then_some(Self(path))
-            .ok_or(WorkspaceProjectionError::InvalidPath)
-    }
-
-    pub(super) fn as_path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl fmt::Debug for WorkspaceTemplateDirectory {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("WorkspaceTemplateDirectory([REDACTED])")
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct ManagedWorkspaceTemplateDirectory(PathBuf);
-
-impl ManagedWorkspaceTemplateDirectory {
-    pub fn from_openclaw_installation(
-        openclaw_dir: &Path,
-    ) -> Result<Option<Self>, WorkspaceProjectionError> {
+        let primary = working_directory
+            .join("resources")
+            .join("agent-workspace-templates")
+            .join("main-agent");
+        if primary.is_dir() {
+            return Self::try_new(primary);
+        }
         let resources = openclaw_dir
             .parent()
             .ok_or(WorkspaceProjectionError::InvalidPath)?;
-        optional_directory(
+        Self::try_new(
             resources
+                .join("resources")
                 .join("agent-workspace-templates")
                 .join("main-agent"),
         )
-        .map(|directory| directory.map(Self))
     }
 
     pub fn try_new(path: PathBuf) -> Result<Self, WorkspaceProjectionError> {
@@ -91,9 +67,9 @@ impl ManagedWorkspaceTemplateDirectory {
     }
 }
 
-impl fmt::Debug for ManagedWorkspaceTemplateDirectory {
+impl fmt::Debug for MatchaWorkspaceTemplateDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ManagedWorkspaceTemplateDirectory([REDACTED])")
+        formatter.write_str("MatchaWorkspaceTemplateDirectory([REDACTED])")
     }
 }
 
@@ -101,13 +77,19 @@ impl fmt::Debug for ManagedWorkspaceTemplateDirectory {
 pub struct WorkspaceContextDirectory(PathBuf);
 
 impl WorkspaceContextDirectory {
-    pub fn from_openclaw_installation(
+    pub fn from_runtime_layout(
+        working_directory: &Path,
         openclaw_dir: &Path,
     ) -> Result<Option<Self>, WorkspaceProjectionError> {
+        let primary = working_directory.join("resources").join("context");
+        if primary.is_dir() {
+            return Ok(Some(Self::try_new(primary)?));
+        }
         let resources = openclaw_dir
             .parent()
             .ok_or(WorkspaceProjectionError::InvalidPath)?;
-        optional_directory(resources.join("context")).map(|directory| directory.map(Self))
+        optional_directory(resources.join("resources").join("context"))
+            .map(|directory| directory.map(Self))
     }
 
     pub fn try_new(path: PathBuf) -> Result<Self, WorkspaceProjectionError> {

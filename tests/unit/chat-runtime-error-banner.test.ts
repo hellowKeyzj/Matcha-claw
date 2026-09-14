@@ -14,6 +14,7 @@ function runtime(patch: Partial<ChatSessionRuntimeState> = {}): ChatSessionRunti
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
     runtimeActivity: null,
+    errorDetail: null,
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,

@@ -64,7 +64,6 @@ export interface RuntimeHostBootstrapResolverDependencies {
       | 'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'
       | 'MATCHACLAW_SECURITY_POLICY_TRANSPORT'
       | 'MATCHACLAW_SESSION_APPROVAL_TRANSPORT'
-      | 'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT'
       | 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT'
       | 'MATCHACLAW_USAGE_TRANSPORT'
       | 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
@@ -136,6 +135,7 @@ export function resolveRuntimeHostBootstrap(
     layout.matcha.entry,
     layout.openClaw.entry,
     runtimeHostBinary,
+    layout.runtimeHostMcpExecutable,
     ...(platform === 'unix' ? [layout.guardianExecutable] : [layout.gitBash]),
   ]);
 
@@ -145,6 +145,7 @@ export function resolveRuntimeHostBootstrap(
       appVersion: application.getVersion(),
       appLogDir: layout.appLogDir,
       runtimeHostStateDir: layout.runtimeHostStateDir,
+      runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
       sessionTransportPort: layout.sessionTransportPort,
       fleetTransportPort: layout.fleetTransportPort,
       diagnosticsTransportPort: layout.diagnosticsTransportPort,
@@ -163,7 +164,6 @@ export function resolveRuntimeHostBootstrap(
       settingsDesiredTransportPort: layout.settingsDesiredTransportPort,
       securityPolicyTransportPort: layout.securityPolicyTransportPort,
       sessionApprovalTransportPort: layout.sessionApprovalTransportPort,
-      openclawHistoryTransportPort: layout.openclawHistoryTransportPort,
       matchaHistoryTransportPort: layout.matchaHistoryTransportPort,
       usageTransportPort: layout.usageTransportPort,
       sessionModelSelectionTransportPort: layout.sessionModelSelectionTransportPort,
@@ -195,6 +195,7 @@ export function resolveRuntimeHostBootstrap(
     appVersion: application.getVersion(),
     appLogDir: layout.appLogDir,
     runtimeHostStateDir: layout.runtimeHostStateDir,
+    runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
     sessionTransportPort: layout.sessionTransportPort,
     fleetTransportPort: layout.fleetTransportPort,
     diagnosticsTransportPort: layout.diagnosticsTransportPort,
@@ -213,7 +214,6 @@ export function resolveRuntimeHostBootstrap(
     settingsDesiredTransportPort: layout.settingsDesiredTransportPort,
     securityPolicyTransportPort: layout.securityPolicyTransportPort,
     sessionApprovalTransportPort: layout.sessionApprovalTransportPort,
-    openclawHistoryTransportPort: layout.openclawHistoryTransportPort,
     matchaHistoryTransportPort: layout.matchaHistoryTransportPort,
     usageTransportPort: layout.usageTransportPort,
     sessionModelSelectionTransportPort: layout.sessionModelSelectionTransportPort,
@@ -273,7 +273,6 @@ type RuntimeLayoutInput = {
       | 'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'
       | 'MATCHACLAW_SECURITY_POLICY_TRANSPORT'
       | 'MATCHACLAW_SESSION_APPROVAL_TRANSPORT'
-      | 'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT'
       | 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT'
       | 'MATCHACLAW_USAGE_TRANSPORT'
       | 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
@@ -302,6 +301,7 @@ type RuntimeLayoutInput = {
 type RuntimeLayout = {
   readonly appLogDir: string;
   readonly runtimeHostStateDir: string;
+  readonly runtimeHostMcpExecutable: string;
   readonly sessionTransportPort: number;
   readonly fleetTransportPort: number;
   readonly diagnosticsTransportPort: number;
@@ -320,7 +320,6 @@ type RuntimeLayout = {
   readonly settingsDesiredTransportPort: number;
   readonly securityPolicyTransportPort: number;
   readonly sessionApprovalTransportPort: number;
-  readonly openclawHistoryTransportPort: number;
   readonly matchaHistoryTransportPort: number;
   readonly usageTransportPort: number;
   readonly sessionModelSelectionTransportPort: number;
@@ -386,10 +385,15 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
           'bash.exe'
         );
   const runtimeHostDirectory = input.path.dirname(input.runtimeHostBinary);
+  const runtimeHostMcpExecutable = input.path.join(
+    runtimeHostDirectory,
+    input.platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
+  );
   const guardianExecutable = input.path.join(runtimeHostDirectory, 'runtime-host-guardian');
   return {
     appLogDir: input.path.join(userData, 'logs'),
     runtimeHostStateDir: input.getRuntimeHostStateDir(),
+    runtimeHostMcpExecutable,
     sessionTransportPort: input.getPort('MATCHACLAW_SESSION_TRANSPORT'),
     fleetTransportPort: input.getPort('MATCHACLAW_FLEET_TRANSPORT'),
     diagnosticsTransportPort: input.getPort('MATCHACLAW_DIAGNOSTICS_TRANSPORT'),
@@ -408,7 +412,6 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
     settingsDesiredTransportPort: input.getPort('MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'),
     securityPolicyTransportPort: input.getPort('MATCHACLAW_SECURITY_POLICY_TRANSPORT'),
     sessionApprovalTransportPort: input.getPort('MATCHACLAW_SESSION_APPROVAL_TRANSPORT'),
-    openclawHistoryTransportPort: input.getPort('MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT'),
     matchaHistoryTransportPort: input.getPort('MATCHACLAW_MATCHA_HISTORY_TRANSPORT'),
     usageTransportPort: input.getPort('MATCHACLAW_USAGE_TRANSPORT'),
     sessionModelSelectionTransportPort: input.getPort(

@@ -5,8 +5,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use rusqlite::{Connection, params};
+
 use super::*;
-use crate::lifecycle::state_dir::{AgentId, CanonicalStateDir, PrivateAuthProfiles};
+use crate::lifecycle::state_dir::CanonicalStateDir;
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -38,44 +40,36 @@ impl Drop for TestRoot {
     }
 }
 
-trait AmbiguousIfClone<A> {}
-impl<T> AmbiguousIfClone<()> for T {}
-impl<T: Clone> AmbiguousIfClone<u8> for T {}
-
-trait AmbiguousIfDisplay<A> {}
-impl<T> AmbiguousIfDisplay<()> for T {}
-impl<T: fmt::Display> AmbiguousIfDisplay<u8> for T {}
-
-trait AmbiguousIfSerialize<A> {}
-impl<T> AmbiguousIfSerialize<()> for T {}
-impl<T: serde::Serialize> AmbiguousIfSerialize<u8> for T {}
-
-fn assert_not_clone<T: AmbiguousIfClone<A>, A>() {}
-fn assert_not_display<T: AmbiguousIfDisplay<A>, A>() {}
-fn assert_not_serialize<T: AmbiguousIfSerialize<A>, A>() {}
-
-#[test]
-fn private_credentials_are_redacted_and_cannot_cross_public_projections() {
-    assert_not_clone::<PrivateCredential, _>();
-    assert_not_display::<PrivateCredential, _>();
-    assert_not_serialize::<PrivateCredential, _>();
-
-    let credential = PrivateCredential::try_new("auth-secret-canary".into()).unwrap();
-
-    assert_eq!(
-        format!("{credential:?}"),
-        "PrivateCredential(\"[REDACTED]\")"
-    );
-    assert!(!format!("{credential:?}").contains("auth-secret-canary"));
+fn write_state_db_auth_fixture(root: &TestRoot, store: &str) {
+    write_state_db_auth_fixture_with_state(root, store, r#"{"version":1}"#);
 }
 
-#[test]
-fn private_credentials_reject_empty_or_blank_values_without_exposure() {
-    for value in ["", " \t\n ", "\r\n"] {
-        let error = PrivateCredential::try_new(value.into()).unwrap_err();
-
-        assert_eq!(error, AuthProjectionError::EmptyCredential);
-        assert_eq!(error.to_string(), "OpenClaw credential is invalid");
+fn write_state_db_auth_fixture_with_state(root: &TestRoot, store: &str, state: &str) {
+    let database_path = root
+        .state_dir
+        .as_path()
+        .join("state")
+        .join("openclaw.sqlite");
+    fs::create_dir_all(database_path.parent().expect("state db parent"))
+        .expect("create state db directory");
+    let connection = Connection::open(database_path).expect("open state db");
+    connection
+        .execute(
+            "CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
+            [],
+        )
+        .expect("create config_machine_state");
+    for (state_key, value_json) in [
+        (AUTH_SHARED_STORE_STATE_KEY, r#"{"location":"state-db"}"#),
+        (AUTH_PROFILES_STATE_KEY, store),
+        (AUTH_PROFILES_STATE_STATE_KEY, state),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO config_machine_state (state_key, value_json) VALUES (?1, ?2)",
+                params![state_key, value_json],
+            )
+            .expect("insert config_machine_state row");
     }
 }
 
@@ -108,34 +102,37 @@ fn credential_reference_grammar_rejects_unknown_or_non_current_versions_without_
 }
 
 #[test]
-fn private_auth_profiles_do_not_expose_credentials_through_debug_output() {
-    let profile = PrivateAuthProfile::oauth(
-        ProfileId::try_new("openai:primary".into()).unwrap(),
-        ProviderId::try_new("openai".into()).unwrap(),
-        PrivateCredential::try_new("access-secret-canary".into()).unwrap(),
-        PrivateCredential::try_new("refresh-secret-canary".into()).unwrap(),
-        1,
-    );
+fn state_db_auth_profiles_keep_only_non_secret_availability_state() {
+    let store = serde_json::json!({
+        "version": 1,
+        "profiles": {
+            "openai:default": {
+                "type": "token",
+                "provider": "openai",
+                "token": "access-secret-canary",
+                "expires": 2000
+            }
+        }
+    });
 
-    let rendered = format!("{profile:?}");
+    let profiles = parse_state_db_auth_profiles(&store, None).unwrap();
+    let rendered = format!("{profiles:?}");
 
-    assert!(rendered.contains("[REDACTED]"));
-    assert!(!rendered.contains("secret-canary"));
+    assert_eq!(profiles[0].id.as_str(), "openai:default");
+    assert_eq!(profiles[0].provider.as_str(), "openai");
+    assert_eq!(profiles[0].kind, CredentialKind::Token);
+    assert_eq!(profiles[0].expires, Some(2000));
+    assert!(!rendered.contains("access-secret-canary"));
 }
 
 #[test]
-fn credential_availability_requires_oauth_to_be_unexpired_at_the_supplied_time() {
+fn credential_availability_requires_token_to_be_unexpired_at_the_supplied_time() {
     let root = TestRoot::new();
-    let agent = AgentId::try_new("main".into()).unwrap();
-    let document = br#"{"version":1,"profiles":{"openai:oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":2000}}}"#;
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(document.to_vec()).unwrap(),
-        )
-        .unwrap();
-    let reference =
-        environment::CredentialReference::try_new("credential:v1:openai:oauth").unwrap();
+    write_state_db_auth_fixture(
+        &root,
+        r#"{"version":1,"profiles":{"openai:default":{"type":"token","provider":"openai","token":"access-token","expires":2000}}}"#,
+    );
+    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
     assert!(!credential_is_available(&root.state_dir, "openai", &reference, 2_000).unwrap());
@@ -145,14 +142,10 @@ fn credential_availability_requires_oauth_to_be_unexpired_at_the_supplied_time()
 #[test]
 fn credential_availability_uses_provider_profile_not_credential_reference_id() {
     let root = TestRoot::new();
-    let agent = AgentId::try_new("main".into()).unwrap();
-    let document = br#"{"version":1,"profiles":{"openai:default":{"type":"api_key","provider":"openai","key":"api-key"}}}"#;
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(document.to_vec()).unwrap(),
-        )
-        .unwrap();
+    write_state_db_auth_fixture(
+        &root,
+        r#"{"version":1,"profiles":{"openai:default":{"type":"api_key","provider":"openai","key":"api-key"}}}"#,
+    );
     let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
@@ -162,35 +155,39 @@ fn credential_availability_uses_provider_profile_not_credential_reference_id() {
 #[test]
 fn credential_availability_accepts_native_secret_refs_without_resolving_them() {
     let root = TestRoot::new();
-    let agent = AgentId::try_new("main".into()).unwrap();
-    let document = br#"{"version":1,"profiles":{"custom-main:default":{"type":"api_key","provider":"custom-main","keyRef":{"source":"env","provider":"custom-main","id":"CUSTOM_MAIN_API_KEY"}}}}"#;
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(document.to_vec()).unwrap(),
-        )
-        .unwrap();
+    write_state_db_auth_fixture(
+        &root,
+        r#"{"version":1,"profiles":{"custom-main:default":{"type":"api_key","provider":"custom-main","keyRef":{"source":"env","provider":"custom-main","id":"CUSTOM_MAIN_API_KEY"}}}}"#,
+    );
     let reference = environment::CredentialReference::try_new("credential:v1:custom-main").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "custom-main", &reference, 1_999).unwrap());
 }
 
 #[test]
-fn malformed_oauth_profile_fails_closed_without_exposing_profile_contents() {
+fn credential_availability_accepts_oauth_access_or_refresh_token() {
     let root = TestRoot::new();
-    let agent = AgentId::try_new("main".into()).unwrap();
-    let malformed = br#"{"version":1,"profiles":{"openai:oauth":{"type":"oauth","provider":"openai","access":"access","refresh":"refresh","expires":"invalid"}}}"#;
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(malformed.to_vec()).unwrap(),
-        )
-        .unwrap();
-    let reference =
-        environment::CredentialReference::try_new("credential:v1:openai:oauth").unwrap();
+    write_state_db_auth_fixture(
+        &root,
+        r#"{"version":1,"profiles":{"openai:access":{"type":"oauth","provider":"openai","access":"access-token"},"anthropic:refresh":{"type":"oauth","provider":"anthropic","refresh":"refresh-token"}}}"#,
+    );
+    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
+
+    assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
+    assert!(credential_is_available(&root.state_dir, "anthropic", &reference, 1_999).unwrap());
+}
+
+#[test]
+fn malformed_token_profile_fails_closed_without_exposing_profile_contents() {
+    let root = TestRoot::new();
+    write_state_db_auth_fixture(
+        &root,
+        r#"{"version":1,"profiles":{"openai:default":{"type":"token","provider":"openai","token":"access-secret-canary","expires":"invalid"}}}"#,
+    );
+    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     let error = credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap_err();
 
     assert_eq!(error, AuthProjectionError::InvalidPersistedAuthProfiles);
-    assert!(!format!("{error:?} {error}").contains("access"));
+    assert!(!format!("{error:?} {error}").contains("access-secret-canary"));
 }

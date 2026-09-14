@@ -29,6 +29,15 @@ impl WorkspaceProjectionFixture {
             )
             .expect("write OpenClaw workspace template");
         }
+        let matcha_templates = root.join("resources/agent-workspace-templates/main-agent");
+        fs::create_dir_all(&matcha_templates).expect("create Matcha workspace templates");
+        fs::write(
+            matcha_templates.join(WorkspaceTemplateFile::Identity.file_name()),
+            "# IDENTITY.md\n\n- **名字：** Matcha\n",
+        )
+        .expect("write Matcha identity template");
+        fs::create_dir_all(root.join("resources/context"))
+            .expect("create Matcha context directory");
         Self { root, openclaw_dir }
     }
 

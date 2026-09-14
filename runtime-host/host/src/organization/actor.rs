@@ -8,11 +8,11 @@ use std::{
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
-    BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, DeliveryPhase,
-    GraphRunId, GraphRunLifecycleState, IdempotencyKey, MatchaTerminalReceiptTarget,
-    MaterializationRecordOutcome, NativeDeletionEvidence, NativeTerminalStatus, NodeKind,
-    OrganizationStore, PromptDeliveryOutcome, PromptDeliveryRequest, RoleAbortOutcome,
-    RuntimeEndpointReference, StoreFault, TeamId,
+    ActivityId, ActivityKind, ActivityPhase, ActivityTarget, BeginCancellationOutcome,
+    CreateGraphRunOutcome, DeliveryId, GraphRunId, GraphRunLifecycleState, IdempotencyKey,
+    MatchaTerminalReceiptTarget, MaterializationRecordOutcome, NativeDeletionEvidence,
+    NativeTerminalStatus, OrganizationStore, RoleAbortOutcome, RuntimeEndpointReference,
+    StoreFault, TeamId,
     package::{
         TeamSkillDependencyCatalog, TeamSkillDependencyPlanResult, TeamSkillPackageValidation,
         TeamSkillSelectionError, TeamSkillSelectionId, TeamSkillSelectionResolver,
@@ -879,65 +879,18 @@ impl OrganizationGlobalState {
         &mut self,
         run_id: GraphRunId,
         now: u64,
-    ) -> Result<Vec<DeliveryId>, StoreFault> {
+    ) -> Result<Vec<ActivityId>, StoreFault> {
         schedule_ready_nodes(&self.team_run, &mut self.store, run_id, now)
     }
 
-    fn active_run_local_sessions(&self, run_id: &GraphRunId) -> BTreeSet<String> {
-        active_run_local_sessions(&self.store, run_id)
+    fn pending_run_activity_ids(&self, run_id: &GraphRunId, now: u64) -> Vec<ActivityId> {
+        pending_run_activity_ids(&self.store, run_id, now)
     }
 
-    fn claim_openclaw_delivery(
-        &mut self,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
-    ) -> Result<crate::composition::OpenClawDeliveryStart, crate::composition::OpenClawDeliveryError>
-    {
-        self.team_run
-            .claim_openclaw_delivery(&mut self.store, delivery_id, claimed_at)
-    }
-
-    fn claim_matcha_delivery(
-        &mut self,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
-    ) -> Result<
-        crate::composition::MatchaDeliveryStartOutcome,
-        crate::composition::MatchaDeliveryError,
-    > {
-        self.team_run
-            .claim_matcha_delivery(&mut self.store, delivery_id, claimed_at)
-    }
-
-    fn settle_openclaw_delivery(
-        &mut self,
-        claim: DeliveryClaim,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<
-        crate::composition::OpenClawDeliveryOutcome,
-        crate::composition::OpenClawDeliveryError,
-    > {
-        self.team_run
-            .settle_openclaw_delivery(&mut self.store, claim, outcome, retry_at)
-    }
-
-    fn settle_matcha_delivery(
-        &mut self,
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<crate::composition::MatchaDeliveryOutcome, crate::composition::MatchaDeliveryError>
-    {
-        self.team_run
-            .settle_matcha_delivery(&mut self.store, claim, delivery, outcome, retry_at)
-    }
-
-    fn delivery_target(
+    fn activity_target(
         &self,
-        delivery_id: &DeliveryId,
-    ) -> Option<crate::composition::TeamRunDeliveryTarget> {
+        activity_id: &ActivityId,
+    ) -> Option<crate::composition::TeamRunActivityTarget> {
         let open_claw_endpoint = RuntimeEndpointReference::try_new(
             RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
         )
@@ -946,12 +899,36 @@ impl OrganizationGlobalState {
             RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference(),
         )
         .expect("fixed Matcha endpoint must be valid");
-        self.team_run.delivery_target(
+        activity_target(
             &self.store,
-            delivery_id,
+            activity_id,
             &open_claw_endpoint,
             &matcha_endpoint,
         )
+    }
+
+    fn active_run_local_sessions(&self, run_id: &GraphRunId) -> BTreeSet<String> {
+        active_run_local_sessions(&self.store, run_id)
+    }
+
+    fn claim_activity(
+        &mut self,
+        activity_id: ActivityId,
+        claimed_at: u64,
+    ) -> Result<crate::composition::TeamRunActivityStart, crate::composition::TeamRunActivityError>
+    {
+        self.team_run
+            .claim_agent_activity(&mut self.store, activity_id, claimed_at)
+    }
+
+    fn settle_activity(
+        &mut self,
+        claim: organization::ActivityClaim,
+        outcome: crate::runtime_driver::ActivityExecutionOutcome,
+    ) -> Result<crate::composition::TeamRunActivityOutcome, crate::composition::TeamRunActivityError>
+    {
+        self.team_run
+            .settle_agent_activity_dispatch(&mut self.store, claim, outcome)
     }
 
     fn matcha_terminal_target(
@@ -1044,10 +1021,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::NodeTerminalResolve { run_id, .. }
             | OrganizationCommand::TaskBoardMutate { run_id, .. }
             | OrganizationCommand::ScheduleReadyNodes { run_id, .. }
-            | OrganizationCommand::ClaimOpenClawDelivery { run_id, .. }
-            | OrganizationCommand::ClaimMatchaDelivery { run_id, .. }
-            | OrganizationCommand::SettleOpenClawDelivery { run_id, .. }
-            | OrganizationCommand::SettleMatchaDelivery { run_id, .. }
+            | OrganizationCommand::ClaimActivity { run_id, .. }
+            | OrganizationCommand::SettleActivity { run_id, .. }
             | OrganizationCommand::ObserveMatchaTerminal { run_id, .. } => {
                 CommandRoute::Keyed(run_id.clone())
             }
@@ -1108,10 +1083,10 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::RoleSessions { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
-            | OrganizationQuery::PendingDeliveryIds { .. }
+            | OrganizationQuery::PendingRunActivityIds { .. }
             | OrganizationQuery::TerminalObservationDeliveries { .. }
             | OrganizationQuery::ActiveRunIds { .. }
-            | OrganizationQuery::DeliveryTarget { .. }
+            | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => QueryRoute::Global,
         }
     }
@@ -1409,84 +1384,41 @@ impl OwnerSpec for OrganizationOwner {
                 });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::ClaimOpenClawDelivery {
+            OrganizationCommand::ClaimActivity {
                 run_id,
-                delivery_id,
+                activity_id,
                 claimed_at,
                 reply,
             } => {
                 let outcome = state
                     .open_store()
-                    .map_err(crate::composition::OpenClawDeliveryError::Store)
+                    .map_err(crate::composition::TeamRunActivityError::Store)
                     .and_then(|mut store| {
-                        if !delivery_belongs_to(&store, &run_id, &delivery_id) {
-                            return Err(crate::composition::OpenClawDeliveryError::SessionMismatch);
+                        if !activity_belongs_to(&store, &run_id, &activity_id) {
+                            return Err(crate::composition::TeamRunActivityError::SessionMismatch);
                         }
                         state
                             .team_run
-                            .claim_openclaw_delivery(&mut store, delivery_id, claimed_at)
+                            .claim_agent_activity(&mut store, activity_id, claimed_at)
                     });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::ClaimMatchaDelivery {
-                run_id,
-                delivery_id,
-                claimed_at,
-                reply,
-            } => {
-                let outcome = state
-                    .open_store()
-                    .map_err(crate::composition::MatchaDeliveryError::Store)
-                    .and_then(|mut store| {
-                        if !delivery_belongs_to(&store, &run_id, &delivery_id) {
-                            return Err(crate::composition::MatchaDeliveryError::SessionMismatch);
-                        }
-                        state
-                            .team_run
-                            .claim_matcha_delivery(&mut store, delivery_id, claimed_at)
-                    });
-                let _ = reply.send(outcome);
-            }
-            OrganizationCommand::SettleOpenClawDelivery {
+            OrganizationCommand::SettleActivity {
                 run_id,
                 claim,
                 outcome,
-                retry_at,
                 reply,
             } => {
                 let outcome = state
                     .open_store()
-                    .map_err(crate::composition::OpenClawDeliveryError::Store)
+                    .map_err(crate::composition::TeamRunActivityError::Store)
                     .and_then(|mut store| {
-                        if !delivery_belongs_to(&store, &run_id, claim.delivery_id()) {
-                            return Err(crate::composition::OpenClawDeliveryError::SessionMismatch);
+                        if !activity_belongs_to(&store, &run_id, claim.activity_id()) {
+                            return Err(crate::composition::TeamRunActivityError::SessionMismatch);
                         }
                         state
                             .team_run
-                            .settle_openclaw_delivery(&mut store, claim, outcome, retry_at)
-                    });
-                let _ = reply.send(outcome);
-            }
-            OrganizationCommand::SettleMatchaDelivery {
-                run_id,
-                claim,
-                delivery,
-                outcome,
-                retry_at,
-                reply,
-            } => {
-                let outcome = state
-                    .open_store()
-                    .map_err(crate::composition::MatchaDeliveryError::Store)
-                    .and_then(|mut store| {
-                        if delivery.binding().team_run() != &run_id
-                            || !delivery_belongs_to(&store, &run_id, claim.delivery_id())
-                        {
-                            return Err(crate::composition::MatchaDeliveryError::SessionMismatch);
-                        }
-                        state
-                            .team_run
-                            .settle_matcha_delivery(&mut store, claim, delivery, outcome, retry_at)
+                            .settle_agent_activity_dispatch(&mut store, claim, outcome)
                     });
                 let _ = reply.send(outcome);
             }
@@ -1753,10 +1685,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::DecisionSubmit { .. }
             | OrganizationCommand::TaskBoardMutate { .. }
             | OrganizationCommand::ScheduleReadyNodes { .. }
-            | OrganizationCommand::ClaimOpenClawDelivery { .. }
-            | OrganizationCommand::ClaimMatchaDelivery { .. }
-            | OrganizationCommand::SettleOpenClawDelivery { .. }
-            | OrganizationCommand::SettleMatchaDelivery { .. }
+            | OrganizationCommand::ClaimActivity { .. }
+            | OrganizationCommand::SettleActivity { .. }
             | OrganizationCommand::ObserveMatchaTerminal { .. } => {
                 unreachable!("organization command routed to global lane")
             }
@@ -1931,10 +1861,10 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::RoleSessions { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
-            | OrganizationQuery::PendingDeliveryIds { .. }
+            | OrganizationQuery::PendingRunActivityIds { .. }
             | OrganizationQuery::TerminalObservationDeliveries { .. }
             | OrganizationQuery::ActiveRunIds { .. }
-            | OrganizationQuery::DeliveryTarget { .. }
+            | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => {
                 unreachable!("global organization query routed to run lane")
             }
@@ -2004,9 +1934,9 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome);
             }
-            OrganizationQuery::PendingDeliveryIds { now, reply } => {
+            OrganizationQuery::PendingRunActivityIds { run_id, now, reply } => {
                 let outcome = match state.refresh() {
-                    Ok(()) => state.team_run.pending_delivery_ids(&state.store, now),
+                    Ok(()) => state.pending_run_activity_ids(&run_id, now),
                     Err(_) => Vec::new(),
                 };
                 let _ = reply.send(outcome);
@@ -2025,9 +1955,9 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome);
             }
-            OrganizationQuery::DeliveryTarget { delivery_id, reply } => {
+            OrganizationQuery::ActivityTarget { activity_id, reply } => {
                 let outcome = match state.refresh() {
-                    Ok(()) => state.delivery_target(&delivery_id),
+                    Ok(()) => state.activity_target(&activity_id),
                     Err(_) => None,
                 };
                 let _ = reply.send(outcome);
@@ -2067,7 +1997,7 @@ fn schedule_ready_nodes(
     store: &mut OrganizationStore,
     run_id: GraphRunId,
     now: u64,
-) -> Result<Vec<DeliveryId>, StoreFault> {
+) -> Result<Vec<ActivityId>, StoreFault> {
     const MAX_ACTIVE_ROLE_PROMPTS: usize = 2;
     let Some(run) = store.facts().run(&run_id).cloned() else {
         return Ok(Vec::new());
@@ -2076,6 +2006,20 @@ fn schedule_ready_nodes(
         return Ok(Vec::new());
     }
 
+    let control = organization::run::control::plan_ready_control_execution(
+        run.graph().definition(),
+        run.graph(),
+        now,
+    )
+    .map_err(|_| StoreFault::InvalidFacts)?;
+    for step in control.into_steps() {
+        team_run.apply_control_execution_step(store, &run_id, step)?;
+    }
+    let run = store
+        .facts()
+        .run(&run_id)
+        .cloned()
+        .ok_or(StoreFault::InvalidFacts)?;
     let active_local_sessions = active_run_local_sessions(store, &run_id);
     let selected = organization::run::scheduler::schedule_ready_nodes(
         run.graph(),
@@ -2088,101 +2032,14 @@ fn schedule_ready_nodes(
         .map(|runtime| runtime.bindings())
         .unwrap_or(&[]);
     let mut reserved = active_local_sessions;
-    let mut delivery_ids = Vec::new();
+    let mut activity_ids = Vec::new();
 
     for item in selected {
         let Some(node) = run.graph().definition().node(item.node_id()) else {
             continue;
         };
-        let (role_id, prompt) = match node.kind() {
-            NodeKind::Work => {
-                let Some(work) = node.work_assignment() else {
-                    continue;
-                };
-                (work.role_id().to_owned(), work.prompt().to_owned())
-            }
-            NodeKind::Review => {
-                let Some(review) = node.review_assignment() else {
-                    continue;
-                };
-                let binding = bindings
-                    .iter()
-                    .find(|binding| binding.role().as_str() == review.role_id())
-                    .ok_or(StoreFault::InvalidFacts)?;
-                if !reserved.insert(binding.local_session().as_str().to_owned()) {
-                    continue;
-                }
-                let prompt = [
-                        format!("## TeamRun ReviewNode: {}", node.title()),
-                        String::new(),
-                        "### Node context".to_owned(),
-                        String::new(),
-                        "These fields identify the exact TeamRun review node execution. Use them when a TeamRun tool asks for runId, nodeExecutionId, or roleId; do not invent replacements.".to_owned(),
-                        String::new(),
-                        format!("- runId: {}", run_id.as_str()),
-                        format!("- nodeId: {}", item.node_id().as_str()),
-                        format!(
-                            "- nodeExecutionId: {}",
-                            item.fence().node_execution_id().as_str()
-                        ),
-                        format!("- roleId: {}", review.role_id()),
-                        format!("- attempt: {}", item.fence().attempt_id().as_str()),
-                        String::new(),
-                        format!("- runtimeEndpoint: {}", binding.endpoint().as_str()),
-                        String::new(),
-                        "### Node event lifecycle".to_owned(),
-                        String::new(),
-                        "Use Team Node Event only for this nodeExecutionId. Do not invent or edit attempt ids.".to_owned(),
-                        String::new(),
-                        "Before calling Team Node Event:".to_owned(),
-                        "- Copy runId, nodeExecutionId, roleId, and the runtime endpoint fields from this prompt.".to_owned(),
-                        "- Include top-level summary, event, and a stable idempotencyKey.".to_owned(),
-                        String::new(),
-                        "After calling Team Node Event:".to_owned(),
-                        "- If complete or reject returns success: true, stop calling Team Node Event for this nodeExecutionId.".to_owned(),
-                        "- Do not submit another terminal event for the same nodeExecutionId with a new idempotencyKey.".to_owned(),
-                        "- If review requests rework, wait for a new TeamRun node prompt with a new nodeExecutionId; do not guess the next attempt id.".to_owned(),
-                        String::new(),
-                        "### Review work".to_owned(),
-                        String::new(),
-                        "This is the review instruction from the review node config. Use it to judge upstream results; do not treat it as tool documentation.".to_owned(),
-                        String::new(),
-                        review.prompt().to_owned(),
-                    ]
-                    .join("\n");
-                let delivery_key = format!(
-                    "team-graph-review-delivery:{}:{}",
-                    run_id.as_str(),
-                    item.fence().attempt_id().as_str()
-                );
-                let delivery = organization::DeliveryRequest {
-                    delivery_id: DeliveryId::new(delivery_key.clone())
-                        .map_err(|_| StoreFault::InvalidFacts)?,
-                    team_id: run.team().as_str().to_owned(),
-                    run_id: run_id.as_str().to_owned(),
-                    node_id: item.node_id().as_str().to_owned(),
-                    node_execution_id: item.fence().node_execution_id().as_str().to_owned(),
-                    task_id: item.node_id().as_str().to_owned(),
-                    role_id: review.role_id().to_owned(),
-                    idempotency_key: delivery_key,
-                    message: prompt,
-                    requested_at: now,
-                    max_attempts: node.max_attempts().get(),
-                };
-                delivery.validate().map_err(|_| StoreFault::InvalidFacts)?;
-                match team_run.register_delivery(store, delivery)? {
-                    organization::RegisterOutcome::Recorded(delivery)
-                    | organization::RegisterOutcome::Replayed(delivery) => {
-                        delivery_ids.push(delivery.facts().delivery_id.clone());
-                    }
-                    organization::RegisterOutcome::ConflictingIdempotencyKey
-                    | organization::RegisterOutcome::ConflictingDeliveryId { .. } => {
-                        return Err(StoreFault::InvalidFacts);
-                    }
-                }
-                continue;
-            }
-            _ => continue,
+        let ActivityKind::AgentTask { role_id, .. } = item.activity_kind() else {
+            continue;
         };
         let Some(binding) = bindings
             .iter()
@@ -2193,83 +2050,107 @@ fn schedule_ready_nodes(
         if !reserved.insert(binding.local_session().as_str().to_owned()) {
             continue;
         }
-        let delivery_key = format!(
-            "team-graph-delivery:{}:{}",
-            run_id.as_str(),
-            item.fence().attempt_id().as_str()
-        );
-        let delivery = organization::DeliveryRequest {
-            delivery_id: DeliveryId::new(delivery_key.clone())
-                .map_err(|_| StoreFault::InvalidFacts)?,
-            team_id: run.team().as_str().to_owned(),
-            run_id: run_id.as_str().to_owned(),
-            node_id: item.node_id().as_str().to_owned(),
-            node_execution_id: item.fence().node_execution_id().as_str().to_owned(),
-            task_id: node
-                .work_assignment()
-                .ok_or(StoreFault::InvalidFacts)?
-                .task_id()
-                .to_owned(),
-            role_id,
-            idempotency_key: delivery_key,
-            message: prompt,
-            requested_at: now,
-            max_attempts: node.max_attempts().get(),
-        };
-        delivery.validate().map_err(|_| StoreFault::InvalidFacts)?;
-        match team_run.register_delivery(store, delivery)? {
-            organization::RegisterOutcome::Recorded(delivery)
-            | organization::RegisterOutcome::Replayed(delivery) => {
-                delivery_ids.push(delivery.facts().delivery_id.clone());
+        let activity = item
+            .bind_activity_target(
+                ActivityTarget::new(binding.local_session().as_str().to_owned())
+                    .map_err(|_| StoreFault::InvalidFacts)?,
+                now,
+                node.max_attempts().get(),
+            )
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        match store.register_activity_and_start_attempt(activity, now)? {
+            organization::ActivityRegistrationOutcome::Recorded(activity)
+            | organization::ActivityRegistrationOutcome::Replayed(activity) => {
+                activity_ids.push(activity.facts().activity_id.clone());
             }
-            organization::RegisterOutcome::ConflictingIdempotencyKey
-            | organization::RegisterOutcome::ConflictingDeliveryId { .. } => {
+            organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey
+            | organization::ActivityRegistrationOutcome::ConflictingActivityId { .. } => {
                 return Err(StoreFault::InvalidFacts);
             }
         }
     }
-    Ok(delivery_ids)
+    Ok(activity_ids)
 }
 
 fn active_run_local_sessions(store: &OrganizationStore, run_id: &GraphRunId) -> BTreeSet<String> {
-    let mut active = BTreeSet::new();
-    for delivery in store.facts().deliveries().deliveries() {
-        if delivery.facts().run_id != run_id.as_str() {
-            continue;
-        }
-        if matches!(
-            delivery.phase(),
-            DeliveryPhase::Pending
-                | DeliveryPhase::RetryScheduled { .. }
-                | DeliveryPhase::Delivering(_)
-                | DeliveryPhase::Delivered { .. }
-        ) {
-            if let Some(run) = store.facts().run(run_id) {
-                if let Some(runtime) = run.runtime() {
-                    if let Some(binding) = runtime
-                        .bindings()
-                        .iter()
-                        .find(|binding| binding.role().as_str() == delivery.facts().role_id)
-                    {
-                        active.insert(binding.local_session().as_str().to_owned());
-                    }
-                }
-            }
-        }
-    }
-    active
+    store
+        .facts()
+        .activities()
+        .activities()
+        .filter(|activity| activity.facts().run_id == *run_id)
+        .filter(|activity| {
+            matches!(
+                activity.phase(),
+                ActivityPhase::Pending
+                    | ActivityPhase::RetryScheduled { .. }
+                    | ActivityPhase::Claimed(_)
+                    | ActivityPhase::Dispatched(_)
+            )
+        })
+        .map(|activity| activity.facts().target.as_str().to_owned())
+        .collect()
 }
 
-fn delivery_belongs_to(
+fn pending_run_activity_ids(
     store: &OrganizationStore,
     run_id: &GraphRunId,
-    delivery_id: &DeliveryId,
+    now: u64,
+) -> Vec<ActivityId> {
+    store
+        .facts()
+        .activities()
+        .activities()
+        .filter(|activity| activity.facts().run_id == *run_id)
+        .filter_map(|activity| match activity.phase() {
+            ActivityPhase::Pending => Some(activity.facts().activity_id.clone()),
+            ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at <= now => {
+                Some(activity.facts().activity_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn activity_belongs_to(
+    store: &OrganizationStore,
+    run_id: &GraphRunId,
+    activity_id: &ActivityId,
 ) -> bool {
     store
         .facts()
-        .deliveries()
-        .delivery(delivery_id)
-        .is_some_and(|delivery| delivery.facts().run_id.as_str() == run_id.as_str())
+        .activities()
+        .activity(activity_id)
+        .is_some_and(|activity| activity.facts().run_id == *run_id)
+}
+
+fn activity_target(
+    store: &OrganizationStore,
+    activity_id: &ActivityId,
+    open_claw_endpoint: &RuntimeEndpointReference,
+    matcha_endpoint: &RuntimeEndpointReference,
+) -> Option<crate::composition::TeamRunActivityTarget> {
+    let activity = store.facts().activities().activity(activity_id)?;
+    let run_id = activity.facts().run_id.clone();
+    let run = store.facts().run(&run_id)?;
+    let ActivityKind::AgentTask { role_id, .. } = &activity.facts().activity_kind else {
+        return None;
+    };
+    let role = organization::RoleId::try_new(role_id.clone()).ok()?;
+    let binding = run
+        .runtime()?
+        .bindings()
+        .iter()
+        .find(|binding| binding.role() == &role)?;
+    if binding.local_session().as_str() != activity.facts().target.as_str() {
+        return None;
+    }
+    if binding.endpoint() == open_claw_endpoint {
+        Some(crate::composition::TeamRunActivityTarget::OpenClaw { run_id })
+    } else if binding.endpoint() == matcha_endpoint {
+        Some(crate::composition::TeamRunActivityTarget::Matcha { run_id })
+    } else {
+        None
+    }
 }
 
 fn task_board_mutate(
@@ -2477,10 +2358,9 @@ mod tests {
     use crate::runtime_driver::{RuntimeCapabilitySurface, TeamOps};
 
     use organization::{
-        Delivery, DeliveryFailure, DeliveryLedgerSnapshot, DeliveryPhase, DeliveryReceipt,
-        DeliveryStart, EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy,
-        ExternalSessionReference, GraphDefinition, GraphEvent, GraphRunFacts, GraphState,
-        LocalSessionReference, ManagedAgentReference, MaterializationReceipt, MemberId,
+        ActivityFailure, ActivityPhase, DeliveryLedgerSnapshot, EdgeAction, EdgeDefinition, EdgeId,
+        ExecutorPolicy, ExternalSessionReference, GraphDefinition, GraphEvent, GraphRunFacts,
+        GraphState, LocalSessionReference, ManagedAgentReference, MaterializationReceipt, MemberId,
         NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind,
         RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
         RuntimeEndpointReference, TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole,
@@ -2488,7 +2368,7 @@ mod tests {
     };
 
     #[test]
-    fn scheduler_registers_downstream_ready_work_delivery() {
+    fn scheduler_registers_downstream_ready_work_activity() {
         let graph = downstream_work_graph();
         let downstream_fence = graph
             .current_attempt(&NodeId::new("downstream"))
@@ -2496,7 +2376,7 @@ mod tests {
             .fence()
             .clone();
         let (_temp_dir, mut store) = store_with_graph(graph);
-        let delivery_ids = schedule_ready_nodes(
+        let activity_ids = schedule_ready_nodes(
             &TeamRunOwner::new(),
             &mut store,
             GraphRunId::new("run:one"),
@@ -2504,19 +2384,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delivery_ids.len(), 1);
-        let delivery = store
+        assert_eq!(activity_ids.len(), 1);
+        let activity = store
             .facts()
-            .deliveries()
-            .delivery(&delivery_ids[0])
+            .activities()
+            .activity(&activity_ids[0])
             .unwrap();
-        assert_eq!(delivery.facts().node_id, "downstream");
+        assert_eq!(activity.facts().node_id.as_str(), "downstream");
         assert_eq!(
-            delivery.facts().node_execution_id,
-            downstream_fence.node_execution_id().as_str()
+            activity.facts().node_execution_id,
+            *downstream_fence.node_execution_id()
         );
-        assert_eq!(delivery.facts().role_id, "leader");
-        assert!(matches!(delivery.phase(), DeliveryPhase::Pending));
+        assert!(matches!(activity.phase(), ActivityPhase::Pending));
         assert!(
             schedule_ready_nodes(
                 &TeamRunOwner::new(),
@@ -2527,7 +2406,7 @@ mod tests {
             .unwrap()
             .is_empty()
         );
-        assert_eq!(store.facts().deliveries().deliveries().count(), 1);
+        assert_eq!(store.facts().activities().activities().count(), 1);
     }
 
     #[test]
@@ -2539,7 +2418,7 @@ mod tests {
             .fence()
             .clone();
         let (_temp_dir, mut store) = store_with_graph(graph);
-        let delivery_ids = schedule_ready_nodes(
+        let activity_ids = schedule_ready_nodes(
             &TeamRunOwner::new(),
             &mut store,
             GraphRunId::new("run:one"),
@@ -2547,21 +2426,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delivery_ids.len(), 1);
-        let deliveries = store.facts().deliveries().deliveries().collect::<Vec<_>>();
-        assert_eq!(deliveries.len(), 1);
-        let delivery = deliveries[0];
-        assert_eq!(delivery.facts().node_id, "review");
+        assert_eq!(activity_ids.len(), 1);
+        let activities = store.facts().activities().activities().collect::<Vec<_>>();
+        assert_eq!(activities.len(), 1);
+        let activity = activities[0];
+        assert_eq!(activity.facts().node_id.as_str(), "review");
         assert_eq!(
-            delivery.facts().node_execution_id,
-            review_fence.node_execution_id().as_str()
+            activity.facts().node_execution_id,
+            *review_fence.node_execution_id()
         );
-        assert_eq!(delivery.facts().role_id, "leader");
-        assert!(matches!(delivery.phase(), DeliveryPhase::Pending));
+        assert!(matches!(activity.phase(), ActivityPhase::Pending));
     }
 
     #[test]
-    fn scheduler_namespaces_delivery_identity_by_run() {
+    fn scheduler_namespaces_activity_identity_by_run() {
         let run_one = GraphRunId::new("run:one");
         let run_two = GraphRunId::new("run:two");
         let (_temp_dir, mut store) = store_with_runs(vec![
@@ -2581,22 +2459,22 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1);
         assert_ne!(first[0], second[0]);
-        let deliveries = store.facts().deliveries().deliveries().collect::<Vec<_>>();
-        assert_eq!(deliveries.len(), 2);
+        let activities = store.facts().activities().activities().collect::<Vec<_>>();
+        assert_eq!(activities.len(), 2);
         assert!(
-            deliveries
+            activities
                 .iter()
-                .any(|delivery| delivery.facts().run_id == "run:one")
+                .any(|activity| activity.facts().run_id.as_str() == "run:one")
         );
         assert!(
-            deliveries
+            activities
                 .iter()
-                .any(|delivery| delivery.facts().run_id == "run:two")
+                .any(|activity| activity.facts().run_id.as_str() == "run:two")
         );
     }
 
     #[test]
-    fn scheduler_namespaces_review_rework_delivery_identity_by_attempt() {
+    fn scheduler_namespaces_review_rework_activity_identity_by_attempt() {
         let mut graph = reworkable_review_graph(GraphRunId::new("run:one"));
         let first_fence = graph
             .current_attempt(&NodeId::new("review"))
@@ -2611,37 +2489,33 @@ mod tests {
             3,
         )
         .unwrap();
-        let DeliveryStart::Claimed(claim) = store.claim_delivery(&first[0], 4).unwrap() else {
-            panic!("first review delivery must be claimable");
+        let organization::ActivityClaimOutcome::Claimed(claim) =
+            store.claim_activity(&first[0], 4).unwrap()
+        else {
+            panic!("first review activity must be claimable");
         };
+        store.dispatch_activity(&claim, 4).unwrap();
         store
-            .settle_delivery(
+            .settle_activity(
                 &claim,
-                DeliveryReceipt::Rejected {
-                    failure: DeliveryFailure::PolicyRejected,
-                    observed_at: 5,
+                organization::ActivitySettlement::Failed {
+                    failed_at: 5,
+                    failure: ActivityFailure::Rejected,
                 },
-                5,
             )
             .unwrap();
-        graph = reduce(
-            graph,
-            GraphEvent::ReworkRequested {
-                node_id: NodeId::new("review"),
-                requested_at: 6,
-            },
-        )
-        .unwrap();
+        let rework = GraphEvent::ReworkRequested {
+            node_id: NodeId::new("review"),
+            requested_at: 6,
+        };
+        graph = reduce(graph, rework.clone()).unwrap();
         let second_fence = graph
             .current_attempt(&NodeId::new("review"))
             .unwrap()
             .fence()
             .clone();
         store
-            .replace_facts(facts_with_deliveries(
-                vec![(graph, runtime_receipt())],
-                store.facts().deliveries().snapshot(),
-            ))
+            .apply_graph_event(&GraphRunId::new("run:one"), rework)
             .unwrap();
 
         let second = schedule_ready_nodes(
@@ -2655,10 +2529,10 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_ne!(first[0], second[0]);
         assert_ne!(first_fence.attempt_id(), second_fence.attempt_id());
-        let deliveries = store.facts().deliveries().deliveries().collect::<Vec<_>>();
-        assert_eq!(deliveries.len(), 2);
-        assert!(deliveries.iter().any(|delivery| {
-            delivery.facts().node_execution_id == second_fence.node_execution_id().as_str()
+        let activities = store.facts().activities().activities().collect::<Vec<_>>();
+        assert_eq!(activities.len(), 2);
+        assert!(activities.iter().any(|activity| {
+            activity.facts().node_execution_id == *second_fence.node_execution_id()
         }));
     }
 

@@ -2,7 +2,7 @@
  * Main Layout Component
  * TitleBar at top, then layout panes below.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { ChatWorkspaceHost } from './ChatWorkspaceHost';
@@ -23,13 +23,6 @@ export function MainLayout() {
   const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
   const chatWindowRightDockLayout = useLayoutStore((state) => state.chatWindowRightDockLayout);
   const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
-  const [agentSessionsUserCollapsed, setAgentSessionsUserCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('layout:agent-sessions-collapsed') === '1';
-    } catch {
-      return false;
-    }
-  });
   const [containerWidth, setContainerWidth] = useState<number>(() => window.innerWidth);
   const layoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
@@ -42,9 +35,6 @@ export function MainLayout() {
     if (!dockLayout || dockLayout.dockWidth <= 0) {
       return containerWidth;
     }
-    if (dockLayout.phase === 'open' && containerWidth > dockLayout.baseWidth + 1) {
-      return Math.max(1, containerWidth - dockLayout.dockWidth);
-    }
     return dockLayout.baseWidth;
   }, [activeRightDockLayout, containerWidth]);
 
@@ -52,9 +42,7 @@ export function MainLayout() {
     containerWidth: layoutContainerWidth,
     sidebarVisible,
     sidebarWidth,
-    agentSessionsUserCollapsed,
   }), [
-    agentSessionsUserCollapsed,
     layoutContainerWidth,
     sidebarVisible,
     sidebarWidth,
@@ -73,14 +61,6 @@ export function MainLayout() {
   const mainStyle = chatMainFlexWidth == null
     ? undefined
     : { flex: `0 0 ${chatMainFlexWidth}px` };
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('layout:agent-sessions-collapsed', agentSessionsUserCollapsed ? '1' : '0');
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [agentSessionsUserCollapsed]);
 
   useEffect(() => {
     if (isChatRoute) {
@@ -122,13 +102,6 @@ export function MainLayout() {
       }
     };
   }, []);
-
-  const setAgentSessionsCollapsed = useCallback((next: SetStateAction<boolean>) => {
-    const desiredCollapsed = typeof next === 'function'
-      ? next(workspaceLayout.agentSessionsCollapsed)
-      : next;
-    setAgentSessionsUserCollapsed(desiredCollapsed);
-  }, [workspaceLayout.agentSessionsCollapsed]);
 
   const startSidebarResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!sidebarVisible) {
@@ -183,15 +156,9 @@ export function MainLayout() {
         ) : null}
         <main className="min-w-0 flex-1 overflow-hidden bg-card" style={mainStyle}>
           {isChatRoute ? (
-            <ChatWorkspaceHost
-              agentSessionsWidth={workspaceLayout.agentSessionsWidth}
-              agentSessionsCollapsed={workspaceLayout.agentSessionsCollapsed}
-              agentSessionsCollapsedWidth={CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth}
-              onToggleAgentSessionsCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
-              takeoverMode={chatTakeoverMode}
-            />
+            <ChatWorkspaceHost takeoverMode={chatTakeoverMode} />
           ) : (
-            <div className="h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6">
+            <div data-page-scroll className="h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6">
               <Outlet />
             </div>
           )}

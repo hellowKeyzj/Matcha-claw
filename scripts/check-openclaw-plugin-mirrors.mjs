@@ -2,26 +2,39 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  findOpenClawPluginSdkImportIssues,
+  formatOpenClawPluginSdkImportIssue,
+} from './lib/openclaw-plugin-sdk-import-policy.mjs';
 
 const ROOT = process.cwd();
 const MIRROR_ROOT = path.join(ROOT, 'build', 'openclaw-plugins');
 
 const REQUIRED_PLUGIN_MIRRORS = [
+  ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode'].map((pluginId) => ({
+    pluginId,
+    dir: pluginId,
+    requiredFiles: pluginId === 'tencent' ? ['dist/index.js', 'dist/setup-api.js'] : ['dist/index.js'],
+  })),
   {
     pluginId: 'task-manager',
     dir: 'task-manager',
+    scanSdkImports: true,
   },
   {
     pluginId: 'security-core',
     dir: 'security-core',
+    scanSdkImports: true,
   },
   {
     pluginId: 'browser-relay',
     dir: 'browser-relay',
+    scanSdkImports: true,
   },
   {
     pluginId: 'memory-lancedb-pro',
     dir: 'memory-lancedb-pro',
+    scanSdkImports: true,
     requiredFiles: [
       'models/Xenova/all-MiniLM-L6-v2/config.json',
       'models/Xenova/all-MiniLM-L6-v2/tokenizer.json',
@@ -30,12 +43,30 @@ const REQUIRED_PLUGIN_MIRRORS = [
     ],
   },
   {
+    pluginId: 'dingtalk',
+    dir: 'dingtalk',
+  },
+  {
+    pluginId: 'wecom-openclaw-plugin',
+    dir: 'wecom',
+  },
+  {
+    pluginId: 'openclaw-weixin',
+    dir: 'openclaw-weixin',
+  },
+  {
+    pluginId: 'qqbot',
+    dir: 'qqbot',
+  },
+  {
     pluginId: 'openclaw-lark',
     dir: 'feishu-openclaw-plugin',
+    scanSdkImports: true,
   },
   {
     pluginId: 'matchaclaw-media',
     dir: 'matchaclaw-media',
+    scanSdkImports: true,
   },
 ];
 
@@ -105,19 +136,31 @@ async function validateMirror(definition) {
   }
 
   const openclaw = isRecord(packageJson?.openclaw) ? packageJson.openclaw : null;
-  const extensions = Array.isArray(openclaw?.extensions)
+  const sourceExtensions = Array.isArray(openclaw?.extensions)
     ? openclaw.extensions.filter((entry) => typeof entry === 'string' && entry.trim())
     : [];
+  const runtimeExtensions = Array.isArray(openclaw?.runtimeExtensions)
+    ? openclaw.runtimeExtensions.filter((entry) => typeof entry === 'string' && entry.trim())
+    : [];
+  const extensions = runtimeExtensions.length > 0 ? runtimeExtensions : sourceExtensions;
   if (extensions.length === 0) {
-    issues.push(`build package.json 缺少 openclaw.extensions: ${definition.dir}`);
+    issues.push(`build package.json 缺少 openclaw.extensions/openclaw.runtimeExtensions: ${definition.dir}`);
     return issues;
   }
 
+  const sdkImportScanFiles = [];
   for (const entry of extensions) {
     const entryPath = path.resolve(mirrorDir, entry);
     if (!(await pathExists(entryPath))) {
       issues.push(`build openclaw.extensions 入口不存在: ${definition.dir} -> ${entry}`);
+      continue;
     }
+    sdkImportScanFiles.push(entryPath);
+  }
+
+  if (definition.scanSdkImports) {
+    const sdkImportIssues = await findOpenClawPluginSdkImportIssues({ files: sdkImportScanFiles });
+    issues.push(...sdkImportIssues.map((issue) => formatOpenClawPluginSdkImportIssue(issue, ROOT)));
   }
 
   const runtimeDependencyNames = Object.keys(

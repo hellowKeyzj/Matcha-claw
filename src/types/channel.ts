@@ -33,6 +33,33 @@ export type ChannelStatus = 'connected' | 'disconnected' | 'connecting' | 'error
  */
 export type ChannelConnectionType = 'token' | 'qr' | 'oauth' | 'webhook';
 
+export type ChannelGuidedSetupFlow =
+  | { kind: 'qr-login' }
+  | { kind: 'authorization'; presentation: 'qr' | 'link' | 'qr-or-link' };
+
+export type ChannelSetupFlow =
+  | { mode: 'guided'; flow: ChannelGuidedSetupFlow }
+  | { mode: 'credential' };
+
+export type ChannelSetupMode = ChannelSetupFlow['mode'];
+
+export type ChannelIconId =
+  | 'wechat'
+  | 'qqbot'
+  | 'dingtalk'
+  | 'wecom'
+  | 'feishu'
+  | 'whatsapp'
+  | 'telegram'
+  | 'discord'
+  | 'signal'
+  | 'imessage'
+  | 'matrix'
+  | 'line'
+  | 'msteams'
+  | 'googlechat'
+  | 'mattermost';
+
 /**
  * Channel data structure
  */
@@ -68,9 +95,10 @@ export interface ChannelConfigField {
 export interface ChannelMeta {
   id: ChannelType;
   name: string;
-  icon: string;
+  iconId: ChannelIconId;
   description: string;
   connectionType: ChannelConnectionType;
+  setupFlows: readonly ChannelSetupFlow[];
   docsPath?: string;
   configFields: ChannelConfigField[];
   instructions: string[];
@@ -80,22 +108,22 @@ export interface ChannelMeta {
 /**
  * Channel icons mapping
  */
-export const CHANNEL_ICONS: Record<ChannelType, string> = {
-  whatsapp: '📱',
-  dingtalk: '💬',
-  telegram: '✈️',
-  discord: '🎮',
-  'openclaw-weixin': '🧧',
-  signal: '🔒',
-  feishu: '🐦',
-  wecom: '💼',
-  imessage: '💬',
-  matrix: '🔗',
-  line: '🟢',
-  msteams: '👔',
-  googlechat: '💭',
-  mattermost: '💠',
-  qqbot: '🐧',
+export const CHANNEL_ICON_IDS: Record<ChannelType, ChannelIconId> = {
+  whatsapp: 'whatsapp',
+  dingtalk: 'dingtalk',
+  telegram: 'telegram',
+  discord: 'discord',
+  'openclaw-weixin': 'wechat',
+  signal: 'signal',
+  feishu: 'feishu',
+  wecom: 'wecom',
+  imessage: 'imessage',
+  matrix: 'matrix',
+  line: 'line',
+  msteams: 'msteams',
+  googlechat: 'googlechat',
+  mattermost: 'mattermost',
+  qqbot: 'qqbot',
 };
 
 /**
@@ -126,9 +154,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   'openclaw-weixin': {
     id: 'openclaw-weixin',
     name: 'WeChat',
-    icon: '🧧',
+    iconId: 'wechat',
     description: 'channels:meta.openclaw-weixin.description',
     connectionType: 'qr',
+    setupFlows: [{ mode: 'guided', flow: { kind: 'qr-login' } }],
     docsPath: 'connector-guide/wechat.html',
     configFields: [
       {
@@ -172,9 +201,13 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   qqbot: {
     id: 'qqbot',
     name: 'QQ Bot',
-    icon: '🐧',
+    iconId: 'qqbot',
     description: 'channels:meta.qqbot.description',
-    connectionType: 'token',
+    connectionType: 'qr',
+    setupFlows: [
+      { mode: 'guided', flow: { kind: 'authorization', presentation: 'qr' } },
+      { mode: 'credential' },
+    ],
     docsPath: 'connector-guide/qqbot.html',
     configFields: [
       {
@@ -202,9 +235,13 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   dingtalk: {
     id: 'dingtalk',
     name: 'DingTalk',
-    icon: '💬',
+    iconId: 'dingtalk',
     description: 'channels:meta.dingtalk.description',
-    connectionType: 'token',
+    connectionType: 'oauth',
+    setupFlows: [
+      { mode: 'guided', flow: { kind: 'authorization', presentation: 'qr-or-link' } },
+      { mode: 'credential' },
+    ],
     docsPath: 'connector-guide/dingtalk.html',
     configFields: [
       {
@@ -254,9 +291,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   wecom: {
     id: 'wecom',
     name: 'WeCom',
-    icon: '💼',
+    iconId: 'wecom',
     description: 'channels:meta.wecom.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     docsPath: 'connector-guide/wecom.html',
     configFields: [
       {
@@ -284,9 +322,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   telegram: {
     id: 'telegram',
     name: 'Telegram',
-    icon: '✈️',
+    iconId: 'telegram',
     description: 'channels:meta.telegram.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     docsPath: 'connector-guide/telegram.html',
     configFields: [
       {
@@ -317,9 +356,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   discord: {
     id: 'discord',
     name: 'Discord',
-    icon: '🎮',
+    iconId: 'discord',
     description: 'channels:meta.discord.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     docsPath: 'connector-guide/discord.html',
     configFields: [
       {
@@ -360,9 +400,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   whatsapp: {
     id: 'whatsapp',
     name: 'WhatsApp',
-    icon: '📱',
+    iconId: 'whatsapp',
     description: 'channels:meta.whatsapp.description',
     connectionType: 'qr',
+    setupFlows: [{ mode: 'guided', flow: { kind: 'qr-login' } }],
     docsPath: 'connector-guide/whatsapp.html',
     configFields: [],
     instructions: [
@@ -375,9 +416,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   signal: {
     id: 'signal',
     name: 'Signal',
-    icon: '🔒',
+    iconId: 'signal',
     description: 'channels:meta.signal.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'phoneNumber',
@@ -396,9 +438,13 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   feishu: {
     id: 'feishu',
     name: 'Feishu / Lark',
-    icon: '🐦',
+    iconId: 'feishu',
     description: 'channels:meta.feishu.description',
-    connectionType: 'token',
+    connectionType: 'oauth',
+    setupFlows: [
+      { mode: 'guided', flow: { kind: 'authorization', presentation: 'qr-or-link' } },
+      { mode: 'credential' },
+    ],
     docsPath: 'connector-guide/feishu.html',
     configFields: [
       {
@@ -430,9 +476,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   imessage: {
     id: 'imessage',
     name: 'iMessage',
-    icon: '💬',
+    iconId: 'imessage',
     description: 'channels:meta.imessage.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'serverUrl',
@@ -458,9 +505,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   matrix: {
     id: 'matrix',
     name: 'Matrix',
-    icon: '🔗',
+    iconId: 'matrix',
     description: 'channels:meta.matrix.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'homeserver',
@@ -487,9 +535,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   line: {
     id: 'line',
     name: 'LINE',
-    icon: '🟢',
+    iconId: 'line',
     description: 'channels:meta.line.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'channelAccessToken',
@@ -518,9 +567,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   msteams: {
     id: 'msteams',
     name: 'Microsoft Teams',
-    icon: '👔',
+    iconId: 'msteams',
     description: 'channels:meta.msteams.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'appId',
@@ -550,9 +600,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   googlechat: {
     id: 'googlechat',
     name: 'Google Chat',
-    icon: '💭',
+    iconId: 'googlechat',
     description: 'channels:meta.googlechat.description',
     connectionType: 'webhook',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'serviceAccountKey',
@@ -572,9 +623,10 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   mattermost: {
     id: 'mattermost',
     name: 'Mattermost',
-    icon: '💠',
+    iconId: 'mattermost',
     description: 'channels:meta.mattermost.description',
     connectionType: 'token',
+    setupFlows: [{ mode: 'credential' }],
     configFields: [
       {
         key: 'serverUrl',
@@ -601,35 +653,24 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
 };
 
 /**
- * Get primary supported channels (non-plugin, commonly used)
+ * Current configurable channel catalog.
+ * Historical ChannelType entries are retained only for displaying existing configs.
  */
-const PRIMARY_CHANNEL_TYPES = [
-  'telegram',
-  'discord',
-  'whatsapp',
-  'dingtalk',
-  'feishu',
-  'wecom',
+export const CONFIGURABLE_CHANNEL_TYPES = [
   'openclaw-weixin',
   'qqbot',
+  'dingtalk',
+  'wecom',
+  'feishu',
 ] satisfies ChannelType[];
 
-const LEGACY_IM_CHANNEL_TYPES = new Set<ChannelType>(['telegram', 'discord', 'whatsapp']);
-
-export const LEGACY_IM_CHANNELS_FEATURE_ENABLED =
-  import.meta.env.VITE_ENABLE_LEGACY_IM_CHANNELS_FEATURE === 'true';
-
-export function isPrimaryChannelVisible(type: ChannelType): boolean {
-  return LEGACY_IM_CHANNELS_FEATURE_ENABLED || !LEGACY_IM_CHANNEL_TYPES.has(type);
-}
-
 export function getPrimaryChannels(): ChannelType[] {
-  return PRIMARY_CHANNEL_TYPES.filter(isPrimaryChannelVisible);
+  return [...CONFIGURABLE_CHANNEL_TYPES];
 }
 
 /**
- * Get all available channels including plugins
+ * Get current configurable channels.
  */
 export function getAllChannels(): ChannelType[] {
-  return Object.keys(CHANNEL_META) as ChannelType[];
+  return getPrimaryChannels();
 }

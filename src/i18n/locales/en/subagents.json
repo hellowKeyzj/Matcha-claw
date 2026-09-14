@@ -1,21 +1,54 @@
 {
-  "title": "Subagent Workspace",
+  "title": "Agent",
   "subtitle": "Manage subagents and model settings.",
-  "newSubagent": "New Subagent",
+  "newSubagent": "New Agent",
+  "tabs": {
+    "agents": "My Agents",
+    "templates": "Template Library"
+  },
+  "search": {
+    "agents": "Search agents...",
+    "templates": "Search templates...",
+    "empty": "No matching results."
+  },
+  "view": {
+    "label": "Display mode",
+    "grid": "Grid view",
+    "list": "List view"
+  },
+  "results": {
+    "agents": "Agents: {{total}}",
+    "templates": "Templates: {{total}}"
+  },
+  "filters": {
+    "category": "Category"
+  },
   "transfer": {
     "import": "Import Agent",
     "importDialogTitle": "Import Agent Config",
     "exportDialogTitle": "Export Agent Config",
     "importSuccess": "Agent config imported.",
     "exportSuccess": "Agent config exported.",
+    "exportPackageSuccess": "Agent package exported: {{fileName}}",
+    "uploadPackageSuccess": "Agent package uploaded: {{fileName}}",
+    "downloadPackageSuccess": "Agent package downloaded: {{fileName}}",
+    "installPackageSuccess": "Agent package installed: {{agentId}}",
     "importFailed": "Failed to import agent config: {{message}}",
-    "exportFailed": "Failed to export agent config: {{message}}"
+    "exportFailed": "Failed to export agent config: {{message}}",
+    "exportPackageFailed": "Failed to export agent package: {{message}}",
+    "uploadPackageFailed": "Failed to upload agent package: {{message}}",
+    "downloadPackageFailed": "Failed to download agent package: {{message}}",
+    "installPackageFailed": "Failed to install agent package: {{message}}"
   },
   "status": {
     "refreshing": "Refreshing...",
     "mutating": "Saving changes..."
   },
   "empty": "No subagents found.",
+  "startup": {
+    "title": "OpenClaw is starting",
+    "description": "Agents will appear automatically when the service is ready."
+  },
   "modelGuide": {
     "description": "Please go to Models to add a model first.",
     "action": "Open Models"
@@ -28,6 +61,8 @@
     "loading": "Loading templates...",
     "loadingButton": "Loading...",
     "load": "Load Template",
+    "modelSelection": "Choose a model when loading",
+    "view": "View template",
     "empty": "No templates found.",
     "error": "Failed to load templates: {{message}}",
     "badge": "Template",
@@ -64,7 +99,7 @@
   "manageTitle": "Managing: {{agentId}}",
   "manage": {
     "promptLabel": "Prompt",
-    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / USER.md / MEMORY.md",
     "includeCurrentFilesLabel": "Use current files",
     "generateDraft": "Generate Draft",
     "generatingDraft": "Generating...",
@@ -87,6 +122,10 @@
     "deleting": "Deleting..."
   },
   "close": "Close",
+  "sealed": {
+    "editDisabled": "Sealed agents cannot be edited.",
+    "configExportDisabled": "Sealed agents cannot export editable JSON config. Use Export Package instead."
+  },
   "form": {
     "basicInfo": "Basic Information",
     "aiConfig": "AI Configuration",
@@ -164,8 +203,18 @@
       }
     }
   },
+  "cloudPackages": {
+    "title": "Cloud Agent Packages",
+    "empty": "No cloud agent packages.",
+    "download": "Download",
+    "install": "Install"
+  },
   "card": {
+    "system": "System agent",
+    "agent": "Agent",
     "default": "Default",
+    "sealed": "Sealed",
+    "package": "Package",
     "modelFallback": "Model not configured",
     "modelMissingHint": "Model is not configured. Chat and run are disabled.",
     "lockedHint": "Main agent is read-only.",
@@ -173,6 +222,9 @@
       "edit": "Edit",
       "delete": "Delete",
       "export": "Export",
+      "exportPackage": "Export Package",
+      "uploadPackageToCloud": "Upload to Cloud",
+      "cloudPackages": "Cloud Packages",
       "manage": "Manage",
       "chat": "Chat",
       "more": "More actions"

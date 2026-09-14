@@ -1,4 +1,3 @@
-import { useRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
@@ -12,45 +11,25 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
-const chatHostInstanceSeq = vi.hoisted(() => ({ current: 0 }));
-
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
+function MockChat({ isActive = true }: { isActive?: boolean }) {
+  return (
+    <div
+      data-testid="chat-host"
+      data-active={String(isActive)}
+      data-instance-id="chat"
+    >
+      chat-host
+    </div>
+  );
+}
+
 vi.mock('@/pages/Chat', () => ({
-  Chat: ({ isActive = true }: { isActive?: boolean }) => {
-    const instanceIdRef = useRef<number | null>(null);
-    if (instanceIdRef.current == null) {
-      chatHostInstanceSeq.current += 1;
-      instanceIdRef.current = chatHostInstanceSeq.current;
-    }
-    return (
-      <div
-        data-testid="chat-host"
-        data-active={String(isActive)}
-        data-instance-id={String(instanceIdRef.current)}
-      >
-        chat-host
-      </div>
-    );
-  },
-  default: ({ isActive = true }: { isActive?: boolean }) => {
-    const instanceIdRef = useRef<number | null>(null);
-    if (instanceIdRef.current == null) {
-      chatHostInstanceSeq.current += 1;
-      instanceIdRef.current = chatHostInstanceSeq.current;
-    }
-    return (
-      <div
-        data-testid="chat-host"
-        data-active={String(isActive)}
-        data-instance-id={String(instanceIdRef.current)}
-      >
-        chat-host
-      </div>
-    );
-  },
+  Chat: MockChat,
+  default: MockChat,
 }));
 
 function RouteSwitcher() {
@@ -67,12 +46,10 @@ describe('main layout chat workspace host', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
     invokeIpcMock.mockResolvedValue(false);
-    chatHostInstanceSeq.current = 0;
     window.electron.platform = 'linux';
     i18n.changeLanguage('en');
 
     useSettingsStore.setState({
-      setupComplete: true,
       language: 'en',
       devModeUnlocked: false,
       init: vi.fn().mockResolvedValue(undefined),
@@ -81,6 +58,7 @@ describe('main layout chat workspace host', () => {
       sidebarVisible: true,
       sidebarWidth: 256,
       chatTakeoverMode: 'none',
+      chatWindowRightDockLayout: null,
     });
 
     useSubagentsStore.setState({
@@ -132,7 +110,7 @@ describe('main layout chat workspace host', () => {
     } as never);
   });
 
-  it('keeps chat workspace active on chat route without route overlay', () => {
+  it('keeps chat workspace active without a resident agent sessions pane width', () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <Routes>
@@ -145,7 +123,9 @@ describe('main layout chat workspace host', () => {
 
     expect(screen.getByTestId('chat-workspace-host')).toBeInTheDocument();
     expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'true');
-    expect(screen.getByTestId('agent-sessions-pane')).toBeInTheDocument();
+    const agentSessionsPane = screen.getByTestId('agent-sessions-pane');
+    expect(agentSessionsPane).toHaveClass('w-0');
+    expect(screen.getByTestId('agent-session-identity-beacon')).toBeInTheDocument();
     expect(screen.queryByTestId('layout-agent-sessions-resizer')).toBeNull();
   });
 
@@ -169,6 +149,29 @@ describe('main layout chat workspace host', () => {
     expect(screen.queryByTestId('agent-sessions-pane')).toBeNull();
     expect(screen.queryByTestId('layout-left-resizer')).toBeNull();
     expect(screen.queryByRole('button', { name: /new chat/i })).toBeNull();
+  });
+
+  it('sizes the chat route from the right dock layout base and dock widths', () => {
+    useLayoutStore.setState({
+      chatWindowRightDockLayout: {
+        phase: 'open',
+        dockWidth: 726,
+        baseWidth: 1200,
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<MainLayout />}>
+            <Route index element={null} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const main = screen.getByTestId('chat-workspace-host').parentElement as HTMLElement;
+    expect(main.style.flex).toBe('0 0 1664px');
   });
 
   it('does not mount chat workspace on non-chat routes', () => {

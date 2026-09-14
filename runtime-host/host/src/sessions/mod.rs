@@ -11,6 +11,7 @@ pub(crate) mod openclaw;
 pub(crate) mod query;
 pub(crate) mod rename;
 pub(crate) mod send;
+pub(crate) mod session_permission;
 pub mod state;
 pub(crate) mod timeline;
 

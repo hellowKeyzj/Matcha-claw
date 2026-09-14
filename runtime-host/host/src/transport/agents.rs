@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    agents::{self, NativeEndpoint},
+    agents::{self, NativeEndpoint, WorkspaceInitialization},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -22,6 +22,13 @@ const MAX_TEXT_LENGTH: usize = 1024 * 1024;
 
 fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4096 && !value.contains('\0')
+}
+
+fn valid_package_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.contains('\0')
+        && value.ends_with(".matcha-agentpkg")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,10 +119,15 @@ impl AgentsRequest {
                     name,
                     workspace,
                     model,
+                    workspace_initialization,
                     ..
                 },
             ) => openclaw::agents::AgentCreate::try_new(name, workspace, model)
-                .map(|input| agents::Command::Create { endpoint, input })
+                .map(|input| agents::Command::Create {
+                    endpoint,
+                    input,
+                    workspace_initialization: workspace_initialization.into(),
+                })
                 .map_err(|_| RequestError::Invalid),
             (
                 Operation::Update,
@@ -126,9 +138,16 @@ impl AgentsRequest {
                     model,
                     ..
                 },
-            ) => openclaw::agents::AgentUpdate::try_new(agent_id, name, workspace, model)
-                .map(|input| agents::Command::Update { endpoint, input })
-                .map_err(|_| RequestError::Invalid),
+            ) => openclaw::agents::AgentUpdate::try_new_with_display(
+                agent_id,
+                name.into_value(),
+                workspace.into_value(),
+                model.into_model_update(),
+                None,
+                None,
+            )
+            .map(|input| agents::Command::Update { endpoint, input })
+            .map_err(|_| RequestError::Invalid),
             (
                 Operation::Delete,
                 Input::Delete {
@@ -148,6 +167,12 @@ impl AgentsRequest {
                     agent_id,
                     name,
                 }),
+            (Operation::PackageExport, Input::PackageExport { agent_id, .. }) => {
+                Ok(agents::Command::ExportPackage { endpoint, agent_id })
+            }
+            (Operation::PackageInstall, Input::PackageInstall { package_path, .. }) => {
+                Ok(agents::Command::InstallPackage { endpoint, package_path })
+            }
             (
                 Operation::FilesSet,
                 Input::FilesSet {
@@ -279,6 +304,8 @@ enum Operation {
     FilesSet,
     FilesList,
     DisplayConfiguration,
+    PackageExport,
+    PackageInstall,
     SetDescription,
     SetConfigurationModel,
     SetSkills,
@@ -294,6 +321,8 @@ impl Operation {
             self,
             Self::DraftWait
                 | Self::DisplayConfiguration
+                | Self::PackageExport
+                | Self::PackageInstall
                 | Self::SetDescription
                 | Self::SetConfigurationModel
                 | Self::SetSkills
@@ -323,6 +352,8 @@ impl Operation {
             "subagents.files.set" => Some(Self::FilesSet),
             "subagents.files.list" => Some(Self::FilesList),
             "subagents.displayConfig.get" => Some(Self::DisplayConfiguration),
+            "subagents.package.export" => Some(Self::PackageExport),
+            "subagents.package.install" => Some(Self::PackageInstall),
             "subagents.description.set" => Some(Self::SetDescription),
             "subagents.model.set" => Some(Self::SetConfigurationModel),
             "subagents.skills.set" => Some(Self::SetSkills),
@@ -424,17 +455,19 @@ enum Input {
         workspace: String,
         #[serde(default)]
         model: Option<String>,
+        #[serde(rename = "workspaceInitialization", default)]
+        workspace_initialization: WorkspaceInitializationInput,
     },
     Update {
         endpoint: Endpoint,
         #[serde(rename = "agentId")]
         agent_id: String,
         #[serde(default)]
-        name: Option<String>,
+        name: FieldUpdate<String>,
         #[serde(default)]
-        workspace: Option<String>,
+        workspace: FieldUpdate<String>,
         #[serde(default)]
-        model: Option<String>,
+        model: FieldUpdate<String>,
     },
     Delete {
         endpoint: Endpoint,
@@ -460,6 +493,16 @@ enum Input {
         endpoint: Endpoint,
         #[serde(rename = "agentId")]
         agent_id: String,
+    },
+    PackageExport {
+        endpoint: Endpoint,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    PackageInstall {
+        endpoint: Endpoint,
+        #[serde(rename = "packagePath")]
+        package_path: String,
     },
     DisplayConfiguration {
         endpoint: Endpoint,
@@ -502,6 +545,82 @@ enum Input {
         revision: String,
         selection: ToolSelectionInput,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceInitializationInput {
+    #[default]
+    MainAgentTemplate,
+    EmptyWorkspace,
+}
+
+impl From<WorkspaceInitializationInput> for WorkspaceInitialization {
+    fn from(value: WorkspaceInitializationInput) -> Self {
+        match value {
+            WorkspaceInitializationInput::MainAgentTemplate => Self::MainAgentTemplate,
+            WorkspaceInitializationInput::EmptyWorkspace => Self::EmptyWorkspace,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FieldUpdate<T> {
+    Unchanged,
+    Set(Option<T>),
+}
+
+impl<T> Default for FieldUpdate<T> {
+    fn default() -> Self {
+        Self::Unchanged
+    }
+}
+
+impl<'de, T> Deserialize<'de> for FieldUpdate<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Self::Set)
+    }
+}
+
+impl FieldUpdate<String> {
+    fn is_set(&self) -> bool {
+        matches!(self, Self::Set(_))
+    }
+
+    fn is_valid_value(&self) -> bool {
+        match self {
+            Self::Unchanged => true,
+            Self::Set(Some(value)) => valid_id(value),
+            Self::Set(None) => false,
+        }
+    }
+
+    fn is_valid_nullable_value(&self) -> bool {
+        match self {
+            Self::Unchanged | Self::Set(None) => true,
+            Self::Set(Some(value)) => valid_id(value),
+        }
+    }
+
+    fn into_value(self) -> Option<String> {
+        match self {
+            Self::Set(Some(value)) => Some(value),
+            Self::Unchanged | Self::Set(None) => None,
+        }
+    }
+
+    fn into_model_update(self) -> openclaw::agents::AgentModelUpdate {
+        match self {
+            Self::Unchanged => openclaw::agents::AgentModelUpdate::Unchanged,
+            Self::Set(value) => openclaw::agents::AgentModelUpdate::Set(value),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -608,6 +727,8 @@ impl Input {
             | Self::FilesGet { endpoint, .. }
             | Self::FilesSet { endpoint, .. }
             | Self::FilesList { endpoint, .. }
+            | Self::PackageExport { endpoint, .. }
+            | Self::PackageInstall { endpoint, .. }
             | Self::DisplayConfiguration { endpoint, .. }
             | Self::SetDescription { endpoint, .. }
             | Self::SetConfigurationModel { endpoint, .. }
@@ -665,14 +786,18 @@ impl Input {
             ) => {
                 valid_id(agent_id)
                     && target_matches(agent_id)
-                    && name.as_deref().is_none_or(valid_id)
-                    && workspace.as_deref().is_none_or(valid_id)
-                    && model.as_deref().is_none_or(valid_id)
-                    && (name.is_some() || workspace.is_some() || model.is_some())
+                    && name.is_valid_value()
+                    && workspace.is_valid_value()
+                    && model.is_valid_nullable_value()
+                    && (name.is_set() || workspace.is_set() || model.is_set())
             }
             (Operation::Delete, Self::Delete { agent_id, .. })
-            | (Operation::FilesList, Self::FilesList { agent_id, .. }) => {
+            | (Operation::FilesList, Self::FilesList { agent_id, .. })
+            | (Operation::PackageExport, Self::PackageExport { agent_id, .. }) => {
                 valid_id(agent_id) && target_matches(agent_id)
+            }
+            (Operation::PackageInstall, Self::PackageInstall { package_path, .. }) => {
+                target.subagent_id.is_none() && valid_package_path(package_path)
             }
             (Operation::FilesGet, Self::FilesGet { agent_id, name, .. }) => {
                 valid_id(agent_id)
@@ -782,6 +907,7 @@ impl Input {
 pub(crate) enum Delivery {
     Agents {
         default_id: String,
+        selection_required: bool,
         agents: Vec<AgentSummaryResponse>,
     },
     Wait(AgentWaitResponse),
@@ -794,6 +920,8 @@ pub(crate) enum Delivery {
     ConfigurationApplied,
     SkillConfiguration(Value),
     ToolConfiguration(Value),
+    PackageExport(PackageExportResponse),
+    PackageInstall(PackageInstallResponse),
     Rejected,
     OutcomeUnknown,
     WaitUnknown,
@@ -814,7 +942,9 @@ impl Delivery {
             | Self::Configuration(_)
             | Self::ConfigurationApplied
             | Self::SkillConfiguration(_)
-            | Self::ToolConfiguration(_) => 200,
+            | Self::ToolConfiguration(_)
+            | Self::PackageExport(_)
+            | Self::PackageInstall(_) => 200,
             Self::Rejected => 422,
             Self::OutcomeUnknown | Self::WaitUnknown | Self::Unsupported => 409,
             Self::Unavailable => 503,
@@ -823,9 +953,14 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Agents { default_id, agents } => serde_json::json!({
+            Self::Agents {
+                default_id,
+                selection_required,
+                agents,
+            } => serde_json::json!({
                 "success": true,
                 "defaultId": default_id,
+                "selectionRequired": selection_required,
                 "agents": agents,
             }),
             Self::Wait(wait) => serde_json::json!({
@@ -846,6 +981,12 @@ impl Delivery {
             }),
             Self::ConfigurationApplied => serde_json::json!({ "success": true }),
             Self::SkillConfiguration(view) | Self::ToolConfiguration(view) => view.clone(),
+            Self::PackageExport(package) => {
+                serde_json::json!({ "success": true, "package": package })
+            }
+            Self::PackageInstall(package) => {
+                serde_json::json!({ "success": true, "package": package })
+            }
             Self::Rejected => error("Subagent request was rejected"),
             Self::OutcomeUnknown => error("Subagent mutation outcome is unknown"),
             Self::WaitUnknown => error("Subagent wait outcome is unknown"),
@@ -878,6 +1019,31 @@ pub(crate) struct AgentSummaryResponse {
     name: Option<String>,
     workspace: Option<String>,
     model: Option<String>,
+    kind: AgentKindResponse,
+    sealed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum AgentKindResponse {
+    Agent,
+    System,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackageExportResponse {
+    agent_id: String,
+    file_name: String,
+    package_path: String,
+    size: u64,
+    exported_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackageInstallResponse {
+    agent_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -931,8 +1097,13 @@ struct ConfigurationModelResponse {
 
 pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
     match outcome {
-        agents::Outcome::Agents { default_id, agents } => Delivery::Agents {
+        agents::Outcome::Agents {
             default_id,
+            selection_required,
+            agents,
+        } => Delivery::Agents {
+            default_id,
+            selection_required,
             agents: agents.into_iter().map(agent_summary).collect(),
         },
         agents::Outcome::Waited(wait) => Delivery::Wait(agent_wait(wait)),
@@ -949,6 +1120,12 @@ pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
         agents::Outcome::ConfigurationApplied => Delivery::ConfigurationApplied,
         agents::Outcome::SkillConfiguration(outcome) => skill_configuration_delivery(outcome),
         agents::Outcome::ToolConfiguration(outcome) => tool_configuration_delivery(outcome),
+        agents::Outcome::PackageExported(package) => {
+            Delivery::PackageExport(package_export(package))
+        }
+        agents::Outcome::PackageInstalled(package) => {
+            Delivery::PackageInstall(package_install(package))
+        }
         agents::Outcome::Rejected => Delivery::Rejected,
         agents::Outcome::Unknown => Delivery::OutcomeUnknown,
         agents::Outcome::WaitUnknown => Delivery::WaitUnknown,
@@ -1082,7 +1259,7 @@ fn skill_option_value(option: &openclaw::projection::agent_configuration::SkillO
     });
     serde_json::json!({
         "skillKey": option.key(), "displayName": option.display_name(), "description": option.description(),
-        "installed": option.installed(), "selectable": option.selectable(),
+        "selectable": option.selectable(),
         "unavailableReason": unavailable_reason, "missingRequirements": missing_requirements,
     })
 }
@@ -1142,11 +1319,37 @@ fn agent_wait(wait: openclaw::agents::AgentWaitResult) -> AgentWaitResponse {
 }
 
 fn agent_summary(agent: openclaw::agents::AgentSummary) -> AgentSummaryResponse {
+    let kind = match agent.kind() {
+        openclaw::agents::AgentKind::Agent => AgentKindResponse::Agent,
+        openclaw::agents::AgentKind::System => AgentKindResponse::System,
+    };
     AgentSummaryResponse {
         id: agent.id,
         name: agent.name,
         workspace: agent.workspace,
         model: agent.model,
+        kind,
+        sealed: agent.sealed,
+    }
+}
+
+fn package_export(
+    package: crate::sealed_resource::SealedAgentPackageExport,
+) -> PackageExportResponse {
+    PackageExportResponse {
+        agent_id: package.agent_key().as_str().to_owned(),
+        file_name: package.file_name().to_owned(),
+        package_path: package.package_path().to_string_lossy().into_owned(),
+        size: package.size(),
+        exported_at_ms: package.exported_at_ms(),
+    }
+}
+
+fn package_install(
+    package: crate::sealed_resource::SealedAgentCatalogEntry,
+) -> PackageInstallResponse {
+    PackageInstallResponse {
+        agent_id: package.agent_key().as_str().to_owned(),
     }
 }
 
@@ -1350,6 +1553,64 @@ mod tests {
     }
 
     #[test]
+    fn create_defaults_to_main_agent_templates_and_accepts_empty_workspace_override() {
+        let request = json!({
+            "id": "subagent.management",
+            "operationId": "subagents.create",
+            "scope": { "kind": "agent", "endpoint": endpoint("openclaw"), "agentId": "main" },
+            "target": { "kind": "subagent" },
+            "input": {
+                "kind": "create",
+                "endpoint": endpoint("openclaw"),
+                "name": "writer",
+                "workspace": "C:/workspace/writer",
+                "model": null,
+            },
+        });
+        assert!(AgentsRequest::decode_semantics(request.clone()).is_ok());
+        assert_eq!(
+            AgentsRequest::decode_semantics(request.clone())
+                .expect("decode create")
+                .command(None),
+            Ok(agents::Command::Create {
+                endpoint: NativeEndpoint::OpenClawLocal,
+                input: openclaw::agents::AgentCreate::try_new(
+                    "writer".into(),
+                    "C:/workspace/writer".into(),
+                    None,
+                )
+                .expect("agent create"),
+                workspace_initialization: WorkspaceInitialization::MainAgentTemplate,
+            })
+        );
+
+        let mut empty = request.clone();
+        empty["input"]["workspaceInitialization"] = json!("emptyWorkspace");
+        assert_eq!(
+            AgentsRequest::decode_semantics(empty)
+                .expect("decode create")
+                .command(None),
+            Ok(agents::Command::Create {
+                endpoint: NativeEndpoint::OpenClawLocal,
+                input: openclaw::agents::AgentCreate::try_new(
+                    "writer".into(),
+                    "C:/workspace/writer".into(),
+                    None,
+                )
+                .expect("agent create"),
+                workspace_initialization: WorkspaceInitialization::EmptyWorkspace,
+            })
+        );
+
+        let mut invalid = request;
+        invalid["input"]["workspaceInitialization"] = json!("bad");
+        assert_eq!(
+            AgentsRequest::decode_semantics(invalid),
+            Err(RequestError::Invalid)
+        );
+    }
+
+    #[test]
     fn accepts_only_the_fixed_rooted_file_request() {
         assert!(AgentsRequest::decode_semantics(request()).is_ok());
         for value in [
@@ -1375,6 +1636,50 @@ mod tests {
                 Err(RequestError::Invalid)
             );
         }
+    }
+
+    #[test]
+    fn projects_agent_list_with_public_kind_and_selection_requirement() {
+        let body = Delivery::Agents {
+            default_id: "main".into(),
+            selection_required: true,
+            agents: vec![
+                AgentSummaryResponse {
+                    id: "main".into(),
+                    name: Some("Main".into()),
+                    workspace: None,
+                    model: Some("provider/model".into()),
+                    kind: AgentKindResponse::Agent,
+                    sealed: false,
+                },
+                AgentSummaryResponse {
+                    id: "system".into(),
+                    name: None,
+                    workspace: None,
+                    model: None,
+                    kind: AgentKindResponse::System,
+                    sealed: true,
+                },
+            ],
+        }
+        .body();
+
+        assert_eq!(
+            body,
+            json!({
+                "success": true,
+                "defaultId": "main",
+                "selectionRequired": true,
+                "agents": [
+                    { "id": "main", "name": "Main", "workspace": null, "model": "provider/model", "kind": "agent", "sealed": false },
+                    { "id": "system", "name": null, "workspace": null, "model": null, "kind": "system", "sealed": true },
+                ],
+            })
+        );
+        let rendered = body.to_string();
+        assert!(!rendered.contains("identity"));
+        assert!(!rendered.contains("agentRuntime"));
+        assert!(!rendered.contains("ownership"));
     }
 
     #[test]
@@ -1488,6 +1793,82 @@ mod tests {
         assert!(!rendered.contains("workspace"));
         assert!(!rendered.contains("path"));
         assert!(!rendered.contains("hash"));
+    }
+
+    #[test]
+    fn package_install_uses_root_subagent_target_and_public_receipt() {
+        let request = json!({
+            "id": "subagent.management",
+            "operationId": "subagents.package.install",
+            "scope": { "kind": "agent", "endpoint": endpoint("openclaw"), "agentId": "main" },
+            "target": { "kind": "subagent" },
+            "input": {
+                "kind": "packageInstall",
+                "endpoint": endpoint("openclaw"),
+                "packagePath": "C:/sealed/writer.matcha-agentpkg",
+            },
+        });
+        let decoded =
+            AgentsRequest::decode_semantics(request.clone()).expect("decode package install");
+        assert_eq!(
+            decoded.command(None),
+            Ok(agents::Command::InstallPackage {
+                endpoint: NativeEndpoint::OpenClawLocal,
+                package_path: "C:/sealed/writer.matcha-agentpkg".into(),
+            })
+        );
+
+        for value in [
+            {
+                let mut value = request.clone();
+                value["target"]["subagentId"] = json!("writer");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["agentId"] = json!("writer");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["files"] = json!([]);
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["workspaceInitialization"] = json!("emptyWorkspace");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["description"] = json!("Writes copy");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["packagePath"] = json!("C:/sealed/writer.matchaclaw-agent.json");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["scope"]["endpoint"] = endpoint("matcha-agent");
+                value["input"]["endpoint"] = endpoint("matcha-agent");
+                value
+            },
+        ] {
+            assert_eq!(
+                AgentsRequest::decode_semantics(value),
+                Err(RequestError::Invalid)
+            );
+        }
+
+        assert_eq!(
+            Delivery::PackageInstall(PackageInstallResponse {
+                agent_id: "writer".into(),
+            })
+            .body(),
+            json!({ "success": true, "package": { "agentId": "writer" } })
+        );
     }
 
     #[test]

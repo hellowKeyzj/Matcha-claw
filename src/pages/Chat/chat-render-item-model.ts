@@ -79,6 +79,7 @@ function buildAttachedFilesSignature(
     fileSize?: number;
     preview?: string | null;
     previewStatus?: string;
+    attachmentStatus?: string;
     source?: string;
   }>,
 ): string {
@@ -93,6 +94,7 @@ function buildAttachedFilesSignature(
     String(file.fileSize ?? ''),
     file.preview ?? '',
     file.previewStatus ?? '',
+    file.attachmentStatus ?? '',
     file.source ?? '',
   ].join(':'));
   return hashStringDjb2(parts.join('|'));
@@ -174,12 +176,14 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
       segment.tool.id,
       segment.tool.toolCallId ?? '',
       segment.tool.name,
+      segment.tool.runtimeAdapterId ?? '',
       segment.tool.status,
       String(segment.tool.updatedAt ?? ''),
       String(segment.tool.durationMs ?? ''),
       toolPayloadSignature(segment.tool.input),
       hashText(segment.tool.inputText),
       toolPayloadSignature(segment.tool.output),
+      toolPayloadSignature(segment.tool.details),
       hashText(segment.tool.summary),
       buildAssistantToolResultSignature(segment.tool.result),
     ].join(':');
@@ -189,12 +193,14 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
     tool.id,
     tool.toolCallId ?? '',
     tool.name,
+    tool.runtimeAdapterId ?? '',
     tool.status,
     String(tool.updatedAt ?? ''),
     String(tool.durationMs ?? ''),
     toolPayloadSignature(tool.input),
     hashText(tool.inputText),
     toolPayloadSignature(tool.output),
+    toolPayloadSignature(tool.details),
     hashText(tool.summary),
     buildAssistantToolResultSignature(tool.result),
   ].join(':'));

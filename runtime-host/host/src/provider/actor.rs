@@ -16,14 +16,14 @@ use super::{
     accounts::{ProviderAccountsDesiredOutcome, ProviderAccountsMutation},
     command::{ProviderCommand, ProviderQuery},
     models::{
-        ProviderModelListOutcome, ProviderModelReplaceOutcome, ProviderModelSelectableOutcome,
-        ProviderModelView, SelectableProviderModelView,
+        ProviderModelDiscoverOutcome, ProviderModelListOutcome, ProviderModelReplaceOutcome,
+        ProviderModelSelectableOutcome, ProviderModelView, SelectableProviderModelView,
     },
     routing::ProviderRoutingListOutcome,
 };
 use crate::{
     runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::{LifecycleOps, ProviderNativeConfigurationCommand},
+    runtime_driver::ProviderNativeConfigurationCommand,
     sessions::model_selection::{
         MatchaSessionModelRuntimeCommand, NativeEndpoint, ResolvedSessionModelSelection,
         SessionModelSelectionBinding, SessionModelSelectionCommand, SessionModelSelectionOutcome,
@@ -209,7 +209,7 @@ impl ProviderOwner {
         }
     }
 
-    async fn handle_provider_query(&self, query: ProviderQuery) {
+    async fn handle_provider_query(&mut self, query: ProviderQuery) {
         use ProviderQuery::*;
         match query {
             ListAccounts { reply } => {
@@ -226,6 +226,9 @@ impl ProviderOwner {
                     &self.snapshot,
                     capability,
                 ));
+            }
+            DiscoverModels { account_id, reply } => {
+                let _ = reply.send(self.models.discover(&mut self.cascade, &account_id).await);
             }
             ListRouting { reply } => {
                 let _ = reply.send(list_provider_routing_for_snapshot(&self.snapshot));
@@ -254,12 +257,40 @@ impl ProviderOwner {
         &mut self,
         mutation: ProviderAccountsMutation,
     ) -> crate::transport::provider_accounts::ProviderAccountsDelivery {
+        eprintln!(
+            "[startup-trace] source=provider-owner phase=account-mutation detail=start desired={:?} kind={:?} persisted={:?} commit={:?} private_ok={} account_present={} retired={} required_auth={} auth_refresh={}",
+            mutation.desired,
+            mutation.kind,
+            mutation.persisted,
+            mutation.commit,
+            mutation.private.is_ok(),
+            mutation.account.is_some(),
+            mutation.retired.len(),
+            mutation.required_auth_accounts().len(),
+            mutation.auth_state_refresh_required
+        );
         let native = if mutation.private.is_err() {
+            eprintln!(
+                "[startup-trace] source=provider-owner phase=account-mutation detail=private-projection-failed"
+            );
             ProviderNativeConfigurationEffect::Unavailable
         } else if mutation.commit == super::accounts::ProviderCommitOutcome::Committed {
-            self.reconcile(&mutation.retired, mutation.required_auth_accounts())
-                .await
+            eprintln!(
+                "[startup-trace] source=provider-owner phase=account-mutation detail=reconcile-start"
+            );
+            let native = self
+                .reconcile(
+                    &mutation.retired,
+                    mutation.required_auth_accounts(),
+                    mutation.auth_state_refresh_required,
+                )
+                .await;
+            log_provider_native_effect("account-mutation", &native);
+            native
         } else {
+            eprintln!(
+                "[startup-trace] source=provider-owner phase=account-mutation detail=commit-not-confirmed"
+            );
             ProviderNativeConfigurationEffect::Unavailable
         };
         match mutation.desired {
@@ -313,7 +344,9 @@ impl ProviderOwner {
         let Some(account_id) = account_id else {
             return outcome;
         };
-        let native = self.reconcile(&[], &BTreeSet::from([account_id])).await;
+        let native = self
+            .reconcile(&[], &BTreeSet::from([account_id]), false)
+            .await;
         super::models::ProviderModelReplaceOutcome::DesiredStored {
             persisted,
             native,
@@ -332,7 +365,7 @@ impl ProviderOwner {
             return outcome;
         };
         let required = self.routing.route_account_ids(&self.cascade);
-        let native = self.reconcile(&[], &required).await;
+        let native = self.reconcile(&[], &required, false).await;
         super::routing::ProviderRoutingReplaceOutcome::DesiredStored {
             persisted,
             native,
@@ -493,7 +526,10 @@ impl ProviderOwner {
     ) -> openclaw::bootstrap::PrivateProjectionEffect {
         if self.cascade.reload().is_err() {
             return openclaw::bootstrap::PrivateProjectionEffect {
-                providers: openclaw::bootstrap::ConfigWriteEffect::Unknown,
+                providers: openclaw::bootstrap::ConfigWriteEffect::unknown(
+                    "provider-cascade-unavailable",
+                    "Provider cascade is unavailable",
+                ),
                 restart: openclaw::bootstrap::RestartPreparation::Unknown,
             };
         }
@@ -510,6 +546,7 @@ impl ProviderOwner {
         &mut self,
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<ProviderAccountId>,
+        auth_state_refresh_required: bool,
     ) -> ProviderNativeConfigurationEffect {
         if self.cascade.reload().is_err() {
             return ProviderNativeConfigurationEffect::Unavailable;
@@ -517,19 +554,17 @@ impl ProviderOwner {
         let accounts = self.cascade.accounts().to_vec();
         let catalog = self.cascade.catalog().clone();
         let routing = self.cascade.routing().cloned();
-        if self
+        let auth_state_refresh_required = match self
             .accounts
             .apply_private_profiles_for_provider_config(&accounts, required_auth_accounts)
-            .is_err()
         {
-            return ProviderNativeConfigurationEffect::Unavailable;
-        }
+            Ok(applied) => auth_state_refresh_required || applied,
+            Err(_) => return ProviderNativeConfigurationEffect::Unavailable,
+        };
 
+        let now_millis = now_millis();
         let mut effects = Vec::new();
         for driver in self.runtime_directory.all_drivers() {
-            if !driver.lifecycle_ops().is_some_and(LifecycleOps::readiness) {
-                continue;
-            }
             if let Some(provider_ops) = driver.provider_config_ops() {
                 let command = ProviderNativeConfigurationCommand {
                     accounts: &accounts,
@@ -537,7 +572,8 @@ impl ProviderOwner {
                     routing: routing.as_ref(),
                     retired,
                     required_auth_accounts,
-                    now_millis: now_millis(),
+                    auth_state_refresh_required,
+                    now_millis,
                 };
                 let effect = provider_ops
                     .reconcile_provider_native_configuration(command)
@@ -579,10 +615,43 @@ async fn handle_provider_snapshot_query(
         ProviderQuery::ListRouting { reply } => {
             let _ = reply.send(list_provider_routing_for_snapshot(snapshot));
         }
+        ProviderQuery::DiscoverModels { reply, .. } => {
+            let _ = reply.send(ProviderModelDiscoverOutcome::Unavailable);
+        }
         ProviderQuery::ResolveSessionModelSelection { reply, .. }
         | ProviderQuery::ResolveMatchaSessionModelRuntime { reply, .. } => {
             let _ = reply.send(Err(SessionModelSelectionOutcome::Unavailable));
         }
+    }
+}
+
+fn log_provider_native_effect(phase: &str, native: &ProviderNativeConfigurationEffect) {
+    match native {
+        ProviderNativeConfigurationEffect::Evidence(evidence) => {
+            if let Some(diagnostic) = evidence.diagnostic() {
+                eprintln!(
+                    "[startup-trace] source=provider-owner phase={phase} detail=reconcile-outcome changed={} applied={:?} observed={:?} diagnostic_phase={} diagnostic_reason={} method={} expected_path={} detail_len={}",
+                    evidence.changed(),
+                    evidence.applied(),
+                    evidence.observed(),
+                    diagnostic.phase(),
+                    diagnostic.reason(),
+                    diagnostic.method().unwrap_or("none"),
+                    diagnostic.expected_path().unwrap_or("none"),
+                    diagnostic.detail().map(str::len).unwrap_or(0)
+                );
+            } else {
+                eprintln!(
+                    "[startup-trace] source=provider-owner phase={phase} detail=reconcile-outcome changed={} applied={:?} observed={:?}",
+                    evidence.changed(),
+                    evidence.applied(),
+                    evidence.observed()
+                );
+            }
+        }
+        ProviderNativeConfigurationEffect::Unavailable => eprintln!(
+            "[startup-trace] source=provider-owner phase={phase} detail=reconcile-outcome unavailable=true"
+        ),
     }
 }
 

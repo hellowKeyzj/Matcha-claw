@@ -3,13 +3,9 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidebarMaxWidth: 420,
   sidebarDefaultWidth: 256,
   sidebarRailWidth: 64,
-  agentSessionsMinWidth: 220,
-  agentSessionsMaxWidth: 520,
-  agentSessionsDefaultWidth: 240,
-  agentSessionsCollapsedWidth: 0,
   sidePanelMinWidth: 260,
   sidePanelLightMaxWidth: 520,
-  sidePanelArtifactMaxWidth: 960,
+  sidePanelArtifactMaxWidth: 1600,
   sidePanelLightDefaultWidth: 360,
   sidePanelArtifactDefaultWidth: 520,
   paneResizerWidth: 6,
@@ -21,14 +17,11 @@ export interface ChatWorkspaceLayoutInput {
   containerWidth: number;
   sidebarVisible: boolean;
   sidebarWidth: number;
-  agentSessionsUserCollapsed: boolean;
 }
 
 export interface ChatWorkspaceLayoutResult {
   sidebarWidth: number;
   sidebarOccupiedWidth: number;
-  agentSessionsCollapsed: boolean;
-  agentSessionsWidth: number;
 }
 
 export type ChatSidePanelMode = 'docked' | 'overlay';
@@ -68,7 +61,6 @@ export function getSidebarResizeMaxWidth(containerWidth: number): number {
     CHAT_WORKSPACE_LAYOUT.sidebarMaxWidth,
     containerWidth
       - CHAT_WORKSPACE_LAYOUT.paneResizerWidth
-      - CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth
       - CHAT_WORKSPACE_LAYOUT.chatMainLightMinWidth,
   );
   return Math.max(CHAT_WORKSPACE_LAYOUT.sidebarMinWidth, maxWidth);
@@ -90,17 +82,6 @@ export function getSidebarOccupiedWidth(sidebarVisible: boolean, sidebarWidth: n
     + (sidebarVisible ? CHAT_WORKSPACE_LAYOUT.paneResizerWidth : 0);
 }
 
-export function canExpandAgentSessions(
-  containerWidth: number,
-  sidebarOccupiedWidth: number,
-): boolean {
-  const availableWidth = containerWidth - sidebarOccupiedWidth;
-  return availableWidth >= (
-    CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth
-    + CHAT_WORKSPACE_LAYOUT.chatMainLightMinWidth
-  );
-}
-
 export function resolveChatWorkspaceLayout(
   input: ChatWorkspaceLayoutInput,
 ): ChatWorkspaceLayoutResult {
@@ -111,32 +92,10 @@ export function resolveChatWorkspaceLayout(
       getSidebarResizeMaxWidth(input.containerWidth),
     )
     : CHAT_WORKSPACE_LAYOUT.sidebarRailWidth;
-  const sidebarOccupiedWidth = getSidebarOccupiedWidth(input.sidebarVisible, sidebarWidth);
-
-  if (
-    input.agentSessionsUserCollapsed
-    || !canExpandAgentSessions(input.containerWidth, sidebarOccupiedWidth)
-  ) {
-    return {
-      sidebarWidth,
-      sidebarOccupiedWidth,
-      agentSessionsCollapsed: true,
-      agentSessionsWidth: CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth,
-    };
-  }
 
   return {
     sidebarWidth,
-    sidebarOccupiedWidth,
-    agentSessionsCollapsed: false,
-    agentSessionsWidth: clampPaneWidth(
-      CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth,
-      CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
-      Math.min(
-        CHAT_WORKSPACE_LAYOUT.agentSessionsMaxWidth,
-        input.containerWidth - sidebarOccupiedWidth - CHAT_WORKSPACE_LAYOUT.chatMainLightMinWidth,
-      ),
-    ),
+    sidebarOccupiedWidth: getSidebarOccupiedWidth(input.sidebarVisible, sidebarWidth),
   };
 }
 

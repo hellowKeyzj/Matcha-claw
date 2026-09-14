@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { SubAgents } from '@/pages/SubAgents';
@@ -196,6 +196,31 @@ describe('subagents page', () => {
       files: {},
     },
   });
+  const exportAgentPackage = vi.fn().mockResolvedValue({
+    agentId: 'agent-alpha',
+    fileName: 'agent-alpha.matcha-agentpkg',
+    packagePath: 'C:/sealed/agent-alpha.matcha-agentpkg',
+    size: 1024,
+    exportedAtMs: 1,
+  });
+  const uploadAgentPackageToCloud = vi.fn().mockResolvedValue({
+    agentId: 'agent-alpha',
+    packageId: 'pkg-alpha',
+    fileName: 'agent-alpha.matcha-agentpkg',
+    size: 1024,
+    uploadedAtMs: 1,
+  });
+  const downloadAgentPackageFromCloud = vi.fn().mockResolvedValue({
+    agentId: 'agent-alpha',
+    packageId: 'pkg-alpha',
+    fileName: 'agent-alpha.matcha-agentpkg',
+    size: 1024,
+    downloadedAtMs: 1,
+  });
+  const installAgentPackageFromCloud = vi.fn().mockResolvedValue({
+    agentId: 'agent-alpha',
+    packageId: 'pkg-alpha',
+  });
   const importAgentConfig = vi.fn().mockResolvedValue({ agentId: 'imported-agent' });
   const loadAgents = vi.fn().mockResolvedValue(undefined);
   const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
@@ -252,6 +277,10 @@ describe('subagents page', () => {
     updateAgent.mockClear();
     deleteAgent.mockClear();
     exportAgentConfig.mockClear();
+    exportAgentPackage.mockClear();
+    uploadAgentPackageToCloud.mockClear();
+    downloadAgentPackageFromCloud.mockClear();
+    installAgentPackageFromCloud.mockClear();
     __resetAgentSkillConfigStoreInternalCachesForTest();
     __resetAgentToolConfigStoreInternalCachesForTest();
     importAgentConfig.mockClear();
@@ -319,6 +348,17 @@ describe('subagents page', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
+      cloudPackages: [
+        {
+          packageId: 'pkg-alpha',
+          packageVersionId: 'version-alpha',
+          name: 'agent-alpha',
+          packageType: 'agent',
+          version: 'v1',
+          status: 'published',
+          downloadable: true,
+        },
+      ],
       mutating: false,
       error: null,
       managedAgentId: null,
@@ -331,9 +371,8 @@ describe('subagents page', () => {
         'agent-alpha': {
           'AGENTS.md': 'saved agents',
           'SOUL.md': 'saved soul',
-          'TOOLS.md': 'saved tools',
-          'IDENTITY.md': 'saved identity',
           'USER.md': 'saved user',
+          'MEMORY.md': 'saved memory',
         },
       },
       draftByFile: {},
@@ -341,6 +380,7 @@ describe('subagents page', () => {
       previewDiffByFile: {},
       selectedAgentId: null,
       loadAgents,
+      loadCloudPackages: vi.fn().mockResolvedValue(undefined),
       loadAvailableModels,
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
@@ -349,6 +389,10 @@ describe('subagents page', () => {
       updateAgent,
       deleteAgent,
       exportAgentConfig,
+      exportAgentPackage,
+      uploadAgentPackageToCloud,
+      downloadAgentPackageFromCloud,
+      installAgentPackageFromCloud,
       importAgentConfig,
       generateDraftFromPrompt,
       cancelDraft,
@@ -749,20 +793,40 @@ describe('subagents page', () => {
   });
 
   it('calls edit/delete actions for non-main agent', async () => {
-    renderSubagentsPage();
+    const { container } = renderSubagentsPage();
+    const clickMenuItem = (label: string) => {
+      const item = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+        .find((entry) => entry.textContent?.trim() === label);
+      expect(item).toBeTruthy();
+      fireEvent.click(item!);
+    };
+    const openMenu = async () => {
+      const button = await screen.findByLabelText('More actions agent-alpha');
+      fireEvent.pointerDown(button, { button: 0, ctrlKey: false });
+    };
 
-    await openEditDialog('agent-alpha');
+    await openMenu();
+    clickMenuItem('Edit');
+    await screen.findByText('Edit Subagent');
     expect(screen.getByText('Avatar')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'avatar-style-botttsNeutral' }));
-    fireEvent.click(screen.getAllByRole('button', { name: /pick-avatar-/ })[2]);
+    fireEvent.click(screen.getByLabelText('avatar-style-botttsNeutral'));
+    const avatarButtons = container.querySelectorAll<HTMLButtonElement>('button[aria-label^="pick-avatar-"]');
+    fireEvent.click(avatarButtons[2]);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alpha v2' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Handles international sourcing.' } });
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: ANTHROPIC_CLAUDE37_SELECTION_ID } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => {
+      expect(updateAgent).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Edit Subagent')).toBeNull();
+    });
 
-    await clickAgentAction('agent-alpha', 'Delete');
-    const dialog = screen.getByRole('dialog', { name: 'Delete agent-alpha' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await openMenu();
+    clickMenuItem('Delete');
+    await screen.findByText('Delete agent-alpha');
+    fireEvent.click(screen.getByText('Delete'));
 
     await waitFor(() => {
       expect(updateAgent).toHaveBeenCalledWith({
@@ -839,6 +903,90 @@ describe('subagents page', () => {
     await waitFor(() => {
       expect(toast.success).toHaveBeenCalledWith('Agent config exported.');
     });
+  });
+
+  it('sealed agent disables edit and editable json export but allows package export', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        ...useSubagentsStore.getState().agents,
+        {
+          id: 'sealed-agent',
+          name: 'Sealed Agent',
+          workspace: '/home/dev/.openclaw/workspace-subagents/sealed-agent',
+          model: 'gpt-4o-mini',
+          sealed: true,
+          isDefault: false,
+        },
+      ],
+    });
+    renderSubagentsPage();
+
+    expect(screen.getByText('Sealed')).toBeInTheDocument();
+    expect(screen.getAllByText('Package').length).toBeGreaterThan(0);
+    await openAgentActionMenu('sealed-agent');
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toHaveAttribute('data-disabled');
+    expect(screen.getByRole('menuitem', { name: 'Export' })).toHaveAttribute('data-disabled');
+    expect(screen.getByRole('menuitem', { name: 'Export Package' })).not.toHaveAttribute('data-disabled');
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Package' }));
+
+    await waitFor(() => {
+      expect(exportAgentPackage).toHaveBeenCalledWith('sealed-agent');
+    });
+    expect(exportAgentConfig).not.toHaveBeenCalledWith('sealed-agent');
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith('Agent package exported: agent-alpha.matcha-agentpkg');
+    });
+  });
+
+  it('adds cloud package actions for normal agents', async () => {
+    renderSubagentsPage();
+
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload to Cloud' }));
+    await waitFor(() => {
+      expect(uploadAgentPackageToCloud).toHaveBeenCalledWith('agent-alpha');
+    });
+    expect(toast.success).toHaveBeenCalledWith('Agent package uploaded: agent-alpha.matcha-agentpkg');
+
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
+    await waitFor(() => {
+      expect(downloadAgentPackageFromCloud).toHaveBeenCalledWith('version-alpha');
+    });
+    expect(toast.success).toHaveBeenCalledWith('Agent package downloaded: agent-alpha.matcha-agentpkg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }));
+    await waitFor(() => {
+      expect(installAgentPackageFromCloud).toHaveBeenCalledWith('version-alpha');
+    });
+    expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-alpha');
+    expect(toast.success).toHaveBeenCalledWith('Agent package installed: agent-alpha');
+  });
+
+  it('does not open prompt editor for managed sealed agent', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        ...useSubagentsStore.getState().agents,
+        {
+          id: 'sealed-agent',
+          name: 'Sealed Agent',
+          workspace: '/home/dev/.openclaw/workspace-subagents/sealed-agent',
+          model: 'gpt-4o-mini',
+          sealed: true,
+          isDefault: false,
+        },
+      ],
+      managedAgentId: 'sealed-agent',
+    });
+    renderSubagentsPage();
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Sealed agents cannot be edited.');
+    });
+    expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
+    expect(screen.queryByLabelText('Prompt')).toBeNull();
   });
 
   it('imports agent config from a picked json file', async () => {
@@ -1319,7 +1467,7 @@ describe('subagents page', () => {
                   id: 'brand-guardian',
                   name: 'Brand Guardian',
                   summary: 'Brand guard template',
-                  files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+                  files: ['AGENTS.md', 'SOUL.md', 'USER.md', 'MEMORY.md'],
                 },
               ],
             },
@@ -1338,13 +1486,12 @@ describe('subagents page', () => {
                 id: 'brand-guardian',
                 name: 'Brand Guardian',
                 summary: 'Brand guard template',
-                files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+                files: ['AGENTS.md', 'SOUL.md', 'USER.md', 'MEMORY.md'],
                 fileContents: {
                   'AGENTS.md': 'agents',
                   'SOUL.md': 'soul',
-                  'TOOLS.md': 'tools',
-                  'IDENTITY.md': 'identity',
                   'USER.md': 'user',
+                  'MEMORY.md': 'memory',
                 },
               },
             },

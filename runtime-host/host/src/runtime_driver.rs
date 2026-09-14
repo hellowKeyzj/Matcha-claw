@@ -39,6 +39,7 @@ use crate::{
     sessions::model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
     sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
     sessions::send::{SessionSendCommand, SessionSendOutcome},
+    sessions::session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     sessions::timeline::{self, ContentCommand, ContentOutcome},
     skill_bundle,
     skill_install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
@@ -135,6 +136,156 @@ pub(crate) trait RuntimeDriver: Send + Sync {
 pub(crate) type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) type OwnedRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ActivityExecutionRequest {
+    activity: RuntimeActivity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RuntimeActivity {
+    AgentTask(AgentTaskActivity),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AgentTaskActivity {
+    delivery: organization::DeliveryRequest,
+    binding: organization::RoleSessionReceipt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActivityExecutionRequestError {
+    InvalidDeliveryReference,
+    InvalidIdempotencyKey,
+    InvalidPromptPayload,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ActivityExecutionOutcome {
+    Accepted {
+        receipt: organization::DeliveryReceiptReference,
+    },
+    Rejected {
+        rejection: organization::DeliveryRejection,
+    },
+    Unknown,
+}
+
+impl ActivityExecutionRequest {
+    pub(crate) fn agent_task(activity: AgentTaskActivity) -> Self {
+        Self {
+            activity: RuntimeActivity::AgentTask(activity),
+        }
+    }
+
+    pub(crate) fn binding(&self) -> &organization::RoleSessionReceipt {
+        match &self.activity {
+            RuntimeActivity::AgentTask(activity) => activity.binding(),
+        }
+    }
+
+    pub(crate) fn delivery_request(&self) -> &organization::DeliveryRequest {
+        match &self.activity {
+            RuntimeActivity::AgentTask(activity) => activity.delivery_request(),
+        }
+    }
+
+    pub(crate) fn into_prompt_delivery(
+        self,
+    ) -> Result<organization::PromptDeliveryRequest, ActivityExecutionRequestError> {
+        match self.activity {
+            RuntimeActivity::AgentTask(activity) => activity.into_prompt_delivery(),
+        }
+    }
+}
+
+impl AgentTaskActivity {
+    pub(crate) fn from_activity_request(
+        team_id: &organization::TeamId,
+        activity: &organization::ActivityRequest,
+        binding: organization::RoleSessionReceipt,
+    ) -> Result<Self, ActivityExecutionRequestError> {
+        let organization::ActivityKind::AgentTask {
+            task_id,
+            role_id,
+            prompt,
+        } = &activity.activity_kind
+        else {
+            return Err(ActivityExecutionRequestError::InvalidPromptPayload);
+        };
+        let delivery = organization::DeliveryRequest {
+            delivery_id: organization::DeliveryId::new(activity.activity_id.as_str().to_owned())
+                .map_err(|_| ActivityExecutionRequestError::InvalidDeliveryReference)?,
+            team_id: team_id.as_str().to_owned(),
+            run_id: activity.run_id.as_str().to_owned(),
+            node_id: activity.node_id.as_str().to_owned(),
+            node_execution_id: activity.node_execution_id.as_str().to_owned(),
+            task_id: task_id.clone(),
+            role_id: role_id.clone(),
+            idempotency_key: activity.idempotency_key.clone(),
+            message: prompt.clone(),
+            requested_at: activity.created_at,
+            max_attempts: activity.max_attempts,
+        };
+        delivery
+            .validate()
+            .map_err(|_| ActivityExecutionRequestError::InvalidPromptPayload)?;
+        Ok(Self { delivery, binding })
+    }
+
+    pub(crate) fn from_delivery_request(
+        delivery: organization::DeliveryRequest,
+        binding: organization::RoleSessionReceipt,
+    ) -> Self {
+        Self { delivery, binding }
+    }
+
+    pub(crate) fn binding(&self) -> &organization::RoleSessionReceipt {
+        &self.binding
+    }
+
+    pub(crate) fn delivery_request(&self) -> &organization::DeliveryRequest {
+        &self.delivery
+    }
+
+    pub(crate) fn into_prompt_delivery(
+        self,
+    ) -> Result<organization::PromptDeliveryRequest, ActivityExecutionRequestError> {
+        Ok(organization::PromptDeliveryRequest::new(
+            organization::DeliveryReference::try_new(self.delivery.delivery_id.as_str().to_owned())
+                .map_err(|_| ActivityExecutionRequestError::InvalidDeliveryReference)?,
+            self.binding,
+            organization::IdempotencyKey::try_new(self.delivery.idempotency_key)
+                .map_err(|_| ActivityExecutionRequestError::InvalidIdempotencyKey)?,
+            organization::PromptDispatchPayload::try_new(self.delivery.message)
+                .map_err(|_| ActivityExecutionRequestError::InvalidPromptPayload)?,
+        ))
+    }
+}
+
+impl From<organization::PromptDeliveryOutcome> for ActivityExecutionOutcome {
+    fn from(outcome: organization::PromptDeliveryOutcome) -> Self {
+        match outcome {
+            organization::PromptDeliveryOutcome::Delivered { receipt } => {
+                Self::Accepted { receipt }
+            }
+            organization::PromptDeliveryOutcome::Rejected { rejection } => {
+                Self::Rejected { rejection }
+            }
+            organization::PromptDeliveryOutcome::OutcomeUnknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<ActivityExecutionOutcome> for organization::PromptDeliveryOutcome {
+    fn from(outcome: ActivityExecutionOutcome) -> Self {
+        match outcome {
+            ActivityExecutionOutcome::Accepted { receipt } => Self::Delivered { receipt },
+            ActivityExecutionOutcome::Rejected { rejection } => Self::Rejected { rejection },
+            ActivityExecutionOutcome::Unknown => Self::OutcomeUnknown,
+        }
+    }
+}
+
 pub(crate) trait SessionOps: Send + Sync {
     fn admission(&self) -> SessionAdmission;
 
@@ -165,13 +316,12 @@ pub(crate) trait SessionOps: Send + Sync {
         Box::pin(async { Err(RuntimeSessionError::RuntimeUnavailable) })
     }
 
-    fn history_window<'a>(
+    fn load_openclaw_session_replay<'a>(
         &'a self,
-        _params: ChatHistoryParams,
-        _request: openclaw::session_window::PageRequest,
+        _request: timeline::OpenClawReplayRequest,
     ) -> SessionFuture<
         'a,
-        Result<openclaw::session_window::SessionWindow, RuntimeSessionError<OpenClawSessionError>>,
+        Result<timeline::OpenClawReplayWindow, RuntimeSessionError<OpenClawSessionError>>,
     > {
         Box::pin(async { Err(RuntimeSessionError::RuntimeUnavailable) })
     }
@@ -276,6 +426,13 @@ pub(crate) trait SessionOps: Send + Sync {
         &'a self,
         command: ResolvedSessionModelSelection,
     ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
+
+    fn session_permission<'a>(
+        &'a self,
+        _command: SessionPermissionCommand,
+    ) -> SessionFuture<'a, SessionPermissionOutcome> {
+        Box::pin(async { SessionPermissionOutcome::unsupported() })
+    }
 }
 
 pub(crate) trait TaskOps: Send + Sync {
@@ -310,6 +467,23 @@ pub(crate) trait TeamOps: Send + Sync {
         &self,
         receipt: RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<crate::composition::RuntimeReceiptOutcome>;
+
+    fn execute_activity(
+        &self,
+        request: ActivityExecutionRequest,
+    ) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
+        match request.into_prompt_delivery() {
+            Ok(delivery) => {
+                let delivery = self.deliver_prompt(delivery);
+                Box::pin(async move { ActivityExecutionOutcome::from(delivery.await) })
+            }
+            Err(_) => Box::pin(async {
+                ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Permanent,
+                }
+            }),
+        }
+    }
 
     fn deliver_prompt(
         &self,
@@ -648,6 +822,7 @@ pub(crate) trait ChannelOps: Send + Sync {
         &'a self,
         _channel: String,
         _account_id: String,
+        _agent_id: Option<String>,
         _values: zeroize::Zeroizing<Vec<u8>>,
     ) -> SessionFuture<'a, ChannelConfigureOutcome> {
         Box::pin(async { ChannelConfigureOutcome::Unknown })
@@ -657,23 +832,34 @@ pub(crate) trait ChannelOps: Send + Sync {
         &'a self,
         channel: String,
         account_id: String,
+        agent_id: Option<String>,
         values: zeroize::Zeroizing<Vec<u8>>,
     ) -> SessionFuture<'a, ChannelConfigureOutcome> {
-        self.configure(channel, account_id, values)
+        self.configure(channel, account_id, agent_id, values)
     }
 
     fn delete_config<'a>(
         &'a self,
         _channel: String,
-        _account_id: String,
+        _account_id: Option<String>,
     ) -> SessionFuture<'a, channel_delete::Outcome> {
         Box::pin(async { channel_delete::Outcome::Unknown })
+    }
+
+    fn finalize_channel_login<'a>(
+        &'a self,
+        _channel: String,
+        _account_id: String,
+        _agent_id: Option<String>,
+        _values: zeroize::Zeroizing<Vec<u8>>,
+    ) -> SessionFuture<'a, ChannelConfigureOutcome> {
+        Box::pin(async { ChannelConfigureOutcome::Unknown })
     }
 
     fn channel_delete_config<'a>(
         &'a self,
         channel: String,
-        account_id: String,
+        account_id: Option<String>,
     ) -> SessionFuture<'a, channel_delete::Outcome> {
         self.delete_config(channel, account_id)
     }
@@ -686,8 +872,9 @@ pub(crate) trait ProviderConfigOps {
 }
 
 pub(crate) trait ConnectorOps: Send + Sync {
-    fn apply_external_connector_projection<'a>(
+    fn apply_runtime_mcp_projection<'a>(
         &'a self,
+        preset: Option<openclaw::projection::connector::preset::PresetMcpProjection<'a>>,
         catalog: environment::ConnectorCatalog,
         secrets: &'a dyn environment::ConnectorSecretResolverPort,
     ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorProjectionEffect>;
@@ -697,14 +884,30 @@ pub(crate) trait ConnectorOps: Send + Sync {
         connector: environment::Connector,
     ) -> SessionFuture<'a, openclaw::projection::connector::external::ConnectorObservation>;
 
+    fn list_mcp_servers<'a>(
+        &'a self,
+    ) -> SessionFuture<
+        'a,
+        Result<
+            Vec<openclaw::projection::connector::config::OpenClawMcpServerConfig>,
+            RuntimeOperationFailure,
+        >,
+    >;
+
     fn observe_mcp_server_status<'a>(
         &'a self,
         session_key: String,
-        endpoint_session_id: Option<String>,
     ) -> SessionFuture<
         'a,
         Result<openclaw::gateway::wire::McpServerStatusList, RuntimeOperationFailure>,
     >;
+
+    fn set_mcp_session_server_enabled<'a>(
+        &'a self,
+        session_key: String,
+        server_name: String,
+        enabled: bool,
+    ) -> SessionFuture<'a, Result<(), RuntimeOperationFailure>>;
 }
 
 pub(crate) trait SecurityOps {
@@ -755,6 +958,7 @@ pub(crate) struct ProviderNativeConfigurationCommand<'a> {
     pub(crate) retired: &'a [environment::ProviderAccount],
     pub(crate) required_auth_accounts:
         &'a std::collections::BTreeSet<environment::ProviderAccountId>,
+    pub(crate) auth_state_refresh_required: bool,
     pub(crate) now_millis: u64,
 }
 
@@ -963,7 +1167,7 @@ impl RuntimeCapabilityFamily {
             | "session.approval"
             | "session.modelSelection"
             | "tool.invoke" => Some(Self::Session),
-            "task.management" | "task.control" => Some(Self::Task),
+            "task.management" => Some(Self::Task),
             "subagent.management" | "subagent.skills" | "subagent.tools" => Some(Self::Subagent),
             "team.runtime" => Some(Self::Team),
             "scheduler.cron" => Some(Self::Cron),

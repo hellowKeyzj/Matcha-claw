@@ -49,7 +49,7 @@ describe('Electron Main Matcha session catalog transport', () => {
             agentId: 'matcha',
             sessionKey: 'matcha-agent:matcha:native-session-1',
           },
-          kind: 'named',
+          kind: 'session',
           preferred: false,
           endpointSessionId: 'native-session-1',
           protocolId: 'matcha-agent-app-server',

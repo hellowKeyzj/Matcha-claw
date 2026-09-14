@@ -3,7 +3,7 @@ import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/stores/chat';
 import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { hasSessionCatalogLoaded } from '@/stores/chat/session-helpers';
-import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
+import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
@@ -89,18 +89,8 @@ function shouldLoadSidebarAgentCatalog(): boolean {
     && catalog.endpoints.some((endpoint) => endpoint.agentCatalog.source === 'subagent-management');
 }
 
-function shouldLoadSelectedSidebarAgentCatalog(): boolean {
-  const state = useChatStore.getState();
-  const endpoint = state.currentConversation?.endpoint
-    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint
-    ?? null;
-  if (!endpoint || state.sessionRuntimeCatalog.status !== 'ready') {
-    return false;
-  }
-  return state.sessionRuntimeCatalog.endpoints.some((target) => (
-    target.agentCatalog.source === 'subagent-management'
-    && sameRuntimeEndpointScope(target.endpoint, endpoint)
-  ));
+function shouldLoadSidebarAgents(): boolean {
+  return shouldLoadSubagentsSnapshot() && shouldLoadSidebarAgentCatalog();
 }
 
 function shouldLoadSelectedSessionCatalog(): boolean {
@@ -173,7 +163,7 @@ export function useChatInit(input: UseChatInitInput): void {
   const sessionsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRuntimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRuntimeEventRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const selectedRuntimeResourceEnsureScheduledRef = useRef(false);
+  const sidebarResourceEnsureScheduledRef = useRef(false);
 
   useEffect(() => {
     if (!isActive) return;
@@ -188,10 +178,11 @@ export function useChatInit(input: UseChatInitInput): void {
       return shouldLoadSelectedSessionCatalog();
     };
     const scheduleAgentsRetry = (attempt = 1) => {
-      if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS) {
+      if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS || agentsRetryTimerRef.current) {
         return;
       }
       agentsRetryTimerRef.current = setTimeout(() => {
+        agentsRetryTimerRef.current = null;
         if (cancelled) {
           return;
         }
@@ -228,7 +219,6 @@ export function useChatInit(input: UseChatInitInput): void {
       }
       sessionRuntimeLoadInFlight = true;
       try {
-        const shouldLoadAgents = shouldLoadSubagentsSnapshot();
         await bootstrapSessionRuntime();
         if (cancelled) {
           return;
@@ -246,8 +236,8 @@ export function useChatInit(input: UseChatInitInput): void {
           }, RESOURCE_RETRY_DELAY_MS);
           return;
         }
-        const shouldLoadSidebarAgents = shouldLoadAgents && shouldLoadSidebarAgentCatalog();
-        const agentsLoadTask = shouldLoadSidebarAgents ? loadAgents() : Promise.resolve();
+        const shouldLoadAgents = shouldLoadSidebarAgents();
+        const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
         const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
         const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
         await Promise.all([agentsLoadTask, sessionsLoadTask]);
@@ -266,7 +256,7 @@ export function useChatInit(input: UseChatInitInput): void {
           navigate('/', { replace: true });
           switchedViaQueryParam = true;
         }
-        if (shouldLoadSidebarAgents && shouldRetryAgentsAfterLoad()) {
+        if (shouldLoadAgents && shouldRetryAgentsAfterLoad()) {
           scheduleAgentsRetry();
         }
         if (shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
@@ -315,13 +305,15 @@ export function useChatInit(input: UseChatInitInput): void {
       }
     };
 
-    const ensureSelectedRuntimeSidebarResources = async (): Promise<void> => {
-      const agentsLoadTask = shouldLoadSubagentsSnapshot() && shouldLoadSelectedSidebarAgentCatalog()
-        ? loadAgents()
-        : Promise.resolve();
+    const ensureSidebarResources = async (): Promise<void> => {
+      const shouldLoadAgents = shouldLoadSidebarAgents();
+      const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
       const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
       const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
       await Promise.all([agentsLoadTask, sessionsLoadTask]);
+      if (!cancelled && shouldLoadAgents && shouldRetryAgentsAfterLoad()) {
+        scheduleAgentsRetry();
+      }
       if (!cancelled && shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
         scheduleSessionsRetry();
       }
@@ -341,23 +333,23 @@ export function useChatInit(input: UseChatInitInput): void {
         if (cancelled) {
           return;
         }
-        await ensureSelectedRuntimeSidebarResources();
+        await ensureSidebarResources();
       } finally {
         sessionRuntimeLoadInFlight = false;
       }
     };
 
-    const scheduleSelectedRuntimeResourceEnsure = () => {
-      if (cancelled || selectedRuntimeResourceEnsureScheduledRef.current) {
+    const scheduleSidebarResourceEnsure = () => {
+      if (cancelled || sidebarResourceEnsureScheduledRef.current) {
         return;
       }
-      selectedRuntimeResourceEnsureScheduledRef.current = true;
+      sidebarResourceEnsureScheduledRef.current = true;
       queueMicrotask(() => {
-        selectedRuntimeResourceEnsureScheduledRef.current = false;
+        sidebarResourceEnsureScheduledRef.current = false;
         if (cancelled || sessionRuntimeLoadInFlight) {
           return;
         }
-        void ensureSelectedRuntimeSidebarResources();
+        void ensureSidebarResources();
       });
     };
 
@@ -390,7 +382,7 @@ export function useChatInit(input: UseChatInitInput): void {
     });
     const unsubscribeChatRuntimeSelection = useChatStore.subscribe((state, previousState) => {
       if (state.currentConversation?.runtimeScopeKey !== previousState.currentConversation?.runtimeScopeKey) {
-        scheduleSelectedRuntimeResourceEnsure();
+        scheduleSidebarResourceEnsure();
       }
     });
     void runInitialLoad();
@@ -417,7 +409,7 @@ export function useChatInit(input: UseChatInitInput): void {
         clearTimeout(sessionRuntimeEventRefreshTimerRef.current);
         sessionRuntimeEventRefreshTimerRef.current = null;
       }
-      selectedRuntimeResourceEnsureScheduledRef.current = false;
+      sidebarResourceEnsureScheduledRef.current = false;
       unsubscribeRuntimeEndpoints();
       unsubscribeChatRuntimeSelection();
       cleanupEmptySession();

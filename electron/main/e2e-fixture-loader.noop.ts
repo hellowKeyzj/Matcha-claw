@@ -32,11 +32,13 @@ export async function getE2EDialogOpenResult(): Promise<{ canceled: boolean; fil
 }
 
 export async function getE2EDialogStagedAttachments(): Promise<{
-  stagedAttachmentId: string;
+  stagedAttachmentId?: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 }[] | null> {
   return null;
 }

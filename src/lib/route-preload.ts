@@ -1,11 +1,11 @@
 import { lazy, type ComponentType, type LazyExoticComponent } from 'react';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 
-type PreloadableLazyComponent<T extends ComponentType<unknown>> = LazyExoticComponent<T> & {
+type PreloadableLazyComponent<T extends ComponentType<object>> = LazyExoticComponent<T> & {
   preload: () => Promise<{ default: T }>;
 };
 
-function lazyWithPreload<T extends ComponentType<unknown>>(
+function lazyWithPreload<T extends ComponentType<object>>(
   loader: () => Promise<{ default: T }>,
 ): PreloadableLazyComponent<T> {
   const Component = lazy(loader) as PreloadableLazyComponent<T>;
@@ -13,7 +13,6 @@ function lazyWithPreload<T extends ComponentType<unknown>>(
   return Component;
 }
 
-export const SetupRoute = lazyWithPreload(() => import('../pages/Setup'));
 export const AuthRoute = lazyWithPreload(() => import('../pages/Auth'));
 export const SkillsRoute = lazyWithPreload(() => import('../pages/Skills'));
 export const SecurityRoute = lazyWithPreload(() => import('../pages/Security'));
@@ -53,9 +52,6 @@ function resolveRoutePreloader(path: string): (() => Promise<unknown>) | null {
   }
   if (normalizedPath.startsWith('/skills')) {
     return () => SkillsRoute.preload();
-  }
-  if (normalizedPath.startsWith('/setup')) {
-    return () => SetupRoute.preload();
   }
   if (normalizedPath.startsWith('/dashboard')) {
     return () => DashboardRoute.preload();

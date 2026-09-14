@@ -260,3 +260,9 @@ You're successful when:
 - Use WebRTC DataChannel for peer-to-peer game data in browser-deployed Godot Web exports
 - Implement lag compensation using server-side snapshot history: roll back the world state to when the client fired their shot
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

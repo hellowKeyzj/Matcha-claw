@@ -1,21 +1,48 @@
 {
-  "title": "サブAgentワークスペース",
+  "title": "Agent",
   "subtitle": "サブAgentとモデル設定を管理します。",
-  "newSubagent": "新規サブAgent",
+  "newSubagent": "Agentを作成",
+  "tabs": {
+    "agents": "マイAgent",
+    "templates": "テンプレートライブラリ"
+  },
+  "search": {
+    "agents": "Agentを検索...",
+    "templates": "テンプレートを検索...",
+    "empty": "一致する結果がありません。"
+  },
+  "view": {
+    "label": "表示形式",
+    "grid": "グリッド表示",
+    "list": "リスト表示"
+  },
+  "results": {
+    "agents": "Agent：{{total}} 件",
+    "templates": "テンプレート：{{total}} 件"
+  },
+  "filters": {
+    "category": "カテゴリ"
+  },
   "transfer": {
     "import": "Agentをインポート",
     "importDialogTitle": "Agent設定をインポート",
     "exportDialogTitle": "Agent設定をエクスポート",
     "importSuccess": "Agent設定をインポートしました。",
     "exportSuccess": "Agent設定をエクスポートしました。",
+    "exportPackageSuccess": "Agentパッケージをエクスポートしました: {{fileName}}",
     "importFailed": "Agent設定のインポートに失敗しました: {{message}}",
-    "exportFailed": "Agent設定のエクスポートに失敗しました: {{message}}"
+    "exportFailed": "Agent設定のエクスポートに失敗しました: {{message}}",
+    "exportPackageFailed": "Agentパッケージのエクスポートに失敗しました: {{message}}"
   },
   "status": {
     "refreshing": "更新中...",
     "mutating": "変更を保存中..."
   },
   "empty": "サブAgentが見つかりません。",
+  "startup": {
+    "title": "OpenClaw を起動中",
+    "description": "サービスの準備ができると Agent が自動で表示されます。"
+  },
   "modelGuide": {
     "description": "先に「モデル」でモデルを追加してください。",
     "action": "モデルを開く"
@@ -28,6 +55,8 @@
     "loading": "テンプレートを読み込み中...",
     "loadingButton": "読み込み中...",
     "load": "テンプレートを読み込む",
+    "modelSelection": "読み込み時にモデルを選択",
+    "view": "テンプレートを表示",
     "empty": "利用可能なテンプレートが見つかりません。",
     "error": "テンプレート読み込みに失敗しました: {{message}}",
     "badge": "テンプレート",
@@ -64,7 +93,7 @@
   "manageTitle": "管理中: {{agentId}}",
   "manage": {
     "promptLabel": "プロンプト",
-    "promptPlaceholder": "このサブAgentが AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md に書く内容を入力してください",
+    "promptPlaceholder": "このサブAgentが AGENTS.md / SOUL.md / USER.md / MEMORY.md に書く内容を入力してください",
     "includeCurrentFilesLabel": "現在のファイルを使う",
     "generateDraft": "下書きを生成",
     "generatingDraft": "生成中...",
@@ -84,6 +113,10 @@
     "deleting": "削除中..."
   },
   "close": "閉じる",
+  "sealed": {
+    "editDisabled": "シールドAgentは編集できません。",
+    "configExportDisabled": "シールドAgentは編集可能なJSON設定をエクスポートできません。Export Packageを使用してください。"
+  },
   "form": {
     "basicInfo": "基本情報",
     "aiConfig": "AI 設定",
@@ -162,7 +195,11 @@
     }
   },
   "card": {
+    "system": "システムAgent",
+    "agent": "Agent",
     "default": "デフォルト",
+    "sealed": "シールド",
+    "package": "パッケージ",
     "modelFallback": "モデル未設定",
     "modelMissingHint": "モデルが未設定のため、会話/実行はできません。",
     "lockedHint": "main agent はシステム予約のため操作できません。",
@@ -170,6 +207,9 @@
       "edit": "編集",
       "delete": "削除",
       "export": "エクスポート",
+      "exportPackage": "パッケージをエクスポート",
+      "uploadPackageToCloud": "クラウドにアップロード",
+      "cloudPackages": "クラウドパッケージ",
       "manage": "管理",
       "chat": "会話",
       "more": "その他の操作"

@@ -4,6 +4,7 @@ use super::{WorkspaceProjectionError, identity};
 use crate::workspace::replace_regular_file;
 
 const SNIPPET_SUFFIX: &str = ".matchaclaw.md";
+const RETIRED_CONTEXT_TARGETS: &[&str] = &["TOOLS.md"];
 const MARKER_BEGIN: &str = "<!-- matchaclaw:begin -->";
 const MARKER_END: &str = "<!-- matchaclaw:end -->";
 
@@ -11,6 +12,16 @@ const MARKER_END: &str = "<!-- matchaclaw:end -->";
 pub struct ContextMerge {
     merged_files: Vec<String>,
     skipped_missing: usize,
+}
+
+impl ContextMerge {
+    pub fn merged_files(&self) -> &[String] {
+        &self.merged_files
+    }
+
+    pub const fn skipped_missing(&self) -> usize {
+        self.skipped_missing
+    }
 }
 
 pub(super) fn merge(
@@ -42,6 +53,9 @@ pub(super) fn merge(
             return Err(WorkspaceProjectionError::WorkspaceUnavailable);
         }
         let target = format!("{target}.md");
+        if RETIRED_CONTEXT_TARGETS.contains(&target.as_str()) {
+            continue;
+        }
         let target_path = workspace.join(&target);
         let Some(original) = identity::read_regular(&target_path)? else {
             result.skipped_missing += 1;
@@ -49,12 +63,7 @@ pub(super) fn merge(
         };
         let snippet = identity::read_regular(&entry.path())?
             .ok_or(WorkspaceProjectionError::WorkspaceUnavailable)?;
-        let source = if target == "AGENTS.md" {
-            strip_first_run_section(&original)
-        } else {
-            original.clone()
-        };
-        let merged = merge_section(&source, &snippet);
+        let merged = merge_section(&original, &snippet);
         if merged != original {
             replace_regular_file(&workspace, &target, merged.as_bytes())
                 .map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)?;
@@ -65,7 +74,11 @@ pub(super) fn merge(
 }
 
 fn merge_section(existing: &str, section: &str) -> String {
-    let wrapped = format!("{MARKER_BEGIN}\n{}\n{MARKER_END}", section.trim());
+    let section = section.trim();
+    if existing.contains(section) {
+        return existing.to_owned();
+    }
+    let wrapped = format!("{MARKER_BEGIN}\n{section}\n{MARKER_END}");
     let begin = existing.find(MARKER_BEGIN);
     let end = existing.find(MARKER_END);
     match (begin, end) {
@@ -77,59 +90,4 @@ fn merge_section(existing: &str, section: &str) -> String {
         ),
         _ => format!("{}\n\n{wrapped}\n", existing.trim_end()),
     }
-}
-
-fn strip_first_run_section(content: &str) -> String {
-    let mut result = Vec::new();
-    let mut skipping = false;
-    let mut consumed_first_paragraph = false;
-    let mut seen_blank_after_paragraph = false;
-
-    for line in content.split('\n') {
-        let trimmed = line.trim();
-        let heading_hashes = line.bytes().take_while(|byte| *byte == b'#').count();
-        let is_heading = (1..=6).contains(&heading_hashes)
-            && line
-                .as_bytes()
-                .get(heading_hashes)
-                .is_some_and(|byte| byte.is_ascii_whitespace());
-
-        if trimmed == "## First Run" {
-            skipping = true;
-            consumed_first_paragraph = false;
-            seen_blank_after_paragraph = false;
-            continue;
-        }
-
-        if skipping {
-            if is_heading {
-                skipping = false;
-            } else if !consumed_first_paragraph {
-                if trimmed.is_empty() {
-                    continue;
-                }
-                consumed_first_paragraph = true;
-                continue;
-            } else if !seen_blank_after_paragraph {
-                if trimmed.is_empty() {
-                    seen_blank_after_paragraph = true;
-                }
-                continue;
-            } else if trimmed.is_empty() {
-                continue;
-            } else {
-                skipping = false;
-            }
-        }
-
-        if !skipping {
-            result.push(line);
-        }
-    }
-
-    let mut normalized = result.join("\n");
-    while normalized.contains("\n\n\n") {
-        normalized = normalized.replace("\n\n\n", "\n\n");
-    }
-    normalized
 }

@@ -30,6 +30,19 @@ export function isCronSessionKey(sessionKey: string): boolean {
   return parseCronSessionKey(sessionKey) != null;
 }
 
+export function getCronSessionBaseKey(sessionKey: string): string | null {
+  const parts = parseCronSessionKey(sessionKey);
+  if (!parts) return null;
+  return `agent:${parts.agentId}:cron:${parts.jobId}`;
+}
+
+export function sessionKeysAreEquivalent(leftSessionKey: string, rightSessionKey: string): boolean {
+  if (leftSessionKey === rightSessionKey) return true;
+  const leftCronBaseKey = getCronSessionBaseKey(leftSessionKey);
+  if (!leftCronBaseKey) return false;
+  return leftCronBaseKey === getCronSessionBaseKey(rightSessionKey);
+}
+
 export function buildCronSessionHistoryPath(sessionKey: string, limit = 200): string {
   const params = new URLSearchParams({ sessionKey });
   if (Number.isFinite(limit) && limit > 0) {

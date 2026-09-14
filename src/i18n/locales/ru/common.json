@@ -1,4 +1,9 @@
 {
+    "auth": {
+        "boot": {
+            "title": "Проверка входа"
+        }
+    },
     "sidebar": {
         "chat": "Чат",
         "newChat": "Новый чат",
@@ -85,6 +90,8 @@
                 "subscriptionWeekly": "Недельный лимит плана",
                 "subscriptionMonthly": "Месячный лимит плана",
                 "platformMonthly": "{{platform}} за месяц",
+                "availableBalance": "Доступный баланс",
+                "frozenBalance": "Замороженный баланс",
                 "totalUsage": "Всего использовано"
             }
         }
@@ -114,10 +121,18 @@
         "current": {
             "subscriptionCount": "Подписок Matcha: {{count}}",
             "noSubscription": "Нет подписки Matcha",
+            "noActiveSubscription": "Нет активной подписки",
+            "freePlan": "Free",
             "expiresAt": "Истекает: {{date}}",
             "quotaTitle": "Лимит подписки",
             "emptyQuota": "Для текущей подписки нет данных о лимитах.",
-            "platformQuotaTitle": "Лимит платформы"
+            "balanceTitle": "Баланс аккаунта"
+        },
+        "balance": {
+            "details": "Детали баланса",
+            "available": "Доступный баланс",
+            "frozen": "Замороженный баланс",
+            "total": "Общий баланс"
         },
         "quota": {
             "daily": "Дневной лимит",
@@ -125,6 +140,7 @@
             "monthly": "Месячный лимит",
             "platformMonthly": "{{platform}} за месяц",
             "unlimited": "Без лимита",
+            "usedOnly": "Использовано {{used}}",
             "usedOfLimit": "Использовано {{used}} / {{limit}}",
             "remaining": "Осталось {{amount}}",
             "resetsAt": "Сброс: {{date}}"
@@ -220,6 +236,18 @@
         "configured": "Настроен",
         "loading": "Загрузка...",
         "saving": "Сохранение..."
+    },
+    "switchboard": {
+        "quickSwitch": "Быстрое переключение",
+        "runtime": "Runtime",
+        "teamSession": "Team session",
+        "tabs": {
+            "agents": "Agents",
+            "teams": "Teams",
+            "sessions": "Sessions"
+        },
+        "normalSessions": "Обычные",
+        "automationSessions": "Automation"
     },
     "gateway": {
         "notRunning": "Шлюз не запущен",

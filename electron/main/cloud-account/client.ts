@@ -1,3 +1,7 @@
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+
 import type {
   AuthLogin2FARequest,
   AuthLoginRequest,
@@ -9,6 +13,15 @@ import type {
   BillingCheckoutInfo,
   BillingMethodLimit,
   BillingPlan,
+  CloudClientBootstrap,
+  CloudClientConfig,
+  CloudPackageDownloadRecord,
+  CloudPackageDownloadRecordRequest,
+  CloudPackageDownloadRequest,
+  CloudPackageListPage,
+  CloudPackageListQuery,
+  CloudPackageLocalDownload,
+  CloudPackageVersion,
   CloudUser,
   CreatePaymentOrderRequest,
   CreatePaymentOrderResult,
@@ -61,6 +74,7 @@ export type CloudAccountClient = Readonly<{
   refresh(refreshToken: string): Promise<Omit<AuthTokenResult, 'user'>>;
   logout(refreshToken: string): Promise<void>;
   fetchProfile(token: string): Promise<CloudUser>;
+  fetchClientBootstrap(token: string): Promise<CloudClientBootstrap>;
   fetchCheckoutInfo(token: string): Promise<BillingCheckoutInfo>;
   fetchPlans(token: string): Promise<BillingPlan[]>;
   createPaymentOrder(token: string, request: CreatePaymentOrderRequest): Promise<CreatePaymentOrderResult>;
@@ -70,6 +84,11 @@ export type CloudAccountClient = Readonly<{
   fetchActiveSubscriptions(token: string): Promise<UserSubscription[]>;
   fetchSubscriptionProgress(token: string): Promise<SubscriptionProgress[]>;
   fetchPlatformQuotas(token: string): Promise<PlatformQuota[]>;
+  listOwnedPackages(token: string, query: CloudPackageListQuery): Promise<CloudPackageListPage>;
+  listMarketPackages(token: string, query: CloudPackageListQuery): Promise<CloudPackageListPage>;
+  uploadPackage(token: string, packagePath: string): Promise<CloudPackageVersion>;
+  recordPackageDownload(token: string, request: CloudPackageDownloadRecordRequest): Promise<CloudPackageDownloadRecord>;
+  downloadPackage(token: string, request: CloudPackageDownloadRequest): Promise<CloudPackageLocalDownload>;
 }>;
 
 export function createCloudAccountClient(): CloudAccountClient {
@@ -102,6 +121,7 @@ export function createCloudAccountClient(): CloudAccountClient {
       });
     },
     fetchProfile: (token) => requestCloud<unknown>('/auth/me', { token }).then(toCloudUser),
+    fetchClientBootstrap: (token) => requestCloud<unknown>('/client/bootstrap', { token }).then(toCloudClientBootstrap),
     fetchCheckoutInfo: (token) => requestCloud<unknown>('/payment/checkout-info', { token }).then(toBillingCheckoutInfo),
     fetchPlans: (token) => requestCloud<unknown[]>('/payment/plans', { token }).then((items) => items.map(toBillingPlan)),
     createPaymentOrder: (token, request) => requestCloud<unknown>('/payment/orders', {
@@ -119,7 +139,122 @@ export function createCloudAccountClient(): CloudAccountClient {
     fetchActiveSubscriptions: (token) => requestCloud<unknown[]>('/subscriptions/active', { token }).then((items) => items.map(toUserSubscription)),
     fetchSubscriptionProgress: (token) => requestCloud<unknown[]>('/subscriptions/progress', { token }).then((items) => items.map(toSubscriptionProgressInfo)),
     fetchPlatformQuotas: (token) => requestCloud<unknown>('/user/platform-quotas', { token }).then(toPlatformQuotas),
+    listOwnedPackages: (token, query) => requestCloud<unknown>(`/packages/mine${packageListSearch(query)}`, { token }).then(toCloudPackageListPage),
+    listMarketPackages: (token, query) => requestCloud<unknown>(`/packages/market${packageListSearch(query)}`, { token }).then(toCloudPackageListPage),
+    uploadPackage: (token, packagePath) => uploadCloudPackage(token, packagePath).then(toCloudPackageVersion),
+    recordPackageDownload: (token, request) => requestCloud<unknown>(`/packages/${encodeURIComponent(request.packageVersionId)}/download-record`, {
+      method: 'POST',
+      token,
+      body: toPackageDownloadRecordPayload(request),
+    }).then(toCloudPackageDownloadRecord),
+    downloadPackage: (token, request) => downloadCloudPackage(token, request),
   };
+}
+
+async function uploadCloudPackage(token: string, packagePath: string): Promise<unknown> {
+  const filename = basename(packagePath);
+  const form = new FormData();
+  form.set('package', new Blob([await readFile(packagePath)]), filename);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${cloudBaseUrl()}/packages/upload`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: form,
+    });
+    const payload = await readEnvelope<unknown>(response);
+    if (!response.ok || payload.code !== 0) {
+      throw new CloudAccountClientError(
+        response.status,
+        payload.code ?? response.status,
+        payload.message || `Cloud package upload failed with HTTP ${response.status}`,
+        payload.reason,
+      );
+    }
+    return payload.data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function downloadCloudPackage(token: string, request: CloudPackageDownloadRequest): Promise<CloudPackageLocalDownload> {
+  const record = await requestPackageDownloadRecord(token, request);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${cloudBaseUrl()}/packages/${encodeURIComponent(request.packageVersionId)}/download`, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/octet-stream',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!response.ok) {
+      const payload = await readEnvelope<unknown>(response);
+      throw new CloudAccountClientError(
+        response.status,
+        payload.code ?? response.status,
+        payload.message || `Cloud package download failed with HTTP ${response.status}`,
+        payload.reason,
+      );
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const filename = downloadFilename(response, request);
+    const packagePath = await packageDownloadPath(request.destinationPath, filename);
+    await mkdir(dirname(packagePath), { recursive: true });
+    await writeFile(packagePath, bytes);
+    return {
+      packagePath,
+      packageVersionId: request.packageVersionId,
+      filename,
+      ...(response.headers.get('content-type') ? { contentType: response.headers.get('content-type') ?? undefined } : {}),
+      bytes: bytes.length,
+      ...(record.meteringBinding ? { meteringBinding: record.meteringBinding } : {}),
+      ...(record.entitlementStatus ? { entitlementStatus: record.entitlementStatus } : {}),
+      recorded: record.recorded,
+      ...(record.recordedAt ? { recordedAt: record.recordedAt } : {}),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function requestPackageDownloadRecord(token: string, request: CloudPackageDownloadRequest): Promise<CloudPackageDownloadRecord> {
+  return requestCloud<unknown>(`/packages/${encodeURIComponent(request.packageVersionId)}/download-record`, {
+    method: 'POST',
+    token,
+    body: toPackageDownloadRecordPayload(request),
+  }).then(toCloudPackageDownloadRecord);
+}
+
+async function packageDownloadPath(destinationPath: string | undefined, filename: string): Promise<string> {
+  if (destinationPath?.trim()) return destinationPath.trim();
+  const directory = await mkdtemp(join(tmpdir(), 'matcha-package-'));
+  return join(directory, filename);
+}
+
+function downloadFilename(response: Response, request: CloudPackageDownloadRequest): string {
+  const headerFilename = filenameFromContentDisposition(response.headers.get('content-disposition'));
+  const filename = headerFilename || request.filename?.trim() || `${request.packageVersionId}${packageExtension(request.packageType)}`;
+  return basename(filename);
+}
+
+function filenameFromContentDisposition(value: string | null): string | undefined {
+  const match = value?.match(/filename=(?:"([^"]+)"|([^;]+))/i);
+  const filename = (match?.[1] || match?.[2])?.trim();
+  return filename ? basename(filename) : undefined;
+}
+
+function packageExtension(packageType: string | undefined): string {
+  const normalized = packageType?.trim().toLowerCase();
+  if (normalized === 'agent') return '.matcha-agentpkg';
+  return '.matcha-skillpkg';
 }
 
 async function requestCloud<T>(path: string, options: CloudRequestOptions = {}): Promise<T> {
@@ -288,6 +423,46 @@ function toCloudUser(value: unknown): CloudUser {
     createdAt: requireString(record.created_at, 'Cloud user created time is invalid'),
     updatedAt: requireString(record.updated_at, 'Cloud user updated time is invalid'),
     ...(record.run_mode === 'standard' || record.run_mode === 'simple' ? { runMode: record.run_mode } : {}),
+  };
+}
+
+function toCloudClientBootstrap(value: unknown): CloudClientBootstrap {
+  const record = requireRecord(value, 'Cloud client bootstrap response is invalid');
+  const apiKey = record.api_key === null || record.api_key === undefined
+    ? null
+    : toCloudClientBootstrapApiKey(record.api_key);
+  return {
+    schemaVersion: requireNumber(record.schema_version, 'Cloud client bootstrap schema version is invalid'),
+    ready: record.ready === true,
+    needsSetup: record.needs_setup === true,
+    ...(typeof record.setup_reason === 'string' ? { setupReason: record.setup_reason } : {}),
+    baseUrl: requireString(record.base_url, 'Cloud client bootstrap base URL is invalid'),
+    rootUrl: requireString(record.root_url, 'Cloud client bootstrap root URL is invalid'),
+    apiKey,
+    clients: toCloudClientConfigs(record.clients),
+  };
+}
+
+function toCloudClientBootstrapApiKey(value: unknown): NonNullable<CloudClientBootstrap['apiKey']> {
+  const record = requireRecord(value, 'Cloud client bootstrap API key is invalid');
+  return {
+    key: requireString(record.key, 'Cloud client bootstrap API key is invalid'),
+    status: requireString(record.status, 'Cloud client bootstrap API key status is invalid'),
+  };
+}
+
+function toCloudClientConfigs(value: unknown): Record<string, CloudClientConfig> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, toCloudClientConfig(item)]));
+}
+
+function toCloudClientConfig(value: unknown): CloudClientConfig {
+  const record = requireRecord(value, 'Cloud client config is invalid');
+  return {
+    baseUrl: requireString(record.base_url, 'Cloud client config base URL is invalid'),
+    ...(typeof record.api_key === 'string' ? { apiKey: record.api_key } : {}),
+    ...(typeof record.models_url === 'string' ? { modelsUrl: record.models_url } : {}),
+    ...(typeof record.messages_url === 'string' ? { messagesUrl: record.messages_url } : {}),
   };
 }
 
@@ -574,6 +749,78 @@ function toPlatformQuota(value: unknown): PlatformQuota {
       resetsAt: stringOrNull(record.monthly_window_resets_at),
     },
     ...(typeof record.updated_at === 'string' ? { updatedAt: record.updated_at } : {}),
+  };
+}
+
+function packageListSearch(query: CloudPackageListQuery): string {
+  const params = new URLSearchParams();
+  if (query.page !== undefined) params.set('page', String(query.page));
+  if (query.pageSize !== undefined) params.set('page_size', String(query.pageSize));
+  if (query.search) params.set('search', query.search);
+  if (query.packageType) params.set('packageType', query.packageType);
+  const search = params.toString();
+  return search ? `?${search}` : '';
+}
+
+function toPackageDownloadRecordPayload(request: CloudPackageDownloadRecordRequest): Record<string, unknown> {
+  return compactObject({
+    packageVersionId: request.packageVersionId,
+    clientVersion: request.clientVersion,
+    installId: request.installId,
+    source: request.source,
+  });
+}
+
+function toCloudPackageListPage(value: unknown): CloudPackageListPage {
+  const record = requireRecord(value, 'Cloud package list response is invalid');
+  return {
+    items: Array.isArray(record.items) ? record.items.map(toCloudPackageVersion) : [],
+    total: requireNumber(record.total, 'Cloud package list total is invalid'),
+    page: requireNumber(record.page, 'Cloud package list page is invalid'),
+    pageSize: requireNumber(record.page_size, 'Cloud package list page size is invalid'),
+    pages: requireNumber(record.pages, 'Cloud package list pages is invalid'),
+  };
+}
+
+function toCloudPackageVersion(value: unknown): CloudPackageVersion {
+  const record = requireRecord(value, 'Cloud package version is invalid');
+  return {
+    packageId: requireString(record.packageId, 'Cloud package id is invalid'),
+    packageVersionId: requireString(record.packageVersionId, 'Cloud package version id is invalid'),
+    name: requireString(record.name, 'Cloud package name is invalid'),
+    ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
+    packageType: requireString(record.packageType, 'Cloud package type is invalid'),
+    version: requireString(record.version, 'Cloud package version is invalid'),
+    ...(typeof record.description === 'string' ? { description: record.description } : {}),
+    status: requireString(record.status, 'Cloud package status is invalid'),
+    ...(typeof record.entitlementStatus === 'string' ? { entitlementStatus: record.entitlementStatus } : {}),
+    downloadable: record.downloadable === true,
+    ...(isRecord(record.meteringBinding) ? { meteringBinding: toCloudPackageMeteringBinding(record.meteringBinding) } : {}),
+    ...(typeof record.downloadCount === 'number' ? { downloadCount: record.downloadCount } : {}),
+    ...(typeof record.createdAt === 'string' ? { createdAt: record.createdAt } : {}),
+    ...(typeof record.updatedAt === 'string' ? { updatedAt: record.updatedAt } : {}),
+  };
+}
+
+function toCloudPackageDownloadRecord(value: unknown): CloudPackageDownloadRecord {
+  const record = requireRecord(value, 'Cloud package download record is invalid');
+  return {
+    packageVersionId: requireString(record.packageVersionId, 'Cloud package version id is invalid'),
+    ...(isRecord(record.meteringBinding) ? { meteringBinding: toCloudPackageMeteringBinding(record.meteringBinding) } : {}),
+    ...(typeof record.entitlementStatus === 'string' ? { entitlementStatus: record.entitlementStatus } : {}),
+    recorded: record.recorded === true,
+    ...(typeof record.recordedAt === 'string' ? { recordedAt: record.recordedAt } : {}),
+  };
+}
+
+function toCloudPackageMeteringBinding(value: unknown): NonNullable<CloudPackageVersion['meteringBinding']> {
+  const record = requireRecord(value, 'Cloud package metering binding is invalid');
+  return {
+    ...(typeof record.id === 'string' ? { id: record.id } : {}),
+    ...(typeof record.type === 'string' ? { type: record.type } : {}),
+    ...(typeof record.unit === 'string' ? { unit: record.unit } : {}),
+    ...(typeof record.amount === 'number' ? { amount: record.amount } : {}),
+    ...(typeof record.currency === 'string' ? { currency: record.currency } : {}),
   };
 }
 

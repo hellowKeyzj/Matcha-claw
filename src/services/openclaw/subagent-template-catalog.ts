@@ -1,3 +1,4 @@
+import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { hostOpenClawGetSubagentTemplate, hostOpenClawGetSubagentTemplateCatalog } from '@/lib/host-api';
 import type {
   SubagentTargetFile,
@@ -7,13 +8,7 @@ import type {
   SubagentTemplateSummary,
 } from '@/types/subagent';
 
-const TEMPLATE_FILE_SET = new Set<SubagentTargetFile>([
-  'AGENTS.md',
-  'SOUL.md',
-  'TOOLS.md',
-  'IDENTITY.md',
-  'USER.md',
-]);
+const TEMPLATE_FILE_SET = new Set<SubagentTargetFile>(SUBAGENT_TARGET_FILES);
 
 let templateCatalogCache: SubagentTemplateCatalogResult | null = null;
 let templateCatalogInflight: Promise<SubagentTemplateCatalogResult> | null = null;

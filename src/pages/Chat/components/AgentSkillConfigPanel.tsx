@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
@@ -13,12 +14,14 @@ export interface AgentSkillOption {
 
 export function AgentSkillConfigPanel({
   title,
+  headerAccessory,
   skillOptions,
   skillsLoading,
   selectedSkillIds,
   onToggleSkill,
 }: {
   title: string;
+  headerAccessory?: ReactNode;
   skillOptions: AgentSkillOption[];
   skillsLoading: boolean;
   selectedSkillIds: string[];
@@ -29,7 +32,10 @@ export function AgentSkillConfigPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 border-b border-border/40 px-3 py-3">
-        <p className="text-sm font-medium text-foreground">{title}</p>
+        <div className="flex items-center justify-between gap-3">
+          <p className="min-w-0 truncate text-sm font-medium text-foreground">{title}</p>
+          {headerAccessory ? <div className="shrink-0">{headerAccessory}</div> : null}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">

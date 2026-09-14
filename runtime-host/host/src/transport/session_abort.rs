@@ -13,6 +13,7 @@ const OPERATION_ID: &str = "sessions.abort";
 const AUTHORIZATION_ENDPOINT: &str = "/api/sessions/abort";
 const AUTHORIZATION_SCOPE: &str = "sessions:write";
 const AUTHORIZATION_SUBJECT: &str = "session-abort";
+const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestError {
@@ -77,6 +78,15 @@ impl Endpoint {
     }
 }
 
+fn valid_endpoint_session_id(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= MAX_ENDPOINT_SESSION_ID_BYTES
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    })
+}
+
 impl SessionAbortRequest {
     pub(crate) fn decode(
         value: Value,
@@ -111,6 +121,7 @@ impl SessionAbortRequest {
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.parse().is_some()
             && self.scope.session_key == self.input.session_key
+            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref())
             && self
                 .input
                 .approval_ids
@@ -125,7 +136,7 @@ impl SessionAbortRequest {
         SessionAbortCommand::try_new(
             endpoint,
             self.input.session_key,
-            self.input.endpoint_session_id,
+            None,
             self.input.run_id,
             self.input.approval_ids,
         )
@@ -265,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_endpoint_session_binding_without_using_it_as_run_identity() {
+    fn ignores_public_endpoint_session_binding_on_active_abort() {
         let mut value = request("openclaw");
         value["input"]["endpointSessionId"] = json!("native-session-1");
 
@@ -273,10 +284,7 @@ mod tests {
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(
-            command.endpoint_session_id.as_deref(),
-            Some("native-session-1")
-        );
+        assert_eq!(command.endpoint_session_id, None);
         assert_eq!(command.session_key, "agent:main:demo");
         assert_eq!(command.run_id.as_deref(), Some("run-1"));
     }

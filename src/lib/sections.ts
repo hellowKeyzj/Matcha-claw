@@ -4,7 +4,6 @@ export const SETTINGS_SECTIONS = [
   'browser',
   'updates',
   'advanced',
-  'license',
   'diagnostics',
 ] as const;
 

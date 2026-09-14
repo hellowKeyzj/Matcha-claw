@@ -76,6 +76,50 @@ describe('Electron Main channel status transport', () => {
     }));
   });
 
+  it('accepts public refreshing/error snapshot fields without native details', async () => {
+    const body = {
+      ts: 1_725_000_000_000,
+      ready: false,
+      refreshing: true,
+      error: 'Channel status reported an error',
+      channelOrder: ['discord'],
+      channels: { discord: { configured: true, running: true, error: 'Channel status reported an error' } },
+      channelAccounts: {
+        discord: [{ accountId: 'primary', connected: true }],
+      },
+      channelDefaultAccountId: { discord: 'primary' },
+    };
+    const transport = createChannelStatusTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-snapshot-decision' },
+      34_124,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.readSnapshot()).resolves.toEqual({ status: 200, body });
+    expect(JSON.stringify(body)).not.toContain('token');
+  });
+
+  it('accepts refreshing snapshots without forcing an error', async () => {
+    const body = {
+      ts: 1_725_000_000_000,
+      ready: false,
+      refreshing: true,
+      channelOrder: ['discord'],
+      channels: { discord: { configured: true, running: true } },
+      channelAccounts: {
+        discord: [{ accountId: 'primary', connected: true }],
+      },
+      channelDefaultAccountId: { discord: 'primary' },
+    };
+    const transport = createChannelStatusTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-snapshot-decision' },
+      34_124,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.readSnapshot()).resolves.toEqual({ status: 200, body });
+  });
+
   it('rejects malformed snapshot responses and transport failures', async () => {
     const malformed = createChannelStatusTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },

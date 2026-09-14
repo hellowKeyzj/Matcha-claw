@@ -4,6 +4,8 @@
  */
 import { create } from 'zustand';
 import {
+  channelErrorCode,
+  logChannelTrace,
   hostChannelsConnect,
   hostChannelsDeleteConfig,
   hostChannelsDisconnect,
@@ -34,7 +36,7 @@ interface ChannelsState {
   // Actions
   fetchChannels: (options?: FetchChannelsOptions) => Promise<void>;
   probeChannels: () => Promise<void>;
-  deleteChannel: (channelId: string) => Promise<void>;
+  deleteChannel: (channelId: string, options?: { traceId?: string }) => Promise<boolean>;
   connectChannel: (channelId: string) => Promise<void>;
   disconnectChannel: (channelId: string) => Promise<void>;
   setChannels: (channels: Channel[]) => void;
@@ -191,12 +193,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           const channelOrder = data.channelOrder || Object.keys(data.channels || {});
           for (const channelId of channelOrder) {
             const summary = (data.channels as Record<string, unknown> | undefined)?.[channelId] as Record<string, unknown> | undefined;
-            const configured =
-              typeof summary?.configured === 'boolean'
-                ? summary.configured
-                : typeof (summary as { running?: boolean })?.running === 'boolean'
-                  ? true
-                  : false;
+            const configured = summary?.configured === true;
             if (!configured) continue;
 
             const accounts = data.channelAccounts?.[channelId] || [];
@@ -300,7 +297,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     await get().fetchChannels({ silent: true });
   },
 
-  deleteChannel: async (channelId) => {
+  deleteChannel: async (channelId, options) => {
+    const traceId = options?.traceId ?? crypto.randomUUID();
+    const startedAt = Date.now();
+    logChannelTrace('delete.store.start', traceId);
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -313,6 +313,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     const placeholderMatch = channelId.match(/^(.*)-default$/);
     const channelType = channelTypeFromState ?? (placeholderMatch?.[1] as ChannelType | undefined);
     if (!channelType) {
+      logChannelTrace('delete.store.end', traceId, { outcome: 'noop', durationMs: Date.now() - startedAt });
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
@@ -320,27 +321,36 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           mutating: hasMutatingChannels(next),
         };
       });
-      return;
+      return false;
     }
 
+    let outcome: 'confirmed' | 'target_rejected' | 'unknown' | 'error' | undefined;
     try {
-      const result = await hostChannelsDeleteConfig(channelType, channel?.accountId);
+      logChannelTrace('delete.config.start', traceId, { accountPresent: Boolean(channel?.accountId) });
+      const result = await hostChannelsDeleteConfig(channelType, undefined, { traceId });
+      outcome = ['confirmed', 'target_rejected'].includes(result.outcome) ? result.outcome : 'unknown';
+      logChannelTrace('delete.config.end', traceId, { outcome, durationMs: Date.now() - startedAt });
       if (result.outcome !== 'confirmed') {
         const error = `Channel deletion outcome was ${result.outcome}`;
         set((state) => ({
           channels: state.channels.map((item) => item.id === channelId ? { ...item, error } : item),
         }));
-        return;
+        return false;
       }
       set((state) => ({
         channels: state.channels.filter((item) => item.id !== channelId),
       }));
+      return true;
     } catch (error) {
+      outcome = 'error';
+      logChannelTrace('delete.config.end', traceId, { outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
       const message = error instanceof Error ? error.message : String(error);
       set((state) => ({
         channels: state.channels.map((item) => item.id === channelId ? { ...item, error: message } : item),
       }));
+      return false;
     } finally {
+      logChannelTrace('delete.store.end', traceId, { outcome, durationMs: Date.now() - startedAt });
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {

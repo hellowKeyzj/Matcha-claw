@@ -27,6 +27,7 @@ import {
 } from './openclaw-runtime-deps.mjs';
 import { applyOpenClawBundlePatches } from './openclaw-bundle-patches.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
+import { safeRmSync } from './lib/safe-delete.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,9 +62,7 @@ const openclawReal = fs.realpathSync(openclawLink);
 printLine(`   openclaw resolved: ${openclawReal}`);
 
 // 2. Clean and create output directory
-if (fs.existsSync(OUTPUT)) {
-  fs.rmSync(OUTPUT, { recursive: true });
-}
+safeRmSync(OUTPUT, { root: path.dirname(OUTPUT) });
 fs.mkdirSync(OUTPUT, { recursive: true });
 
 // 3. Copy openclaw package itself to OUTPUT root
@@ -458,12 +457,9 @@ function formatSize(bytes) {
   return `${bytes}B`;
 }
 
-function rmSafe(target) {
+function rmSafe(target, root) {
   try {
-    const stat = fs.lstatSync(target);
-    if (stat.isDirectory()) fs.rmSync(target, { recursive: true, force: true });
-    else fs.rmSync(target, { force: true });
-    return true;
+    return safeRmSync(target, { root });
   } catch { return false; }
 }
 
@@ -474,7 +470,7 @@ function cleanupBundle(outputDir) {
 
   // --- openclaw root junk ---
   for (const name of ['CHANGELOG.md', 'README.md']) {
-    if (rmSafe(path.join(outputDir, name))) removedCount++;
+    if (rmSafe(path.join(outputDir, name), outputDir)) removedCount++;
   }
 
   // docs/ is kept — contains prompt templates and other runtime-used prompts
@@ -506,7 +502,7 @@ function cleanupBundle(outputDir) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (insideNodeModules && NM_REMOVE_DIRS.has(entry.name)) {
-            if (rmSafe(full)) removedCount++;
+            if (rmSafe(full, outputDir)) removedCount++;
           } else {
             walkExt(
               full,
@@ -518,7 +514,7 @@ function cleanupBundle(outputDir) {
           if (insideNodeModules) {
             const name = entry.name;
             if (NM_REMOVE_FILE_NAMES.has(name) || NM_REMOVE_FILE_EXTS.some(e => name.endsWith(e))) {
-              if (rmSafe(full)) removedCount++;
+              if (rmSafe(full, outputDir)) removedCount++;
             }
           } else {
             // Inside skills/ directories, .md files are skill content — keep them.
@@ -527,7 +523,7 @@ function cleanupBundle(outputDir) {
             const isJunkMd = isMd && JUNK_MD_NAMES.has(entry.name);
             const isJunkExt = JUNK_EXTS.has(path.extname(entry.name));
             if (isJunkExt || (isMd && !insideSkills && isJunkMd)) {
-              if (rmSafe(full)) removedCount++;
+              if (rmSafe(full, outputDir)) removedCount++;
             }
           }
         }
@@ -554,14 +550,14 @@ function cleanupBundle(outputDir) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (REMOVE_DIRS.has(entry.name)) {
-            if (rmSafe(full)) removedCount++;
+            if (rmSafe(full, outputDir)) removedCount++;
           } else {
             walkClean(full);
           }
         } else if (entry.isFile()) {
           const name = entry.name;
           if (REMOVE_FILE_NAMES.has(name) || REMOVE_FILE_EXTS.some(e => name.endsWith(e))) {
-            if (rmSafe(full)) removedCount++;
+            if (rmSafe(full, outputDir)) removedCount++;
           }
         }
       }
@@ -579,7 +575,7 @@ function cleanupBundle(outputDir) {
     'node_modules/koffi/doc',
   ];
   for (const rel of LARGE_REMOVALS) {
-    if (rmSafe(path.join(outputDir, rel))) removedCount++;
+    if (rmSafe(path.join(outputDir, rel), outputDir)) removedCount++;
   }
 
   return removedCount;

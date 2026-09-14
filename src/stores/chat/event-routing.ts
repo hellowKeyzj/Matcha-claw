@@ -1,3 +1,7 @@
+import { sessionKeysAreEquivalent } from './cron-session-utils';
+
+export { sessionKeysAreEquivalent };
+
 export type RuntimeEventKind = 'started' | 'delta' | 'final' | 'error' | 'aborted' | 'unknown';
 
 export interface RuntimeEventFilterInput {
@@ -6,7 +10,7 @@ export interface RuntimeEventFilterInput {
 }
 
 export function shouldIgnoreRuntimeEvent(input: RuntimeEventFilterInput): boolean {
-  if (input.eventSessionKey && input.eventSessionKey !== input.targetEventSessionKey) {
+  if (input.eventSessionKey && !sessionKeysAreEquivalent(input.eventSessionKey, input.targetEventSessionKey)) {
     return true;
   }
   return false;

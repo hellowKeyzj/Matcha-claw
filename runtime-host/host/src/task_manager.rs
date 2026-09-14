@@ -3,8 +3,8 @@ use std::fmt;
 use openclaw::{
     session::protocol::{AgentId, AgentScopedSessionKey, EndpointSessionId},
     task_manager::{
-        Task, TaskCreate, TaskMutationOutcome, TaskOutput, TaskReadFailure, TaskScope,
-        TaskSnapshot, TaskStopResult, TaskUpdate, Todo, TodoSnapshot,
+        Task, TaskCreate, TaskMutationOutcome, TaskReadFailure, TaskScope, TaskSnapshot,
+        TaskUpdate, Todo, TodoSnapshot,
     },
 };
 
@@ -33,14 +33,6 @@ pub(crate) enum Command {
     },
     TodoGet {
         target: SessionTarget,
-    },
-    Output {
-        target: SessionTarget,
-        task_id: String,
-    },
-    Stop {
-        target: SessionTarget,
-        task_id: String,
     },
 }
 
@@ -109,28 +101,6 @@ impl Command {
             target: SessionTarget::try_new(agent_id, session_key)?,
         })
     }
-
-    pub(crate) fn output(
-        agent_id: String,
-        session_key: String,
-        task_id: String,
-    ) -> Result<Self, InvalidIdentity> {
-        Ok(Self::Output {
-            target: SessionTarget::try_new(agent_id, session_key)?,
-            task_id: required(task_id)?,
-        })
-    }
-
-    pub(crate) fn stop(
-        agent_id: String,
-        session_key: String,
-        task_id: String,
-    ) -> Result<Self, InvalidIdentity> {
-        Ok(Self::Stop {
-            target: SessionTarget::try_new(agent_id, session_key)?,
-            task_id: required(task_id)?,
-        })
-    }
 }
 
 impl fmt::Debug for Command {
@@ -142,13 +112,11 @@ impl fmt::Debug for Command {
             Self::Update { .. } => formatter.write_str("TaskManagerCommand::Update"),
             Self::TodoWrite { .. } => formatter.write_str("TaskManagerCommand::TodoWrite"),
             Self::TodoGet { .. } => formatter.write_str("TaskManagerCommand::TodoGet"),
-            Self::Output { .. } => formatter.write_str("TaskManagerCommand::Output"),
-            Self::Stop { .. } => formatter.write_str("TaskManagerCommand::Stop"),
         }
     }
 }
 
-/// A canonical agent-scoped OpenClaw session target for todo/output/stop.
+/// A canonical agent-scoped OpenClaw session target for todos.
 /// It is deliberately not a public DTO: session identity is never projected.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct SessionTarget {
@@ -196,8 +164,8 @@ impl fmt::Debug for SessionTarget {
     }
 }
 
-/// A task CRUD target may carry a team key. Todos and task runtime operations
-/// intentionally use `SessionTarget`, so a team key cannot enter those calls.
+/// A task CRUD target may carry a team key. Todos intentionally use
+/// `SessionTarget`, so a team key cannot enter those calls.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct TaskTarget {
     session: SessionTarget,
@@ -294,8 +262,6 @@ pub(crate) type CreateOutcome = MutationOutcome<openclaw::task_manager::TaskCrea
 pub(crate) type UpdateOutcome = MutationOutcome<TaskSnapshot>;
 pub(crate) type TodoWriteOutcome = MutationOutcome<TodoSnapshot>;
 pub(crate) type TodoGetOutcome = ReadOutcome<TodoSnapshot>;
-pub(crate) type OutputOutcome = ReadOutcome<TaskOutput>;
-pub(crate) type StopOutcome = MutationOutcome<TaskStopResult>;
 
 pub(crate) enum Outcome {
     List(ListOutcome),
@@ -304,8 +270,6 @@ pub(crate) enum Outcome {
     Update(UpdateOutcome),
     TodoWrite(TodoWriteOutcome),
     TodoGet(TodoGetOutcome),
-    Output(OutputOutcome),
-    Stop(StopOutcome),
 }
 
 impl fmt::Debug for Outcome {
@@ -335,14 +299,6 @@ impl fmt::Debug for Outcome {
                 .debug_tuple("TaskManagerOutcome::TodoGet")
                 .field(outcome)
                 .finish(),
-            Self::Output(outcome) => formatter
-                .debug_tuple("TaskManagerOutcome::Output")
-                .field(outcome)
-                .finish(),
-            Self::Stop(outcome) => formatter
-                .debug_tuple("TaskManagerOutcome::Stop")
-                .field(outcome)
-                .finish(),
         }
     }
 }
@@ -356,8 +312,6 @@ impl Outcome {
             Command::Update { .. } => Self::Update(MutationOutcome::OutcomeUnknown),
             Command::TodoWrite { .. } => Self::TodoWrite(MutationOutcome::OutcomeUnknown),
             Command::TodoGet { .. } => Self::TodoGet(ReadOutcome::Unavailable),
-            Command::Output { .. } => Self::Output(ReadOutcome::Unavailable),
-            Command::Stop { .. } => Self::Stop(MutationOutcome::OutcomeUnknown),
         }
     }
 
@@ -373,8 +327,6 @@ impl Outcome {
                 Command::Update { .. } => Self::Update(MutationOutcome::Rejected),
                 Command::TodoWrite { .. } => Self::TodoWrite(MutationOutcome::Rejected),
                 Command::TodoGet { .. } => Self::TodoGet(ReadOutcome::Rejected),
-                Command::Output { .. } => Self::Output(ReadOutcome::Rejected),
-                Command::Stop { .. } => Self::Stop(MutationOutcome::Rejected),
             },
             crate::runtime_driver::RuntimeOperationFailure::Unsupported
             | crate::runtime_driver::RuntimeOperationFailure::Unavailable

@@ -27,10 +27,10 @@ export async function handleChannelStatusRoutes(
         sendJson(res, 200, {
           success: true,
           snapshot: response.body,
-          ready: true,
-          refreshing: false,
+          ready: response.body.ready ?? true,
+          refreshing: response.body.refreshing ?? false,
           updatedAt: response.body.ts,
-          error: null,
+          error: response.body.error ?? null,
         });
       } else {
         sendJson(res, 503, UNAVAILABLE);

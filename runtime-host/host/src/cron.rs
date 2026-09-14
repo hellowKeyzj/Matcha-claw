@@ -10,15 +10,18 @@ const MAX_JOB_ID_BYTES: usize = 4 * 1024;
 const MAX_NAME_BYTES: usize = 4 * 1024;
 const MAX_AGENT_ID_BYTES: usize = 4 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_MODEL_BYTES: usize = 4 * 1024;
 const MAX_SCHEDULE_BYTES: usize = 4 * 1024;
 const MAX_DELIVERY_BYTES: usize = 4 * 1024;
+const MAX_DATE_TIMESTAMP_MS: u64 = 8_640_000_000_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CronCreateCommand {
     pub(crate) name: String,
     pub(crate) agent_id: String,
     pub(crate) message: String,
-    pub(crate) schedule: String,
+    pub(crate) model: Option<String>,
+    pub(crate) schedule: CronScheduleCommand,
     pub(crate) delivery: CronDeliveryCommand,
     pub(crate) enabled: bool,
 }
@@ -28,14 +31,18 @@ impl CronCreateCommand {
         name: String,
         agent_id: String,
         message: String,
-        schedule: String,
+        model: Option<String>,
+        schedule: CronScheduleCommand,
         delivery: CronDeliveryCommand,
         enabled: bool,
     ) -> Result<Self, InvalidCronCommand> {
         if !valid_text(&name, MAX_NAME_BYTES)
             || !valid_text(&agent_id, MAX_AGENT_ID_BYTES)
             || !valid_text(&message, MAX_MESSAGE_BYTES)
-            || !valid_cron_expression(&schedule)
+            || model
+                .as_deref()
+                .is_some_and(|value| !valid_text(value, MAX_MODEL_BYTES))
+            || !schedule.is_valid()
             || !delivery.is_valid()
         {
             return Err(InvalidCronCommand);
@@ -44,6 +51,7 @@ impl CronCreateCommand {
             name,
             agent_id,
             message,
+            model,
             schedule,
             delivery,
             enabled,
@@ -53,12 +61,14 @@ impl CronCreateCommand {
     pub(crate) fn into_gateway(self) -> Result<CronJobCreate, InvalidCronCommand> {
         let job = CronJobCreate::isolated_agent_turn(
             self.name,
-            CronSchedule::cron(self.schedule).map_err(|_| InvalidCronCommand)?,
+            self.schedule.into_gateway()?,
             CronWakeMode::NextHeartbeat,
             self.message,
         )
         .map_err(|_| InvalidCronCommand)?
         .with_agent_id(self.agent_id)
+        .map_err(|_| InvalidCronCommand)?
+        .with_model(self.model)
         .map_err(|_| InvalidCronCommand)?
         .with_enabled(self.enabled);
         match self.delivery {
@@ -80,7 +90,8 @@ pub(crate) struct CronUpdateCommand {
     pub(crate) name: Option<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) message: Option<String>,
-    pub(crate) schedule: Option<String>,
+    pub(crate) model: Option<Option<String>>,
+    pub(crate) schedule: Option<CronScheduleCommand>,
     pub(crate) delivery: Option<CronDeliveryCommand>,
     pub(crate) enabled: Option<bool>,
 }
@@ -91,7 +102,8 @@ impl CronUpdateCommand {
         name: Option<String>,
         agent_id: Option<String>,
         message: Option<String>,
-        schedule: Option<String>,
+        model: Option<Option<String>>,
+        schedule: Option<CronScheduleCommand>,
         delivery: Option<CronDeliveryCommand>,
         enabled: Option<bool>,
     ) -> Result<Self, InvalidCronCommand> {
@@ -105,13 +117,16 @@ impl CronUpdateCommand {
             || message
                 .as_deref()
                 .is_some_and(|value| !valid_text(value, MAX_MESSAGE_BYTES))
-            || schedule
-                .as_deref()
-                .is_some_and(|value| !valid_cron_expression(value))
+            || model
+                .as_ref()
+                .and_then(|value| value.as_deref())
+                .is_some_and(|value| !valid_text(value, MAX_MODEL_BYTES))
+            || schedule.as_ref().is_some_and(|value| !value.is_valid())
             || delivery.as_ref().is_some_and(|value| !value.is_valid())
             || (name.is_none()
                 && agent_id.is_none()
                 && message.is_none()
+                && model.is_none()
                 && schedule.is_none()
                 && delivery.is_none()
                 && enabled.is_none())
@@ -123,6 +138,7 @@ impl CronUpdateCommand {
             name,
             agent_id,
             message,
+            model,
             schedule,
             delivery,
             enabled,
@@ -136,13 +152,13 @@ impl CronUpdateCommand {
     pub(crate) fn into_gateway(self) -> Result<(String, CronJobPatch), InvalidCronCommand> {
         let schedule = self
             .schedule
-            .map(CronSchedule::cron)
-            .transpose()
-            .map_err(|_| InvalidCronCommand)?;
+            .map(CronScheduleCommand::into_gateway)
+            .transpose()?;
         let mut update = CronJobUpdate::new(
             self.name,
             self.agent_id,
             self.message,
+            self.model,
             schedule,
             self.enabled,
         )
@@ -176,6 +192,59 @@ impl CronDeleteCommand {
 
     pub(crate) fn job_id(&self) -> &str {
         &self.job_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CronScheduleCommand {
+    Cron {
+        expr: String,
+        tz: Option<String>,
+    },
+    At {
+        at: String,
+    },
+    Every {
+        every_ms: u64,
+        anchor_ms: Option<u64>,
+    },
+}
+
+impl CronScheduleCommand {
+    pub(crate) fn cron(expr: String) -> Self {
+        Self::Cron { expr, tz: None }
+    }
+
+    fn is_valid(&self) -> bool {
+        match self {
+            Self::Cron { expr, tz } => {
+                valid_cron_expression(expr)
+                    && tz
+                        .as_deref()
+                        .is_none_or(|value| valid_text(value, MAX_SCHEDULE_BYTES))
+            }
+            Self::At { at } => valid_text(at, MAX_SCHEDULE_BYTES),
+            Self::Every {
+                every_ms,
+                anchor_ms,
+            } => {
+                (1..=MAX_DATE_TIMESTAMP_MS).contains(every_ms)
+                    && anchor_ms.is_none_or(|value| value <= MAX_DATE_TIMESTAMP_MS)
+            }
+        }
+    }
+
+    fn into_gateway(self) -> Result<CronSchedule, InvalidCronCommand> {
+        match self {
+            Self::Cron { expr, tz: None } => CronSchedule::cron(expr),
+            Self::Cron { expr, tz } => CronSchedule::cron_with_options(expr, tz, None),
+            Self::At { at } => CronSchedule::at(at),
+            Self::Every {
+                every_ms,
+                anchor_ms,
+            } => CronSchedule::every_with_anchor(every_ms, anchor_ms),
+        }
+        .map_err(|_| InvalidCronCommand)
     }
 }
 
@@ -459,8 +528,9 @@ fn valid_text(value: &str, max_bytes: usize) -> bool {
 }
 
 fn valid_cron_expression(value: &str) -> bool {
+    let fields = value.split_ascii_whitespace().count();
     valid_text(value, MAX_SCHEDULE_BYTES)
-        && value.split_ascii_whitespace().count() == 5
+        && (fields == 5 || fields == 6)
         && !value.contains(['\r', '\n'])
 }
 
@@ -474,7 +544,8 @@ mod tests {
             "Cron name".into(),
             "main".into(),
             "Scheduled message".into(),
-            "0 9 * * 1".into(),
+            None,
+            CronScheduleCommand::cron("0 9 * * 1".into()),
             CronDeliveryCommand::Announce {
                 channel: "telegram".into(),
                 to: "recipient".into(),
@@ -490,7 +561,8 @@ mod tests {
                 "Cron name".into(),
                 "main".into(),
                 "Scheduled message".into(),
-                "not a cron".into(),
+                None,
+                CronScheduleCommand::cron("not a cron".into()),
                 CronDeliveryCommand::None,
                 true,
             )
@@ -499,21 +571,87 @@ mod tests {
     }
 
     #[test]
+    fn projects_structured_schedules_to_gateway_commands() {
+        let at_command = CronCreateCommand::try_new(
+            "Cron name".into(),
+            "main".into(),
+            "Scheduled message".into(),
+            None,
+            CronScheduleCommand::At {
+                at: "2026-09-04T09:00:00.000Z".into(),
+            },
+            CronDeliveryCommand::None,
+            true,
+        )
+        .unwrap();
+        let at_gateway = serde_json::to_value(at_command.into_gateway().unwrap()).unwrap();
+        assert_eq!(
+            at_gateway["schedule"],
+            serde_json::json!({ "kind": "at", "at": "2026-09-04T09:00:00.000Z" })
+        );
+
+        let every_command = CronUpdateCommand::try_new(
+            "cron-job".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(CronScheduleCommand::Every {
+                every_ms: 60_000,
+                anchor_ms: Some(1_000),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        let (_job_id, patch) = every_command.into_gateway().unwrap();
+        let every_gateway = serde_json::to_value(patch).unwrap();
+        assert_eq!(
+            every_gateway["schedule"],
+            serde_json::json!({ "kind": "every", "everyMs": 60_000, "anchorMs": 1_000 })
+        );
+
+        let cron_command = CronUpdateCommand::try_new(
+            "cron-job".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(CronScheduleCommand::Cron {
+                expr: "0 9 * * *".into(),
+                tz: Some("UTC".into()),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        let (_job_id, patch) = cron_command.into_gateway().unwrap();
+        let cron_gateway = serde_json::to_value(patch).unwrap();
+        assert_eq!(
+            cron_gateway["schedule"],
+            serde_json::json!({ "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" })
+        );
+    }
+
+    #[test]
     fn update_rejects_empty_or_malformed_commands() {
         assert!(
-            CronUpdateCommand::try_new("cron-job".into(), None, None, None, None, None, None,)
+            CronUpdateCommand::try_new("cron-job".into(), None, None, None, None, None, None, None,)
                 .is_err()
         );
-        assert!(CronUpdateCommand::try_new(
-            "cron/job".into(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(true),
-        )
-        .is_err());
+        assert!(
+            CronUpdateCommand::try_new(
+                "cron/job".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .is_err()
+        );
     }
 
     #[test]

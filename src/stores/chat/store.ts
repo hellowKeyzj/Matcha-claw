@@ -24,12 +24,14 @@ import { executeStoreSend } from './send-handlers';
 import {
   executeCleanupEmptySession,
   executeDeleteSession,
+  executeForgetAgentSessions,
   executeJumpViewportToLatest,
   executeLoadOlderViewportItems,
   executeLoadSessions,
   executeNewSession,
   executeNewSessionForScope,
   executeOpenAgentConversation,
+  executeReconcileAgentSessionTombstones,
   executeOpenSessionIdentity,
   executeRenameSession,
   executeSelectSessionRuntimeEndpoint,
@@ -343,6 +345,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       await executeNewSessionForScope(sessionInput, scope);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
+    forgetAgentSessions: (agentId) => {
+      executeForgetAgentSessions(sessionInput, agentId);
+    },
+    reconcileAgentSessionTombstones: (agentIds) => {
+      executeReconcileAgentSessionTombstones(agentIds);
+    },
     renameSession: (key, label) => executeRenameSession({
       ...sessionInput,
       renameSession: hostSessionRename,

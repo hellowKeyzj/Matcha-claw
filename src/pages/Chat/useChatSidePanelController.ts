@@ -15,8 +15,69 @@ import {
   type ChatSidePanelMode,
 } from './chat-workspace-layout';
 
-export type ChatSidePanelTab = 'tasks' | 'skills' | 'artifacts';
+export type ChatSidePanelTab = 'tasks' | 'artifacts' | 'runtime';
 export type TaskInboxTask = Task & { sourceSessionKey: string; scopeKey: string };
+
+export const CHAT_RUNTIME_SURFACE_OPEN_EVENT = 'chat:open-runtime-surface';
+
+export type ChatRuntimeSurfaceDescriptor =
+  | {
+    readonly kind: 'browser-tab';
+    readonly targetId: string;
+    readonly profile: string;
+    readonly target: 'host' | 'node';
+    readonly node?: string;
+    readonly title?: string;
+    readonly url?: string;
+    readonly toolName?: string;
+    readonly toolCallId?: string;
+  }
+  | {
+    readonly kind: 'mcp-app';
+    readonly title?: string;
+    readonly url?: string;
+    readonly viewId?: string;
+    readonly surface?: 'assistant_message' | 'node_panel';
+    readonly preferredHeight?: number;
+    readonly sandbox?: 'strict' | 'scripts';
+    readonly boardWidgetName?: string;
+    readonly toolName?: string;
+    readonly toolCallId?: string;
+    readonly mcpApp?: {
+      readonly viewId: string;
+      readonly serverName?: string;
+      readonly toolName?: string;
+      readonly uiResourceUri?: string;
+      readonly toolCallId?: string;
+      readonly originSessionKey?: string;
+      readonly resultMetaState?: 'unavailable';
+    };
+  };
+
+let chatRuntimeSurfaceSnapshot: ChatRuntimeSurfaceDescriptor | null = null;
+const chatRuntimeSurfaceListeners = new Set<() => void>();
+
+export function getChatRuntimeSurfaceSnapshot(): ChatRuntimeSurfaceDescriptor | null {
+  return chatRuntimeSurfaceSnapshot;
+}
+
+export function subscribeChatRuntimeSurface(listener: () => void): () => void {
+  chatRuntimeSurfaceListeners.add(listener);
+  return () => {
+    chatRuntimeSurfaceListeners.delete(listener);
+  };
+}
+
+export function openChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void {
+  window.dispatchEvent(new CustomEvent<ChatRuntimeSurfaceDescriptor>(CHAT_RUNTIME_SURFACE_OPEN_EVENT, { detail: surface }));
+}
+
+function publishChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void {
+  chatRuntimeSurfaceSnapshot = surface;
+  for (const listener of chatRuntimeSurfaceListeners) {
+    listener();
+  }
+}
 
 function uniqueSorted(values: string[]): string[] {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0))).sort((left, right) => left.localeCompare(right));
@@ -48,19 +109,22 @@ interface ChatSidePanelState {
   artifactWidth: number;
 }
 
+function isStoredSidePanelTab(value: string | null): value is ChatSidePanelTab {
+  return value === 'tasks' || value === 'artifacts' || value === 'runtime';
+}
+
 function resolveSidePanelWidthPolicy(tab: ChatSidePanelTab): ChatSidePanelWidthPolicy {
   return tab === 'artifacts' ? 'artifacts' : 'light';
 }
 
 function readStoredPanelState(): ChatSidePanelState {
   try {
-    const open = window.localStorage.getItem('chat:side-panel-open') === '1';
     const storedTab = window.localStorage.getItem('chat:side-panel-tab');
     const storedLightWidth = Number(window.localStorage.getItem('chat:side-panel-light-width'));
     const storedArtifactWidth = Number(window.localStorage.getItem('chat:side-panel-artifact-width'));
     return {
-      open,
-      activeTab: storedTab === 'skills' || storedTab === 'artifacts' ? storedTab : 'tasks',
+      open: false,
+      activeTab: isStoredSidePanelTab(storedTab) ? storedTab : 'tasks',
       lightWidth: Number.isFinite(storedLightWidth) && storedLightWidth > 0
         ? storedLightWidth
         : getDefaultChatSidePanelWidth('light'),
@@ -191,18 +255,37 @@ export function useChatSidePanelController(
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('chat:side-panel-open', panelState.open ? '1' : '0');
       window.localStorage.setItem('chat:side-panel-tab', panelState.activeTab);
       window.localStorage.setItem('chat:side-panel-light-width', String(panelState.lightWidth));
       window.localStorage.setItem('chat:side-panel-artifact-width', String(panelState.artifactWidth));
     } catch {
       // ignore localStorage errors
     }
-  }, [panelState.activeTab, panelState.artifactWidth, panelState.lightWidth, panelState.open]);
+  }, [panelState.activeTab, panelState.artifactWidth, panelState.lightWidth]);
 
   useEffect(() => {
     return () => {
       clearChatTakeoverMode();
+    };
+  }, [clearChatTakeoverMode]);
+
+  useEffect(() => {
+    const openRuntimeSurface = (event: Event) => {
+      const surface = (event as CustomEvent<ChatRuntimeSurfaceDescriptor>).detail;
+      if (!surface || (surface.kind !== 'browser-tab' && surface.kind !== 'mcp-app')) {
+        return;
+      }
+      publishChatRuntimeSurface(surface);
+      setPanelState((prev) => ({
+        ...prev,
+        open: true,
+        activeTab: 'runtime',
+      }));
+      clearChatTakeoverMode();
+    };
+    window.addEventListener(CHAT_RUNTIME_SURFACE_OPEN_EVENT, openRuntimeSurface);
+    return () => {
+      window.removeEventListener(CHAT_RUNTIME_SURFACE_OPEN_EVENT, openRuntimeSurface);
     };
   }, [clearChatTakeoverMode]);
 

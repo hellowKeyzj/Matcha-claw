@@ -17,7 +17,7 @@ describe('Toolchain Host API routes', () => {
     vi.clearAllMocks();
   });
 
-  it('returns the Rust Toolchain UV state as a bare boolean', async () => {
+  it('returns the Rust Toolchain UV state through host.toolchain.status', async () => {
     commandMock.mockResolvedValue({
       kind: 'succeeded',
       result: { result: { uv: 'available', python: 'ready' } },
@@ -32,11 +32,11 @@ describe('Toolchain Host API routes', () => {
       { runtimeHost: { command: commandMock } } as never,
     )).resolves.toBe(true);
 
-    expect(commandMock).toHaveBeenCalledWith({ name: 'openclaw.toolchain.status' });
-    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, true);
+    expect(commandMock).toHaveBeenCalledWith({ name: 'host.toolchain.status' });
+    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, { installed: true });
   });
 
-  it('returns false without exposing producer details when UV is absent', async () => {
+  it('returns installed false without exposing producer details when UV is absent', async () => {
     commandMock.mockResolvedValue({
       kind: 'succeeded',
       result: { result: { uv: 'unavailable', python: 'unavailable' } },
@@ -51,9 +51,52 @@ describe('Toolchain Host API routes', () => {
       { runtimeHost: { command: commandMock } } as never,
     );
 
-    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, false);
+    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, { installed: false });
     expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('private-path');
     expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('Error');
+  });
+
+  it('prepares the UV toolchain through host.toolchain.prepare', async () => {
+    commandMock.mockResolvedValue({
+      kind: 'succeeded',
+      result: { result: { outcome: 'installed' } },
+    });
+    const { handleToolchainRoutes } = await import('../../electron/api/routes/toolchain');
+    const response = {} as never;
+
+    await expect(handleToolchainRoutes(
+      request('POST') as never,
+      response,
+      new URL('http://localhost/api/toolchain/uv/prepare'),
+      { runtimeHost: { command: commandMock } } as never,
+    )).resolves.toBe(true);
+
+    expect(commandMock).toHaveBeenCalledWith(
+      { name: 'host.toolchain.prepare' },
+      { timeoutMs: 120_000 },
+    );
+    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, { success: true, outcome: 'installed' });
+  });
+
+  it('returns a closed prepare failure when the Rust outcome is rejected', async () => {
+    commandMock.mockResolvedValue({
+      kind: 'succeeded',
+      result: { result: { outcome: 'rejected' } },
+    });
+    const { handleToolchainRoutes } = await import('../../electron/api/routes/toolchain');
+    const response = {} as never;
+
+    await handleToolchainRoutes(
+      request('POST') as never,
+      response,
+      new URL('http://localhost/api/toolchain/uv/prepare'),
+      { runtimeHost: { command: commandMock } } as never,
+    );
+
+    expect(sendJsonMock).toHaveBeenCalledWith(response, 409, {
+      success: false,
+      error: 'Toolchain preparation was rejected',
+    });
   });
 
   it('fails closed when the Rust status is unknown', async () => {
@@ -73,7 +116,7 @@ describe('Toolchain Host API routes', () => {
 
     expect(sendJsonMock).toHaveBeenCalledWith(response, 503, {
       success: false,
-      error: 'Toolchain status is unavailable',
+      error: 'Toolchain is unavailable',
     });
   });
 
@@ -96,7 +139,7 @@ describe('Toolchain Host API routes', () => {
 
     expect(sendJsonMock).toHaveBeenCalledWith(response, 503, {
       success: false,
-      error: 'Toolchain status is unavailable',
+      error: 'Toolchain is unavailable',
     });
     expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('C:/private/uv.exe');
   });
@@ -109,6 +152,12 @@ describe('Toolchain Host API routes', () => {
       request('POST') as never,
       {} as never,
       new URL('http://localhost/api/toolchain/uv/check'),
+      { runtimeHost } as never,
+    )).resolves.toBe(false);
+    await expect(handleToolchainRoutes(
+      request('GET') as never,
+      {} as never,
+      new URL('http://localhost/api/toolchain/uv/prepare'),
       { runtimeHost } as never,
     )).resolves.toBe(false);
     await expect(handleToolchainRoutes(

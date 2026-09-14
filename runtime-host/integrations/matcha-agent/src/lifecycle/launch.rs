@@ -7,13 +7,11 @@ use std::{
 
 #[cfg(windows)]
 use foundation::process::windows_system_root;
-use foundation::{
-    process::{
-        InvalidLaunchSpec, LaunchAttempt, LaunchAttemptFuture, LaunchAttemptMaterializer,
-        LaunchSpec, StdioMode, StdioSpec, supervision::LaunchFailure,
-    },
-    toolchain::{NativeToolchainRuntime, ToolchainEnvProjection},
+use foundation::process::{
+    InvalidLaunchSpec, LaunchAttempt, LaunchAttemptFuture, LaunchAttemptMaterializer, LaunchSpec,
+    StdioMode, StdioSpec, supervision::LaunchFailure,
 };
+use toolchain::{NativeToolchain, ToolchainEnvProjection};
 
 use super::secret::Secret;
 
@@ -30,6 +28,10 @@ const NO_COLOR: &str = "NO_COLOR";
 const MATCHACLAW_SESSION_TRACE: &str = "MATCHACLAW_SESSION_TRACE";
 const MATCHACLAW_UV_BIN: &str = "MATCHACLAW_UV_BIN";
 const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+const MATCHA_SEALED_ENDPOINT: &str = "MATCHA_SEALED_ENDPOINT";
+const MATCHA_SEALED_TOKEN: &str = "MATCHA_SEALED_TOKEN";
+const MATCHA_SEALED_RUNTIME: &str = "MATCHA_SEALED_RUNTIME";
+const MATCHA_SEALED_RUNTIME_MATCHA_AGENT: &str = "matcha-agent";
 const TOOLCHAIN_PRIVATE_ENV_KEYS: [&str; 12] = [
     "PATH",
     "HOME",
@@ -58,14 +60,22 @@ pub struct LaunchInput {
     pub storage_root: PathBuf,
     pub port: u16,
     pub secret: Arc<Secret>,
-    pub toolchain: Arc<NativeToolchainRuntime>,
+    pub toolchain: Arc<NativeToolchain>,
     #[cfg(windows)]
     pub git_bash: PathBuf,
 }
 
 impl LaunchInput {
     pub fn try_into_launch_factory(self) -> Result<LaunchFactory, LaunchError> {
-        let input = LaunchFactoryInput::try_from(self)?;
+        self.try_into_launch_factory_with_sealed_target(None)
+    }
+
+    pub fn try_into_launch_factory_with_sealed_target(
+        self,
+        sealed_target: Option<SealedResourceTarget>,
+    ) -> Result<LaunchFactory, LaunchError> {
+        let mut input = LaunchFactoryInput::try_from(self)?;
+        input.sealed_target = sealed_target;
         #[cfg(test)]
         let spec = build_spec(&input, None)?;
         #[cfg(not(test))]
@@ -86,6 +96,12 @@ pub struct LaunchFactory {
     spec: LaunchSpec,
 }
 
+#[derive(Clone)]
+pub struct SealedResourceTarget {
+    pub endpoint: String,
+    pub token: String,
+}
+
 struct LaunchFactoryInput {
     bun_executable: PathBuf,
     entry: PathBuf,
@@ -93,7 +109,8 @@ struct LaunchFactoryInput {
     storage_root: PathBuf,
     port: u16,
     secret: Arc<Secret>,
-    toolchain: Arc<NativeToolchainRuntime>,
+    toolchain: Arc<NativeToolchain>,
+    sealed_target: Option<SealedResourceTarget>,
     #[cfg(windows)]
     git_bash: PathBuf,
 }
@@ -111,6 +128,7 @@ impl TryFrom<LaunchInput> for LaunchFactoryInput {
             port: input.port,
             secret: input.secret,
             toolchain: input.toolchain,
+            sealed_target: None,
             #[cfg(windows)]
             git_bash: input.git_bash,
         })
@@ -139,6 +157,7 @@ impl Clone for LaunchFactoryInput {
             port: self.port,
             secret: Arc::clone(&self.secret),
             toolchain: Arc::clone(&self.toolchain),
+            sealed_target: self.sealed_target.clone(),
             #[cfg(windows)]
             git_bash: self.git_bash.clone(),
         }
@@ -163,6 +182,9 @@ fn build_spec(
         OsString::from(auth_token.as_str()),
     ];
     let mut public_environment = app_server_environment(std::env::vars_os(), toolchain);
+    if let Some(sealed_target) = &input.sealed_target {
+        public_environment.extend(sealed_resource_environment(sealed_target));
+    }
     #[cfg(windows)]
     {
         public_environment.push((
@@ -183,6 +205,20 @@ fn build_spec(
         APP_SERVER_STDIO,
     )
     .map_err(LaunchError::InvalidSpec)
+}
+
+fn sealed_resource_environment(target: &SealedResourceTarget) -> [(OsString, OsString); 3] {
+    [
+        (
+            MATCHA_SEALED_ENDPOINT.into(),
+            target.endpoint.clone().into(),
+        ),
+        (MATCHA_SEALED_TOKEN.into(), target.token.clone().into()),
+        (
+            MATCHA_SEALED_RUNTIME.into(),
+            MATCHA_SEALED_RUNTIME_MATCHA_AGENT.into(),
+        ),
+    ]
 }
 
 fn app_server_environment(

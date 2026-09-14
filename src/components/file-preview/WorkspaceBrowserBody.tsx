@@ -1,5 +1,5 @@
-import { startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown, ChevronRight, FolderTree, GitCompare, RefreshCw } from 'lucide-react';
+import { startTransition, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight, FolderTree, GitCompare, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -315,6 +315,7 @@ export function WorkspaceBrowserBody({
   const [reloadToken, setReloadToken] = useState(0);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
   const treeRef = useRef<WorkspaceTreeNode | null>(null);
   const treeVersionRef = useRef(0);
   const loadingPathsRef = useRef<Set<string>>(new Set());
@@ -573,67 +574,102 @@ export function WorkspaceBrowserBody({
     });
   }, [effectiveRootPath, expandedPaths, loadingPaths, onSelectFile, selectedFile?.relativePath, selectedFilePath, treeState]);
 
+  const treeToggleLabel = treeCollapsed
+    ? t('artifacts.expandWorkspaceTree')
+    : t('artifacts.collapseWorkspaceTree');
+  const workspaceTreeToggleButton = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="h-7 w-7 rounded-md"
+      onClick={() => setTreeCollapsed((current) => !current)}
+      title={treeToggleLabel}
+      aria-label={treeToggleLabel}
+      aria-expanded={!treeCollapsed}
+      data-testid="workspace-tree-collapse-toggle"
+    >
+      {treeCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+    </Button>
+  );
+  const workspaceBrowserStyle = useMemo<CSSProperties>(() => {
+    if (workspaceLayout.mode === 'split') {
+      return {
+        gridTemplateColumns: treeCollapsed
+          ? 'minmax(0,1fr)'
+          : `minmax(${WORKSPACE_TREE_MIN_WIDTH}px, ${workspaceLayout.treeWidth}px) minmax(0,1fr)`,
+      };
+    }
+    return {
+      gridTemplateRows: treeCollapsed
+        ? 'minmax(0,1fr)'
+        : `minmax(0, ${WORKSPACE_STACKED_TREE_HEIGHT}px) minmax(0,1fr)`,
+    };
+  }, [treeCollapsed, workspaceLayout.mode, workspaceLayout.treeWidth]);
+
   return (
     <div
       data-testid="workspace-browser-body"
       data-layout={workspaceLayout.mode}
-      className={cn(
-        'min-h-0 h-full overflow-hidden',
-        workspaceLayout.mode === 'split'
-          ? 'grid'
-          : 'grid',
-        className,
-      )}
-      style={workspaceLayout.mode === 'split'
-        ? { gridTemplateColumns: `minmax(${WORKSPACE_TREE_MIN_WIDTH}px, ${workspaceLayout.treeWidth}px) minmax(0,1fr)` }
-        : { gridTemplateRows: `minmax(0, ${WORKSPACE_STACKED_TREE_HEIGHT}px) minmax(0,1fr)` }}
+      data-tree-collapsed={treeCollapsed ? 'true' : 'false'}
+      className={cn('relative grid min-h-0 h-full overflow-hidden', className)}
+      style={workspaceBrowserStyle}
     >
-      <div className={cn(
-        'flex min-h-0 flex-col overflow-hidden',
-        workspaceLayout.mode === 'split'
-          ? 'border-r border-border/40'
-          : 'border-b border-border/40',
-      )}>
-        <div className="flex items-center justify-between border-b border-border/40 px-3 py-2">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-foreground">
-              {t('artifacts.workspaceTab')}
-            </p>
+      {treeCollapsed && !selectedFile ? (
+        <div className="absolute left-3 top-2 z-20">
+          {workspaceTreeToggleButton}
+        </div>
+      ) : null}
+
+      {treeCollapsed ? null : (
+        <div className={cn(
+          'flex min-h-0 flex-col overflow-hidden',
+          workspaceLayout.mode === 'split'
+            ? 'border-r border-border/40'
+            : 'border-b border-border/40',
+        )}>
+          <div className="flex items-center justify-between border-b border-border/40 px-3 py-2">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-foreground">
+                {t('artifacts.workspaceTab')}
+              </p>
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md"
+                onClick={() => setReloadToken((current) => current + 1)}
+                disabled={!effectiveRootPath || treeState.status === 'loading'}
+                title={t('common:actions.refresh', { defaultValue: 'Refresh' })}
+                aria-label={t('common:actions.refresh', { defaultValue: 'Refresh' })}
+              >
+                {treeState.status === 'loading' ? <LoadingSpinner size="sm" /> : <RefreshCw className="h-4 w-4" />}
+              </Button>
+              {workspaceTreeToggleButton}
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-md"
-              onClick={() => setReloadToken((current) => current + 1)}
-              disabled={!effectiveRootPath || treeState.status === 'loading'}
-              title={t('common:actions.refresh', { defaultValue: 'Refresh' })}
-              aria-label={t('common:actions.refresh', { defaultValue: 'Refresh' })}
-            >
-              {treeState.status === 'loading' ? <LoadingSpinner size="sm" /> : <RefreshCw className="h-4 w-4" />}
-            </Button>
+          <div className="min-h-0 flex-1 overflow-auto p-1.5">
+            {treeState.status === 'idle' ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+                {t('artifacts.workspaceEmpty')}
+              </div>
+            ) : null}
+            {treeState.status === 'loading' ? (
+              <div className="flex h-full items-center justify-center">
+                <LoadingSpinner />
+              </div>
+            ) : null}
+            {treeState.status === 'error' ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+                {t('artifacts.workspaceLoadFailed', { error: treeState.message })}
+              </div>
+            ) : null}
+            {treeState.status === 'ready' ? treeBody : null}
           </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto p-1.5">
-          {treeState.status === 'idle' ? (
-            <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              {t('artifacts.workspaceEmpty')}
-            </div>
-          ) : null}
-          {treeState.status === 'loading' ? (
-            <div className="flex h-full items-center justify-center">
-              <LoadingSpinner />
-            </div>
-          ) : null}
-          {treeState.status === 'error' ? (
-            <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
-              {t('artifacts.workspaceLoadFailed', { error: treeState.message })}
-            </div>
-          ) : null}
-          {treeState.status === 'ready' ? treeBody : null}
-        </div>
-      </div>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {selectedFile ? (
@@ -643,6 +679,7 @@ export function WorkspaceBrowserBody({
             sessionIdentity={sessionIdentity}
             workspaceContext={workspaceContext}
             className="h-full"
+            headerLeadingAccessory={treeCollapsed ? workspaceTreeToggleButton : null}
             headerAccessory={(
               <>
                 {supportsInlineDiff(selectedFile) ? (

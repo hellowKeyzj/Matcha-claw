@@ -10,18 +10,24 @@ use sha2::{Digest, Sha256};
 
 use crate::gateway::{
     client::{GatewayClient, GatewayClientError},
+    config_patch::{
+        destructive_array_replace_paths_at, encode_request as encode_config_patch_request,
+        merge_patch, request_parts_are_valid,
+    },
     delivery::MutationDelivery,
     wire::{self, GatewayResponse},
 };
 
 const CONFIG_GET_METHOD: &str = "config.get";
-const CONFIG_SET_METHOD: &str = "config.set";
+const CONFIG_PATCH_METHOD: &str = "config.patch";
 const SKILLS_STATUS_METHOD: &str = "skills.status";
 const TOOLS_CATALOG_METHOD: &str = "tools.catalog";
 const CONFIG_READ_METHODS: [&str; 1] = [CONFIG_GET_METHOD];
-const CONFIG_WRITE_METHODS: [&str; 1] = [CONFIG_SET_METHOD];
+const CONFIG_WRITE_METHODS: [&str; 1] = [CONFIG_PATCH_METHOD];
 const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];
 const TOOL_CATALOG_METHODS: [&str; 1] = [TOOLS_CATALOG_METHOD];
+const AGENT_FACING_INTERNAL_TOOL_DENY: [&str; 5] =
+    ["gateway", "nodes", "create_goal", "get_goal", "update_goal"];
 
 fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: Value) {
     if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
@@ -109,7 +115,7 @@ impl AgentConfiguration {
     }
 
     pub async fn set_skills(&self, agent_id: String, skills: Vec<String>) -> MutationOutcome {
-        let catalog = match self.skill_catalog().await {
+        let catalog = match self.skill_catalog(&agent_id).await {
             Ok(catalog) => catalog,
             Err(ReadFailure::Rejected) => return MutationOutcome::Rejected,
             Err(ReadFailure::Unavailable | ReadFailure::Protocol) => {
@@ -141,7 +147,7 @@ impl AgentConfiguration {
             );
             return SkillConfigurationOutcome::View(snapshot.skill_view_without_catalog(agent_id));
         }
-        let catalog = match self.skill_catalog().await {
+        let catalog = match self.skill_catalog(&agent_id).await {
             Ok(catalog) => catalog,
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
         };
@@ -209,7 +215,7 @@ impl AgentConfiguration {
             );
             return SkillConfigurationOutcome::Unsupported;
         }
-        let catalog = match self.skill_catalog().await {
+        let catalog = match self.skill_catalog(&agent_id).await {
             Ok(catalog) => catalog,
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
         };
@@ -351,6 +357,7 @@ impl AgentConfiguration {
             Ok(catalog) => catalog,
             Err(error) => return ToolConfigurationOutcome::Unavailable(error),
         };
+        let selection = enforce_agent_facing_internal_tool_deny(selection);
         if let ToolSelection::Policy { allow, deny, .. } = &selection {
             let unknown = unknown_tool_keys(allow, deny, catalog.policy_keys());
             if !unknown.is_empty() {
@@ -393,12 +400,7 @@ impl AgentConfiguration {
             self.trace_id.as_deref(),
             serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
         );
-        let request = wire::operations_request(
-            next_request_id("tools-catalog"),
-            TOOLS_CATALOG_METHOD,
-            serde_json::json!({ "agentId": agent_id }),
-        )
-        .map_err(|_| ReadFailure::Protocol)?;
+        let request = tool_catalog_request(agent_id).map_err(|_| ReadFailure::Protocol)?;
         let _ = TOOL_CATALOG_METHODS;
         let outcome = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
@@ -425,18 +427,13 @@ impl AgentConfiguration {
         outcome
     }
 
-    async fn skill_catalog(&self) -> Result<SkillCatalog, ReadFailure> {
+    async fn skill_catalog(&self, agent_id: &str) -> Result<SkillCatalog, ReadFailure> {
         log_session_trace(
             "runtime.openclaw.agent-config.skills-status.request",
             self.trace_id.as_deref(),
-            serde_json::json!({}),
+            serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
         );
-        let request = wire::operations_request(
-            next_request_id("skills-status"),
-            SKILLS_STATUS_METHOD,
-            Value::Object(Map::new()),
-        )
-        .map_err(|_| ReadFailure::Protocol)?;
+        let request = skill_catalog_request(agent_id).map_err(|_| ReadFailure::Protocol)?;
         let _ = SKILL_STATUS_METHODS;
         let outcome = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
@@ -513,14 +510,14 @@ impl AgentConfiguration {
         outcome
     }
 
-    async fn write(&self, request: ConfigSetRequest) -> MutationOutcome {
+    async fn write(&self, request: ConfigPatchRequest) -> MutationOutcome {
         let request_id = request.request_id().to_owned();
         let encoded = match request.encode() {
             Ok(encoded) => encoded,
             Err(()) => return MutationOutcome::Rejected,
         };
         log_session_trace(
-            "runtime.openclaw.agent-config.config-set.request",
+            "runtime.openclaw.agent-config.config-patch.request",
             self.trace_id.as_deref(),
             serde_json::json!({ "requestBytes": encoded.len() }),
         );
@@ -529,7 +526,7 @@ impl AgentConfiguration {
             MutationDelivery::Response(GatewayResponse::Failure { .. })
             | MutationDelivery::NotWritten(_) => MutationOutcome::Rejected,
             MutationDelivery::Response(response) => {
-                if decode_config_set(response) {
+                if decode_config_patch(response) {
                     MutationOutcome::Applied
                 } else {
                     MutationOutcome::OutcomeUnknown
@@ -538,7 +535,7 @@ impl AgentConfiguration {
             MutationDelivery::MayHaveReached(_) => MutationOutcome::OutcomeUnknown,
         };
         log_session_trace(
-            "runtime.openclaw.agent-config.config-set.outcome",
+            "runtime.openclaw.agent-config.config-patch.outcome",
             self.trace_id.as_deref(),
             serde_json::json!({ "result": mutation_outcome_reason(outcome) }),
         );
@@ -763,7 +760,6 @@ pub struct SkillOption {
     key: String,
     display_name: String,
     description: String,
-    installed: bool,
     selectable: bool,
     unavailable_reason: Option<SkillUnavailableReason>,
     missing_requirements: Option<MissingSkillRequirements>,
@@ -778,9 +774,6 @@ impl SkillOption {
     }
     pub fn description(&self) -> &str {
         &self.description
-    }
-    pub fn installed(&self) -> bool {
-        self.installed
     }
     pub fn selectable(&self) -> bool {
         self.selectable
@@ -859,6 +852,17 @@ impl SkillCatalog {
         &self.options
     }
 
+    fn options_for_allowlist_view(self, selected_skill_keys: &[String]) -> Vec<SkillOption> {
+        let selected_skill_keys = selected_skill_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        self.options
+            .into_iter()
+            .filter(|option| option.selectable || selected_skill_keys.contains(option.key.as_str()))
+            .collect()
+    }
+
     fn canonicalize(
         &self,
         requested: Vec<String>,
@@ -904,10 +908,10 @@ impl SkillCatalog {
 
 fn skill_option(value: &Value) -> Option<SkillOption> {
     let skill = value.as_object()?;
-    let key = ["skillKey", "id", "slug", "name"]
-        .into_iter()
-        .filter_map(|field| skill.get(field).and_then(Value::as_str))
-        .find_map(canonical_skill)?;
+    let key = skill
+        .get("skillKey")
+        .and_then(Value::as_str)
+        .and_then(canonical_skill)?;
     let missing_requirements = missing_skill_requirements(skill.get("missing"));
     let unavailable_reason = if skill.get("disabled") == Some(&Value::Bool(true)) {
         Some(SkillUnavailableReason::GlobalSkillDisabled)
@@ -918,7 +922,6 @@ fn skill_option(value: &Value) -> Option<SkillOption> {
     } else {
         None
     };
-    let installed = skill.get("installed") == Some(&Value::Bool(true));
     Some(SkillOption {
         display_name: skill
             .get("name")
@@ -928,9 +931,8 @@ fn skill_option(value: &Value) -> Option<SkillOption> {
             .get("description")
             .and_then(value_text)
             .unwrap_or_default(),
-        selectable: installed && unavailable_reason.is_none(),
+        selectable: unavailable_reason.is_none(),
         key,
-        installed,
         unavailable_reason,
         missing_requirements,
     })
@@ -1276,12 +1278,61 @@ fn tool_group(value: &Value) -> Option<ToolGroup> {
 fn unknown_tool_keys(allow: &[String], deny: &[String], known: &BTreeSet<String>) -> Vec<String> {
     allow
         .iter()
-        .chain(deny)
         .filter(|key| !known.contains(*key))
+        .chain(
+            deny.iter()
+                .filter(|key| !known.contains(*key) && !is_agent_facing_internal_tool_deny(key)),
+        )
         .cloned()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn enforce_agent_facing_internal_tool_deny(selection: ToolSelection) -> ToolSelection {
+    match selection {
+        ToolSelection::InheritDefaultTools => selection,
+        ToolSelection::Policy {
+            profile,
+            allow,
+            mut deny,
+        } => {
+            append_agent_facing_internal_tool_deny(&mut deny);
+            ToolSelection::Policy {
+                profile,
+                allow,
+                deny,
+            }
+        }
+    }
+}
+
+fn append_agent_facing_internal_tool_deny(deny: &mut Vec<String>) {
+    for tool in AGENT_FACING_INTERNAL_TOOL_DENY {
+        if !deny.iter().any(|existing| existing == tool) {
+            deny.push(tool.to_owned());
+        }
+    }
+}
+
+fn is_agent_facing_internal_tool_deny(value: &str) -> bool {
+    AGENT_FACING_INTERNAL_TOOL_DENY.contains(&value)
+}
+
+fn skill_catalog_request(agent_id: &str) -> Result<wire::RpcRequest, wire::WireError> {
+    wire::operations_request(
+        next_request_id("skills-status"),
+        SKILLS_STATUS_METHOD,
+        serde_json::json!({ "agentId": agent_id }),
+    )
+}
+
+fn tool_catalog_request(agent_id: &str) -> Result<wire::RpcRequest, wire::WireError> {
+    wire::operations_request(
+        next_request_id("tools-catalog"),
+        TOOLS_CATALOG_METHOD,
+        serde_json::json!({ "agentId": agent_id, "includePlugins": true }),
+    )
 }
 
 enum Patch {
@@ -1317,22 +1368,23 @@ impl Patch {
         }
     }
 
-    fn apply(self, entry: &mut Map<String, Value>) {
+    fn apply(self, entry: &mut Map<String, Value>, default_model_fallbacks: &[String]) {
         match self {
             Self::Description(Some(value)) => {
                 entry.insert("description".into(), Value::String(value));
             }
             Self::Description(None) => {
-                entry.remove("description");
+                entry.insert("description".into(), Value::Null);
             }
             Self::Model(Some(model)) => {
+                let model = model_for_primary_patch(entry, model, default_model_fallbacks);
                 entry.insert("model".into(), model.into_value());
             }
             Self::Model(None) => {
-                entry.remove("model");
+                entry.insert("model".into(), Value::Null);
             }
             Self::Skills(values) if values.is_empty() => {
-                entry.remove("skills");
+                entry.insert("skills".into(), Value::Null);
             }
             Self::Skills(values) => {
                 entry.insert(
@@ -1341,7 +1393,7 @@ impl Patch {
                 );
             }
             Self::SkillConfiguration(None) => {
-                entry.remove("skills");
+                entry.insert("skills".into(), Value::Null);
             }
             Self::SkillConfiguration(Some(values)) => {
                 entry.insert(
@@ -1350,7 +1402,7 @@ impl Patch {
                 );
             }
             Self::ToolConfiguration(ToolSelection::InheritDefaultTools) => {
-                entry.remove("tools");
+                entry.insert("tools".into(), Value::Null);
             }
             Self::ToolConfiguration(ToolSelection::Policy {
                 profile,
@@ -1364,6 +1416,31 @@ impl Patch {
             }
         }
     }
+}
+
+fn model_for_primary_patch(
+    entry: &Map<String, Value>,
+    mut model: Model,
+    default_model_fallbacks: &[String],
+) -> Model {
+    if !model.fallbacks.is_empty() {
+        return model;
+    }
+    let fallbacks = entry
+        .get("model")
+        .and_then(display_model)
+        .map(|model| model.fallbacks)
+        .filter(|fallbacks| !fallbacks.is_empty())
+        .unwrap_or_else(|| default_model_fallbacks.to_vec());
+    if let Some(primary) = model.primary.as_deref() {
+        model.fallbacks = fallbacks
+            .into_iter()
+            .filter(|fallback| fallback != primary)
+            .collect();
+    } else {
+        model.fallbacks = fallbacks;
+    }
+    model
 }
 
 impl Model {
@@ -1385,6 +1462,7 @@ impl Model {
 
 struct Snapshot {
     document: Vec<u8>,
+    source_document: Vec<u8>,
     base_hash: Option<Vec<u8>>,
 }
 
@@ -1404,7 +1482,12 @@ impl Snapshot {
             .get("config")
             .filter(|value| value.is_object())
             .ok_or(())?;
+        let source_config = payload
+            .get("sourceConfig")
+            .filter(|value| value.is_object())
+            .ok_or(())?;
         let document = serde_json::to_vec(config).map_err(|_| ())?;
+        let source_document = serde_json::to_vec(source_config).map_err(|_| ())?;
         let base_hash = match payload.get("hash") {
             None | Some(Value::Null) => None,
             Some(Value::String(value)) if !value.is_empty() => Some(value.as_bytes().to_vec()),
@@ -1412,21 +1495,22 @@ impl Snapshot {
         };
         Ok(Self {
             document,
+            source_document,
             base_hash,
         })
     }
 
     fn display(&self) -> Result<Display, ReadFailure> {
         let document = self.document().map_err(|_| ReadFailure::Protocol)?;
-        let agents = document.get("agents").and_then(Value::as_object);
+        let agents = document.get("agents");
         let defaults = agents
+            .and_then(Value::as_object)
             .and_then(|agents| agents.get("defaults"))
             .and_then(Value::as_object)
             .map(display_defaults)
             .unwrap_or_default();
         let entries = agents
-            .and_then(|agents| agents.get("list"))
-            .and_then(Value::as_array)
+            .and_then(agent_entries)
             .into_iter()
             .flatten()
             .filter_map(display_agent)
@@ -1447,16 +1531,12 @@ impl Snapshot {
     }
 
     fn has_agent(&self, agent_id: &str) -> bool {
-        self.document()
-            .ok()
-            .and_then(|document| document.get("agents").cloned())
-            .and_then(|agents| agents.get("list").cloned())
-            .and_then(|list| list.as_array().cloned())
-            .is_some_and(|list| {
-                list.iter()
-                    .filter_map(Value::as_object)
-                    .any(|agent| agent.get("id").and_then(Value::as_str) == Some(agent_id))
-            })
+        self.document().ok().is_some_and(|document| {
+            document
+                .get("agents")
+                .and_then(agent_entries)
+                .is_some_and(|entries| entries.iter().any(|agent| agent.id() == Some(agent_id)))
+        })
     }
 
     fn skill_view_without_catalog(&self, agent_id: String) -> SkillConfigurationView {
@@ -1488,16 +1568,16 @@ impl Snapshot {
             .unwrap_or_default();
         let agent = document
             .get("agents")
-            .and_then(Value::as_object)
-            .and_then(|agents| agents.get("list"))
-            .and_then(Value::as_array)
-            .and_then(|agents| {
-                agents.iter().filter_map(Value::as_object).find(|agent| {
-                    agent.get("id").and_then(Value::as_str) == Some(agent_id.as_str())
-                })
-            })
+            .and_then(agent_entries)
+            .into_iter()
+            .flatten()
+            .find(|agent| agent.id() == Some(agent_id.as_str()))
+            .and_then(ConfigAgentEntry::fields)
             .ok_or(())?;
-        let explicit = agent.get("skills").map(display_skills);
+        let explicit = agent
+            .get("skills")
+            .filter(|skills| skills.is_array())
+            .map(display_skills);
         let inherited_default_skill_keys = if configured_defaults.is_empty() {
             catalog
                 .options()
@@ -1511,6 +1591,7 @@ impl Snapshot {
         let effective_skill_keys = explicit
             .clone()
             .unwrap_or_else(|| inherited_default_skill_keys.clone());
+        let options = catalog.options_for_allowlist_view(&effective_skill_keys);
         Ok(SkillConfigurationView {
             agent_id,
             configured: true,
@@ -1518,7 +1599,7 @@ impl Snapshot {
             explicit_skill_keys: explicit.unwrap_or_default(),
             inherited_default_skill_keys,
             effective_skill_keys,
-            options: catalog.options,
+            options,
             revision: self.revision(),
         })
     }
@@ -1541,14 +1622,11 @@ impl Snapshot {
         let document = self.document()?;
         let agent = document
             .get("agents")
-            .and_then(Value::as_object)
-            .and_then(|agents| agents.get("list"))
-            .and_then(Value::as_array)
-            .and_then(|agents| {
-                agents.iter().filter_map(Value::as_object).find(|agent| {
-                    agent.get("id").and_then(Value::as_str) == Some(agent_id.as_str())
-                })
-            });
+            .and_then(agent_entries)
+            .into_iter()
+            .flatten()
+            .find(|agent| agent.id() == Some(agent_id.as_str()))
+            .and_then(ConfigAgentEntry::fields);
         let Some(agent) = agent else {
             return Ok(self.tool_view_without_catalog(agent_id));
         };
@@ -1557,10 +1635,15 @@ impl Snapshot {
             .and_then(Value::as_object)
             .and_then(|tools| {
                 let profile = tools.get("profile").and_then(value_text)?;
+                let mut deny = tools
+                    .get("deny")
+                    .map(display_tool_policy_keys)
+                    .unwrap_or_default();
+                append_agent_facing_internal_tool_deny(&mut deny);
                 Some(ToolPolicy {
                     profile,
                     allow: tools.get("allow").map(display_skills).unwrap_or_default(),
-                    deny: tools.get("deny").map(display_skills).unwrap_or_default(),
+                    deny,
                 })
             });
         Ok(ToolConfigurationView {
@@ -1572,107 +1655,113 @@ impl Snapshot {
         })
     }
 
-    fn patch_existing(self, agent_id: String, patch: Patch) -> Result<ConfigSetRequest, ()> {
+    fn patch_existing(self, agent_id: String, patch: Patch) -> Result<ConfigPatchRequest, ()> {
         if !self.has_agent(&agent_id) {
             return Err(());
         }
         self.patch(agent_id, patch)
     }
 
-    fn patch(mut self, agent_id: String, patch: Patch) -> Result<ConfigSetRequest, ()> {
-        let mut document = self.document()?;
-        let root = document.as_object_mut().ok_or(())?;
-        let agents = root
-            .entry("agents")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
+    fn patch(mut self, agent_id: String, patch: Patch) -> Result<ConfigPatchRequest, ()> {
+        let document = self.source_document()?;
+        let agents = document
+            .get("agents")
+            .and_then(Value::as_object)
             .ok_or(())?;
-        let list = agents
-            .entry("list")
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or(())?;
-        let matching = list
-            .iter()
-            .enumerate()
-            .filter(|(_, value)| {
-                value
-                    .as_object()
-                    .and_then(|entry| entry.get("id"))
-                    .and_then(Value::as_str)
-                    == Some(agent_id.as_str())
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let mut entry = match matching.as_slice() {
-            [] => {
-                let mut entry = Map::new();
-                entry.insert("id".into(), Value::String(agent_id));
-                entry
-            }
-            [index] => list[*index].as_object().cloned().ok_or(())?,
-            _ => return Err(()),
+        let current_entry = agent_entry(agents, &agent_id).ok_or(())?;
+        let entry_path = match current_entry {
+            ConfigAgentEntry::List(_) => None,
+            ConfigAgentEntry::Entries { id, .. } => Some(format!("agents.entries.{id}")),
         };
-        patch.apply(&mut entry);
-        match matching.as_slice() {
-            [] => list.push(Value::Object(entry)),
-            [index] => list[*index] = Value::Object(entry),
-            _ => unreachable!("duplicate agent IDs were rejected"),
-        }
-        let raw = serde_json::to_vec(&document).map_err(|_| ())?;
-        Ok(ConfigSetRequest {
-            request_id: next_request_id("configuration-set"),
+        let agent_id = current_entry.id().ok_or(())?.to_owned();
+        let current_entry = Value::Object(current_entry.fields().ok_or(())?);
+        let mut expected_agents = agents.clone();
+        patch_agent_entry(&mut expected_agents, agent_id.clone(), patch)?;
+        let expected_entry = agent_entry(&expected_agents, &agent_id)
+            .and_then(ConfigAgentEntry::fields)
+            .map(Value::Object)
+            .ok_or(())?;
+        let mut entry_patch = merge_patch(&current_entry, &expected_entry);
+        let path = match entry_path.as_deref() {
+            Some(path) => path,
+            None => {
+                entry_patch
+                    .as_object_mut()
+                    .ok_or(())?
+                    .insert("id".into(), Value::String(agent_id.clone()));
+                "agents.list[]"
+            }
+        };
+        let replace_paths =
+            destructive_array_replace_paths_at(&current_entry, &expected_entry, path);
+        let raw = serde_json::to_vec(&agent_patch_document(
+            agent_id,
+            entry_patch,
+            entry_path.is_some(),
+        )?)
+        .map_err(|_| ())?;
+        Ok(ConfigPatchRequest {
+            request_id: next_request_id("configuration-patch"),
             raw,
             base_hash: self.base_hash.take(),
+            replace_paths,
         })
     }
 
     fn document(&self) -> Result<Value, ()> {
         serde_json::from_slice(&self.document).map_err(|_| ())
     }
+
+    fn source_document(&self) -> Result<Value, ()> {
+        serde_json::from_slice(&self.source_document).map_err(|_| ())
+    }
 }
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
         self.document.fill(0);
+        self.source_document.fill(0);
         if let Some(base_hash) = &mut self.base_hash {
             base_hash.fill(0);
         }
     }
 }
 
-struct ConfigSetRequest {
+struct ConfigPatchRequest {
     request_id: String,
     raw: Vec<u8>,
     base_hash: Option<Vec<u8>>,
+    replace_paths: Vec<String>,
 }
 
-impl ConfigSetRequest {
+impl ConfigPatchRequest {
     fn request_id(&self) -> &str {
         &self.request_id
     }
 
     fn encode(&self) -> Result<String, ()> {
-        let raw = std::str::from_utf8(&self.raw).map_err(|_| ())?;
-        let base_hash = self
-            .base_hash
-            .as_ref()
-            .map(|value| std::str::from_utf8(value).map_err(|_| ()))
-            .transpose()?;
-        serde_json::to_string(&serde_json::json!({
-            "type": "req",
-            "id": self.request_id,
-            "method": CONFIG_SET_METHOD,
-            "params": {
-                "raw": raw,
-                "baseHash": base_hash,
-            },
-        }))
+        if !request_parts_are_valid(
+            &self.request_id,
+            &self.raw,
+            self.base_hash.as_deref(),
+            &self.replace_paths,
+        ) {
+            return Err(());
+        }
+        encode_config_patch_request(
+            &self.request_id,
+            std::str::from_utf8(&self.raw).map_err(|_| ())?,
+            self.base_hash
+                .as_ref()
+                .map(|value| std::str::from_utf8(value).map_err(|_| ()))
+                .transpose()?,
+            &self.replace_paths,
+        )
         .map_err(|_| ())
     }
 }
 
-impl Drop for ConfigSetRequest {
+impl Drop for ConfigPatchRequest {
     fn drop(&mut self) {
         self.raw.fill(0);
         if let Some(base_hash) = &mut self.base_hash {
@@ -1681,15 +1770,207 @@ impl Drop for ConfigSetRequest {
     }
 }
 
-impl fmt::Debug for ConfigSetRequest {
+impl fmt::Debug for ConfigPatchRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ConfigSetRequest")
+            .debug_struct("ConfigPatchRequest")
             .field("request_id", &"[REDACTED]")
             .field("raw", &"[REDACTED]")
             .field("base_hash", &self.base_hash.as_ref().map(|_| "[REDACTED]"))
+            .field("replace_paths", &self.replace_paths.len())
             .finish()
     }
+}
+
+#[derive(Clone, Copy)]
+enum ConfigAgentEntry<'a> {
+    List(&'a Value),
+    Entries { id: &'a str, value: &'a Value },
+}
+
+impl ConfigAgentEntry<'_> {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::List(value) => value
+                .as_object()
+                .and_then(|entry| entry.get("id"))
+                .and_then(Value::as_str),
+            Self::Entries { id, .. } => Some(id),
+        }
+    }
+
+    fn fields(self) -> Option<Map<String, Value>> {
+        match self {
+            Self::List(value) => value.as_object().cloned(),
+            Self::Entries { id, value } => {
+                let mut fields = value.as_object().cloned()?;
+                fields.insert("id".into(), Value::String((*id).to_owned()));
+                Some(fields)
+            }
+        }
+    }
+}
+
+fn agent_entries(agents: &Value) -> Option<Vec<ConfigAgentEntry<'_>>> {
+    let agents = agents.as_object()?;
+    if let Some(entries) = agents.get("entries").and_then(Value::as_object) {
+        return Some(
+            entries
+                .iter()
+                .map(|(id, value)| ConfigAgentEntry::Entries { id, value })
+                .collect(),
+        );
+    }
+    Some(
+        agents
+            .get("list")?
+            .as_array()?
+            .iter()
+            .map(ConfigAgentEntry::List)
+            .collect(),
+    )
+}
+
+fn agent_entry<'a>(
+    agents: &'a Map<String, Value>,
+    agent_id: &'a str,
+) -> Option<ConfigAgentEntry<'a>> {
+    if let Some(entries) = agents.get("entries").and_then(Value::as_object) {
+        return entries
+            .get(agent_id)
+            .map(|value| ConfigAgentEntry::Entries {
+                id: agent_id,
+                value,
+            });
+    }
+    agents
+        .get("list")
+        .and_then(Value::as_array)
+        .and_then(|list| list_agent_entry(list, agent_id))
+}
+
+fn list_agent_entry<'a>(list: &'a [Value], agent_id: &str) -> Option<ConfigAgentEntry<'a>> {
+    if !list.iter().all(|value| {
+        value.as_object().is_some_and(|entry| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(valid_text)
+        })
+    }) {
+        return None;
+    }
+    let mut matching = list
+        .iter()
+        .filter(|value| {
+            value
+                .as_object()
+                .and_then(|entry| entry.get("id"))
+                .and_then(Value::as_str)
+                == Some(agent_id)
+        })
+        .map(ConfigAgentEntry::List);
+    let entry = matching.next()?;
+    matching.next().is_none().then_some(entry)
+}
+
+fn agent_patch_document(
+    agent_id: String,
+    entry_patch: Value,
+    entries_shape: bool,
+) -> Result<Value, ()> {
+    let mut root = Map::new();
+    let mut agents = Map::new();
+    if entries_shape {
+        let mut entries = Map::new();
+        entries.insert(agent_id, entry_patch);
+        agents.insert("entries".into(), Value::Object(entries));
+    } else {
+        agents.insert("list".into(), Value::Array(vec![entry_patch]));
+    }
+    root.insert("agents".into(), Value::Object(agents));
+    Ok(Value::Object(root))
+}
+
+fn patch_agent_entry(
+    agents: &mut Map<String, Value>,
+    agent_id: String,
+    patch: Patch,
+) -> Result<(), ()> {
+    let default_model_fallbacks = agents
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("model"))
+        .and_then(display_model)
+        .map(|model| model.fallbacks)
+        .unwrap_or_default();
+    if agents.get("entries").is_some() {
+        patch_agent_entries(agents, agent_id, patch, &default_model_fallbacks)
+    } else {
+        patch_agent_list(agents, agent_id, patch, &default_model_fallbacks)
+    }
+}
+
+fn patch_agent_entries(
+    agents: &mut Map<String, Value>,
+    agent_id: String,
+    patch: Patch,
+    default_model_fallbacks: &[String],
+) -> Result<(), ()> {
+    let entries = agents
+        .entry("entries")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or(())?;
+    let entry = entries
+        .entry(agent_id)
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or(())?;
+    patch.apply(entry, default_model_fallbacks);
+    entry.remove("id");
+    Ok(())
+}
+
+fn patch_agent_list(
+    agents: &mut Map<String, Value>,
+    agent_id: String,
+    patch: Patch,
+    default_model_fallbacks: &[String],
+) -> Result<(), ()> {
+    let list = agents
+        .entry("list")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or(())?;
+    let matching = list
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            value
+                .as_object()
+                .and_then(|entry| entry.get("id"))
+                .and_then(Value::as_str)
+                == Some(agent_id.as_str())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut entry = match matching.as_slice() {
+        [] => {
+            let mut entry = Map::new();
+            entry.insert("id".into(), Value::String(agent_id));
+            entry
+        }
+        [index] => list[*index].as_object().cloned().ok_or(())?,
+        _ => return Err(()),
+    };
+    patch.apply(&mut entry, default_model_fallbacks);
+    match matching.as_slice() {
+        [] => list.push(Value::Object(entry)),
+        [index] => list[*index] = Value::Object(entry),
+        _ => unreachable!("duplicate agent IDs were rejected"),
+    }
+    Ok(())
 }
 
 fn display_defaults(entry: &Map<String, Value>) -> DisplayDefaults {
@@ -1700,8 +1981,8 @@ fn display_defaults(entry: &Map<String, Value>) -> DisplayDefaults {
     }
 }
 
-fn display_agent(value: &Value) -> Option<DisplayAgent> {
-    let entry = value.as_object()?;
+fn display_agent(value: ConfigAgentEntry<'_>) -> Option<DisplayAgent> {
+    let entry = value.fields()?;
     let id = entry.get("id").and_then(value_text)?;
     Some(DisplayAgent {
         id,
@@ -1743,6 +2024,17 @@ fn display_skills(value: &Value) -> Vec<String> {
     skills
 }
 
+fn display_tool_policy_keys(value: &Value) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(value_text)
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
 fn value_text(value: &Value) -> Option<String> {
     value.as_str().and_then(normalize_text)
 }
@@ -1781,20 +2073,15 @@ fn valid_text(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4096 && !value.contains('\0')
 }
 
-fn decode_config_set(response: GatewayResponse) -> bool {
-    let GatewayResponse::Success {
-        payload: Some(Value::Object(payload)),
-        ..
-    } = response
-    else {
-        return false;
-    };
-    payload.get("ok") == Some(&Value::Bool(true))
-        && payload
-            .get("path")
-            .and_then(Value::as_str)
-            .is_some_and(valid_text)
-        && payload.get("config").is_some_and(Value::is_object)
+fn decode_config_patch(response: GatewayResponse) -> bool {
+    match response {
+        GatewayResponse::Success { payload: None, .. } => true,
+        GatewayResponse::Success {
+            payload: Some(Value::Object(payload)),
+            ..
+        } => payload.get("ok") == Some(&Value::Bool(true)),
+        GatewayResponse::Failure { .. } | GatewayResponse::Success { .. } => false,
+    }
 }
 
 fn map_read_failure(error: GatewayClientError) -> ReadFailure {
@@ -1820,7 +2107,13 @@ mod tests {
     use super::*;
     use crate::gateway::wire::decode_response;
 
-    fn response(payload: Value) -> GatewayResponse {
+    fn response(mut payload: Value) -> GatewayResponse {
+        if let Some(payload) = payload.as_object_mut()
+            && !payload.contains_key("sourceConfig")
+            && let Some(config) = payload.get("config").cloned()
+        {
+            payload.insert("sourceConfig".into(), config);
+        }
         decode_response(
             &json!({"type": "res", "id": "request", "ok": true, "payload": payload}).to_string(),
             "request",
@@ -1862,7 +2155,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_uses_base_hash_preserves_other_config_and_redacts_request() {
+    fn patch_uses_base_hash_local_raw_and_redacts_request() {
         let snapshot = Snapshot::decode(response(json!({
             "valid": true,
             "raw": null,
@@ -1875,12 +2168,279 @@ mod tests {
             .unwrap();
         let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
         let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(frame["method"], CONFIG_PATCH_METHOD);
         assert_eq!(frame["params"]["baseHash"], "base-hash-canary");
-        assert_eq!(raw["private"], "canary");
-        assert_eq!(raw["agents"]["list"][0]["other"], "keep");
+        assert_eq!(
+            raw,
+            json!({"agents":{"list":[{"id":"writer","description":"Docs"}]}})
+        );
+        assert!(frame["params"].get("replacePaths").is_none());
         let debug = format!("{request:?}");
         assert!(!debug.contains("base-hash-canary"));
         assert!(!debug.contains("canary"));
+        assert!(!debug.contains("Docs"));
+    }
+
+    #[test]
+    fn patch_uses_source_config_without_runtime_defaults() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "sourceConfig": {"agents":{"list":[{"id":"writer","model":"old"}]}},
+            "config": {"agents":{"defaults":{"model":{"primary":"default","fallbacks":["runtime-backup"]}},"list":[{"id":"writer","model":"old"}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch(
+                "writer".into(),
+                Patch::Model(Some(
+                    Model::try_new(Some("new".into()), Vec::new()).unwrap(),
+                )),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+
+        assert_eq!(
+            raw,
+            json!({"agents":{"list":[{"id":"writer","model":"new"}]}})
+        );
+    }
+
+    #[test]
+    fn config_patch_omits_absent_base_hash() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer"}]}},
+            "hash": null
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch("writer".into(), Patch::Description(Some("Docs".into())))
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+
+        assert!(
+            !frame["params"]
+                .as_object()
+                .unwrap()
+                .contains_key("baseHash")
+        );
+    }
+
+    #[test]
+    fn snapshot_reads_and_patches_entries_shape() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"entries":{"writer":{"description":"Docs","tools":{"profile":"coding","allow":["read"],"deny":["exec"]}}},"list":[{"id":"writer","description":"Docs","tools":{"profile":"coding","allow":["read"],"deny":["exec"]}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let display = snapshot.display().unwrap();
+        assert_eq!(display.agents()[0].id(), "writer");
+        assert_eq!(display.agents()[0].description(), Some("Docs"));
+        let view = snapshot
+            .tool_view("writer".into(), ToolCatalog::empty())
+            .unwrap();
+        assert_eq!(view.policy().unwrap().profile(), "coding");
+        assert_eq!(view.policy().unwrap().allow(), ["read"]);
+        let request = snapshot
+            .patch_existing(
+                "writer".into(),
+                Patch::ToolConfiguration(ToolSelection::Policy {
+                    profile: "minimal".into(),
+                    allow: vec!["session_status".into()],
+                    deny: Vec::new(),
+                }),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            raw,
+            json!({"agents":{"entries":{"writer":{"tools":{"profile":"minimal","allow":["session_status"],"deny":[]}}}}})
+        );
+        assert_eq!(
+            frame["params"]["replacePaths"],
+            json!([
+                "agents.entries.writer.tools.allow",
+                "agents.entries.writer.tools.deny"
+            ])
+        );
+    }
+
+    #[test]
+    fn model_patch_preserves_existing_agent_fallbacks() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","model":{"primary":"old","fallbacks":["backup","new"]}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch(
+                "writer".into(),
+                Patch::Model(Some(
+                    Model::try_new(Some("new".into()), Vec::new()).unwrap(),
+                )),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+
+        assert_eq!(raw["agents"]["list"][0]["id"], "writer");
+        assert_eq!(raw["agents"]["list"][0]["model"]["primary"], "new");
+        assert_eq!(
+            raw["agents"]["list"][0]["model"]["fallbacks"],
+            json!(["backup"])
+        );
+    }
+
+    #[test]
+    fn model_patch_inherits_default_fallbacks_when_agent_has_none() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"defaults":{"model":{"primary":"default","fallbacks":["backup","new",7]}},"list":[{"id":"writer","model":"old"}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch(
+                "writer".into(),
+                Patch::Model(Some(
+                    Model::try_new(Some("new".into()), Vec::new()).unwrap(),
+                )),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+
+        assert_eq!(raw["agents"]["list"][0]["model"]["primary"], "new");
+        assert_eq!(
+            raw["agents"]["list"][0]["model"]["fallbacks"],
+            json!(["backup"])
+        );
+    }
+
+    #[test]
+    fn model_patch_keeps_minimal_serialization_without_fallbacks() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","model":{"primary":"old"}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch(
+                "writer".into(),
+                Patch::Model(Some(
+                    Model::try_new(Some("new".into()), Vec::new()).unwrap(),
+                )),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+
+        assert_eq!(raw["agents"]["list"][0]["model"], "new");
+    }
+
+    #[test]
+    fn description_and_model_deletes_patch_nulls() {
+        let description_snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","description":"Docs","model":"old"}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let description_request = description_snapshot
+            .patch("writer".into(), Patch::Description(None))
+            .unwrap();
+        let description_frame: Value =
+            serde_json::from_str(&description_request.encode().unwrap()).unwrap();
+        let description_raw: Value =
+            serde_json::from_str(description_frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            description_raw,
+            json!({"agents":{"list":[{"id":"writer","description":null}]}})
+        );
+
+        let model_snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","description":"Docs","model":"old"}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let model_request = model_snapshot
+            .patch("writer".into(), Patch::Model(None))
+            .unwrap();
+        let model_frame: Value = serde_json::from_str(&model_request.encode().unwrap()).unwrap();
+        let model_raw: Value =
+            serde_json::from_str(model_frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            model_raw,
+            json!({"agents":{"list":[{"id":"writer","model":null}]}})
+        );
+    }
+
+    #[test]
+    fn skills_and_tools_array_reductions_emit_exact_replace_paths() {
+        let skills_snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","skills":["research","plan"]}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let skills_request = skills_snapshot
+            .patch("writer".into(), Patch::Skills(vec!["research".into()]))
+            .unwrap();
+        let skills_frame: Value = serde_json::from_str(&skills_request.encode().unwrap()).unwrap();
+        let skills_raw: Value =
+            serde_json::from_str(skills_frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            skills_raw,
+            json!({"agents":{"list":[{"id":"writer","skills":["research"]}]}})
+        );
+        assert_eq!(
+            skills_frame["params"]["replacePaths"],
+            json!(["agents.list[].skills"])
+        );
+
+        let tools_snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","tools":{"profile":"coding","allow":["read","write"],"deny":["exec"]}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let tools_request = tools_snapshot
+            .patch(
+                "writer".into(),
+                Patch::ToolConfiguration(ToolSelection::Policy {
+                    profile: "coding".into(),
+                    allow: vec!["read".into()],
+                    deny: Vec::new(),
+                }),
+            )
+            .unwrap();
+        let tools_frame: Value = serde_json::from_str(&tools_request.encode().unwrap()).unwrap();
+        let tools_raw: Value =
+            serde_json::from_str(tools_frame["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            tools_raw,
+            json!({"agents":{"list":[{"id":"writer","tools":{"allow":["read"],"deny":[]}}]}})
+        );
+        assert_eq!(
+            tools_frame["params"]["replacePaths"],
+            json!(["agents.list[].tools.allow", "agents.list[].tools.deny"])
+        );
     }
 
     #[test]
@@ -1896,8 +2456,13 @@ mod tests {
     }
 
     #[test]
-    fn skill_catalog_uses_the_dedicated_read_scope() {
+    fn skill_catalog_uses_agent_scoped_status_request() {
         assert_eq!(SKILL_STATUS_METHODS, [SKILLS_STATUS_METHOD]);
+        let request = skill_catalog_request("writer").unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+
+        assert_eq!(frame["method"], "skills.status");
+        assert_eq!(frame["params"], json!({ "agentId": "writer" }));
     }
 
     #[test]
@@ -1905,9 +2470,10 @@ mod tests {
         let catalog = SkillCatalog::decode(response(json!({
             "privateWorkspace": "must-not-project",
             "skills": [
-                {"skillKey": "research", "name": "Research", "description": "Researches", "installed": true},
-                {"skillKey": "disabled", "installed": true, "disabled": true},
-                {"skillKey": "missing", "installed": true, "missing": {"bins": ["git"]}}
+                {"skillKey": "research", "name": "Research", "description": "Researches", "blockedByAgentFilter": true},
+                {"skillKey": "disabled", "disabled": true},
+                {"skillKey": "runtime-blocked", "blockedByAllowlist": true},
+                {"skillKey": "missing", "missing": {"bins": ["git"]}}
             ]
         })))
         .unwrap();
@@ -1916,12 +2482,26 @@ mod tests {
             .iter()
             .find(|option| option.key() == "disabled")
             .unwrap();
+        let runtime_blocked = catalog
+            .options()
+            .iter()
+            .find(|option| option.key() == "runtime-blocked")
+            .unwrap();
         let missing = catalog
             .options()
             .iter()
             .find(|option| option.key() == "missing")
             .unwrap();
         assert!(!disabled.selectable());
+        assert!(!runtime_blocked.selectable());
+        assert!(
+            catalog
+                .options()
+                .iter()
+                .find(|option| option.key() == "research")
+                .unwrap()
+                .selectable()
+        );
         assert_eq!(missing.missing_requirements().unwrap().bins(), ["git"]);
         assert_eq!(
             catalog.canonicalize(vec![" Research ".into(), "missing".into()]),
@@ -1938,29 +2518,73 @@ mod tests {
         let snapshot = Snapshot::decode(response(json!({
             "valid": true,
             "raw": null,
-            "config": {"agents":{"defaults":{"skills":["research"]},"list":[{"id":"inherits"},{"id":"empty","skills":[]}]}},
+            "config": {"agents":{"defaults":{"skills":["research"]},"list":[{"id":"inherits"},{"id":"null","skills":null},{"id":"empty","skills":[]},{"id":"retains-disabled","skills":["disabled"]}]}},
             "hash": "base"
         })))
         .unwrap();
         let catalog = SkillCatalog {
-            options: vec![SkillOption {
-                key: "research".into(),
-                display_name: "Research".into(),
-                description: String::new(),
-                installed: true,
-                selectable: true,
-                unavailable_reason: None,
-                missing_requirements: None,
-            }],
+            options: vec![
+                SkillOption {
+                    key: "research".into(),
+                    display_name: "Research".into(),
+                    description: String::new(),
+                    selectable: true,
+                    unavailable_reason: None,
+                    missing_requirements: None,
+                },
+                SkillOption {
+                    key: "disabled".into(),
+                    display_name: "Disabled".into(),
+                    description: String::new(),
+                    selectable: false,
+                    unavailable_reason: Some(SkillUnavailableReason::GlobalSkillDisabled),
+                    missing_requirements: None,
+                },
+            ],
         };
         let inherits = snapshot
             .skill_view("inherits".into(), catalog.clone())
             .unwrap();
-        let empty = snapshot.skill_view("empty".into(), catalog).unwrap();
+        let null = snapshot.skill_view("null".into(), catalog.clone()).unwrap();
+        let empty = snapshot
+            .skill_view("empty".into(), catalog.clone())
+            .unwrap();
+        let retains_disabled = snapshot
+            .skill_view("retains-disabled".into(), catalog)
+            .unwrap();
         assert!(!inherits.has_explicit_skill_allowlist());
         assert_eq!(inherits.effective_skill_keys(), ["research"]);
+        assert_eq!(
+            inherits
+                .options()
+                .iter()
+                .map(|option| option.key())
+                .collect::<Vec<_>>(),
+            ["research"]
+        );
+        assert!(!null.has_explicit_skill_allowlist());
+        assert_eq!(null.effective_skill_keys(), ["research"]);
         assert!(empty.has_explicit_skill_allowlist());
         assert!(empty.effective_skill_keys().is_empty());
+        let mut retained_keys = retains_disabled
+            .options()
+            .iter()
+            .map(|option| option.key())
+            .collect::<Vec<_>>();
+        retained_keys.sort();
+        assert_eq!(retained_keys, ["disabled", "research"]);
+    }
+
+    #[test]
+    fn tools_catalog_request_asks_for_plugin_metadata() {
+        let request = tool_catalog_request("writer").unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+
+        assert_eq!(frame["method"], "tools.catalog");
+        assert_eq!(
+            frame["params"],
+            json!({ "agentId": "writer", "includePlugins": true })
+        );
     }
 
     #[test]
@@ -1976,6 +2600,110 @@ mod tests {
                 catalog.policy_keys(),
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn agent_tool_policy_appends_internal_denies_without_reordering_existing_denies() {
+        let selection = enforce_agent_facing_internal_tool_deny(ToolSelection::Policy {
+            profile: "coding".into(),
+            allow: vec!["read".into()],
+            deny: vec!["terminal".into(), "gateway".into()],
+        });
+
+        let ToolSelection::Policy { deny, .. } = selection else {
+            panic!("policy expected");
+        };
+        assert_eq!(
+            deny,
+            [
+                "terminal",
+                "gateway",
+                "nodes",
+                "create_goal",
+                "get_goal",
+                "update_goal",
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_tool_policy_keeps_internal_denies_idempotent_in_patch() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","tools":{"profile":"coding","allow":["read"],"deny":["terminal","gateway","nodes","create_goal","get_goal","update_goal"]}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let request = snapshot
+            .patch_existing(
+                "writer".into(),
+                Patch::ToolConfiguration(enforce_agent_facing_internal_tool_deny(
+                    ToolSelection::Policy {
+                        profile: "coding".into(),
+                        allow: vec!["read".into()],
+                        deny: vec![
+                            "terminal".into(),
+                            "gateway".into(),
+                            "nodes".into(),
+                            "create_goal".into(),
+                            "get_goal".into(),
+                            "update_goal".into(),
+                        ],
+                    },
+                )),
+            )
+            .unwrap();
+        let frame: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(frame["params"]["raw"].as_str().unwrap()).unwrap();
+
+        assert_eq!(raw, json!({"agents":{"list":[{"id":"writer"}]}}));
+        assert!(frame["params"].get("replacePaths").is_none());
+    }
+
+    #[test]
+    fn agent_tool_view_projects_internal_denies_without_mutating_catalog_validation() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {"agents":{"list":[{"id":"writer","tools":{"profile":"coding","allow":["read"],"deny":["terminal"]}}]}},
+            "hash": "base"
+        })))
+        .unwrap();
+        let view = snapshot
+            .tool_view("writer".into(), ToolCatalog::empty())
+            .unwrap();
+
+        assert_eq!(
+            view.policy().unwrap().deny(),
+            [
+                "terminal",
+                "gateway",
+                "nodes",
+                "create_goal",
+                "get_goal",
+                "update_goal",
+            ]
+        );
+        assert_eq!(
+            unknown_tool_keys(
+                &[],
+                &[
+                    "gateway".into(),
+                    "nodes".into(),
+                    "create_goal".into(),
+                    "get_goal".into(),
+                    "update_goal".into(),
+                    "definitely_unknown".into(),
+                ],
+                ToolCatalog::empty().policy_keys(),
+            ),
+            ["definitely_unknown"]
+        );
+        assert_eq!(
+            unknown_tool_keys(&["gateway".into()], &[], ToolCatalog::empty().policy_keys()),
+            ["gateway"]
         );
     }
 
@@ -2019,9 +2747,9 @@ mod tests {
     }
 
     #[test]
-    fn config_set_decode_failure_is_unknown_not_applied() {
-        assert!(!decode_config_set(response(
-            json!({"ok": true, "path": "x", "config": []})
-        )));
+    fn config_patch_decode_requires_patch_success() {
+        assert!(decode_config_patch(response(json!({"ok": true}))));
+        assert!(!decode_config_patch(response(json!({"ok": false}))));
+        assert!(!decode_config_patch(response(json!([]))));
     }
 }

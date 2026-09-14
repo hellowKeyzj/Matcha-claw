@@ -42,6 +42,20 @@ describe('cron session utils', () => {
     expect(cronSessionUtils.parseCronSessionKey('agent::cron:job-1')).toBeNull();
     expect(cronSessionUtils.isCronSessionKey('agent::cron:job-1')).toBe(false);
     expect(cronSessionUtils.parseCronSessionKey('agent:test:cron:job-1')).toEqual({ agentId: 'test', jobId: 'job-1' });
+    expect(cronSessionUtils.parseCronSessionKey('agent:test:cron:job-1:run:run-1')).toEqual({ agentId: 'test', jobId: 'job-1', runSessionId: 'run-1' });
+    expect(cronSessionUtils.getCronSessionBaseKey('agent:test:cron:job-1:run:run-1')).toBe('agent:test:cron:job-1');
+    expect(cronSessionUtils.sessionKeysAreEquivalent(
+      'agent:test:cron:job-1',
+      'agent:test:cron:job-1:run:run-1',
+    )).toBe(true);
+    expect(cronSessionUtils.sessionKeysAreEquivalent(
+      'agent:test:cron:job-1:run:run-1',
+      'agent:test:cron:job-2:run:run-1',
+    )).toBe(false);
+    expect(cronSessionUtils.sessionKeysAreEquivalent(
+      'agent:test:main',
+      'agent:test:main:run:run-1',
+    )).toBe(false);
   });
 });
 
@@ -243,7 +257,20 @@ describe('cron store', () => {
     expect(useCronStore.getState().jobs).toEqual([projectedJob('job-6')]);
   });
 
-  it('maps a skipped manual trigger to the frozen already-running callback result', async () => {
+  it('maps skipped manual trigger reasons to callback result', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome: 'skipped', reason: 'disabled' } });
+
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([projectedJob('job-skipped')]);
+
+    await expect(useCronStore.getState().triggerJob('job-skipped')).resolves.toEqual({
+      ran: false,
+      reason: 'disabled',
+    });
+    expect(useCronStore.getState()).toMatchObject({ mutating: false, mutatingByJobId: {} });
+  });
+
+  it('maps a skipped manual trigger without reason to the frozen already-running callback result', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome: 'skipped' } });
 
     const { useCronStore } = await import('@/stores/cron');
@@ -253,7 +280,6 @@ describe('cron store', () => {
       ran: false,
       reason: 'already-running',
     });
-    expect(useCronStore.getState()).toMatchObject({ mutating: false, mutatingByJobId: {} });
   });
 
   it.each([

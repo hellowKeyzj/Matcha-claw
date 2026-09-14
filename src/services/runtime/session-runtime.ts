@@ -180,9 +180,9 @@ export async function listSessions(
     key: buildSessionIdentityKey(session.sessionIdentity),
     agentId: session.agentId,
     sessionIdentity: session.sessionIdentity,
-    kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
+    kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'automation'
       ? session.kind
-      : 'named',
+      : 'session',
     preferred: session.preferred === true,
     ...(session.protocolId ? { protocolId: session.protocolId } : {}),
     ...(session.runtimeEndpointId ? { runtimeEndpointId: session.runtimeEndpointId } : {}),

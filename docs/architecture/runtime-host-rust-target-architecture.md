@@ -107,7 +107,10 @@ Host composition 负责 command admission 与 Host-level serialization；product
 - OpenClaw config/Gateway/channel/cron；
 - Matcha app-server/session/run/transcript/event；
 - Environment、Fleet、Organization durable facts；
-- owner-local operation/task/receipt。
+- owner-local operation/task/receipt；
+- sealed skill package 由 `runtime-host` host-level concrete owner/facade 管理；OpenClaw 与 matcha-agent 只消费已授权投影或 package artifact，不拥有该包事实。
+
+对 OpenClaw native 配置，`openclaw.json` 只记录 `skills.<key>.enabled` 开关；明文 skill package material 不进入该文件。加密 package material 可落在 `runtime-local` owner-local 目录；需要修改 OpenClaw 源码行为时通过 bundle patch 投递。
 
 不得建立 Host-wide ledger、global fact store 或 Host-wide generic operation owner。
 
@@ -148,7 +151,7 @@ job_compatibility
 
 以上名称只用于说明本轮已经删除的旧 public/internal 面；它们不是当前 authority、route、DTO、事件或待办。
 
-真实 operation/task/run 属于具体 owner；提交后是否等待真实业务结果由 owner 语义决定。Toolchain install 属于必须等待真实结果的调用：`hostUvInstallAll` 直接走 `platform.runtime` / `toolchain.installUv`，target=`platform-runtime`，Electron public adapter 调用 Rust private `openclaw.toolchain.install-uv` 并等待 native result。其他只需要提交成功即可继续的慢操作返回 owner-local operationId，并通过该 owner/facade 的 typed query/event 观察完成、失败、进度和 unknown。
+真实 operation/task/run 属于具体 owner；提交后是否等待真实业务结果由 owner 语义决定。Toolchain prepare 属于必须等待真实结果的调用：Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 调 Rust private `host.toolchain.prepare`，等待 `runtime-host/external/toolchain::NativeToolchain` native result 后只返回 public outcome。其他只需要提交成功即可继续的慢操作返回 owner-local operationId，并通过该 owner/facade 的 typed query/event 观察完成、失败、进度和 unknown。
 
 ### 3.5 Foundation execution 机制保留
 

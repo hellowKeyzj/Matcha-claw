@@ -12,6 +12,8 @@ use openclaw::{
     },
 };
 
+use crate::sealed_resource::{SealedAgentCatalogEntry, SealedAgentPackageExport};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeEndpoint {
     OpenClawLocal,
@@ -31,6 +33,12 @@ impl NativeEndpoint {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceInitialization {
+    MainAgentTemplate,
+    EmptyWorkspace,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
     List {
@@ -43,6 +51,7 @@ pub(crate) enum Command {
     Create {
         endpoint: NativeEndpoint,
         input: AgentCreate,
+        workspace_initialization: WorkspaceInitialization,
     },
     Update {
         endpoint: NativeEndpoint,
@@ -109,6 +118,14 @@ pub(crate) enum Command {
         selection: ToolSelection,
         trace_id: Option<String>,
     },
+    ExportPackage {
+        endpoint: NativeEndpoint,
+        agent_id: String,
+    },
+    InstallPackage {
+        endpoint: NativeEndpoint,
+        package_path: String,
+    },
 }
 
 impl Command {
@@ -129,7 +146,9 @@ impl Command {
             | Self::SkillConfiguration { endpoint, .. }
             | Self::SetSkillConfiguration { endpoint, .. }
             | Self::ToolConfiguration { endpoint, .. }
-            | Self::SetToolConfiguration { endpoint, .. } => *endpoint,
+            | Self::SetToolConfiguration { endpoint, .. }
+            | Self::ExportPackage { endpoint, .. }
+            | Self::InstallPackage { endpoint, .. } => *endpoint,
         }
     }
 }
@@ -137,6 +156,7 @@ impl Command {
 pub(crate) enum Outcome {
     Agents {
         default_id: String,
+        selection_required: bool,
         agents: Vec<AgentSummary>,
     },
     Waited(AgentWaitResult),
@@ -150,6 +170,8 @@ pub(crate) enum Outcome {
     ConfigurationApplied,
     SkillConfiguration(SkillConfigurationOutcome),
     ToolConfiguration(ToolConfigurationOutcome),
+    PackageExported(SealedAgentPackageExport),
+    PackageInstalled(SealedAgentCatalogEntry),
     Rejected,
     Unknown,
     Unsupported,
@@ -166,7 +188,15 @@ pub(crate) fn wait(result: AgentsWaitOutcome) -> Outcome {
 
 pub(crate) fn read(result: Result<AgentsList, AgentsReadFailure>) -> Outcome {
     match result {
-        Ok(AgentsList { default_id, agents }) => Outcome::Agents { default_id, agents },
+        Ok(AgentsList {
+            default_id,
+            selection_required,
+            agents,
+        }) => Outcome::Agents {
+            default_id,
+            selection_required,
+            agents,
+        },
         Err(AgentsReadFailure::Rejected) => Outcome::Rejected,
         Err(AgentsReadFailure::Unavailable | AgentsReadFailure::Protocol) => Outcome::Unavailable,
     }

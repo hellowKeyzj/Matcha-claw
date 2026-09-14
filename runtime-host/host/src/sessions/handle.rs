@@ -22,6 +22,7 @@ use super::{
     query::SessionQuery,
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
+    session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     state::{SessionIdentity, SessionView},
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
@@ -177,6 +178,14 @@ impl SessionHandle {
         command: SessionModelSelectionCommand,
     ) -> Result<SessionModelSelectionOutcome, ()> {
         self.request_command(|reply| SessionCommand::ModelSelection { command, reply })
+            .await
+    }
+
+    pub(crate) async fn session_permission(
+        &self,
+        command: SessionPermissionCommand,
+    ) -> Result<SessionPermissionOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Permission { command, reply })
             .await
     }
 

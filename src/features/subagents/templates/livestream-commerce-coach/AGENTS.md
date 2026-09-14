@@ -259,3 +259,9 @@ Organic recommendation traffic = f(watch time, engagement rate, conversion rate,
 - Session GMV month-over-month growth > 15%
 - Return/refund rate below category average
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -134,6 +134,24 @@ describe('chat message normalization', () => {
     expect(sanitizeCanonicalUserText(text)).toBe('在吗');
   });
 
+  it('strips OpenClaw ctx sender metadata from displayed external user messages', () => {
+    const text = [
+      'Sender: ⟦openclaw:ctx⟧',
+      '```json',
+      '{',
+      '  "label": "MatchaClaw Runtime Host (gateway-client)",',
+      '  "id": "gateway-client",',
+      '  "name": "MatchaClaw Runtime Host",',
+      '  "username": "MatchaClaw Runtime Host"',
+      '}',
+      '```',
+      '',
+      '[Fri 2026-08-21 16:28 GMT+8] 你好',
+    ].join('\n');
+
+    expect(sanitizeCanonicalUserText(text)).toBe('你好');
+  });
+
   it('does not strip normal user text that mentions System', () => {
     const text = 'System: 这是我要发给模型看的普通文本，不是渠道消息信封。';
 
@@ -187,6 +205,21 @@ describe('chat message normalization', () => {
     expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(false);
   });
 
+  it('treats OpenClaw gateway restart recovery prompts as internal display messages', () => {
+    const text = '[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response. Treat a tool result marked interrupted or missing as having an unknown outcome. If a tool failed, say so; never claim completion or success.';
+    const message = {
+      role: 'user',
+      content: [{
+        type: 'text',
+        text,
+      }],
+    };
+
+    expect(sanitizeCanonicalUserText(text)).toBe('');
+    expect(isInternalRuntimeDisplayMessage(message)).toBe(true);
+    expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(false);
+  });
+
   it('filters assistant NO_REPLY but keeps user NO_REPLY', () => {
     const assistant = {
       role: 'assistant',
@@ -226,9 +259,28 @@ describe('chat message normalization', () => {
       'HEARTBEAT_OK',
     ].join('\n'))).toBe([
       'Real reply',
+      '',
       'Inline  done',
       'Bare  path',
       'More detail',
+    ].join('\n'));
+  });
+
+  it('preserves assistant markdown block boundaries while trimming edges', () => {
+    expect(sanitizeAssistantDisplayText([
+      '',
+      '| Column | Value |',
+      '| --- | --- |',
+      '| A | B |',
+      '',
+      'Normal paragraph.',
+      '',
+    ].join('\n'))).toBe([
+      '| Column | Value |',
+      '| --- | --- |',
+      '| A | B |',
+      '',
+      'Normal paragraph.',
     ].join('\n'));
   });
 

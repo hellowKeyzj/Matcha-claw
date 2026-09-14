@@ -1,5 +1,5 @@
-import { memo, useMemo, type CSSProperties } from 'react';
-import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, PanelRightClose, RefreshCw, Settings2 } from 'lucide-react';
+import { memo, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
+import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, PanelRightClose, RefreshCw, SquareActivity } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -10,9 +10,12 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useChatStore } from '@/stores/chat';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
-import type { ChatSidePanelTab } from '../useChatSidePanelController';
-import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
-import { getOrBuildMarkdownBody } from '../md-pipeline';
+import {
+  getChatRuntimeSurfaceSnapshot,
+  subscribeChatRuntimeSurface,
+  type ChatSidePanelTab,
+} from '../useChatSidePanelController';
+import { ChatRuntimeSurfacePanel } from './ChatRuntimeSurfacePanel';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
 import { invokeIpc } from '@/lib/api-client';
 import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview/FilePreviewBody';
@@ -40,21 +43,6 @@ interface ChatSidePanelProps {
   onRefreshTaskInbox: () => Promise<void>;
   onClearTaskInboxError: () => void;
   derivedPlanStatus: DerivedPlanStatus;
-  skillConfigLabel: string;
-  skillConfigTitle: string;
-  skillOptions: AgentSkillOption[];
-  skillsLoading: boolean;
-  selectedSkillIds: string[];
-  onToggleSkill: (skillId: string, checked: boolean) => void;
-  skillPreview: {
-    skillId: string;
-    skillName: string;
-    markdown: string | null;
-    loading: boolean;
-    error: string | null;
-    filePath?: string;
-  } | null;
-  onClearSkillPreview: () => void;
   artifactGroups: Array<{
     graphItemKey: string;
     anchorItemKey?: string;
@@ -126,14 +114,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onRefreshTaskInbox,
   onClearTaskInboxError,
   derivedPlanStatus,
-  skillConfigLabel,
-  skillConfigTitle,
-  skillOptions,
-  skillsLoading,
-  selectedSkillIds,
-  onToggleSkill,
-  skillPreview,
-  onClearSkillPreview,
   artifactGroups,
   artifactFocusedGroupKey,
   artifactFocusedGroupFiles,
@@ -156,19 +136,15 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const openTaskSession = useChatStore((state) => state.openTaskSession);
+  const runtimeSurface = useSyncExternalStore(
+    subscribeChatRuntimeSurface,
+    getChatRuntimeSurfaceSnapshot,
+    getChatRuntimeSurfaceSnapshot,
+  );
   const loading = taskInboxLoading;
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
-  const previewHtml = useMemo(() => {
-    if (!skillPreview?.markdown) {
-      return null;
-    }
-    return getOrBuildMarkdownBody(
-      `chat-skill-preview:${skillPreview.skillId}:${skillPreview.filePath ?? ''}:${skillPreview.markdown}`,
-      { markdown: skillPreview.markdown },
-    ).fullHtml;
-  }, [skillPreview]);
   const artifactFiles = useMemo(() => artifactFocusedGroupFiles ?? [], [artifactFocusedGroupFiles]);
   const artifactFocusedGeneratedIndex = useMemo(() => (
     artifactFocusedFile
@@ -332,7 +308,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                             +{file.lineStats.added} / -{file.lineStats.removed}
                           </div>
                           <div className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground/75">
-                            {file.action === 'created' ? t('artifacts.created') : t('artifacts.modified')}
+                            {file.action === 'created' ? t('artifacts.created') : file.action === 'deleted' ? t('artifacts.deleted') : t('artifacts.modified')}
                           </div>
                         </div>
                       </div>
@@ -487,19 +463,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 {!compactTopTabs ? <span className="truncate">{t('taskInbox.shortTitle')}</span> : null}
               </TabsTrigger>
               <TabsTrigger
-                value="skills"
-                data-testid="chat-side-panel-tab-skills"
-                title={skillConfigLabel}
-                aria-label={skillConfigLabel}
-                className={cn(
-                  `h-8 ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME}`,
-                  compactTopTabs ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2.5',
-                )}
-              >
-                <Settings2 className="h-3.5 w-3.5" />
-                {!compactTopTabs ? <span className="truncate">{t('toolbar.skillShortLabel')}</span> : null}
-              </TabsTrigger>
-              <TabsTrigger
                 value="artifacts"
                 data-testid="chat-side-panel-tab-artifacts"
                 title={t('artifacts.title')}
@@ -511,6 +474,19 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               >
                 <FileCode2 className="h-3.5 w-3.5" />
                 {!compactTopTabs ? <span className="truncate">{t('artifacts.sectionLabel')}</span> : null}
+              </TabsTrigger>
+              <TabsTrigger
+                value="runtime"
+                data-testid="chat-side-panel-tab-runtime"
+                title="运行面"
+                aria-label="运行面"
+                className={cn(
+                  `h-8 ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME}`,
+                  compactTopTabs ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2.5',
+                )}
+              >
+                <SquareActivity className="h-3.5 w-3.5" />
+                {!compactTopTabs ? <span className="truncate">运行面</span> : null}
               </TabsTrigger>
             </TabsList>
             <Button
@@ -625,56 +601,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
           </div>
         </TabsContent>
 
-        <TabsContent value="skills" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
-          {skillPreview ? (
-            <div data-testid="chat-skill-preview-panel" className="flex min-h-0 flex-1 flex-col">
-              <div className={cn('border-b border-border/40', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 rounded-md"
-                    onClick={onClearSkillPreview}
-                    aria-label={t('common:actions.back')}
-                    title={t('common:actions.back')}
-                  >
-                    <ArrowLeft className="h-4 w-4" />
-                  </Button>
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-foreground">{skillPreview.skillName}</p>
-                    <p className="text-xs text-muted-foreground">{t('skillPreviewTitle')}</p>
-                  </div>
-                </div>
-              </div>
-              <div className={cn('min-h-0 flex-1 overflow-y-auto', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
-                {skillPreview.loading ? (
-                  <p className="text-sm text-muted-foreground">{t('skillPreviewLoading')}</p>
-                ) : null}
-                {!skillPreview.loading && skillPreview.error ? (
-                  <div className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
-                    {skillPreview.error}
-                  </div>
-                ) : null}
-                {!skillPreview.loading && !skillPreview.error && previewHtml ? (
-                  <div
-                    className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:rounded-[18px] prose-pre:border prose-pre:border-border/45 prose-pre:bg-background/88 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/60 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/75 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
-                    dangerouslySetInnerHTML={{ __html: previewHtml }}
-                  />
-                ) : null}
-              </div>
-            </div>
-          ) : (
-            <AgentSkillConfigPanel
-              title={skillConfigTitle}
-              skillOptions={skillOptions}
-              skillsLoading={skillsLoading}
-              selectedSkillIds={selectedSkillIds}
-              onToggleSkill={onToggleSkill}
-            />
-          )}
-        </TabsContent>
-
         <TabsContent value="artifacts" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
           <div className="border-b border-border/40 px-3 py-2">
             <div className="grid grid-cols-3 gap-1 bg-transparent p-0">
@@ -787,6 +713,14 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               </div>
             </div>
           )}
+        </TabsContent>
+
+        <TabsContent value="runtime" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
+          <div className={cn('border-b border-border/40', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
+            <p className="text-sm font-medium text-foreground">运行面</p>
+            <p className="mt-1 text-xs text-muted-foreground">Browser Tab / MCP App 预览</p>
+          </div>
+          <ChatRuntimeSurfacePanel surface={runtimeSurface} />
         </TabsContent>
       </Tabs>
     </aside>

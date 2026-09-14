@@ -15,8 +15,8 @@ use tokio::{
 use crate::{facade::TaskManagerHandle, transport::authorization::CapabilityDecisionVerifier};
 
 use super::{
-    CREATE_PATH, DecodeError, Delivery, GET_PATH, LIST_PATH, OUTPUT_PATH, STOP_PATH,
-    TODOS_GET_PATH, TODOS_WRITE_PATH, TaskRequest, UPDATE_PATH,
+    CREATE_PATH, DecodeError, Delivery, GET_PATH, LIST_PATH, TODOS_GET_PATH, TODOS_WRITE_PATH,
+    TaskRequest, UPDATE_PATH,
 };
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
@@ -126,14 +126,7 @@ fn accepts_route(method: &str, path: &str) -> bool {
     method == "POST"
         && matches!(
             path,
-            LIST_PATH
-                | GET_PATH
-                | CREATE_PATH
-                | UPDATE_PATH
-                | TODOS_GET_PATH
-                | TODOS_WRITE_PATH
-                | OUTPUT_PATH
-                | STOP_PATH
+            LIST_PATH | GET_PATH | CREATE_PATH | UPDATE_PATH | TODOS_GET_PATH | TODOS_WRITE_PATH
         )
 }
 
@@ -308,8 +301,6 @@ mod tests {
             UPDATE_PATH,
             TODOS_GET_PATH,
             TODOS_WRITE_PATH,
-            OUTPUT_PATH,
-            STOP_PATH,
         ] {
             assert!(accepts_route("POST", path));
         }

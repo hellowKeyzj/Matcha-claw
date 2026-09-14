@@ -16,8 +16,10 @@ import {
   type PaymentOrder,
   type PaymentOrderResult,
 } from '@/lib/billing';
-import type { PlatformQuota, SubscriptionProgress, SubscriptionQuotaProgress, SubscriptionSummary } from '@/lib/subscription';
+import type { CloudUser } from '@/lib/account';
+import type { SubscriptionProgress, SubscriptionQuotaProgress, SubscriptionSummary } from '@/lib/subscription';
 import { cn } from '@/lib/utils';
+import { useAccountStore } from '@/stores/account';
 import { useSubscriptionStore } from '@/stores/subscription';
 import { useTranslation } from 'react-i18next';
 
@@ -55,18 +57,21 @@ type PlanTab = Readonly<{
 }>;
 
 type QuotaPeriod = 'daily' | 'weekly' | 'monthly';
+type QuotaLimitKind = 'amount' | 'unlimited';
 
 type QuotaDisplayRow = Readonly<{
   id: string;
   label: string;
   used: number;
   limit: number | null;
+  limitKind: QuotaLimitKind;
   remaining?: number | null;
-  percentage: number;
+  percentage: number | null;
   resetsAt?: string | null;
 }>;
 
 type SubscriptionSummaryItem = SubscriptionSummary['subscriptions'][number];
+type BalanceDisplayRow = Readonly<{ id: string; label: string; value: number }>;
 
 const POLL_INTERVAL_MS = 3000;
 const ALL_PLANS_TAB = 'all';
@@ -218,14 +223,22 @@ function subscriptionStatusVariant(status: string): BadgeProps['variant'] {
   return 'secondary';
 }
 
-function quotaPercent(used: number, limit: number | null): number {
-  if (limit === null) return 100;
+function isUsableSubscriptionStatus(status: string | undefined): boolean {
+  return status === 'active' || status === 'trialing';
+}
+
+function quotaPercent(used: number, limit: number | null): number | null {
+  if (limit === null) return null;
   if (limit <= 0) return 0;
   return Math.min(100, Math.round((used / limit) * 100));
 }
 
 function formatQuotaValue(value: number | null, t: Translate, locale: string): string {
   if (value === null) return t('subscriptionDialog.quota.unlimited');
+  return formatBillingAmount(value, 'USD', locale);
+}
+
+function formatQuotaUsageValue(value: number, locale: string): string {
   return formatBillingAmount(value, 'USD', locale);
 }
 
@@ -256,14 +269,19 @@ function planTabs(plans: readonly BillingPlan[], t: Translate): PlanTab[] {
   return tabs;
 }
 
+function quotaLimitKind(limit: number | null, nullKind: QuotaLimitKind): QuotaLimitKind {
+  return limit === null ? nullKind : 'amount';
+}
+
 function quotaRowFromProgress(id: string, label: string, quota: SubscriptionQuotaProgress): QuotaDisplayRow {
   return {
     id,
     label,
     used: quota.used,
     limit: quota.limit,
+    limitKind: quotaLimitKind(quota.limit, 'unlimited'),
     remaining: quota.remaining,
-    percentage: quota.percentage,
+    percentage: quota.limit === null ? null : quota.percentage,
     resetsAt: quota.resetsAt,
   };
 }
@@ -282,31 +300,45 @@ function quotaRowsFromSummary(subscription: SubscriptionSummaryItem | null, t: T
   if (subscription.dailyUsedUsd !== undefined || subscription.dailyLimitUsd !== undefined) {
     const used = subscription.dailyUsedUsd ?? 0;
     const limit = subscription.dailyLimitUsd ?? null;
-    rows.push({ id: `${subscription.id}:daily`, label: t('subscriptionDialog.quota.daily'), used, limit, percentage: quotaPercent(used, limit) });
+    rows.push({ id: `${subscription.id}:daily`, label: t('subscriptionDialog.quota.daily'), used, limit, limitKind: quotaLimitKind(limit, 'unlimited'), percentage: quotaPercent(used, limit) });
   }
   if (subscription.weeklyUsedUsd !== undefined || subscription.weeklyLimitUsd !== undefined) {
     const used = subscription.weeklyUsedUsd ?? 0;
     const limit = subscription.weeklyLimitUsd ?? null;
-    rows.push({ id: `${subscription.id}:weekly`, label: t('subscriptionDialog.quota.weekly'), used, limit, percentage: quotaPercent(used, limit) });
+    rows.push({ id: `${subscription.id}:weekly`, label: t('subscriptionDialog.quota.weekly'), used, limit, limitKind: quotaLimitKind(limit, 'unlimited'), percentage: quotaPercent(used, limit) });
   }
   if (subscription.monthlyUsedUsd !== undefined || subscription.monthlyLimitUsd !== undefined) {
     const used = subscription.monthlyUsedUsd ?? 0;
     const limit = subscription.monthlyLimitUsd ?? null;
-    rows.push({ id: `${subscription.id}:monthly`, label: t('subscriptionDialog.quota.monthly'), used, limit, percentage: quotaPercent(used, limit) });
+    rows.push({ id: `${subscription.id}:monthly`, label: t('subscriptionDialog.quota.monthly'), used, limit, limitKind: quotaLimitKind(limit, 'unlimited'), percentage: quotaPercent(used, limit) });
   }
   return rows;
 }
 
-function platformQuotaRows(quotas: readonly PlatformQuota[] | null, t: Translate): QuotaDisplayRow[] {
-  if (!quotas) return [];
-  return quotas.slice(0, 3).map((quota) => ({
-    id: `platform:${quota.platform}:monthly`,
-    label: t('subscriptionDialog.quota.platformMonthly', { platform: quota.platform }),
-    used: quota.monthly.usedUsd,
-    limit: quota.monthly.limitUsd,
-    percentage: quotaPercent(quota.monthly.usedUsd, quota.monthly.limitUsd),
-    resetsAt: quota.monthly.resetsAt,
-  }));
+function balanceRows(user: CloudUser | null, t: Translate): BalanceDisplayRow[] {
+  if (!user) return [];
+  const frozenBalance = user.frozenBalance ?? 0;
+  return [
+    { id: 'available', label: t('subscriptionDialog.balance.available'), value: user.balance },
+    { id: 'frozen', label: t('subscriptionDialog.balance.frozen'), value: frozenBalance },
+    { id: 'total', label: t('subscriptionDialog.balance.total'), value: user.balance + frozenBalance },
+  ];
+}
+
+function primarySubscriptionQuota(rows: readonly QuotaDisplayRow[]): QuotaDisplayRow | null {
+  return rows.find((row) => row.id.endsWith(':monthly')) ?? rows[0] ?? null;
+}
+
+function quotaAmountLabel(quota: QuotaDisplayRow, locale: string, t: Translate): string {
+  return quota.limitKind === 'amount' && quota.limit !== null
+    ? t('subscriptionDialog.quota.usedOfLimit', {
+      used: formatQuotaUsageValue(quota.used, locale),
+      limit: formatQuotaUsageValue(quota.limit, locale),
+    })
+    : t('subscriptionDialog.quota.usedOfLimit', {
+      used: formatQuotaUsageValue(quota.used, locale),
+      limit: t('subscriptionDialog.quota.unlimited'),
+    });
 }
 
 function planQuotaRows(plan: BillingPlan | null, t: Translate): Array<Readonly<{ label: string; limit: number | null }>> {
@@ -353,9 +385,9 @@ function mergePaymentOrder(order: PaymentOrder, previous?: ActiveBillingOrder | 
 }
 
 export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanDialogProps) {
+  const accountUser = useAccountStore((state) => state.user);
   const subscriptionSummary = useSubscriptionStore((state) => state.summary);
   const subscriptionProgress = useSubscriptionStore((state) => state.progress);
-  const platformQuotas = useSubscriptionStore((state) => state.platformQuotas);
   const subscriptionStatus = useSubscriptionStore((state) => state.status);
   const subscriptionErrorMessage = useSubscriptionStore((state) => state.errorMessage);
   const refreshSubscriptions = useSubscriptionStore((state) => state.refreshAll);
@@ -404,7 +436,6 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
       : visibleSalePlans.filter((plan) => planTabKey(plan) === activePlanTab)
   ), [activePlanTab, visibleSalePlans]);
   const choosePlan = useCallback((planId: number) => setSelectedPlanId(planId), []);
-  const openCheckoutTab = useCallback(() => setActiveDialogTab('checkout'), []);
   const selectedMethod = useMemo(() => (
     availableMethods.find((method) => method.id === selectedMethodId) ?? null
   ), [availableMethods, selectedMethodId]);
@@ -412,25 +443,22 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
     visibleSalePlans.find((plan) => plan.id === selectedPlanId) ?? null
   ), [selectedPlanId, visibleSalePlans]);
   const selectedPlanQuotaRows = useMemo(() => planQuotaRows(selectedPlan, t), [selectedPlan, t]);
-  const currentSubscription = subscriptionSummary?.subscriptions.find((subscription) => subscription.status === 'active')
-    ?? subscriptionSummary?.subscriptions[0]
+  const currentSubscription = subscriptionSummary?.subscriptions.find((subscription) => isUsableSubscriptionStatus(subscription.status))
     ?? null;
   const currentProgress = useMemo(() => (
-    subscriptionProgress?.find((progress) => progress.subscriptionId === currentSubscription?.id)
-    ?? subscriptionProgress?.[0]
-    ?? null
-  ), [currentSubscription?.id, subscriptionProgress]);
-  const currentQuotaRows = useMemo(() => {
+    currentSubscription
+      ? subscriptionProgress?.find((progress) => progress.subscriptionId === currentSubscription.id) ?? null
+      : null
+  ), [currentSubscription, subscriptionProgress]);
+  const subscriptionQuotaRows = useMemo(() => {
     const progressRows = quotaRowsFromProgress(currentProgress, t);
     return progressRows.length > 0 ? progressRows : quotaRowsFromSummary(currentSubscription, t);
   }, [currentProgress, currentSubscription, t]);
-  const secondaryQuotaRows = useMemo(() => platformQuotaRows(platformQuotas, t), [platformQuotas, t]);
-  const subscriptionDisplayStatus = currentSubscription?.status ?? (subscriptionSummary?.activeCount ? 'active' : 'none');
+  const balanceDisplayRows = useMemo(() => balanceRows(accountUser, t), [accountUser, t]);
+  const subscriptionDisplayStatus = currentSubscription?.status ?? 'none';
   const subscriptionPlanName = currentProgress?.groupName
     ?? currentSubscription?.groupName
-    ?? (subscriptionSummary?.activeCount
-      ? t('subscriptionDialog.current.subscriptionCount', { count: subscriptionSummary.activeCount })
-      : t('subscriptionDialog.current.noSubscription'));
+    ?? t('subscriptionDialog.current.noSubscription');
 
   const hasPendingOrder = currentOrder ? shouldPollOrderStatus(currentOrder.status) : false;
   const canCreateOrder = !!selectedPlan
@@ -654,10 +682,10 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
 
             <TabsContent value="current" className="mt-0 min-h-0 flex-1 overflow-y-auto p-6">
               <CurrentSubscriptionPanel
-                currentQuotaRows={currentQuotaRows}
+                balanceRows={balanceDisplayRows}
+                currentQuotaRows={subscriptionQuotaRows}
                 currentSubscription={currentSubscription}
                 currentProgress={currentProgress}
-                secondaryQuotaRows={secondaryQuotaRows}
                 subscriptionDisplayStatus={subscriptionDisplayStatus}
                 subscriptionErrorMessage={subscriptionErrorMessage}
                 subscriptionPlanName={subscriptionPlanName}
@@ -665,7 +693,6 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
                 locale={i18n.language}
                 t={t}
                 onRefresh={refreshSubscriptions}
-                onChoosePlan={openCheckoutTab}
               />
             </TabsContent>
 
@@ -756,10 +783,10 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
 }
 
 function CurrentSubscriptionPanel({
+  balanceRows,
   currentQuotaRows,
   currentSubscription,
   currentProgress,
-  secondaryQuotaRows,
   subscriptionDisplayStatus,
   subscriptionErrorMessage,
   subscriptionPlanName,
@@ -767,12 +794,11 @@ function CurrentSubscriptionPanel({
   locale,
   t,
   onRefresh,
-  onChoosePlan,
 }: {
+  balanceRows: BalanceDisplayRow[];
   currentQuotaRows: QuotaDisplayRow[];
   currentSubscription: SubscriptionSummaryItem | null;
   currentProgress: SubscriptionProgress | null;
-  secondaryQuotaRows: QuotaDisplayRow[];
   subscriptionDisplayStatus: string;
   subscriptionErrorMessage: string | null;
   subscriptionPlanName: string;
@@ -780,95 +806,138 @@ function CurrentSubscriptionPanel({
   locale: string;
   t: Translate;
   onRefresh: () => Promise<void>;
-  onChoosePlan: () => void;
 }) {
+  const hasSubscription = currentSubscription !== null;
+  const primaryQuota = primarySubscriptionQuota(currentQuotaRows);
+  const availableBalance = balanceRows.find((row) => row.id === 'available') ?? balanceRows[0] ?? null;
+  const subscriptionExpiresAt = currentProgress?.expiresAt ?? currentSubscription?.expiresAt ?? null;
+
   return (
-    <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <section className="flex min-h-52 flex-col rounded-[1.35rem] border border-border/70 bg-card p-5">
+    <section className="rounded-[1.35rem] border border-border/70 bg-card p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm text-muted-foreground">{t('subscriptionDialog.tabs.current')}</p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-xl font-semibold tracking-[-0.03em] text-foreground">
+              {hasSubscription ? subscriptionPlanName : t('subscriptionDialog.current.freePlan')}
+            </h3>
             <Badge variant={subscriptionStatusVariant(subscriptionDisplayStatus)}>
               {subscriptionStatusLabel(subscriptionDisplayStatus, t)}
             </Badge>
-            <span className="text-lg font-semibold tracking-[-0.02em] text-foreground">{subscriptionPlanName}</span>
           </div>
-          {currentSubscription?.expiresAt || currentProgress?.expiresAt ? (
-            <p className="mt-3 text-sm text-muted-foreground">
-              {t('subscriptionDialog.current.expiresAt', { date: formatDate(currentProgress?.expiresAt ?? currentSubscription?.expiresAt, locale) })}
-            </p>
-          ) : null}
+          {hasSubscription ? (
+            subscriptionExpiresAt ? (
+              <p className="mt-2 text-sm text-muted-foreground">
+                {t('subscriptionDialog.current.expiresAt', { date: formatDate(subscriptionExpiresAt, locale) })}
+              </p>
+            ) : null
+          ) : (
+            <p className="mt-2 text-sm text-muted-foreground">{t('subscriptionDialog.current.noActiveSubscription')}</p>
+          )}
         </div>
+        <Button variant="outline" size="sm" onClick={() => { void onRefresh(); }} disabled={subscriptionStatus === 'loading'}>
+          {subscriptionStatus === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          {t('actions.refresh')}
+        </Button>
+      </div>
 
-        {subscriptionErrorMessage ? (
-          <p className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {subscriptionErrorMessage}
-          </p>
-        ) : null}
-
-        <div className="mt-auto flex flex-wrap gap-2 pt-5">
-          <Button variant="outline" size="sm" onClick={() => { void onRefresh(); }} disabled={subscriptionStatus === 'loading'}>
-            {subscriptionStatus === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {t('actions.refresh')}
-          </Button>
-          <Button size="sm" onClick={onChoosePlan}>{t('subscriptionDialog.tabs.checkout')}</Button>
-        </div>
-      </section>
-
-      <section className="rounded-[1.35rem] border border-border/70 bg-card p-5">
-        <h3 className="mb-4 text-base font-semibold tracking-[-0.02em]">{t('subscriptionDialog.current.quotaTitle')}</h3>
-
-        {currentQuotaRows.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]">
-            {currentQuotaRows.map((quota) => (
-              <QuotaCard key={quota.id} quota={quota} locale={locale} t={t} />
-            ))}
-          </div>
-        ) : (
-          <div className="flex min-h-36 items-center justify-center rounded-xl border border-dashed border-border/80 bg-background/70 px-4 text-center text-sm text-muted-foreground">
-            {t('subscriptionDialog.current.emptyQuota')}
-          </div>
-        )}
-      </section>
-
-      {secondaryQuotaRows.length > 0 ? (
-        <section className="rounded-[1.35rem] border border-border/70 bg-card p-5 lg:col-span-2">
-          <h3 className="mb-4 text-base font-semibold tracking-[-0.02em]">{t('subscriptionDialog.current.platformQuotaTitle')}</h3>
-          <div className="grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]">
-            {secondaryQuotaRows.map((quota) => (
-              <QuotaCard key={quota.id} quota={quota} locale={locale} t={t} />
-            ))}
-          </div>
-        </section>
+      {subscriptionErrorMessage ? (
+        <p className="mt-4 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {subscriptionErrorMessage}
+        </p>
       ) : null}
-    </div>
+
+      {hasSubscription ? (
+        <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <div className="rounded-2xl border border-border/70 bg-background/70 p-5">
+            {primaryQuota ? (
+              <>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium text-muted-foreground">{primaryQuota.label}</p>
+                    <p className="mt-3 text-3xl font-semibold tracking-[-0.05em] text-foreground">
+                      {quotaAmountLabel(primaryQuota, locale, t)}
+                    </p>
+                  </div>
+                  {primaryQuota.percentage === null ? null : (
+                    <span className="rounded-full border border-border/70 bg-card px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                      {primaryQuota.percentage}%
+                    </span>
+                  )}
+                </div>
+                {primaryQuota.percentage === null ? null : <Progress className="mt-5 h-2" value={primaryQuota.percentage} />}
+                {primaryQuota.remaining !== undefined ? (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    {t('subscriptionDialog.quota.remaining', { amount: primaryQuota.remaining === null ? '-' : formatQuotaUsageValue(primaryQuota.remaining, locale) })}
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <div className="flex min-h-36 items-center justify-center text-center text-sm text-muted-foreground">
+                {t('subscriptionDialog.current.emptyQuota')}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
+            <p className="text-sm font-semibold text-foreground">{t('subscriptionDialog.current.quotaTitle')}</p>
+            {currentQuotaRows.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {currentQuotaRows.map((quota) => (
+                  <QuotaLine key={quota.id} quota={quota} locale={locale} t={t} />
+                ))}
+              </div>
+            ) : null}
+            {availableBalance ? (
+              <div className="mt-4 flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm">
+                <span className="text-muted-foreground">{t('subscriptionDialog.current.balanceTitle')}</span>
+                <span className="font-medium text-foreground">{formatBillingAmount(availableBalance.value, 'USD', locale)}</span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : balanceRows.length > 0 && availableBalance ? (
+        <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <div className="rounded-2xl border border-border/70 bg-background/70 p-5">
+            <p className="text-sm font-medium text-muted-foreground">{t('subscriptionDialog.current.balanceTitle')}</p>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.06em] text-foreground">
+              {formatBillingAmount(availableBalance.value, 'USD', locale)}
+            </p>
+          </div>
+          <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
+            <p className="text-sm font-semibold text-foreground">{t('subscriptionDialog.balance.details')}</p>
+            <div className="mt-3 space-y-2">
+              {balanceRows.map((row) => (
+                <BalanceLine key={row.id} row={row} locale={locale} />
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-6 flex min-h-36 items-center justify-center rounded-2xl border border-dashed border-border/80 bg-background/70 px-4 text-center text-sm text-muted-foreground">
+          {t('subscriptionDialog.current.emptyQuota')}
+        </div>
+      )}
+    </section>
   );
 }
 
-const QuotaCard = memo(function QuotaCard({ quota, locale, t }: { quota: QuotaDisplayRow; locale: string; t: Translate }) {
+const BalanceLine = memo(function BalanceLine({ row, locale }: { row: BalanceDisplayRow; locale: string }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-background/70 p-4">
-      <div className="flex items-center justify-between gap-2 text-sm">
-        <span className="font-medium text-foreground">{quota.label}</span>
-        <span className="text-muted-foreground">{quota.percentage}%</span>
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-sm">
+      <span className="text-muted-foreground">{row.label}</span>
+      <span className="font-medium text-foreground">{formatBillingAmount(row.value, 'USD', locale)}</span>
+    </div>
+  );
+});
+
+const QuotaLine = memo(function QuotaLine({ quota, locale, t }: { quota: QuotaDisplayRow; locale: string; t: Translate }) {
+  return (
+    <div className="rounded-xl border border-border/70 bg-card px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="text-muted-foreground">{quota.label}</span>
+        <span className="font-medium text-foreground">{quotaAmountLabel(quota, locale, t)}</span>
       </div>
-      <Progress className="mt-3 h-1.5" value={quota.percentage} />
-      <p className="mt-3 text-sm text-muted-foreground">
-        {t('subscriptionDialog.quota.usedOfLimit', {
-          used: formatQuotaValue(quota.used, t, locale),
-          limit: formatQuotaValue(quota.limit, t, locale),
-        })}
-      </p>
-      {quota.remaining !== undefined ? (
-        <p className="mt-1 text-sm text-muted-foreground">
-          {t('subscriptionDialog.quota.remaining', { amount: formatQuotaValue(quota.remaining, t, locale) })}
-        </p>
-      ) : null}
-      {quota.resetsAt ? (
-        <p className="mt-1 text-xs text-muted-foreground">
-          {t('subscriptionDialog.quota.resetsAt', { date: formatDate(quota.resetsAt, locale) })}
-        </p>
-      ) : null}
+      {quota.percentage === null ? null : <Progress className="mt-2 h-1.5" value={quota.percentage} />}
     </div>
   );
 });

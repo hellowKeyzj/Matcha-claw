@@ -369,6 +369,8 @@ fn host_input(root: &TestRoot) -> HostInput {
         },
         matcha_secret: Secret::new("test-matcha-secret".into()).expect("matcha secret"),
         open_claw: OpenClawInput {
+            team_run_mcp_executable: absolute_path("runtime-host-mcp"),
+            team_run_mcp_state_dir: absolute_path("runtime-host"),
             electron_image: absolute_path("MatchaClaw"),
             working_directory: absolute_path("runtime"),
             openclaw_dir: root.openclaw.openclaw_dir().to_owned(),
@@ -382,6 +384,8 @@ fn host_input(root: &TestRoot) -> HostInput {
             entry: root.openclaw.openclaw_dir().join("openclaw.mjs"),
             state_dir,
             port: 18_789,
+            sealed_endpoint: None,
+            sealed_token: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),

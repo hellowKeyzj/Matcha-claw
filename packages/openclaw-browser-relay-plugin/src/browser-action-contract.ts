@@ -37,6 +37,7 @@ export const browserRequestKinds = [
   'wait',
   'hover',
   'click',
+  'clickCoords',
   'press',
   'drag',
   'evaluate',
@@ -117,6 +118,17 @@ export type BrowserClickRequest = {
   doubleClick?: boolean
   button?: MouseButton
   modifiers?: string[]
+}
+
+export type BrowserClickCoordsRequest = {
+  kind: 'clickCoords'
+  targetId?: string
+  timeoutMs?: number
+  x?: number
+  y?: number
+  doubleClick?: boolean
+  button?: MouseButton
+  delayMs?: number
 }
 
 export type BrowserTypeRequest = {
@@ -230,6 +242,7 @@ export type BrowserScrollRequest = {
 
 export type BrowserActRequest =
   | BrowserClickRequest
+  | BrowserClickCoordsRequest
   | BrowserTypeRequest
   | BrowserPressRequest
   | BrowserHoverRequest

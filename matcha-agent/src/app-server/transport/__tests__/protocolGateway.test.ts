@@ -195,6 +195,61 @@ describe('ProtocolGateway', () => {
     expect(prompted).toEqual(['hello'])
   })
 
+  test('rejects host-scoped ids as native app-server session ids', async () => {
+    const calls: unknown[] = []
+    const gateway = new ProtocolGateway(
+      createTestPorts({
+        session: {
+          create: params => {
+            calls.push(params)
+            return {
+              sessionId: params.sessionId ?? 'session-1',
+              workspaceRoot: '/workspace',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              runtime: 'matcha-agent',
+              lastSeq: 0,
+              lastSnapshotVersion: 0,
+              workerState: { state: 'unloaded', reason: 'notStarted' },
+            }
+          },
+          prompt: params => {
+            calls.push(params)
+            return { runId: 'run-1' }
+          },
+        },
+      }),
+    )
+
+    for (const [method, params] of [
+      [
+        'session.create',
+        { cwd: '/workspace', sessionId: 'matcha-agent:matcha:session-1' },
+      ],
+      [
+        'session.prompt',
+        { sessionId: 'matcha-agent:matcha:session-1', prompt: 'hello' },
+      ],
+    ] as const) {
+      const response = parseResponse(
+        await gateway.handleTextMessage(
+          'client-1',
+          JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+        ),
+      )
+
+      expect(response).toMatchObject({
+        jsonrpc: '2.0',
+        id: method,
+        error: {
+          code: -32602,
+          message: 'sessionId must be a portable native session id',
+        },
+      })
+    }
+    expect(calls).toEqual([])
+  })
+
   test('preserves session.prompt payload through params parsing', async () => {
     const payload = {
       message: 'hello with media ref',

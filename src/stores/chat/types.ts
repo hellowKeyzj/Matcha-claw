@@ -26,6 +26,7 @@ export interface AttachedFileMeta {
   fileSize: number;
   preview: string | null;
   previewStatus?: 'unavailable';
+  attachmentStatus?: SessionRenderAttachedFile['attachmentStatus'];
   filePath?: string;
   gatewayUrl?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';
@@ -135,6 +136,28 @@ export interface TaskChatBridgeState {
   canSendRecoveryPrompt: boolean;
 }
 
+export interface ChatSessionImageGenerationRuntimeState {
+  active: boolean;
+  pendingTaskIds: ReadonlyArray<string>;
+}
+
+export interface ChatSessionRuntimeErrorDetail {
+  failoverReason: string | null;
+  providerRuntimeFailureKind: string | null;
+  providerErrorType: string | null;
+  providerErrorMessagePreview: string | null;
+  httpStatus: number | null;
+}
+
+export interface ChatSessionRuntimeNotice {
+  runId: string;
+  kind: 'guardian_reviewing' | 'guardian_approved' | 'guardian_denied' | 'guardian_warning' | 'guardian_strict_review_required';
+  command: string | null;
+  riskLevel: string | null;
+  rationale: string | null;
+  message: string | null;
+}
+
 export interface ChatSessionRuntimeState {
   activeRunId: string | null;
   runPhase: ChatRunPhase;
@@ -142,6 +165,9 @@ export interface ChatSessionRuntimeState {
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
   runtimeActivity: 'compacting' | null;
+  errorDetail: ChatSessionRuntimeErrorDetail | null;
+  runtimeNotice: ChatSessionRuntimeNotice | null;
+  imageGeneration?: ChatSessionImageGenerationRuntimeState;
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;
@@ -315,10 +341,12 @@ export interface ChatStoreBaseState extends ChatViewState {
 
 export interface ChatSendAttachment {
   stagedAttachmentId: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 }
 
 export type ChatSendRejectReason =
@@ -329,6 +357,7 @@ export type ChatSendRejectReason =
   | 'stopping'
   | 'missing-session'
   | 'missing-session-identity'
+  | 'automation-session'
   | 'error';
 
 export type ChatSendGate =
@@ -386,6 +415,8 @@ export interface ChatStoreActions {
   newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
   newSessionForScope: (scope: AgentScope) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
+  forgetAgentSessions: (agentId: string) => void;
+  reconcileAgentSessionTombstones: (agentIds: readonly string[]) => void;
   renameSession: (key: string, label: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;

@@ -6,6 +6,11 @@ use serde_json::Value;
 use super::{approval::ApprovalRecord, protocol_event::EventEnvelope};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_SESSION_ID_BYTES: usize = 240;
+const WINDOWS_RESERVED_SESSION_IDS: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidationError(&'static str);
@@ -65,7 +70,59 @@ macro_rules! string_id {
     };
 }
 
-string_id!(SessionId, "session id must be a non-empty string");
+#[derive(Clone, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, ValidationError> {
+        let value = value.into();
+        if !is_native_session_id(&value) {
+            return Err(ValidationError::new(
+                "session id must be a portable native session id",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionId([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+fn is_native_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SESSION_ID_BYTES
+        && is_native_session_id_start(value.as_bytes()[0])
+        && value.bytes().all(is_native_session_id_byte)
+        && !WINDOWS_RESERVED_SESSION_IDS
+            .iter()
+            .any(|reserved| value.eq_ignore_ascii_case(reserved))
+}
+
+const fn is_native_session_id_start(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
+const fn is_native_session_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
 string_id!(RunId, "run id must be a non-empty string");
 string_id!(MessageId, "message id must be a non-empty string");
 string_id!(EventId, "event id must be a non-empty string");
@@ -572,9 +629,27 @@ mod tests {
     fn validated_identifiers_reject_empty_values_without_echoing_them() {
         let secret = "  ";
         let error = SessionId::try_new(secret).unwrap_err();
-        assert_eq!(error.to_string(), "session id must be a non-empty string");
+        assert_eq!(
+            error.to_string(),
+            "session id must be a portable native session id"
+        );
         assert!(!error.to_string().contains(secret));
         assert!(Sequence::try_new(MAX_SAFE_INTEGER + 1).is_err());
+    }
+
+    #[test]
+    fn native_session_id_rejects_host_keys_and_path_segments() {
+        for value in [
+            "matcha-agent:matcha:session-1",
+            "../session-1",
+            "session.1",
+            "session 1",
+            "CON",
+        ] {
+            assert!(SessionId::try_new(value).is_err(), "accepted {value}");
+        }
+        assert!(SessionId::try_new("session-1").is_ok());
+        assert!(SessionId::try_new("role_session-1").is_ok());
     }
 
     #[test]

@@ -45,7 +45,7 @@ export type ProviderMutationAccount = Readonly<{
   endpoint?: string;
   protocol?: 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
   mediaProtocol?: 'google' | 'openAi' | 'openRouter';
-  authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local';
+  authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse' | 'local';
   revision: number;
 }>;
 
@@ -216,7 +216,7 @@ function decodeProviderMutationAccount(value: unknown): ProviderMutationAccount 
       'anthropicMessages', 'googleGenerativeAi', 'openAiCompletions', 'openAiResponses',
     ].includes(value.protocol as string))
     || (value.mediaProtocol !== undefined && !['google', 'openAi', 'openRouter'].includes(value.mediaProtocol as string))
-    || !['apiKey', 'oauthBrowser', 'oauthDevice', 'local'].includes(value.authMode as string)
+    || !['apiKey', 'oauthBrowser', 'oauthDevice', 'token', 'cliReuse', 'local'].includes(value.authMode as string)
     || !isPositiveInteger(value.revision)) {
     return null;
   }

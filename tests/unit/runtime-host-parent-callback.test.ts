@@ -1,4 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const openPathMock = vi.hoisted(() => vi.fn(async () => ''));
+
+vi.mock('electron', () => ({
+  shell: {
+    openPath: (pathToOpen: string) => openPathMock(pathToOpen),
+  },
+}));
+
 import { HostEventBus } from '../../electron/api/event-bus';
 import { createParentCallbackReceiver } from '../../electron/main/runtime-host-delivery/parent-callback';
 
@@ -6,6 +15,8 @@ const receivers: Array<{ close: () => Promise<void> }> = [];
 
 afterEach(async () => {
   await Promise.all(receivers.splice(0).map((receiver) => receiver.close()));
+  openPathMock.mockReset();
+  openPathMock.mockResolvedValue('');
 });
 
 describe('runtime-host parent callback receiver', () => {
@@ -99,5 +110,91 @@ describe('runtime-host parent callback receiver', () => {
       .resolves.toHaveProperty('status', 400);
 
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('opens absolute shell_open_path payloads', async () => {
+    const receiver = await createParentCallbackReceiver({ emit: vi.fn() } as never);
+    receivers.push(receiver);
+
+    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/shell-actions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-runtime-host-dispatch-token': receiver.dispatchToken,
+      },
+      body: JSON.stringify({ version: 1, action: 'shell_open_path', payload: { path: '  /tmp/report.txt  ' } }),
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      version: 1,
+      success: true,
+      status: 200,
+      data: { opened: true },
+    });
+    expect(response.status).toBe(200);
+    expect(openPathMock).toHaveBeenCalledWith('/tmp/report.txt');
+  });
+
+  it('returns a shell failure envelope when Electron cannot open a path', async () => {
+    openPathMock.mockResolvedValue('failed');
+    const receiver = await createParentCallbackReceiver({ emit: vi.fn() } as never);
+    receivers.push(receiver);
+
+    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/shell-actions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-runtime-host-dispatch-token': receiver.dispatchToken,
+      },
+      body: JSON.stringify({ version: 1, action: 'shell_open_path', payload: { path: '/tmp/report.txt' } }),
+    });
+
+    await expect(response.json()).resolves.toEqual({
+      version: 1,
+      success: false,
+      status: 500,
+      error: { code: 'SHELL_OPEN_PATH_FAILED', message: 'Failed to open path.' },
+    });
+    expect(response.status).toBe(500);
+  });
+
+  it('rejects unknown shell actions', async () => {
+    const receiver = await createParentCallbackReceiver({ emit: vi.fn() } as never);
+    receivers.push(receiver);
+
+    const response = await fetch(`${receiver.baseUrl}/internal/runtime-host/shell-actions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-runtime-host-dispatch-token': receiver.dispatchToken,
+      },
+      body: JSON.stringify({ version: 1, action: 'gateway_restart', payload: {} }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(openPathMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid shell_open_path payloads', async () => {
+    const receiver = await createParentCallbackReceiver({ emit: vi.fn() } as never);
+    receivers.push(receiver);
+
+    const path = `${receiver.baseUrl}/internal/runtime-host/shell-actions`;
+    const headers = {
+      'content-type': 'application/json',
+      'x-runtime-host-dispatch-token': receiver.dispatchToken,
+    };
+    const request = (payload: unknown) => fetch(path, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ version: 1, action: 'shell_open_path', payload }),
+    });
+
+    await expect(request({ path: '' })).resolves.toHaveProperty('status', 400);
+    await expect(request({ path: 'relative/report.txt' })).resolves.toHaveProperty('status', 400);
+    await expect(request({ path: '/tmp/bad\0path' })).resolves.toHaveProperty('status', 400);
+    await expect(request({ path: 1 })).resolves.toHaveProperty('status', 400);
+
+    expect(openPathMock).not.toHaveBeenCalled();
   });
 });

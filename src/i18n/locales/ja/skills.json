@@ -6,19 +6,38 @@
     "gatewayWarning": "ゲートウェイが稼働していません。アクティブなゲートウェイがないとスキルを読み込めません。",
     "gatewayStarting": "ゲートウェイを起動中です。準備ができしだいスキルを自動で読み込みます。",
     "tabs": {
-        "installed": "インストール済み",
+        "installed": "スキル",
+        "sealed": "スキルパッケージ",
         "marketplace": "マーケットプレイス"
     },
     "filter": {
+        "source": "ソース",
+        "status": "状態",
+        "allStatuses": "すべての状態",
+        "enabled": "有効",
+        "disabled": "無効",
+        "managed": "ユーザーインストール ({{count}})",
         "all": "すべて ({{count}})",
         "eligible": "利用可能 ({{count}})",
         "builtIn": "内蔵 ({{count}})",
         "marketplace": "マーケットプレイス ({{count}})"
     },
+    "view": {
+        "grid": "グリッド表示",
+        "list": "リスト表示",
+        "label": "表示"
+    },
+    "count": "{{count}} 件のスキル",
     "search": "スキルを検索...",
     "searchMarketplace": "マーケットプレイスを検索...",
     "searchButton": "検索",
     "actions": {
+        "details": "詳細を表示",
+        "install": "インストール",
+        "uninstall": "アンインストール",
+        "close": "閉じる",
+        "clearSearch": "検索をクリア",
+        "removeVariable": "変数を削除",
         "enableVisible": "表示中を一括有効化",
         "disableVisible": "表示中を一括無効化",
         "installSkill": "スキルをインストール"
@@ -74,11 +93,48 @@
     },
     "availability": {
         "eligible": "利用可能",
-        "blocked": "ブロック",
         "missing": "依存不足",
         "unknown": "不明",
-        "blockedByAllowlist": "allowlist によってブロック",
+        "unselectable": "選択不可",
         "missingPrefix": "Missing: {{items}}"
+    },
+    "sealed": {
+        "search": "スキルパッケージを検索",
+        "packageInstalled": "インストール済み",
+        "packageAvailable": "未インストール",
+        "cloudTitle": "クラウドスキルパッケージ",
+        "cloudEmpty": "クラウドスキルパッケージはまだありません。",
+        "cloudAvailable": "クラウドで利用可能",
+        "cloudInstalled": "インストール済み",
+        "packageSize": "{{size}} バイト",
+        "uploadLocalPackage": "パッケージをアップロード",
+        "installFromCloud": "インストール",
+        "uploaded": "スキルパッケージをアップロードしました",
+        "uploadFailed": "スキルパッケージのアップロードに失敗しました",
+        "installedFromCloud": "スキルパッケージをインストールしました",
+        "installFromCloudFailed": "クラウドスキルパッケージのインストールに失敗しました",
+        "uploadDialog": {
+            "title": "スキルパッケージをアップロード",
+            "empty": ".matcha-skillpkg をドラッグするか、クリックして選択",
+            "hint": "ローカルで生成済みの .matcha-skillpkg のみアップロードできます。",
+            "replace": "別のパッケージをクリックまたはドラッグすると選び直せます",
+            "confirm": "クラウドにアップロード",
+            "packageFilter": "Matcha スキルパッケージ"
+        },
+        "securityNote": "スキルパッケージ（.matcha-skillpkg）は読み取り専用の実行/配布成果物です。編集可能なソースは通常のスキルフォルダまたは .md のまま残ります。生成してもソースは保持され、同じ key が両方にある場合は通常ソースが優先されます。",
+        "runtimeLabel": "Runtime: {{runtime}}",
+        "runtimeAny": "すべて",
+        "noDescription": "説明はありません",
+        "emptyTitle": "スキルパッケージはまだありません",
+        "emptyDescription": "通常のスキルフォルダまたは .md から読み取り専用パッケージを生成できます。ソースは編集可能なままです。",
+        "cloudUnavailableTitle": "クラウドスキルパッケージは一時的に利用できません",
+        "cloudUnavailableDescription": "バックエンドプラットフォームに接続できません。後で更新してください。",
+        "exportTitle": "スキルパッケージを生成",
+        "exportDescription": "送信するのは skillKey のみで、バックエンドが通常ソースを置き換えずに .matcha-skillpkg を生成します。",
+        "export": "パッケージ生成",
+        "exported": "読み取り専用スキルパッケージを生成しました",
+        "exportFailed": "スキルパッケージの生成に失敗しました",
+        "noExportTargets": "生成できる通常の非内蔵スキルはありません。"
     },
     "toast": {
         "enabled": "スキルを有効にしました",
@@ -111,6 +167,7 @@
         "batchPartial": "{{success}} / {{total}} 件を更新しました。一部失敗しています。"
     },
     "marketplace": {
+        "discover": "見つける",
         "title": "マーケットプレイス",
         "installDialogTitle": "スキルをインストール",
         "installDialogSubtitle": "初期表示は Explore、キーワード入力時は検索します。",

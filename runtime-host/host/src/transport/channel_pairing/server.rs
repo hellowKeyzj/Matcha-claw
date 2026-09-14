@@ -21,7 +21,7 @@ use super::{ChannelPairingDelivery, DecodeError, decode_approval, decode_list};
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
 const MAX_BODY_BYTES: usize = 256;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -66,18 +66,14 @@ async fn serve(
     channel: ChannelHandle,
     endpoint: RuntimeEndpoint,
 ) -> io::Result<()> {
-    let response = match timeout(REQUEST_DEADLINE, async {
-        let request = read_request(&mut stream).await?;
-        Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, channel, endpoint).await,
-            Err(response) => response,
-        })
-    })
-    .await
-    {
-        Ok(Ok(response)) => response,
+    let request = match timeout(REQUEST_READ_DEADLINE, read_request(&mut stream)).await {
+        Ok(Ok(request)) => request,
         Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+        Err(_) => Err(Response::bad_request()),
+    };
+    let response = match request {
+        Ok(request) => handle(request, verifier, channel, endpoint).await,
+        Err(response) => response,
     };
     write_response(&mut stream, response).await
 }
@@ -88,50 +84,79 @@ async fn handle(
     channel: ChannelHandle,
     endpoint: RuntimeEndpoint,
 ) -> Response {
-    if request.method != "POST" || request.path != "/api/channels/pairing" {
-        return Response::not_found();
-    }
-    let Some(authorization) = request
-        .headers
-        .iter()
-        .find(|(name, _)| name == AUTHORIZATION_HEADER)
-        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
-    else {
-        return Response::unauthorized();
-    };
-    let value = match serde_json::from_slice::<Value>(&request.body) {
-        Ok(value) => value,
-        Err(_) => return Response::bad_request(),
-    };
-    let mut verifier = verifier.lock().await;
-    if value.get("action").and_then(Value::as_str) == Some("approve") {
-        match decode_approval(value, authorization, &mut verifier, now_millis()) {
-            Ok(command) => {
-                drop(verifier);
-                let key = match ChannelKey::try_new(endpoint, command.channel, command.account) {
-                    Ok(key) => key,
-                    Err(_) => return Response::bad_request(),
-                };
-                match channel.approve_pairing(key, command.code).await {
-                    Ok(outcome) => Response::approval(outcome),
-                    Err(_) => Response::unavailable(),
+    let trace_id = crate::transport::channel_catalog::channel_trace_id(&request.headers);
+    openclaw::operations::channel_config::with_channel_trace(trace_id, async {
+        let mut span =
+            crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_pairing");
+        let response = async {
+            if request.method != "POST" || request.path != "/api/channels/pairing" {
+                return Response::not_found();
+            }
+            let Some(authorization) = request
+                .headers
+                .iter()
+                .find(|(name, _)| name == AUTHORIZATION_HEADER)
+                .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+            else {
+                return Response::unauthorized();
+            };
+            let value = match serde_json::from_slice::<Value>(&request.body) {
+                Ok(value) => value,
+                Err(error) => {
+                    openclaw::operations::channel_config::channel_trace(
+                        "host.transport.json_decode",
+                        match error.classify() {
+                            serde_json::error::Category::Io => "outcome=io",
+                            serde_json::error::Category::Syntax => "outcome=syntax",
+                            serde_json::error::Category::Data => "outcome=data",
+                            serde_json::error::Category::Eof => "outcome=eof",
+                        },
+                    );
+                    return Response::bad_request();
+                }
+            };
+            let mut verifier = verifier.lock().await;
+            if value.get("action").and_then(Value::as_str) == Some("approve") {
+                match decode_approval(value, authorization, &mut verifier, now_millis()) {
+                    Ok(command) => {
+                        drop(verifier);
+                        let key =
+                            match ChannelKey::try_new(endpoint, command.channel, command.account) {
+                                Ok(key) => key,
+                                Err(_) => return Response::bad_request(),
+                            };
+                        match channel.approve_pairing(key, command.code).await {
+                            Ok(outcome) => Response::approval(outcome),
+                            Err(_) => Response::unavailable(),
+                        }
+                    }
+                    Err(DecodeError::Unauthorized) => Response::unauthorized(),
+                    Err(DecodeError::Invalid) => Response::bad_request(),
+                }
+            } else {
+                match decode_list(value, authorization, &mut verifier, now_millis()) {
+                    Ok((channel_id, account)) => {
+                        drop(verifier);
+                        Response::from_delivery(ChannelPairingDelivery::from_outcome(
+                            channel.pairing(channel_id, account).await,
+                        ))
+                    }
+                    Err(DecodeError::Unauthorized) => Response::unauthorized(),
+                    Err(DecodeError::Invalid) => Response::bad_request(),
                 }
             }
-            Err(DecodeError::Unauthorized) => Response::unauthorized(),
-            Err(DecodeError::Invalid) => Response::bad_request(),
         }
-    } else {
-        match decode_list(value, authorization, &mut verifier, now_millis()) {
-            Ok((channel_id, account)) => {
-                drop(verifier);
-                Response::from_delivery(ChannelPairingDelivery::from_outcome(
-                    channel.pairing(channel_id, account).await,
-                ))
-            }
-            Err(DecodeError::Unauthorized) => Response::unauthorized(),
-            Err(DecodeError::Invalid) => Response::bad_request(),
-        }
-    }
+        .await;
+        span.finish(match response.status {
+            200 => "delivered",
+            400 => "invalid",
+            401 => "unauthorized",
+            404 => "not_found",
+            _ => "unavailable",
+        });
+        response
+    })
+    .await
 }
 
 struct Request {
@@ -187,84 +212,101 @@ impl Response {
 }
 
 async fn read_request(stream: &mut TcpStream) -> io::Result<Result<Request, Response>> {
-    let mut bytes = Vec::with_capacity(1024);
-    let mut buffer = [0_u8; 8192];
-    let header_end = loop {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(Err(Response::bad_request()));
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-        if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
-            let header_end = end + 4;
-            if header_end > MAX_HEADER_BYTES {
+    let mut span =
+        crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_pairing.http_read");
+    let result: io::Result<Result<Request, Response>> = async {
+        let mut bytes = Vec::with_capacity(1024);
+        let mut buffer = [0_u8; 8192];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
                 return Ok(Err(Response::bad_request()));
             }
-            break header_end;
-        }
-        if bytes.len() > MAX_HEADER_BYTES {
-            return Ok(Err(Response::bad_request()));
-        }
-    };
-    let headers = match std::str::from_utf8(&bytes[..header_end]) {
-        Ok(value) => value,
-        Err(_) => return Ok(Err(Response::bad_request())),
-    };
-    let mut lines = headers.split("\r\n");
-    let Some(start) = lines.next() else {
-        return Ok(Err(Response::bad_request()));
-    };
-    let mut start = start.split_whitespace();
-    let (Some(method), Some(path), Some(version), None) =
-        (start.next(), start.next(), start.next(), start.next())
-    else {
-        return Ok(Err(Response::bad_request()));
-    };
-    if version != "HTTP/1.1" {
-        return Ok(Err(Response::bad_request()));
-    }
-    let method = method.to_owned();
-    let path = path.to_owned();
-    let mut parsed_headers = Vec::new();
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        let Some((name, value)) = line.split_once(':') else {
+            bytes.extend_from_slice(&buffer[..read]);
+            if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                let header_end = end + 4;
+                if header_end > MAX_HEADER_BYTES {
+                    return Ok(Err(Response::bad_request()));
+                }
+                break header_end;
+            }
+            if bytes.len() > MAX_HEADER_BYTES {
+                return Ok(Err(Response::bad_request()));
+            }
+        };
+        let headers = match std::str::from_utf8(&bytes[..header_end]) {
+            Ok(value) => value,
+            Err(_) => return Ok(Err(Response::bad_request())),
+        };
+        let mut lines = headers.split("\r\n");
+        let Some(start) = lines.next() else {
             return Ok(Err(Response::bad_request()));
         };
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty()
-            || parsed_headers.len() == MAX_HEADERS
-            || parsed_headers.iter().any(|(existing, _)| existing == &name)
-        {
+        let mut start = start.split_whitespace();
+        let (Some(method), Some(path), Some(version), None) =
+            (start.next(), start.next(), start.next(), start.next())
+        else {
+            return Ok(Err(Response::bad_request()));
+        };
+        if version != "HTTP/1.1" {
             return Ok(Err(Response::bad_request()));
         }
-        parsed_headers.push((name, value.trim().to_owned()));
-    }
-    let content_length = parsed_headers
-        .iter()
-        .find(|(name, _)| name == "content-length")
-        .and_then(|(_, value)| value.parse::<usize>().ok());
-    let Some(content_length) = content_length.filter(|length| *length <= MAX_BODY_BYTES) else {
-        return Ok(Err(Response::bad_request()));
-    };
-    while bytes.len() < header_end + content_length {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 || bytes.len() + read > MAX_HEADER_BYTES + content_length {
+        let method = method.to_owned();
+        let path = path.to_owned();
+        let mut parsed_headers = Vec::new();
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                return Ok(Err(Response::bad_request()));
+            };
+            let name = name.trim().to_ascii_lowercase();
+            if name.is_empty()
+                || parsed_headers.len() == MAX_HEADERS
+                || parsed_headers.iter().any(|(existing, _)| existing == &name)
+            {
+                return Ok(Err(Response::bad_request()));
+            }
+            parsed_headers.push((name, value.trim().to_owned()));
+        }
+        let content_length = parsed_headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .and_then(|(_, value)| value.parse::<usize>().ok());
+        let Some(content_length) = content_length.filter(|length| *length <= MAX_BODY_BYTES) else {
+            return Ok(Err(Response::bad_request()));
+        };
+        while bytes.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 || bytes.len() + read > MAX_HEADER_BYTES + content_length {
+                return Ok(Err(Response::bad_request()));
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        if bytes.len() != header_end + content_length {
             return Ok(Err(Response::bad_request()));
         }
-        bytes.extend_from_slice(&buffer[..read]);
+        Ok(Ok(Request {
+            method,
+            path,
+            headers: parsed_headers,
+            body: bytes[header_end..].to_vec(),
+        }))
     }
-    if bytes.len() != header_end + content_length {
-        return Ok(Err(Response::bad_request()));
-    }
-    Ok(Ok(Request {
-        method,
-        path,
-        headers: parsed_headers,
-        body: bytes[header_end..].to_vec(),
-    }))
+    .await;
+    span.finish(match &result {
+        Ok(Ok(_)) => "decoded",
+        Ok(Err(_)) => "invalid",
+        Err(error) => {
+            openclaw::operations::channel_config::channel_trace(
+                "host.transport.http_read_error",
+                &format!("kind={:?}", error.kind()),
+            );
+            "io"
+        }
+    });
+    result
 }
 
 async fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {

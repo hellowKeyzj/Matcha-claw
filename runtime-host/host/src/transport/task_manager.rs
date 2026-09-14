@@ -14,11 +14,8 @@ pub(crate) const CREATE_PATH: &str = "/api/tasks/create";
 pub(crate) const UPDATE_PATH: &str = "/api/tasks/update";
 pub(crate) const TODOS_GET_PATH: &str = "/api/tasks/todos/get";
 pub(crate) const TODOS_WRITE_PATH: &str = "/api/tasks/todos/write";
-pub(crate) const OUTPUT_PATH: &str = "/api/tasks/output";
-pub(crate) const STOP_PATH: &str = "/api/tasks/stop";
 
 const MANAGEMENT_CAPABILITY: &str = "task.management";
-const CONTROL_CAPABILITY: &str = "task.control";
 const RUNTIME_KIND: &str = "native-runtime";
 const RUNTIME_ADAPTER_ID: &str = "openclaw";
 const RUNTIME_INSTANCE_ID: &str = "local";
@@ -173,13 +170,6 @@ struct TodoInput {
     owner: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RuntimeInput {
-    session_identity: SessionIdentity,
-    task_id: String,
-}
-
 pub(crate) struct TaskRequest(Command);
 
 impl TaskRequest {
@@ -244,18 +234,6 @@ fn authorization_for(
             MANAGEMENT_CAPABILITY,
             "todos-write",
             "todos.write",
-        )),
-        OUTPUT_PATH => Some((
-            "tasks:control",
-            CONTROL_CAPABILITY,
-            "tasks-output",
-            "tasks.output",
-        )),
-        STOP_PATH => Some((
-            "tasks:control",
-            CONTROL_CAPABILITY,
-            "tasks-stop",
-            "tasks.stop",
         )),
         _ => None,
     }
@@ -384,28 +362,6 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<Command, 
             )
             .map_err(|_| ())
         }
-        OUTPUT_PATH => {
-            let request: Request<RuntimeInput> =
-                decode_request(value, CONTROL_CAPABILITY, operation, "session", "task")?;
-            validate_identity(&request, &request.input.session_identity)?;
-            Command::output(
-                request.input.session_identity.agent_id,
-                request.input.session_identity.session_key,
-                request.input.task_id,
-            )
-            .map_err(|_| ())
-        }
-        STOP_PATH => {
-            let request: Request<RuntimeInput> =
-                decode_request(value, CONTROL_CAPABILITY, operation, "session", "task")?;
-            validate_identity(&request, &request.input.session_identity)?;
-            Command::stop(
-                request.input.session_identity.agent_id,
-                request.input.session_identity.session_key,
-                request.input.task_id,
-            )
-            .map_err(|_| ())
-        }
         _ => Err(()),
     }
 }
@@ -468,8 +424,6 @@ impl Delivery {
             Outcome::Update(outcome) => mutation_snapshot(outcome),
             Outcome::TodoGet(outcome) => read_todos(outcome),
             Outcome::TodoWrite(outcome) => mutation_todos(outcome),
-            Outcome::Output(outcome) => output(outcome),
-            Outcome::Stop(outcome) => stop(outcome),
         }
     }
 
@@ -583,39 +537,6 @@ fn mutation_todos(outcome: MutationOutcome<openclaw::task_manager::TodoSnapshot>
     }
 }
 
-fn output(outcome: ReadOutcome<openclaw::task_manager::TaskOutput>) -> Delivery {
-    match outcome {
-        ReadOutcome::Found(output) => match output.kind() {
-            openclaw::task_manager::TaskOutputKind::Available => Delivery {
-                status: 200,
-                body: serde_json::json!({ "output": "available" }),
-            },
-            openclaw::task_manager::TaskOutputKind::NotFound => Delivery {
-                status: 200,
-                body: serde_json::json!({ "output": "not_found" }),
-            },
-        },
-        outcome => unavailable(outcome),
-    }
-}
-
-fn stop(outcome: MutationOutcome<openclaw::task_manager::TaskStopResult>) -> Delivery {
-    match outcome {
-        MutationOutcome::Applied(result) => Delivery {
-            status: 200,
-            body: serde_json::json!({ "found": result.found(), "cancelled": result.cancelled() }),
-        },
-        MutationOutcome::Rejected => Delivery {
-            status: 200,
-            body: serde_json::json!({ "outcome": "rejected" }),
-        },
-        MutationOutcome::OutcomeUnknown => Delivery {
-            status: 200,
-            body: serde_json::json!({ "outcome": "unknown" }),
-        },
-    }
-}
-
 fn snapshot_body(snapshot: &openclaw::task_manager::TaskSnapshot) -> Value {
     serde_json::json!({ "tasks": snapshot.tasks().iter().map(task_body).collect::<Vec<_>>(), "todos": snapshot.todos().iter().map(todo_body).collect::<Vec<_>>() })
 }
@@ -705,17 +626,7 @@ mod tests {
     }
 
     fn request(operation: &str, input: Value) -> Value {
-        let id = if operation == "tasks.output" || operation == "tasks.stop" {
-            CONTROL_CAPABILITY
-        } else {
-            MANAGEMENT_CAPABILITY
-        };
-        let target_kind = if operation == "tasks.output" || operation == "tasks.stop" {
-            "task"
-        } else {
-            "task-manager"
-        };
-        json!({ "id": id, "operationId": operation, "scope": { "kind": "session", "identity": identity() }, "target": { "kind": target_kind, "identity": identity() }, "input": input })
+        json!({ "id": MANAGEMENT_CAPABILITY, "operationId": operation, "scope": { "kind": "session", "identity": identity() }, "target": { "kind": "task-manager", "identity": identity() }, "input": input })
     }
 
     fn signing_key() -> SigningKey {
@@ -981,28 +892,12 @@ mod tests {
     }
 
     #[test]
-    fn maps_owner_unavailability_and_closed_mutation_outcomes() {
-        let unavailable = Delivery::from_outcome(Outcome::Output(ReadOutcome::Unavailable));
+    fn maps_owner_unavailability() {
+        let unavailable = Delivery::from_outcome(Outcome::List(ReadOutcome::Unavailable));
         assert_eq!(unavailable.status(), 503);
         assert_eq!(
             unavailable.body(),
             &json!({ "success": false, "error": "Task manager is unavailable" })
         );
-        let unknown = Delivery::from_outcome(Outcome::Stop(MutationOutcome::OutcomeUnknown));
-        assert_eq!(unknown.status(), 200);
-        assert_eq!(unknown.body(), &json!({ "outcome": "unknown" }));
-    }
-
-    #[test]
-    fn rejects_unknown_fields_for_control_requests() {
-        let output = request(
-            "tasks.output",
-            json!({
-                "sessionIdentity": identity(),
-                "taskId": "task-1",
-                "teamKey": "forbidden",
-            }),
-        );
-        assert!(decode_command(OUTPUT_PATH, output, "tasks.output").is_err());
     }
 }

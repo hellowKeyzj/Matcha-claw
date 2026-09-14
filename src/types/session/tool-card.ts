@@ -1,9 +1,16 @@
+export type SessionRenderAttachmentStatus =
+  | 'preview-unavailable'
+  | 'unsafe-media-omitted'
+  | 'unknown-omitted'
+  | 'thinking-omitted';
+
 export interface SessionRenderAttachedFile {
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
   previewStatus?: 'unavailable';
+  attachmentStatus?: SessionRenderAttachmentStatus;
   filePath?: string;
   gatewayUrl?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';
@@ -14,6 +21,8 @@ export interface SessionRenderImage {
   data?: string;
   mimeType: string;
 }
+
+export type SessionRenderToolRuntimeAdapterId = 'openclaw' | 'matcha-agent';
 
 export type SessionRenderToolStatusKind = 'running' | 'completed' | 'error' | 'missing_result';
 
@@ -84,7 +93,9 @@ export interface SessionRenderToolCard {
   durationMs?: number;
   updatedAt?: number;
   firstSeenOrder?: number;
+  runtimeAdapterId?: SessionRenderToolRuntimeAdapterId;
   output?: unknown;
+  details?: unknown;
   result: SessionRenderToolResult;
 }
 

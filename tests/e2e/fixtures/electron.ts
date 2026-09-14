@@ -132,20 +132,16 @@ export async function readE2EOpenClawState(electronApp: ElectronApplication): Pr
   });
 }
 
-export async function ensureSetupComplete(page: Page): Promise<void> {
-  const setupHeading = page.getByRole('heading', { name: '环境检查' });
-  const chatHeading = page.getByRole('heading', { name: 'MatchaClaw 聊天' });
-  await expect(setupHeading.or(chatHeading)).toBeVisible();
+export async function enterLocalWorkspace(page: Page): Promise<void> {
+  const chatHeading = page.getByRole('heading', { name: /MatchaClaw 聊天|MatchaClaw Chat/i });
+  const localEntry = page.getByRole('button', { name: /游客进入|离线进入|Enter as guest|Enter offline/i }).first();
+  await expect(chatHeading.or(localEntry)).toBeVisible({ timeout: 45_000 });
 
-  if (await setupHeading.isVisible()) {
-    await expect(page.getByText('Runtime Host', { exact: true })).toBeVisible();
-    await expect(page.getByText('检查中', { exact: true })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '下一步' })).toBeEnabled();
-    await page.getByRole('button', { name: '下一步' }).click();
-    await expect(page.getByRole('heading', { name: '设置完成！' })).toBeVisible();
-    await page.getByRole('button', { name: '开始使用' }).click();
+  if (await localEntry.isVisible().catch(() => false)) {
+    await localEntry.click();
   }
-  await expect(chatHeading).toBeVisible();
+
+  await expect(chatHeading).toBeVisible({ timeout: 45_000 });
 }
 
 

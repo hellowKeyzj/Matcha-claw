@@ -95,6 +95,10 @@ export function ChatShell({
   };
 
   const handleComposerWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    const target = event.target;
+    if (!(target instanceof Node) || !event.currentTarget.contains(target)) {
+      return;
+    }
     if (!onComposerWheel || event.defaultPrevented || shouldLetNestedScrollableConsumeWheel(event)) {
       return;
     }
@@ -183,13 +187,16 @@ export function ChatShell({
     document.body.style.cursor = 'col-resize';
   };
 
-  const sidePanelMounted = !artifactWorkbenchFullscreen && sidePanelPhase !== 'closed';
   const resolvedSidePanelVisible = sidePanelVisible ?? sidePanelPhase === 'open';
-  const dockedSidePanelMounted = sidePanelMounted && sidePanelMode === 'docked';
-  const overlaySidePanelMounted = sidePanelMounted && sidePanelMode === 'overlay';
+  const dockedSidePanelMounted = !artifactWorkbenchFullscreen
+    && sidePanelMode === 'docked'
+    && (sidePanelPhase === 'opening' || sidePanelPhase === 'open' || sidePanelPhase === 'closing');
+  const overlaySidePanelMounted = !artifactWorkbenchFullscreen
+    && sidePanelMode === 'overlay'
+    && sidePanelPhase === 'open';
   const gridTemplateColumns = dockedSidePanelMounted
     ? sidePanelMainWidth != null
-      ? `minmax(0, ${sidePanelMainWidth}px) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)`
+      ? `${sidePanelMainWidth}px var(--chat-side-panel-resizer-width) minmax(0, 1fr)`
       : 'minmax(0, 1fr) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)'
     : 'minmax(0, 1fr)';
 

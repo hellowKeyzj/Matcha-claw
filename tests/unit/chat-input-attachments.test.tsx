@@ -40,6 +40,7 @@ const readyNotesDialogAttachment = {
   mimeType: 'text/plain',
   fileSize: 128,
   preview: null,
+  sourcePath: 'D:\\docs\\notes.txt',
 };
 
 
@@ -89,7 +90,7 @@ describe('chat input attachments', () => {
     });
 
     expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageOpenAttachments', {
-      properties: ['openFile', 'multiSelections'],
+      properties: ['openFile', 'openDirectory', 'multiSelections'],
     });
     expect(screen.queryByRole('img', { name: /image\.png/i })).toBeNull();
 
@@ -175,7 +176,52 @@ describe('chat input attachments', () => {
     }
   });
 
-  it('普通文件附件不向 renderer 投影本地路径或打开能力', async () => {
+  it('目录附件只作为 receipt 发送，不释放或传给 materialization', async () => {
+    const directoryAttachment = {
+      entryKind: 'directory' as const,
+      fileName: 'project',
+      mimeType: 'application/x-directory',
+      fileSize: 0,
+      preview: null,
+      sourcePath: 'D:\\docs\\project',
+    };
+    const onSend = vi.fn().mockResolvedValue({ accepted: true });
+    invokeIpcMock.mockImplementation(async (channel: string) => {
+      if (channel === 'dialog:stageOpenAttachments') {
+        return {
+          canceled: false,
+          attachments: [directoryAttachment],
+        };
+      }
+      return null;
+    });
+
+    render(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+
+    fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('project')).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    const input = screen.getByPlaceholderText('input.messagePlaceholder');
+    fireEvent.change(input, { target: { value: '打开这个目录' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('打开这个目录', [expect.objectContaining({
+        stagedAttachmentId: expect.any(String),
+        entryKind: 'directory',
+        mimeType: 'application/x-directory',
+        sourcePath: 'D:\\docs\\project',
+      })]);
+    });
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('dialog:releaseStagedAttachments', expect.anything());
+  });
+
+  it('普通文件附件在输入区仍不直接打开', async () => {
     invokeIpcMock.mockImplementation(async (channel: string, payload?: unknown) => {
       if (channel === 'dialog:stageOpenAttachments') {
         return {
@@ -236,6 +282,8 @@ describe('chat input attachments', () => {
           fileName: 'notes.txt',
           mimeType: 'text/plain',
           fileSize: 128,
+          preview: null,
+          sourcePath: 'D:\\docs\\notes.txt',
         },
       ]);
     });

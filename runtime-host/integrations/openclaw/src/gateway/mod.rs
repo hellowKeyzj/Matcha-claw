@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod client;
+pub(crate) mod config_patch;
 pub(crate) mod connection;
 pub mod control_ui;
 pub(crate) mod delivery;

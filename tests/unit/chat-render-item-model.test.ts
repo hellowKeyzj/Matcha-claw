@@ -321,6 +321,53 @@ describe('chat render item model', () => {
     expect(toolItem.images).toEqual([]);
   });
 
+  it('updates assistant-turn render signature when tool details change', () => {
+    const sessionKey = 'agent:main:main';
+    const tool = {
+      id: 'tool-1',
+      toolCallId: 'tool-1',
+      name: 'Edit',
+      displayTitle: 'Edit',
+      input: { file_path: 'src/main.rs' },
+      status: 'completed' as const,
+      result: { kind: 'none' as const, surface: 'tool-card' as const },
+    };
+    const firstItem = {
+      key: 'assistant-tool-details-1',
+      kind: 'assistant-turn' as const,
+      role: 'assistant' as const,
+      sessionKey,
+      identitySource: 'tool_call' as const,
+      identityMode: 'tool_call' as const,
+      identityConfidence: 'strong' as const,
+      status: 'final' as const,
+      segments: [{ kind: 'tool' as const, key: 'segment-tool-1', tool: { ...tool, details: { diff: '-old' } } }],
+      thinking: null,
+      tools: [{ ...tool, details: { diff: '-old' } }],
+      text: '',
+      images: [],
+      attachedFiles: [],
+    };
+    const firstDecorated = applyAssistantPresentationToItems({
+      items: [firstItem],
+      agents: [],
+      defaultAssistant: null,
+    });
+    const secondDecorated = applyAssistantPresentationToItems({
+      items: [{
+        ...firstItem,
+        segments: [{ kind: 'tool' as const, key: 'segment-tool-1', tool: { ...tool, details: { diff: '+new' } } }],
+        tools: [{ ...tool, details: { diff: '+new' } }],
+      }],
+      agents: [],
+      defaultAssistant: null,
+      previousItems: firstDecorated,
+    });
+
+    expect(secondDecorated[0]).not.toBe(firstDecorated[0]);
+    expect(secondDecorated[0]?.renderSignature).not.toBe(firstDecorated[0]?.renderSignature);
+  });
+
   it('reuses previous assistant-turn item objects when their model content is unchanged', () => {
     const sessionKey = 'agent:main:main';
     const initialProtocolItems = buildRenderItemsFromMessages(sessionKey, [

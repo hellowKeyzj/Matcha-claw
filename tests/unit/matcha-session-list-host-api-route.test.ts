@@ -53,7 +53,7 @@ describe('Matcha session catalog Host API route', () => {
             agentId: 'matcha',
             sessionKey: 'matcha-agent:matcha:native-session-1',
           },
-          kind: 'named',
+          kind: 'session',
           preferred: false,
           endpointSessionId: 'native-session-1',
           protocolId: 'matcha-agent-app-server',
@@ -68,7 +68,6 @@ describe('Matcha session catalog Host API route', () => {
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list: openClawList },
         matchaSessionListTransport: { list: matchaList },
       } as never,
@@ -87,7 +86,7 @@ describe('Matcha session catalog Host API route', () => {
             agentId: 'matcha',
             sessionKey: 'matcha-agent:matcha:native-session-1',
           },
-          kind: 'named',
+          kind: 'session',
           preferred: false,
           endpointSessionId: 'native-session-1',
           protocolId: 'matcha-agent-app-server',
@@ -110,7 +109,6 @@ describe('Matcha session catalog Host API route', () => {
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list: openClawList },
         matchaSessionListTransport: { list: matchaList },
       } as never,

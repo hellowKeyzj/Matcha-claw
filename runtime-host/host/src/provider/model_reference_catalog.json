@@ -1,0 +1,960 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "modelId": "claude-fable-5-1",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-haiku-4-5-20251001",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 64000,
+      "source": "https://platform.claude.com/docs/en/models/haiku-4-5/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-opus-4-8",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-opus-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/opus-5/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-sonnet-4-5-20250929",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 64000,
+      "source": "https://platform.claude.com/docs/en/models/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "claude-sonnet-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5/overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "chat-latest",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/chat-latest",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "chatgpt-4o-latest",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/chatgpt-4o-latest",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-3.5-turbo",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 16385,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-3.5-turbo",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-3.5-turbo-0125",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 16385,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-3.5-turbo",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-3.5-turbo-instruct",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 4096,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-3.5-turbo-instruct",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 8192,
+      "maxTokens": 8192,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4-turbo",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4-turbo",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4-turbo-2024-04-09",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4-turbo",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4-turbo-preview",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 4096,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4-turbo-preview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4.1",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1047576,
+      "maxTokens": 32768,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.1",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4.1-mini",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1047576,
+      "maxTokens": 32768,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4.1-nano",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1047576,
+      "maxTokens": 32768,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.1-nano",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4.5-preview",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.5-preview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4o",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4o-2024-05-13",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-4o-mini",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5-chat-latest",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-chat-latest",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5-codex",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-codex",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5-mini",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5-nano",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-nano",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 272000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.1",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.1",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.1-chat-latest",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.1-chat-latest",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.1-codex",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.1-codex",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.2",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.2-chat-latest",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 16384,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2-chat-latest",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.2-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.2-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.3-codex",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.4",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.4-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.4-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.5",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.5-2026-04-23",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.5-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.5-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.6",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.6-luna",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.6-sol",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-5.6-terra",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gpt-6-astra",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o1",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o1",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o1-mini",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 65536,
+      "source": "https://developers.openai.com/api/docs/models/o1-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o1-preview",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 32768,
+      "source": "https://developers.openai.com/api/docs/models/o1-preview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o1-pro",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o1-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o3",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o3",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o3-mini",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o3-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o3-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o3-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "o4-mini",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 100000,
+      "source": "https://developers.openai.com/api/docs/models/o4-mini",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-2.5-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-2.5-flash-lite",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-2.5-pro",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-3-flash-preview",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-3.1-pro-preview",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "gemini-3.8-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "source": "https://ai.google.dev/gemini-api/docs/models",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "deepseek-v4-flash",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 393216,
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "deepseek-v4-flash-vision-exp",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 393216,
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "deepseek-v4-pro",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 393216,
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "kimi-k2.6",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 262144,
+      "source": "https://platform.kimi.com/docs/api/models-overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "kimi-k2.7-code",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 262144,
+      "source": "https://platform.kimi.com/docs/guide/kimi-k2-7-code-quickstart",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "kimi-k2.7-code-highspeed",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 262144,
+      "source": "https://platform.kimi.com/docs/guide/kimi-k2-7-code-quickstart",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "kimi-k3",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 1048576,
+      "source": "https://platform.kimi.com/docs/models",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen-long",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 10000000,
+      "source": "https://help.aliyun.com/zh/model-studio/text-generation-model",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen-long-latest",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 10000000,
+      "source": "https://help.aliyun.com/zh/model-studio/text-generation-model",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen-max",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 32768,
+      "maxTokens": 8192,
+      "source": "https://help.aliyun.com/en/model-studio/qwen-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3-coder-flash",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 65536,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-coder-flash",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3-coder-plus",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 65536,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-coder-plus",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3-max",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 262144,
+      "maxTokens": 65536,
+      "source": "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/model-qwen3-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.7-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "source": "https://help.aliyun.com/zh/model-studio/vision-model",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.7-max",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-7-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.7-max-2026-05-20",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-7-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.7-plus",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.7-plus-2026-05-26",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-2.4t-a95b",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-2-4t-a95b",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-27b",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-27b",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-flash",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-flash",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-max",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-max-0902",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "qwen3.8-max-2026-09-02",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://help.aliyun.com/en/model-studio/qwen3-8-max",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "glm-4.5",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 128000,
+      "maxTokens": 98304,
+      "source": "https://docs.z.ai/guides/llm/glm-4.5",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "glm-4.6",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 131072,
+      "source": "https://docs.z.ai/guides/llm/glm-4.6",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "glm-4.7",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 200000,
+      "maxTokens": 131072,
+      "source": "https://docs.z.ai/guides/llm/glm-4.7",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "glm-5.2",
+      "capabilities": [
+        "chat",
+        "imageUnderstand"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
+      "source": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "MiniMax-M2.5",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 204800,
+      "maxTokens": 204800,
+      "source": "https://platform.minimaxi.com/docs/api-reference/api-overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "MiniMax-M2.7",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 204800,
+      "maxTokens": 204800,
+      "source": "https://platform.minimaxi.com/docs/api-reference/api-overview",
+      "checkedAt": "2026-09-06"
+    },
+    {
+      "modelId": "MiniMax-M3",
+      "capabilities": [
+        "chat"
+      ],
+      "contextWindow": 1000000,
+      "maxTokens": 524288,
+      "source": "https://platform.minimaxi.com/docs/guides/text-generation",
+      "checkedAt": "2026-09-06"
+    }
+  ]
+}

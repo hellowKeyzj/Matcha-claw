@@ -6,8 +6,10 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Clock,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Loader2,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -26,9 +28,16 @@ import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
 } from './usage-history';
+import type { UsageSessionDetailEntry } from './usage-history';
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
 const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
+
+type UsageSessionDetailViewState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'loaded'; entries: UsageSessionDetailEntry[] }
+  | { status: 'error'; message: string };
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
@@ -47,9 +56,11 @@ export function Dashboard() {
   const usagePanelReady = useDashboardUsageStore((state) => state.usagePanelReady);
   const usageChartReady = useDashboardUsageStore((state) => state.usageChartReady);
   const usageDetailListReady = useDashboardUsageStore((state) => state.usageDetailListReady);
+  const usageSessionDetails = useDashboardUsageStore((state) => state.sessionDetails);
   const usageFetchError = useDashboardUsageStore((state) => state.error);
   const setUsagePanelReady = useDashboardUsageStore((state) => state.setUsagePanelReady);
   const setUsageVisualizationReady = useDashboardUsageStore((state) => state.setUsageVisualizationReady);
+  const loadSessionDetails = useDashboardUsageStore((state) => state.loadSessionDetails);
   const refreshUsageHistory = useDashboardUsageStore((state) => state.refreshUsageHistory);
   const dashboardHeavyContentReady = useDashboardUiStore((state) => state.dashboardHeavyContentReady);
   const usageGroupBy = useDashboardUiStore((state) => state.usageGroupBy);
@@ -60,6 +71,7 @@ export function Dashboard() {
   const setUsageWindow = useDashboardUiStore((state) => state.setUsageWindow);
   const setUsagePage = useDashboardUiStore((state) => state.setUsagePage);
   const [uptime, setUptime] = useState(0);
+  const [expandedUsageSessionId, setExpandedUsageSessionId] = useState<string | null>(null);
 
   // Track page view on mount only.
   useEffect(() => {
@@ -192,6 +204,13 @@ export function Dashboard() {
     ),
     [filteredUsageHistory],
   );
+  const toggleUsageSessionDetails = (sessionId: string, agentId: string) => {
+    const expanding = expandedUsageSessionId !== sessionId;
+    setExpandedUsageSessionId(expanding ? sessionId : null);
+    if (expanding) {
+      void loadSessionDetails(sessionId, agentId);
+    }
+  };
 
   // Update uptime periodically
   useEffect(() => {
@@ -431,42 +450,74 @@ export function Dashboard() {
               ) : (
                 <>
                   <div className="space-y-3">
-                    {pagedUsageHistory.map((entry) => (
-                      <div
-                        key={`${entry.sessionId}-${entry.timestamp}`}
-                        className="rounded-lg border p-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="font-medium truncate">
-                              {entry.model || t('recentTokenHistory.unknownModel')}
-                            </p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
-                            </p>
+                    {pagedUsageHistory.map((entry) => {
+                      const detail = usageSessionDetails[entry.sessionId] ?? { status: 'idle' as const };
+                      const expanded = expandedUsageSessionId === entry.sessionId;
+                      return (
+                        <div
+                          key={`${entry.sessionId}-${entry.timestamp}`}
+                          className="rounded-lg border p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-medium truncate">
+                                {entry.model || t('recentTokenHistory.unknownModel')}
+                              </p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 items-start gap-2 text-right">
+                              <div>
+                                <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {formatUsageTimestamp(entry.timestamp)}
+                                </p>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2"
+                                onClick={() => toggleUsageSessionDetails(entry.sessionId, entry.agentId)}
+                              >
+                                {expanded ? (
+                                  <ChevronUp className="h-4 w-4" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4" />
+                                )}
+                                <span className="sr-only">
+                                  {expanded ? t('recentTokenHistory.hideDetails') : t('recentTokenHistory.showDetails')}
+                                </span>
+                              </Button>
+                            </div>
                           </div>
-                          <div className="text-right shrink-0">
-                            <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {formatUsageTimestamp(entry.timestamp)}
-                            </p>
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                            <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
+                            <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
+                            {entry.cacheReadTokens > 0 && (
+                              <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
+                            )}
+                            {entry.cacheWriteTokens > 0 && (
+                              <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
+                            )}
+                            {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
+                              <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
+                            )}
                           </div>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
-                          <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
-                          {entry.cacheReadTokens > 0 && (
-                            <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
-                          )}
-                          {entry.cacheWriteTokens > 0 && (
-                            <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
-                          )}
-                          {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
-                            <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
+                          {expanded && (
+                            <UsageSessionDetails
+                              detail={detail}
+                              loadingLabel={t('recentTokenHistory.detailsLoading')}
+                              emptyLabel={t('recentTokenHistory.detailsEmpty')}
+                              errorLabel={t('recentTokenHistory.detailsError')}
+                              inputLabel={t('recentTokenHistory.inputShort')}
+                              outputLabel={t('recentTokenHistory.outputShort')}
+                              cacheLabel={t('recentTokenHistory.cacheShort')}
+                            />
                           )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   <div className="flex items-center justify-between gap-3 border-t pt-3">
@@ -535,6 +586,72 @@ function formatUsageTimestamp(timestamp: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+function UsageSessionDetails({
+  detail,
+  loadingLabel,
+  emptyLabel,
+  errorLabel,
+  inputLabel,
+  outputLabel,
+  cacheLabel,
+}: {
+  detail: UsageSessionDetailViewState;
+  loadingLabel: string;
+  emptyLabel: string;
+  errorLabel: string;
+  inputLabel: string;
+  outputLabel: string;
+  cacheLabel: string;
+}) {
+  if (detail.status === 'idle' || detail.status === 'loading') {
+    return (
+      <div className="mt-3 flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        {loadingLabel}
+      </div>
+    );
+  }
+
+  if (detail.status === 'error') {
+    return (
+      <div className="mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        {errorLabel}: {detail.message}
+      </div>
+    );
+  }
+
+  if (detail.entries.length === 0) {
+    return (
+      <div className="mt-3 rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        {emptyLabel}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-2 border-t pt-3">
+      {detail.entries.map((entry, index) => (
+        <div
+          key={entry.messageId || entry.eventId || `${entry.sessionId}-${entry.timestamp}-${index}`}
+          className="rounded-md bg-muted/30 px-3 py-2"
+        >
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="truncate text-muted-foreground">{formatUsageTimestamp(entry.timestamp)}</span>
+            <span className="font-medium">{formatTokenCount(entry.totalTokens)}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>{inputLabel}: {formatTokenCount(entry.inputTokens)}</span>
+            <span>{outputLabel}: {formatTokenCount(entry.outputTokens)}</span>
+            {(entry.cacheReadTokens > 0 || entry.cacheWriteTokens > 0) && (
+              <span>{cacheLabel}: {formatTokenCount(entry.cacheReadTokens + entry.cacheWriteTokens)}</span>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function UsageBarChart({

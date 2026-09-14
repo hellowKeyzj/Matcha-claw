@@ -27,6 +27,7 @@ use organization::{
     TeamDefinition, TeamFacts, TeamId, TeamMember, TeamRevision, TeamRole, TriggerFireRequest,
     TriggerRegistration, TriggerSource,
 };
+use serde_json::json;
 
 use super::*;
 use crate::{
@@ -68,7 +69,14 @@ impl TestRoot {
         fs::create_dir(&matcha_storage_parent).unwrap();
         let openclaw_dir = std::fs::canonicalize(&base).unwrap().join("openclaw");
         let template_directory = openclaw_dir.join("docs/reference/templates");
+        let matcha_template_directory = base.join("resources/agent-workspace-templates/main-agent");
         fs::create_dir_all(&template_directory).unwrap();
+        fs::create_dir_all(&matcha_template_directory).unwrap();
+        fs::write(
+            matcha_template_directory.join("IDENTITY.md"),
+            "# IDENTITY.md\n\n- **名字：** Matcha\n",
+        )
+        .unwrap();
         for name in [
             "AGENTS.md",
             "SOUL.md",
@@ -157,7 +165,7 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     accounts.persist(account).expect("persist local account");
     drop(accounts);
     let (mut host, _events, handles) = Host::new(host_input).expect("construct host");
-    host.start().await.expect("start host");
+    host.start_admission_only().await.expect("start host");
     assert!(matches!(
         handles.provider.list_provider_accounts().await.unwrap(),
         crate::transport::provider_accounts::ProviderAccountsDelivery::List(ref accounts)
@@ -218,6 +226,20 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
             if models.len() == 1
                 && models[0].selection_id == expected_selection_id
     ));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(root.state_parent.join("openclaw/openclaw.json"))
+                .expect("read projected OpenClaw config"),
+        )
+        .expect("parse projected OpenClaw config")["models"]["providers"]["ollama-local-ollama"]["models"],
+        json!([{
+            "id": "llama-3.3",
+            "name": "llama-3.3",
+            "input": ["text"],
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+        }]),
+    );
 
     let routing_revision = match handles.provider.list_provider_routing().await.unwrap() {
         crate::provider::routing::ProviderRoutingListOutcome::Desired(Some(routing)) => {
@@ -701,16 +723,16 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
 }
 
 #[test]
-fn matcha_terminal_readback_stays_in_teamrun_coordinator_native_watches() {
+fn matcha_terminal_readback_stays_in_teamrun_receipt_router_native_watches() {
     let host = include_str!("../host.rs");
-    let coordinator = include_str!("../../organization/coordinator.rs");
+    let receipt_router = include_str!("../../organization/receipt_router.rs");
     let matcha = include_str!("../matcha.rs");
     let crate_root = include_str!("../../lib.rs");
     let control_wire = include_str!("../../control/wire.rs");
 
     assert!(!host.contains("read_matcha_terminal_receipt"));
-    assert!(coordinator.contains("struct TerminalWatches"));
-    assert!(coordinator.contains("fn watch_matcha_terminal("));
+    assert!(receipt_router.contains("struct TerminalWatches"));
+    assert!(receipt_router.contains("fn watch_matcha_terminal("));
     assert!(matcha.contains("impl TeamTerminalOps for MatchaRuntimeDriver"));
     assert!(matcha.contains("watch_role_terminal"));
     assert!(!crate_root.contains("read_matcha_terminal_receipt"));
@@ -731,16 +753,23 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     let root_actor = include_str!("../../owner/actor.rs");
     let organization_actor = include_str!("../../organization/actor.rs");
     let organization_handle = include_str!("../../organization/handle.rs");
-    let coordinator = include_str!("../../organization/coordinator.rs");
+    let supervisor = include_str!("../../organization/supervisor.rs");
+    let run_actor = include_str!("../../organization/run_actor.rs");
+    let receipt_router = include_str!("../../organization/receipt_router.rs");
 
     assert!(!host.contains("schedule_team_run_ready_nodes"));
     assert!(!root_actor.contains("schedule_team_run_ready_nodes"));
     assert!(organization_actor.contains("impl OwnerSpec for OrganizationOwner"));
     assert!(organization_actor.contains("OrganizationCommand::ScheduleReadyNodes"));
     assert!(organization_actor.contains("fn schedule_ready_nodes("));
-    assert!(organization_actor.contains("MAX_ACTIVE_ROLE_PROMPTS: usize = 2"));
-    assert!(organization_actor.contains("DeliveryPhase::Delivered"));
+    assert!(organization_actor.contains("OrganizationQuery::ActiveRunIds"));
+    assert!(organization_actor.contains("OrganizationQuery::ActivityTarget"));
+    assert!(organization_actor.contains("OrganizationCommand::ClaimActivity"));
+    assert!(organization_actor.contains("OrganizationCommand::SettleActivity"));
     assert!(organization_handle.contains("pub async fn schedule_ready_nodes("));
+    assert!(organization_handle.contains("pub async fn activity_target("));
+    assert!(organization_handle.contains("pub async fn claim_activity("));
+    assert!(organization_handle.contains("pub async fn settle_activity("));
     assert!(
         organization_handle.contains(
             ".send_command(OrganizationCommand::ScheduleReadyNodes { run_id, now, reply })"
@@ -752,10 +781,15 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     assert!(!host.contains("self.team_run_coordinator.wake()"));
     assert!(!host.contains("PeerMaintenanceHandle"));
     assert!(!host.contains("peer_maintenance"));
-    assert!(coordinator.contains("struct DeliveryReconciliationState"));
-    assert!(coordinator.contains("async fn reconcile_team_run_deliveries("));
-    assert!(coordinator.contains(".schedule_ready_nodes(run_id.clone(), now)"));
-    assert!(coordinator.contains(".active_run_ids()"));
+    assert!(receipt_router.contains("struct ActivityReceipt"));
+    assert!(receipt_router.contains("pub(super) async fn route_activity_receipt("));
+    assert!(!receipt_router.contains("\nstruct DeliveryReconciliationState"));
+    assert!(!receipt_router.contains("\npub(super) async fn reconcile_deliveries("));
+    assert!(run_actor.contains("struct TeamRunActor"));
+    assert!(run_actor.contains(".schedule_ready_nodes(run_id, now)"));
+    assert!(run_actor.contains("claim_activity(run_id.clone(), activity_id.clone(), claimed_at)"));
+    assert!(run_actor.contains(".route_activity_receipt("));
+    assert!(supervisor.contains(".active_run_ids()"));
     for removed in [
         concat!("Terminal", "Watches"),
         concat!("Delivery", "Reconciliation", "State"),
@@ -1052,24 +1086,14 @@ fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
 }
 
 #[tokio::test]
-async fn ready_host_reads_usage_history_when_openclaw_is_not_running() {
+async fn usage_history_requires_runtime_admission() {
     let root = TestRoot::new();
-    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
-    let sessions = root.state_parent.join("openclaw/agents/main/sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        sessions.join("live.jsonl"),
-        r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":{"total":7}}}"#,
-    )
-    .unwrap();
+    let (_host, _events, handles) = Host::new(host_input(&root)).unwrap();
 
-    host.start().await.unwrap();
-
-    let entries = handles.usage.recent(10).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].total_tokens(), 7);
-
-    host.shutdown().await.unwrap();
+    assert_eq!(
+        handles.usage.recent(10).await,
+        Err(openclaw::usage::UsageReadError::Unavailable)
+    );
 }
 
 #[tokio::test]
@@ -1203,6 +1227,8 @@ fn host_input(root: &TestRoot) -> HostInput {
         },
         matcha_secret: Secret::new(entropy()).unwrap(),
         open_claw: OpenClawInput {
+            team_run_mcp_executable: absolute_path("runtime-host-mcp"),
+            team_run_mcp_state_dir: absolute_path("runtime-host"),
             electron_image: absolute_path("MatchaClaw"),
             working_directory: absolute_path("runtime"),
             openclaw_dir: root.openclaw_dir.clone(),
@@ -1216,6 +1242,8 @@ fn host_input(root: &TestRoot) -> HostInput {
             entry: root.openclaw_dir.join("openclaw.mjs"),
             state_dir,
             port: root.openclaw_port,
+            sealed_endpoint: None,
+            sealed_token: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),

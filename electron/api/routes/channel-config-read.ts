@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelConfigReadTransport } from '../../main/runtime-host-delivery/transport/channels/config-read';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
 
 const INVALID = {
   success: false,
@@ -19,26 +20,34 @@ export async function handleChannelConfigReadRoutes(
 ): Promise<boolean> {
   if (url.pathname !== '/api/channels/config/read' || req.method !== 'POST') return false;
 
+  const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
     body = await parseJsonBody(req);
   } catch {
+    beginChannelTrace('route.config_read.invalid', traceId)(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
   if (!isRequest(body)) {
+    beginChannelTrace('route.config_read.invalid', traceId)(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
 
+  const finish = beginChannelTrace('route.config_read', traceId);
   try {
-    const projection = await transport.read(body);
+    const projection = await transport.read(body, traceId);
     if (projection) {
-      sendJson(res, 200, { success: true, values: projection.values });
+      const response = { success: true, values: projection.values };
+      finish(200, response);
+      sendJson(res, 200, response);
     } else {
+      finish(503, UNAVAILABLE);
       sendJson(res, 503, UNAVAILABLE);
     }
-  } catch {
+  } catch (error) {
+    finish(503, UNAVAILABLE, channelTraceError(error));
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;

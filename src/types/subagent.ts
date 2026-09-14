@@ -18,6 +18,8 @@ export interface SubagentSummary {
   workspace?: string;
   model?: string;
   skills?: string[];
+  kind?: 'agent' | 'system';
+  sealed?: boolean;
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
   identity?: AgentIdentitySummary;
@@ -54,6 +56,52 @@ export interface SubagentImportResult {
   warning?: string;
 }
 
+export interface SubagentPackageExportResult {
+  agentId: string;
+  fileName: string;
+  packagePath: string;
+  size: number;
+  exportedAtMs: number;
+}
+
+export interface SubagentCloudPackage {
+  packageId: string;
+  packageVersionId: string;
+  name: string;
+  displayName?: string;
+  packageType: string;
+  version: string;
+  description?: string;
+  status: string;
+  entitlementStatus?: string;
+  downloadable: boolean;
+}
+
+export interface SubagentCloudPackageUploadResult {
+  agentId: string;
+  packageId?: string;
+  packageVersionId?: string;
+  fileName?: string;
+  size?: number;
+  uploadedAtMs?: number;
+}
+
+export interface SubagentCloudPackageDownloadResult {
+  agentId?: string;
+  packageId?: string;
+  packageVersionId?: string;
+  fileName: string;
+  size?: number;
+  downloadedAtMs?: number;
+}
+
+export interface SubagentCloudPackageInstallResult {
+  agentId: string;
+  packageId?: string;
+  packageVersionId?: string;
+  warning?: string;
+}
+
 export interface SubagentTemplateSummary {
   id: string;
   name: string;
@@ -84,6 +132,7 @@ export interface SubagentTemplateDetail extends SubagentTemplateSummary {
 export interface AgentsListResult {
   agents: SubagentSummary[];
   defaultId?: string;
+  selectionRequired?: boolean;
   mainKey?: string;
   scope?: string;
   ready?: boolean;

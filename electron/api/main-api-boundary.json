@@ -5,6 +5,7 @@
     "app.ts",
     "billing.ts",
     "capabilities.ts",
+    "channel-authorization.ts",
     "channel-catalog.ts",
     "channel-configure.ts",
     "channel-credentials.ts",
@@ -23,6 +24,7 @@
     "settings-desired.ts",
     "security-policy.ts",
     "security.ts",
+    "sealed-skills.ts",
     "sessions.ts",
     "settings.ts",
     "skill-bundle.ts",
@@ -30,7 +32,6 @@
     "subscription.ts",
     "files.ts",
     "gateway.ts",
-    "license.ts",
     "logs.ts",
     "runtime-host-process.ts",
     "runtime-host-usage.ts",
@@ -38,6 +39,8 @@
     "manual-team.ts",
     "matcha-agent-app-server.ts",
     "openclaw.ts",
+    "openclaw-mcp-servers.ts",
+    "packages.ts",
     "plugins.ts",
     "provider-accounts.ts",
     "provider-models.ts",
@@ -80,6 +83,7 @@
     "/api/capabilities/list",
     "/api/capabilities/describe",
     "/api/capabilities/execute",
+    "/api/channels/authorization",
     "/api/channels/catalog",
     "/api/channels/configure",
     "/api/channels/credentials/validate",
@@ -99,7 +103,6 @@
     "/api/cron/jobs/delete",
     "/api/cron/jobs/toggle",
     "/api/cron/session-history",
-    "/api/openclaw/chat/history",
     "/api/matcha-agent/chat/history",
     "/api/usage/recent",
     "/api/diagnostics/memory",
@@ -130,8 +133,6 @@
     "/api/gateway/stop",
     "/api/gateway/restart",
     "/api/gateway/control-ui",
-    "/api/license/gate",
-    "/api/license/stored-key",
     "/api/openclaw/status",
     "/api/openclaw/ready",
     "/api/openclaw/dir",
@@ -145,12 +146,20 @@
     "/api/openclaw/runtime/snapshot",
     "/api/openclaw/lifecycle/status",
     "/api/openclaw/lifecycle/restart",
+    "/api/openclaw/mcp-servers",
     "/api/openclaw/logs",
+    "/api/packages/mine",
+    "/api/packages/market",
+    "/api/packages/upload",
+    "/api/packages/download-record",
+    "/api/packages/download",
+    "/api/packages/install",
     "/api/runtime-host/status",
     "/api/runtime-host/restart",
     "/api/provider-accounts",
     "/api/provider-models",
     "/api/provider-models/selectable",
+    "/api/provider-models/discover",
     "/api/provider-routing",
     "/api/external-connectors",
     "/api/external-connectors/mcp-server-programs",
@@ -176,6 +185,10 @@
     "/api/skills/import/markdown",
     "/api/skills/import/bundle",
     "/api/skills/readme",
+    "/api/sealed-skills/status",
+    "/api/sealed-skills/export",
+    "/api/sealed-skills/install",
+    "/api/sealed-skills/uninstall",
     "/api/subagents/skill-bundles/export",
     "/api/subagents/skill-bundles/import",
     "/api/subscription/summary",
@@ -185,6 +198,7 @@
     "/api/matcha-agent/app-server/status",
     "/api/matcha-agent/app-server/restart",
     "/api/runtime-host/usage/recent",
+    "/api/runtime-host/usage/session-timeseries",
     "/api/runtime-adapters/list",
     "/api/runtime-adapters/instances/list",
     "/api/runtime-connectors/list",
@@ -205,6 +219,7 @@
     "/api/team/trigger",
     "/api/runtime-host/team-webhook-auth",
     "/api/toolchain/uv/check",
+    "/api/toolchain/uv/prepare",
     "/api/remote-fleet/list-audit-events",
     "/api/remote-fleet/list-commands",
     "/api/remote-fleet/metrics",
@@ -306,6 +321,10 @@
     ],
     [
       "POST",
+      "/api/channels/authorization"
+    ],
+    [
+      "POST",
       "/api/channels/catalog"
     ],
     [
@@ -379,10 +398,6 @@
     [
       "GET",
       "/api/cron/session-history"
-    ],
-    [
-      "POST",
-      "/api/openclaw/chat/history"
     ],
     [
       "POST",
@@ -506,14 +521,6 @@
     ],
     [
       "GET",
-      "/api/license/gate"
-    ],
-    [
-      "GET",
-      "/api/license/stored-key"
-    ],
-    [
-      "GET",
       "/api/openclaw/status"
     ],
     [
@@ -570,14 +577,38 @@
     ],
     [
       "GET",
+      "/api/openclaw/mcp-servers"
+    ],
+    [
+      "GET",
       "/api/openclaw/logs"
     ],
     [
       "GET",
-      "/api/provider-accounts"
+      "/api/packages/mine"
+    ],
+    [
+      "GET",
+      "/api/packages/market"
     ],
     [
       "POST",
+      "/api/packages/upload"
+    ],
+    [
+      "POST",
+      "/api/packages/download-record"
+    ],
+    [
+      "POST",
+      "/api/packages/download"
+    ],
+    [
+      "POST",
+      "/api/packages/install"
+    ],
+    [
+      "GET",
       "/api/provider-accounts"
     ],
     [
@@ -591,6 +622,10 @@
     [
       "GET",
       "/api/provider-models/selectable"
+    ],
+    [
+      "GET",
+      "/api/provider-models/discover"
     ],
     [
       "GET",
@@ -701,6 +736,22 @@
       "/api/skills/readme"
     ],
     [
+      "GET",
+      "/api/sealed-skills/status"
+    ],
+    [
+      "POST",
+      "/api/sealed-skills/export"
+    ],
+    [
+      "POST",
+      "/api/sealed-skills/install"
+    ],
+    [
+      "POST",
+      "/api/sealed-skills/uninstall"
+    ],
+    [
       "POST",
       "/api/subagents/skill-bundles/export"
     ],
@@ -735,6 +786,10 @@
     [
       "GET",
       "/api/runtime-host/usage/recent"
+    ],
+    [
+      "GET",
+      "/api/runtime-host/usage/session-timeseries"
     ],
     [
       "GET",
@@ -823,6 +878,10 @@
     [
       "GET",
       "/api/toolchain/uv/check"
+    ],
+    [
+      "POST",
+      "/api/toolchain/uv/prepare"
     ],
     [
       "GET",

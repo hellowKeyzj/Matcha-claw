@@ -19,6 +19,8 @@ export interface SessionConnectorStatusDetails {
   readonly sessionKey?: string;
   readonly toolCount?: number;
   readonly launchSummary?: string;
+  readonly enabledNextRun?: boolean;
+  readonly enabledConfigurable?: boolean;
 }
 
 export interface SessionConnectorStatus {
@@ -41,6 +43,7 @@ type SessionConnectorStatusState = {
   loadingBySessionKey: Record<string, boolean>;
   errorBySessionKey: Record<string, string | null>;
   refreshSessionStatus: (sessionIdentity: SessionIdentity) => Promise<SessionConnectorStatus[]>;
+  setSessionMcpServerEnabled: (sessionIdentity: SessionIdentity, serverId: string, enabled: boolean) => Promise<void>;
   clearSessionStatus: (sessionIdentity: SessionIdentity) => void;
 };
 
@@ -70,6 +73,40 @@ export const useSessionConnectorStatusStore = create<SessionConnectorStatusState
       const message = error instanceof Error ? error.message : '加载会话连接器状态失败';
       set((state) => ({
         loadingBySessionKey: { ...state.loadingBySessionKey, [key]: false },
+        errorBySessionKey: { ...state.errorBySessionKey, [key]: message },
+      }));
+      throw error;
+    }
+  },
+
+  setSessionMcpServerEnabled: async (sessionIdentity, serverId, enabled) => {
+    const key = buildSessionIdentityKey(sessionIdentity);
+    set((state) => ({
+      errorBySessionKey: { ...state.errorBySessionKey, [key]: null },
+    }));
+    try {
+      await hostApiFetch('/api/external-connectors/session-mcp-server-enabled', {
+        method: 'POST',
+        body: JSON.stringify({ sessionIdentity, serverId, enabled }),
+      });
+      set((state) => ({
+        statusesBySessionKey: {
+          ...state.statusesBySessionKey,
+          [key]: (state.statusesBySessionKey[key] ?? []).map((status) => (
+            status.details?.serverId === serverId
+              ? {
+                ...status,
+                reason: enabled ? '已启用' : '已禁用',
+                details: { ...status.details, enabledNextRun: enabled },
+              }
+              : status
+          )),
+        },
+      }));
+      await useSessionConnectorStatusStore.getState().refreshSessionStatus(sessionIdentity);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '更新会话 MCP 状态失败';
+      set((state) => ({
         errorBySessionKey: { ...state.errorBySessionKey, [key]: message },
       }));
       throw error;

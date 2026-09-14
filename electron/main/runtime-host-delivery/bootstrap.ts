@@ -33,6 +33,8 @@ interface RuntimeHostBootstrapBaseInput {
   readonly appLogDir: string;
   /** MatchaClaw Host-owned durable state root. */
   readonly runtimeHostStateDir: string;
+  /** Native TeamRun MCP stdio executable started by OpenClaw. */
+  readonly runtimeHostMcpExecutable: string;
   /** Sealed Main-only provider credential resolver. */
   readonly providerCredentialResolver?: Readonly<{
     readonly endpoint: string;
@@ -82,8 +84,6 @@ interface RuntimeHostBootstrapBaseInput {
   readonly securityPolicyTransportPort: number;
   /** Fixed loopback public session approval transport port. */
   readonly sessionApprovalTransportPort: number;
-  /** Fixed loopback public OpenClaw chat history transport port. */
-  readonly openclawHistoryTransportPort: number;
   /** Fixed loopback public Matcha Agent chat history transport port. */
   readonly matchaHistoryTransportPort: number;
   /** Fixed loopback public OpenClaw usage history transport port. */
@@ -166,6 +166,7 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
     appVersion: input.appVersion,
     appLogDir: input.appLogDir,
     runtimeHostStateDir: input.runtimeHostStateDir,
+    runtimeHostMcpExecutable: input.runtimeHostMcpExecutable,
     ...(input.providerCredentialResolver
       ? {
           providerCredentialResolver: {
@@ -196,7 +197,6 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
     settingsDesiredTransportPort: input.settingsDesiredTransportPort,
     securityPolicyTransportPort: input.securityPolicyTransportPort,
     sessionApprovalTransportPort: input.sessionApprovalTransportPort,
-    openclawHistoryTransportPort: input.openclawHistoryTransportPort,
     matchaHistoryTransportPort: input.matchaHistoryTransportPort,
     usageTransportPort: input.usageTransportPort,
     sessionModelSelectionTransportPort: input.sessionModelSelectionTransportPort,
@@ -246,6 +246,7 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
   validateDeliveryVerificationKey(input.deliveryVerificationKey);
   validateCronBrokerVerificationKey(input.cronBrokerVerificationKey);
   validateAbsolutePath(input.runtimeHostStateDir, 'runtimeHostStateDir', input.platform);
+  validateAbsolutePath(input.runtimeHostMcpExecutable, 'runtimeHostMcpExecutable', input.platform);
   validateParentCallbackBaseUrl(input.parentCallbackBaseUrl);
   validateParentCallbackDispatchToken(input.parentCallbackDispatchToken);
   validatePrivateResolver(input.providerCredentialResolver, 'providerCredentialResolver', '/resolve');
@@ -267,7 +268,6 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
   validatePort(input.settingsDesiredTransportPort, 'settingsDesiredTransportPort');
   validatePort(input.securityPolicyTransportPort, 'securityPolicyTransportPort');
   validatePort(input.sessionApprovalTransportPort, 'sessionApprovalTransportPort');
-  validatePort(input.openclawHistoryTransportPort, 'openclawHistoryTransportPort');
   validatePort(input.matchaHistoryTransportPort, 'matchaHistoryTransportPort');
   validatePort(input.usageTransportPort, 'usageTransportPort');
   validatePort(input.sessionModelSelectionTransportPort, 'sessionModelSelectionTransportPort');
@@ -308,7 +308,6 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
       input.settingsDesiredTransportPort,
       input.securityPolicyTransportPort,
       input.sessionApprovalTransportPort,
-      input.openclawHistoryTransportPort,
       input.matchaHistoryTransportPort,
       input.usageTransportPort,
       input.sessionModelSelectionTransportPort,
@@ -329,7 +328,7 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
       input.teamTriggerTransportPort,
       input.teamLifecycleTransportPort,
       input.manualTeamTransportPort,
-    ]).size !== 39
+    ]).size !== 38
   ) {
     throw new RuntimeHostBootstrapValidationError('transportPorts');
   }
@@ -354,7 +353,6 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
     input.settingsDesiredTransportPort,
     input.securityPolicyTransportPort,
     input.sessionApprovalTransportPort,
-    input.openclawHistoryTransportPort,
     input.matchaHistoryTransportPort,
     input.usageTransportPort,
     input.sessionModelSelectionTransportPort,

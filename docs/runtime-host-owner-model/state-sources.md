@@ -36,8 +36,7 @@ requested
 
 Host-owned Organization/Fleet durable facts must not be written under OpenClaw state or matcha-agent app-server state. OpenClaw private projection still owns OpenClaw config/auth material; matcha-agent app-server still owns peer-native session and run artifacts.
 
-### Settings / security / license
-
+### Settings / security
 ```text
 SettingsStoreWorkflow
   -> settings durable document
@@ -53,20 +52,12 @@ security.policy.json
   -> audit/enforcement observation
 ```
 
-```text
-raw license key
-  -> encrypted secret + hash/device identity
-  -> NodeLicenseRuntime validation/cache
-  -> gate snapshot
-  -> license:gate-changed
-```
-
 关键约束：
 
 - settings store 不是 OpenClaw applied config；
 - policy persisted 不是 enforcement active；
-- license gate projection 不是 raw key owner；
-- 当前 Rust 已有 OpenClaw config document store 和 rule catalog，但不能据此宣称 settings/security/license 已完成接管；
+- License 产品门禁已退休，不再有 license gate/raw key owner、public route、capability 或事件；
+- 当前 Rust 已有 OpenClaw config document store 和 rule catalog，但不能据此宣称 settings/security 已完成接管；
 - TS `gateway.auth.token` 与 Rust sensitive-field guard 的冲突必须在切换前解决。
 
 ### Channel
@@ -80,6 +71,16 @@ Renderer Zustand store          -> UI/cache projection
 ```
 
 `/api/channels/snapshot` 与当前 Rust `/api/channels/status` 不是天然同一契约。`gateway:channel-status` 的 wrapper/native payload shape 需要真实运行 trace，不得在 Rust 或 bridge 中擅自 unwrap/rewrap。
+
+### Provider
+
+```text
+curated JSON reference catalog = modelId-keyed built-in discovery/import draft defaults
+user input / saved provider catalog = final desired/persisted model facts
+OpenClaw private projection      = consumer of saved catalog only
+```
+
+Curated reference 不成为 runtime fact owner；OpenClaw projection 不按模型名猜 `contextWindow`，只使用已保存 catalog 中的字段。
 
 ### Cron / usage
 

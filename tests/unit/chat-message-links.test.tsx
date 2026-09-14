@@ -18,6 +18,7 @@ const sessionIdentity = {
   agentId: 'files',
   sessionKey: 'files:test',
 };
+const workspaceContext = { workspaceRoot: '/tmp' };
 
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
@@ -45,13 +46,10 @@ describe('chat message links', () => {
     hostFileStatMock.mockReset();
     hostFileStatMock.mockResolvedValue({
       ok: true,
-      entry: {
-        name: 'default',
-        path: '/tmp/default',
-        isDir: false,
-        size: 1024,
-        mtimeMs: 1,
-      },
+      name: 'default',
+      isDirectory: false,
+      size: 1024,
+      mtimeMs: 1,
     });
   });
 
@@ -59,8 +57,9 @@ describe('chat message links', () => {
     vi.useRealTimers();
   });
 
-  it('plain text file name should open mapped absolute path from attached files', () => {
+  it('plain text file cards open mapped paths through the artifact callback', () => {
     const targetPath = 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md';
+    const onOpenAttachedArtifact = vi.fn();
     const message: RawMessage = {
       role: 'assistant',
       content: '搞定！已经写进 TOOLS.md 了',
@@ -76,15 +75,17 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
-    expect(invokeIpcMock).toHaveBeenCalledWith('shell:openPath', targetPath);
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({ filePath: targetPath }));
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
   it('legacy markdown relative file link should stay actionable when attached absolute path exists', () => {
     const targetPath = 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md';
+    const onOpenAttachedArtifact = vi.fn();
     const message: RawMessage = {
       role: 'assistant',
       content: '[TOOLS.md](TOOLS.md)',
@@ -100,16 +101,14 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
 
     const actionable = screen.queryByRole('link', { name: 'TOOLS.md' })
       ?? screen.getByRole('button', { name: /TOOLS\.md/i });
     fireEvent.click(actionable);
 
-    expect(invokeIpcMock).toHaveBeenCalled();
-    expect(invokeIpcMock.mock.calls.some(([channel, value]) => (
-      (channel === 'shell:showItemInFolder' || channel === 'shell:openPath') && value === targetPath
-    ))).toBe(true);
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({ filePath: targetPath }));
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
   it('legacy markdown relative file link should not be clickable without attached absolute path', () => {
@@ -141,10 +140,36 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalled();
   });
 
-  it('attached file card should open file directly when filePath exists', () => {
+  it('renders attachment source and unavailable preview labels', () => {
+    const item = buildItem({
+      role: 'assistant',
+      content: '附件状态',
+      _attachedFiles: [{
+        fileName: 'result.txt',
+        mimeType: 'text/plain',
+        fileSize: 12,
+        preview: null,
+        source: 'tool-result',
+      }, {
+        fileName: 'missing.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: null,
+        previewStatus: 'unavailable',
+        source: 'message-ref',
+      }],
+    });
+
+    render(<ChatAssistantTurn item={item} showThinking={false} />);
+
+    expect(screen.getByText(/工具结果 · 12 B/)).toBeInTheDocument();
+    expect(screen.getByText('预览不可用')).toBeInTheDocument();
+  });
+
+  it('user-upload attached file card should open file directly when filePath exists', () => {
     const message: RawMessage = {
       role: 'assistant',
-      content: '文件已生成',
+      content: '文件已上传',
       _attachedFiles: [
         {
           fileName: 'TOOLS.md',
@@ -152,6 +177,7 @@ describe('chat message links', () => {
           fileSize: 1234,
           preview: null,
           filePath: 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md',
+          source: 'user-upload',
         },
       ],
     };
@@ -170,13 +196,10 @@ describe('chat message links', () => {
     const onOpenAttachedArtifact = vi.fn();
     hostFileStatMock.mockResolvedValueOnce({
       ok: true,
-      entry: {
-        name: 'report.pdf',
-        path: '/tmp/report.pdf',
-        isDir: false,
-        size: 4096,
-        mtimeMs: 1,
-      },
+      name: 'report.pdf',
+      isDirectory: false,
+      size: 4096,
+      mtimeMs: 1,
     });
     const message: RawMessage = {
       role: 'assistant',
@@ -188,6 +211,7 @@ describe('chat message links', () => {
         item={buildItem(message)}
         showThinking={false}
         sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -205,13 +229,10 @@ describe('chat message links', () => {
     const onOpenAttachedArtifact = vi.fn();
     hostFileStatMock.mockResolvedValueOnce({
       ok: true,
-      entry: {
-        name: 'chart.png',
-        path: '/tmp/chart.png',
-        isDir: false,
-        size: 4096,
-        mtimeMs: 1,
-      },
+      name: 'chart.png',
+      isDirectory: false,
+      size: 4096,
+      mtimeMs: 1,
     });
     const message: RawMessage = {
       role: 'assistant',
@@ -223,6 +244,7 @@ describe('chat message links', () => {
         item={buildItem(message)}
         showThinking={false}
         sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -240,13 +262,10 @@ describe('chat message links', () => {
     const onOpenAttachedArtifact = vi.fn();
     hostFileStatMock.mockResolvedValueOnce({
       ok: true,
-      entry: {
-        name: 'report.pdf',
-        path: '/tmp/report.pdf',
-        isDir: false,
-        size: 4096,
-        mtimeMs: 1,
-      },
+      name: 'report.pdf',
+      isDirectory: false,
+      size: 4096,
+      mtimeMs: 1,
     });
     const message: RawMessage = {
       role: 'assistant',
@@ -258,6 +277,7 @@ describe('chat message links', () => {
         item={buildItem(message)}
         showThinking={false}
         sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -274,13 +294,10 @@ describe('chat message links', () => {
     const onOpenAttachedArtifact = vi.fn();
     hostFileStatMock.mockResolvedValueOnce({
       ok: true,
-      entry: {
-        name: 'report.pdf',
-        path: '/tmp/report.pdf',
-        isDir: false,
-        size: 4096,
-        mtimeMs: 1,
-      },
+      name: 'report.pdf',
+      isDirectory: false,
+      size: 4096,
+      mtimeMs: 1,
     });
     const message: RawMessage = {
       role: 'assistant',
@@ -292,6 +309,7 @@ describe('chat message links', () => {
         item={buildItem(message)}
         showThinking={false}
         sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -307,25 +325,32 @@ describe('chat message links', () => {
   it('derives skill directory cards from assistant text after stat validation', async () => {
     hostFileStatMock.mockResolvedValueOnce({
       ok: true,
-      entry: {
-        name: 'open-eastmoney',
-        path: '~/.openclaw/skills/open-eastmoney',
-        isDir: true,
-        size: 0,
-        mtimeMs: 1,
-      },
+      name: 'open-eastmoney',
+      isDirectory: true,
+      size: 0,
+      mtimeMs: 1,
     });
     const message: RawMessage = {
       role: 'assistant',
       content: '位置： ~/.openclaw/skills/open-eastmoney',
     };
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} sessionIdentity={sessionIdentity} />);
+    render(
+      <ChatAssistantTurn
+        item={buildItem(message)}
+        showThinking={false}
+        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
+        onOpenAttachedArtifact={vi.fn()}
+      />,
+    );
 
     await waitFor(() => {
       expect(hostFileStatMock).toHaveBeenCalledWith({
-        path: '~/.openclaw/skills/open-eastmoney',
-        sessionIdentity,
+        endpoint: sessionIdentity.endpoint,
+        sessionKey: sessionIdentity.sessionKey,
+        relativePath: '~/.openclaw/skills/open-eastmoney',
+        workspaceRoot: workspaceContext.workspaceRoot,
       });
     });
     expect(await screen.findByRole('button', { name: /open-eastmoney/i })).toBeInTheDocument();

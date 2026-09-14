@@ -18,6 +18,64 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }));
 
+vi.mock('node:fs', () => {
+  const fs = { existsSync: (path: string) => state.files.has(path) };
+  return { ...fs, default: fs };
+});
+
+vi.mock('node:sqlite', () => {
+  class DatabaseSync {
+    private cells: Record<string, string>;
+    private tableExists: boolean;
+    private readonly readOnly: boolean;
+    isTransaction = false;
+
+    constructor(private readonly path: string, options?: { readOnly?: boolean }) {
+      const raw = state.files.get(path);
+      this.cells = raw ? JSON.parse(raw) : {};
+      this.tableExists = raw !== undefined;
+      this.readOnly = options?.readOnly === true;
+    }
+
+    exec(sql: string): void {
+      const statement = sql.trim().toUpperCase();
+      if (statement.startsWith('CREATE TABLE')) this.tableExists = true;
+      if (statement === 'BEGIN IMMEDIATE') this.isTransaction = true;
+      if (statement === 'COMMIT') {
+        this.isTransaction = false;
+        this.persist();
+      }
+      if (statement === 'ROLLBACK') {
+        this.isTransaction = false;
+      }
+    }
+
+    prepare(sql: string): { get: (key?: string) => unknown; run: (key: string, value: string) => void } {
+      if (sql.includes('sqlite_master')) {
+        return { get: () => this.tableExists ? { 1: 1 } : undefined, run: () => undefined };
+      }
+      if (sql.includes('SELECT value_json')) {
+        return { get: (key?: string) => key && this.cells[key] ? { value_json: this.cells[key] } : undefined, run: () => undefined };
+      }
+      return {
+        get: () => undefined,
+        run: (key: string, value: string) => {
+          this.tableExists = true;
+          this.cells[key] = value;
+        },
+      };
+    }
+
+    close(): void {}
+
+    private persist(): void {
+      if (!this.readOnly) state.files.set(this.path, JSON.stringify(this.cells));
+    }
+  }
+
+  return { DatabaseSync, default: { DatabaseSync } };
+});
+
 vi.mock('node:fs/promises', () => {
   const fsPromises = {
     mkdir: vi.fn(async () => undefined),
@@ -168,11 +226,14 @@ describe('Provider private auth Main ownership', () => {
       });
       expect(apply.status).toBe(204);
       await expect(apply.text()).resolves.toBe('');
-      const authProfiles = [...state.files.values()]
+      const authProfileCells = [...state.files.values()]
         .map((value) => JSON.parse(value))
-        .find((value) => value.profiles);
-      expect(authProfiles).toMatchObject({
+        .find((value) => value['authProfiles.store']);
+      expect(JSON.parse(authProfileCells['auth.sharedStore'])).toEqual({ location: 'state-db' });
+      expect(JSON.parse(authProfileCells['authProfiles.store'])).toMatchObject({
         profiles: { 'openai:default': { type: 'api_key', provider: 'openai', key: 'secret-canary' } },
+      });
+      expect(JSON.parse(authProfileCells['authProfiles.state'])).toMatchObject({
         order: { openai: ['openai:default'] },
         lastGood: { openai: 'openai:default' },
       });

@@ -55,16 +55,24 @@
     "existingDesc": "Обновите существующую конфигурацию",
     "selectDesc": "Выберите тип канала для настройки",
     "qrCode": "QR-код",
-    "token": "Токен",
+    "token": "Учётные данные",
+    "authorization": "Авторизация",
+    "webhook": "Webhook",
     "scanQR": "Сканируйте этот QR-код с {{name}}",
+    "openAuthorization": "Откройте ссылку авторизации {{name}}",
+    "openAuthorizationLink": "Открыть ссылку авторизации",
     "qrImageAlt": "{{name}} login QR code",
-    "refreshCode": "Обновить код",
+    "waitingForScan": "Ожидание сканирования или авторизации...",
+    "refreshCode": "Обновить QR-код",
     "loadingConfig": "Загрузка конфигурации...",
     "existingHint": "У вас уже есть конфигурация для этого канала",
     "howToConnect": "Как подключить",
     "viewDocs": "Просмотреть документацию",
     "channelName": "Название канала",
     "channelNamePlaceholder": "Мой {{name}}",
+    "agent": "Агент",
+    "agentDefault": "По умолчанию (main) / сохранить текущую",
+    "mainAgent": "Основной агент",
     "enableChannel": "Включить канал",
     "enableChannelDesc": "При выключении конфигурация сохраняется, но канал остаётся отключённым",
     "credentialsVerified": "Учётные данные проверены",
@@ -74,9 +82,13 @@
     "validating": "Проверка...",
     "validateConfig": "Проверить конфигурацию",
     "generatingQR": "Генерация QR...",
+    "startingAuthorization": "Запуск авторизации...",
     "validatingAndSaving": "Проверка и сохранение...",
     "advancedSettings": "Advanced settings (optional)",
+    "setupModeGuided": "Сканирование / авторизация",
+    "setupModeCredential": "Через конфигурацию",
     "generateQRCode": "Сгенерировать QR-код",
+    "startAuthorization": "Начать авторизацию",
     "updateAndReconnect": "Обновить и переподключить",
     "saveAndConnect": "Сохранить и подключить",
     "envVar": "Переменная окружения: {{var}}"
@@ -232,21 +244,21 @@
       ]
     },
     "wecom": {
-      "description": "Подключите бота WeCom через плагин",
+      "description": "Подключите WeCom Bot через официальный плагин с Bot ID и Bot Secret.",
       "fields": {
         "botId": {
           "label": "Bot ID",
-          "placeholder": "ww_xxxxxx"
+          "placeholder": "Введите WeCom Bot ID"
         },
         "secret": {
-          "label": "App Secret",
-          "placeholder": "Секрет вашего WeCom бота"
+          "label": "Bot Secret",
+          "placeholder": "Введите WeCom Bot Secret"
         }
       },
       "instructions": [
-        "Создайте приложение в WeCom Admin Console для получения информации о конфигурации",
-        "Убедитесь, что конфигурация сервера получения сообщений включена",
-        "Введите ваш Bot ID (или Corp ID) и Secret для установления соединения"
+        "Создайте или откройте WeCom Bot в WeCom Admin Console и скопируйте Bot ID и Bot Secret.",
+        "Эта форма использует стандартный режим WebSocket Bot. QR-код, OAuth и callback URL здесь не требуются.",
+        "Сохраните учётные данные; шлюз выполнит неинтерактивную авторизацию и запустит канал."
       ]
     },
     "imessage": {

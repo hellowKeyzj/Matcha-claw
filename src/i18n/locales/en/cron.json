@@ -12,6 +12,19 @@
         "paused": "Paused",
         "failed": "Failed"
     },
+    "console": {
+        "status": "Schedule console"
+    },
+    "filters": {
+        "all": "All",
+        "active": "Active",
+        "running": "Running",
+        "paused": "Paused",
+        "failed": "Failed"
+    },
+    "list": {
+        "noMatches": "No scheduled tasks match this filter."
+    },
     "empty": {
         "title": "No scheduled tasks",
         "description": "Create scheduled tasks to automate AI workflows. Tasks can send messages, run queries, or perform actions at specified times.",
@@ -26,18 +39,25 @@
     "dialog": {
         "createTitle": "Create Task",
         "editTitle": "Edit Task",
-        "description": "Schedule an automated AI task",
+        "schedulePlan": "Schedule plan",
+        "schedulePreview": "Next run: {{time}}",
+        "noSchedulePreview": "Next run appears after the schedule is saved.",
+        "onceDate": "Date",
+        "onceTime": "Time",
         "taskName": "Task Name",
         "taskNamePlaceholder": "e.g., Morning briefing",
         "message": "Message / Prompt",
         "messagePlaceholder": "What should the AI do? e.g., Give me a summary of today's news and weather",
         "agent": "Agent",
+        "model": "Model",
+        "followAgent": "Use agent default",
+        "skills": "Skills",
+        "useSkillInstruction": "Use the “{{name}}” skill to complete the task.",
         "schedule": "Schedule",
         "cronPlaceholder": "Cron expression (e.g., 0 9 * * *)",
-        "usePresets": "Use presets",
-        "useCustomCron": "Use custom cron",
+        "periodicTab": "Recurring",
+        "onceTab": "One-time",
         "deliveryTitle": "Delivery",
-        "deliveryDescription": "Choose whether this task stays in MatchaClaw or is pushed to an external channel.",
         "deliveryModeNone": "In MatchaClaw only",
         "deliveryModeAnnounce": "External channel",
         "deliveryChannel": "Channel",
@@ -55,9 +75,14 @@
         "discordChannelId": "Discord Channel ID",
         "discordChannelIdPlaceholder": "e.g., 1438452657525100686",
         "discordChannelIdDesc": "Right-click the Discord channel → Copy Channel ID",
-        "enableImmediately": "Enable immediately",
-        "enableImmediatelyDesc": "Start running this task after creation",
         "saveChanges": "Save Changes"
+    },
+    "periodic": {
+        "hourly": "Hourly",
+        "daily": "Daily at 9am",
+        "weekdays": "Weekdays at 9am",
+        "weekly": "Mondays at 9am",
+        "custom": "Custom cron"
     },
     "presets": {
         "everyMinute": "Every minute",
@@ -76,6 +101,8 @@
         "paused": "Task paused",
         "deleted": "Task deleted",
         "triggered": "Task triggered successfully",
+        "alreadyRunning": "Task is already running. Try again later.",
+        "notTriggered": "Task was not triggered",
         "failedTrigger": "Failed to trigger task: {{error}}",
         "failedUpdate": "Failed to update task",
         "failedDelete": "Failed to delete task",
@@ -87,7 +114,9 @@
         "deliveryChannelUnsupported": "The selected channel does not support scheduled delivery yet",
         "channelRequired": "Please select a channel",
         "discordIdRequired": "Please enter a Discord Channel ID",
-        "scheduleRequired": "Please select or enter a schedule"
+        "scheduleRequired": "Please select or enter a schedule",
+        "onceTimeRequired": "Please choose a one-time date and time",
+        "onceFutureRequired": "One-time task time must be in the future"
     },
     "schedule": {
         "everySeconds": "Every {{count}}s",

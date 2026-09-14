@@ -38,7 +38,7 @@ async fn list_projects_only_safe_agent_ids_after_correlated_pinned_tls_rpc() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -80,7 +80,7 @@ async fn recover_requires_complete_unique_native_agent_workspace_facts() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -249,7 +249,7 @@ async fn materialization_readback_confirms_only_matching_external_agent_and_mark
     let workspace_wire = workspace.to_string_lossy().to_string();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -308,7 +308,7 @@ async fn materialization_readback_keeps_missing_marker_outcome_unknown() {
     let workspace_wire = workspace.to_string_lossy().to_string();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -396,7 +396,7 @@ async fn materialization_port_rejects_managed_collision_without_writing() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.create");
         let id = request["id"].as_str().unwrap();
@@ -447,7 +447,7 @@ async fn materialization_port_confirms_external_agent_and_writes_its_marker() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -465,7 +465,7 @@ async fn materialization_port_confirms_external_agent_and_writes_its_marker() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -519,7 +519,7 @@ async fn managed_materialization_uses_team_and_role_projected_workspace() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
 
         let request = read_json(&mut socket).await;
         assert_team_request(&request, "agents.create");
@@ -575,10 +575,11 @@ async fn managed_materialization_uses_team_and_role_projected_workspace() {
         .await;
 
         let request = read_json(&mut socket).await;
-        assert_team_request(&request, "config.set");
-        assert_eq!(request["params"]["baseHash"], "base-hash-canary");
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let config: Value =
             serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(config.as_object().unwrap().len(), 1);
+        assert_eq!(config["agents"].as_object().unwrap().len(), 1);
         assert_eq!(config["agents"]["list"][0]["id"], "managed-reviewer");
         assert_eq!(config["agents"]["list"][0]["name"], "managed-reviewer");
         assert!(
@@ -666,7 +667,7 @@ async fn managed_materialization_writes_its_marker_only_after_gateway_mutations(
     let state_dir = test_state_dir();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let workspace = request["params"]["workspace"].clone();
         let id = request["id"].as_str().unwrap();
@@ -684,7 +685,7 @@ async fn managed_materialization_writes_its_marker_only_after_gateway_mutations(
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -695,7 +696,7 @@ async fn managed_materialization_writes_its_marker_only_after_gateway_mutations(
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -706,8 +707,9 @@ async fn managed_materialization_writes_its_marker_only_after_gateway_mutations(
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let id = request["id"].as_str().unwrap();
         send_json(
             &mut socket,
@@ -717,7 +719,7 @@ async fn managed_materialization_writes_its_marker_only_after_gateway_mutations(
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -807,7 +809,7 @@ async fn multi_role_materialization_compensates_native_mutations_in_reverse_afte
 
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
 
         let request = read_json(&mut socket).await;
         assert_eq!(request["params"]["name"], "managed-leader");
@@ -894,9 +896,11 @@ async fn multi_role_materialization_compensates_native_mutations_in_reverse_afte
         .await;
 
         let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], "config.set");
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let config: Value =
             serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(config.as_object().unwrap().len(), 1);
+        assert_eq!(config["agents"].as_object().unwrap().len(), 1);
         assert_eq!(
             config["agents"]["list"],
             json!([
@@ -956,10 +960,11 @@ async fn multi_role_materialization_compensates_native_mutations_in_reverse_afte
         .await;
 
         let request = read_json(&mut socket).await;
-        assert_eq!(request["method"], "config.set");
-        assert_eq!(request["params"]["baseHash"], "restore-base-hash");
+        assert_restore_config_patch_request(&request, "restore-base-hash");
         let restored: Value =
             serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(restored.as_object().unwrap().len(), 1);
+        assert_eq!(restored["agents"].as_object().unwrap().len(), 1);
         assert_eq!(restored["agents"]["list"], json!([]));
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -1053,7 +1058,7 @@ async fn post_config_readback_failure_restores_matching_managed_config_entry() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let workspace = request["params"]["workspace"].clone();
         let id = request["id"].as_str().unwrap();
@@ -1064,35 +1069,36 @@ async fn post_config_readback_failure_restores_matching_managed_config_entry() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "managed-reviewer"}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": materialization_config_snapshot_payload()})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "path": "config-path-canary", "config": {}}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"defaultId": "agent-main", "mainKey": "main", "scope": "global", "agents": [], "future": true}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         let restored_from = materialization_config_snapshot_payload();
@@ -1115,9 +1121,9 @@ async fn post_config_readback_failure_restores_matching_managed_config_entry() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
-        assert_eq!(request["params"]["baseHash"], "restore-base-hash");
+        assert_restore_config_patch_request(&request, "restore-base-hash");
         let restored: Value =
             serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(restored["agents"]["list"], json!([]));
@@ -1154,7 +1160,7 @@ async fn marker_write_failure_restores_matching_managed_config_entry() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let workspace = request["params"]["workspace"].clone();
         let id = request["id"].as_str().unwrap();
@@ -1165,28 +1171,29 @@ async fn marker_write_failure_restores_matching_managed_config_entry() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "managed-reviewer"}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": materialization_config_snapshot_payload()})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "path": "config-path-canary", "config": {}}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -1203,7 +1210,7 @@ async fn marker_write_failure_restores_matching_managed_config_entry() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         let mut current = serde_json::from_str::<Value>(
@@ -1229,9 +1236,9 @@ async fn marker_write_failure_restores_matching_managed_config_entry() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
-        assert_eq!(request["params"]["baseHash"], "marker-restore-base-hash");
+        assert_restore_config_patch_request(&request, "marker-restore-base-hash");
         let restored: Value =
             serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(restored["agents"]["list"], json!([]));
@@ -1264,7 +1271,7 @@ async fn changed_external_config_entry_fences_restore_and_keeps_outcome_unknown(
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let workspace = request["params"]["workspace"].clone();
         let id = request["id"].as_str().unwrap();
@@ -1272,35 +1279,36 @@ async fn changed_external_config_entry_fences_restore_and_keeps_outcome_unknown(
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "managed-reviewer"}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": materialization_config_snapshot_payload()})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "path": "config-path-canary", "config": {}}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"defaultId": "agent-main", "mainKey": "main", "scope": "global", "agents": [], "future": true}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         let mut changed = serde_json::from_str::<Value>(
@@ -1346,7 +1354,7 @@ async fn restore_unknown_still_deletes_the_managed_agent() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let workspace = request["params"]["workspace"].clone();
         let id = request["id"].as_str().unwrap();
@@ -1354,35 +1362,36 @@ async fn restore_unknown_still_deletes_the_managed_agent() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "agentId": "managed-reviewer"}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": materialization_config_snapshot_payload()})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
+        assert_materialization_config_patch_request(&request, "base-hash-canary");
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"ok": true, "path": "config-path-canary", "config": {}}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(&mut socket, json!({"type": "res", "id": id, "ok": true, "payload": {"defaultId": "agent-main", "mainKey": "main", "scope": "global", "agents": [], "future": true}})).await;
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "config.get").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         let mut current = serde_json::from_str::<Value>(
@@ -1408,13 +1417,13 @@ async fn restore_unknown_still_deletes_the_managed_agent() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "config.set").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
-        assert_eq!(request["params"]["baseHash"], "unknown-restore-base-hash");
+        assert_restore_config_patch_request(&request, "unknown-restore-base-hash");
         socket.close(None).await.unwrap();
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["params"]["agentId"], "managed-reviewer");
         let id = request["id"].as_str().unwrap();
@@ -1452,7 +1461,7 @@ async fn removal_port_never_deletes_external_receipt_agents() {
         .into_owned();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.delete");
         assert_eq!(request["params"]["agentId"], "managed-reviewer");
@@ -1562,7 +1571,7 @@ async fn managed_removal_uses_receipt_workspace_for_marker_cleanup() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.delete");
         assert_eq!(
@@ -1616,7 +1625,7 @@ async fn managed_removal_confirms_native_not_found_from_owned_receipt() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["params"]["agentId"], "managed-reviewer");
         let id = request["id"].as_str().unwrap();
@@ -1665,7 +1674,7 @@ async fn managed_removal_malformed_delete_response_remains_outcome_unknown() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -1746,7 +1755,7 @@ async fn manual_materialization_projects_only_gateway_confirmed_external_workspa
     let server_workspace = workspace_wire.clone();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -1764,7 +1773,7 @@ async fn manual_materialization_projects_only_gateway_confirmed_external_workspa
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -1835,7 +1844,7 @@ async fn manual_materialization_rejects_missing_or_duplicate_native_workspace_fa
         let acceptor = identity.acceptor();
         let server = tokio::spawn(async move {
             let mut socket = accept_websocket(&listener, &acceptor).await;
-            serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+            serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
             let request = read_json(&mut socket).await;
             let id = request["id"].as_str().unwrap();
             send_json(
@@ -1888,7 +1897,7 @@ async fn external_materialization_writes_only_its_own_marker() {
     let server_workspace = native_workspace.to_string_lossy().into_owned();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -1905,7 +1914,7 @@ async fn external_materialization_writes_only_its_own_marker() {
         finish_control_exchange(&mut socket).await;
 
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.list");
         let id = request["id"].as_str().unwrap();
@@ -1965,7 +1974,7 @@ async fn create_accepts_only_matching_success_and_redacts_workspace_input() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.create");
         assert_eq!(
@@ -2008,7 +2017,7 @@ async fn create_requires_native_echo_of_the_requested_name_and_workspace() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         for response in [
             json!({
                 "ok": true, "agentId": "team-agent", "name": "other-agent",
@@ -2059,7 +2068,7 @@ async fn malformed_create_response_remains_outcome_unknown() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.create");
         let id = request["id"].as_str().unwrap();
@@ -2094,7 +2103,7 @@ async fn update_and_delete_issue_exact_scoped_requests_and_require_confirmed_ide
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.update").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.update");
         assert_eq!(
@@ -2187,7 +2196,7 @@ async fn closed_write_connection_remains_outcome_unknown() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let _ = read_json(&mut socket).await;
         socket.close(None).await.unwrap();
     });
@@ -2209,7 +2218,7 @@ async fn managed_create_uncertainty_does_not_retry_or_list_guess() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.create").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.create");
         socket.close(None).await.unwrap();
@@ -2251,7 +2260,7 @@ async fn timeout_after_write_remains_outcome_unknown() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         assert_eq!(request["method"], "agents.delete");
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2285,7 +2294,7 @@ async fn invalid_correlated_write_response_remains_outcome_unknown() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -2313,7 +2322,7 @@ async fn recover_rejects_malformed_native_facts_without_private_leaks() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -2322,7 +2331,7 @@ async fn recover_rejects_malformed_native_facts_without_private_leaks() {
                 "type": "res", "id": id, "ok": true,
                 "payload": {
                     "defaultId": "agent-main", "mainKey": "main", "scope": "global",
-                    "agents": [{"id": "agent-lead", "workspace": "private-workspace-canary"}],
+                    "agents": [{"id": 42, "workspace": "private-workspace-canary"}],
                     "unexpected": "private-native-detail-canary"
                 }
             }),
@@ -2364,14 +2373,14 @@ async fn malformed_read_schema_is_protocol_failure() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE, "agents.list").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_READ_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
             &mut socket,
             json!({
                 "type": "res", "id": id, "ok": true,
-                "payload": {"defaultId": "agent-main", "mainKey": "main", "scope": "global", "agents": [], "future": true}
+                "payload": {"defaultId": "agent-main", "mainKey": "main", "scope": "global", "agents": "not-a-list"}
             }),
         )
         .await;
@@ -2393,7 +2402,7 @@ async fn explicit_gateway_write_failure_is_rejected() {
     let acceptor = identity.acceptor();
     let server = tokio::spawn(async move {
         let mut socket = accept_websocket(&listener, &acceptor).await;
-        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE, "agents.delete").await;
+        serve_hello(&mut socket, wire::GATEWAY_TEAM_WRITE_SCOPE).await;
         let request = read_json(&mut socket).await;
         let id = request["id"].as_str().unwrap();
         send_json(
@@ -2447,7 +2456,7 @@ fn debug_redacts_workspace_raw_config_and_agent_ids() {
     assert_not_debug::<TeamConfigSnapshot, _>();
 }
 
-fn test_provider(client: &GatewayClient) -> TeamProvider<'_> {
+fn test_provider(client: &GatewayClient) -> TeamProvider {
     TeamProvider::new(client, test_state_dir())
 }
 
@@ -2628,29 +2637,46 @@ fn assert_team_request(request: &Value, method: &str) {
     assert_ne!(request["method"], "sessions.subscribe");
 }
 
-async fn serve_hello(socket: &mut TestSocket, required_scope: &str, method: &str) {
+fn assert_materialization_config_patch_request(request: &Value, base_hash: &str) {
+    assert_team_request(request, "config.patch");
+    assert_eq!(request["params"]["baseHash"], base_hash);
+    assert!(request["params"].get("replacePaths").is_none());
+    let raw: Value = serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
+    assert_eq!(raw.as_object().unwrap().len(), 1);
+    assert_eq!(raw["agents"].as_object().unwrap().len(), 1);
+    assert!(raw["agents"]["list"].is_array());
+}
+
+fn assert_restore_config_patch_request(request: &Value, base_hash: &str) {
+    assert_team_request(request, "config.patch");
+    assert_eq!(request["params"]["baseHash"], base_hash);
+    assert_eq!(request["params"]["replacePaths"], json!(["agents.list"]));
+    let raw: Value = serde_json::from_str(request["params"]["raw"].as_str().unwrap()).unwrap();
+    assert_eq!(raw.as_object().unwrap().len(), 1);
+    assert_eq!(raw["agents"].as_object().unwrap().len(), 1);
+    assert!(raw["agents"]["list"].is_array());
+}
+
+async fn serve_hello(socket: &mut TestSocket, required_scope: &str) {
     const CONTROL_SCOPES: [&str; 4] = [
         wire::GATEWAY_TEAM_READ_SCOPE,
         wire::GATEWAY_TEAM_WRITE_SCOPE,
         "operator.admin",
         "operator.approvals",
     ];
-    const CONTROL_METHODS: [&str; 11] = [
+    const CONTROL_METHODS: [&str; 9] = [
         "status",
         "config.get",
-        "config.set",
         "config.patch",
         "config.apply",
+        "plugins.refresh",
         "agents.list",
-        "agents.create",
-        "agents.update",
-        "agents.delete",
         "skills.status",
+        "channels.pairing.list",
         wire::SYSTEM_PRESENCE_METHOD,
     ];
 
     assert!(CONTROL_SCOPES.contains(&required_scope));
-    assert!(CONTROL_METHODS.contains(&method));
     send_json(
         socket,
         json!({
@@ -2670,7 +2696,7 @@ async fn serve_hello(socket: &mut TestSocket, required_scope: &str, method: &str
             "payload": {
                 "type": "hello-ok", "protocol": 4,
                 "server": {"version": "2026.5.20", "connId": "fake-connection"},
-                "features": {"methods": CONTROL_METHODS, "events": ["tick"]},
+                "features": {"methods": CONTROL_METHODS, "events": ["tick"], "capabilities": ["agent-kind", "tool-events"]},
                 "snapshot": {
                     "presence": [{"ts": 41}], "health": {"ok": true},
                     "stateVersion": {"presence": 1, "health": 1}, "uptimeMs": 100

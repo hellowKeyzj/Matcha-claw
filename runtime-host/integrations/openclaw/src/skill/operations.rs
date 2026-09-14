@@ -13,6 +13,7 @@ use zeroize::Zeroize;
 use crate::{
     gateway::{
         client::GatewayClient,
+        config_patch::{destructive_array_replace_paths, merge_patch},
         delivery::MutationDelivery,
         wire::{self, GatewayResponse},
     },
@@ -27,6 +28,36 @@ const UPLOAD_CHUNK: &str = "skills.upload.chunk";
 const UPLOAD_COMMIT: &str = "skills.upload.commit";
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct SkillRequestContext {
+    agent_id: Option<String>,
+}
+
+impl SkillRequestContext {
+    pub fn new(agent_id: Option<String>) -> Result<Self, SkillRequestError> {
+        Ok(Self {
+            agent_id: agent_id.map(clean_identity).transpose()?,
+        })
+    }
+
+    fn apply_agent(&self, params: &mut Value) {
+        let Some(params) = params.as_object_mut() else {
+            return;
+        };
+        if let Some(agent_id) = &self.agent_id {
+            params.insert("agentId".to_owned(), Value::String(agent_id.clone()));
+        }
+    }
+}
+
+impl fmt::Debug for SkillRequestContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SkillRequestContext")
+            .field("agent_id", &self.agent_id.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillDetailRequest {
@@ -156,6 +187,7 @@ pub enum SkillRequestError {
     InvalidUpload,
     InvalidChunk,
     InvalidConfig,
+    InvalidContext,
 }
 
 impl fmt::Display for SkillRequestError {
@@ -165,6 +197,7 @@ impl fmt::Display for SkillRequestError {
             Self::InvalidUpload => "skill upload request is invalid",
             Self::InvalidChunk => "skill upload chunk is invalid",
             Self::InvalidConfig => "skill config update is invalid",
+            Self::InvalidContext => "skill request context is invalid",
         })
     }
 }
@@ -239,7 +272,7 @@ impl SkillInstallRequest {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum SkillUpdateRequest {
     Config {
         skill_key: String,
@@ -253,6 +286,14 @@ pub enum SkillUpdateRequest {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkillConfigRemoveOutcome {
+    Removed,
+    NotFound,
+    Rejected,
+    Unknown,
+}
+
 impl SkillUpdateRequest {
     pub fn config(
         skill_key: String,
@@ -260,7 +301,8 @@ impl SkillUpdateRequest {
         api_key: Option<String>,
         env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<Self, SkillRequestError> {
-        let skill_key = canonical_name(&skill_key).ok_or(SkillRequestError::InvalidConfig)?;
+        let skill_key =
+            clean_openclaw_skill_key(skill_key).ok_or(SkillRequestError::InvalidConfig)?;
         Ok(Self::Config {
             skill_key,
             enabled,
@@ -324,6 +366,30 @@ impl SkillUpdateRequest {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct PrivateSkillValue(String);
+impl fmt::Debug for SkillUpdateRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config {
+                skill_key,
+                enabled,
+                api_key,
+                env,
+            } => f
+                .debug_struct("Config")
+                .field("skill_key", skill_key)
+                .field("enabled", enabled)
+                .field("api_key", &api_key.as_ref().map(|_| "[REDACTED]"))
+                .field("env", &env.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+            Self::ClawHub { slug, all } => f
+                .debug_struct("ClawHub")
+                .field("slug", slug)
+                .field("all", all)
+                .finish(),
+        }
+    }
+}
+
 impl PrivateSkillValue {
     fn new(value: String) -> Self {
         Self(value)
@@ -466,19 +532,129 @@ pub enum SkillReadError {
 
 pub struct OpenClawSkillOperations {
     gateway: Arc<GatewayClient>,
+    context: SkillRequestContext,
 }
 impl OpenClawSkillOperations {
     pub fn new(gateway: Arc<GatewayClient>) -> Self {
-        Self { gateway }
+        Self {
+            gateway,
+            context: SkillRequestContext::default(),
+        }
     }
+
+    pub fn with_context(gateway: Arc<GatewayClient>, context: SkillRequestContext) -> Self {
+        Self { gateway, context }
+    }
+
+    pub fn for_agent(
+        gateway: Arc<GatewayClient>,
+        agent_id: String,
+    ) -> Result<Self, SkillRequestError> {
+        Ok(Self::with_context(
+            gateway,
+            SkillRequestContext::new(Some(agent_id))?,
+        ))
+    }
+
     pub async fn detail(&self, request: SkillDetailRequest) -> Result<SkillDetail, SkillReadError> {
         self.read(DETAIL, request.params(), decode_detail).await
     }
     pub async fn install(&self, request: SkillInstallRequest) -> SkillMutationOutcome {
-        self.mutate(INSTALL, request.params()).await
+        self.mutate(INSTALL, self.agent_params(request.params()))
+            .await
     }
     pub async fn update(&self, request: SkillUpdateRequest) -> SkillMutationOutcome {
-        self.mutate(UPDATE, request.params()).await
+        let needs_agent = matches!(&request, SkillUpdateRequest::ClawHub { .. });
+        let params = request.params();
+        let params = if needs_agent {
+            self.agent_params(params)
+        } else {
+            params
+        };
+        self.mutate(UPDATE, params).await
+    }
+    pub async fn remove_config(&self, skill_key: String) -> SkillConfigRemoveOutcome {
+        let Some(skill_key) = clean_openclaw_skill_key(skill_key) else {
+            return SkillConfigRemoveOutcome::Rejected;
+        };
+        for _ in 0..3 {
+            match self.remove_config_once(&skill_key).await {
+                ConfigRemoveAttempt::Conflict => {}
+                ConfigRemoveAttempt::Outcome(outcome) => return outcome,
+            }
+        }
+        SkillConfigRemoveOutcome::Rejected
+    }
+
+    async fn remove_config_once(&self, skill_key: &str) -> ConfigRemoveAttempt {
+        let get = match wire::team::config_get_request(next_id("skill-config-get")) {
+            Ok(request) => request,
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        let snapshot = match self.gateway.rpc_query(get).await {
+            Ok(GatewayResponse::Failure { .. }) => {
+                return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Rejected);
+            }
+            Ok(response) => match wire::team::decode_config_get(response) {
+                Ok(snapshot) => snapshot,
+                Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+            },
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        let (mut source, base_hash) = snapshot.into_source_config_parts();
+        let mut target = source.clone();
+        let Some(mut removed) = remove_skill_config_entry(&mut target, skill_key) else {
+            zeroize_value(&mut source);
+            zeroize_value(&mut target);
+            return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::NotFound);
+        };
+        zeroize_value(&mut removed);
+        let mut patch = merge_patch(&source, &target);
+        let replace_paths = destructive_array_replace_paths(&source, &target);
+        zeroize_value(&mut source);
+        zeroize_value(&mut target);
+        let raw = serde_json::to_string(&patch);
+        zeroize_value(&mut patch);
+        let raw = match raw {
+            Ok(raw) => raw,
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        let document = match wire::team::ConfigDocument::new(raw) {
+            Ok(document) => document,
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        let request = match wire::team::config_patch_request(
+            next_id("skill-config-patch"),
+            document,
+            base_hash,
+            replace_paths,
+        ) {
+            Ok(request) => request,
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        let request_id = request.request_id().to_owned();
+        let encoded = match request.encode() {
+            Ok(encoded) => encoded,
+            Err(_) => return ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+        };
+        match self.gateway.rpc_encoded_mutation(request_id, encoded).await {
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                if wire::channel::is_config_conflict(&error) {
+                    ConfigRemoveAttempt::Conflict
+                } else {
+                    ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Rejected)
+                }
+            }
+            MutationDelivery::Response(response) => {
+                match wire::channel::decode_config_patch(response) {
+                    Ok(_) => ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Removed),
+                    Err(_) => ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown),
+                }
+            }
+            MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => {
+                ConfigRemoveAttempt::Outcome(SkillConfigRemoveOutcome::Unknown)
+            }
+        }
     }
     pub async fn upload_begin(&self, request: SkillUploadBegin) -> SkillUploadOutcome {
         self.upload_progress(UPLOAD_BEGIN, request.params()).await
@@ -488,6 +664,11 @@ impl OpenClawSkillOperations {
     }
     pub async fn upload_commit(&self, request: SkillUploadCommit) -> SkillUploadOutcome {
         self.upload_receipt(UPLOAD_COMMIT, request.params()).await
+    }
+
+    fn agent_params(&self, mut params: Value) -> Value {
+        self.context.apply_agent(&mut params);
+        params
     }
     async fn read<T>(
         &self,
@@ -579,6 +760,31 @@ impl OpenClawSkillOperations {
         self.gateway.rpc_mutation(request).await
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigRemoveAttempt {
+    Conflict,
+    Outcome(SkillConfigRemoveOutcome),
+}
+
+fn remove_skill_config_entry(document: &mut Value, skill_key: &str) -> Option<Value> {
+    document
+        .get_mut("skills")
+        .and_then(Value::as_object_mut)
+        .and_then(|skills| skills.get_mut("entries"))
+        .and_then(Value::as_object_mut)
+        .and_then(|entries| entries.remove(skill_key))
+}
+
+fn zeroize_value(value: &mut Value) {
+    match value {
+        Value::String(string) => string.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_value),
+        Value::Object(object) => object.values_mut().for_each(zeroize_value),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 impl fmt::Debug for OpenClawSkillOperations {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenClawSkillOperations")
@@ -734,6 +940,18 @@ fn required_u64(value: Option<&Value>) -> Result<u64, ()> {
 }
 fn required_name(value: Option<&Value>) -> Result<String, ()> {
     canonical_name(value.and_then(Value::as_str).ok_or(())?).ok_or(())
+}
+fn clean_identity(value: String) -> Result<String, SkillRequestError> {
+    let value = value.trim().to_owned();
+    if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+        Err(SkillRequestError::InvalidContext)
+    } else {
+        Ok(value)
+    }
+}
+fn clean_openclaw_skill_key(value: String) -> Option<String> {
+    let value = value.trim().to_owned();
+    (!value.is_empty() && value.len() <= 4096 && !value.contains('\0')).then_some(value)
 }
 fn canonical_name(value: &str) -> Option<String> {
     let value = value.trim().to_ascii_lowercase();

@@ -21,10 +21,12 @@
     "incomplete": "Incomplete"
   },
   "timeWindow": {
-    "title": "Statistics Time Window",
-    "all": "All Time",
-    "last7Days": "Last 7 Days",
-    "last30Days": "Last 30 Days"
+    "title": "Период",
+    "selection": "Период: {{range}}",
+    "all": "Всё время",
+    "last7Days": "Последние 7 дней",
+    "last30Days": "Последние 30 дней",
+    "custom": "Свой период"
   },
   "filters": {
     "dateRange": "Date Range",
@@ -32,6 +34,11 @@
     "to": "End Date",
     "isoDatePlaceholder": "YYYY-MM-DD",
     "clear": "Clear"
+  },
+  "scope": {
+    "label": "Область",
+    "session": "Сессия",
+    "team": "Команда"
   },
   "listTitle": "Tasks",
   "empty": "No tasks available",

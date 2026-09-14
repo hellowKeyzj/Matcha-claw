@@ -404,6 +404,7 @@ describe('chat send handlers', () => {
         fileSize: 16,
         stagedAttachmentId: 'attachment-text',
         preview: 'data:text/plain;base64,c2VjcmV0',
+        sourcePath: 'D:\\docs\\attachment.txt',
       }, {
         fileName: 'attachment.png',
         mimeType: 'image/png',
@@ -452,6 +453,8 @@ describe('chat send handlers', () => {
           mimeType: 'text/plain',
           fileSize: 16,
           preview: null,
+          filePath: 'D:\\docs\\attachment.txt',
+          source: 'user-upload',
         }],
       }),
     ]));
@@ -590,6 +593,7 @@ describe('chat send handlers', () => {
               pendingTurnKey: 'run-1',
               pendingTurnLaneKey: 'main',
               runtimeActivity: null,
+              errorDetail: null,
               lastUserMessageAt: 1,
               lastError: null,
               lastIssue: null,
@@ -657,6 +661,7 @@ describe('chat send handlers', () => {
               pendingTurnKey: 'turn-1',
               pendingTurnLaneKey: 'main',
               runtimeActivity: null,
+              errorDetail: null,
               lastUserMessageAt: 1,
               lastError: null,
               lastIssue: null,
@@ -708,6 +713,7 @@ describe('chat send handlers', () => {
               pendingTurnKey: 'turn-1',
               pendingTurnLaneKey: 'main',
               runtimeActivity: null,
+              errorDetail: null,
               lastUserMessageAt: 1,
               lastError: null,
               lastIssue: null,
@@ -803,6 +809,66 @@ describe('chat send handlers', () => {
     expect(beginMutating).not.toHaveBeenCalled();
     expect(finishMutating).not.toHaveBeenCalled();
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
+  });
+
+  it('keeps directory receipts out of the runtime-host materialization payload', async () => {
+    const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: true,
+      runId: 'run-directory-1',
+      projection: null,
+    });
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createSessionRecord({ sessionKey }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+
+    await expect(executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'open folder',
+      attachments: [{
+        stagedAttachmentId: 'receipt-folder',
+        entryKind: 'directory',
+        fileName: 'project',
+        mimeType: 'application/x-directory',
+        fileSize: 0,
+        preview: null,
+        sourcePath: 'D:\\docs\\project',
+      }],
+    })).resolves.toEqual({ accepted: true });
+
+    expect(sendChatTransportMock).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'open folder',
+      attachments: undefined,
+    }));
+    const userReceipts = getSessionItems(state, sessionKey).filter((item) => item.kind === 'user-message');
+    expect(userReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        attachedFiles: [expect.objectContaining({
+          fileName: 'project',
+          mimeType: 'application/x-directory',
+          filePath: 'D:\\docs\\project',
+          source: 'user-upload',
+        })],
+      }),
+    ]));
   });
 
   it('keeps the composer draft when runtime-host rejects an attachment send', async () => {

@@ -77,6 +77,7 @@ function isRuntimeSystemInjectionText(text: string): boolean {
   if (sanitizeCanonicalUserText(normalized).length === 0 && (
     /\[Bootstrap pending\]/i.test(normalized)
     || /^\s*System:\s*\[[^\]\r\n]+\]\s+[^\r\n]*\[msg:[^\]\r\n]+\]/i.test(normalized)
+    || /^\s*Sender:\s*⟦openclaw:ctx⟧/i.test(normalized)
     || /(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):/i.test(normalized)
   )) {
     return true;

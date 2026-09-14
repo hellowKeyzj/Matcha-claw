@@ -103,7 +103,7 @@ export function resolveArtifactWorkbenchSelection(
   const focusedGroupFiles = focusedGroup?.files ?? [];
   const focusedGeneratedFile = input.focusedFilePath
     ? focusedGroupFiles.find((file) => file.filePath === input.focusedFilePath) ?? null
-    : null;
+    : resolveArtifactGroupFocusFile(focusedGroup, null);
   const focusedFile = focusedGeneratedFile
     ? buildArtifactPreviewTargetFromGeneratedFile(focusedGeneratedFile)
     : (

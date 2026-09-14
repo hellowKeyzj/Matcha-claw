@@ -98,4 +98,10 @@ Use this agent when you need:
 - **Media Relations**: Social proof for earned media and press opportunities
 - **Award Nominations**: Document achievements for industry recognition programs
 
+## Tools
 
+### Workflow Integration
+- **Handoff from**: Content Creator, Trend Researcher, Brand Guardian
+- **Collaborates with**: Twitter Engager, Reddit Community Builder, Instagram Curator
+- **Delivers to**: Analytics Reporter, Growth Hacker, Sales teams
+- **Escalates to**: Legal Compliance Checker for sensitive topics, Brand Guardian for messaging alignment

@@ -30,10 +30,38 @@ describe('Runtime Host usage legacy route', () => {
       { method: 'GET' } as IncomingMessage,
       response,
       new URL('http://127.0.0.1/api/runtime-host/usage/recent?limit=25'),
-      { read },
+      { read, readSessionTimeseries: vi.fn() },
     )).resolves.toBe(true);
 
     expect(read).toHaveBeenCalledWith(25);
+    expect(sendJsonMock).toHaveBeenCalledWith(response, 200, entries);
+  });
+
+  it('routes session timeseries through the sealed transport', async () => {
+    const { handleRuntimeHostUsageRoutes } = await import('../../electron/api/routes/runtime-host-usage');
+    const entries = [{
+      sessionId: 'session-1',
+      agentId: 'main',
+      timestamp: '2026-08-07T10:00:00.000Z',
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 3,
+    }];
+    const read = vi.fn();
+    const readSessionTimeseries = vi.fn().mockResolvedValue({ status: 200, body: { entries } });
+    const response = {} as ServerResponse;
+
+    await expect(handleRuntimeHostUsageRoutes(
+      { method: 'GET' } as IncomingMessage,
+      response,
+      new URL('http://127.0.0.1/api/runtime-host/usage/session-timeseries?sessionId=session-1&agentId=main'),
+      { read, readSessionTimeseries },
+    )).resolves.toBe(true);
+
+    expect(read).not.toHaveBeenCalled();
+    expect(readSessionTimeseries).toHaveBeenCalledWith({ sessionId: 'session-1', agentId: 'main' });
     expect(sendJsonMock).toHaveBeenCalledWith(response, 200, entries);
   });
 
@@ -47,7 +75,7 @@ describe('Runtime Host usage legacy route', () => {
       { method: 'GET' } as IncomingMessage,
       response,
       new URL('http://127.0.0.1/api/runtime-host/usage/recent'),
-      { read },
+      { read, readSessionTimeseries: vi.fn() },
     )).resolves.toBe(true);
 
     expect(sendJsonMock).toHaveBeenCalledWith(response, 503, body);
@@ -64,7 +92,7 @@ describe('Runtime Host usage legacy route', () => {
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1/api/runtime-host/usage/recent?limit=not-a-number'),
-      { read },
+      { read, readSessionTimeseries: vi.fn() },
     )).resolves.toBe(true);
 
     expect(read).toHaveBeenCalledWith(Number.NaN);
@@ -78,13 +106,13 @@ describe('Runtime Host usage legacy route', () => {
       { method: 'POST' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1/api/runtime-host/usage/recent'),
-      { read },
+      { read, readSessionTimeseries: vi.fn() },
     )).resolves.toBe(false);
     await expect(handleRuntimeHostUsageRoutes(
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1/api/usage/recent'),
-      { read },
+      { read, readSessionTimeseries: vi.fn() },
     )).resolves.toBe(false);
     expect(read).not.toHaveBeenCalled();
   });

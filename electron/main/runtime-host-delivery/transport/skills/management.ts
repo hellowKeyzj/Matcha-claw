@@ -34,22 +34,26 @@ export type SkillsSafeSource =
   | 'agents-skills-personal'
   | 'agents-skills-project';
 
+export type SkillMissingCategory = 'binaries' | 'anyBinaries' | 'environment' | 'configuration' | 'operatingSystem';
+
+export type SkillUnavailableReason = 'disabled' | 'missingRequirements' | 'ineligible';
+
 export type NativeSkillStatusEntry = Readonly<{
   key: string;
+  slug?: string;
   name: string;
   description: string;
   enabled: boolean;
   selectable: boolean;
-  unavailableReason: string | null;
-  missingCategories: string[];
-  installed: boolean;
+  unavailableReason: SkillUnavailableReason | null;
+  missingCategories: SkillMissingCategory[];
   eligible: boolean;
-  blockedByAllowlist: boolean;
-  blockedByAgentFilter: boolean;
   bundled?: boolean;
   always?: boolean;
   emoji?: string;
   source?: SkillsSafeSource;
+  baseDir?: string;
+  filePath?: string;
 }>;
 
 export type NativeSkillsStatusResult = Readonly<{
@@ -57,6 +61,7 @@ export type NativeSkillsStatusResult = Readonly<{
   ready?: boolean;
   refreshing?: boolean;
   updatedAt?: number | null;
+  error?: string | null;
 }>;
 
 type SkillMissingProjection = Readonly<Partial<{
@@ -69,22 +74,21 @@ type SkillMissingProjection = Readonly<Partial<{
 
 export type SkillStatusEntry = Readonly<{
   skillKey: string;
-  slug: string;
+  slug?: string;
   name: string;
   description: string;
   disabled: boolean;
   selectable: boolean;
-  unavailableReason: string | null;
-  installed: boolean;
+  unavailableReason: SkillUnavailableReason | null;
   eligible: boolean;
-  blockedByAllowlist: boolean;
-  blockedByAgentFilter: boolean;
-  missingCategories: string[];
+  missingCategories: SkillMissingCategory[];
   missing?: SkillMissingProjection;
   bundled?: boolean;
   always?: boolean;
   emoji?: string;
   source?: SkillsSafeSource;
+  baseDir?: string;
+  filePath?: string;
 }>;
 
 export type SkillsStatusResult = Readonly<{
@@ -167,12 +171,13 @@ export type SkillsUploadCommitResult = Readonly<{
   sha256: string;
   expiresAt: number;
 }>;
-export type SkillsUninstallRequest = Readonly<{ skillKey: string }>;
+export type SkillsUninstallRequest = Readonly<{ skillKey: string; slug?: string }>;
 export type SkillsUninstallResult = Readonly<{ outcome: 'removed' | 'notFound' | 'rejected' | 'unknown' }>;
 export type SkillsImportMarkdownRequest = Readonly<{ content: string }>;
 export type SkillsImportBundleRequest = Readonly<{ skillKey: string; files: Array<Readonly<{ path: string; content: string }>> }>;
 export type SkillsReadmeRequest = Readonly<{
   skillKey: string;
+  slug?: string;
   filePath?: string;
   baseDir?: string;
 }>;
@@ -255,76 +260,132 @@ async function readStatus(
 }
 
 export function decodeSkillsStatus(value: unknown): NativeSkillsStatusResult | null {
-  return isNativeSkillsStatusResult(value) ? value : null;
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['skills', 'ready', 'refreshing', 'updatedAt', 'error'])
+    || !Array.isArray(value.skills)
+    || (value.ready !== undefined && typeof value.ready !== 'boolean')
+    || (value.refreshing !== undefined && typeof value.refreshing !== 'boolean')
+    || (value.updatedAt !== undefined && value.updatedAt !== null && !isTimestamp(value.updatedAt))
+    || (value.error !== undefined && value.error !== null && !isText(value.error, 1_024))) {
+    return null;
+  }
+  const skills = value.skills.map(normalizeSkillStatusEntry);
+  if (skills.some((entry) => entry === null)) return null;
+  return {
+    skills: skills as NativeSkillStatusEntry[],
+    ...(value.ready === undefined ? {} : { ready: value.ready }),
+    ...(value.refreshing === undefined ? {} : { refreshing: value.refreshing }),
+    ...(value.updatedAt === undefined ? {} : { updatedAt: value.updatedAt }),
+    ...(value.error === undefined ? {} : { error: value.error }),
+  };
 }
 
 export function projectSkillsStatus(value: NativeSkillsStatusResult): SkillsStatusResult {
   return {
     skills: value.skills.map((entry) => ({
       skillKey: entry.key,
-      slug: entry.key,
+      ...(entry.slug === undefined ? {} : { slug: entry.slug }),
       name: entry.name,
       description: entry.description,
       disabled: !entry.enabled,
       selectable: entry.selectable,
       unavailableReason: entry.unavailableReason,
-      installed: entry.installed,
       eligible: entry.eligible,
-      blockedByAllowlist: entry.blockedByAllowlist,
-      blockedByAgentFilter: entry.blockedByAgentFilter,
       missingCategories: entry.missingCategories,
       ...(entry.missingCategories.length > 0 ? { missing: projectMissing(entry.missingCategories) } : {}),
       ...(entry.bundled === undefined ? {} : { bundled: entry.bundled }),
       ...(entry.always === undefined ? {} : { always: entry.always }),
       ...(entry.emoji === undefined ? {} : { emoji: entry.emoji }),
       ...(entry.source === undefined ? {} : { source: entry.source }),
+      ...(entry.baseDir === undefined ? {} : { baseDir: entry.baseDir }),
+      ...(entry.filePath === undefined ? {} : { filePath: entry.filePath }),
     })),
     ...(value.ready === undefined ? {} : { ready: value.ready }),
     ...(value.refreshing === undefined ? {} : { refreshing: value.refreshing }),
     ...(value.updatedAt === undefined ? {} : { updatedAt: value.updatedAt }),
+    ...(value.error === undefined ? {} : { error: value.error }),
   };
 }
 
-function projectMissing(categories: readonly string[]): SkillMissingProjection {
+function projectMissing(categories: readonly SkillMissingCategory[]): SkillMissingProjection {
   const missing: Record<string, string[]> = {};
   for (const category of categories) {
     if (category === 'binaries') missing.bins = [];
-    else if (category === 'anyBinaries' || category === 'anybinaries') missing.anyBins = [];
+    else if (category === 'anyBinaries') missing.anyBins = [];
     else if (category === 'environment') missing.env = [];
     else if (category === 'configuration') missing.config = [];
-    else if (category === 'operatingSystem' || category === 'operatingsystem') missing.os = [];
+    else if (category === 'operatingSystem') missing.os = [];
   }
   return missing;
 }
 
 function isNativeSkillsStatusResult(value: unknown): value is NativeSkillsStatusResult {
-  return hasOnlyKeys(value, ['skills', 'ready', 'refreshing', 'updatedAt'])
-    && Array.isArray(value.skills)
-    && value.skills.every(isNativeSkillStatusEntry)
-    && (value.ready === undefined || typeof value.ready === 'boolean')
-    && (value.refreshing === undefined || typeof value.refreshing === 'boolean')
-    && (value.updatedAt === undefined || value.updatedAt === null || isTimestamp(value.updatedAt));
+  return decodeSkillsStatus(value) !== null;
 }
 
-function isNativeSkillStatusEntry(value: unknown): value is NativeSkillStatusEntry {
-  return hasOnlyKeys(value, ['key', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'installed', 'eligible', 'blockedByAllowlist', 'blockedByAgentFilter', 'bundled', 'always', 'emoji', 'source'])
-    && hasRequiredKeys(value, ['key', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'installed', 'eligible', 'blockedByAllowlist', 'blockedByAgentFilter'])
-    && isIdentifier(value.key)
+function normalizeSkillStatusEntry(value: unknown): NativeSkillStatusEntry | null {
+  if (isProjectedSkillStatusEntry(value)) return normalizeProjectedSkillStatusEntry(value);
+  return null;
+}
+
+
+type ProjectedSkillStatusEntry = Readonly<{
+  key: string;
+  slug?: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  selectable: boolean;
+  unavailableReason: SkillUnavailableReason | null;
+  missingCategories: SkillMissingCategory[];
+  eligible: boolean;
+  bundled?: boolean;
+  always?: boolean;
+  emoji?: string;
+  source?: SkillsSafeSource;
+  baseDir?: string;
+  filePath?: string;
+}>;
+
+function normalizeProjectedSkillStatusEntry(entry: ProjectedSkillStatusEntry): NativeSkillStatusEntry {
+  return {
+    key: entry.key,
+    ...(entry.slug === undefined ? {} : { slug: entry.slug }),
+    name: entry.name,
+    description: entry.description,
+    enabled: entry.enabled,
+    selectable: entry.selectable,
+    unavailableReason: entry.unavailableReason,
+    missingCategories: entry.missingCategories,
+    eligible: entry.eligible,
+    ...(entry.bundled === undefined ? {} : { bundled: entry.bundled }),
+    ...(entry.always === undefined ? {} : { always: entry.always }),
+    ...(entry.emoji === undefined ? {} : { emoji: entry.emoji }),
+    ...(entry.source === undefined ? {} : { source: entry.source }),
+    ...(entry.baseDir === undefined ? {} : { baseDir: entry.baseDir }),
+    ...(entry.filePath === undefined ? {} : { filePath: entry.filePath }),
+  };
+}
+
+function isProjectedSkillStatusEntry(value: unknown): value is ProjectedSkillStatusEntry {
+  return hasOnlyKeys(value, ['key', 'slug', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'eligible', 'bundled', 'always', 'emoji', 'source', 'baseDir', 'filePath'])
+    && hasRequiredKeys(value, ['key', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'eligible'])
+    && isOpenClawSkillKey(value.key)
+    && (value.slug === undefined || isSlug(value.slug))
     && isText(value.name, 256)
     && isBoundedText(value.description, 8_192)
     && typeof value.enabled === 'boolean'
     && typeof value.selectable === 'boolean'
-    && (value.unavailableReason === null || isText(value.unavailableReason, 256))
+    && (value.unavailableReason === null || isSkillUnavailableReason(value.unavailableReason))
     && Array.isArray(value.missingCategories)
-    && value.missingCategories.every(isIdentifier)
-    && typeof value.installed === 'boolean'
+    && value.missingCategories.every(isSkillMissingCategory)
     && typeof value.eligible === 'boolean'
-    && typeof value.blockedByAllowlist === 'boolean'
-    && typeof value.blockedByAgentFilter === 'boolean'
     && (value.bundled === undefined || typeof value.bundled === 'boolean')
     && (value.always === undefined || typeof value.always === 'boolean')
     && (value.emoji === undefined || isText(value.emoji, 32))
-    && (value.source === undefined || isSafeSource(value.source));
+    && (value.source === undefined || isSafeSource(value.source))
+    && (value.baseDir === undefined || isAbsolutePath(value.baseDir, 4 * 1024))
+    && (value.filePath === undefined || (isAbsolutePath(value.filePath, 4 * 1024) && isManifestPath(value.filePath)));
 }
 
 function isSafeSource(value: unknown): value is SkillsSafeSource {
@@ -336,6 +397,20 @@ function isSafeSource(value: unknown): value is SkillsSafeSource {
     || value === 'openclaw-extra'
     || value === 'agents-skills-personal'
     || value === 'agents-skills-project';
+}
+
+function isSkillUnavailableReason(value: unknown): value is SkillUnavailableReason {
+  return value === 'disabled'
+    || value === 'missingRequirements'
+    || value === 'ineligible';
+}
+
+function isSkillMissingCategory(value: unknown): value is SkillMissingCategory {
+  return value === 'binaries'
+    || value === 'anyBinaries'
+    || value === 'environment'
+    || value === 'configuration'
+    || value === 'operatingSystem';
 }
 
 async function get<T>(
@@ -464,7 +539,7 @@ function isSkillsDetailOwner(value: unknown): boolean {
 function isSkillsConfigMutationRequest(value: unknown): value is SkillsConfigMutationRequest {
   return hasOnlyKeys(value, ['skillKey', 'enabled', 'apiKey', 'env'])
     && hasRequiredKeys(value, ['skillKey'])
-    && isIdentifier(value.skillKey)
+    && isOpenClawSkillKey(value.skillKey)
     && (value.enabled === undefined || typeof value.enabled === 'boolean')
     && (value.apiKey === undefined || isText(value.apiKey, 4_096))
     && (value.env === undefined || isStringRecord(value.env, 128, 4_096))
@@ -510,7 +585,10 @@ function isSkillsUploadCommitRequest(value: unknown): value is SkillsUploadCommi
 }
 
 function isSkillsUninstallRequest(value: unknown): value is SkillsUninstallRequest {
-  return hasExactKeys(value, ['skillKey']) && isIdentifier(value.skillKey);
+  return hasOnlyKeys(value, ['skillKey', 'slug'])
+    && hasRequiredKeys(value, ['skillKey'])
+    && isOpenClawSkillKey(value.skillKey)
+    && (value.slug === undefined || isSlug(value.slug));
 }
 
 function isSkillsImportMarkdownRequest(value: unknown): value is SkillsImportMarkdownRequest {
@@ -518,15 +596,16 @@ function isSkillsImportMarkdownRequest(value: unknown): value is SkillsImportMar
 }
 
 function isSkillsImportBundleRequest(value: unknown): value is SkillsImportBundleRequest {
-  return hasExactKeys(value, ['skillKey', 'files']) && isIdentifier(value.skillKey)
+  return hasExactKeys(value, ['skillKey', 'files']) && isOpenClawSkillKey(value.skillKey)
     && Array.isArray(value.files) && value.files.length > 0 && value.files.length <= 256
     && value.files.every((file) => isRecord(file) && hasExactKeys(file, ['path', 'content']) && isText(file.path, 240) && isText(file.content, 48 * 1024));
 }
 
 function isSkillsReadmeRequest(value: unknown): value is SkillsReadmeRequest {
-  return hasOnlyKeys(value, ['skillKey', 'filePath', 'baseDir'])
+  return hasOnlyKeys(value, ['skillKey', 'slug', 'filePath', 'baseDir'])
     && hasRequiredKeys(value, ['skillKey'])
-    && isReadmeSkillKey(value.skillKey)
+    && isOpenClawSkillKey(value.skillKey)
+    && (value.slug === undefined || isOpenClawSkillKey(value.slug))
     && (value.filePath === undefined || (isAbsolutePath(value.filePath, 4 * 1024) && isManifestPath(value.filePath)))
     && (value.baseDir === undefined || isAbsolutePath(value.baseDir, 4 * 1024));
 }
@@ -594,8 +673,8 @@ function isManifestPath(value: string): boolean {
   return /(?:^|[\\/])SKILL\.md$/i.test(value);
 }
 
-function isReadmeSkillKey(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,94}[A-Za-z0-9])?$/.test(value);
+function isOpenClawSkillKey(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 4_096 && !value.includes('\0');
 }
 
 function isSlug(value: unknown): value is string {

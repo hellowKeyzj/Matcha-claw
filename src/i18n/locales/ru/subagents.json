@@ -1,21 +1,48 @@
 {
-  "title": "Subagent Workspace",
+  "title": "Агент",
   "subtitle": "Manage subagents and model settings.",
-  "newSubagent": "New Subagent",
+  "newSubagent": "Новый агент",
+  "tabs": {
+    "agents": "Мои агенты",
+    "templates": "Библиотека шаблонов"
+  },
+  "search": {
+    "agents": "Поиск агентов...",
+    "templates": "Поиск шаблонов...",
+    "empty": "Ничего не найдено."
+  },
+  "view": {
+    "label": "Режим отображения",
+    "grid": "Сетка",
+    "list": "Список"
+  },
+  "results": {
+    "agents": "Агенты: {{total}}",
+    "templates": "Шаблоны: {{total}}"
+  },
+  "filters": {
+    "category": "Категория"
+  },
   "transfer": {
     "import": "Import Agent",
     "importDialogTitle": "Import Agent Config",
     "exportDialogTitle": "Export Agent Config",
     "importSuccess": "Agent config imported.",
     "exportSuccess": "Agent config exported.",
+    "exportPackageSuccess": "Agent package exported: {{fileName}}",
     "importFailed": "Failed to import agent config: {{message}}",
-    "exportFailed": "Failed to export agent config: {{message}}"
+    "exportFailed": "Failed to export agent config: {{message}}",
+    "exportPackageFailed": "Failed to export agent package: {{message}}"
   },
   "status": {
     "refreshing": "Refreshing...",
     "mutating": "Saving changes..."
   },
   "empty": "No subagents found.",
+  "startup": {
+    "title": "OpenClaw is starting",
+    "description": "Agents will appear automatically when the service is ready."
+  },
   "modelGuide": {
     "description": "Please go to Models to add a model first.",
     "action": "Open Models"
@@ -28,6 +55,8 @@
     "loading": "Loading templates...",
     "loadingButton": "Loading...",
     "load": "Load Template",
+    "modelSelection": "Выберите модель при загрузке",
+    "view": "Просмотреть шаблон",
     "empty": "No templates found.",
     "error": "Failed to load templates: {{message}}",
     "badge": "Template",
@@ -64,7 +93,7 @@
   "manageTitle": "Managing: {{agentId}}",
   "manage": {
     "promptLabel": "Prompt",
-    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / USER.md / MEMORY.md",
     "generateDraft": "Generate Draft",
     "generatingDraft": "Generating...",
     "applyingDraft": "Applying...",
@@ -87,6 +116,10 @@
     "deleting": "Deleting..."
   },
   "close": "Close",
+  "sealed": {
+    "editDisabled": "Sealed agents cannot be edited.",
+    "configExportDisabled": "Sealed agents cannot export editable JSON config. Use Export Package instead."
+  },
   "form": {
     "basicInfo": "Basic Information",
     "aiConfig": "AI Configuration",
@@ -165,17 +198,24 @@
     }
   },
   "card": {
-    "default": "Default",
-    "modelFallback": "Model not configured",
-    "modelMissingHint": "Model is not configured. Chat and run are disabled.",
-    "lockedHint": "Main agent is read-only.",
+    "system": "Системный агент",
+    "agent": "Агент",
+    "default": "По умолчанию",
+    "sealed": "Зашифрован",
+    "package": "Пакет",
+    "modelFallback": "Модель не настроена",
+    "modelMissingHint": "Модель не настроена. Чат и запуск недоступны.",
+    "lockedHint": "Главный агент доступен только для чтения.",
     "actions": {
-      "edit": "Edit",
-      "delete": "Delete",
-      "export": "Export",
-      "manage": "Manage",
-      "chat": "Chat",
-      "more": "More actions"
+      "edit": "Редактировать",
+      "delete": "Удалить",
+      "export": "Экспортировать",
+      "exportPackage": "Экспортировать пакет",
+      "uploadPackageToCloud": "Загрузить в облако",
+      "cloudPackages": "Облачные пакеты",
+      "manage": "Управление",
+      "chat": "Чат",
+      "more": "Другие действия"
     }
   }
 }

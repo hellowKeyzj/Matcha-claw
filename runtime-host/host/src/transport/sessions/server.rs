@@ -21,8 +21,8 @@ use super::{
     DecodeError, SessionListDelivery, SessionListRequest, content, map_native_outcome, timeline,
 };
 use crate::transport::{
-    matcha_session_catalog, platform_tools, session_create, session_delete, session_trace,
-    sessions::rename,
+    matcha_session_catalog, platform_tools, session_create, session_delete, session_permission,
+    session_trace, sessions::rename,
 };
 
 #[cfg(test)]
@@ -153,6 +153,17 @@ async fn handle(
     if request.path == "/api/sessions/rename" {
         return Response::from_rename(
             rename::handle(&request.headers, &request.body, verifier, session.clone()).await,
+        );
+    }
+    if request.path == "/api/sessions/permission" {
+        return Response::from_permission(
+            session_permission::server::handle(
+                &request.headers,
+                &request.body,
+                verifier,
+                session.clone(),
+            )
+            .await,
         );
     }
     if request.path == "/api/matcha/sessions" {
@@ -421,6 +432,9 @@ impl Response {
             Some("/api/sessions/create") => Self::fixed(503, "Session create is unavailable"),
             Some("/api/sessions/delete") => Self::fixed(503, "Session delete is unavailable"),
             Some("/api/sessions/rename") => Self::fixed(503, "Session rename is unavailable"),
+            Some("/api/sessions/permission") => {
+                Self::fixed(503, "Session permission is unavailable")
+            }
             Some("/api/matcha/sessions") => {
                 Self::fixed(503, "Matcha session catalog is unavailable")
             }
@@ -465,6 +479,13 @@ impl Response {
     }
 
     fn from_rename(response: rename::Response) -> Self {
+        Self {
+            status: response.status,
+            body: response.body,
+        }
+    }
+
+    fn from_permission(response: session_permission::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,

@@ -406,13 +406,13 @@ fn reference_for(
         .get(reference.account_id().as_str())
         .copied()
         .ok_or(ProviderRoutingProjectionError::AccountUnavailable)?;
-    let matches_model = models.models().iter().any(|model| {
-        model.account_id() == reference.account_id()
-            && model.model_id() == reference.model_id()
-            && model.supports(model_capability(capability))
-    });
-    if !matches_model {
+    let Some(model) = models.models().iter().find(|model| {
+        model.account_id() == reference.account_id() && model.model_id() == reference.model_id()
+    }) else {
         return Err(ProviderRoutingProjectionError::ModelUnavailable);
+    };
+    if !model.supports(model_capability(capability)) {
+        return Err(ProviderRoutingProjectionError::ModelCapabilityUnavailable);
     }
     let key = keys
         .get(account.id().as_str())
@@ -467,6 +467,9 @@ fn projection_keys(
     let mut keys = BTreeMap::new();
     for (base, mut group) in grouped {
         group.sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
+        if group.len() > 1 && provider_key::is_single_slot_provider_key(&base) {
+            return Err(ProviderRoutingProjectionError::AccountUnavailable);
+        }
         let unique = group.len() == 1;
         for account in group {
             let key = if unique {
@@ -510,8 +513,22 @@ pub enum ProviderRoutingProjectionError {
     AccountUnavailable,
     CredentialUnavailable,
     InvalidRoute,
+    ModelCapabilityUnavailable,
     ModelUnavailable,
     Persistence,
+}
+
+impl ProviderRoutingProjectionError {
+    pub const fn diagnostic_reason(self) -> &'static str {
+        match self {
+            Self::AccountUnavailable => "provider-routing-account-unavailable",
+            Self::CredentialUnavailable => "provider-routing-credential-unavailable",
+            Self::InvalidRoute => "provider-routing-invalid",
+            Self::ModelCapabilityUnavailable => "provider-routing-model-capability-unavailable",
+            Self::ModelUnavailable => "provider-routing-model-unavailable",
+            Self::Persistence => "provider-routing-persistence-failed",
+        }
+    }
 }
 
 impl fmt::Display for ProviderRoutingProjectionError {
@@ -520,6 +537,7 @@ impl fmt::Display for ProviderRoutingProjectionError {
             Self::AccountUnavailable => "OpenClaw routing account is unavailable",
             Self::CredentialUnavailable => "OpenClaw routing credential is unavailable",
             Self::InvalidRoute => "OpenClaw routing route is invalid",
+            Self::ModelCapabilityUnavailable => "OpenClaw routing model capability is unavailable",
             Self::ModelUnavailable => "OpenClaw routing model is unavailable",
             Self::Persistence => "OpenClaw routing configuration persistence failed",
         })

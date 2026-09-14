@@ -31,31 +31,41 @@ pub(crate) fn decode(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<ChannelStatusRequest, DecodeError> {
-    let request = match value {
-        Value::Object(body) if body.is_empty() => ChannelStatusRequest::Accounts,
-        Value::Object(body)
-            if body.len() == 1
-                && body.get("operation").and_then(Value::as_str) == Some("snapshot") =>
-        {
-            ChannelStatusRequest::Snapshot
-        }
-        _ => return Err(DecodeError::Invalid),
-    };
-    let operation_id = match request {
-        ChannelStatusRequest::Accounts => ACCOUNTS_OPERATION_ID,
-        ChannelStatusRequest::Snapshot => SNAPSHOT_OPERATION_ID,
-    };
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            AUTHORIZATION_SCOPE,
-            operation_id,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    Ok(request)
+    let mut span =
+        crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_status.decode");
+    let result = (|| {
+        let request = match value {
+            Value::Object(body) if body.is_empty() => ChannelStatusRequest::Accounts,
+            Value::Object(body)
+                if body.len() == 1
+                    && body.get("operation").and_then(Value::as_str) == Some("snapshot") =>
+            {
+                ChannelStatusRequest::Snapshot
+            }
+            _ => return Err(DecodeError::Invalid),
+        };
+        let operation_id = match request {
+            ChannelStatusRequest::Accounts => ACCOUNTS_OPERATION_ID,
+            ChannelStatusRequest::Snapshot => SNAPSHOT_OPERATION_ID,
+        };
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                AUTHORIZATION_SCOPE,
+                operation_id,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        Ok(request)
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 pub(crate) enum ChannelStatusDelivery {
@@ -142,6 +152,9 @@ mod tests {
     fn snapshot_delivery_serializes_public_shape_and_fixed_unavailable() {
         let snapshot = ChannelSnapshotOutcome::new(
             1_725_000_000_000,
+            true,
+            false,
+            None,
             vec!["discord".into()],
             std::collections::BTreeMap::from([(
                 "discord".into(),
@@ -172,6 +185,54 @@ mod tests {
             std::collections::BTreeMap::from([("discord".into(), "primary".into())]),
         );
         assert_eq!(ChannelStatusDelivery::Snapshot(snapshot).status_code(), 200);
+
+        let refreshing_snapshot = ChannelSnapshotOutcome::new(
+            1_725_000_000_000,
+            false,
+            true,
+            Some("Channel status reported an error".into()),
+            vec!["discord".into()],
+            std::collections::BTreeMap::from([(
+                "discord".into(),
+                crate::channel::status::ChannelSummarySnapshot::new(
+                    Some(true),
+                    Some(true),
+                    Some("Channel status reported an error".into()),
+                    None,
+                ),
+            )]),
+            std::collections::BTreeMap::from([(
+                "discord".into(),
+                vec![crate::channel::status::ChannelAccountSnapshot::new(
+                    "primary".into(),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )],
+            )]),
+            std::collections::BTreeMap::from([("discord".into(), "primary".into())]),
+        );
+        assert_eq!(
+            ChannelStatusDelivery::Snapshot(refreshing_snapshot).body(),
+            json!({
+                "ts": 1_725_000_000_000_u64,
+                "ready": false,
+                "refreshing": true,
+                "error": "Channel status reported an error",
+                "channelOrder": ["discord"],
+                "channels": {"discord": {"configured": true, "running": true, "error": "Channel status reported an error"}},
+                "channelAccounts": {"discord": [{"accountId": "primary", "configured": true, "connected": true, "running": true}]},
+                "channelDefaultAccountId": {"discord": "primary"}
+            })
+        );
         assert_eq!(
             ChannelStatusDelivery::Unavailable.body(),
             json!({

@@ -68,6 +68,29 @@ describe('Electron Main session-list transport', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('accepts automation session catalog rows', async () => {
+    const automationSession = {
+      ...session,
+      key: 'agent:agent-1:cron:heartbeat-main',
+      sessionIdentity: {
+        ...session.sessionIdentity,
+        sessionKey: 'agent:agent-1:cron:heartbeat-main',
+      },
+      kind: 'automation',
+      endpointSessionId: 'cron:heartbeat-main',
+    } as const;
+    const transport = createSessionListTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_101,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ sessions: [automationSession] }) }),
+    );
+
+    await expect(transport.list(request)).resolves.toEqual({
+      status: 200,
+      body: { sessions: [automationSession] },
+    });
+  });
+
   it.each([
     {
       name: 'identity agent binding mismatch',

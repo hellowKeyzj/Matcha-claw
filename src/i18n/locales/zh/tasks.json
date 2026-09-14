@@ -21,15 +21,17 @@
         "incomplete": "未完成"
     },
     "timeWindow": {
-        "title": "统计时间维度",
-        "all": "全部",
+        "title": "时间范围",
+        "selection": "时间范围：{{range}}",
+        "all": "全部时间",
         "last7Days": "过去一周",
-        "last30Days": "过去一个月"
+        "last30Days": "过去一月",
+        "custom": "自定义"
     },
     "filters": {
         "dateRange": "日期范围",
-        "from": "开始日期",
-        "to": "结束日期",
+        "from": "开始",
+        "to": "结束",
         "isoDatePlaceholder": "YYYY-MM-DD",
         "clear": "清除筛选"
     },

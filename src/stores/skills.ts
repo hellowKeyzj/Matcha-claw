@@ -8,7 +8,7 @@ import {
   resolveSingleCapabilityScope,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
+import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '../types/skill';
 import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
 import type { LocalSkillImportPayload } from '@/services/local-path-picker';
 
@@ -26,16 +26,16 @@ type GatewaySkillStatus = {
   name?: string;
   description?: string;
   disabled?: boolean;
+  selectable?: boolean;
+  unavailableReason?: SkillUnavailableReason | null;
+  missingCategories?: SkillMissingCategory[];
   emoji?: string;
   version?: string;
   author?: string;
-  config?: Record<string, unknown>;
   bundled?: boolean;
   always?: boolean;
   eligible?: boolean;
-  blockedByAllowlist?: boolean;
   missing?: GatewaySkillMissing;
-  installed?: boolean;
   source?: string;
   baseDir?: string;
   filePath?: string;
@@ -197,7 +197,7 @@ interface SkillsState {
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
   importLocalSkill: (payload: LocalSkillImportPayload) => Promise<string>;
-  uninstallSkill: (slug: string) => Promise<void>;
+  uninstallSkill: (skillKey: string, slug?: string) => Promise<void>;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
   batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
@@ -289,18 +289,19 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
             return {
               id: s.skillKey,
-              slug: s.slug || s.skillKey,
+              slug: s.slug,
               name: s.name || s.skillKey,
               description: s.description || '',
               enabled: !s.disabled,
               icon: s.emoji || '📦',
               version: s.version || '1.0.0',
               author: s.author,
-              installed: s.installed !== false,
+              selectable: typeof s.selectable === 'boolean' ? s.selectable : undefined,
               eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
-              blockedByAllowlist: s.blockedByAllowlist === true,
+              unavailableReason: s.unavailableReason ?? null,
+              missingCategories: Array.isArray(s.missingCategories) ? s.missingCategories : undefined,
               missing: normalizeMissingRequirements(s.missing),
-              config: s.config || {},
+              config: {},
               isCore: s.bundled && s.always,
               isBundled: s.bundled,
               source: s.source,
@@ -471,11 +472,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  uninstallSkill: async (slug: string) => {
+  uninstallSkill: async (skillKey: string, slug?: string) => {
     set((state) => {
-      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, slug);
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillKey);
       return {
-        installing: { ...state.installing, [slug]: true },
+        installing: { ...state.installing, [skillKey]: true },
         mutatingBySkillId: nextMutating,
         mutating: true,
       };
@@ -483,7 +484,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     try {
       const result = await hostApiFetch<SkillsUninstallResponse>('/api/skills/uninstall', {
         method: 'POST',
-        body: JSON.stringify({ skillKey: slug }),
+        body: JSON.stringify({ skillKey, ...(slug ? { slug } : {}) }),
       });
       if (result.outcome !== 'removed') {
         throw new Error('Uninstall failed');
@@ -495,8 +496,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     } finally {
       set((state) => {
         const newInstalling = { ...state.installing };
-        delete newInstalling[slug];
-        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, slug);
+        delete newInstalling[skillKey];
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillKey);
         return {
           installing: newInstalling,
           mutatingBySkillId: nextMutating,
@@ -524,7 +525,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to enable skill');
       }
-      updateSkill(skillId, { enabled: true });
+      const staleDisabledReason = get().skills.find((skill) => skill.id === skillId)?.unavailableReason;
+      updateSkill(skillId, {
+        enabled: true,
+        ...(staleDisabledReason === 'disabled' ? { unavailableReason: null } : {}),
+      });
     } catch (error) {
       console.error('Failed to enable skill:', error);
       throw error;

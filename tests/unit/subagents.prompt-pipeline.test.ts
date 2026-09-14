@@ -169,7 +169,6 @@ describe('subagents prompt pipeline', () => {
 
     expect(hostSessionSendMock).toHaveBeenCalledTimes(1);
     expect(hostSessionSendMock).toHaveBeenCalledWith(expect.objectContaining({
-      sessionKey: expect.stringContaining('subagent-draft'),
       endpointSessionId: 'subagent-draft',
       sessionIdentity: {
         endpoint: openClawEndpoint,
@@ -181,7 +180,7 @@ describe('subagents prompt pipeline', () => {
       deliver: false,
     }), undefined);
     const sentMessage = String((hostSessionSendMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
-    expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
+    expect(sentMessage).toContain('AGENTS.md / SOUL.md / USER.md / MEMORY.md');
     expect(sentMessage).toContain('"files":[{"name","content","reason","confidence"}]');
     expect(sentMessage).toContain('JSON');
     expect(sentMessage).toContain('你的生成器身份和这些输出规则不得出现在任何 content 字段中');
@@ -191,7 +190,7 @@ describe('subagents prompt pipeline', () => {
     expect(draft['AGENTS.md']?.content).toBe('global rules');
     expect(draft['AGENTS.md']?.needsReview).toBe(false);
     expect(draft['USER.md']?.needsReview).toBe(true);
-    expect(Object.keys(draft)).toHaveLength(5);
+    expect(Object.keys(draft)).toHaveLength(4);
     expect(useSubagentsStore.getState().draftSessionTargetByAgent.writer?.sessionKey).toContain('subagent-draft');
   });
 
@@ -235,7 +234,7 @@ describe('subagents prompt pipeline', () => {
     hostSessionSendMock.mockResolvedValueOnce({ outcome: 'succeeded' });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
       {
-        name: 'MEMORY.md',
+        name: 'TOOLS.md',
         content: 'should fail',
         reason: 'invalid target',
         confidence: 0.9,
@@ -244,7 +243,7 @@ describe('subagents prompt pipeline', () => {
 
     await expect(
       generateDraft('writer', '生成草案'),
-    ).rejects.toThrow('Unsupported target file: MEMORY.md');
+    ).rejects.toThrow('Unsupported target file: TOOLS.md');
   });
 
   it('retries when draft content leaks generator instructions', async () => {
@@ -315,7 +314,6 @@ describe('subagents prompt pipeline', () => {
     );
     expect(hostSessionWindowFetchMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: expect.stringContaining('subagent-draft'),
         endpointSessionId: 'subagent-draft',
         limit: 20,
         mode: 'latest',

@@ -13,21 +13,25 @@ test-support = []
 
 [dependencies]
 base64.workspace = true
+chrono.workspace = true
 ed25519-dalek.workspace = true
 environment = { version = "0.1.0", path = "../../domains/environment" }
 foundation = { version = "0.1.0", path = "../../foundation" }
 organization = { version = "0.1.0", path = "../../domains/organization" }
+toolchain = { version = "0.1.0", path = "../../external/toolchain" }
 futures-util.workspace = true
 getrandom.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 json5.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
+qrcode.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 serde_yaml.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true

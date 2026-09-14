@@ -435,6 +435,65 @@ describe('session capability dispatcher', () => {
     expect(JSON.stringify(response)).not.toContain('private-token');
   });
 
+  it('dispatches session permission get/set with the full SessionIdentity envelope', async () => {
+    const identity = { endpoint: openClawEndpoint, agentId: 'main', sessionKey: 'agent:main:main' };
+    const getProjection = {
+      supported: true,
+      mode: 'guarded',
+      defaultMode: 'workspace',
+      pending: false,
+      canSelectFull: true,
+      options: ['read-only', 'guarded', 'workspace', 'full'],
+    };
+    const setProjection = { ...getProjection, mode: 'full' };
+    const get = vi.fn().mockResolvedValue({ status: 200, body: getProjection });
+    const set = vi.fn().mockResolvedValue({ status: 200, body: setProjection });
+    const getRequest = {
+      id: 'session.management',
+      operationId: 'sessions.permission.get',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: { sessionKey: identity.sessionKey, sessionIdentity: identity },
+    };
+    const setRequest = {
+      ...getRequest,
+      operationId: 'sessions.permission.set',
+      input: { sessionKey: identity.sessionKey, sessionIdentity: identity, permissionMode: 'full' },
+    };
+
+    await expect(dispatchSessionCapability(getRequest, { sessionPermissionTransport: { get, set } } as never)).resolves.toEqual({
+      status: 200,
+      body: getProjection,
+    });
+    await expect(dispatchSessionCapability(setRequest, { sessionPermissionTransport: { get, set } } as never)).resolves.toEqual({
+      status: 200,
+      body: setProjection,
+    });
+
+    expect(get).toHaveBeenCalledWith(getRequest);
+    expect(set).toHaveBeenCalledWith(setRequest);
+  });
+
+  it('rejects session permission requests bound only by the session key', async () => {
+    const identity = { endpoint: openClawEndpoint, agentId: 'main', sessionKey: 'agent:main:main' };
+    const get = vi.fn();
+    const set = vi.fn();
+
+    await expect(dispatchSessionCapability({
+      id: 'session.management',
+      operationId: 'sessions.permission.set',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: {
+        sessionKey: identity.sessionKey,
+        sessionIdentity: { ...identity, agentId: 'other' },
+        permissionMode: 'full',
+      },
+    }, { sessionPermissionTransport: { get, set } } as never)).rejects.toThrow('Session permission request is invalid');
+    expect(get).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('flattens legacy renderer model selection requests to the native Rust schema', async () => {
     const identity = { endpoint: openClawEndpoint, agentId: 'default', sessionKey: 'agent:default:main' };
     const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });

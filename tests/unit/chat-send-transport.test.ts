@@ -40,7 +40,6 @@ describe('chat send transport', () => {
     });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
-      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-1',
@@ -68,7 +67,6 @@ describe('chat send transport', () => {
     });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith(expect.objectContaining({
-      sessionKey: sessionIdentity.sessionKey,
       idempotencyKey: 'user-local-deadline',
       deliver: false,
     }));
@@ -96,11 +94,11 @@ describe('chat send transport', () => {
         fileSize: 1,
         stagedAttachmentId: 'attachment-a',
         preview: 'data:image/png;base64,AA==',
+        sourcePath: 'D:\\docs\\a.png',
       }],
     })).resolves.toEqual({ ok: true, runId: 'user-local-2', projection: null });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
-      sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
       message: 'hello',
       idempotencyKey: 'user-local-2',
@@ -113,6 +111,7 @@ describe('chat send transport', () => {
       }],
     });
     expect(JSON.stringify(hostSessionPromptMock.mock.calls)).not.toContain('base64');
+    expect(JSON.stringify(hostSessionPromptMock.mock.calls)).not.toContain('D:\\\\docs');
   });
 
   it('maps prompt rejection errors to the transport failure result', async () => {

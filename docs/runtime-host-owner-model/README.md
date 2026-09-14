@@ -61,4 +61,5 @@ config write != runtime ready != connected != operation succeeded
 5. ClawHub marketplace search 是 third-party external registry lookup，不是 durable Domain owner，也不是 OpenClaw Gateway native skill RPC；安装请求仍归 Skills runtime ops，但执行方是 legacy ClawHub CLI + registry fallback。
 6. Runtime address 的身份边界固定为 `RuntimeEndpoint`、`SessionIdentity(endpoint + agentId + sessionKey)` 与 `RuntimeScope`；`endpointSessionId` 是 peer-local 元数据，不是 Host identity。
 7. 不能从现有 `runtime-host-rust/` 目录反推最终架构。
-8. 任何 `OPEN` 项在 owner cutover 前必须由源码、测试或运行时 trace 显式裁决。
+8. sealed skill package 是 `runtime-host` 的 host-level concrete owner/facade；OpenClaw 与 matcha-agent 是消费者。`openclaw.json` 只保存 `skills.<key>.enabled`，不保存明文 package material；加密包可存放在 `runtime-local`，OpenClaw 源码改动通过 bundle patch 投递。
+9. 任何 `OPEN` 项在 owner cutover 前必须由源码、测试或运行时 trace 显式裁决。

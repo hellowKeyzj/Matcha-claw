@@ -4,6 +4,7 @@ import type {
   ChannelLoginTransport,
 } from '../../main/runtime-host-delivery/transport/channels/login';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;
@@ -19,22 +20,28 @@ export async function handleChannelLoginRoutes(
 ): Promise<boolean> {
   if (url.pathname !== '/api/channels/login' || req.method !== 'POST') return false;
 
+  const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
     body = await parseJsonBody(req);
   } catch {
+    beginChannelTrace('route.invalid', traceId)(400, { outcome: 'rejected' });
     sendJson(res, 400, INVALID);
     return true;
   }
   if (!isRequest(body)) {
+    beginChannelTrace('route.invalid', traceId)(400, { outcome: 'rejected' });
     sendJson(res, 400, INVALID);
     return true;
   }
 
+  const finish = beginChannelTrace(`route.login.${body.action}`, traceId);
   try {
-    const response = await transport.login(body);
+    const response = await transport.login(body, traceId);
+    finish(response.status, response.body);
     sendJson(res, response.status, response.body);
-  } catch {
+  } catch (error) {
+    finish(503, UNKNOWN, channelTraceError(error));
     sendJson(res, 503, UNKNOWN);
   }
   return true;
@@ -50,7 +57,8 @@ function isRequest(value: unknown): value is ChannelLoginRequest {
     return keys.every((key) => key === 'action' || key === 'channel' || key === 'accountId') && keys.length <= 3;
   }
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'config', 'force', 'timeoutMs'].includes(key))
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs'].includes(key))
+      && (value.agentId === undefined || isIdentity(value.agentId))
       && (value.config === undefined || isConfig(value.config))
       && (value.force === undefined || typeof value.force === 'boolean')
       && (value.timeoutMs === undefined || isTimeout(value.timeoutMs));

@@ -19,22 +19,28 @@ use super::{
 
 pub(crate) enum ChannelCommand {
     Configure {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
+        agent_id: Option<String>,
         values: Zeroizing<Vec<u8>>,
         reply: oneshot::Sender<Result<ChannelConfigureOutcome, ChannelOwnerUnavailable>>,
     },
     Delete {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         reply: oneshot::Sender<Result<channel_delete::Outcome, ChannelOwnerUnavailable>>,
     },
     LoginStart {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         force: bool,
         timeout_ms: Option<u64>,
+        agent_id: Option<String>,
         config: Zeroizing<Vec<u8>>,
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     LoginWait {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         timeout_ms: Option<u64>,
         session_key: Option<String>,
@@ -43,24 +49,29 @@ pub(crate) enum ChannelCommand {
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     LoginCancel {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     Logout {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     Control {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         action: ChannelControlAction,
         reply: oneshot::Sender<Result<ChannelControlOutcome, ChannelOwnerUnavailable>>,
     },
     PairingApprove {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         code: Zeroizing<Vec<u8>>,
         reply: oneshot::Sender<Result<ChannelPairingApprovalOutcome, ChannelOwnerUnavailable>>,
     },
     ValidateCredentials {
+        trace: super::trace::CommandTrace,
         key: ChannelKey,
         config: Zeroizing<Vec<u8>>,
         reply: oneshot::Sender<Result<channel_credentials::Outcome, ChannelOwnerUnavailable>>,
@@ -70,31 +81,52 @@ pub(crate) enum ChannelCommand {
 
 pub(crate) enum ChannelQuery {
     Catalog {
+        trace: super::trace::CommandTrace,
         reply: oneshot::Sender<ChannelCatalogOutcome>,
     },
     ConfigRead {
+        trace: super::trace::CommandTrace,
         channel_id: String,
         account_id: Option<String>,
         reply: oneshot::Sender<channel_config_read::Outcome>,
     },
     ConfigureForm {
+        trace: super::trace::CommandTrace,
         channel_id: String,
         reply: oneshot::Sender<ChannelConfigureFormOutcome>,
     },
     Pairing {
+        trace: super::trace::CommandTrace,
         channel_id: String,
         account_id: Option<String>,
         reply: oneshot::Sender<ChannelPairingOutcome>,
     },
     Status {
+        trace: super::trace::CommandTrace,
         reply: oneshot::Sender<Result<ChannelStatusOutcome, ChannelStatusFailure>>,
     },
     Snapshot {
+        trace: super::trace::CommandTrace,
         reply: oneshot::Sender<Result<ChannelSnapshotOutcome, ChannelStatusFailure>>,
     },
 }
 
 impl ChannelCommand {
+    pub(super) fn trace(&self) -> Option<&super::trace::CommandTrace> {
+        match self {
+            Self::Configure { trace, .. } => Some(trace),
+            Self::Delete { trace, .. } => Some(trace),
+            Self::LoginStart { trace, .. } => Some(trace),
+            Self::LoginWait { trace, .. } => Some(trace),
+            Self::LoginCancel { trace, .. } => Some(trace),
+            Self::Logout { trace, .. } => Some(trace),
+            Self::Control { trace, .. } => Some(trace),
+            Self::PairingApprove { trace, .. } => Some(trace),
+            Self::ValidateCredentials { trace, .. } => Some(trace),
+            Self::Shutdown(_) => None,
+        }
+    }
+
     pub(super) fn route(&self) -> CommandRoute<ChannelKey> {
         match self {
             Self::Configure { key, .. }
@@ -112,6 +144,17 @@ impl ChannelCommand {
 }
 
 impl ChannelQuery {
+    pub(super) fn trace(&self) -> &super::trace::CommandTrace {
+        match self {
+            Self::Catalog { trace, .. } => trace,
+            Self::ConfigRead { trace, .. } => trace,
+            Self::ConfigureForm { trace, .. } => trace,
+            Self::Pairing { trace, .. } => trace,
+            Self::Status { trace, .. } => trace,
+            Self::Snapshot { trace, .. } => trace,
+        }
+    }
+
     pub(super) fn route(&self) -> QueryRoute<ChannelKey> {
         match self {
             Self::Catalog { .. }

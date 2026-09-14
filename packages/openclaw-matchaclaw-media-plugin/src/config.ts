@@ -1,4 +1,4 @@
-import type { ImageGenerationProviderConfiguredContext } from 'openclaw/plugin-sdk/image-generation'
+import type { ImageGenerationProviderConfiguredContext } from './types.js'
 import {
   DEFAULT_TIMEOUT_MS,
   MIN_TIMEOUT_MS,

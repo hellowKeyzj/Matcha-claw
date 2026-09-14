@@ -6,19 +6,38 @@
     "gatewayWarning": "网关未运行。没有活跃的网关，无法加载技能。",
     "gatewayStarting": "网关正在启动。待其就绪后会自动加载技能。",
     "tabs": {
-        "installed": "已安装",
+        "installed": "技能",
+        "sealed": "技能包",
         "marketplace": "市场"
     },
     "filter": {
+        "source": "来源",
+        "status": "状态",
+        "allStatuses": "全部状态",
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "managed": "用户安装 ({{count}})",
         "all": "全部 ({{count}})",
         "eligible": "可用 ({{count}})",
         "builtIn": "内置 ({{count}})",
         "marketplace": "市场 ({{count}})"
     },
+    "view": {
+        "grid": "网格视图",
+        "list": "列表视图",
+        "label": "视图"
+    },
+    "count": "{{count}} 个技能",
     "search": "搜索技能...",
     "searchMarketplace": "搜索市场...",
     "searchButton": "搜索",
     "actions": {
+        "details": "查看详情",
+        "install": "安装",
+        "uninstall": "卸载",
+        "close": "关闭",
+        "clearSearch": "清除搜索",
+        "removeVariable": "移除变量",
         "enableVisible": "批量启用可见项",
         "disableVisible": "批量禁用可见项",
         "installSkill": "安装技能"
@@ -74,11 +93,45 @@
     },
     "availability": {
         "eligible": "可用",
-        "blocked": "阻止",
         "missing": "缺少依赖",
         "unknown": "状态未知",
-        "blockedByAllowlist": "被 allowlist 阻止",
+        "unselectable": "不可选择",
         "missingPrefix": "缺失: {{items}}"
+    },
+    "sealed": {
+        "search": "搜索技能包",
+        "runtimeLabel": "Runtime: {{runtime}}",
+        "runtimeAny": "不限",
+        "noDescription": "暂无描述",
+        "emptyTitle": "暂无技能包",
+        "packageInstalled": "已安装",
+        "packageAvailable": "未安装",
+        "cloudTitle": "云端技能包",
+        "cloudEmpty": "暂无云端技能包。",
+        "cloudUnavailableTitle": "云端技能包暂不可用",
+        "cloudUnavailableDescription": "无法连接后端平台，请稍后刷新。",
+        "cloudAvailable": "云端可用",
+        "cloudInstalled": "已安装",
+        "packageSize": "{{size}} bytes",
+        "uploadLocalPackage": "上传技能包",
+        "installFromCloud": "安装",
+        "uploaded": "技能包已上传",
+        "uploadFailed": "上传技能包失败",
+        "installedFromCloud": "技能包已安装",
+        "installFromCloudFailed": "安装云端技能包失败",
+        "uploadDialog": {
+            "title": "上传技能包",
+            "empty": "拖拽 .matcha-skillpkg 或点击选择",
+            "hint": "仅上传本地已生成的 .matcha-skillpkg。",
+            "replace": "点击或拖拽其他技能包可重新选择",
+            "confirm": "上传到云端",
+            "packageFilter": "Matcha 技能包"
+        },
+        "exportTitle": "生成技能包",
+        "export": "生成包",
+        "exported": "已生成只读技能包",
+        "exportFailed": "生成技能包失败",
+        "noExportTargets": "暂无可生成技能包的明文非内置技能。"
     },
     "toast": {
         "enabled": "技能已启用",
@@ -111,6 +164,7 @@
         "batchPartial": "已更新 {{success}} / {{total}} 个技能，部分操作失败。"
     },
     "marketplace": {
+        "discover": "发现",
         "title": "市场",
         "installDialogTitle": "安装技能",
         "installDialogSubtitle": "默认展示 Explore，输入关键词后执行搜索。",

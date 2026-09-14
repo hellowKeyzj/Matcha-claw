@@ -13,7 +13,7 @@ describe('Electron Main channel pairing transport', () => {
     });
     const transport = createChannelPairingTransport({ verificationKey: 'public', signDecision }, 32_137, fetcher);
 
-    await expect(transport.list('feishu')).resolves.toEqual({
+    await expect(transport.list('feishu', 'default')).resolves.toEqual({
       status: 200,
       body: {
         requests: [{ id: 'request-1', status: 'pending' }],
@@ -28,7 +28,7 @@ describe('Electron Main channel pairing transport', () => {
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:32137/api/channels/pairing', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
-      body: JSON.stringify({ channel: 'feishu' }),
+      body: JSON.stringify({ channel: 'feishu', accountId: 'default' }),
     }));
   });
 

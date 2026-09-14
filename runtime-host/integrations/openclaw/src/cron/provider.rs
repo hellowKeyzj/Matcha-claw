@@ -420,7 +420,7 @@ mod tests {
                 "type": "hello-ok", "protocol": 4,
                 "server": {"version": wire::OPENCLAW_GATEWAY_VERSION, "connId": "delayed-cron-provider"},
                 "features": {"methods": [
-                    "status", "config.get", "config.patch", "config.apply", "agents.list", "skills.status",
+                    "status", "config.get", "config.patch", "config.apply", "plugins.refresh", "agents.list", "skills.status",
                     wire::SYSTEM_PRESENCE_METHOD,
                     wire::cron::CRON_LIST_METHOD,
                     "cron.status", wire::cron::CRON_RUNS_METHOD

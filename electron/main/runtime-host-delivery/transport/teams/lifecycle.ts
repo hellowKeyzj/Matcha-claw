@@ -54,15 +54,16 @@ type LifecycleResponse = Readonly<{
   body:
     | Readonly<{ success: true; action: 'list'; runs: readonly TeamRun[] }>
     | Readonly<{ success: true; action: 'create'; runId: string; outcome: 'created' | 'replayed' }>
-    | Readonly<{ success: true; action: 'delete'; teamId: string; outcome: 'deleted' | 'outcome_unknown' }>
-    | Readonly<{ success: true; action: 'delete'; runId: string; state: 'tombstoned' | 'cancellation_required' | 'outcome_unknown' }>
+    | Readonly<{ success: true; action: 'delete'; teamId: string; outcome: 'deleted' }>
+    | Readonly<{ success: true; action: 'delete'; runId: string; state: 'tombstoned' | 'cancellation_required' }>
     | Readonly<{ success: true; action: 'resume'; runs: readonly ResumeRun[] }>
     | Readonly<{
       success: true;
       action: 'cancel';
       runId: string;
-      state: 'cancelling' | 'cancelled' | 'outcome_unknown' | 'tombstoned';
+      state: 'cancelling' | 'cancelled' | 'tombstoned';
     }>
+    | Readonly<{ success: false; error: 'Team lifecycle outcome is unknown' }>
     | typeof REJECTED
     | typeof UNAVAILABLE;
 }>;
@@ -120,7 +121,7 @@ async function send(
     if (response.status === 200 && isSuccess(result) && (expectedAction === undefined || result.action === expectedAction)) {
       return { status: 200, body: result };
     }
-    if (response.status === 409 && isRejected(result)) return { status: 409, body: result };
+    if (response.status === 409 && (isUnknown(result) || isRejected(result))) return { status: 409, body: result };
   } catch {
     // Native transport details do not cross the Electron delivery boundary.
   }
@@ -199,7 +200,7 @@ function isSuccess(value: unknown): value is Extract<LifecycleResponse['body'], 
     || (hasExactKeys(value, ['success', 'action', 'teamId', 'outcome'])
       && value.action === 'delete'
       && isIdentifier(value.teamId)
-      && (value.outcome === 'deleted' || value.outcome === 'outcome_unknown'))
+      && value.outcome === 'deleted')
     || (hasExactKeys(value, ['success', 'action', 'runs'])
       && value.action === 'resume'
       && Array.isArray(value.runs)
@@ -236,16 +237,23 @@ function isResumeRun(value: unknown): value is ResumeRun {
 }
 
 function isCancellationState(value: unknown): boolean {
-  return value === 'cancelling' || value === 'cancelled' || value === 'outcome_unknown' || value === 'tombstoned';
+  return value === 'cancelling' || value === 'cancelled' || value === 'tombstoned';
 }
 
 function isTombstoneState(value: unknown): boolean {
-  return value === 'tombstoned' || value === 'cancellation_required' || value === 'outcome_unknown';
+  return value === 'tombstoned' || value === 'cancellation_required';
 }
 
 function isGraphStatus(value: unknown): boolean {
   return value === 'pending' || value === 'ready' || value === 'running' || value === 'waiting'
     || value === 'completed' || value === 'failed' || value === 'cancelled';
+}
+
+function isUnknown(value: unknown): value is Readonly<{ success: false; error: 'Team lifecycle outcome is unknown' }> {
+  return isRecord(value)
+    && hasExactKeys(value, ['success', 'error'])
+    && value.success === false
+    && value.error === 'Team lifecycle outcome is unknown';
 }
 
 function isRejected(value: unknown): value is typeof REJECTED {

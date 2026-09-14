@@ -28,9 +28,6 @@ export const PORTS = {
   /** Runtime Host Fleet transport port */
   MATCHACLAW_FLEET_TRANSPORT: 3248,
 
-  /** Runtime Host License transport port */
-  MATCHACLAW_LICENSE_TRANSPORT: 3249,
-
   /** Runtime Host channel catalog transport port */
   MATCHACLAW_CHANNEL_CATALOG_TRANSPORT: 3246,
 
@@ -51,9 +48,6 @@ export const PORTS = {
 
   /** Runtime Host session abort transport port */
   MATCHACLAW_SESSION_ABORT_TRANSPORT: 3218,
-
-  /** Runtime Host OpenClaw chat history transport port */
-  MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT: 3219,
 
   /** Runtime Host Matcha Agent chat history transport port */
   MATCHACLAW_MATCHA_HISTORY_TRANSPORT: 3244,
@@ -158,7 +152,7 @@ type CanonicalPortKey =
   | 'MATCHACLAW_RUNTIME_HOST'
   | 'MATCHACLAW_SESSION_TRANSPORT'
   | 'MATCHA_AGENT_APP_SERVER'
-  | 'MATCHACLAW_LICENSE_TRANSPORT'
+  | 'MATCHACLAW_FLEET_TRANSPORT'
   | 'MATCHACLAW_DIAGNOSTICS_TRANSPORT'
   | 'MATCHACLAW_WORKSPACE_TEXT_TRANSPORT'
   | 'MATCHACLAW_WORKSPACE_BINARY_TRANSPORT'
@@ -167,7 +161,6 @@ type CanonicalPortKey =
   | 'MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT'
   | 'MATCHACLAW_SESSION_SEND_TRANSPORT'
   | 'MATCHACLAW_SESSION_ABORT_TRANSPORT'
-  | 'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT'
   | 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT'
   | 'MATCHACLAW_USAGE_TRANSPORT'
   | 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
@@ -224,10 +217,6 @@ export function getPort(key: PortKey): number {
     `MatchaClaw_PORT_${key}`,
   ]);
 
-  if (canonical === 'MATCHACLAW_LICENSE_TRANSPORT') {
-    envKeys.clear();
-    envKeys.add(canonical);
-  }
   if (canonical === 'MATCHACLAW_HOST_API') {
     envKeys.clear();
     envKeys.add('MATCHACLAW_PORT_MATCHACLAW_HOST_API');

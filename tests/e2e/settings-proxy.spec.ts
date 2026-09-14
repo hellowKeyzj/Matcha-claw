@@ -1,4 +1,4 @@
-import { ensureSetupComplete, expect, test } from './fixtures/electron';
+import { enterLocalWorkspace, expect, test } from './fixtures/electron';
 import type { Locator } from '@playwright/test';
 
 async function ensureSwitchState(
@@ -13,7 +13,7 @@ async function ensureSwitchState(
 
 test.describe('MatchaClaw developer proxy settings', () => {
   test('禁用代理时仍可保存', async ({ page }) => {
-    await ensureSetupComplete(page);
+    await enterLocalWorkspace(page);
     await page.evaluate(() => {
       window.location.hash = '#/settings?section=gateway';
     });

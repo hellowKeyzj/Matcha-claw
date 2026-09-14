@@ -352,3 +352,9 @@
 - Thumbnail CTR > category average
 - Student growth: within 3 months, progress from "template-dependent" to "can independently deliver a full commercial project"
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

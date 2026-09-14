@@ -1,4 +1,7 @@
-import type { ChatSession, ChatStoreState } from './types';
+import type { ChatSession, ChatSessionImageGenerationRuntimeState, ChatStoreState } from './types';
+import {
+  deriveSessionImageGenerationPendingStateFromItems,
+} from '../../types/session/render-item';
 import {
   readSessionCatalogStatusShell,
   readSessionsFromState,
@@ -58,6 +61,10 @@ function hasSessionPaneActivity(record: ChatSessionRecord): boolean {
     || record.runtime.activeRunId != null
     || record.runtime.activeTurnItemKey != null
     || record.runtime.lastUserMessageAt != null;
+}
+
+export function deriveSessionImageGenerationRuntime(record: ChatSessionRecord | undefined): ChatSessionImageGenerationRuntimeState {
+  return deriveSessionImageGenerationPendingStateFromItems(record?.items ?? [], record?.runtime.imageGeneration);
 }
 
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {

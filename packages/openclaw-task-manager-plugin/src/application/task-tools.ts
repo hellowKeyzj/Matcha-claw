@@ -16,17 +16,8 @@ type ToolContext = {
   sessionKey?: string
 }
 
-function logTaskPipeline(api: OpenClawPluginApi, event: string, payload: Record<string, unknown>): void {
-  api.logger?.debug?.(`[task-pipeline] plugin.${event} ${JSON.stringify(payload)}`)
-}
-
-function readPluginStorageRoot(api: OpenClawPluginApi): string | null {
-  const config = api.pluginConfig
-  if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    return null
-  }
-  const storageRoot = (config as Record<string, unknown>).storageRoot
-  return typeof storageRoot === 'string' && storageRoot.trim() ? storageRoot.trim() : null
+function logTaskPipeline(api: OpenClawPluginApi, event: string, count: number): void {
+  api.logger?.debug?.(`[task-pipeline] plugin.${event} count=${count}`)
 }
 
 function asJsonText(value: unknown): string {
@@ -105,9 +96,7 @@ async function executeTaskCreate(api: OpenClawPluginApi, toolCtx: ToolContext, p
   const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: `Task #${task.id} created successfully: ${task.subject}` }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'todo' },
   }
 }
 
@@ -125,9 +114,7 @@ async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, p
     const payload = { scope, taskId, deleted: true, todos }
     return {
       content: [{ type: 'text' as const, text: `Task ${taskId} deleted successfully` }],
-      rawResponse: payload,
       details: payload,
-      renderer: { type: 'todo' },
     }
   }
   const task = await store.update(scope.key, taskId, input)
@@ -137,31 +124,19 @@ async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, p
   const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: `Updated task #${task.id}` }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'todo' },
   }
 }
 
 async function executeTaskList(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
   const scope = resolveTaskScope({ params, sessionKey: toolCtx.sessionKey })
   const tasks = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).list(scope.key)
-  logTaskPipeline(api, 'tool.TaskList', {
-    scopeKey: scope.key,
-    scopeType: scope.type,
-    toolCtxSessionKey: toolCtx.sessionKey ?? null,
-    paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
-    workspaceDir: toolCtx.workspaceDir ?? null,
-    storageRoot: readPluginStorageRoot(api),
-    tasksCount: tasks.length,
-  })
+  logTaskPipeline(api, 'tool.TaskList', tasks.length)
   const todos = await loadStoredTodos(api, toolCtx, resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey }))
   const payload = { scope, tasks: tasks.map(asTaskDetailPayload), todos }
   return {
     content: [{ type: 'text' as const, text: renderTaskList(tasks) }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'todo' },
   }
 }
 
@@ -175,9 +150,7 @@ async function executeTaskGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
   const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: renderTaskDetail(task) }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'text' },
   }
 }
 
@@ -185,20 +158,11 @@ async function executeTodoWrite(api: OpenClawPluginApi, toolCtx: ToolContext, pa
   const scopeKey = resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const input = parseTodoWriteInput(params)
   const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.newTodos)
-  logTaskPipeline(api, 'tool.TodoWrite', {
-    scopeKey,
-    toolCtxSessionKey: toolCtx.sessionKey ?? null,
-    paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
-    workspaceDir: toolCtx.workspaceDir ?? null,
-    storageRoot: readPluginStorageRoot(api),
-    todosCount: result.todos.length,
-  })
+  logTaskPipeline(api, 'tool.TodoWrite', result.todos.length)
   const payload = { todos: result.todos, updatedAt: result.updatedAt }
   return {
     content: [{ type: 'text' as const, text: 'Todo list updated successfully' }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'todo' },
   }
 }
 
@@ -208,9 +172,7 @@ async function executeTodoGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
   const payload = { todos: result.todos, updatedAt: result.updatedAt }
   return {
     content: [{ type: 'text' as const, text: asJsonText(payload) }],
-    rawResponse: payload,
     details: payload,
-    renderer: { type: 'todo' },
   }
 }
 

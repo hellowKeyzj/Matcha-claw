@@ -28,32 +28,43 @@ pub(crate) fn decode_list(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<(String, Option<String>), DecodeError> {
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            LIST_AUTHORIZATION_SCOPE,
-            LIST_OPERATION_ID,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    let Value::Object(body) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if !(body.len() == 1 || body.len() == 2)
-        || body
-            .keys()
-            .any(|key| key != "channel" && key != "accountId")
-    {
-        return Err(DecodeError::Invalid);
-    }
-    let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
-    let account = body
-        .get("accountId")
-        .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
-        .transpose()?;
-    Ok((channel, account))
+    let mut span = crate::channel::trace::ChannelTraceSpan::begin(
+        "host.transport.channel_pairing.decode_list",
+    );
+    let result = (|| {
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                LIST_AUTHORIZATION_SCOPE,
+                LIST_OPERATION_ID,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let Value::Object(body) = value else {
+            return Err(DecodeError::Invalid);
+        };
+        if !(body.len() == 1 || body.len() == 2)
+            || body
+                .keys()
+                .any(|key| key != "channel" && key != "accountId")
+        {
+            return Err(DecodeError::Invalid);
+        }
+        let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
+        let account = body
+            .get("accountId")
+            .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
+            .transpose()?;
+        Ok((channel, account))
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 pub(crate) struct ApprovalRequest {
@@ -68,53 +79,64 @@ pub(crate) fn decode_approval(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<ApprovalRequest, DecodeError> {
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            APPROVE_AUTHORIZATION_SCOPE,
-            APPROVE_OPERATION_ID,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    let Value::Object(mut body) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if !(body.len() == 3 || body.len() == 4)
-        || body
-            .remove("action")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .as_deref()
-            != Some("approve")
-        || !body.contains_key("channel")
-        || !body.contains_key("code")
-        || body
-            .keys()
-            .any(|key| key != "channel" && key != "accountId" && key != "code")
-    {
-        return Err(DecodeError::Invalid);
-    }
-    let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
-    let account = body
-        .get("accountId")
-        .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
-        .transpose()?;
-    let code = body
-        .get("code")
-        .and_then(Value::as_str)
-        .filter(|code| {
-            !code.is_empty()
-                && code.len() <= MAX_CODE_BYTES
-                && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    let mut span = crate::channel::trace::ChannelTraceSpan::begin(
+        "host.transport.channel_pairing.decode_approval",
+    );
+    let result = (|| {
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                APPROVE_AUTHORIZATION_SCOPE,
+                APPROVE_OPERATION_ID,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let Value::Object(mut body) = value else {
+            return Err(DecodeError::Invalid);
+        };
+        if !(body.len() == 3 || body.len() == 4)
+            || body
+                .remove("action")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .as_deref()
+                != Some("approve")
+            || !body.contains_key("channel")
+            || !body.contains_key("code")
+            || body
+                .keys()
+                .any(|key| key != "channel" && key != "accountId" && key != "code")
+        {
+            return Err(DecodeError::Invalid);
+        }
+        let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
+        let account = body
+            .get("accountId")
+            .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
+            .transpose()?;
+        let code = body
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                !code.is_empty()
+                    && code.len() <= MAX_CODE_BYTES
+                    && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .map(|code| Zeroizing::new(code.as_bytes().to_vec()))
+            .ok_or(DecodeError::Invalid)?;
+        Ok(ApprovalRequest {
+            channel,
+            account,
+            code,
         })
-        .map(|code| Zeroizing::new(code.as_bytes().to_vec()))
-        .ok_or(DecodeError::Invalid)?;
-    Ok(ApprovalRequest {
-        channel,
-        account,
-        code,
-    })
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 fn identity(value: Option<&Value>) -> Option<String> {

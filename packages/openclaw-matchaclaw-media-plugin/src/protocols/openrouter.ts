@@ -1,7 +1,7 @@
 import {
   assertOkOrThrowHttpError,
   postJsonRequest,
-} from 'openclaw/plugin-sdk/provider-http'
+} from '../http-runtime.js'
 import {
   collectOpenRouterImageSources,
   materializeImageSources,

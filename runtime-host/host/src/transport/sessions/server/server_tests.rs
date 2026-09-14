@@ -49,10 +49,17 @@ impl TestRoot {
         let matcha_storage_parent = base.join("matcha");
         let openclaw_dir = base.join("openclaw");
         let templates = openclaw_dir.join("docs/reference/templates");
+        let matcha_templates = base.join("resources/agent-workspace-templates/main-agent");
         fs::create_dir_all(&state_parent).expect("create state parent");
         fs::create_dir(&matcha_storage_parent).expect("create matcha parent");
         fs::create_dir(matcha_storage_parent.join("app-server")).expect("create app-server root");
         fs::create_dir_all(&templates).expect("create workspace templates");
+        fs::create_dir_all(&matcha_templates).expect("create Matcha workspace templates");
+        fs::write(
+            matcha_templates.join("IDENTITY.md"),
+            "# IDENTITY.md\n\n- **名字：** Matcha\n",
+        )
+        .expect("write Matcha identity template");
         for name in [
             "AGENTS.md",
             "SOUL.md",
@@ -1079,6 +1086,8 @@ fn host_input(root: &TestRoot) -> HostInput {
         },
         matcha_secret: Secret::new("test-matcha-secret".into()).expect("matcha secret"),
         open_claw: OpenClawInput {
+            team_run_mcp_executable: absolute_path("runtime-host-mcp"),
+            team_run_mcp_state_dir: absolute_path("runtime-host"),
             electron_image: absolute_path("MatchaClaw"),
             working_directory: absolute_path("runtime"),
             openclaw_dir: root.openclaw_dir.clone(),
@@ -1092,6 +1101,8 @@ fn host_input(root: &TestRoot) -> HostInput {
             entry: root.openclaw_dir.join("openclaw.mjs"),
             state_dir,
             port: 18_789,
+            sealed_endpoint: None,
+            sealed_token: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),

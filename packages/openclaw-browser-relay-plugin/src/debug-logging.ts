@@ -1,4 +1,4 @@
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from './plugin-types.js'
 
 // Flip this on locally when you need relay/playwright trace logs again.
 export const ENABLE_BROWSER_RELAY_DEBUG_LOGS = false

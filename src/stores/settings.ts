@@ -39,8 +39,6 @@ interface SettingsState {
   // UI State
   devModeUnlocked: boolean;
 
-  // Setup
-  setupComplete: boolean;
   initialized: boolean;
 
   // Actions
@@ -57,7 +55,6 @@ interface SettingsState {
   setUpdateChannel: (channel: UpdateChannel) => Promise<void>;
   setAutoCheckUpdate: (value: boolean) => Promise<void>;
   setDevModeUnlocked: (value: boolean) => Promise<void>;
-  markSetupComplete: () => Promise<void>;
   resetSettings: () => Promise<void>;
 }
 
@@ -77,7 +74,6 @@ const defaultSettings = {
   updateChannel: 'stable' as UpdateChannel,
   autoCheckUpdate: true,
   devModeUnlocked: false,
-  setupComplete: false,
   initialized: false,
 };
 
@@ -150,9 +146,6 @@ export const useSettingsStore = create<SettingsState>()(
       },
       setDevModeUnlocked: async (devModeUnlocked) => {
         set({ devModeUnlocked });
-      },
-      markSetupComplete: async () => {
-        set({ setupComplete: true });
       },
       resetSettings: async () => {
         await hostSettingsPutPatch({

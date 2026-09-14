@@ -7,6 +7,17 @@
         "title": "No runtime available",
         "description": "No chat runtime endpoint is available. Try again shortly or check Runtime Host in Settings."
     },
+    "workspaceUnavailable": {
+        "title": "Workspace unavailable",
+        "description": "This session's workspace cannot be opened: {{path}}. Restore the folder, or choose a new workspace and start a new session.",
+        "unknownPath": "unknown workspace",
+        "chooseWorkspaceAndNewSession": "Choose workspace and start new session",
+        "updating": "Updating…",
+        "pickTitle": "Choose a new agent workspace",
+        "pickButton": "Choose workspace",
+        "updateSuccess": "Agent workspace updated and a new session was started.",
+        "updateFailed": "Failed to update workspace: {{error}}"
+    },
     "welcome": {
         "title": "MatchaClaw Chat",
         "subtitle": "Your AI assistant is ready. Start a conversation below.",
@@ -20,12 +31,26 @@
         "gatewayRecoveringNotice": "Runtime is preparing…",
         "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
         "approvalWaitingPlaceholder": "Waiting for approval...",
+        "imageGenerationActive": "Generating image",
         "pickModel": "Choose model",
         "modelPickerTitle": "Switch model for this chat",
         "pickPermissionMode": "Choose permission mode",
-        "permissionPickerTitle": "Switch OpenClaw tool permissions",
-        "permissionDefault": "Default permissions",
-        "permissionFullAccess": "Full access",
+        "permissionPickerTitle": "Switch session permissions",
+        "permissionDefault": "Default",
+        "permissionDefaultWithMode": "Default ({{mode}})",
+        "permissionDefaultDescription": "Follow the agent's configured policy.",
+        "permissionReadOnly": "Read-only",
+        "permissionReadOnlyDescription": "Read within the session root; writes and commands are blocked.",
+        "permissionGuarded": "Guarded",
+        "permissionGuardedDescription": "A human reviews requests beyond the session root.",
+        "permissionWorkspace": "Workspace",
+        "permissionWorkspaceDescription": "An AI reviewer checks requests beyond the session root.",
+        "permissionFull": "Full access",
+        "permissionFullDescription": "No reviewer; files and commands are unrestricted.",
+        "permissionFullRequiresAccess": "Full access is not available for this session",
+        "permissionLoading": "Loading permissions…",
+        "permissionPending": "Switching permissions…",
+        "permissionUnsupported": "Permission controls are not available yet",
         "permissionLoadFailed": "Failed to load permissions: {{error}}",
         "permissionSwitchFailed": "Failed to switch permissions: {{error}}",
         "modelSwitchFailed": "Failed to switch model: {{error}}",
@@ -42,7 +67,6 @@
         "openSidePanel": "Open side panel",
         "closeSidePanel": "Close side panel",
         "skillConfig": "Skill Configuration",
-        "skillShortLabel": "Skills",
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking",
         "exportMarkdown": "Export Markdown"
@@ -60,6 +84,16 @@
         "typing": "Thinking",
         "activity": "Working",
         "compacting": "Compressing context, then the reply will continue"
+    },
+    "runtimeStatus": {
+        "providerFallback": "Provider fallback applied",
+        "guardian": {
+            "reviewing": "Guardian is reviewing the action",
+            "approved": "Guardian approved the action",
+            "denied": "Guardian blocked the action",
+            "warning": "Guardian warning",
+            "strictReviewRequired": "Guardian requires strict review"
+        }
     },
     "errors": {
         "activeRunDisconnected": "The active run disconnected before a terminal event was received.",
@@ -138,6 +172,8 @@
         "changesTab": "Changes",
         "previewTab": "Preview",
         "workspaceTab": "Workspace",
+        "collapseWorkspaceTree": "Collapse workspace tree",
+        "expandWorkspaceTree": "Expand workspace tree",
         "enterFullscreen": "View artifact workbench full screen",
         "exitFullscreen": "Exit artifact full screen",
         "openExternal": "Open externally",
@@ -166,6 +202,7 @@
         "directoryPreviewDescription": "Folders are browsed from the workspace tree. You can keep navigating there or open the folder in your system file manager.",
         "created": "Created",
         "modified": "Modified",
+        "deleted": "Deleted",
         "revealFailed": "Failed to reveal the file in your file manager",
         "workspaceEmpty": "No workspace directory is available to browse.",
         "workspaceLoadFailed": "Workspace load failed: {{error}}"

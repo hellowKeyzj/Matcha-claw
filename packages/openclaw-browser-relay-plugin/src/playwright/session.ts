@@ -1,4 +1,4 @@
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from '../plugin-types.js'
 import { BrowserTabState } from '../state/browser-tab-state.js'
 import { waitForBrowserCdpReady } from './cdp-readiness.js'
 import { loadPlaywrightCore } from './dependency.js'

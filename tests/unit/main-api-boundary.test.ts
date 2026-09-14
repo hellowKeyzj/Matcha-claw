@@ -75,6 +75,8 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('POST', '/api/capabilities/describe')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/capabilities/execute')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/capabilities/execute')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/channels/authorization')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/channels/authorization')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/channels/config/validate')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/channels/config/validate')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/security/policy')).toBe(true);
@@ -88,8 +90,9 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('GET', '/api/plugins/configuration')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/files/save-image')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/files/save-image')).toBe(true);
-    expect(isHostApiRequestAllowed('GET', '/api/license/gate')).toBe(true);
-    expect(isHostApiRequestAllowed('POST', '/api/license/gate')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/license/gate')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/license/stored-key')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/license/validate')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/logs')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/logs')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/logs/dir')).toBe(true);
@@ -126,11 +129,15 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('GET', '/api/cron/jobs')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/provider-models/selectable')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/provider-models/selectable')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/provider-models/discover')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/provider-models/discover')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/cron/jobs/create')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/cron/jobs/toggle')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/cron/jobs')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/usage/recent')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/usage/recent')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/runtime-host/usage/session-timeseries')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/runtime-host/usage/session-timeseries')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/matcha-agent/app-server/status')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/matcha-agent/app-server/status')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/matcha-agent/app-server/restart')).toBe(true);
@@ -146,6 +153,10 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('POST', '/api/runtime-host/status')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/runtime-host/restart')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/runtime-host/restart')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/toolchain/uv/check')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/toolchain/uv/check')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/toolchain/uv/prepare')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/toolchain/uv/prepare')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/runtime-agent/ingress')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/remote-fleet/runtime-agent/ingress')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/remote-fleet/start-runtime')).toBe(true);

@@ -5,8 +5,9 @@ use tokio::sync::oneshot;
 use super::command::{ConnectorCommand, ConnectorQuery};
 use crate::{
     external_connectors::{
-        CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, ProbeOutcome, SessionIdentity,
-        SessionStatusOutcome, StatusOutcome,
+        CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, OpenClawMcpServersOutcome,
+        ProbeOutcome, SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget,
+        SessionStatusOutcome, SessionStatusTarget, StatusOutcome,
     },
     transport::provider_accounts::private_auth::Resolver,
 };
@@ -89,11 +90,32 @@ impl ConnectorHandle {
 
     pub(crate) async fn session_status(
         &self,
-        identity: SessionIdentity,
+        target: SessionStatusTarget,
     ) -> Result<SessionStatusOutcome, ()> {
         let (reply, rx) = oneshot::channel();
         self.owner
-            .send_query(ConnectorQuery::SessionStatus { identity, reply })
+            .send_query(ConnectorQuery::SessionStatus { target, reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    }
+
+    pub(crate) async fn openclaw_mcp_servers(&self) -> Result<OpenClawMcpServersOutcome, ()> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ConnectorQuery::OpenClawMcpServers { reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    }
+
+    pub(crate) async fn set_session_mcp_server_enabled(
+        &self,
+        target: SessionMcpServerEnabledTarget,
+    ) -> Result<SessionMcpServerEnabledOutcome, ()> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_command(ConnectorCommand::SetSessionMcpServerEnabled { target, reply })
             .await
             .map_err(|_| ())?;
         rx.await.map_err(|_| ())

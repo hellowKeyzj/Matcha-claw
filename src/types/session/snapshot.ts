@@ -3,7 +3,7 @@ import type { SessionRenderItem } from './render-item';
 import type { SessionRuntimeStateSnapshot } from './runtime-state';
 import type { TaskSnapshotEvent } from './task-snapshot';
 
-export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'named';
+export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'automation';
 export type SessionCatalogTitleSource = 'user' | 'assistant' | 'none';
 
 export interface SessionWindowStateSnapshot {
@@ -190,6 +190,7 @@ export type SessionWireTool = {
   inputText: string | null;
   summary: string | null;
   output: unknown | null;
+  details: unknown | null;
   isError: boolean | null;
 };
 
@@ -198,6 +199,30 @@ export type SessionWireApproval = {
   runId: string | null;
   phase: 'requested' | 'resolved';
   optionIds: string[];
+};
+
+export type SessionWireRuntimeActivity = 'compacting';
+
+export type SessionWireRuntimeErrorDetail = {
+  failoverReason: string | null;
+  providerRuntimeFailureKind: string | null;
+  providerErrorType: string | null;
+  providerErrorMessagePreview: string | null;
+  httpStatus: number | null;
+};
+
+export type SessionWireRuntimeNotice = {
+  runId: string;
+  kind:
+    | 'guardian_reviewing'
+    | 'guardian_approved'
+    | 'guardian_denied'
+    | 'guardian_warning'
+    | 'guardian_strict_review_required';
+  command: string | null;
+  riskLevel: string | null;
+  rationale: string | null;
+  message: string | null;
 };
 
 export type SessionWireRuntime = {
@@ -212,6 +237,8 @@ export type SessionWireRuntime = {
     | 'interrupted';
   activeRunId: string | null;
   issue: 'unknown' | 'unavailable' | 'timeout' | 'rejected' | null;
+  runtimeActivity: SessionWireRuntimeActivity | null;
+  errorDetail: SessionWireRuntimeErrorDetail | null;
 };
 
 export type SessionWireWindow = {
@@ -253,6 +280,7 @@ export type SessionChange =
   | { kind: 'toolUpdated'; tool: SessionWireTool }
   | { kind: 'approvalUpdated'; approval: SessionWireApproval }
   | { kind: 'runtimeChanged'; runtime: SessionWireRuntime }
+  | { kind: 'runtimeNoticeUpdated'; notice: SessionWireRuntimeNotice }
   | { kind: 'windowChanged'; window: SessionWireWindow }
   | { kind: 'recoveryRequired'; reason: SessionRecoveryReason };
 
@@ -327,6 +355,10 @@ function isNonEmptyIdentifier(value: unknown, maxBytes = MAX_ID_BYTES): value is
     && utf8ByteLength(value) <= maxBytes
     && value.trim() === value
     && ![...value].some((character) => (character.codePointAt(0) ?? 0) < 32 || character === '\\0');
+}
+
+function isNullableShortText(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && utf8ByteLength(value) <= 300 && !value.includes('\0'));
 }
 
 function isPayloadText(value: unknown): value is string {
@@ -528,7 +560,7 @@ function isItemStatus(value: unknown): value is SessionWireItemStatus {
 
 function decodeTool(value: unknown): SessionWireTool | null {
   return isRecord(value)
-    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'isError'])
+    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'details', 'isError'])
     && isNonEmptyIdentifier(value.toolCallId)
     && (value.runId === null || isNonEmptyIdentifier(value.runId))
     && (value.name === null || isNonEmptyIdentifier(value.name))
@@ -537,6 +569,7 @@ function decodeTool(value: unknown): SessionWireTool | null {
     && (value.inputText === null || isPayloadText(value.inputText))
     && (value.summary === null || isPayloadText(value.summary))
     && (value.output === null || isPayloadValue(value.output))
+    && (value.details === null || isPayloadValue(value.details))
     && (value.isError === null || typeof value.isError === 'boolean')
     ? {
       toolCallId: value.toolCallId,
@@ -547,6 +580,7 @@ function decodeTool(value: unknown): SessionWireTool | null {
       inputText: value.inputText,
       summary: value.summary,
       output: value.output,
+      details: value.details,
       isError: value.isError,
     }
     : null;
@@ -565,14 +599,74 @@ function decodeApproval(value: unknown): SessionWireApproval | null {
     : null;
 }
 
-function decodeRuntime(value: unknown): SessionWireRuntime | null {
+function decodeRuntimeNotice(value: unknown): SessionWireRuntimeNotice | null {
   return isRecord(value)
-    && hasExactKeys(value, ['phase', 'activeRunId', 'issue'])
-    && isRuntimePhase(value.phase)
-    && (value.activeRunId === null || isNonEmptyIdentifier(value.activeRunId))
-    && (value.issue === null || value.issue === 'unknown' || value.issue === 'unavailable' || value.issue === 'timeout' || value.issue === 'rejected')
-    ? { phase: value.phase, activeRunId: value.activeRunId, issue: value.issue }
+    && hasExactKeys(value, ['runId', 'kind', 'command', 'riskLevel', 'rationale', 'message'])
+    && isNonEmptyIdentifier(value.runId)
+    && isRuntimeNoticeKind(value.kind)
+    && isNullableShortText(value.command)
+    && isNullableShortText(value.riskLevel)
+    && isNullableShortText(value.rationale)
+    && isNullableShortText(value.message)
+    ? {
+      runId: value.runId,
+      kind: value.kind,
+      command: value.command,
+      riskLevel: value.riskLevel,
+      rationale: value.rationale,
+      message: value.message,
+    }
     : null;
+}
+
+function isRuntimeNoticeKind(value: unknown): value is SessionWireRuntimeNotice['kind'] {
+  return value === 'guardian_reviewing'
+    || value === 'guardian_approved'
+    || value === 'guardian_denied'
+    || value === 'guardian_warning'
+    || value === 'guardian_strict_review_required';
+}
+
+function decodeRuntime(value: unknown): SessionWireRuntime | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runtimeActivity', 'errorDetail'])
+    || !isRuntimePhase(value.phase)
+    || (value.activeRunId !== null && !isNonEmptyIdentifier(value.activeRunId))
+    || (value.issue !== null && value.issue !== 'unknown' && value.issue !== 'unavailable' && value.issue !== 'timeout' && value.issue !== 'rejected')
+    || (value.runtimeActivity !== null && value.runtimeActivity !== 'compacting')) {
+    return null;
+  }
+  const errorDetail = decodeRuntimeErrorDetail(value.errorDetail);
+  if (value.errorDetail !== null && !errorDetail) {
+    return null;
+  }
+  return {
+    phase: value.phase,
+    activeRunId: value.activeRunId,
+    issue: value.issue,
+    runtimeActivity: value.runtimeActivity,
+    errorDetail,
+  };
+}
+
+function decodeRuntimeErrorDetail(value: unknown): SessionWireRuntimeErrorDetail | null {
+  return value === null
+    ? null
+    : isRecord(value)
+      && hasExactKeys(value, ['failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+      && isNullableShortText(value.failoverReason)
+      && isNullableShortText(value.providerRuntimeFailureKind)
+      && isNullableShortText(value.providerErrorType)
+      && isNullableShortText(value.providerErrorMessagePreview)
+      && (value.httpStatus === null || (isSafeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599))
+      ? {
+        failoverReason: value.failoverReason,
+        providerRuntimeFailureKind: value.providerRuntimeFailureKind,
+        providerErrorType: value.providerErrorType,
+        providerErrorMessagePreview: value.providerErrorMessagePreview,
+        httpStatus: value.httpStatus,
+      }
+      : null;
 }
 
 function isRuntimePhase(value: unknown): value is SessionWireRuntime['phase'] {
@@ -630,6 +724,8 @@ function decodeChange(value: unknown): SessionChange | null {
       return hasExactKeys(value, ['kind', 'approval']) ? (() => { const approval = decodeApproval(value.approval); return approval ? { kind: 'approvalUpdated', approval } : null; })() : null;
     case 'runtimeChanged':
       return hasExactKeys(value, ['kind', 'runtime']) ? (() => { const runtime = decodeRuntime(value.runtime); return runtime ? { kind: 'runtimeChanged', runtime } : null; })() : null;
+    case 'runtimeNoticeUpdated':
+      return hasExactKeys(value, ['kind', 'notice']) ? (() => { const notice = decodeRuntimeNotice(value.notice); return notice ? { kind: 'runtimeNoticeUpdated', notice } : null; })() : null;
     case 'windowChanged':
       return hasExactKeys(value, ['kind', 'window']) ? (() => { const window = decodeWindow(value.window); return window ? { kind: 'windowChanged', window } : null; })() : null;
     case 'recoveryRequired':

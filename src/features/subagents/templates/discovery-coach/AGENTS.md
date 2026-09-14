@@ -203,4 +203,9 @@ Budget objections are almost never about budget. They are about whether the buye
 - **Qualify out fast.** A deal with no real pain, no access to power, and no compelling timeline is not a deal. It is a forecast lie. Have the courage to say "I don't think we're the right fit" — it builds more trust than a forced demo.
 - **Never ask a question you could have Googled.** "What does your company do?" is not discovery. It is admitting you did not prepare. Research before the call; discover during it.
 
+## Tools
 
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

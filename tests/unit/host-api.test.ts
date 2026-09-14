@@ -281,25 +281,18 @@ describe('host-api', () => {
     expect(JSON.stringify(capabilityCall)).toContain('media.thumbnail');
   });
 
-  it('hostUvInstallAll uses the platform runtime install capability', async () => {
+  it('hostToolchainPrepare uses the host-level prepare route', async () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true }));
 
-    const { hostUvInstallAll } = await import('@/lib/host-api');
-    await hostUvInstallAll(testRuntimeEndpoint);
+    const { hostToolchainPrepare } = await import('@/lib/host-api');
+    await hostToolchainPrepare();
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
-        path: '/api/capabilities/execute',
+        path: '/api/toolchain/uv/prepare',
         method: 'POST',
         timeoutMs: 120000,
-        body: JSON.stringify({
-          id: 'platform.runtime',
-          operationId: 'toolchain.installUv',
-          scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
-          target: { kind: 'platform-runtime' },
-          input: {},
-        }),
       }),
     );
   });
@@ -528,8 +521,8 @@ describe('host-api', () => {
       .mockResolvedValueOnce(proxyEnvelope({ capabilities: [] }))
       .mockResolvedValueOnce(proxyEnvelope({
         capabilities: [{
-          id: 'platform.runtime',
-          kind: 'platform-runtime',
+          id: 'scheduler.cron',
+          kind: 'scheduler-cron',
           scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
           scopeKind: 'runtime-instance',
           runtimeAdapterId: 'openclaw',
@@ -538,10 +531,10 @@ describe('host-api', () => {
           supportLevel: 'native',
           availability: 'available',
           operations: [],
-          policyScope: 'platform.runtime',
+          policyScope: 'scheduler.cron',
         }, {
-          id: 'platform.runtime',
-          kind: 'platform-runtime',
+          id: 'scheduler.cron',
+          kind: 'scheduler-cron',
           scope: { kind: 'runtime-instance', endpoint: { ...testRuntimeEndpoint, runtimeInstanceId: 'workspace-b' } },
           scopeKind: 'runtime-instance',
           runtimeAdapterId: 'openclaw',
@@ -550,21 +543,21 @@ describe('host-api', () => {
           supportLevel: 'native',
           availability: 'available',
           operations: [],
-          policyScope: 'platform.runtime',
+          policyScope: 'scheduler.cron',
         }],
       }));
 
     const { resolveSingleCapabilityScope } = await import('@/lib/host-api');
 
-    await expect(resolveSingleCapabilityScope('platform.runtime')).rejects.toThrow('available scopes: none');
-    await expect(resolveSingleCapabilityScope('platform.runtime')).rejects.toThrow('got 2; available scopes:');
+    await expect(resolveSingleCapabilityScope('scheduler.cron')).rejects.toThrow('available scopes: none');
+    await expect(resolveSingleCapabilityScope('scheduler.cron')).rejects.toThrow('got 2; available scopes:');
   });
 
   it('resolveSingleCapabilityScope shares inflight capability list requests', async () => {
     invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({
       capabilities: [{
-        id: 'platform.runtime',
-        kind: 'platform-runtime',
+        id: 'scheduler.cron',
+        kind: 'scheduler-cron',
         scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
         scopeKind: 'runtime-instance',
         runtimeAdapterId: 'openclaw',
@@ -573,14 +566,14 @@ describe('host-api', () => {
         supportLevel: 'native',
         availability: 'available',
         operations: [],
-        policyScope: 'platform.runtime',
+        policyScope: 'scheduler.cron',
       }],
     }));
 
     const { resolveSingleCapabilityScope } = await import('@/lib/host-api');
     const [first, second] = await Promise.all([
-      resolveSingleCapabilityScope('platform.runtime'),
-      resolveSingleCapabilityScope('platform.runtime'),
+      resolveSingleCapabilityScope('scheduler.cron'),
+      resolveSingleCapabilityScope('scheduler.cron'),
     ]);
 
     expect(first).toEqual({ kind: 'runtime-instance', endpoint: testRuntimeEndpoint });
@@ -599,6 +592,72 @@ describe('host-api', () => {
     expect(source).not.toContain('hostRuntimeGatewayLifecycle');
     expect(source).not.toContain('hostRuntimeGatewayReady');
     expect(source).not.toContain('hostRuntimeGatewayControlUiAutoApprove');
+  });
+
+  it('hostOpenClawBrowserRequest executes the browser capability request', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ ok: true }));
+
+    const { hostOpenClawBrowserRequest } = await import('@/lib/host-api');
+    await expect(hostOpenClawBrowserRequest({
+      method: 'GET',
+      path: '/browser/request',
+      query: { tabId: 'tab-1', includeHidden: false },
+      body: { action: 'status' },
+      timeoutMs: 2500,
+      target: 'node',
+      node: 'browser-node-1',
+    }, { timeoutMs: 15000 })).resolves.toEqual({ ok: true });
+
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/capabilities/execute',
+        method: 'POST',
+        timeoutMs: 15000,
+        body: JSON.stringify({
+          id: 'openclaw.browser',
+          operationId: 'browser.request',
+          scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
+          target: null,
+          input: {
+            method: 'GET',
+            path: '/browser/request',
+            query: { tabId: 'tab-1', includeHidden: false },
+            body: { action: 'status' },
+            timeoutMs: 2500,
+            target: 'node',
+            node: 'browser-node-1',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('hostOpenClawMcpAppRequest executes the MCP app capability request', async () => {
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ lease: { viewId: 'view-1' } }));
+
+    const { hostOpenClawMcpAppRequest } = await import('@/lib/host-api');
+    await expect(hostOpenClawMcpAppRequest({
+      operationId: 'mcp.app.lease',
+      sessionKey: 'session-1',
+      viewId: 'view-1',
+      standalone: true,
+    })).resolves.toEqual({ lease: { viewId: 'view-1' } });
+
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/capabilities/execute',
+        method: 'POST',
+        body: JSON.stringify({
+          id: 'openclaw.mcpApp',
+          operationId: 'mcp.app.lease',
+          scope: { kind: 'runtime-instance', endpoint: testRuntimeEndpoint },
+          target: null,
+          input: { sessionKey: 'session-1', viewId: 'view-1', standalone: true },
+        }),
+      }),
+    );
   });
 
   it('hostSessionLoad executes the session load capability and preserves timeoutMs', async () => {

@@ -8,7 +8,7 @@ use crate::gateway::{
     wire::{self, GatewayResponse},
 };
 
-use super::next_request_id;
+use super::{channel_config::channel_trace, next_request_id};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelRuntimeAction {
@@ -102,6 +102,20 @@ impl fmt::Debug for LoginProgress {
 }
 
 impl LoginProgress {
+    pub(crate) fn new(
+        status: LoginProgressStatus,
+        account_id: Option<String>,
+        session_key: Option<String>,
+        qr_data_url: Option<String>,
+    ) -> Self {
+        Self {
+            status,
+            account_id,
+            session_key,
+            qr_data_url,
+        }
+    }
+
     pub fn status(&self) -> LoginProgressStatus {
         self.status
     }
@@ -212,8 +226,22 @@ impl ChannelLoginOperation {
             LoginExchange::Unknown => WebLoginStartEffect::Unknown,
             LoginExchange::Response(response) => {
                 match wire::channel::decode_login_progress(response, input.account_id.as_deref()) {
-                    Ok(progress) => WebLoginStartEffect::Progress(progress.into_public()),
-                    Err(_) => WebLoginStartEffect::Unknown,
+                    Ok(progress) => {
+                        let progress = progress.into_public();
+                        channel_trace(
+                            "login.start-decode",
+                            &format!(
+                                "outcome={:?} accountPresent={}",
+                                progress.status(),
+                                progress.account_id().is_some()
+                            ),
+                        );
+                        WebLoginStartEffect::Progress(progress)
+                    }
+                    Err(_) => {
+                        channel_trace("login.start-decode", "outcome=unknown error=protocol");
+                        WebLoginStartEffect::Unknown
+                    }
                 }
             }
         }
@@ -256,21 +284,46 @@ impl ChannelLoginOperation {
             LoginExchange::Unknown => WebLoginWaitEffect::Unknown,
             LoginExchange::Response(response) => {
                 match wire::channel::decode_login_progress(response, input.account_id.as_deref()) {
-                    Ok(progress) => WebLoginWaitEffect::Progress(progress.into_public()),
-                    Err(_) => WebLoginWaitEffect::Unknown,
+                    Ok(progress) => {
+                        let progress = progress.into_public();
+                        channel_trace(
+                            "login.wait-decode",
+                            &format!(
+                                "outcome={:?} accountPresent={}",
+                                progress.status(),
+                                progress.account_id().is_some()
+                            ),
+                        );
+                        WebLoginWaitEffect::Progress(progress)
+                    }
+                    Err(_) => {
+                        channel_trace("login.wait-decode", "outcome=unknown error=protocol");
+                        WebLoginWaitEffect::Unknown
+                    }
                 }
             }
         }
     }
 
     async fn exchange_login(&self, request: wire::RpcRequest) -> LoginExchange {
-        match self.gateway.rpc_mutation(request).await {
-            MutationDelivery::Response(GatewayResponse::Failure { .. }) => LoginExchange::Rejected,
-            MutationDelivery::Response(response) => LoginExchange::Response(response),
-            MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => {
-                LoginExchange::Unknown
+        let started = std::time::Instant::now();
+        channel_trace("login.gateway", "event=begin");
+        let (effect, delivery) = match self.gateway.rpc_mutation(request).await {
+            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
+                (LoginExchange::Rejected, "Rejected")
             }
-        }
+            MutationDelivery::Response(response) => (LoginExchange::Response(response), "Response"),
+            MutationDelivery::NotWritten(_) => (LoginExchange::Unknown, "NotWritten"),
+            MutationDelivery::MayHaveReached(_) => (LoginExchange::Unknown, "MayHaveReached"),
+        };
+        channel_trace(
+            "login.gateway",
+            &format!(
+                "event=end delivery={delivery} elapsedMs={}",
+                started.elapsed().as_millis()
+            ),
+        );
+        effect
     }
 }
 

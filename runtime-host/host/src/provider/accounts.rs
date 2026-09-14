@@ -54,6 +54,7 @@ pub(super) struct ProviderAccountsMutation {
     pub(super) persisted: ProviderPersistedOutcome,
     pub(super) commit: ProviderCommitOutcome,
     pub(super) private: Result<(), PrivateProfileProjectionError>,
+    pub(super) auth_state_refresh_required: bool,
 }
 
 impl ProviderAccountsMutation {
@@ -67,6 +68,7 @@ impl ProviderAccountsMutation {
             persisted: ProviderPersistedOutcome::Unknown,
             commit: ProviderCommitOutcome::CommitOutcomeUnknown,
             private: Ok(()),
+            auth_state_refresh_required: false,
         }
     }
 
@@ -80,6 +82,7 @@ impl ProviderAccountsMutation {
             persisted: ProviderPersistedOutcome::Unknown,
             commit: ProviderCommitOutcome::CommitOutcomeUnknown,
             private: Ok(()),
+            auth_state_refresh_required: false,
         }
     }
 
@@ -146,42 +149,48 @@ impl ProviderAccountsOwner {
         if cascade.persist_account(account.clone()).is_err() {
             return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Stored);
         }
-        let private = match account.configuration().auth_mode() {
-            ProviderAccountAuthMode::Local => existing
-                .as_ref()
-                .and_then(|previous| {
+        let (private, auth_state_refresh_required) = match account.configuration().auth_mode() {
+            ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse => {
+                let previous = existing.as_ref().and_then(|previous| {
                     previous
                         .configuration()
                         .credential()
                         .map(|reference| (previous, reference))
-                })
-                .map(|(previous, reference)| {
-                    private_profile_provider_key_for_account(previous)
-                        .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)
-                        .and_then(|profile_provider| {
-                            self.private_resolver
-                                .discard(
-                                    reference.as_str(),
-                                    profile_provider.as_str(),
-                                    account.revision().get(),
-                                )
-                                .map_err(PrivateProfileProjectionError::Resolver)
-                        })
-                })
-                .unwrap_or(Ok(())),
+                });
+                match previous {
+                    Some((previous, reference)) => (
+                        private_profile_provider_key_for_account(previous)
+                            .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)
+                            .and_then(|profile_provider| {
+                                self.private_resolver
+                                    .discard(
+                                        reference.as_str(),
+                                        profile_provider.as_str(),
+                                        account.revision().get(),
+                                    )
+                                    .map_err(PrivateProfileProjectionError::Resolver)
+                            }),
+                        true,
+                    ),
+                    None => (Ok(()), false),
+                }
+            }
             ProviderAccountAuthMode::ApiKey
+            | ProviderAccountAuthMode::Token
             | ProviderAccountAuthMode::OAuthBrowser
             | ProviderAccountAuthMode::OAuthDevice => {
                 if account.configuration().enabled() {
                     let identities = public_provider_model_identities(cascade.accounts())
                         .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey);
-                    identities
-                        .and_then(|identities| self.apply_private_profile(&identities, &account))
+                    (
+                        identities.and_then(|identities| {
+                            self.apply_private_profile(&identities, &account)
+                        }),
+                        true,
+                    )
                 } else {
-                    account
-                        .configuration()
-                        .credential()
-                        .map(|reference| {
+                    match account.configuration().credential() {
+                        Some(reference) => (
                             private_profile_provider_key_for_account(&account)
                                 .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)
                                 .and_then(|profile_provider| {
@@ -192,9 +201,11 @@ impl ProviderAccountsOwner {
                                             account.revision().get(),
                                         )
                                         .map_err(PrivateProfileProjectionError::Resolver)
-                                })
-                        })
-                        .unwrap_or(Ok(()))
+                                }),
+                            true,
+                        ),
+                        None => (Ok(()), false),
+                    }
                 }
             }
         };
@@ -216,6 +227,7 @@ impl ProviderAccountsOwner {
             persisted: ProviderPersistedOutcome::Confirmed,
             commit: ProviderCommitOutcome::Committed,
             private,
+            auth_state_refresh_required,
         }
     }
 
@@ -262,6 +274,7 @@ impl ProviderAccountsOwner {
             .flat_map(|(_, route)| std::iter::once(route.primary()).chain(route.fallbacks()))
             .map(|reference| reference.account_id().clone())
             .collect();
+        let auth_state_refresh_required = account_has_private_auth_profile(&account);
         ProviderAccountsMutation {
             desired: ProviderAccountsDesiredOutcome::Deleted,
             kind: Some(ProviderAccountMutationKind::Deleted),
@@ -271,6 +284,7 @@ impl ProviderAccountsOwner {
             persisted: ProviderPersistedOutcome::Confirmed,
             commit: ProviderCommitOutcome::Committed,
             private: Ok(()),
+            auth_state_refresh_required,
         }
     }
 
@@ -278,20 +292,23 @@ impl ProviderAccountsOwner {
         &self,
         accounts: &[ProviderAccount],
         required_account_ids: &BTreeSet<ProviderAccountId>,
-    ) -> Result<(), PrivateProfileProjectionError> {
+    ) -> Result<bool, PrivateProfileProjectionError> {
         if required_account_ids.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let identities = public_provider_model_identities(accounts)
             .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)?;
+        let mut applied = false;
         for account in accounts
             .iter()
             .filter(|account| required_account_ids.contains(account.id()))
             .filter(|account| account.configuration().enabled())
+            .filter(|account| account_uses_private_auth_mode(account))
         {
             self.apply_private_profile(&identities, account)?;
+            applied = true;
         }
-        Ok(())
+        Ok(applied)
     }
 
     fn apply_private_profile(
@@ -300,8 +317,9 @@ impl ProviderAccountsOwner {
         account: &ProviderAccount,
     ) -> Result<(), PrivateProfileProjectionError> {
         match account.configuration().auth_mode() {
-            ProviderAccountAuthMode::Local => Ok(()),
+            ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse => Ok(()),
             ProviderAccountAuthMode::ApiKey
+            | ProviderAccountAuthMode::Token
             | ProviderAccountAuthMode::OAuthBrowser
             | ProviderAccountAuthMode::OAuthDevice => {
                 let reference = account
@@ -355,6 +373,20 @@ fn account_json(account: &ProviderAccount) -> Value {
 
 fn credential_provider_name(account: &ProviderAccount) -> Option<&str> {
     account.provider().as_str().strip_prefix("provider:")
+}
+
+fn account_has_private_auth_profile(account: &ProviderAccount) -> bool {
+    account_uses_private_auth_mode(account) && account.configuration().credential().is_some()
+}
+
+fn account_uses_private_auth_mode(account: &ProviderAccount) -> bool {
+    matches!(
+        account.configuration().auth_mode(),
+        ProviderAccountAuthMode::ApiKey
+            | ProviderAccountAuthMode::Token
+            | ProviderAccountAuthMode::OAuthBrowser
+            | ProviderAccountAuthMode::OAuthDevice
+    )
 }
 
 fn private_profile_provider_key_for_account(account: &ProviderAccount) -> Result<String, ()> {

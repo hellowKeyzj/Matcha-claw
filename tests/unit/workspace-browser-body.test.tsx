@@ -20,13 +20,16 @@ const revealArtifactPathInFileManagerMock = vi.fn();
 const filePreviewBodyMock = vi.fn(({
   file,
   mode,
+  headerLeadingAccessory,
   headerAccessory,
 }: {
   file: { fileName: string; filePath: string };
   mode: string;
+  headerLeadingAccessory?: ReactNode;
   headerAccessory?: ReactNode;
 }) => (
   <div data-testid="workspace-preview-body">
+    <div data-testid="workspace-preview-header-leading">{headerLeadingAccessory}</div>
     <span>{file.fileName}</span>
     <span>{file.filePath}</span>
     <span>{mode}</span>
@@ -172,6 +175,57 @@ describe('workspace browser body', () => {
     expect(screen.getByTestId('workspace-browser-body')).toHaveAttribute('data-layout', 'split');
     expect(screen.getByText('artifacts.workspaceTab')).toBeInTheDocument();
     expect(screen.queryByTestId('workspace-root-path')).toBeNull();
+  });
+
+  it('collapses and restores the workspace tree without unloading the preview', async () => {
+    hostFileListDirMock.mockResolvedValue({
+      ok: true,
+      entries: [
+        {
+          relativePath: 'demo.ts',
+          display: 'demo.ts',
+          isDirectory: false,
+          size: 0,
+        },
+      ],
+    });
+
+    render(
+      <WorkspaceBrowserBody
+        rootPath="/workspace"
+        selectedFilePath="/workspace/demo.ts"
+        selectedFile={{
+          filePath: '/workspace/demo.ts',
+          fileName: 'demo.ts',
+          ext: '.ts',
+          mimeType: 'text/typescript',
+          contentType: 'code',
+        }}
+        sessionIdentity={sessionIdentity}
+        previewMode="preview"
+        onSelectFile={vi.fn()}
+        onPreviewModeChange={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: /demo\.ts/i })).toBeInTheDocument();
+    expect(await screen.findByTestId('workspace-preview-body')).toHaveTextContent('/workspace/demo.ts');
+
+    fireEvent.click(screen.getByTestId('workspace-tree-collapse-toggle'));
+
+    expect(screen.getByTestId('workspace-browser-body')).toHaveAttribute('data-tree-collapsed', 'true');
+    expect(screen.getByTestId('workspace-browser-body')).toHaveStyle({ gridTemplateColumns: 'minmax(0,1fr)' });
+    expect(screen.queryByRole('button', { name: /demo\.ts/i })).toBeNull();
+    expect(screen.getByTestId('workspace-preview-body')).toHaveTextContent('/workspace/demo.ts');
+    expect(screen.getByTestId('workspace-preview-header-leading')).toContainElement(screen.getByTestId('workspace-tree-collapse-toggle'));
+    expect(screen.getByTestId('workspace-tree-collapse-toggle')).toHaveAttribute('aria-label', 'artifacts.expandWorkspaceTree');
+    expect(hostFileListDirMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('workspace-tree-collapse-toggle'));
+
+    expect(screen.getByTestId('workspace-browser-body')).toHaveAttribute('data-tree-collapsed', 'false');
+    expect(await screen.findByRole('button', { name: /demo\.ts/i })).toBeInTheDocument();
+    expect(hostFileListDirMock).toHaveBeenCalledTimes(1);
   });
 
   it('switches to a stacked workspace layout when the available width is narrow', async () => {

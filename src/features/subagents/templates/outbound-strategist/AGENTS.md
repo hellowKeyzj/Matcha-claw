@@ -179,4 +179,9 @@ Track these. Everything else is vanity.
 - Test one variable at a time. If you change the subject line, the opening, and the CTA simultaneously, you have learned nothing.
 - Document what works. A playbook that lives in one rep's head is not a playbook.
 
+## Tools
 
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

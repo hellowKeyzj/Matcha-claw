@@ -17,8 +17,8 @@ use crate::{
 
 use super::{
     models::{
-        ProviderModelDraft, ProviderModelListOutcome, ProviderModelReplaceOutcome,
-        ProviderModelSelectableOutcome,
+        ProviderModelDiscoverOutcome, ProviderModelDraft, ProviderModelListOutcome,
+        ProviderModelReplaceOutcome, ProviderModelSelectableOutcome,
     },
     routing::{ProviderRoutingListOutcome, ProviderRoutingReplaceOutcome},
 };
@@ -67,6 +67,10 @@ pub(crate) enum ProviderQuery {
         capability: ProviderModelCapability,
         reply: oneshot::Sender<ProviderModelSelectableOutcome>,
     },
+    DiscoverModels {
+        account_id: ProviderAccountId,
+        reply: oneshot::Sender<ProviderModelDiscoverOutcome>,
+    },
     ListRouting {
         reply: oneshot::Sender<ProviderRoutingListOutcome>,
     },
@@ -94,7 +98,8 @@ impl ProviderQuery {
             | Self::ListModels { .. }
             | Self::SelectableModels { .. }
             | Self::ListRouting { .. } => QueryRoute::Direct,
-            Self::ResolveSessionModelSelection { .. }
+            Self::DiscoverModels { .. }
+            | Self::ResolveSessionModelSelection { .. }
             | Self::ResolveMatchaSessionModelRuntime { .. } => QueryRoute::Global,
         }
     }

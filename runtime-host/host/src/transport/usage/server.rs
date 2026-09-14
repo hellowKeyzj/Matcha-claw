@@ -22,6 +22,7 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 const PATH: &str = "/api/usage/recent";
+const SESSION_TIMESERIES_PATH: &str = "/api/usage/session-timeseries";
 
 pub(crate) struct Server {
     listener: TcpListener,
@@ -80,7 +81,8 @@ async fn handle(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     usage: UsageHandle,
 ) -> Response {
-    if request.method != "GET" || request.pathname != PATH {
+    if request.method != "GET" || !matches!(request.route, Route::Recent | Route::SessionTimeseries)
+    {
         return Response::not_found();
     }
     let Some(authorization) = request
@@ -94,7 +96,7 @@ async fn handle(
     let mut verifier = verifier.lock().await;
     let limit = match decode_limit(
         authorization,
-        request.query_limit.as_deref(),
+        request.limit.as_deref(),
         &mut verifier,
         now_millis(),
     ) {
@@ -103,14 +105,31 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    let result = usage.recent(limit);
+    let result = match request.route {
+        Route::Recent => usage.recent(limit).await,
+        Route::SessionTimeseries => {
+            usage
+                .session_timeseries(&request.agent_id, &request.session_id)
+                .await
+        }
+        Route::Unknown => return Response::not_found(),
+    };
     Response::from_delivery(UsageDelivery::from_native(result))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Route {
+    Recent,
+    SessionTimeseries,
+    Unknown,
 }
 
 struct Request {
     method: String,
-    pathname: String,
-    query_limit: Option<String>,
+    route: Route,
+    limit: Option<String>,
+    session_id: String,
+    agent_id: String,
     headers: Vec<(String, String)>,
 }
 
@@ -189,8 +208,8 @@ fn parse_headers(bytes: &[u8]) -> io::Result<Result<Request, Response>> {
         Some((pathname, query)) => (pathname, Some(query)),
         None => (target, None),
     };
-    let query_limit = match parse_query_limit(target.1) {
-        Ok(limit) => limit,
+    let query = match parse_query(target.0, target.1) {
+        Ok(query) => query,
         Err(()) => return Ok(Err(Response::bad_request())),
     };
     let mut parsed_headers = Vec::new();
@@ -212,26 +231,86 @@ fn parse_headers(bytes: &[u8]) -> io::Result<Result<Request, Response>> {
     }
     Ok(Ok(Request {
         method: method.to_owned(),
-        pathname: target.0.to_owned(),
-        query_limit,
+        route: query.route,
+        limit: query.limit,
+        session_id: query.session_id,
+        agent_id: query.agent_id,
         headers: parsed_headers,
     }))
 }
 
-fn parse_query_limit(query: Option<&str>) -> Result<Option<String>, ()> {
-    let Some(query) = query else {
-        return Ok(None);
+struct Query {
+    route: Route,
+    limit: Option<String>,
+    session_id: String,
+    agent_id: String,
+}
+
+fn parse_query(pathname: &str, query: Option<&str>) -> Result<Query, ()> {
+    let route = match pathname {
+        PATH => Route::Recent,
+        SESSION_TIMESERIES_PATH => Route::SessionTimeseries,
+        _ => Route::Unknown,
     };
     let mut limit = None;
-    for pair in query.split('&') {
-        let Some((name, value)) = pair.split_once('=') else {
-            return Err(());
-        };
-        if name != "limit" || limit.replace(value.to_owned()).is_some() {
-            return Err(());
+    let mut session_id = None;
+    let mut agent_id = None;
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            let Some((name, value)) = pair.split_once('=') else {
+                return Err(());
+            };
+            let name = percent_decode_query_component(name).ok_or(())?;
+            let value = percent_decode_query_component(value).ok_or(())?;
+            match name.as_str() {
+                "limit" if limit.is_none() => limit = Some(value),
+                "sessionId" if session_id.is_none() => session_id = Some(value),
+                "agentId" if agent_id.is_none() => agent_id = Some(value),
+                _ => return Err(()),
+            }
         }
     }
-    Ok(limit)
+    match route {
+        Route::Recent if session_id.is_some() || agent_id.is_some() => return Err(()),
+        Route::SessionTimeseries
+            if session_id.is_none() || agent_id.is_none() || limit.is_some() =>
+        {
+            return Err(());
+        }
+        _ => {}
+    }
+    Ok(Query {
+        route,
+        limit,
+        session_id: session_id.unwrap_or_default(),
+        agent_id: agent_id.unwrap_or_default(),
+    })
+}
+
+fn percent_decode_query_component(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut input = value.as_bytes().iter().copied();
+    while let Some(byte) = input.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let high = hex(input.next()?)?;
+                let low = hex(input.next()?)?;
+                bytes.push((high << 4) | low);
+            }
+            byte => bytes.push(byte),
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 async fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
@@ -268,8 +347,8 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(request.pathname, PATH);
-        assert_eq!(request.query_limit.as_deref(), Some("12"));
+        assert_eq!(request.route, Route::Recent);
+        assert_eq!(request.limit.as_deref(), Some("12"));
         assert_eq!(request.headers.len(), 2);
 
         for target in [
@@ -277,6 +356,11 @@ mod tests {
             "/api/usage/recent?limit=1&limit=2",
             "/api/usage/recent?limit",
             "/api/usage/recent?",
+            "/api/usage/recent?sessionId=session-1",
+            "/api/usage/recent?sessionKey=agent:main:session-1",
+            "/api/usage/session-timeseries",
+            "/api/usage/session-timeseries?limit=1&sessionId=session-1&agentId=main",
+            "/api/usage/session-timeseries?sessionId=session-1&agentId=main&agentId=other",
         ] {
             let response = parse_headers(
                 format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes(),
@@ -284,6 +368,18 @@ mod tests {
             .unwrap();
             assert!(matches!(response, Err(Response { status: 400, .. })));
         }
+    }
+
+    #[test]
+    fn parses_session_timeseries_query() {
+        let request = parse_headers(
+            b"GET /api/usage/session-timeseries?sessionId=session-1&agentId=main HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer signed\r\n\r\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(request.route, Route::SessionTimeseries);
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.agent_id, "main");
     }
 
     #[test]

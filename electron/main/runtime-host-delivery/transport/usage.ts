@@ -24,6 +24,7 @@ export type UsageTransportResponse = Readonly<{
 
 export interface UsageTransport {
   read(limit?: number): Promise<UsageTransportResponse>;
+  readSessionTimeseries(input: { sessionId: string; agentId: string }): Promise<UsageTransportResponse>;
 }
 
 export function createUsageTransport(
@@ -31,36 +32,55 @@ export function createUsageTransport(
   usageTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): UsageTransport {
-  const url = `http://127.0.0.1:${usageTransportPort}/api/usage/recent`;
+  const baseUrl = `http://127.0.0.1:${usageTransportPort}`;
   return {
     async read(limit?: number): Promise<UsageTransportResponse> {
       if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1000)) {
         return { status: 400, body: UNAVAILABLE };
       }
       const query = limit === undefined ? '' : `?limit=${String(limit)}`;
-      try {
-        const response = await fetcher(`${url}${query}`, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/usage/recent',
-              scope: 'openclaw:usage-history:read',
-              capability: 'openclaw.usage.history',
-              subject: 'openclaw-usage-history',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-          },
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isResponse(body)) return { status: 200, body };
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      return readUsageTransport(fetcher, issuer, `${baseUrl}/api/usage/recent${query}`);
+    },
+
+    async readSessionTimeseries(input): Promise<UsageTransportResponse> {
+      if (!isSafeSessionId(input.sessionId) || !isSafeAgentId(input.agentId)) {
+        return { status: 400, body: UNAVAILABLE };
       }
-      return { status: 503, body: UNAVAILABLE };
+      const query = new URLSearchParams({
+        sessionId: input.sessionId,
+        agentId: input.agentId,
+      });
+      return readUsageTransport(fetcher, issuer, `${baseUrl}/api/usage/session-timeseries?${query.toString()}`);
     },
   };
+}
+
+async function readUsageTransport(
+  fetcher: typeof fetch,
+  issuer: RuntimeHostDeliveryIssuer,
+  url: string,
+): Promise<UsageTransportResponse> {
+  try {
+    const response = await fetcher(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${issuer.signDecision({
+          principal: 'electron-main-local',
+          endpoint: '/api/usage/recent',
+          scope: 'openclaw:usage-history:read',
+          capability: 'openclaw.usage.history',
+          subject: 'openclaw-usage-history',
+          expiresAt: Date.now() + DECISION_TTL_MS,
+          revision: '1',
+        })}`,
+      },
+    });
+    const body: unknown = await response.json();
+    if (response.status === 200 && isResponse(body)) return { status: 200, body };
+  } catch {
+    // The public contract deliberately suppresses transport details.
+  }
+  return { status: 503, body: UNAVAILABLE };
 }
 
 function isResponse(value: unknown): value is Readonly<{ entries: readonly UsageHistoryEntry[] }> {

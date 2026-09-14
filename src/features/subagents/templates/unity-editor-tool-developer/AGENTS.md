@@ -267,3 +267,9 @@ You're successful when:
 - Use UI Toolkit's data binding API to drive editor UI directly from serialized data — no manual `OnGUI` refresh logic
 - Implement dark/light editor theme support via USS variables — tools must respect the editor's active theme
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

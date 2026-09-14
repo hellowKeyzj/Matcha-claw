@@ -140,6 +140,39 @@ describe('chat render item fixtures', () => {
     });
   });
 
+  it('renders only the real external user text after OpenClaw ctx sender metadata', () => {
+    const items = buildRenderItemsFromMessages('agent:main:main', [{
+      role: 'user',
+      content: [
+        'Sender: ⟦openclaw:ctx⟧',
+        '```json',
+        '{ "id": "gateway-client" }',
+        '```',
+        '',
+        '[Fri 2026-08-21 16:28 GMT+8] 你好',
+      ].join('\n'),
+      timestamp: 1,
+      id: 'user-openclaw-ctx-1',
+    }]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'user-message',
+      text: '你好',
+    });
+  });
+
+  it('does not render OpenClaw gateway restart recovery prompts', () => {
+    const items = buildRenderItemsFromMessages('agent:main:main', [{
+      role: 'user',
+      content: '[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response. Treat a tool result marked interrupted or missing as having an unknown outcome. If a tool failed, say so; never claim completion or success.',
+      timestamp: 1,
+      id: 'user-openclaw-recovery-1',
+    }]);
+
+    expect(items).toEqual([]);
+  });
+
   it('materializes tool-only assistant messages as assistant-turn items', () => {
     const items = buildRenderItemsFromMessages('agent:main:main', [{
       role: 'assistant',

@@ -65,7 +65,7 @@ vi.mock('@/components/file-preview/MarkdownPreview', () => ({
 }));
 
 vi.mock('@/components/file-preview/HtmlPreview', () => ({
-  HtmlPreview: ({ source }: { source: string }) => <iframe data-testid="html-preview-frame" srcDoc={source} sandbox="allow-scripts allow-forms" />,
+  HtmlPreview: ({ source }: { source: string }) => <iframe data-testid="html-preview-frame" srcDoc={source} sandbox="" />,
 }));
 
 vi.mock('@/components/file-preview/PdfViewer', () => ({
@@ -155,7 +155,7 @@ describe('file preview body', () => {
     });
     const frame = await screen.findByTestId('html-preview-frame');
     expect(frame).toHaveAttribute('srcdoc', '<!doctype html><h1>Rendered Preview</h1>');
-    expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-forms');
+    expect(frame).toHaveAttribute('sandbox', '');
   });
 
   it('renders image previews from binary file reads', async () => {

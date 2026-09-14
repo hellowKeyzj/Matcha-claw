@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { trackUiEvent } from '@/lib/telemetry';
-import type { UsageHistoryEntry } from '@/pages/Dashboard/usage-history';
+import type { UsageHistoryEntry, UsageSessionDetailEntry } from '@/pages/Dashboard/usage-history';
 
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const USAGE_FETCH_RETRY_DELAY_MS = 1500;
@@ -15,6 +15,12 @@ interface RefreshUsageHistoryOptions {
   silent?: boolean;
 }
 
+type UsageSessionDetailState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'loaded'; entries: UsageSessionDetailEntry[] }
+  | { status: 'error'; message: string };
+
 interface DashboardUsageState {
   usageHistory: UsageHistoryEntry[];
   usageHistoryReady: boolean;
@@ -23,20 +29,43 @@ interface DashboardUsageState {
   usagePanelReady: boolean;
   usageChartReady: boolean;
   usageDetailListReady: boolean;
+  sessionDetails: Record<string, UsageSessionDetailState>;
   error: string | null;
   setUsagePanelReady: (ready: boolean) => void;
   setUsageVisualizationReady: (ready: boolean) => void;
+  loadSessionDetails: (sessionId: string, agentId: string) => Promise<void>;
   refreshUsageHistory: (options?: RefreshUsageHistoryOptions) => Promise<void>;
 }
 
 let usageHistoryCache: UsageHistoryEntry[] = [];
 let usageHistoryReadyCache = false;
+let sessionDetailsCache: Record<string, UsageSessionDetailState> = {};
 let inflightUsageRefreshTask: Promise<void> | null = null;
 let inflightUsageRefreshMarker: string | null = null;
 let latestUsageRefreshRequestId = 0;
+const inflightSessionDetailTasks = new Map<string, Promise<void>>();
 
 function cloneUsageHistory(entries: UsageHistoryEntry[]): UsageHistoryEntry[] {
   return entries.map((entry) => ({ ...entry }));
+}
+
+function cloneUsageSessionDetails(details: Record<string, UsageSessionDetailState>): Record<string, UsageSessionDetailState> {
+  return Object.fromEntries(Object.entries(details).map(([sessionId, detail]) => [
+    sessionId,
+    detail.status === 'loaded'
+      ? { ...detail, entries: cloneUsageHistory(detail.entries) }
+      : { ...detail },
+  ]));
+}
+
+function normalizeUsageSessionDetails(payload: unknown): UsageSessionDetailEntry[] {
+  if (Array.isArray(payload)) {
+    return cloneUsageHistory(payload as UsageSessionDetailEntry[]);
+  }
+  if (payload && typeof payload === 'object' && Array.isArray((payload as { entries?: unknown }).entries)) {
+    return cloneUsageHistory((payload as { entries: UsageSessionDetailEntry[] }).entries);
+  }
+  return [];
 }
 
 function resolveRetryDelayMs(): number {
@@ -59,6 +88,7 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
   usagePanelReady: usageHistoryReadyCache,
   usageChartReady: false,
   usageDetailListReady: false,
+  sessionDetails: cloneUsageSessionDetails(sessionDetailsCache),
   error: null,
 
   setUsagePanelReady: (ready) => {
@@ -74,6 +104,57 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
           usageDetailListReady: ready,
         }
     ));
+  },
+
+  loadSessionDetails: async (sessionId, agentId) => {
+    if (!sessionId || !agentId) return;
+    const current = get().sessionDetails[sessionId];
+    if (current?.status === 'loaded' || current?.status === 'loading') {
+      const inflight = inflightSessionDetailTasks.get(sessionId);
+      if (inflight) await inflight;
+      return;
+    }
+
+    const task = (async () => {
+      set((state) => {
+        const next = {
+          ...state.sessionDetails,
+          [sessionId]: { status: 'loading' } as UsageSessionDetailState,
+        };
+        sessionDetailsCache = cloneUsageSessionDetails(next);
+        return { sessionDetails: next };
+      });
+
+      try {
+        const payload = await hostApiFetch<unknown>(`/api/runtime-host/usage/session-timeseries?sessionId=${encodeURIComponent(sessionId)}&agentId=${encodeURIComponent(agentId)}`);
+        const detail: UsageSessionDetailState = {
+          status: 'loaded',
+          entries: normalizeUsageSessionDetails(payload),
+        };
+        set((state) => {
+          const next = { ...state.sessionDetails, [sessionId]: detail };
+          sessionDetailsCache = cloneUsageSessionDetails(next);
+          return { sessionDetails: next };
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const detail: UsageSessionDetailState = { status: 'error', message };
+        set((state) => {
+          const next = { ...state.sessionDetails, [sessionId]: detail };
+          sessionDetailsCache = cloneUsageSessionDetails(next);
+          return { sessionDetails: next };
+        });
+      }
+    })();
+
+    inflightSessionDetailTasks.set(sessionId, task);
+    try {
+      await task;
+    } finally {
+      if (inflightSessionDetailTasks.get(sessionId) === task) {
+        inflightSessionDetailTasks.delete(sessionId);
+      }
+    }
   },
 
   refreshUsageHistory: async (options) => {

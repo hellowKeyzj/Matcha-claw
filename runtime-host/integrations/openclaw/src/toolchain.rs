@@ -1,12 +1,12 @@
 use std::{fmt, sync::Arc};
 
-use foundation::toolchain as native_toolchain;
-pub use foundation::toolchain::{
-    FoundationToolchainCommandPort, NativeToolchainRuntime, NativeToolchainRuntimeError,
-    ToolchainCommandFuture, ToolchainCommandOutcome, ToolchainCommandPort, ToolchainCommandRequest,
-    ToolchainPlatform, UnsupportedToolchainCommandPort,
-};
 use serde::Serialize;
+use toolchain as native_toolchain;
+pub use toolchain::{
+    FoundationToolchainCommandPort, NativeToolchain, ToolchainCommandFuture,
+    ToolchainCommandOutcome, ToolchainCommandPort, ToolchainCommandRequest, ToolchainPlatform,
+    UnsupportedToolchainCommandPort,
+};
 
 use crate::{lifecycle::state_dir::CanonicalStateDir, projection::tool_permission};
 
@@ -111,27 +111,6 @@ impl ToolchainEntry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UvInstallOutcome {
-    Installed,
-    Rejected,
-    Unknown,
-    Unavailable,
-    Unsupported,
-}
-
-impl From<native_toolchain::UvInstallOutcome> for UvInstallOutcome {
-    fn from(outcome: native_toolchain::UvInstallOutcome) -> Self {
-        match outcome {
-            native_toolchain::UvInstallOutcome::Installed => Self::Installed,
-            native_toolchain::UvInstallOutcome::Rejected => Self::Rejected,
-            native_toolchain::UvInstallOutcome::Unknown => Self::Unknown,
-            native_toolchain::UvInstallOutcome::Unavailable => Self::Unavailable,
-            native_toolchain::UvInstallOutcome::Unsupported => Self::Unsupported,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PermissionReadOutcome {
     Observed(tool_permission::Mode),
     Unavailable,
@@ -151,26 +130,21 @@ pub enum PermissionWriteOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolchainWriteRequest {
     Permission(tool_permission::Mode),
-    InstallUv,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolchainWriteOutcome {
     Permission(PermissionWriteOutcome),
-    InstallUv(UvInstallOutcome),
 }
 
 /// OpenClaw Integration owner for public Toolchain projection and the existing config permission owner.
 pub struct OpenClawToolchain {
     state_dir: CanonicalStateDir,
-    runtime: Arc<NativeToolchainRuntime>,
+    runtime: Arc<NativeToolchain>,
 }
 
 impl OpenClawToolchain {
-    pub fn new(
-        state_dir: CanonicalStateDir,
-        runtime: impl Into<Arc<NativeToolchainRuntime>>,
-    ) -> Self {
+    pub fn new(state_dir: CanonicalStateDir, runtime: impl Into<Arc<NativeToolchain>>) -> Self {
         Self {
             state_dir,
             runtime: runtime.into(),
@@ -182,7 +156,7 @@ impl OpenClawToolchain {
     }
 
     pub async fn status(&self) -> ToolchainStatus {
-        self.runtime.observe().await.into()
+        self.runtime.status().await.into()
     }
 
     pub async fn list(&self) -> ToolchainCatalog {
@@ -206,17 +180,10 @@ impl OpenClawToolchain {
         }
     }
 
-    pub async fn install_uv(&self) -> UvInstallOutcome {
-        self.runtime.install_uv().await.into()
-    }
-
     pub async fn write(&self, request: ToolchainWriteRequest) -> ToolchainWriteOutcome {
         match request {
             ToolchainWriteRequest::Permission(mode) => {
                 ToolchainWriteOutcome::Permission(self.write_permission(mode))
-            }
-            ToolchainWriteRequest::InstallUv => {
-                ToolchainWriteOutcome::InstallUv(self.install_uv().await)
             }
         }
     }
@@ -330,30 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn uv_install_outcomes_project_to_openclaw_public_categories() {
-        assert_eq!(
-            UvInstallOutcome::from(native_toolchain::UvInstallOutcome::Installed),
-            UvInstallOutcome::Installed
-        );
-        assert_eq!(
-            UvInstallOutcome::from(native_toolchain::UvInstallOutcome::Rejected),
-            UvInstallOutcome::Rejected
-        );
-        assert_eq!(
-            UvInstallOutcome::from(native_toolchain::UvInstallOutcome::Unknown),
-            UvInstallOutcome::Unknown
-        );
-        assert_eq!(
-            UvInstallOutcome::from(native_toolchain::UvInstallOutcome::Unavailable),
-            UvInstallOutcome::Unavailable
-        );
-        assert_eq!(
-            UvInstallOutcome::from(native_toolchain::UvInstallOutcome::Unsupported),
-            UvInstallOutcome::Unsupported
-        );
-    }
-
-    #[test]
     fn list_exposes_only_openclaw_public_tool_facts() {
         let catalog = catalog_from_status(ToolchainStatus {
             uv: ToolAvailability::Unknown,
@@ -374,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn permission_read_write_uses_the_existing_permission_owner_and_readback() {
         let root = TestRoot::new();
-        let runtime = NativeToolchainRuntime::new(
+        let runtime = NativeToolchain::new(
             ToolchainPlatform::Unix,
             "x64",
             root.path.clone(),
@@ -432,7 +375,7 @@ mod tests {
     #[test]
     fn debug_output_does_not_expose_runtime_details() {
         let root = TestRoot::new();
-        let runtime = NativeToolchainRuntime::new(
+        let runtime = NativeToolchain::new(
             ToolchainPlatform::Unix,
             "x64",
             root.path.clone(),

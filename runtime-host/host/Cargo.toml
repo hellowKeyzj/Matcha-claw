@@ -22,6 +22,7 @@ base64.workspace = true
 chrono.workspace = true
 clawhub = { version = "0.1.0", path = "../external/clawhub" }
 foundation = { version = "0.1.0", path = "../foundation" }
+toolchain = { version = "0.1.0", path = "../external/toolchain" }
 futures-util.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true

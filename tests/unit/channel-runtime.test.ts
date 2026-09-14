@@ -24,18 +24,59 @@ describe('channel runtime client', () => {
     await expect(hostChannelsActivate({
       channelType: 'wecom',
       accountId: 'main',
+      agentId: 'support',
       config: { botId: 'bot-1' },
-    })).resolves.toEqual({ success: true });
+    }, { traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362' })).resolves.toEqual({ success: true });
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/configure', {
+      traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362',
       method: 'POST',
       body: JSON.stringify({
         action: 'apply',
         channel: 'wecom',
         accountId: 'main',
+        agentId: 'support',
         values: { botId: 'bot-1' },
       }),
     });
+  });
+
+  it('applies direct QR configuration through the configure endpoint', async () => {
+    hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
+    const { hostChannelsConfigure } = await import('@/lib/channel-runtime');
+
+    await expect(hostChannelsConfigure({
+      channelType: 'openclaw-weixin',
+      accountId: 'wx-main',
+      agentId: 'support',
+      config: {},
+    }, { traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362' })).resolves.toEqual({ success: true });
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/configure', {
+      traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362',
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'apply',
+        channel: 'openclaw-weixin',
+        accountId: 'wx-main',
+        agentId: 'support',
+        values: {},
+      }),
+    });
+  });
+
+  it('omits a blank agent id from activation bodies', async () => {
+    hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
+    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+
+    await hostChannelsActivate({
+      channelType: 'feishu',
+      agentId: '  ',
+      config: {},
+    });
+
+    const requestOptions = hostApiFetchMock.mock.calls[0]?.[1] as { body: string };
+    expect(JSON.parse(requestOptions.body)).not.toHaveProperty('agentId');
   });
 
   it.each([
@@ -65,6 +106,7 @@ describe('channel runtime client', () => {
     await expect(hostChannelsActivate({
       channelType: 'whatsapp',
       accountId: 'main',
+      agentId: 'support',
       config: { phoneNumber: '+1' },
     })).resolves.toEqual({ success: true, progress });
 
@@ -74,6 +116,7 @@ describe('channel runtime client', () => {
         action: 'start',
         channel: 'whatsapp',
         accountId: 'main',
+        agentId: 'support',
         force: true,
         config: { phoneNumber: '+1' },
       }),
@@ -84,7 +127,7 @@ describe('channel runtime client', () => {
     const progress = {
       outcome: 'connected' as const,
       channel: 'openclaw-weixin',
-      accountId: 'default',
+      accountId: 'wechat-main',
       sessionKey: 'login-session-connected',
     };
     hostApiFetchMock.mockResolvedValue(progress);
@@ -92,24 +135,41 @@ describe('channel runtime client', () => {
 
     await expect(hostChannelsActivate({
       channelType: 'openclaw-weixin',
+      accountId: 'wechat-main',
       config: {},
     })).resolves.toEqual({ success: true, progress });
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'start',
+        channel: 'openclaw-weixin',
+        accountId: 'wechat-main',
+        force: true,
+        config: {},
+      }),
+    });
+    const requestOptions = hostApiFetchMock.mock.calls[0]?.[1] as { body: string };
+    const requestBody = JSON.parse(requestOptions.body);
+    for (const key of ['directLogin', 'alreadyConnected', 'token', 'message']) {
+      expect(requestBody).not.toHaveProperty(key);
+      expect(JSON.stringify(progress)).not.toContain(key);
+    }
   });
 
   it('waits through the named login endpoint with QR refresh, session state, timeout, and abort signal', async () => {
     const controller = new AbortController();
     const progress = {
       outcome: 'progress' as const,
-      channel: 'whatsapp',
-      accountId: 'main',
+      channel: 'openclaw-weixin',
+      accountId: 'wechat-main',
       qrDataUrl: 'data:image/png;base64,qr-refresh',
       sessionKey: 'login-session-2',
     };
     hostApiFetchMock.mockResolvedValue(progress);
     const { hostChannelsLoginWait } = await import('@/lib/channel-runtime');
 
-    await expect(hostChannelsLoginWait('whatsapp', 'main', {
+    await expect(hostChannelsLoginWait('openclaw-weixin', 'wechat-main', {
       sessionKey: 'login-session-1',
       currentQrDataUrl: 'data:image/png;base64,qr-old',
       timeoutMs: 300_000,
@@ -122,8 +182,8 @@ describe('channel runtime client', () => {
       signal: controller.signal,
       body: JSON.stringify({
         action: 'wait',
-        channel: 'whatsapp',
-        accountId: 'main',
+        channel: 'openclaw-weixin',
+        accountId: 'wechat-main',
         sessionKey: 'login-session-1',
         currentQrDataUrl: 'data:image/png;base64,qr-old',
         timeoutMs: 300_000,
@@ -139,6 +199,52 @@ describe('channel runtime client', () => {
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/login', {
       method: 'POST',
       body: JSON.stringify({ action: 'cancel', channel: 'whatsapp', accountId: 'main' }),
+    });
+  });
+
+  it('uses the channel authorization endpoint for QR and link onboarding', async () => {
+    const controller = new AbortController();
+    hostApiFetchMock
+      .mockResolvedValueOnce({ outcome: 'progress', channel: 'qqbot', sessionKey: 'auth-session-1', qrDataUrl: 'data:image/png;base64,qr' })
+      .mockResolvedValueOnce({ outcome: 'connected', channel: 'qqbot', sessionKey: 'auth-session-1' })
+      .mockResolvedValueOnce({ outcome: 'cancelled', channel: 'qqbot', sessionKey: 'auth-session-1' });
+    const { hostChannelsCancelAuthorization, hostChannelsStartAuthorization, hostChannelsWaitAuthorization } = await import('@/lib/channel-runtime');
+
+    await expect(hostChannelsStartAuthorization({
+      channelType: 'qqbot',
+      accountId: 'main',
+      agentId: ' support ',
+      config: { locale: 'zh' },
+    }, { traceId: 'trace-auth' })).resolves.toMatchObject({ outcome: 'progress', sessionKey: 'auth-session-1' });
+    await expect(hostChannelsWaitAuthorization('qqbot', 'auth-session-1', {
+      traceId: 'trace-auth',
+      timeoutMs: 300_000,
+      signal: controller.signal,
+    })).resolves.toMatchObject({ outcome: 'connected' });
+    await expect(hostChannelsCancelAuthorization('qqbot', 'auth-session-1', { traceId: 'trace-auth' })).resolves.toMatchObject({ outcome: 'cancelled' });
+
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/channels/authorization', {
+      traceId: 'trace-auth',
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'start',
+        channel: 'qqbot',
+        accountId: 'main',
+        agentId: 'support',
+        config: { locale: 'zh' },
+      }),
+    });
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/channels/authorization', {
+      traceId: 'trace-auth',
+      timeoutMs: 300_000,
+      signal: controller.signal,
+      method: 'POST',
+      body: JSON.stringify({ action: 'wait', channel: 'qqbot', sessionKey: 'auth-session-1', timeoutMs: 300_000 }),
+    });
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(3, '/api/channels/authorization', {
+      traceId: 'trace-auth',
+      method: 'POST',
+      body: JSON.stringify({ action: 'cancel', channel: 'qqbot', sessionKey: 'auth-session-1' }),
     });
   });
 
@@ -172,7 +278,7 @@ describe('channel runtime client', () => {
 
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/channels/pairing', {
       method: 'POST',
-      body: JSON.stringify({ channel: 'feishu' }),
+      body: JSON.stringify({ channel: 'feishu', accountId: 'default' }),
     });
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/channels/pairing', {
       method: 'POST',

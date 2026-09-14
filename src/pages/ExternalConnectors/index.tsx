@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { AlertCircle, Cable, Loader2, Plus, RefreshCw, Save, Trash2, X } from 'lucide-react';
+import { AlertCircle, Cable, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
+import { AgentViewToggle } from '@/components/common/AgentViewToggle';
+import { AgentPage, AgentPageSection, AgentPageToolbar, AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentPage';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { useExternalConnectorsStore, type ExternalConnectorConnectionStatus, type ExternalConnectorKind, type ExternalConnectorSecretRef, type ExternalConnectorSpec, type ExternalMcpServerProgramDescriptor } from '@/stores/external-connectors';
+import { useExternalConnectorsStore, type ExternalConnectorConnectionStatus, type ExternalConnectorKind, type ExternalConnectorSecretRef, type ExternalConnectorSpec, type ExternalMcpServerProgramDescriptor, type OpenClawMcpServerSummary } from '@/stores/external-connectors';
 import { cn } from '@/lib/utils';
 
 const CONNECTOR_KINDS: ExternalConnectorKind[] = ['mcp-stdio', 'mcp-http', 'cli', 'sdk', 'http'];
@@ -227,32 +229,33 @@ function withoutUndefined<T extends Record<string, unknown>>(input: T): T {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as T;
 }
 
-function ConnectorKindBadge({ kind }: { kind: ExternalConnectorKind }) {
-  const variant = kind.startsWith('mcp') ? 'default' : kind === 'sdk' ? 'secondary' : 'outline';
-  return <Badge variant={variant}>{kind}</Badge>;
+function ConnectorKindBadge({ kind }: { kind: ExternalConnectorKind | OpenClawMcpServerSummary['kind'] }) {
+  return <AgentResourcePill>{kind}</AgentResourcePill>;
 }
 
 function ConnectorProbeBadge({ status }: { status?: ExternalConnectorConnectionStatus }) {
   if (!status) {
-    return <Badge variant="outline">未检测</Badge>;
+    return <AgentResourcePill>未检测</AgentResourcePill>;
   }
   if (status.resultType === 'connected') {
-    return <Badge className="border-sky-500/30 bg-sky-500/10 text-sky-700 hover:bg-sky-500/10">探测可达</Badge>;
+    return <AgentResourcePill className="bg-sky-500/10 text-sky-700 ring-sky-500/25 dark:text-sky-300">探测可达</AgentResourcePill>;
   }
   if (status.resultType === 'disconnected') {
-    return <Badge variant="destructive">探测失败</Badge>;
+    return <AgentResourcePill className="bg-destructive/10 text-destructive ring-destructive/25">探测失败</AgentResourcePill>;
   }
   if (status.resultType === 'disabled') {
-    return <Badge variant="outline">未启用</Badge>;
+    return <AgentResourcePill>未启用</AgentResourcePill>;
   }
   if (status.resultType === 'unsupported') {
-    return <Badge variant="outline">待会话验证</Badge>;
+    return <AgentResourcePill>待会话验证</AgentResourcePill>;
   }
-  return <Badge variant="outline">未检测</Badge>;
+  return <AgentResourcePill>未检测</AgentResourcePill>;
 }
 
-function isManagedSystemRuntimeConnector(connector: ExternalConnectorSpec): boolean {
-  return connector.mcpServerProgram?.source === 'system-runtime';
+function mcpServerSourceLabel(source: OpenClawMcpServerSummary['source']): string {
+  if (source === 'preset') return '预置';
+  if (source === 'openclaw') return 'OpenClaw';
+  return '我的';
 }
 
 function ConnectorFields({ form, mcpServerPrograms, setForm }: {
@@ -317,9 +320,6 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
               <option key={program.id} value={program.id}>{program.displayName} · {program.source}</option>
             ))}
           </Select>
-          <p className="text-xs text-muted-foreground">
-            参考 WorkBuddy 的分层：内置程序/插件有自己的目录和 manifest；connector 只绑定到其中一个 server 程序，或保留为外部命令/URL。
-          </p>
         </div>
       )}
 
@@ -500,6 +500,7 @@ function ConnectorFormDialog({
 export function ExternalConnectorsPage() {
   const connectors = useExternalConnectorsStore((state) => state.connectors);
   const connectorStatuses = useExternalConnectorsStore((state) => state.connectorStatuses);
+  const mcpServers = useExternalConnectorsStore((state) => state.mcpServers);
   const mcpServerPrograms = useExternalConnectorsStore((state) => state.mcpServerPrograms);
   const ready = useExternalConnectorsStore((state) => state.ready);
   const loading = useExternalConnectorsStore((state) => state.loading);
@@ -513,6 +514,19 @@ export function ExternalConnectorsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formDialogOpen, setFormDialogOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const search = searchParams.get('q') ?? '';
+  const kindFilter = searchParams.get('kind') ?? 'all';
+  const statusFilter = searchParams.get('status') ?? 'all';
+  const view = searchParams.get('view') === 'list' ? 'list' : 'grid';
+  const updateFilter = (key: string, value: string) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value === '' || (key !== 'q' && value === 'all') || (key === 'view' && value === 'grid')) next.delete(key);
+      else next.set(key, value);
+      return next;
+    }, { replace: true });
+  };
 
   useEffect(() => {
     void refresh().catch(() => {
@@ -520,10 +534,16 @@ export function ExternalConnectorsPage() {
     });
   }, [refresh]);
 
-  const sortedConnectors = useMemo(
-    () => [...connectors].sort((a, b) => a.id.localeCompare(b.id)),
-    [connectors],
-  );
+  const connectorById = useMemo(() => new Map(connectors.map((connector) => [connector.id, connector])), [connectors]);
+  const visibleMcpServers = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return mcpServers.filter((server) => (
+      (kindFilter === 'all' || server.kind === kindFilter)
+      && (statusFilter === 'all' || server.enabled === (statusFilter === 'enabled'))
+      && (!query || [server.displayName, server.serverId, server.connectorId, server.description, server.kind]
+        .some((value) => value?.toLocaleLowerCase().includes(query)))
+    )).sort((a, b) => a.serverId.localeCompare(b.serverId));
+  }, [kindFilter, mcpServers, search, statusFilter]);
 
   const closeFormDialog = useCallback(() => {
     setFormDialogOpen(false);
@@ -591,80 +611,125 @@ export function ExternalConnectorsPage() {
   const showInitialLoading = !ready && loading;
 
   return (
-    <section className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-4 md:p-6">
-      <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">连接器</h1>
-          <p className="text-sm text-muted-foreground">管理 Matcha 外部能力连接。</p>
+    <AgentPage>
+      <AgentPageSection actions={(
+        <>
+          <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label="刷新连接器" onClick={() => void refresh()} disabled={loading}>
+            <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+          </Button>
+          <Button size="sm" className="h-9 rounded-full" onClick={openCreateDialog}>
+            <Plus className="mr-2 size-4" />新增连接器
+          </Button>
+        </>
+      )}>
+        <h2 className="flex min-h-12 items-center gap-2 border-b-2 border-foreground pb-3 text-sm font-medium">
+          我的连接器
+          {ready && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{mcpServers.length}</Badge>}
+        </h2>
+      </AgentPageSection>
+
+      <AgentPageToolbar>
+        <div className="relative w-full sm:w-[300px]">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <Input className="h-10 pl-9 text-sm" aria-label="搜索连接器" placeholder="搜索连接器…" value={search} onChange={(event) => updateFilter('q', event.target.value)} />
         </div>
-        <Button variant="outline" onClick={() => void refresh()} disabled={loading}>
-          <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
-          刷新
-        </Button>
-      </header>
+        <Select className="h-10 w-auto min-w-28 text-sm" aria-label="协议类型" value={kindFilter} onChange={(event) => updateFilter('kind', event.target.value)}>
+          <option value="all">全部协议</option>
+          {CONNECTOR_KINDS.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+        </Select>
+        <Select className="h-10 w-auto min-w-28 text-sm" aria-label="启用状态" value={statusFilter} onChange={(event) => updateFilter('status', event.target.value)}>
+          <option value="all">全部状态</option>
+          <option value="enabled">已启用</option>
+          <option value="disabled">未启用</option>
+        </Select>
+        <div className="ml-auto flex items-center gap-3">
+          {ready && <span className="text-xs text-muted-foreground">{visibleMcpServers.length} 个 MCP server</span>}
+          <AgentViewToggle value={view} onChange={(value) => updateFilter('view', value)} gridLabel="网格视图" listLabel="列表视图" />
+        </div>
+      </AgentPageToolbar>
 
       {error && (
-        <p className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          <AlertCircle className="h-4 w-4" />
+        <p role="alert" className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
           {error}
         </p>
       )}
 
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between gap-3">
-          <div>
-            <CardTitle>连接器列表</CardTitle>
-            <CardDescription>当前登记的多协议外部能力。</CardDescription>
-          </div>
-          <Button size="icon" aria-label="新增连接器" onClick={openCreateDialog}>
-            <Plus className="h-4 w-4" />
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {showInitialLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div key={index} className="h-20 animate-pulse rounded-md bg-muted" />
-              ))}
-            </div>
-          ) : sortedConnectors.length === 0 ? (
-            <div className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-              <Cable className="mx-auto mb-3 h-8 w-8" />
-              暂无连接器。点击右上角加号新增一个 MCP、CLI、SDK 或 HTTP connector。
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {sortedConnectors.map((connector) => (
-                <div key={connector.id} className="rounded-md border border-border/70 bg-background p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => editConnector(connector)}>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-medium">{connector.displayName || connector.id}</span>
-                        <ConnectorKindBadge kind={connector.kind} />
-                        {isManagedSystemRuntimeConnector(connector) && <Badge variant="outline">system-runtime</Badge>}
-                        <Badge variant={connector.enabled === false ? 'outline' : 'secondary'}>{connector.enabled === false ? '禁用' : '启用'}</Badge>
-                        <ConnectorProbeBadge status={connectorStatuses[connector.id]} />
-                      </div>
-                      <div className="mt-1 truncate text-xs text-muted-foreground">{connector.id}</div>
-                      {connector.description && <div className="mt-1 truncate text-xs text-muted-foreground">{connector.description}</div>}
+      {showInitialLoading ? (
+        <AgentResourceGrid aria-busy="true" className={cn(view === 'list' && 'md:grid-cols-1 lg:grid-cols-1 xl:grid-cols-1 2xl:grid-cols-1')}>
+          {Array.from({ length: 4 }).map((_, index) => (
+            <AgentResourceCard key={index} className={cn('gap-4', view === 'grid' && 'min-h-60')}>
+              <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-3/5 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-2/5 animate-pulse rounded bg-muted" />
+            </AgentResourceCard>
+          ))}
+        </AgentResourceGrid>
+      ) : visibleMcpServers.length === 0 ? (
+        <div className="flex min-h-[430px] flex-col items-center justify-center gap-5 rounded-[1.75rem] border border-border/70 bg-gradient-to-b from-card to-secondary/20 p-8 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_24px_64px_rgba(15,23,42,0.04)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <AgentResourceIcon className="size-16 rounded-[1.25rem]"><Cable className="size-7" /></AgentResourceIcon>
+          <p className="max-w-md text-sm text-muted-foreground">{mcpServers.length === 0 ? '添加连接器，让 Agent 访问外部服务、数据与工具。' : '没有符合筛选条件的 MCP server。'}</p>
+          {mcpServers.length === 0 && (
+            <>
+              <Button size="sm" className="h-9 rounded-full" onClick={openCreateDialog}><Plus className="mr-2 size-4" />新增连接器</Button>
+              <div className="flex flex-wrap justify-center gap-2">
+                {['MCP', 'HTTP', 'CLI', 'SDK'].map((protocol) => <AgentResourcePill key={protocol}>{protocol}</AgentResourcePill>)}
+              </div>
+            </>
+          )}
+        </div>
+      ) : (
+        <AgentResourceGrid className={cn(view === 'list' && 'md:grid-cols-1 lg:grid-cols-1 xl:grid-cols-1 2xl:grid-cols-1')}>
+          {visibleMcpServers.map((server) => {
+            const connector = server.connectorId ? connectorById.get(server.connectorId) : undefined;
+            const connectorId = connector?.id;
+            const canEdit = server.source === 'external' && server.editable && connector;
+            const canRemove = server.source === 'external' && server.removable && connector;
+            const canProbe = server.source === 'external' && connectorId;
+            const canToggle = server.source === 'external' && server.editable && connector;
+            const name = server.displayName || server.serverId;
+            return (
+              <AgentResourceCard key={server.serverId} className={cn('gap-3 p-4', view === 'grid' ? 'min-h-56' : 'md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-center')}>
+                <div className="flex min-w-0 items-center gap-3">
+                  <AgentResourceIcon><Cable className="size-5" /></AgentResourceIcon>
+                  {canEdit ? (
+                    <button type="button" className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => editConnector(connector)} aria-label={`编辑 ${name}`}>
+                      <h3 className="truncate text-sm font-semibold" title={name}>{name}</h3>
+                      <p className="mt-1 truncate text-xs text-muted-foreground" title={server.serverId}>{server.serverId}</p>
                     </button>
-                    <div className="flex items-center gap-2">
-                      {mutatingId === connector.id && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
-                      <Button variant="ghost" size="icon" disabled={mutatingId !== null} aria-label="检测连接器" onClick={() => void probeConnector(connector.id)}>
-                        <RefreshCw className="h-4 w-4" />
-                      </Button>
-                      <Switch checked={connector.enabled !== false} disabled={mutatingId !== null || isManagedSystemRuntimeConnector(connector)} onCheckedChange={(checked) => void toggleEnabled(connector, checked)} />
-                      <Button variant="ghost" size="icon" disabled={mutatingId !== null || isManagedSystemRuntimeConnector(connector)} onClick={() => void removeConnector(connector.id)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                  ) : (
+                    <div className="min-w-0 text-left">
+                      <h3 className="truncate text-sm font-semibold" title={name}>{name}</h3>
+                      <p className="mt-1 truncate text-xs text-muted-foreground" title={server.serverId}>{server.serverId}</p>
                     </div>
+                  )}
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col gap-3">
+                  {server.description && <p className="line-clamp-2 text-sm text-muted-foreground" title={server.description}>{server.description}</p>}
+                  <div className="mt-auto flex flex-wrap items-center gap-2">
+                    <ConnectorKindBadge kind={server.kind} />
+                    <AgentResourcePill>{mcpServerSourceLabel(server.source)}</AgentResourcePill>
+                    {connectorId && <ConnectorProbeBadge status={connectorStatuses[connectorId]} />}
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                <AgentResourceFooter className={cn(view === 'list' && 'md:mt-0 md:shrink-0')}>
+                  <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                    <span className={cn('size-1.5 rounded-full', server.enabled ? 'bg-emerald-500' : 'bg-muted-foreground')} />
+                    {server.enabled ? '已启用' : '未启用'}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {connectorId && mutatingId === connectorId && <Loader2 className="size-3.5 animate-spin" />}
+                    <Button variant="ghost" size="icon" className="size-7" disabled={!canEdit} aria-label={`编辑 ${name}`} onClick={() => canEdit && editConnector(connector)}><Pencil className="size-3.5" /></Button>
+                    <Button variant="ghost" size="icon" className="size-7" disabled={mutatingId !== null || !canProbe} aria-label={`检测 ${name}`} onClick={() => connectorId && void probeConnector(connectorId)}><RefreshCw className="size-3.5" /></Button>
+                    <Button variant="ghost" size="icon" className="size-7" disabled={mutatingId !== null || !canRemove} aria-label={`删除 ${name}`} onClick={() => connectorId && void removeConnector(connectorId)}><Trash2 className="size-3.5" /></Button>
+                    <Switch className="ml-1" aria-label={`启用 ${name}`} checked={server.enabled} disabled={mutatingId !== null || !canToggle} onCheckedChange={(checked) => connector && void toggleEnabled(connector, checked)} />
+                  </div>
+                </AgentResourceFooter>
+              </AgentResourceCard>
+            );
+          })}
+        </AgentResourceGrid>
+      )}
 
       {formDialogOpen ? (
         <ConnectorFormDialog
@@ -679,7 +744,7 @@ export function ExternalConnectorsPage() {
           onSubmit={() => void submit()}
         />
       ) : null}
-    </section>
+    </AgentPage>
   );
 }
 

@@ -139,8 +139,8 @@ describe('tasks status filter', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('runtimeHostPreparing')).toBeInTheDocument();
-    expect(screen.queryByText('gatewayNotRunning')).not.toBeInTheDocument();
+    expect(screen.getByText('Gateway is starting. Task data will refresh shortly.')).toBeInTheDocument();
+    expect(screen.queryByText('Gateway is not running')).not.toBeInTheDocument();
     await waitFor(() => expect(listTaskSnapshotMock).toHaveBeenCalled());
   });
 

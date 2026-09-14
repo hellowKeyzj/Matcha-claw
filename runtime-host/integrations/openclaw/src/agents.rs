@@ -12,8 +12,8 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub use crate::gateway::wire::agents::{
     AgentCreate, AgentCreated, AgentDelete, AgentDeleted, AgentFile, AgentFileName, AgentFiles,
-    AgentSummary, AgentUpdate, AgentUpdated, AgentWait, AgentWaitResult, AgentWaitStatus,
-    AgentsList,
+    AgentKind, AgentModelUpdate, AgentSummary, AgentUpdate, AgentUpdated, AgentWait,
+    AgentWaitResult, AgentWaitStatus, AgentsList,
 };
 
 pub(crate) struct OpenClawAgents {

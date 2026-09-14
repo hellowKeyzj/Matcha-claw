@@ -52,17 +52,34 @@ describe('Electron Main Team human decision transport', () => {
     });
   });
 
-  it('preserves durable replay and unknown outcomes without retrying', async () => {
-    for (const outcome of ['replayed', 'outcome-unknown'] as const) {
-      const fetcher = vi.fn().mockResolvedValue(response(200, { success: true, outcome }));
-      const transport = createTeamHumanDecisionTransport(issuer(), 32_134, fetcher as never);
+  it('preserves durable replay without retrying', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response(200, { success: true, outcome: 'replayed' }));
+    const transport = createTeamHumanDecisionTransport(issuer(), 32_134, fetcher as never);
 
-      await expect(transport.resolve(request)).resolves.toEqual({
-        status: 200,
-        body: { success: true, outcome },
-      });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-    }
+    await expect(transport.resolve(request)).resolves.toEqual({
+      status: 200,
+      body: { success: true, outcome: 'replayed' },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves unknown as a non-success outcome without retrying', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response(409, {
+      success: false,
+      outcome: 'outcome-unknown',
+      error: 'Team human decision outcome is unknown',
+    }));
+    const transport = createTeamHumanDecisionTransport(issuer(), 32_134, fetcher as never);
+
+    await expect(transport.resolve(request)).resolves.toEqual({
+      status: 409,
+      body: {
+        success: false,
+        outcome: 'outcome-unknown',
+        error: 'Team human decision outcome is unknown',
+      },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('projects explicit Rust rejection without exposing private details', async () => {

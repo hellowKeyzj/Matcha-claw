@@ -15,14 +15,6 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
-const licenseRuntimeMock = vi.hoisted(() => ({
-  clear: vi.fn().mockResolvedValue({ success: true }),
-  gate: vi.fn(),
-  revalidate: vi.fn(),
-  storedKey: vi.fn(),
-  validate: vi.fn(),
-}));
-
 vi.mock('@/lib/host-api', () => ({
   hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
@@ -34,42 +26,9 @@ vi.mock('@/lib/host-api', () => ({
   }),
 }));
 
-vi.mock('@/lib/license-runtime', () => ({
-  hostLicenseClear: licenseRuntimeMock.clear,
-  hostLicenseGate: licenseRuntimeMock.gate,
-  hostLicenseRevalidate: licenseRuntimeMock.revalidate,
-  hostLicenseStoredKey: licenseRuntimeMock.storedKey,
-  hostLicenseValidate: licenseRuntimeMock.validate,
-}));
-
 describe('settings user avatar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    licenseRuntimeMock.gate.mockResolvedValue({
-      state: 'blocked',
-      reason: 'empty',
-      checkedAtMs: Date.now(),
-      hasStoredKey: false,
-      hasUsableCache: false,
-      nextRevalidateAtMs: null,
-      lastValidation: null,
-      renewalAlert: null,
-    });
-    licenseRuntimeMock.storedKey.mockResolvedValue({ masked: null });
-    licenseRuntimeMock.validate.mockResolvedValue({
-      valid: false,
-      code: 'empty',
-      masked: null,
-      last4: null,
-    });
-    licenseRuntimeMock.revalidate.mockResolvedValue({
-      valid: false,
-      code: 'empty',
-      masked: null,
-      last4: null,
-    });
-    licenseRuntimeMock.clear.mockResolvedValue({ success: true });
-
     i18n.changeLanguage('en');
 
     useSettingsStore.setState((state) => ({
@@ -83,7 +42,6 @@ describe('settings user avatar', () => {
       proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
       autoCheckUpdate: true,
       devModeUnlocked: false,
-      setupComplete: true,
       initialized: true,
     }));
 

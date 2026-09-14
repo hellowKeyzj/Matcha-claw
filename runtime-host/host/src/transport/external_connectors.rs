@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 
 use crate::external_connectors::{
     CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, SessionConnectorStatus,
-    SessionIdentity,
+    SessionIdentity, SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget,
+    SessionStatusTarget,
 };
 use crate::transport::authorization::CapabilityDecisionVerifier;
 use openclaw::projection::connector::external::ConnectorObservation;
@@ -49,6 +50,11 @@ enum Input {
     SessionStatus {
         session_identity: SessionIdentity,
     },
+    SessionMcpServerEnabled {
+        session_identity: SessionIdentity,
+        server_id: String,
+        enabled: bool,
+    },
     Probe {
         connector_id: String,
     },
@@ -79,7 +85,8 @@ pub(crate) enum Command {
     List,
     Catalog,
     Status,
-    SessionStatus(SessionIdentity),
+    SessionStatus(SessionStatusTarget),
+    SessionMcpServerEnabled(SessionMcpServerEnabledTarget),
     Probe(String),
     Get(String),
     Upsert(Box<environment::Connector>),
@@ -117,8 +124,24 @@ impl Request {
                     true
                 }
                 (Input::SessionStatus { session_identity }, "sessionStatus") => {
-                    session_identity.is_valid()
+                    SessionStatusTarget {
+                        session_identity: session_identity.clone(),
+                    }
+                    .is_valid()
                 }
+                (
+                    Input::SessionMcpServerEnabled {
+                        session_identity,
+                        server_id,
+                        enabled,
+                    },
+                    "sessionMcpServerEnabled",
+                ) => SessionMcpServerEnabledTarget {
+                    session_identity: session_identity.clone(),
+                    server_id: server_id.clone(),
+                    enabled: *enabled,
+                }
+                .is_valid(),
                 (Input::Probe { connector_id }, "probe")
                 | (Input::Get { connector_id }, "get")
                 | (Input::Remove { connector_id }, "remove") => valid_id(connector_id),
@@ -134,7 +157,18 @@ impl Request {
             Input::List => Command::List,
             Input::Catalog => Command::Catalog,
             Input::Status => Command::Status,
-            Input::SessionStatus { session_identity } => Command::SessionStatus(session_identity),
+            Input::SessionStatus { session_identity } => {
+                Command::SessionStatus(SessionStatusTarget { session_identity })
+            }
+            Input::SessionMcpServerEnabled {
+                session_identity,
+                server_id,
+                enabled,
+            } => Command::SessionMcpServerEnabled(SessionMcpServerEnabledTarget {
+                session_identity,
+                server_id,
+                enabled,
+            }),
             Input::Probe { connector_id } => Command::Probe(connector_id),
             Input::Get { connector_id } => Command::Get(connector_id),
             Input::Upsert { connector } => Command::Upsert(connector),
@@ -149,6 +183,7 @@ fn operation_name(operation: &str) -> Option<&'static str> {
         "externalConnectors.catalog" => Some("catalog"),
         "externalConnectors.status" => Some("status"),
         "externalConnectors.sessionStatus" => Some("sessionStatus"),
+        "externalConnectors.sessionMcpServerEnabled" => Some("sessionMcpServerEnabled"),
         "externalConnectors.probe" => Some("probe"),
         "externalConnectors.get" => Some("get"),
         "externalConnectors.upsert" => Some("upsert"),
@@ -175,6 +210,7 @@ pub(crate) enum Delivery {
     Catalog(CatalogOutcome),
     Status(Vec<(String, ConnectorObservation)>),
     SessionStatus(Vec<SessionConnectorStatus>),
+    SessionMcpServerEnabled(SessionMcpServerEnabledOutcome),
     Probe(String, ConnectorObservation),
     Missing,
     Get(GetOutcome),
@@ -189,6 +225,7 @@ impl Delivery {
             | Self::Catalog(CatalogOutcome::Available(_))
             | Self::Status(_)
             | Self::SessionStatus(_)
+            | Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Applied)
             | Self::Probe(..)
             | Self::Get(GetOutcome::Found(_))
             | Self::Mutation(MutationOutcome::Stored { .. } | MutationOutcome::Removed { .. }) => {
@@ -203,6 +240,7 @@ impl Delivery {
             | Self::List(ListOutcome::Unavailable)
             | Self::Get(GetOutcome::Unavailable)
             | Self::Mutation(MutationOutcome::Unavailable)
+            | Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Unavailable)
             | Self::Unavailable => 503,
         }
     }
@@ -217,6 +255,12 @@ impl Delivery {
                 json!({ "statuses": statuses.iter().map(|(id, result)| status_json(id, result)).collect::<Vec<_>>() })
             }
             Self::SessionStatus(statuses) => json!({ "statuses": statuses }),
+            Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Applied) => {
+                json!({ "success": true, "effectiveNextRun": true })
+            }
+            Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Unavailable) => {
+                error("External connectors are unavailable")
+            }
             Self::Probe(id, result) => json!({ "status": status_json(id, result) }),
             Self::Get(GetOutcome::Found(connector)) => {
                 json!({ "connector": connector.public_json() })
@@ -371,6 +415,45 @@ mod tests {
 
         assert!(request.valid());
         assert!(matches!(request.into_command(), Command::Probe(id) if id == "remote"));
+    }
+
+    #[test]
+    fn session_mcp_server_enabled_request_decodes_to_next_run_receipt() {
+        let request = serde_json::from_value::<Request>(json!({
+            "id": "external.connectors",
+            "operationId": "externalConnectors.sessionMcpServerEnabled",
+            "scope": { "kind": "external-connector-catalog" },
+            "target": { "kind": "external-connectors" },
+            "input": {
+                "kind": "sessionMcpServerEnabled",
+                "sessionIdentity": {
+                    "endpoint": {
+                        "kind": "native-runtime",
+                        "runtimeAdapterId": "openclaw",
+                        "runtimeInstanceId": "main"
+                    },
+                    "agentId": "main",
+                    "sessionKey": "agent:main:session-1"
+                },
+                "serverId": "remote",
+                "enabled": false
+            }
+        }))
+        .expect("session MCP enablement request");
+
+        assert!(request.valid());
+        match request.into_command() {
+            Command::SessionMcpServerEnabled(target) => {
+                assert_eq!(target.server_id, "remote");
+                assert!(!target.enabled);
+                assert_eq!(target.session_identity.session_key, "agent:main:session-1");
+            }
+            _ => panic!("expected session MCP enablement command"),
+        }
+
+        let delivery = Delivery::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Applied);
+        assert_eq!(delivery.status_code(), 200);
+        assert_eq!(delivery.body(), json!({ "success": true, "effectiveNextRun": true }));
     }
 
     #[test]

@@ -71,19 +71,6 @@ const workspaceMediaRequest = {
   },
 } as const;
 
-const toolchainScope = {
-  kind: 'runtime-instance',
-  endpoint: identity.endpoint,
-} as const;
-
-const toolchainInstallRequest = {
-  id: 'platform.runtime',
-  operationId: 'toolchain.installUv',
-  scope: toolchainScope,
-  target: { kind: 'platform-runtime' },
-  input: {},
-} as const;
-
 const cronTriggerRequest = {
   id: 'scheduler.cron',
   operationId: 'cron.trigger',
@@ -112,24 +99,6 @@ const schedulerDescriptor = {
   policyScope: 'scheduler.cron',
   ownerModuleId: 'scheduler',
   routeOwnerId: 'operations',
-} as const;
-
-const licenseDescriptor = {
-  id: 'license.runtime',
-  kind: 'license-runtime',
-  scopeKind: 'app',
-  scope: { kind: 'app' },
-  targetKinds: ['license'],
-  supportLevel: 'native',
-  availability: 'available',
-  operations: [
-    { id: 'license.validate', title: 'Validate license', targetKind: 'license', targetRequired: true },
-    { id: 'license.revalidate', title: 'Revalidate stored license', targetKind: 'license', targetRequired: true },
-    { id: 'license.clear', title: 'Clear stored license', targetKind: 'license', targetRequired: true },
-  ],
-  policyScope: 'license.runtime',
-  ownerModuleId: 'license',
-  routeOwnerId: 'license',
 } as const;
 
 const providerRoutingDescriptor = {
@@ -430,38 +399,28 @@ describe('capability route sealed projection', () => {
     expect(failed.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
   });
 
-  it('installs the Toolchain through the native control command', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ result: { outcome: 'installed' } }));
+  it('does not expose UV preparation through generic capability execute', async () => {
+    const command = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
-      incoming(toolchainInstallRequest) as never,
+      incoming({
+        id: 'platform.runtime',
+        operationId: 'toolchain.installUv',
+        scope: schedulerScope,
+        target: { kind: 'platform-runtime' },
+        input: {},
+      }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       { runtimeHost: { command } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith(
-      { name: 'openclaw.toolchain.install-uv' },
-      { timeoutMs: 120000 },
-    );
-    expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
-  });
-
-  it.each([
-    ['rejected', 500, { success: false, error: 'Toolchain installation was rejected' }],
-    ['unknown', 503, { success: false, error: 'Toolchain installation outcome is unknown' }],
-  ] as const)('projects a Toolchain %s outcome', async (outcome, statusCode, body) => {
-    const result = response();
-
-    await handleCapabilityRoutes(
-      incoming(toolchainInstallRequest) as never,
-      result.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ result: { outcome } })) } } as never,
-    );
-
-    expect(result.state).toEqual({ statusCode, body });
+    expect(command).not.toHaveBeenCalled();
+    expect(result.state).toEqual({
+      statusCode: 404,
+      body: { success: false, error: 'Capability is not available' },
+    });
   });
 
   it('fails closed for legacy runtime.host execution without dispatching host.runtime.execute', async () => {
@@ -536,7 +495,7 @@ describe('capability route sealed projection', () => {
     });
   });
 
-  it.each(['accepted', 'skipped', 'outcome-unknown'] as const)(
+  it.each(['accepted', 'skipped'] as const)(
     'preserves safe Cron outcome %s', async (outcome) => {
       const result = response();
       await handleCapabilityRoutes(
@@ -549,7 +508,20 @@ describe('capability route sealed projection', () => {
     },
   );
 
-  it('projects an unknown-delivery Cron command as outcome-unknown', async () => {
+  it.each(['already-running', 'not-due', 'invalid-spec', 'disabled', 'stopped'] as const)(
+    'preserves safe Cron skip reason %s', async (reason) => {
+      const result = response();
+      await handleCapabilityRoutes(
+        incoming(cronTriggerRequest) as never,
+        result.raw as never,
+        new URL('http://localhost/api/capabilities/execute'),
+        { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ result: { outcome: 'skipped', reason } })) } } as never,
+      );
+      expect(result.state).toEqual({ statusCode: 200, body: { success: true, result: { outcome: 'skipped', reason } } });
+    },
+  );
+
+  it('projects unknown-delivery Cron commands as outcome-unknown success', async () => {
     const result = response();
     const command = vi.fn().mockRejectedValue(new RuntimeHostControlError('timeout-exceeded', 'unknown-delivery'));
 
@@ -627,15 +599,15 @@ describe('capability route sealed projection', () => {
     expect(result.state).toEqual({
       statusCode: 200,
       body: {
-        capabilities: [agentSkillConfigDescriptor, agentToolConfigDescriptor, subagentDescriptor, providerRoutingDescriptor, schedulerDescriptor, licenseDescriptor],
+        capabilities: [agentSkillConfigDescriptor, agentToolConfigDescriptor, subagentDescriptor, providerRoutingDescriptor, schedulerDescriptor],
       },
     });
   });
 
-  it('describes the Electron-owned License capability without querying Runtime Host', async () => {
-    const command = vi.fn();
+  it('does not describe a deleted Electron-owned License capability', async () => {
+    const command = vi.fn().mockResolvedValue(rejected('INVALID_INPUT', 'private license detail'));
     const result = response();
-    const body = { id: licenseDescriptor.id, scope: licenseDescriptor.scope };
+    const body = { id: 'license.runtime', scope: { kind: 'app' } };
 
     await handleCapabilityRoutes(
       incoming(body) as never,
@@ -644,8 +616,12 @@ describe('capability route sealed projection', () => {
       { runtimeHost: { command } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
-    expect(result.state).toEqual({ statusCode: 200, body: { capability: licenseDescriptor } });
+    expect(command).toHaveBeenCalledWith({ name: 'host.capabilities.describe', input: body });
+    expect(result.state).toEqual({
+      statusCode: 404,
+      body: { success: false, error: 'Capability is not available' },
+    });
+    expect(JSON.stringify(result.state)).not.toContain('private license detail');
   });
 
   it('delivers a capability description with the exact typed request', async () => {
@@ -1083,10 +1059,136 @@ describe('capability route sealed projection', () => {
     expect(JSON.stringify([provider.state, task.state])).not.toContain(privateCanary);
   });
 
-  it('projects only known LicenseService fields', async () => {
+  it('forwards OpenClaw browser request envelope fields to the private runtime command', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({ ok: true, count: 2 }));
     const result = response();
+    const request = {
+      id: 'openclaw.browser',
+      operationId: 'browser.request',
+      scope: schedulerScope,
+      target: null,
+      input: {
+        method: 'GET',
+        path: '/browser/request',
+        query: { tabId: 'tab-1', includeHidden: false },
+        body: { action: 'status' },
+        timeoutMs: 2500,
+        target: 'node',
+        node: 'browser-node-1',
+      },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'openclaw.browser.request',
+      input: request.input,
+    });
+    expect(result.state).toEqual({ statusCode: 200, body: { ok: true, count: 2 } });
+  });
+
+  it('forwards OpenClaw MCP app requests without writing SessionView', async () => {
+    const payload = { lease: { viewId: 'view-1', expiresAtMs: 1 }, url: 'https://mcp.local/view' };
+    const command = vi.fn().mockResolvedValue(succeeded(payload));
+    const result = response();
+    const request = {
+      id: 'openclaw.mcpApp',
+      operationId: 'mcp.app.lease',
+      scope: schedulerScope,
+      target: null,
+      input: { sessionKey: 'session-1', viewId: 'view-1', standalone: true },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'openclaw.mcp-app.request',
+      input: {
+        operationId: 'mcp.app.lease',
+        sessionKey: 'session-1',
+        viewId: 'view-1',
+        standalone: true,
+      },
+    });
+    expect(result.state).toEqual({ statusCode: 200, body: payload });
+  });
+
+  it.each([
+    [{ id: 'openclaw.browser', operationId: 'browser.open', scope: schedulerScope, target: null, input: { method: 'GET', path: '/browser/request' } }, 'OpenClaw browser request is invalid'],
+    [{ id: 'openclaw.browser', operationId: 'browser.request', scope: schedulerScope, target: null, input: { method: 'GET', path: '/browser/request', html: '<secret>' } }, 'OpenClaw browser request is invalid'],
+    [{ id: 'openclaw.browser', operationId: 'browser.request', scope: schedulerScope, target: null, input: { method: 'GET', path: '/browser/request', query: 'secret' } }, 'OpenClaw browser request is invalid'],
+    [{ id: 'openclaw.browser', operationId: 'browser.request', scope: schedulerScope, target: null, input: { method: 'GET', path: '/browser/request', target: 'secret' } }, 'OpenClaw browser request is invalid'],
+    [{ id: 'openclaw.browser', operationId: 'browser.request', scope: schedulerScope, target: null, input: { method: 'GET', path: '/browser/request', target: 'host', node: 'secret' } }, 'OpenClaw browser request is invalid'],
+    [{ id: 'openclaw.mcpApp', operationId: 'mcp.lease', scope: schedulerScope, target: null, input: { sessionKey: 'session-1', viewId: 'view-1' } }, 'OpenClaw MCP app request is invalid'],
+    [{ id: 'openclaw.mcpApp', operationId: 'mcp.app.lease', scope: schedulerScope, target: null, input: { sessionKey: 'session-1', viewId: 'view-1', toolResult: 'secret' } }, 'OpenClaw MCP app request is invalid'],
+  ])('rejects malformed OpenClaw browser/MCP envelopes before dispatch: %p', async (request, error) => {
+    const command = vi.fn();
+    const result = response();
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).not.toHaveBeenCalled();
+    expect(result.state).toEqual({ statusCode: 400, body: { success: false, error } });
+    expect(JSON.stringify(result.state)).not.toContain('secret');
+  });
+
+  it('redacts OpenClaw browser and MCP private runtime errors', async () => {
+    const browser = response();
+    const mcp = response();
+    const privateCanary = 'raw private payload: html/toolInput/toolResult';
+    const command = vi.fn()
+      .mockResolvedValueOnce(rejected('FAILED', privateCanary))
+      .mockRejectedValueOnce(new Error(privateCanary));
+
+    await handleCapabilityRoutes(
+      incoming({
+        id: 'openclaw.browser',
+        operationId: 'browser.request',
+        scope: schedulerScope,
+        target: null,
+        input: { method: 'GET', path: '/browser/request' },
+      }) as never,
+      browser.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+    await handleCapabilityRoutes(
+      incoming({
+        id: 'openclaw.mcpApp',
+        operationId: 'mcp.app.lease',
+        scope: schedulerScope,
+        target: null,
+        input: { sessionKey: 'session-1', viewId: 'view-1' },
+      }) as never,
+      mcp.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(browser.state).toEqual({ statusCode: 503, body: { success: false, error: 'OpenClaw browser request is unavailable' } });
+    expect(mcp.state).toEqual({ statusCode: 503, body: { success: false, error: 'OpenClaw MCP app request is unavailable' } });
+    expect(JSON.stringify([browser.state, mcp.state])).not.toContain(privateCanary);
+  });
+
+  it('does not execute a deleted License capability', async () => {
+    const result = response();
+    const command = vi.fn();
     const key = 'MATCHACLAW-AAAA-BBBB-CCCC-DDDD';
-    const privateCanary = '/private/license/path private-token';
 
     await handleCapabilityRoutes(
       incoming({
@@ -1098,25 +1200,15 @@ describe('capability route sealed projection', () => {
       }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      {
-        licenseService: {
-          validate: vi.fn().mockResolvedValue({
-            valid: true,
-            code: 'valid',
-            mode: 'checksum',
-            masked: 'MATCHACLAW-****-****-****-DDDD',
-            privateCanary,
-          }),
-        },
-      } as never,
+      { runtimeHost: { command } } as never,
     );
 
+    expect(command).not.toHaveBeenCalled();
     expect(result.state).toEqual({
-      statusCode: 503,
-      body: { success: false, error: 'License service is unavailable' },
+      statusCode: 404,
+      body: { success: false, error: 'Capability is not available' },
     });
     expect(JSON.stringify(result.state)).not.toContain(key);
-    expect(JSON.stringify(result.state)).not.toContain(privateCanary);
   });
 
   it('requires matching task session identities before dispatch', async () => {
@@ -1140,5 +1232,101 @@ describe('capability route sealed projection', () => {
       statusCode: 400,
       body: { success: false, error: 'Task manager request is invalid' },
     });
+  });
+
+  it('dispatches skill openReadme with raw key and locator fields', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({
+      success: true,
+      content: '# Excel XLSX',
+      filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
+    }));
+    const result = response();
+    const request = {
+      id: 'skill.management',
+      operationId: 'clawhub.openReadme',
+      scope: schedulerScope,
+      target: { kind: 'skill', skillId: 'Excel XLSX', slug: 'excel-xlsx' },
+      input: {
+        skillKey: 'Excel XLSX',
+        slug: 'excel-xlsx',
+        filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
+        baseDir: 'C:\\skills\\Excel XLSX',
+      },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'openclaw.skills.execute',
+      input: request,
+    });
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: { success: true, content: '# Excel XLSX', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md' },
+    });
+  });
+
+  it('dispatches skill operations when the marketplace slug is absent', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({ success: true }));
+    const result = response();
+    const request = {
+      id: 'skill.management',
+      operationId: 'clawhub.openPath',
+      scope: schedulerScope,
+      target: { kind: 'skill', skillId: 'vendor/foo' },
+      input: { skillKey: 'vendor/foo' },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'openclaw.skills.execute',
+      input: request,
+    });
+    expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
+  });
+
+  it('projects skill openPath as success only after RuntimeHost resolution', async () => {
+    const command = vi.fn().mockResolvedValue(succeeded({
+      success: true,
+      content: '# Excel XLSX',
+      filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
+    }));
+    const result = response();
+    const request = {
+      id: 'skill.management',
+      operationId: 'clawhub.openPath',
+      scope: schedulerScope,
+      target: { kind: 'skill', skillId: 'Excel XLSX', slug: 'excel-xlsx' },
+      input: {
+        skillKey: 'Excel XLSX',
+        slug: 'excel-xlsx',
+        filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
+        baseDir: 'C:\\skills\\Excel XLSX',
+      },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command } } as never,
+    );
+
+    expect(command).toHaveBeenCalledWith({
+      name: 'openclaw.skills.execute',
+      input: request,
+    });
+    expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
   });
 });

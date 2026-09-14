@@ -3,6 +3,10 @@
  * Browse and manage AI skills
  */
 import { memo, useDeferredValue, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { AgentPage, AgentPageSection, AgentPageToolbar, AgentResourceGrid, AgentResourceCard, AgentResourceFooter, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentPage';
+import { Select } from '@/components/ui/select';
+import { AgentViewToggle } from '@/components/common/AgentViewToggle';
 import {
   Search,
   Puzzle,
@@ -36,6 +40,7 @@ import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
+import { SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR, getSealedSkillCloudPackageKey, useSealedSkillsStore } from '@/stores/sealed-skills';
 import { useGatewayStore } from '@/stores/gateway';
 import {
   hostApiFetch,
@@ -51,15 +56,16 @@ import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { toast } from 'sonner';
-import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/skill';
+import type { Skill, MarketplaceSkill, SealedSkillCloudPackage, SealedSkillMetadata, SkillMissingRequirements } from '@/types/skill';
 import type { GatewayStatus } from '@/types/gateway';
 import { useTranslation } from 'react-i18next';
 
-type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
+type SkillAvailabilityKind = 'eligible' | 'missing' | 'disabled' | 'unselectable' | 'unknown';
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
-const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'line-clamp-2 text-sm leading-6 text-muted-foreground';
+const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'mt-3 min-h-10 line-clamp-2 text-sm leading-5 text-muted-foreground group-data-[view=list]/skills:mt-2 group-data-[view=list]/skills:min-h-0';
+const SKILL_CARD_ICON_CLASS_NAME = 'size-11';
 const INSTALL_ERROR_CODES = new Set(['installTimeoutError', 'installRateLimitError']);
 const FETCH_ERROR_CODES = new Set(['fetchTimeoutError', 'fetchRateLimitError', 'timeoutError', 'rateLimitError']);
 const SEARCH_ERROR_CODES = new Set(['searchTimeoutError', 'searchRateLimitError', 'timeoutError', 'rateLimitError']);
@@ -115,23 +121,25 @@ function buildMarketplaceSkillUrl(slug: string) {
 }
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
-  if (!skill.enabled) return 'disabled';
+  if (!skill.enabled || skill.unavailableReason === 'disabled') return 'disabled';
+  if (skill.unavailableReason === 'missingRequirements' || formatMissingSummary(skill.missing) || (skill.missingCategories?.length ?? 0) > 0) return 'missing';
   if (skill.eligible === true) return 'eligible';
-  if (skill.blockedByAllowlist) return 'blocked';
-  if (formatMissingSummary(skill.missing)) return 'missing';
+  if (skill.selectable === false || skill.unavailableReason === 'ineligible') return 'unselectable';
   return 'unknown';
 }
 
-function isInstalledSkillVisible(skill: Skill): boolean {
-  return skill.installed === true;
+function findInstalledMarketplaceSkill(skills: Skill[], marketplaceSkill: MarketplaceSkill): Skill | undefined {
+  return skills.find((skill) =>
+    skill.id === marketplaceSkill.slug
+    || skill.slug === marketplaceSkill.slug
+    || skill.name === marketplaceSkill.name
+  );
 }
 
 function getAvailabilityBadgeClass(kind: SkillAvailabilityKind): string {
   switch (kind) {
     case 'eligible':
       return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400';
-    case 'blocked':
-      return 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400';
     case 'missing':
       return 'border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-400';
     case 'disabled':
@@ -150,6 +158,27 @@ function formatMissingSummary(missing?: SkillMissingRequirements): string {
   if (missing.config?.length) parts.push(...missing.config.map((value) => `config:${value}`));
   if (missing.os?.length) parts.push(...missing.os.map((value) => `os:${value}`));
   return parts.join(', ');
+}
+
+function formatMissingCategories(skill: Skill): string {
+  if (!skill.missingCategories?.length) return '';
+  return skill.missingCategories.map((category) => {
+    if (category === 'binaries') return 'bin';
+    if (category === 'anyBinaries') return 'any-bin';
+    if (category === 'environment') return 'env';
+    if (category === 'configuration') return 'config';
+    return 'os';
+  }).join(', ');
+}
+
+function formatSkillMissingSummary(skill: Skill): string {
+  return formatMissingSummary(skill.missing) || formatMissingCategories(skill);
+}
+
+function resolveAvailabilityLabel(kind: SkillAvailabilityKind, t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (kind === 'disabled') return t('detail.disabled');
+  if (kind === 'unselectable') return t('availability.unselectable', { defaultValue: 'Unavailable' });
+  return t(`availability.${kind}`);
 }
 
 function resolveSkillSourceLabel(skill: Skill, t: (key: string, options?: Record<string, unknown>) => string): string {
@@ -189,10 +218,8 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
   const [isEnvExpanded, setIsEnvExpanded] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const availabilityKind = getSkillAvailabilityKind(skill);
-  const missingSummary = formatMissingSummary(skill.missing);
-  const availabilityLabel = availabilityKind === 'disabled'
-    ? t('detail.disabled')
-    : t(`availability.${availabilityKind}`);
+  const missingSummary = formatSkillMissingSummary(skill);
+  const availabilityLabel = resolveAvailabilityLabel(availabilityKind, t);
 
   // Initialize config from skill
   useEffect(() => {
@@ -229,6 +256,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
         {
           skillKey: skill.id,
           slug: skill.slug,
+          filePath: skill.filePath,
           baseDir: skill.baseDir,
         },
         { kind: 'skill', skillId: skill.id, slug: skill.slug },
@@ -244,11 +272,12 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
   };
 
   const handleCopyPath = async () => {
-    if (!skill.baseDir) {
+    const path = skill.baseDir || skill.filePath;
+    if (!path) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(skill.baseDir);
+      await navigator.clipboard.writeText(path);
       toast.success(t('toast.copiedPath'));
     } catch (err) {
       toast.error(t('toast.failedCopyPath') + ': ' + String(err));
@@ -336,7 +365,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
               </div>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button variant="ghost" size="icon" aria-label={t('actions.close')} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
@@ -379,7 +408,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                       </Badge>
                       <div className="flex items-center gap-2">
                         <Input
-                          value={skill.baseDir || t('detail.pathUnavailable')}
+                          value={skill.baseDir || skill.filePath || t('detail.pathUnavailable')}
                           readOnly
                           className="font-mono text-xs"
                         />
@@ -388,7 +417,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                           variant="outline"
                           size="icon"
                           className="h-9 w-9"
-                          disabled={!skill.baseDir}
+                          disabled={!skill.baseDir && !skill.filePath}
                           title={t('detail.copyPath')}
                           onClick={handleCopyPath}
                         >
@@ -399,7 +428,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                           variant="outline"
                           size="icon"
                           className="h-9 w-9"
-                          disabled={!skill.baseDir}
+                          disabled={!skill.baseDir && !skill.filePath}
                           title={t('detail.openActualFolder')}
                           onClick={() => onOpenFolder?.(skill)}
                         >
@@ -415,11 +444,6 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                         {availabilityLabel}
                       </Badge>
                     </div>
-                    {availabilityKind === 'blocked' && (
-                      <p className="text-xs text-muted-foreground mt-2">
-                        {t('availability.blockedByAllowlist')}
-                      </p>
-                    )}
                     {missingSummary && availabilityKind !== 'eligible' && (
                       <p className="text-xs text-muted-foreground mt-2 break-all">
                         {t('availability.missingPrefix', { items: missingSummary })}
@@ -435,7 +459,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                   <div className="space-y-2">
                     <h3 className="text-sm font-medium flex items-center gap-2">
                       <Key className="h-4 w-4 text-primary" />
-                      API Key
+                      {t('detail.apiKey')}
                     </h3>
                     <Input
                       placeholder={t('detail.apiKeyPlaceholder')}
@@ -461,7 +485,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                         ) : (
                           <ChevronRight className="h-4 w-4" />
                         )}
-                        Environment Variables
+                        {t('detail.envVars')}
                         <Badge variant="secondary" className="px-1.5 py-0 text-[10px] h-5">
                           {envVars.length}
                         </Badge>
@@ -483,7 +507,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                     </div>
 
                     {isEnvExpanded && (
-                      <div className="pt-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+                      <div className="pt-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-200 motion-reduce:animate-none">
                         {envVars.length === 0 && (
                           <p className="text-xs text-muted-foreground italic h-8 flex items-center">
                             {t('detail.noEnvVars')}
@@ -509,6 +533,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                              aria-label={t('actions.removeVariable')}
                               onClick={() => handleRemoveEnv(index)}
                             >
                               <Trash2 className="h-4 w-4" />
@@ -584,72 +609,41 @@ function MarketplaceSkillCard({
   onInstall,
   onUninstall
 }: MarketplaceSkillCardProps) {
+  const { t } = useTranslation('skills');
   return (
-    <Card
-      className="group flex h-full cursor-pointer flex-col overflow-hidden transition-colors hover:border-primary/50"
-      onClick={onOpenDetail}
-    >
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 flex-1 items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xl transition-transform group-hover:scale-110">
-              📦
-            </div>
-            <div className="min-w-0">
-              <CardTitle className="min-h-[3rem] break-words text-base leading-6 transition-colors group-hover:text-primary line-clamp-2">
-                {skill.name}
-              </CardTitle>
-              <CardDescription className="mt-1 flex min-w-0 items-center gap-2 text-xs">
-                <span className="shrink-0">v{skill.version}</span>
-                {skill.author && (
-                  <>
-                    <span className="shrink-0">•</span>
-                    <span className="truncate">{skill.author}</span>
-                  </>
-                )}
-              </CardDescription>
-            </div>
-          </div>
-          <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
-            <Button
-              variant={isInstalled ? 'destructive' : 'default'}
-              size="icon"
-              className="h-8 w-8"
-              onClick={isInstalled ? onUninstall : onInstall}
-              disabled={isInstalling || mutationLocked}
-              aria-label={isInstalled ? 'uninstall-skill' : 'install-skill'}
-            >
-              {isInstalling ? (
-                <RefreshCw className="h-4 w-4 animate-spin" />
-              ) : isInstalled ? (
-                <Trash2 className="h-4 w-4" />
-              ) : (
-                <Download className="h-4 w-4" />
-              )}
-            </Button>
-          </div>
+    <AgentResourceCard className="relative gap-3 p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Package className="size-5" aria-hidden="true" /></AgentResourceIcon>
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold">
+            <button type="button" onClick={onOpenDetail} className="after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring">
+              {skill.name}
+            </button>
+          </h3>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{skill.author || 'ClawHub'}</p>
         </div>
-      </CardHeader>
-      <CardContent className="flex flex-1 flex-col">
-        <p className={cn('mb-3 min-h-[3rem]', SKILL_CARD_DESCRIPTION_CLASS_NAME)}>
-          {skill.description}
-        </p>
-        <div className="mt-auto flex min-h-4 items-center gap-4 text-xs text-muted-foreground">
-          {skill.downloads !== undefined && (
-            <div className="flex items-center gap-1">
-              <Download className="h-3 w-3" />
-              {skill.downloads.toLocaleString()}
-            </div>
-          )}
-          {skill.stars !== undefined && (
-            <div className="flex items-center gap-1">
-              <Sparkles className="h-3 w-3" />
-              {skill.stars.toLocaleString()}
-            </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+      </div>
+      <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{skill.description}</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <AgentResourcePill>ClawHub</AgentResourcePill>
+        <span>v{skill.version}</span>
+        {skill.downloads !== undefined && <span className="inline-flex items-center gap-1"><Download className="size-3" />{skill.downloads.toLocaleString()}</span>}
+        {skill.stars !== undefined && <span className="inline-flex items-center gap-1"><Sparkles className="size-3" />{skill.stars.toLocaleString()}</span>}
+      </div>
+      <AgentResourceFooter>
+        <span>{isInstalled ? t('sealed.packageInstalled') : t('sealed.packageAvailable')}</span>
+        <Button
+          variant="outline"
+          size="sm"
+          className={cn('relative z-10 h-8 gap-2', isInstalled && 'text-destructive hover:text-destructive')}
+          onClick={isInstalled ? onUninstall : onInstall}
+          disabled={isInstalling || mutationLocked}
+        >
+          {isInstalling ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : isInstalled ? <Trash2 className="size-3.5" /> : <Download className="size-3.5" />}
+          {isInstalled ? t('actions.uninstall') : t('actions.install')}
+        </Button>
+      </AgentResourceFooter>
+    </AgentResourceCard>
   );
 }
 
@@ -672,6 +666,7 @@ function MarketplaceSkillDetailDialog({
   onUninstall,
   onClose,
 }: MarketplaceSkillDetailDialogProps) {
+  const { t } = useTranslation('skills');
   const openMarketplacePage = () => {
     void invokeIpc('shell:openExternal', buildMarketplaceSkillUrl(skill.slug));
   };
@@ -695,14 +690,15 @@ function MarketplaceSkillDetailDialog({
               </CardDescription>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button variant="ghost" size="icon" aria-label={t('actions.close')} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
 
         <CardContent className="space-y-4 overflow-y-auto">
+          <p className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck className="size-4 shrink-0" />{t('marketplace.securityNote')}</p>
           <div>
-            <h3 className="text-sm font-medium text-muted-foreground">描述</h3>
+            <h3 className="text-sm font-medium text-muted-foreground">{t('detail.description')}</h3>
             <p className="text-sm mt-1 leading-6">{skill.description || '-'}</p>
           </div>
 
@@ -736,13 +732,13 @@ function MarketplaceSkillDetailDialog({
             disabled={isInstalling || mutationLocked}
           >
             {isInstalling ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
+              <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />
             ) : isInstalled ? (
               <Trash2 className="h-4 w-4" />
             ) : (
               <Download className="h-4 w-4" />
             )}
-            {isInstalled ? 'Uninstall' : 'Install'}
+            {isInstalled ? t('actions.uninstall') : t('actions.install')}
           </Button>
         </div>
       </Card>
@@ -872,7 +868,7 @@ function LocalSkillUploadDialog({
               {t('common:actions.cancel', 'Cancel')}
             </Button>
             <Button onClick={onImport} disabled={!selectedSourcePath || importing} className="gap-2">
-              {importing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {importing ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Upload className="h-4 w-4" />}
               {t('marketplace.uploadDialog.confirm')}
             </Button>
           </div>
@@ -887,6 +883,7 @@ interface SkillGridCardViewModel {
   skillName: string;
   skillDescription: string;
   skillIcon: string;
+  sourceLabel: string;
   isCore: boolean;
   isBundled: boolean;
   slug?: string;
@@ -895,7 +892,6 @@ interface SkillGridCardViewModel {
   configurable: boolean;
   availabilityKind: SkillAvailabilityKind;
   availabilityLabel: string;
-  blockedLabel?: string;
   missingSummaryLabel?: string;
   configurableLabel: string;
 }
@@ -907,13 +903,252 @@ interface SkillGridCardProps extends SkillGridCardViewModel {
   onUninstallSkill: (skillId: string) => void;
 }
 
+interface SealedSkillCardProps {
+  skill: SealedSkillMetadata;
+  enabled: boolean;
+  mutationLocked: boolean;
+  onToggleSkill: (skillId: string, enabled: boolean) => void;
+}
+
+interface SealedSkillCloudPackageCardProps {
+  packageInfo: SealedSkillCloudPackage;
+  installing: boolean;
+  onInstall: (packageInfo: SealedSkillCloudPackage) => void;
+}
+
+interface SealedSkillPackageUploadDialogProps {
+  open: boolean;
+  uploading: boolean;
+  selectedPackageName: string;
+  selectedPackagePath: string;
+  onClose: () => void;
+  onChoosePackage: () => void;
+  onDropPackagePath: (path: string) => void;
+  onUpload: () => void;
+}
+
+interface ExportSkillPackageCardProps {
+  skill: Skill;
+  exporting: boolean;
+  onExportSkillPackage: (skillId: string) => void;
+}
+
 type InstalledSkillSourceFilter = 'all' | 'built-in' | 'managed';
+
+function SealedSkillCard({ skill, enabled, mutationLocked, onToggleSkill }: SealedSkillCardProps) {
+  const { t } = useTranslation('skills');
+  const runtimeLabel = skill.runtimes?.length ? skill.runtimes.join(', ') : t('sealed.runtimeAny');
+
+  return (
+    <AgentResourceCard className="gap-3 p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Lock className="size-5" aria-hidden="true" /></AgentResourceIcon>
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold">{skill.name || skill.skillKey}</h3>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{skill.skillKey}</p>
+        </div>
+      </div>
+      <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{skill.description || t('sealed.noDescription')}</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <AgentResourcePill>{skill.source || t('source.badge.unknown')}</AgentResourcePill>
+        {skill.version && <span>v{skill.version}</span>}
+        <span>{skill.installed === false ? t('sealed.packageAvailable') : t('sealed.packageInstalled')}</span>
+        <span className="max-w-full truncate">{t('sealed.runtimeLabel', { runtime: runtimeLabel })}</span>
+      </div>
+      <AgentResourceFooter>
+        <span className={cn('inline-flex items-center gap-2', enabled && 'text-emerald-700 dark:text-emerald-400')}>
+          <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+          {enabled ? t('detail.enabled') : t('detail.disabled')}
+        </span>
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked) => onToggleSkill(skill.skillKey, checked)}
+          disabled={mutationLocked}
+          aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skill.name || skill.skillKey}`}
+        />
+      </AgentResourceFooter>
+    </AgentResourceCard>
+  );
+}
+
+function SealedSkillCloudPackageCard({ packageInfo, installing, onInstall }: SealedSkillCloudPackageCardProps) {
+  const { t } = useTranslation('skills');
+  const displayName = packageInfo.name?.trim() || packageInfo.skillKey?.trim() || packageInfo.fileName?.trim() || packageInfo.packageId || '-';
+
+  return (
+    <AgentResourceCard className="gap-3 p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Package className="size-5" aria-hidden="true" /></AgentResourceIcon>
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold">{displayName}</h3>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{packageInfo.skillKey || packageInfo.packageId || packageInfo.fileName || '-'}</p>
+        </div>
+      </div>
+      <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{packageInfo.description || t('sealed.noDescription')}</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <AgentResourcePill>{t('sealed.cloudTitle')}</AgentResourcePill>
+        {packageInfo.version && <span>v{packageInfo.version}</span>}
+        {typeof packageInfo.size === 'number' && <span>{t('sealed.packageSize', { size: packageInfo.size.toLocaleString() })}</span>}
+      </div>
+      <AgentResourceFooter>
+        <span>{packageInfo.installed ? t('sealed.cloudInstalled') : t('sealed.cloudAvailable')}</span>
+        <Button size="sm" variant="outline" className="h-8 shrink-0 gap-2" disabled={installing} onClick={() => onInstall(packageInfo)}>
+          {installing ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Download className="size-3.5" />}
+          {t('sealed.installFromCloud')}
+        </Button>
+      </AgentResourceFooter>
+    </AgentResourceCard>
+  );
+}
+
+function SealedSkillPackageUploadDialog({
+  open,
+  uploading,
+  selectedPackageName,
+  selectedPackagePath,
+  onClose,
+  onChoosePackage,
+  onDropPackagePath,
+  onUpload,
+}: SealedSkillPackageUploadDialogProps) {
+  const { t } = useTranslation('skills');
+  const [dragActive, setDragActive] = useState(false);
+
+  if (!open) {
+    return null;
+  }
+
+  const handleClose = () => {
+    setDragActive(false);
+    onClose();
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragActive(false);
+    const droppedPath = Array.from(event.dataTransfer.files)
+      .map((file) => window.electron.getPathForFile(file))
+      .find((path): path is string => typeof path === 'string' && path.trim().length > 0 && path.endsWith('.matcha-skillpkg'));
+    if (!droppedPath) {
+      return;
+    }
+    onDropPackagePath(droppedPath);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={handleClose}>
+      <Card
+        className="w-full max-w-[30rem] rounded-[1.5rem] border border-border/80 bg-card shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-4">
+          <div>
+            <CardTitle className="text-xl">{t('sealed.uploadDialog.title')}</CardTitle>
+          </div>
+          <Button variant="ghost" size="icon" onClick={handleClose} disabled={uploading}>
+            <X className="h-4 w-4" />
+          </Button>
+        </CardHeader>
+
+        <CardContent className="space-y-5">
+          <div
+            role="button"
+            tabIndex={0}
+            className={cn(
+              'rounded-[1.25rem] border border-dashed px-6 py-8 text-center transition-colors',
+              dragActive
+                ? 'border-primary bg-primary/5'
+                : 'border-border/70 bg-muted/15 hover:border-primary/50 hover:bg-muted/30',
+            )}
+            onClick={onChoosePackage}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onChoosePackage();
+              }
+            }}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              setDragActive(false);
+            }}
+            onDrop={handleDrop}
+          >
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
+              <Upload className="h-5 w-5" />
+            </div>
+            {selectedPackageName ? (
+              <div className="mt-4 space-y-1">
+                <p className="text-base font-medium text-foreground">{selectedPackageName}</p>
+                <p className="break-all text-xs text-muted-foreground">{selectedPackagePath}</p>
+                <p className="pt-1 text-sm text-muted-foreground">{t('sealed.uploadDialog.replace')}</p>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-1">
+                <p className="text-base font-medium text-foreground">{t('sealed.uploadDialog.empty')}</p>
+                <p className="text-sm text-muted-foreground">{t('sealed.uploadDialog.hint')}</p>
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={onClose} disabled={uploading}>
+              {t('common:actions.cancel', 'Cancel')}
+            </Button>
+            <Button onClick={onUpload} disabled={!selectedPackagePath || uploading} className="gap-2">
+              {uploading ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Upload className="h-4 w-4" />}
+              {t('sealed.uploadDialog.confirm')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ExportSkillPackageCard({ skill, exporting, onExportSkillPackage }: ExportSkillPackageCardProps) {
+  const { t } = useTranslation('skills');
+  const displayName = skill.name.trim() || skill.slug?.trim() || skill.id;
+
+  return (
+    <AgentResourceCard className="gap-3 p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Puzzle className="size-5" aria-hidden="true" /></AgentResourceIcon>
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold">{displayName}</h3>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{skill.id}</p>
+        </div>
+      </div>
+      <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{skill.description}</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <AgentResourcePill>{resolveSkillSourceLabel(skill, t)}</AgentResourcePill>
+        {skill.version && <span>v{skill.version}</span>}
+      </div>
+      <AgentResourceFooter>
+        <span>{t('sealed.exportTitle')}</span>
+        <Button size="sm" variant="outline" className="h-8 shrink-0 gap-2" disabled={exporting} onClick={() => onExportSkillPackage(skill.id)}>
+          {exporting ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Lock className="size-3.5" />}
+          {t('sealed.export')}
+        </Button>
+      </AgentResourceFooter>
+    </AgentResourceCard>
+  );
+}
 
 const SkillGridCard = memo(function SkillGridCard({
   skillId,
   skillName,
   skillDescription,
   skillIcon,
+  sourceLabel,
   isCore,
   isBundled,
   slug,
@@ -922,7 +1157,6 @@ const SkillGridCard = memo(function SkillGridCard({
   configurable,
   availabilityKind,
   availabilityLabel,
-  blockedLabel,
   missingSummaryLabel,
   configurableLabel,
   mutationLocked,
@@ -930,96 +1164,57 @@ const SkillGridCard = memo(function SkillGridCard({
   onToggleSkill,
   onUninstallSkill
 }: SkillGridCardProps) {
+  const { t } = useTranslation('skills');
   return (
-    <Card
-      className={cn(
-        'group cursor-pointer rounded-[1.35rem] border border-border/65 bg-card/95 transition-[border-color,background-color,box-shadow]',
-        'hover:border-border/85 hover:bg-card',
-        enabled && 'bg-card'
-      )}
-      onClick={() => onOpenDetail(skillId)}
-    >
-      <CardHeader className="pb-3">
-        <div className="flex items-start gap-3">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-secondary/45 text-xl">
-              <span>{skillIcon}</span>
-            </div>
-            <div className="min-w-0">
-              <CardTitle className="flex min-w-0 items-center gap-2 text-base">
-                <span className="min-w-0 truncate">{skillName}</span>
-                {isCore ? (
-                  <Lock className="h-3 w-3 text-muted-foreground" />
-                ) : isBundled ? (
-                  <Puzzle className="h-3 w-3 text-blue-500/70" />
-                ) : (
-                  <Globe className="h-3 w-3 text-purple-500/70" />
-                )}
-              </CardTitle>
-              {slug ? (
-                <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                  {slug}
-                </p>
-              ) : null}
-            </div>
-          </div>
-          <div className="flex w-[88px] shrink-0 items-center justify-end gap-2">
-            {!isBundled && !isCore && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0 text-destructive/80 hover:bg-destructive/10 hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onUninstallSkill(skillId);
-                }}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            )}
-            <Switch
-              checked={enabled}
-              onCheckedChange={(checked) => {
-                onToggleSkill(skillId, checked);
-              }}
-              disabled={isCore || mutationLocked}
-              onClick={(event) => event.stopPropagation()}
-            />
-          </div>
+    <AgentResourceCard className="relative gap-3 p-4">
+      <div className="flex items-start gap-3">
+        <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME} aria-hidden="true">
+          {skillIcon ? <span className="text-xl">{skillIcon}</span> : <Puzzle className="size-5" />}
+        </AgentResourceIcon>
+        <div className="min-w-0 flex-1">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <button type="button" onClick={() => onOpenDetail(skillId)} className="min-w-0 truncate text-left after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring">
+              {skillName}
+            </button>
+            {isCore && <Lock className="size-3 shrink-0 text-muted-foreground" aria-label={t('detail.coreSystem')} />}
+          </h3>
+          {slug && <p className="mt-1 truncate text-xs text-muted-foreground">{slug}</p>}
         </div>
-      </CardHeader>
-      <CardContent>
-        <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>
-          {skillDescription}
-        </p>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {version && (
-            <Badge variant="outline" className="text-xs">
-              v{version}
-            </Badge>
-          )}
-          <Badge variant="outline" className={cn('text-xs', getAvailabilityBadgeClass(availabilityKind))}>
-            {availabilityLabel}
-          </Badge>
-          {configurable && (
-            <Badge variant="secondary" className="text-xs">
-              <Settings className="h-3 w-3 mr-1" />
-              {configurableLabel}
-            </Badge>
-          )}
-        </div>
-        {availabilityKind === 'blocked' && blockedLabel && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {blockedLabel}
-          </p>
+        {!isBundled && !isCore && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="relative z-10 size-8 shrink-0 text-muted-foreground hover:text-destructive"
+            aria-label={`${t('actions.uninstall')} ${skillName}`}
+            onClick={() => onUninstallSkill(skillId)}
+          >
+            <Trash2 className="size-4" />
+          </Button>
         )}
-        {missingSummaryLabel && availabilityKind !== 'eligible' && (
-          <p className="mt-2 text-xs text-muted-foreground break-all">
-            {missingSummaryLabel}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+      </div>
+      <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{skillDescription}</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <AgentResourcePill>{sourceLabel}</AgentResourcePill>
+        {version && <span>v{version}</span>}
+        {configurable && <span className="inline-flex items-center gap-1"><Settings className="size-3" />{configurableLabel}</span>}
+      </div>
+      <AgentResourceFooter>
+        <span
+          className={cn('inline-flex min-w-0 items-center gap-2', availabilityKind === 'eligible' && 'text-emerald-700 dark:text-emerald-400', availabilityKind === 'missing' && 'text-amber-700 dark:text-amber-400')}
+          title={missingSummaryLabel}
+        >
+          <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
+          <span className="truncate">{availabilityLabel}</span>
+        </span>
+        <Switch
+          className="relative z-10 shrink-0"
+          checked={enabled}
+          onCheckedChange={(checked) => onToggleSkill(skillId, checked)}
+          disabled={isCore || mutationLocked}
+          aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skillName}`}
+        />
+      </AgentResourceFooter>
+    </AgentResourceCard>
   );
 });
 
@@ -1029,6 +1224,7 @@ export function Skills() {
   const initialLoading = useSkillsStore((state) => state.initialLoading);
   const refreshing = useSkillsStore((state) => state.refreshing);
   const mutating = useSkillsStore((state) => state.mutating);
+  const mutatingBySkillId = useSkillsStore((state) => state.mutatingBySkillId);
   const error = useSkillsStore((state) => state.error);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const enableSkill = useSkillsStore((state) => state.enableSkill);
@@ -1042,18 +1238,57 @@ export function Skills() {
   const searching = useSkillsStore((state) => state.searching);
   const searchError = useSkillsStore((state) => state.searchError);
   const installing = useSkillsStore((state) => state.installing);
+  const sealedSkills = useSealedSkillsStore((state) => state.skills);
+  const cloudPackages = useSealedSkillsStore((state) => state.cloudPackages);
+  const sealedSkillsLoading = useSealedSkillsStore((state) => state.loading);
+  const sealedCloudLoading = useSealedSkillsStore((state) => state.cloudLoading);
+  const sealedCloudUploading = useSealedSkillsStore((state) => state.cloudUploading);
+  const sealedSkillsError = useSealedSkillsStore((state) => state.error);
+  const sealedCloudError = useSealedSkillsStore((state) => state.cloudError);
+  const exportingBySkillKey = useSealedSkillsStore((state) => state.exportingBySkillKey);
+  const cloudInstallingByPackageKey = useSealedSkillsStore((state) => state.cloudInstallingByPackageKey);
+  const fetchSealedSkills = useSealedSkillsStore((state) => state.fetchSealedSkills);
+  const fetchCloudSkillPackages = useSealedSkillsStore((state) => state.fetchCloudSkillPackages);
+  const exportSkillPackage = useSealedSkillsStore((state) => state.exportSkillPackage);
+  const uploadLocalSkillPackageToCloud = useSealedSkillsStore((state) => state.uploadLocalSkillPackageToCloud);
+  const downloadAndInstallCloudSkillPackage = useSealedSkillsStore((state) => state.downloadAndInstallCloudSkillPackage);
   const { t } = useTranslation('skills');
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [marketplaceQuery, setMarketplaceQuery] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const updateQuery = (key: string, value: string) => {
+    setSearchParams((params) => {
+      const next = new URLSearchParams(params);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      return next;
+    }, { replace: true });
+  };
+  const searchQuery = searchParams.get('search') || '';
+  const marketplaceQuery = searchParams.get('marketSearch') || '';
   const [localSkillDialogOpen, setLocalSkillDialogOpen] = useState(false);
   const [localSkillSourcePath, setLocalSkillSourcePath] = useState('');
   const [localSkillImporting, setLocalSkillImporting] = useState(false);
+  const [skillPackageUploadDialogOpen, setSkillPackageUploadDialogOpen] = useState(false);
+  const [skillPackagePath, setSkillPackagePath] = useState('');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
-  const [activeTab, setActiveTab] = useState('all');
+  const tabParam = searchParams.get('tab');
+  const activeTab = tabParam === 'sealed' || tabParam === 'marketplace' ? tabParam : 'all';
+  const setActiveTab = (tab: string) => {
+    setSearchParams((params) => {
+      const next = new URLSearchParams(params);
+      next.set('tab', tab);
+      return next;
+    });
+  };
   const isAllTabActive = activeTab === 'all';
-  const [selectedSource, setSelectedSource] = useState<InstalledSkillSourceFilter>('all');
+  const isSealedTabActive = activeTab === 'sealed';
+  const sourceParam = searchParams.get('source');
+  const selectedSource: InstalledSkillSourceFilter = sourceParam === 'built-in' || sourceParam === 'managed' ? sourceParam : 'all';
+  const statusParam = searchParams.get('status') || 'all';
+  const selectedStatus = ['enabled', 'disabled', 'eligible', 'missing', 'unselectable', 'unknown'].includes(statusParam) ? statusParam : 'all';
+  const view = searchParams.get('view') === 'list' ? 'list' : 'grid';
+  const sealedQuery = searchParams.get('packageSearch') || '';
   const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test' || skills.length > 0 || snapshotReady,
   );
@@ -1116,6 +1351,13 @@ export function Skills() {
   }, [fetchSkills, gatewayProcessRunning, gatewayReportedReady, gatewayRuntimeKey, skillsFeatureReady, snapshotReady]);
 
   useEffect(() => {
+    if (isSealedTabActive) {
+      void fetchSealedSkills();
+      void fetchCloudSkillPackages();
+    }
+  }, [fetchCloudSkillPackages, fetchSealedSkills, isSealedTabActive]);
+
+  useEffect(() => {
     if (skillsHeavyContentReady) {
       return;
     }
@@ -1135,19 +1377,18 @@ export function Skills() {
 
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
-  const visibleInstalledSkills = useMemo(
-    () => safeSkills.filter(isInstalledSkillVisible),
-    [safeSkills],
-  );
   const skillById = useMemo(() => {
     return new Map(safeSkills.map((skill) => [skill.id, skill] as const));
   }, [safeSkills]);
-  const deferredVisibleInstalledSkills = useDeferredValue(visibleInstalledSkills);
+  const exportableSkills = useMemo(() => {
+    return safeSkills.filter((skill) => !skill.isCore && !skill.isBundled);
+  }, [safeSkills]);
+  const deferredSkills = useDeferredValue(safeSkills);
   const deferredSearchQuery = useDeferredValue(isAllTabActive ? searchQuery : '');
   const deferredSelectedSource = useDeferredValue(isAllTabActive ? selectedSource : 'all');
   const skillsForView = useMemo(
-    () => (isAllTabActive && skillsHeavyContentReady ? deferredVisibleInstalledSkills : []),
-    [deferredVisibleInstalledSkills, isAllTabActive, skillsHeavyContentReady],
+    () => (isAllTabActive && skillsHeavyContentReady ? deferredSkills : []),
+    [deferredSkills, isAllTabActive, skillsHeavyContentReady],
   );
 
   const filteredSkills = useMemo(() => {
@@ -1165,7 +1406,9 @@ export function Skills() {
         || (deferredSelectedSource === 'built-in' && skill.isBundled)
         || (deferredSelectedSource === 'managed' && !skill.isBundled);
 
-      return matchesSearch && matchesSource;
+      const matchesStatus = selectedStatus === 'all'
+        || (selectedStatus === 'enabled' ? skill.enabled : selectedStatus === 'disabled' ? !skill.enabled : getSkillAvailabilityKind(skill) === selectedStatus);
+      return matchesSearch && matchesSource && matchesStatus;
     }).sort((a, b) => {
       // Enabled skills first
       if (a.enabled && !b.enabled) return -1;
@@ -1176,26 +1419,24 @@ export function Skills() {
       // Finally alphabetical
       return a.name.localeCompare(b.name);
     });
-  }, [deferredSearchQuery, deferredSelectedSource, skillsForView]);
+  }, [deferredSearchQuery, deferredSelectedSource, selectedStatus, skillsForView]);
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   const filteredSkillCards = useMemo<SkillGridCardViewModel[]>(() => {
     const configurableLabel = t('detail.configurable');
-    const blockedLabel = t('availability.blockedByAllowlist');
     return filteredSkills.map((skill) => {
       const availabilityKind = getSkillAvailabilityKind(skill);
-      const missingSummary = formatMissingSummary(skill.missing);
-      const availabilityLabel = availabilityKind === 'disabled'
-        ? t('detail.disabled')
-        : t(`availability.${availabilityKind}`);
+      const missingSummary = formatSkillMissingSummary(skill);
+      const availabilityLabel = resolveAvailabilityLabel(availabilityKind, t);
       const displayName = skill.name.trim() || skill.slug?.trim() || skill.id;
       return {
         skillId: skill.id,
         skillName: displayName,
         skillDescription: skill.description,
-        skillIcon: skill.icon || '🧩',
+        skillIcon: skill.icon || '',
+        sourceLabel: resolveSkillSourceLabel(skill, t),
         isCore: Boolean(skill.isCore),
         isBundled: Boolean(skill.isBundled),
         slug: skill.slug && skill.slug !== displayName ? skill.slug : undefined,
@@ -1204,7 +1445,6 @@ export function Skills() {
         configurable: Boolean(skill.configurable),
         availabilityKind,
         availabilityLabel,
-        blockedLabel,
         missingSummaryLabel: missingSummary && availabilityKind !== 'eligible'
           ? t('availability.missingPrefix', { items: missingSummary })
           : undefined,
@@ -1218,11 +1458,29 @@ export function Skills() {
       return { all: 0, builtIn: 0, managed: 0 };
     }
     return {
-      all: visibleInstalledSkills.length,
-      builtIn: visibleInstalledSkills.filter((skill) => skill.isBundled).length,
-      managed: visibleInstalledSkills.filter((skill) => !skill.isBundled).length,
+      all: safeSkills.length,
+      builtIn: safeSkills.filter((skill) => skill.isBundled).length,
+      managed: safeSkills.filter((skill) => !skill.isBundled).length,
     };
-  }, [isAllTabActive, visibleInstalledSkills]);
+  }, [isAllTabActive, safeSkills]);
+
+  const handleRefresh = useCallback(() => {
+    if (isSealedTabActive) {
+      void fetchSealedSkills();
+      void fetchCloudSkillPackages();
+      return;
+    }
+    void fetchSkills({ force: true, fresh: true });
+  }, [fetchCloudSkillPackages, fetchSealedSkills, fetchSkills, isSealedTabActive]);
+
+  const handleExportSkillPackage = useCallback(async (skillId: string) => {
+    try {
+      await exportSkillPackage(skillId);
+      toast.success(t('sealed.exported'));
+    } catch (err) {
+      toast.error(t('sealed.exportFailed') + ': ' + String(err));
+    }
+  }, [exportSkillPackage, t]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -1266,20 +1524,18 @@ export function Skills() {
 
   const handleOpenSkillFolder = useCallback(async (skill: Skill) => {
     try {
-      const targetDir = typeof skill.baseDir === 'string' ? skill.baseDir.trim() : '';
-      if (!targetDir) {
-        throw new Error('Skill path not available');
-      }
-      const openResult = await invokeIpc<string>('shell:openPath', targetDir);
-      if (openResult) {
-        if (
-          openResult.toLowerCase().includes('no such file')
-          || openResult.toLowerCase().includes('not found')
-          || openResult.toLowerCase().includes('failed to open')
-        ) {
-          throw new Error(t('toast.failedFolderNotFound'));
-        }
-        throw new Error(openResult);
+      const result = await skillManagementCapabilityExecute<{ success: boolean; error?: string }>(
+        'clawhub.openPath',
+        {
+          skillKey: skill.id,
+          slug: skill.slug,
+          filePath: skill.filePath,
+          baseDir: skill.baseDir,
+        },
+        { kind: 'skill', skillId: skill.id, slug: skill.slug },
+      );
+      if (!result.success) {
+        throw new Error(result.error || t('toast.failedOpenActualFolder'));
       }
     } catch (err) {
       toast.error(t('toast.failedOpenActualFolder') + ': ' + String(err));
@@ -1290,7 +1546,8 @@ export function Skills() {
     void handleToggle(skillId, enable);
   }, [handleToggle]);
 
-  const hasInstalledSkills = useMemo(() => skills.some((s) => !s.isBundled), [skills]);
+  const hasInstalledSkills = useMemo(() => safeSkills.some((s) => !s.isBundled), [safeSkills]);
+  const cloudPackagesUnavailable = sealedCloudError === SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR;
 
   const handleOpenSkillsFolder = useCallback(async () => {
     try {
@@ -1327,10 +1584,22 @@ export function Skills() {
     return localSkillSourcePath.split(/[\\/]/).pop() || localSkillSourcePath;
   }, [localSkillSourcePath]);
 
+  const skillPackageName = useMemo(() => {
+    if (!skillPackagePath) {
+      return '';
+    }
+    return skillPackagePath.split(/[\\/]/).pop() || skillPackagePath;
+  }, [skillPackagePath]);
+
   const resetLocalSkillDialog = useCallback(() => {
     setLocalSkillDialogOpen(false);
     setLocalSkillSourcePath('');
     setLocalSkillImporting(false);
+  }, []);
+
+  const resetSkillPackageUploadDialog = useCallback(() => {
+    setSkillPackageUploadDialogOpen(false);
+    setSkillPackagePath('');
   }, []);
 
   const handleChooseLocalSkillSource = useCallback(async () => {
@@ -1402,6 +1671,49 @@ export function Skills() {
     }
   }, [enableSkill, fetchSkills, importLocalSkill, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
+  const handleChooseSkillPackage = useCallback(async () => {
+    try {
+      const result = await invokeIpc<{ canceled: boolean; filePaths?: string[] }>('dialog:open', {
+        properties: ['openFile'],
+        filters: [
+          {
+            name: t('sealed.uploadDialog.packageFilter'),
+            extensions: ['matcha-skillpkg'],
+          },
+        ],
+      });
+      if (result.canceled || !result.filePaths?.length) {
+        return;
+      }
+      setSkillPackagePath(result.filePaths[0]);
+    } catch (error) {
+      toast.error(t('sealed.uploadFailed') + ': ' + String(error));
+    }
+  }, [t]);
+
+  const handleUploadSkillPackageToCloud = useCallback(async () => {
+    if (!skillPackagePath.trim() || sealedCloudUploading) {
+      return;
+    }
+    try {
+      await uploadLocalSkillPackageToCloud(skillPackagePath);
+      toast.success(t('sealed.uploaded'));
+      resetSkillPackageUploadDialog();
+    } catch (error) {
+      toast.error(t('sealed.uploadFailed') + ': ' + String(error));
+    }
+  }, [resetSkillPackageUploadDialog, sealedCloudUploading, skillPackagePath, t, uploadLocalSkillPackageToCloud]);
+
+  const handleInstallCloudSkillPackage = useCallback(async (packageInfo: SealedSkillCloudPackage) => {
+    try {
+      await downloadAndInstallCloudSkillPackage(packageInfo);
+      toast.success(t('sealed.installedFromCloud'));
+      await fetchSkills({ force: true, fresh: true });
+    } catch (error) {
+      toast.error(t('sealed.installFromCloudFailed') + ': ' + String(error));
+    }
+  }, [downloadAndInstallCloudSkillPackage, fetchSkills, t]);
+
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -1437,7 +1749,6 @@ export function Skills() {
   const handleInstall = useCallback(async (slug: string) => {
     try {
       await installSkill(slug);
-      await enableSkill(slug);
       toast.success(t('toast.installed'));
     } catch (err) {
       const errorCode = normalizeSkillErrorCode(err instanceof Error ? err.message : String(err));
@@ -1447,7 +1758,7 @@ export function Skills() {
         toast.error(t('toast.failedInstall') + ': ' + errorCode);
       }
     }
-  }, [installSkill, enableSkill, t, skillsDirPath]);
+  }, [installSkill, t, skillsDirPath]);
 
   // Initial marketplace load (Discovery)
   useEffect(() => {
@@ -1468,53 +1779,62 @@ export function Skills() {
   }, [activeTab, marketplaceQuery, searching, searchSkills]);
 
   // Handle uninstall
-  const handleUninstall = useCallback(async (slug: string) => {
+  const handleUninstall = useCallback(async (skillKey: string, slug?: string) => {
     try {
-      await uninstallSkill(slug);
+      await uninstallSkill(skillKey, slug);
       toast.success(t('toast.uninstalled'));
     } catch (err) {
       toast.error(t('toast.failedUninstall') + ': ' + String(err));
     }
   }, [uninstallSkill, t]);
 
-  const handleUninstallSkillQuick = useCallback((slug: string) => {
-    void handleUninstall(slug);
+  const handleUninstallSkillQuick = useCallback((skillKey: string) => {
+    void handleUninstall(skillKey);
   }, [handleUninstall]);
 
-  const selectedMarketplaceInstalled = useMemo(() => {
+  const selectedInstalledMarketplaceSkill = useMemo(() => {
     if (!selectedMarketplaceSkill) {
-      return false;
+      return undefined;
     }
-    return safeSkills.some((s) => s.id === selectedMarketplaceSkill.slug || s.name === selectedMarketplaceSkill.name);
+    return findInstalledMarketplaceSkill(safeSkills, selectedMarketplaceSkill);
   }, [safeSkills, selectedMarketplaceSkill]);
+  const selectedMarketplaceInstalled = selectedInstalledMarketplaceSkill !== undefined;
 
   const selectedMarketplaceInstalling = selectedMarketplaceSkill
-    ? Boolean(installing[selectedMarketplaceSkill.slug])
+    ? Boolean(installing[selectedMarketplaceSkill.slug] || installing[selectedInstalledMarketplaceSkill?.id ?? ''])
     : false;
+  const packageSearch = sealedQuery.trim().toLowerCase();
+  const filteredSealedSkills = sealedSkills.filter((skill) => [skill.name, skill.skillKey, skill.description].some((value) => value?.toLowerCase().includes(packageSearch)));
+  const filteredCloudPackages = cloudPackages.filter((item) => [item.name, item.skillKey, item.packageId, item.fileName, item.description].some((value) => value?.toLowerCase().includes(packageSearch)));
+  const filteredExportableSkills = exportableSkills.filter((skill) => [skill.name, skill.id, skill.description].some((value) => value?.toLowerCase().includes(packageSearch)));
+  const resourceGridClassName = view === 'list' ? 'md:grid-cols-1 xl:grid-cols-1' : undefined;
+  const viewControls = <AgentViewToggle value={view} onChange={(value) => updateQuery('view', value)} gridLabel={t('view.grid')} listLabel={t('view.list')} />;
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-muted-foreground">
-            {t('subtitle')}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => { void fetchSkills({ force: true, fresh: true }); }} disabled={!gatewayProcessRunning || manualRefreshBusy}>
-            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
-            {t('refresh')}
-          </Button>
-          {hasInstalledSkills && (
-            <Button variant="outline" onClick={handleOpenSkillsFolder}>
-              <FolderOpen className="h-4 w-4 mr-2" />
-              {t('openFolder')}
+    <AgentPage>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="group/skills space-y-6" data-view={view}>
+        <AgentPageSection actions={(
+          <>
+            <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label={t('refresh')} title={t('refresh')} onClick={handleRefresh} disabled={isSealedTabActive ? sealedSkillsLoading : (!gatewayProcessRunning || manualRefreshBusy)}>
+              <RefreshCw className={cn('size-4', (refreshing || sealedSkillsLoading) && 'animate-spin motion-reduce:animate-none')} />
             </Button>
-          )}
-        </div>
-      </div>
+            {hasInstalledSkills && (
+              <Button variant="outline" size="sm" className="h-9 gap-2 rounded-full" onClick={handleOpenSkillsFolder}>
+                <FolderOpen className="size-4" />
+                {t('openFolder')}
+              </Button>
+            )}
+          </>
+        )}>
+          <TabsList variant="line" aria-label={t('title')}>
+            <TabsTrigger value="all" className="gap-2">
+              {t('tabs.installed')}
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">{safeSkills.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="sealed">{t('tabs.sealed')}</TabsTrigger>
+            <TabsTrigger value="marketplace">{t('tabs.marketplace')}</TabsTrigger>
+          </TabsList>
+        </AgentPageSection>
 
       {/* Gateway Status */}
       {showGatewayBanner && gatewayBannerState !== 'none' && (
@@ -1541,86 +1861,40 @@ export function Skills() {
 
       {showRefreshingHint && (
         <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
           {t('common:status.loading', 'Loading...')}
         </div>
       )}
 
-      {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
-          <TabsTrigger value="all" className="gap-2">
-            <Puzzle className="h-4 w-4" />
-            {t('tabs.installed')}
-          </TabsTrigger>
-          <TabsTrigger value="marketplace" className="gap-2">
-            <Globe className="h-4 w-4" />
-            {t('tabs.marketplace')}
-          </TabsTrigger>
-          {/* <TabsTrigger value="bundles" className="gap-2">
-            <Package className="h-4 w-4" />
-            Bundles
-          </TabsTrigger> */}
-        </TabsList>
 
         {activeTab === 'all' ? (
           <TabsContent value="all" className="space-y-6 mt-6">
           {/* Search and Filter */}
-          <div className="flex gap-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px]">
-              <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder={t('search')}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9"
-              />
+          <AgentPageToolbar>
+            <div className="relative w-full sm:w-72">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+              <Input aria-label={t('search')} placeholder={t('search')} value={searchQuery} onChange={(e) => updateQuery('search', e.target.value)} className="h-9 pl-9 text-sm" />
             </div>
-
-            <div className="flex gap-2">
-              <Button
-                variant={selectedSource === 'all' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setSelectedSource('all')}
-              >
-                {t('filter.all', { count: sourceStats.all })}
-              </Button>
-              <Button
-                variant={selectedSource === 'built-in' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setSelectedSource('built-in')}
-                className="gap-2"
-              >
-                <Puzzle className="h-3 w-3" />
-                {t('filter.builtIn', { count: sourceStats.builtIn })}
-              </Button>
-              <Button
-                variant={selectedSource === 'managed' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setSelectedSource('managed')}
-                className="gap-2"
-              >
-                <Globe className="h-3 w-3" />
-                {t('filter.marketplace', { count: sourceStats.managed })}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => { void bulkToggleVisible(true); }}
-                disabled={false}
-              >
-                {t('actions.enableVisible')}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => { void bulkToggleVisible(false); }}
-                disabled={false}
-              >
-                {t('actions.disableVisible')}
-              </Button>
+            <Select aria-label={t('filter.source')} value={selectedSource} onChange={(e) => updateQuery('source', e.target.value)} className="h-9 w-auto max-w-full text-xs">
+              <option value="all">{t('filter.all', { count: sourceStats.all })}</option>
+              <option value="built-in">{t('filter.builtIn', { count: sourceStats.builtIn })}</option>
+              <option value="managed">{t('filter.managed', { count: sourceStats.managed })}</option>
+            </Select>
+            <Select aria-label={t('filter.status')} value={selectedStatus} onChange={(e) => updateQuery('status', e.target.value)} className="h-9 w-auto max-w-full text-xs">
+              <option value="all">{t('filter.allStatuses')}</option>
+              <option value="enabled">{t('filter.enabled')}</option>
+              <option value="disabled">{t('filter.disabled')}</option>
+              {(['eligible', 'missing', 'unselectable', 'unknown'] as const).map((kind) => <option key={kind} value={kind}>{resolveAvailabilityLabel(kind, t)}</option>)}
+            </Select>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" className="h-9 text-xs" onClick={() => { void bulkToggleVisible(true); }}>{t('actions.enableVisible')}</Button>
+              <Button variant="outline" size="sm" className="h-9 text-xs" onClick={() => { void bulkToggleVisible(false); }}>{t('actions.disableVisible')}</Button>
             </div>
-          </div>
+            <div className="ml-auto flex items-center gap-3">
+              <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">{t('count', { count: filteredSkillCards.length })}</span>
+              {viewControls}
+            </div>
+          </AgentPageToolbar>
 
           {/* Error Display */}
           {error && (
@@ -1638,21 +1912,21 @@ export function Skills() {
 
           {/* Skills Grid */}
           {!skillsHeavyContentReady ? (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <AgentResourceGrid className={resourceGridClassName}>
               {Array.from({ length: 6 }).map((_, index) => (
                 <Card key={`skills-placeholder-${index}`}>
                   <CardHeader className="pb-3">
-                    <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
-                    <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-3/5 animate-pulse motion-reduce:animate-none rounded bg-muted" />
+                    <div className="mt-2 h-3 w-4/5 animate-pulse motion-reduce:animate-none rounded bg-muted" />
                   </CardHeader>
                   <CardContent>
-                    <div className="h-3 w-full animate-pulse rounded bg-muted" />
-                    <div className="mt-2 h-3 w-2/3 animate-pulse rounded bg-muted" />
-                    <div className="mt-4 h-6 w-24 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-full animate-pulse motion-reduce:animate-none rounded bg-muted" />
+                    <div className="mt-2 h-3 w-2/3 animate-pulse motion-reduce:animate-none rounded bg-muted" />
+                    <div className="mt-4 h-6 w-24 animate-pulse motion-reduce:animate-none rounded bg-muted" />
                   </CardContent>
                 </Card>
               ))}
-            </div>
+            </AgentResourceGrid>
           ) : showInitialLoading ? (
             <Card>
               <CardContent className="flex flex-col items-center justify-center py-12">
@@ -1670,7 +1944,7 @@ export function Skills() {
               </CardContent>
             </Card>
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <AgentResourceGrid className={resourceGridClassName}>
               {filteredSkillCards.map((skill) => (
                 <SkillGridCard
                   key={skill.skillId}
@@ -1681,58 +1955,179 @@ export function Skills() {
                   onUninstallSkill={handleUninstallSkillQuick}
                 />
               ))}
-            </div>
+            </AgentResourceGrid>
           )}
+          </TabsContent>
+        ) : null}
+
+        {activeTab === 'sealed' ? (
+          <TabsContent value="sealed" className="space-y-6 mt-6">
+            <AgentPageToolbar>
+              <div className="relative w-full sm:w-72">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input aria-label={t('sealed.search')} placeholder={t('sealed.search')} value={sealedQuery} onChange={(e) => updateQuery('packageSearch', e.target.value)} className="h-9 pl-9 text-sm" />
+              </div>
+              <div className="ml-auto">{viewControls}</div>
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2"
+                disabled={sealedCloudUploading}
+                onClick={() => setSkillPackageUploadDialogOpen(true)}
+              >
+                {sealedCloudUploading ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Upload className="h-4 w-4" />}
+                {t('sealed.uploadLocalPackage')}
+              </Button>
+            </AgentPageToolbar>
+
+            {sealedSkillsError && (
+              <Card className="border-destructive/50 bg-destructive/5">
+                <CardContent className="py-3 text-sm text-destructive flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>{sealedSkillsError}</span>
+                </CardContent>
+              </Card>
+            )}
+
+            {sealedSkillsLoading && sealedSkills.length === 0 ? (
+              <Card>
+                <CardContent className="flex flex-col items-center justify-center py-12">
+                  <LoadingSpinner size="lg" />
+                </CardContent>
+              </Card>
+            ) : filteredSealedSkills.length === 0 ? (
+              <Card>
+                <CardContent className="flex flex-col items-center justify-center py-12">
+                  <Lock className="h-12 w-12 text-muted-foreground mb-4" />
+                  <h3 className="text-lg font-medium">{packageSearch ? t('noSkills') : t('sealed.emptyTitle')}</h3>
+                </CardContent>
+              </Card>
+            ) : (
+              <AgentResourceGrid className={resourceGridClassName}>
+                {filteredSealedSkills.map((skill) => (
+                  <SealedSkillCard
+                    key={skill.skillKey}
+                    skill={skill}
+                    enabled={skillById.get(skill.skillKey)?.enabled ?? skill.enabled !== false}
+                    mutationLocked={Boolean(mutatingBySkillId[skill.skillKey])}
+                    onToggleSkill={handleToggleSkillQuick}
+                  />
+                ))}
+              </AgentResourceGrid>
+            )}
+
+            <div className="space-y-3">
+              <h2 className="text-lg font-semibold">{t('sealed.cloudTitle')}</h2>
+              {sealedCloudLoading && cloudPackages.length === 0 ? (
+                <Card>
+                  <CardContent className="flex flex-col items-center justify-center py-12">
+                    <LoadingSpinner size="lg" />
+                  </CardContent>
+                </Card>
+              ) : cloudPackagesUnavailable ? (
+                <Card>
+                  <CardContent className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+                    <Globe className="h-10 w-10 text-muted-foreground" />
+                    <div>
+                      <h3 className="text-base font-medium text-foreground">{t('sealed.cloudUnavailableTitle')}</h3>
+                      <p className="mt-1 text-sm text-muted-foreground">{t('sealed.cloudUnavailableDescription')}</p>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => { void fetchCloudSkillPackages(); }}>
+                      <RefreshCw className={cn('mr-2 h-4 w-4', sealedCloudLoading && 'animate-spin')} />
+                      {t('refresh')}
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : filteredCloudPackages.length === 0 ? (
+                <Card>
+                  <CardContent className="py-6 text-sm text-muted-foreground">
+                    {packageSearch ? t('noSkills') : t('sealed.cloudEmpty')}
+                  </CardContent>
+                </Card>
+              ) : (
+                <AgentResourceGrid className={resourceGridClassName}>
+                  {filteredCloudPackages.map((packageInfo) => {
+                    const packageKey = getSealedSkillCloudPackageKey(packageInfo);
+                    return (
+                      <SealedSkillCloudPackageCard
+                        key={packageKey}
+                        packageInfo={packageInfo}
+                        installing={Boolean(cloudInstallingByPackageKey[packageKey])}
+                        onInstall={handleInstallCloudSkillPackage}
+                      />
+                    );
+                  })}
+                </AgentResourceGrid>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <h2 className="text-lg font-semibold">{t('sealed.exportTitle')}</h2>
+              {filteredExportableSkills.length === 0 ? (
+                <Card>
+                  <CardContent className="py-6 text-sm text-muted-foreground">
+                    {packageSearch ? t('noSkills') : t('sealed.noExportTargets')}
+                  </CardContent>
+                </Card>
+              ) : (
+                <AgentResourceGrid className={resourceGridClassName}>
+                  {filteredExportableSkills.map((skill) => (
+                    <ExportSkillPackageCard
+                      key={skill.id}
+                      skill={skill}
+                      exporting={Boolean(exportingBySkillKey[skill.id])}
+                      onExportSkillPackage={handleExportSkillPackage}
+                    />
+                  ))}
+                </AgentResourceGrid>
+              )}
+            </div>
           </TabsContent>
         ) : null}
 
         {activeTab === 'marketplace' ? (
           <TabsContent value="marketplace" className="space-y-6 mt-6">
           <div className="flex flex-col gap-4">
-            <Card className="border-muted/50 bg-muted/20">
-              <CardContent className="py-4 flex items-start gap-3">
-                <ShieldCheck className="h-5 w-5 text-muted-foreground mt-0.5" />
-                <div className="text-muted-foreground">
-                  {t('marketplace.securityNote')}
-                </div>
-              </CardContent>
-            </Card>
-            <div className="flex flex-col gap-3 md:flex-row">
-              <form onSubmit={handleMarketplaceSearch} className="flex-1 flex gap-2">
+            <AgentPageToolbar>
+              <form onSubmit={handleMarketplaceSearch} className="flex min-w-0 flex-1 gap-2">
                 <div className="relative flex-1">
-                  <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                  <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
                   <Input
+                    aria-label={t('searchMarketplace')}
                     placeholder={t('searchMarketplace')}
                     value={marketplaceQuery}
-                    onChange={(e) => setMarketplaceQuery(e.target.value)}
-                    className="pl-9 pr-9"
+                    onChange={(e) => updateQuery('marketSearch', e.target.value)}
+                    className="h-9 pl-9 pr-9 text-sm"
                   />
                   {marketplaceQuery && (
                     <button
                       type="button"
-                      className="absolute right-3 top-3 text-muted-foreground hover:text-foreground"
-                      onClick={() => setMarketplaceQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={t('actions.clearSearch')}
+                      onClick={() => updateQuery('marketSearch', '')}
                     >
                       <X className="h-4 w-4" />
                     </button>
                   )}
                 </div>
-                <Button type="submit" disabled={searching} className="min-w-[100px] gap-2">
-                  {searching && <RefreshCw className="h-4 w-4 animate-spin" />}
+                <Button type="submit" disabled={searching} className="h-9 gap-2">
+                  {searching && <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
                   <span>{searching ? t('marketplace.searching') : t('searchButton')}</span>
                 </Button>
               </form>
               <Button
                 type="button"
                 variant="outline"
-                className="gap-2 md:min-w-[124px]"
+                className="h-9 gap-2"
                 disabled={false}
                 onClick={() => setLocalSkillDialogOpen(true)}
               >
                 <Upload className="h-4 w-4" />
                 {t('marketplace.uploadSkill')}
               </Button>
-            </div>
+              <Button type="button" variant="outline" disabled={searching} onClick={() => { updateQuery('marketSearch', ''); marketplaceDiscoveryAttemptedRef.current = true; void searchSkills(''); }}>{t('marketplace.discover')}</Button>
+              {viewControls}
+            </AgentPageToolbar>
 
             {searchError && (
               <Card className="border-destructive/50 bg-destructive/5">
@@ -1748,23 +2143,23 @@ export function Skills() {
             )}
 
             {searchResults.length > 0 ? (
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <AgentResourceGrid className={resourceGridClassName}>
                 {searchResults.map((skill) => {
-                  const isInstalled = safeSkills.some((s) => s.id === skill.slug || s.name === skill.name);
+                  const installedSkill = findInstalledMarketplaceSkill(safeSkills, skill);
                   return (
                     <MarketplaceSkillCard
                       key={skill.slug}
                       skill={skill}
-                      isInstalling={!!installing[skill.slug]}
-                      isInstalled={isInstalled}
+                      isInstalling={Boolean(installing[skill.slug] || installing[installedSkill?.id ?? ''])}
+                      isInstalled={installedSkill !== undefined}
                       mutationLocked={false}
                       onOpenDetail={() => setSelectedMarketplaceSkill(skill)}
                       onInstall={() => handleInstall(skill.slug)}
-                      onUninstall={() => handleUninstall(skill.slug)}
+                      onUninstall={() => handleUninstall(installedSkill?.id ?? skill.slug, skill.slug)}
                     />
                   );
                 })}
-              </div>
+              </AgentResourceGrid>
             ) : (
               <Card>
                 <CardContent className="flex flex-col items-center justify-center py-12">
@@ -1825,7 +2220,7 @@ export function Skills() {
           isInstalling={selectedMarketplaceInstalling}
           mutationLocked={false}
           onInstall={() => { void handleInstall(selectedMarketplaceSkill.slug); }}
-          onUninstall={() => { void handleUninstall(selectedMarketplaceSkill.slug); }}
+          onUninstall={() => { void handleUninstall(selectedInstalledMarketplaceSkill?.id ?? selectedMarketplaceSkill.slug, selectedMarketplaceSkill.slug); }}
           onClose={() => setSelectedMarketplaceSkill(null)}
         />
       )}
@@ -1844,7 +2239,22 @@ export function Skills() {
         onDropSourcePath={setLocalSkillSourcePath}
         onImport={() => { void handleImportLocalSkill(); }}
       />
-    </div>
+
+      <SealedSkillPackageUploadDialog
+        open={skillPackageUploadDialogOpen}
+        uploading={sealedCloudUploading}
+        selectedPackageName={skillPackageName}
+        selectedPackagePath={skillPackagePath}
+        onClose={() => {
+          if (!sealedCloudUploading) {
+            resetSkillPackageUploadDialog();
+          }
+        }}
+        onChoosePackage={() => { void handleChooseSkillPackage(); }}
+        onDropPackagePath={setSkillPackagePath}
+        onUpload={() => { void handleUploadSkillPackageToCloud(); }}
+      />
+    </AgentPage>
   );
 }
 

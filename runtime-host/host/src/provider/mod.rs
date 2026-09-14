@@ -2,6 +2,7 @@ pub(crate) mod accounts;
 pub(crate) mod actor;
 pub(crate) mod command;
 pub(crate) mod handle;
+pub(crate) mod model_reference;
 pub(crate) mod models;
 pub(crate) mod routing;
 

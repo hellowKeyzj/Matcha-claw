@@ -102,7 +102,7 @@ Renderer session/history request
 2. Gateway health/connection/lifecycle；
 3. channel config/live/login/pairing；
 4. cron definitions/run/receipt/history；
-5. skills/plugins/provider/toolchain 等各自 operation owner；Toolchain 的 `hostUvInstallAll` 直接走 `platform.runtime`/`toolchain.installUv`、target=`platform-runtime`，Electron public adapter 调 Rust private `openclaw.toolchain.install-uv` 并等待真实结果。
+5. skills/plugins/provider/toolchain 等各自 operation owner；Toolchain prepare 走 dedicated Host path：Renderer `hostToolchainPrepare()` → Electron `/api/toolchain/uv/prepare` → Rust private `host.toolchain.prepare` → `runtime-host/external/toolchain::NativeToolchain`，并等待真实结果。
 
 每个 operation 必须拆开 config write、apply、ready、observed 和 terminal outcome；不能由 Host 或已删除的 Host-wide generic operation queue 代管。
 
@@ -114,10 +114,10 @@ Environment 不是 generic config owner。以下 owner 分别闭合：
 - provider account/model/routing/private auth；
 - settings desired/private OpenClaw projection/Gateway apply；
 - security policy/plugin apply/audit/enforcement；
-- license secret/cache/gate/revalidation；
-- toolchain verify/install result。
+- license 产品面已退休，不再作为 Environment owner 迁移；
+- toolchain verify/prepare result。
 
-各 owner 处理自己的 schema migration、secret boundary、Unknown/readback 和 typed operation projection。Toolchain install 等需要真实业务结果的调用必须等待 native terminal result；只有 accepted-only operation 才返回 owner-local operationId，并由具体 owner/facade typed operation query/event 恢复。不能把它们合并为一个 `EnvironmentState`。
+各 owner 处理自己的 schema migration、secret boundary、Unknown/readback 和 typed operation projection。Toolchain prepare 等需要真实业务结果的调用必须等待 native terminal result；只有 accepted-only operation 才返回 owner-local operationId，并由具体 owner/facade typed operation query/event 恢复。不能把它们合并为一个 `EnvironmentState`。
 
 ## Block 7：Fleet
 

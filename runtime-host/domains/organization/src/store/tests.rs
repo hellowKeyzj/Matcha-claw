@@ -46,7 +46,9 @@ use crate::{
             ApprovalEffect, ApprovalOrigin, ApprovalResolutionCause, ApprovalSubject,
             HumanDecisionCommand, HumanDecisionOutcome,
         },
-        event::{ApprovalAction, ApprovalCommand, EventLedger, OpaqueId, RunCommand},
+        event::{
+            ApprovalAction, ApprovalCommand, EventLedger, EventLedgerSnapshot, OpaqueId, RunCommand,
+        },
     },
     settle_delivery,
 };
@@ -189,20 +191,14 @@ fn concurrent_role_chat_admission_produces_at_most_one_delivery() {
     });
 
     let outcomes = [first.join().unwrap(), second.join().unwrap()];
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, RoleChatAdmissionOutcome::Accepted { .. }))
-            .count(),
-        1,
-    );
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, RoleChatAdmissionOutcome::OutcomeUnknown))
-            .count(),
-        1,
-    );
+    let delivery_ids = outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            RoleChatAdmissionOutcome::Accepted { delivery_id } => delivery_id,
+            _ => panic!("concurrent replay must return the accepted delivery"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(delivery_ids[0], delivery_ids[1]);
     let reopened = OrganizationStore::open(&path).unwrap();
     assert_eq!(reopened.facts().deliveries().deliveries().count(), 1);
     drop(reopened);
@@ -606,6 +602,7 @@ fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_frame()
         pending_workflow_plan_admissions: Vec::new(),
         templates: Vec::new(),
         deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+        activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
         triggers: Vec::new(),
         control_resolutions: Vec::new(),
         approvals: vec![approval.durable_snapshot()],
@@ -966,6 +963,7 @@ fn durable_restore_rejects_a_resolution_event_tampered_to_another_decision() {
             pending_workflow_plan_admissions: Vec::new(),
             templates: Vec::new(),
             deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+            activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
             triggers: Vec::new(),
             control_resolutions: Vec::new(),
             approvals: vec![approval.durable_snapshot()],
@@ -1085,6 +1083,7 @@ fn durable_restore_rejects_approval_history_without_its_append_only_resolution_e
             pending_workflow_plan_admissions: Vec::new(),
             templates: Vec::new(),
             deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+            activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
             triggers: [].into_iter().collect(),
             control_resolutions: [].into_iter().collect(),
             approvals: [approval.durable_snapshot()].into_iter().collect(),
@@ -1139,6 +1138,7 @@ fn work_node_approval_resolution_does_not_complete_a_waiting_attempt() {
                 pending_workflow_plan_admissions: Vec::new(),
                 templates: Vec::new(),
                 deliveries: facts.deliveries().snapshot(),
+                activities: facts.activities().snapshot(),
                 triggers: facts.triggers().requests().cloned().collect(),
                 control_resolutions: facts.control_node_resolutions().cloned().collect(),
                 approvals: vec![
@@ -2673,25 +2673,7 @@ fn observe_matcha_terminal_uses_persisted_correlation_after_runtime_binding_drif
     let path = test_path("terminal-observation-runtime-binding-drift");
     let mut store = OrganizationStore::open(&path).unwrap();
     let (delivery, graph, binding) = delivered_delivery_and_graph();
-    let initial = OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph.clone(),
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
-    )
-    .unwrap();
+    let initial = facts_with_delivery(delivery.clone(), graph.clone(), binding, Vec::new());
     store.replace_facts(initial).unwrap();
 
     let drifted_binding = RoleSessionReceipt::new(
@@ -2703,25 +2685,7 @@ fn observe_matcha_terminal_uses_persisted_correlation_after_runtime_binding_drif
         ManagedAgentReference::try_new("agent:one").unwrap(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
     );
-    let drifted = OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(drifted_binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
-    )
-    .unwrap();
+    let drifted = facts_with_delivery(delivery, graph, drifted_binding, Vec::new());
     store.replace_facts(drifted).unwrap();
     assert_eq!(
         store.observe_matcha_terminal(
@@ -2802,25 +2766,7 @@ fn agent_node_event_resolution_commits_once_replays_and_requires_terminal_observ
     let path = test_path("agent-node-event-resolution");
     let mut store = OrganizationStore::open(&path).unwrap();
     let (delivery, graph, binding) = observed_work_delivery_and_graph();
-    let facts = OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
-    )
-    .unwrap();
+    let facts = facts_with_delivery(delivery, graph, binding, Vec::new());
     store.replace_facts(facts).unwrap();
     let resolution = AgentNodeEventResolution::complete(
         AuthorizedGraphResolutionReceipt::try_new("agent-event:one").unwrap(),
@@ -2841,25 +2787,12 @@ fn agent_node_event_resolution_commits_once_replays_and_requires_terminal_observ
     .unwrap();
     let (unobserved_delivery, unobserved_graph, unobserved_binding) =
         delivered_work_delivery_and_graph();
-    let unobserved_facts = OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                unobserved_graph,
-                Some(runtime(unobserved_binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![unobserved_delivery.snapshot()]),
-    )
-    .unwrap();
+    let unobserved_facts = facts_with_delivery(
+        unobserved_delivery,
+        unobserved_graph,
+        unobserved_binding,
+        Vec::new(),
+    );
     let unobserved_path = test_path("agent-node-event-unobserved");
     let mut unobserved_store = OrganizationStore::open(&unobserved_path).unwrap();
     unobserved_store.replace_facts(unobserved_facts).unwrap();
@@ -3130,36 +3063,7 @@ fn authorized_graph_resolution_advances_the_durable_team_run_query() {
     let path = test_path("authorized-graph-resolution");
     let mut store = OrganizationStore::open(&path).unwrap();
     let (delivery, graph, binding) = observed_delivery_and_graph();
-    let facts = OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![
-            MaterializationReceipt::try_new(
-                team_id(),
-                RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-                vec![RoleMaterializationReceipt::new(
-                    RoleId::try_new("leader").unwrap(),
-                    ManagedAgentReference::try_new("agent:one").unwrap(),
-                    RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-                )],
-            )
-            .unwrap(),
-        ],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
-    )
-    .unwrap();
+    let facts = facts_with_delivery(delivery, graph, binding, Vec::new());
     store.replace_facts(facts).unwrap();
     let query = TeamRunQuery::get(team_id(), GraphRunId::new("run:one"));
     assert_eq!(
@@ -3510,6 +3414,7 @@ fn durable_evidence_replays_after_its_node_is_reworked_without_appending() {
             pending_workflow_plan_admissions: Vec::new(),
             templates: Vec::new(),
             deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+            activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
             triggers: [].into_iter().collect(),
             control_resolutions: [].into_iter().collect(),
             approvals: [].into_iter().collect(),
@@ -3859,6 +3764,7 @@ fn human_approval_decision_commits_graph_and_approval_once() {
         pending_workflow_plan_admissions: Vec::new(),
         templates: Vec::new(),
         deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+        activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
         triggers: [].into_iter().collect(),
         control_resolutions: [].into_iter().collect(),
         approvals: vec![approval.durable_snapshot()].into_iter().collect(),
@@ -4685,6 +4591,7 @@ fn facts_with_approvals<const N: usize>(approval_ids: [&str; N]) -> Organization
         pending_workflow_plan_admissions: Vec::new(),
         templates: Vec::new(),
         deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+        activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
         triggers: [].into_iter().collect(),
         control_resolutions: [].into_iter().collect(),
         approvals: approval_ids
@@ -4788,33 +4695,11 @@ fn assert_settled_delivery(facts: &OrganizationFacts, resolution: DeliveryResolu
 
 fn terminal_facts() -> OrganizationFacts {
     let (delivery, graph, binding) = observed_delivery_and_graph();
-    let ledger =
-        DeliveryLedger::restore(DeliveryLedgerSnapshot::new(vec![delivery.snapshot()])).unwrap();
-    OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-        ],
-        ledger.snapshot(),
-    )
-    .unwrap()
+    facts_with_delivery(delivery, graph, binding, Vec::new())
 }
 
 fn delivered_terminal_facts() -> OrganizationFacts {
     let (delivery, graph, binding) = delivered_delivery_and_graph();
-    let ledger =
-        DeliveryLedger::restore(DeliveryLedgerSnapshot::new(vec![delivery.snapshot()])).unwrap();
     let second_run = GraphRunFacts::new(
         team_id(),
         TeamRevision::initial(),
@@ -4822,26 +4707,7 @@ fn delivered_terminal_facts() -> OrganizationFacts {
         None,
     )
     .unwrap();
-    OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-            second_run,
-        ],
-        ledger.snapshot(),
-    )
-    .unwrap()
+    facts_with_delivery(delivery, graph, binding, vec![second_run])
 }
 
 fn terminal_materialization() -> MaterializationReceipt {
@@ -4921,24 +4787,43 @@ fn agent_event_facts(
     graph: GraphState,
     binding: RoleSessionReceipt,
 ) -> OrganizationFacts {
-    OrganizationFacts::restore(
-        vec![TeamFacts::new(
+    facts_with_delivery(delivery, graph, binding, Vec::new())
+}
+
+fn facts_with_delivery(
+    delivery: Delivery,
+    graph: GraphState,
+    binding: RoleSessionReceipt,
+    extra_runs: Vec<GraphRunFacts>,
+) -> OrganizationFacts {
+    let mut runs = vec![
+        GraphRunFacts::new(
+            team_id(),
+            TeamRevision::initial(),
+            graph,
+            Some(runtime(binding)),
+        )
+        .unwrap(),
+    ];
+    runs.extend(extra_runs);
+    OrganizationFacts::restore_with_teamrun_ledgers(TeamRunFactsRestoreInput {
+        teams: vec![TeamFacts::new(
             team_definition(),
             TeamRevision::initial(),
             false,
         )],
-        vec![terminal_materialization()],
-        vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                graph,
-                Some(runtime(binding)),
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
-    )
+        materializations: vec![terminal_materialization()],
+        runs,
+        pending_workflow_plan_admissions: Vec::new(),
+        templates: Vec::new(),
+        deliveries: DeliveryLedgerSnapshot::new(vec![delivery.snapshot()]),
+        activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
+        triggers: Vec::new(),
+        control_resolutions: Vec::new(),
+        approvals: Vec::new(),
+        events: EventLedgerSnapshot::default(),
+        evidence: Vec::new(),
+    })
     .unwrap()
 }
 
@@ -5023,13 +4908,19 @@ fn agent_graph(kind: NodeKind, edges: Vec<EdgeDefinition>) -> GraphState {
             node_id.clone(),
             "work",
             NonZeroU32::new(1).unwrap(),
-            WorkAssignment::new("task:one", "leader"),
+            WorkAssignment::typed(
+                "task:one",
+                "private prompt",
+                ExecutorPolicy::team_role("leader"),
+                None,
+                None,
+            ),
         ),
-        NodeKind::Review => NodeDefinition::control(
+        NodeKind::Review => NodeDefinition::review(
             node_id.clone(),
-            NodeKind::Review,
             "review",
             NonZeroU32::new(1).unwrap(),
+            ReviewAssignment::new("leader", "private prompt"),
         ),
         _ => unreachable!("agent event fixtures only model work and review nodes"),
     }];
@@ -5100,11 +4991,11 @@ fn delivery_and_graph_for_node(
         4,
     )
     .unwrap();
-    let fence = graph
-        .current_attempt(&NodeId::new(node_id))
-        .unwrap()
-        .fence()
-        .clone();
+    let attempt_id = crate::AttemptId::for_node(&NodeId::new(node_id), NonZeroU32::new(1).unwrap());
+    let fence = crate::ExecutionFence::new(
+        attempt_id.clone(),
+        crate::NodeExecutionId::for_attempt(&attempt_id),
+    );
     let graph = reduce(
         graph,
         GraphEvent::AttemptStarted {

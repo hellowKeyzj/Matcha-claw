@@ -193,7 +193,7 @@ describe('subagents crud', () => {
     }
   });
 
-  it('createAgentFromTemplate uses empty workspace initialization and keeps template files on files.set', async () => {
+  it('createAgentFromTemplate skips default workspace templates and writes template files through files.set', async () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
@@ -203,6 +203,7 @@ describe('subagents crud', () => {
           name: 'Brand Guardian',
           workspace: '/home/dev/.openclaw/workspace-subagents/brand-guardian',
           model: 'gpt-4.1-mini',
+          workspaceInitialization: 'emptyWorkspace',
         });
         return { success: true, result: { agentId: 'brand-guardian' } };
       }
@@ -325,7 +326,7 @@ describe('subagents crud', () => {
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
-  it('updateAgent 选择默认模型时会通过 model.set 清理 agent model', async () => {
+  it('updateAgent 选择默认模型时会通过 agents.update 清理 agent model', async () => {
     const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({
@@ -343,9 +344,6 @@ describe('subagents crud', () => {
     });
 
     rpc.mockImplementation(async (method) => {
-      if (method === 'model.set') {
-        return { success: true, result: { revision: 'cfg-revision-model-reset', updatedAt: Date.now(), config: {} } };
-      }
       if (method === 'agents.update') {
         return { success: true, result: {} };
       }
@@ -359,16 +357,15 @@ describe('subagents crud', () => {
       model: undefined,
     });
 
-    expect(rpc).toHaveBeenCalledWith('model.set', {
-      kind: 'setConfigurationModel',
+    expect(rpc).toHaveBeenCalledWith('agents.update', {
+      kind: 'update',
       endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
       agentId: 'writer',
       model: null,
     }, undefined);
+    expect(rpc.mock.calls.some(([method]) => method === 'model.set')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
     expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
-    const updateCalls = rpc.mock.calls.filter(([method]) => method === 'agents.update');
-    expect(updateCalls).toHaveLength(0);
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 

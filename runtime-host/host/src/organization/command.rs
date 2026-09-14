@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
-    BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, GraphDefinition,
-    GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
-    PromptDeliveryRequest, ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand,
-    StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
-    TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunQuery,
-    TeamRunQueryOutcome, TeamTriggerFireOutcome, TombstoneOutcome, TriggerFireRequest,
+    ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
+    GraphDefinition, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, ResumeOutcome,
+    RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault, TeamDecisionCommand,
+    TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
+    TeamNodeEventOutcome, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
+    TombstoneOutcome, TriggerFireRequest,
     package::{
         TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionError,
         TeamSkillSelectionId,
@@ -178,52 +178,27 @@ pub enum OrganizationCommand {
     ScheduleReadyNodes {
         run_id: GraphRunId,
         now: u64,
-        reply: oneshot::Sender<Result<Vec<DeliveryId>, StoreFault>>,
+        reply: oneshot::Sender<Result<Vec<ActivityId>, StoreFault>>,
     },
-    ClaimOpenClawDelivery {
+    ClaimActivity {
         run_id: GraphRunId,
-        delivery_id: DeliveryId,
+        activity_id: ActivityId,
         claimed_at: u64,
         reply: oneshot::Sender<
             Result<
-                crate::composition::OpenClawDeliveryStart,
-                crate::composition::OpenClawDeliveryError,
+                crate::composition::TeamRunActivityStart,
+                crate::composition::TeamRunActivityError,
             >,
         >,
     },
-    ClaimMatchaDelivery {
+    SettleActivity {
         run_id: GraphRunId,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
+        claim: ActivityClaim,
+        outcome: crate::runtime_driver::ActivityExecutionOutcome,
         reply: oneshot::Sender<
             Result<
-                crate::composition::MatchaDeliveryStartOutcome,
-                crate::composition::MatchaDeliveryError,
-            >,
-        >,
-    },
-    SettleOpenClawDelivery {
-        run_id: GraphRunId,
-        claim: DeliveryClaim,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-        reply: oneshot::Sender<
-            Result<
-                crate::composition::OpenClawDeliveryOutcome,
-                crate::composition::OpenClawDeliveryError,
-            >,
-        >,
-    },
-    SettleMatchaDelivery {
-        run_id: GraphRunId,
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-        reply: oneshot::Sender<
-            Result<
-                crate::composition::MatchaDeliveryOutcome,
-                crate::composition::MatchaDeliveryError,
+                crate::composition::TeamRunActivityOutcome,
+                crate::composition::TeamRunActivityError,
             >,
         >,
     },
@@ -324,9 +299,10 @@ pub enum OrganizationQuery {
         team_id: TeamId,
         reply: oneshot::Sender<Vec<ResumeOutcome>>,
     },
-    PendingDeliveryIds {
+    PendingRunActivityIds {
+        run_id: GraphRunId,
         now: u64,
-        reply: oneshot::Sender<Vec<DeliveryId>>,
+        reply: oneshot::Sender<Vec<ActivityId>>,
     },
     TerminalObservationDeliveries {
         reply: oneshot::Sender<Vec<DeliveryId>>,
@@ -334,9 +310,9 @@ pub enum OrganizationQuery {
     ActiveRunIds {
         reply: oneshot::Sender<Vec<GraphRunId>>,
     },
-    DeliveryTarget {
-        delivery_id: DeliveryId,
-        reply: oneshot::Sender<Option<crate::composition::TeamRunDeliveryTarget>>,
+    ActivityTarget {
+        activity_id: ActivityId,
+        reply: oneshot::Sender<Option<crate::composition::TeamRunActivityTarget>>,
     },
     MatchaTerminalTarget {
         delivery_id: DeliveryId,

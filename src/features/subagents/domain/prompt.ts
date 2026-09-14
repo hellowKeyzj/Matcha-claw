@@ -8,10 +8,12 @@ import type {
 const FILE_RESPONSIBILITIES: Record<SubagentTargetFile, string> = {
   'AGENTS.md': '总体行为规则、流程和执行约束',
   'SOUL.md': '人格、语气、价值取向与互动风格',
-  'TOOLS.md': '工具使用策略、授权边界和调用偏好',
-  'IDENTITY.md': '身份、角色、名称和人设定义',
   'USER.md': '用户偏好、沟通习惯和个性化约定',
+  'MEMORY.md': '长期记忆、项目背景和持续偏好',
 };
+
+const TARGET_FILE_NAMES_TEXT = SUBAGENT_TARGET_FILES.join(' / ');
+const TARGET_FILE_COUNT = SUBAGENT_TARGET_FILES.length;
 
 interface PromptPayload {
   systemPrompt: string;
@@ -39,17 +41,17 @@ export interface ParsedSubagentDraft {
 }
 
 const MANDATORY_DRAFT_INSTRUCTIONS = [
-  '你正在生成目标工作区最终落盘的 5 个配置文件，不是在描述你自己的生成任务。',
+  `你正在生成目标工作区最终落盘的 ${TARGET_FILE_COUNT} 个配置文件，不是在描述你自己的生成任务。`,
   '外层生成器身份、JSON 规则、文件职责说明、草稿规则、用户提示词标签，只能用于理解任务，禁止写进任何 content。',
   '每个 content 都必须站在目标 Agent/工作区视角书写，围绕用户真正目标组织内容。',
   '同一草稿会话中的后续请求，必须基于上一版草稿继续迭代优化。',
   '如果本轮没有附加当前文件内容，则从空白模板生成初稿，不继承默认工作区模板。',
   '如果本轮附加了当前文件内容，则把它们作为本轮基线。',
   '只有当用户明确要求只修改部分文件时，未指定文件才保持不变。',
-  '否则 5 个目标文件都必须围绕用户目标重新组织，不能保留与目标无关的旧内容。',
-  '必须输出且仅输出 AGENTS.md、SOUL.md、TOOLS.md、IDENTITY.md、USER.md 五个文件，各出现一次。',
+  `否则 ${TARGET_FILE_COUNT} 个目标文件都必须围绕用户目标重新组织，不能保留与目标无关的旧内容。`,
+  `必须输出且仅输出 ${TARGET_FILE_NAMES_TEXT} ${TARGET_FILE_COUNT} 个文件，各出现一次。`,
   '尽量增量改写：保留已有优点，只重写薄弱部分。',
-  '每轮都检查 AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md 的一致性。',
+  `每轮都检查 ${TARGET_FILE_NAMES_TEXT} 的一致性。`,
   '优先使用具体、可执行的表述，避免空泛语句。',
   '输出前自检：完整性、一致性、清晰度、可执行性、目标视角纯净度。',
   '输出格式必须始终为 JSON：{"files":[{"name","content","reason","confidence"}]}。',
@@ -216,7 +218,7 @@ export function buildSubagentPromptPayload(
   return {
     systemPrompt: [
       '你是工作区配置文件生成器。',
-      '你的任务是把用户目标转换成目标工作区的 5 个 Markdown 配置文件。',
+      `你的任务是把用户目标转换成目标工作区的 ${TARGET_FILE_COUNT} 个 Markdown 配置文件。`,
       '你的生成器身份和这些输出规则不得出现在任何 content 字段中。',
       '严格返回 JSON：{"files":[{"name","content","reason","confidence"}]}，不允许额外文本。',
       'confidence 必须在 0 到 1 之间。',
@@ -325,10 +327,10 @@ export function buildDraftRepairPrompt(errorMessage: string): string {
     `失败原因：${errorMessage}`,
     '请重新输出完整 JSON 对象，不要 Markdown 代码块，不要任何额外解释。',
     `严格使用结构：${DRAFT_OUTPUT_SCHEMA}。`,
-    '必须包含且仅包含 AGENTS.md、SOUL.md、TOOLS.md、IDENTITY.md、USER.md 五个文件。',
+    `必须包含且仅包含 ${TARGET_FILE_NAMES_TEXT} ${TARGET_FILE_COUNT} 个文件。`,
     'content 必须只写目标工作区最终文件内容，不能出现生成器身份、生成协议、文件职责说明、用户提示词标签或 JSON 规则。',
     'content 内不要使用 ``` 代码块；若有双引号必须转义为 \\\\"。',
-    '请让 5 个文件全部围绕用户真正目标重写，并确保 JSON 完整闭合。',
+    `请让 ${TARGET_FILE_COUNT} 个文件全部围绕用户真正目标重写，并确保 JSON 完整闭合。`,
   ].join('\n');
 }
 

@@ -21,7 +21,7 @@ const LIFECYCLE_RESTART_FAILED = 'OpenClaw lifecycle restart failed';
 const LIFECYCLE_RESTART_UNKNOWN = 'OpenClaw lifecycle restart outcome is unknown';
 
 const SUBAGENT_TEMPLATE_PREFIX = '/api/openclaw/subagent-templates/';
-const TEMPLATE_FILE_NAMES = ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'] as const;
+const TEMPLATE_FILE_NAMES = ['AGENTS.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const;
 const MAX_TEMPLATE_TEXT_BYTES = 1024 * 1024;
 
 type TemplateFileName = (typeof TEMPLATE_FILE_NAMES)[number];

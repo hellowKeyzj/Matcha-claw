@@ -13,6 +13,22 @@ const MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS = 2;
 const FILEHINT_HOST = 'matchaclaw.local';
 const FILEHINT_PATH_PREFIX = '/__filehint__/';
 
+type MarkdownRenderOptions = Parameters<Renderer['renderToken']>[2];
+interface MarkdownInlineState {
+  src: string;
+  pos: number;
+  push(type: string, tag: string, nesting: -1 | 0 | 1): Token;
+}
+
+interface MarkdownBlockState {
+  src: string;
+  bMarks: number[];
+  eMarks: number[];
+  tShift: number[];
+  line: number;
+  push(type: string, tag: string, nesting: -1 | 0 | 1): Token;
+}
+
 export interface MarkdownBodyRenderResult {
   fullHtml: string;
 }
@@ -71,9 +87,9 @@ function renderKatex(content: string, displayMode: boolean): string {
   }
 }
 
-function mathInlineDollarRule(state: any, silent: boolean): boolean {
+function mathInlineDollarRule(state: MarkdownInlineState, silent: boolean): boolean {
   const start = state.pos;
-  const src = state.src as string;
+  const src = state.src;
   if (src.charCodeAt(start) !== 0x24 || src.charCodeAt(start + 1) === 0x24) {
     return false;
   }
@@ -110,9 +126,9 @@ function mathInlineDollarRule(state: any, silent: boolean): boolean {
   return false;
 }
 
-function mathInlineParenRule(state: any, silent: boolean): boolean {
+function mathInlineParenRule(state: MarkdownInlineState, silent: boolean): boolean {
   const start = state.pos;
-  const src = state.src as string;
+  const src = state.src;
   if (!src.startsWith('\\(', start)) {
     return false;
   }
@@ -140,7 +156,7 @@ function mathInlineParenRule(state: any, silent: boolean): boolean {
 }
 
 function createMathBlockRule(open: string, close: string, markup: string) {
-  return (state: any, startLine: number, endLine: number, silent: boolean): boolean => {
+  return (state: MarkdownBlockState, startLine: number, endLine: number, silent: boolean): boolean => {
     const start = state.bMarks[startLine] + state.tShift[startLine];
     const max = state.eMarks[startLine];
     const firstLine = state.src.slice(start, max);
@@ -198,13 +214,13 @@ function createMarkdownRenderer(): MarkdownIt {
   });
 
   const defaultLinkOpenRenderer = renderer.renderer.rules.link_open
-    ?? ((tokens: Token[], idx: number, options: any, _env: unknown, self: Renderer) => self.renderToken(tokens, idx, options));
+    ?? ((tokens: Token[], idx: number, options: MarkdownRenderOptions, _env: Parameters<Renderer['render']>[2], self: Renderer) => self.renderToken(tokens, idx, options));
 
   renderer.renderer.rules.link_open = (
     tokens: Token[],
     idx: number,
-    options: any,
-    env: unknown,
+    options: MarkdownRenderOptions,
+    env: Parameters<Renderer['render']>[2],
     self: Renderer,
   ) => {
     const token = tokens[idx];
@@ -223,6 +239,26 @@ function createMarkdownRenderer(): MarkdownIt {
   });
   renderer.renderer.rules.math_inline = (tokens: Token[], idx: number) => renderKatex(tokens[idx]?.content ?? '', false);
   renderer.renderer.rules.math_block = (tokens: Token[], idx: number) => `${renderKatex(tokens[idx]?.content ?? '', true)}\n`;
+  renderer.renderer.rules.fence = (tokens: Token[], idx: number) => {
+    const token = tokens[idx];
+    const language = token.info.trim().split(/\s+/u)[0] || 'text';
+    const escapedLanguage = escapeHtml(language);
+    const escapedCodeClass = escapeHtml(`language-${language}`);
+    const escapedCode = escapeHtml(token.content);
+
+    return [
+      '<figure class="chat-code-block" data-chat-code-block>',
+      '<figcaption class="chat-code-header">',
+      `<span class="chat-code-language">${escapedLanguage}</span>`,
+      '<button type="button" class="chat-code-copy" data-chat-code-copy aria-label="Copy code">',
+      '<span class="chat-code-copy-default">Copy</span>',
+      '<span class="chat-code-copy-done" hidden>Copied</span>',
+      '</button>',
+      '</figcaption>',
+      `<pre><code class="${escapedCodeClass}">${escapedCode}</code></pre>`,
+      '</figure>\n',
+    ].join('');
+  };
 
   return renderer;
 }

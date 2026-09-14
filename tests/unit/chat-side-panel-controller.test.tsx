@@ -82,7 +82,7 @@ describe('chat side panel controller', () => {
     expect(loadSessions).not.toHaveBeenCalled();
   });
 
-  it('restores and persists side panel width with container clamping', () => {
+  it('ignores the deprecated stored open flag while restoring and persisting side panel width', () => {
     window.localStorage.setItem('chat:side-panel-open', '1');
     window.localStorage.setItem('chat:side-panel-tab', 'artifacts');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
@@ -96,7 +96,7 @@ describe('chat side panel controller', () => {
 
     const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
 
-    expect(result.current.sidePanelOpen).toBe(true);
+    expect(result.current.sidePanelOpen).toBe(false);
     expect(result.current.activeSidePanelTab).toBe('artifacts');
     expect(result.current.sidePanelWidth).toBe(520);
 
@@ -110,7 +110,6 @@ describe('chat side panel controller', () => {
   });
 
   it('keeps separate remembered widths for light tabs and artifacts', () => {
-    window.localStorage.setItem('chat:side-panel-open', '1');
     window.localStorage.setItem('chat:side-panel-tab', 'tasks');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
     window.localStorage.setItem('chat:side-panel-artifact-width', '640');
@@ -134,15 +133,14 @@ describe('chat side panel controller', () => {
     expect(result.current.sidePanelWidth).toBe(640);
 
     act(() => {
-      result.current.setActiveSidePanelTab('skills');
+      result.current.setActiveSidePanelTab('runtime');
     });
 
-    expect(result.current.activeSidePanelTab).toBe('skills');
+    expect(result.current.activeSidePanelTab).toBe('runtime');
     expect(result.current.sidePanelWidth).toBe(360);
   });
 
   it('keeps artifact fullscreen scoped to the artifacts tab and exits when switching away', () => {
-    window.localStorage.setItem('chat:side-panel-open', '1');
     window.localStorage.setItem('chat:side-panel-tab', 'artifacts');
     window.localStorage.setItem('chat:side-panel-artifact-width', '640');
 

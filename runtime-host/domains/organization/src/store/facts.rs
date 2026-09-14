@@ -4,12 +4,16 @@ use std::{
 };
 
 use crate::{
-    AgentNodeEventResolution, AgentNodeEventResolutionError, Approval, ControlAuthority,
-    ControlNodeResolution, ControlNodeResolutionError, ControlNodeResolutionOutcome,
-    DeliveryLedger, DeliveryLedgerSnapshot, DeliveryPhase, GraphDefinition, GraphRunId, GraphState,
-    IdempotencyKey, MaterializationLifecycleError, MaterializationOperationOutcome,
-    MaterializationReceipt, MaterializationRecordOutcome, RunRuntimeReceipt, TeamDefinition,
-    TeamId, TeamMaterializationLifecycle, TeamMaterializationRequest, TeamRevision,
+    Activity, ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
+    ActivityKind, ActivityLedger, ActivityLedgerSnapshot, ActivityPhase,
+    ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
+    ActivityTarget, ActivityTransitionError, AgentNodeEventResolution,
+    AgentNodeEventResolutionError, Approval, ControlAuthority, ControlNodeResolution,
+    ControlNodeResolutionError, ControlNodeResolutionOutcome, DeliveryLedger,
+    DeliveryLedgerSnapshot, DeliveryPhase, GraphDefinition, GraphRunId, GraphState, IdempotencyKey,
+    MaterializationLifecycleError, MaterializationOperationOutcome, MaterializationReceipt,
+    MaterializationRecordOutcome, NodeKind, RunRuntimeReceipt, TeamDefinition, TeamId,
+    TeamMaterializationLifecycle, TeamMaterializationRequest, TeamRevision,
     run::artifact::{
         ArtifactEvidenceProvenance, ArtifactLedger, ArtifactRecord, ArtifactRecordOutcome,
         CompletionMetadata, build_graph_completion_artifact,
@@ -290,6 +294,7 @@ pub struct TeamRunFactsRestoreInput {
     pub pending_workflow_plan_admissions: Vec<PendingWorkflowPlanAdmission>,
     pub templates: Vec<WorkflowTemplateFacts>,
     pub deliveries: DeliveryLedgerSnapshot,
+    pub activities: ActivityLedgerSnapshot,
     pub triggers: Vec<TriggerFireRequest>,
     pub control_resolutions: Vec<ControlNodeResolution>,
     pub approvals: Vec<ApprovalDurableSnapshot>,
@@ -304,6 +309,7 @@ pub(crate) struct MaterializationLifecycleFactsRestoreInput {
     pub(crate) pending_workflow_plan_admissions: Vec<PendingWorkflowPlanAdmission>,
     pub(crate) templates: Vec<WorkflowTemplateFacts>,
     pub(crate) deliveries: DeliveryLedgerSnapshot,
+    pub(crate) activities: ActivityLedgerSnapshot,
     pub(crate) triggers: Vec<TriggerFireRequest>,
     pub(crate) control_resolutions: Vec<ControlNodeResolution>,
     pub(crate) approvals: Vec<ApprovalDurableSnapshot>,
@@ -438,6 +444,7 @@ pub struct OrganizationFacts {
     materializations: BTreeMap<String, TeamMaterializationLifecycle>,
     runs: BTreeMap<String, GraphRunFacts>,
     deliveries: DeliveryLedger,
+    activities: ActivityLedger,
     triggers: TriggerLedger,
     control_resolutions: ControlResolutionLedger,
     approvals: BTreeMap<String, Approval>,
@@ -493,6 +500,7 @@ impl OrganizationFacts {
             pending_workflow_plan_admissions: Vec::new(),
             templates: Vec::new(),
             deliveries,
+            activities: ActivityLedgerSnapshot::new(Vec::new()),
             triggers: triggers.into_iter().collect(),
             control_resolutions: control_resolutions.into_iter().collect(),
             approvals: Vec::new(),
@@ -510,6 +518,7 @@ impl OrganizationFacts {
             runs,
             pending_workflow_plan_admissions,
             deliveries,
+            activities,
             triggers,
             control_resolutions,
             approvals,
@@ -531,6 +540,7 @@ impl OrganizationFacts {
                 pending_workflow_plan_admissions,
                 templates,
                 deliveries,
+                activities,
                 triggers,
                 control_resolutions,
                 approvals,
@@ -610,6 +620,7 @@ impl OrganizationFacts {
             runs,
             pending_workflow_plan_admissions,
             deliveries,
+            activities,
             triggers,
             control_resolutions,
             approvals,
@@ -723,6 +734,11 @@ impl OrganizationFacts {
 
         let deliveries = DeliveryLedger::restore(deliveries)
             .map_err(OrganizationFactsError::InvalidDeliveryLedger)?;
+        let activities = ActivityLedger::restore(activities)
+            .map_err(OrganizationFactsError::InvalidActivityLedger)?;
+        for activity in activities.activities() {
+            validate_activity(&run_facts, activity)?;
+        }
         let triggers = TriggerLedger::restore(triggers)
             .map_err(OrganizationFactsError::InvalidTriggerLedger)?;
         for request in triggers.requests() {
@@ -873,6 +889,7 @@ impl OrganizationFacts {
             templates: template_facts,
             pending_workflow_plan_admissions: pending_admissions,
             deliveries,
+            activities,
             triggers,
             control_resolutions,
             approvals: approval_facts,
@@ -1384,6 +1401,10 @@ impl OrganizationFacts {
         &self.deliveries
     }
 
+    pub fn activities(&self) -> &ActivityLedger {
+        &self.activities
+    }
+
     pub fn triggers(&self) -> &TriggerLedger {
         &self.triggers
     }
@@ -1703,6 +1724,7 @@ impl OrganizationFacts {
                     .collect(),
                 templates: self.templates.values().cloned().collect(),
                 deliveries: self.deliveries.snapshot(),
+                activities: self.activities.snapshot(),
                 triggers: self.triggers.requests().cloned().collect(),
                 control_resolutions: self.control_resolutions.resolutions().cloned().collect(),
                 approvals: self
@@ -1812,6 +1834,16 @@ impl OrganizationFacts {
                 return Err(OrganizationFactsError::DeliveryIdentityChanged);
             }
             validate_delivery_transition(delivery, current)?;
+        }
+        for activity in previous.activities.activities() {
+            let current = self
+                .activities
+                .activity(&activity.facts().activity_id)
+                .ok_or(OrganizationFactsError::RemovedActivity)?;
+            if current.facts() != activity.facts() {
+                return Err(OrganizationFactsError::ActivityIdentityChanged);
+            }
+            validate_activity_transition(activity, current)?;
         }
         for request in previous.triggers.requests() {
             if self
@@ -2050,6 +2082,8 @@ impl OrganizationFacts {
             .remove(request.run_id().as_str());
         self.deliveries
             .retain_without_run(request.run_id().as_str());
+        self.activities
+            .retain_without_run(request.run_id().as_str());
         self.triggers.retain_without_run(request.run_id().as_str());
         self.control_resolutions
             .retain_without_run(request.run_id());
@@ -2239,12 +2273,55 @@ impl OrganizationFacts {
             native_terminal,
             observed_at,
         )?;
+        if !matches!(outcome, TerminalObservationOutcome::Replayed) {
+            let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
+                .map_err(|_| TerminalObservationError::DeliveryMismatch)?;
+            if let Some(activity) = self.activities.activity_mut(&activity_id) {
+                let claim = activity
+                    .active_claim()
+                    .cloned()
+                    .ok_or(TerminalObservationError::StaleFence)?;
+                let settlement = match outcome {
+                    TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution => {
+                        ActivitySettlement::TerminalObserved { observed_at }
+                    }
+                    TerminalObservationOutcome::RecordedNodeCancelled => {
+                        ActivitySettlement::Cancelled {
+                            cancelled_at: observed_at,
+                        }
+                    }
+                    TerminalObservationOutcome::Replayed => {
+                        unreachable!("replayed outcome was filtered")
+                    }
+                };
+                crate::settle_activity(activity, &claim, settlement)
+                    .map_err(|_| TerminalObservationError::StaleFence)?;
+            }
+        }
         self.runs.insert(run_id.as_str().to_owned(), run);
         *self
             .deliveries
             .delivery_mut(delivery_id)
             .expect("delivery ledger preserves its delivery identity index") = delivery;
         Ok(outcome)
+    }
+
+    pub(crate) fn replace_run_graph(
+        &mut self,
+        run_id: &GraphRunId,
+        graph: GraphState,
+    ) -> Result<(), OrganizationFactsError> {
+        let run = self
+            .runs
+            .get(run_id.as_str())
+            .cloned()
+            .ok_or(OrganizationFactsError::UnknownRun)?;
+        if graph.definition().run_id() != run_id {
+            return Err(OrganizationFactsError::InvalidGraphRun);
+        }
+        self.runs
+            .insert(run_id.as_str().to_owned(), GraphRunFacts { graph, ..run });
+        Ok(())
     }
 
     pub(crate) fn apply_graph_patch(
@@ -2549,7 +2626,26 @@ impl OrganizationFacts {
             .cloned()
             .ok_or(AuthorizedGraphResolutionError::DeliveryMismatch)?;
         let delivery_id = delivery.facts().delivery_id.clone();
+        let resolution_outcome = resolution.outcome();
+        let resolved_at = resolution.resolved_at();
         let outcome = apply_authorized_graph_resolution(&mut delivery, &mut run.graph, resolution)?;
+        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
+            let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
+                .map_err(|_| AuthorizedGraphResolutionError::DeliveryMismatch)?;
+            if let Some(activity) = self.activities.activity_mut(&activity_id) {
+                let settlement = match resolution_outcome {
+                    crate::AuthorizedGraphOutcome::Completed => ActivitySettlement::Completed {
+                        completed_at: resolved_at,
+                    },
+                    crate::AuthorizedGraphOutcome::Failed => ActivitySettlement::Failed {
+                        failed_at: resolved_at,
+                        failure: crate::ActivityFailure::Rejected,
+                    },
+                };
+                crate::run::activity::resolve_terminal_observed_activity(activity, settlement)
+                    .map_err(|_| AuthorizedGraphResolutionError::GraphStateMismatch)?;
+            }
+        }
         self.runs.insert(run_id.as_str().to_owned(), run);
         *self
             .deliveries
@@ -2671,6 +2767,54 @@ impl OrganizationFacts {
         self.deliveries.register(request)
     }
 
+    pub(crate) fn register_activity(
+        &mut self,
+        request: ActivityRequest,
+    ) -> Result<ActivityRegistrationOutcome, OrganizationFactsError> {
+        validate_activity_request(&self.runs, &request)?;
+        self.activities
+            .register(request)
+            .map_err(|_| OrganizationFactsError::InvalidActivity)
+    }
+
+    pub(crate) fn claim_activity(
+        &mut self,
+        activity_id: &ActivityId,
+        claimed_at: u64,
+    ) -> Result<ActivityClaimOutcome, OrganizationFactsError> {
+        let activity = self
+            .activities
+            .activity_mut(activity_id)
+            .ok_or(OrganizationFactsError::UnknownActivity)?;
+        Ok(crate::claim_activity(activity, claimed_at))
+    }
+
+    pub(crate) fn dispatch_activity(
+        &mut self,
+        claim: &ActivityClaim,
+        dispatched_at: u64,
+    ) -> Result<ActivityDispatchOutcome, OrganizationFactsError> {
+        let activity = self
+            .activities
+            .activity_mut(claim.activity_id())
+            .ok_or(OrganizationFactsError::UnknownActivity)?;
+        crate::dispatch_activity(activity, claim, dispatched_at)
+            .map_err(|_| OrganizationFactsError::InvalidActivityTransition)
+    }
+
+    pub(crate) fn settle_activity(
+        &mut self,
+        claim: &ActivityClaim,
+        settlement: ActivitySettlement,
+    ) -> Result<ActivitySettlementOutcome, ActivityTransitionError> {
+        let activity = self.activities.activity_mut(claim.activity_id()).ok_or(
+            ActivityTransitionError::CannotSettle {
+                phase: ActivityPhase::Cancelled { cancelled_at: 0 },
+            },
+        )?;
+        crate::settle_activity(activity, claim, settlement)
+    }
+
     pub(crate) fn claim_delivery(
         &mut self,
         delivery_id: &crate::DeliveryId,
@@ -2723,6 +2867,24 @@ impl OrganizationFacts {
                     .expect("delivery ledger preserves its delivery identity index");
                 let _ = crate::recover_interrupted_delivery(active, observed_at);
                 recovered = true;
+            }
+        }
+        recovered
+    }
+
+    pub(crate) fn recover_interrupted_activities(&mut self, observed_at: u64) -> bool {
+        let mut recovered = false;
+        for activity in self.activities.activities().cloned().collect::<Vec<_>>() {
+            if activity.active_claim().is_some() {
+                let active = self
+                    .activities
+                    .activity_mut(&activity.facts().activity_id)
+                    .expect("activity ledger preserves its activity identity index");
+                if crate::recover_interrupted_activity(active, observed_at)
+                    == ActivitySettlementOutcome::OutcomeUnknown
+                {
+                    recovered = true;
+                }
             }
         }
         recovered
@@ -3136,6 +3298,7 @@ pub enum OrganizationFactsError {
     RuntimeRoleBindingSetMismatch,
     RuntimeBindingTeamMismatch,
     InvalidDeliveryLedger(crate::RestoreLedgerError),
+    InvalidActivityLedger(crate::RestoreActivityLedgerError),
     InvalidTriggerLedger(RestoreTriggerLedgerError),
     InvalidControlResolutionLedger,
     InvalidDecisionLedger,
@@ -3158,6 +3321,10 @@ pub enum OrganizationFactsError {
     UnknownRun,
     InvalidGraphRunLifecycle,
     UnknownDeliveryRun,
+    UnknownActivityRun,
+    UnknownActivity,
+    InvalidActivity,
+    InvalidActivityTarget,
     InvalidTerminalObservation,
     DuplicateAuthorizedGraphResolution,
     DuplicateMatchaTerminalCorrelation,
@@ -3170,6 +3337,9 @@ pub enum OrganizationFactsError {
     RemovedDelivery,
     DeliveryIdentityChanged,
     InvalidDeliveryTransition,
+    RemovedActivity,
+    ActivityIdentityChanged,
+    InvalidActivityTransition,
     InvalidTriggerRegistration,
     TriggerRegistrationChanged,
     ControlResolutionChanged,
@@ -3193,6 +3363,99 @@ pub enum OrganizationFactsError {
     WorkflowPlanAdmissionMaterializationMissing,
     WorkflowPlanAdmissionRunConflict,
     WorkflowPlanAdmissionIdempotencyConflict,
+}
+
+fn validate_activity(
+    runs: &BTreeMap<String, GraphRunFacts>,
+    activity: &Activity,
+) -> Result<(), OrganizationFactsError> {
+    validate_activity_request(runs, activity.facts())
+}
+
+fn validate_activity_request(
+    runs: &BTreeMap<String, GraphRunFacts>,
+    request: &ActivityRequest,
+) -> Result<(), OrganizationFactsError> {
+    request
+        .validate()
+        .map_err(|_| OrganizationFactsError::InvalidActivity)?;
+    let run = runs
+        .get(request.run_id.as_str())
+        .ok_or(OrganizationFactsError::UnknownActivityRun)?;
+    let node = run
+        .graph()
+        .definition()
+        .node(&request.node_id)
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    let history = run
+        .graph()
+        .executions()
+        .get(&request.node_id)
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    if history
+        .attempts()
+        .iter()
+        .all(|attempt| attempt.fence() != &request.fence)
+        || request.fence.node_execution_id() != &request.node_execution_id
+    {
+        return Err(OrganizationFactsError::InvalidActivity);
+    }
+    match (&request.activity_kind, node.kind()) {
+        (
+            ActivityKind::AgentTask {
+                task_id,
+                role_id,
+                prompt,
+            },
+            NodeKind::Work,
+        ) => {
+            let work = node
+                .work_assignment()
+                .ok_or(OrganizationFactsError::InvalidActivity)?;
+            if work.task_id() != task_id || work.role_id() != role_id || work.prompt() != prompt {
+                return Err(OrganizationFactsError::InvalidActivity);
+            }
+            validate_activity_target(run, role_id, &request.target)
+        }
+        (
+            ActivityKind::AgentTask {
+                role_id, prompt, ..
+            },
+            NodeKind::Review,
+        ) => {
+            let review = node
+                .review_assignment()
+                .ok_or(OrganizationFactsError::InvalidActivity)?;
+            if review.role_id() != role_id || prompt.trim().is_empty() {
+                return Err(OrganizationFactsError::InvalidActivity);
+            }
+            validate_activity_target(run, role_id, &request.target)
+        }
+        (ActivityKind::Control { .. }, NodeKind::Start | NodeKind::Join | NodeKind::End) => Ok(()),
+        _ => Err(OrganizationFactsError::InvalidActivity),
+    }
+}
+
+fn validate_activity_target(
+    run: &GraphRunFacts,
+    role_id: &str,
+    target: &ActivityTarget,
+) -> Result<(), OrganizationFactsError> {
+    let role = crate::RoleId::try_new(role_id.to_owned())
+        .map_err(|_| OrganizationFactsError::InvalidActivity)?;
+    let binding = run
+        .runtime()
+        .and_then(|runtime| {
+            runtime
+                .bindings()
+                .iter()
+                .find(|binding| binding.role() == &role)
+        })
+        .ok_or(OrganizationFactsError::InvalidActivityTarget)?;
+    if binding.local_session().as_str() != target.as_str() {
+        return Err(OrganizationFactsError::InvalidActivityTarget);
+    }
+    Ok(())
 }
 
 fn validate_trigger_registration(
@@ -3226,6 +3489,37 @@ fn source_matches_trigger(
             Some(crate::StartTrigger::Webhook { .. })
         )
     )
+}
+
+fn validate_activity_transition(
+    previous: &Activity,
+    current: &Activity,
+) -> Result<(), OrganizationFactsError> {
+    match (previous.phase(), current.phase()) {
+        (ActivityPhase::Pending, _) => Ok(()),
+        (ActivityPhase::Claimed(_), ActivityPhase::Claimed(_))
+        | (ActivityPhase::Claimed(_), ActivityPhase::Dispatched(_))
+        | (ActivityPhase::Claimed(_), ActivityPhase::OutcomeUnknown { .. })
+        | (ActivityPhase::Claimed(_), ActivityPhase::Cancelled { .. }) => Ok(()),
+        (ActivityPhase::Dispatched(_), ActivityPhase::Dispatched(_))
+        | (ActivityPhase::Dispatched(_), ActivityPhase::RetryScheduled { .. })
+        | (ActivityPhase::Dispatched(_), ActivityPhase::TerminalObserved { .. })
+        | (ActivityPhase::Dispatched(_), ActivityPhase::Completed { .. })
+        | (ActivityPhase::Dispatched(_), ActivityPhase::Failed { .. })
+        | (ActivityPhase::Dispatched(_), ActivityPhase::OutcomeUnknown { .. })
+        | (ActivityPhase::Dispatched(_), ActivityPhase::Cancelled { .. }) => Ok(()),
+        (ActivityPhase::RetryScheduled { .. }, ActivityPhase::RetryScheduled { .. })
+        | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Claimed(_))
+        | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
+        (ActivityPhase::TerminalObserved { .. }, ActivityPhase::TerminalObserved { .. })
+        | (ActivityPhase::TerminalObserved { .. }, ActivityPhase::Completed { .. })
+        | (ActivityPhase::TerminalObserved { .. }, ActivityPhase::Failed { .. }) => Ok(()),
+        (ActivityPhase::Completed { .. }, ActivityPhase::Completed { .. }) => Ok(()),
+        (ActivityPhase::Failed { .. }, ActivityPhase::Failed { .. }) => Ok(()),
+        (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::OutcomeUnknown { .. }) => Ok(()),
+        (ActivityPhase::Cancelled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
+        _ => Err(OrganizationFactsError::InvalidActivityTransition),
+    }
 }
 
 fn validate_delivery_transition(

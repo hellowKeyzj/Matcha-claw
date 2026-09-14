@@ -1,9 +1,6 @@
 # OpenClaw Integration
 
-OpenClaw agents are installed as workspaces containing `AGENTS.md`, `SOUL.md`,
-`TOOLS.md`, `IDENTITY.md`, and `USER.md` files. The installer copies each workspace into
-`~/.openclaw/agency-agents/` and registers it when the `openclaw` CLI is
-available.
+OpenClaw agents are installed as workspaces containing `AGENTS.md`, `SOUL.md`, `USER.md`, and `MEMORY.md` files. Local tool notes belong in the `## Tools` section of `AGENTS.md`; standalone `TOOLS.md` files are not generated.
 
 Before installing, generate the OpenClaw workspaces:
 

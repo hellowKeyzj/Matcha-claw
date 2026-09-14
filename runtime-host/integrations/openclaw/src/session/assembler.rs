@@ -127,8 +127,8 @@ impl<'facts> CanonicalAssistantTurn<'facts> {
     }
 }
 
-/// Thinking was present in the native message, but the native decoder only
-/// exposes its redacted/omitted marker. No thinking text is fabricated.
+/// Thinking was present in the native message. Redacted thinking remains an
+/// omitted marker; visible thinking text is not synthesized.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CanonicalThinking<'facts> {
     message: CanonicalHistoryMessage<'facts>,
@@ -277,6 +277,7 @@ pub struct CanonicalToolResult<'facts> {
     tool_call_id: Option<&'facts str>,
     summary: Option<&'facts str>,
     output: Option<&'facts serde_json::Value>,
+    details: Option<&'facts serde_json::Value>,
     is_error: Option<bool>,
     identity_conflict: bool,
 }
@@ -289,6 +290,7 @@ impl<'facts> CanonicalToolResult<'facts> {
         block_tool_call_id: Option<&'facts str>,
         summary: Option<&'facts str>,
         output: Option<&'facts serde_json::Value>,
+        details: Option<&'facts serde_json::Value>,
         is_error: Option<bool>,
     ) -> Self {
         let (tool_call_id, identity_conflict) =
@@ -300,6 +302,7 @@ impl<'facts> CanonicalToolResult<'facts> {
             tool_call_id,
             summary,
             output,
+            details,
             is_error,
             identity_conflict,
         }
@@ -329,6 +332,10 @@ impl<'facts> CanonicalToolResult<'facts> {
         self.output
     }
 
+    pub fn details(self) -> Option<&'facts serde_json::Value> {
+        self.details
+    }
+
     pub const fn is_error(self) -> Option<bool> {
         self.is_error
     }
@@ -346,6 +353,7 @@ impl fmt::Debug for CanonicalToolResult<'_> {
             .field("has_tool_call_id", &self.tool_call_id.is_some())
             .field("has_summary", &self.summary.is_some())
             .field("has_output", &self.output.is_some())
+            .field("has_details", &self.details.is_some())
             .field("is_error", &self.is_error)
             .field("identity_conflict", &self.identity_conflict)
             .finish()
@@ -505,9 +513,10 @@ impl<'facts> CanonicalSessionView<'facts> {
             for (block_index, block) in message.content().iter().enumerate() {
                 if matches!(
                     block,
-                    MessageContent::Omitted {
-                        kind: OmittedContentKind::Thinking
-                    }
+                    MessageContent::Thinking { .. }
+                        | MessageContent::Omitted {
+                            kind: OmittedContentKind::Thinking
+                        }
                 ) {
                     thinking.push(CanonicalThinking {
                         message: canonical,
@@ -579,6 +588,7 @@ impl<'facts> CanonicalSessionView<'facts> {
                         tool_call_id,
                         summary,
                         output,
+                        details,
                         is_error,
                     } => results.push(CanonicalToolResult::new(
                         canonical,
@@ -587,9 +597,11 @@ impl<'facts> CanonicalSessionView<'facts> {
                         tool_call_id.as_deref(),
                         summary.as_deref(),
                         output.as_ref(),
+                        details.as_ref(),
                         *is_error,
                     )),
                     MessageContent::Text { .. }
+                    | MessageContent::Thinking { .. }
                     | MessageContent::MessageToolDelivery { .. }
                     | MessageContent::Media { .. }
                     | MessageContent::Omitted { .. } => {}
@@ -752,6 +764,8 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(true),
             model: Some("provider/model".into()),
+            permission_mode: None,
+            permission_mode_pending: None,
         }
     }
 
@@ -793,7 +807,7 @@ mod tests {
                         "messageId":"assistant-1",
                         "runId":"run-1",
                         "content":[
-                            {"type":"thinking"},
+                            {"type":"thinking","thinking":"visible thinking"},
                             {"type":"text","text":"answer"},
                             {"type":"toolCall","name":"read","id":"tool-1"},
                             {"type":"image","mimeType":"image/png","data":"aW1hZ2U="}
@@ -894,6 +908,7 @@ mod tests {
                             "toolCallId":"tool-1",
                             "content":"ok",
                             "output":{"content":canary},
+                            "details":{"diff":"+safe","sourceReply":{"text":canary}},
                             "isError":false
                         }]
                     }
@@ -913,11 +928,13 @@ mod tests {
         assert_eq!(call.input().unwrap()["path"], canary);
         assert_eq!(call.input_text(), Some("read tool-payload-canary"));
         assert_eq!(result.output().unwrap()["content"], canary);
+        assert_eq!(result.details().unwrap(), &json!({"diff":"+safe"}));
 
         let debug = format!("{pair:?} {call:?} {result:?}");
         assert!(debug.contains("has_input: true"));
         assert!(debug.contains("input_text_len: Some(24)"));
         assert!(debug.contains("has_output: true"));
+        assert!(debug.contains("has_details: true"));
         assert!(!debug.contains(canary));
     }
 
@@ -973,9 +990,10 @@ mod tests {
                 run_id,
                 outcome: super::super::events::TerminalOutcome::Error,
                 message_id: None,
-                message_text: None,
                 error_kind: Some(super::super::protocol::SessionErrorKind::Timeout),
-                stop_reason: Some(reason)
+                stop_reason: Some(reason),
+                error_detail: None,
+                ..
             }] if run_id.as_str() == "run-1" && reason == "native-stop"
         ));
     }

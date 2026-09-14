@@ -1,10 +1,25 @@
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
-  SessionRenderToolStatusKind,
 } from '../../types/session/tool-card';
+import { buildToolActivityViewModelFromRegistry } from './tool-renderers';
+import {
+  isOpenClawTool,
+  readApprovalReviewOutcome,
+  readApprovalReviews,
+  readBrowserTabPreview,
+  readMcpAppPreview,
+  readProgressReceipt,
+  readPublicDetailSummary,
+  type OpenClawApprovalReview,
+  type OpenClawApprovalReviewOutcome,
+  type OpenClawBrowserTabPreview,
+  type OpenClawPublicDetailValue,
+} from './tool-renderers/openclaw-details';
 
 export type ToolActivityTone = 'neutral' | 'running' | 'danger' | 'muted';
+export type ToolActivityMetadataValue = string | number | boolean;
+export type ToolActivityPublicDetailValue = OpenClawPublicDetailValue;
 
 export interface ToolActivityTrailingLabel {
   text: string;
@@ -16,6 +31,39 @@ export interface ToolActivityTextBlock {
   title?: string;
   text: string;
   copyable: boolean;
+}
+
+export interface ToolActivityMcpAppMetadata {
+  viewId?: string;
+  serverName?: string;
+  toolName?: string;
+  uiResourceUri?: string;
+  toolCallId?: string;
+  originSessionKey?: string;
+}
+
+export type ToolActivityBrowserTabPreview = OpenClawBrowserTabPreview;
+export type ToolActivityApprovalReview = OpenClawApprovalReview;
+
+export interface ToolActivityApprovalReviewOutcome {
+  label: string;
+  status: OpenClawApprovalReviewOutcome;
+}
+
+export interface ToolActivityProgressReceipt {
+  completedCount: number;
+  totalCount: number;
+  currentItem?: string;
+  currentStatus?: 'pending' | 'in_progress' | 'completed';
+  markdownSummary?: string;
+}
+
+export interface ToolActivityDiffStat {
+  filesChanged?: string[];
+  filesCreated?: string[];
+  additions?: number;
+  deletions?: number;
+  fileCount?: number;
 }
 
 export interface ToolActivityViewModel {
@@ -31,197 +79,282 @@ export interface ToolActivityViewModel {
     url: string;
     preferredHeight?: number;
     rawText?: string;
+    mcpApp?: ToolActivityMcpAppMetadata;
   };
+  browserTabPreview?: ToolActivityBrowserTabPreview;
+  approvalReviews?: ToolActivityApprovalReview[];
+  approvalReviewOutcome?: ToolActivityApprovalReviewOutcome;
+  progressReceipt?: ToolActivityProgressReceipt;
+  publicDetails?: Record<string, ToolActivityPublicDetailValue>;
+  diffStatPlacement?: 'header';
+  diffStat?: ToolActivityDiffStat;
+  liveDiffStat?: ToolActivityDiffStat;
 }
 
-const NON_ACTIVITY_TITLE_TEXT = new Set([
-  '失败',
-  '错误',
-  '运行中',
-  '完成',
-  '无结果',
-  'failed',
-  'error',
-  'running',
-  'completed',
-  'missing result',
+type JsonRecord = Record<string, unknown>;
+type ToolActivityCanvasPreview = NonNullable<ToolActivityViewModel['canvasPreview']>;
+
+const SPECIAL_PUBLIC_DETAIL_KEYS = new Set([
+  'browserTab',
+  'changed',
+  'created',
+  'diff',
+  'patch',
+  'approvalReviews',
+  'approvalReviewOutcome',
+  'mcpAppPreview',
+  'truncation',
+  'fullOutputPath',
+  'exitCode',
 ]);
 
-function formatToolDuration(durationMs?: number): string | null {
-  if (!durationMs || !Number.isFinite(durationMs)) return null;
-  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
-  return `${(durationMs / 1000).toFixed(1)}s`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function readStringField(value: unknown, keys: string[]): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? Number(value.trim())
+      : undefined;
+  return parsed !== undefined && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : undefined;
+}
+
+function readNumberField(value: JsonRecord, keys: readonly string[]): number | undefined {
   for (const key of keys) {
-    const field = value[key];
-    if (typeof field === 'string' && field.trim()) {
-      return field.trim();
-    }
+    const field = readNumber(value[key]);
+    if (field !== undefined) return field;
   }
-  return null;
+  return undefined;
 }
 
-function parseStructuredInputText(inputText: string): unknown {
-  const trimmed = inputText.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-    return null;
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
+function readStringList(value: unknown): string[] | undefined {
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  if (!Array.isArray(value)) return undefined;
+  const strings = value
+    .map(readString)
+    .filter((item): item is string => item !== undefined);
+  return strings.length > 0 ? strings : undefined;
 }
 
-function readToolCommand(input: unknown, inputText: string): string {
-  const field = readStringField(input, ['command', 'cmd', 'script', 'code', 'query']);
-  if (field) {
-    return field;
+function uniqueStrings(values: ReadonlyArray<string[] | undefined>): string[] | undefined {
+  const unique = new Set<string>();
+  for (const list of values) {
+    for (const value of list ?? []) unique.add(value);
   }
-  return readStringField(parseStructuredInputText(inputText), ['command', 'cmd', 'script', 'code', 'query']) ?? inputText;
+  return unique.size > 0 ? [...unique] : undefined;
 }
 
-function isMeaningfulActivityText(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized.length > 0 && !NON_ACTIVITY_TITLE_TEXT.has(normalized);
+function readPathListFromDiffValue(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return uniqueStrings(value.map(readPathListFromDiffValue));
+  if (!isRecord(value)) return undefined;
+  const path = readString(value.path) ?? readString(value.filePath) ?? readString(value.file);
+  return path ? [path] : undefined;
 }
 
-function isMeaningfulToolName(name: string): boolean {
-  const normalized = name.trim().toLowerCase();
-  return normalized.length > 0 && normalized !== 'tool' && !NON_ACTIVITY_TITLE_TEXT.has(normalized);
+function readDiffText(value: unknown): string | undefined {
+  const text = readString(value);
+  if (text) return text;
+  if (!isRecord(value)) return undefined;
+  return readString(value.diff) ?? readString(value.patch);
 }
 
-function resolveToolLanguageLabel(toolName: string, command: string): string {
-  const name = toolName.trim();
-  if (/powershell|pwsh/i.test(name) || /\b(powershell|pwsh)\b/i.test(command)) return 'PowerShell';
-  if (/python/i.test(name) || /\bpython3?\b/i.test(command)) return 'Python';
-  if (/node|javascript|typescript/i.test(name) || /\b(node|npm|pnpm|bun)\b/i.test(command)) return 'Node';
-  if (/bash|shell|terminal/i.test(name) || /\b(bash|sh|zsh|fish)\b/i.test(command)) return 'Shell';
-  if (/web|search/i.test(name)) return 'Web';
-  return isMeaningfulToolName(name) ? name : 'Tool';
+function countDiffLines(diffText: string | undefined): Pick<ToolActivityDiffStat, 'additions' | 'deletions'> | undefined {
+  if (!diffText) return undefined;
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diffText.split(/\r\n|\r|\n/)) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) additions += 1;
+    if (line.startsWith('-')) deletions += 1;
+  }
+  return additions > 0 || deletions > 0 ? { additions, deletions } : undefined;
 }
 
-function resolveActivityTitle(input: {
-  primaryTitle: string;
-  detailTitle: string;
-  summary?: string;
-  command: string;
-  languageLabel: string;
-}): string {
-  const detailTitle = input.detailTitle.trim();
-  if (detailTitle !== input.primaryTitle && isMeaningfulActivityText(detailTitle)) {
-    return detailTitle;
-  }
-
-  const summary = input.summary?.trim() ?? '';
-  if (summary.length <= 96 && isMeaningfulActivityText(summary)) {
-    return summary;
-  }
-
-  if (input.command && input.languageLabel !== 'Tool') {
-    return `运行 ${input.languageLabel}`;
-  }
-
-  if (isMeaningfulToolName(input.primaryTitle)) {
-    return `调用 ${input.primaryTitle.trim()}`;
-  }
-
-  return '工具调用';
+function hasDiffStatContent(value: ToolActivityDiffStat): boolean {
+  return (value.filesChanged?.length ?? 0) > 0
+    || (value.filesCreated?.length ?? 0) > 0
+    || value.fileCount !== undefined
+    || value.additions !== undefined
+    || value.deletions !== undefined;
 }
 
-function resolveToolTone(status: SessionRenderToolStatusKind): ToolActivityTone {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
+function readExplicitDiffStat(value: unknown): ToolActivityDiffStat | undefined {
+  if (!isRecord(value)) return undefined;
+  const filesChanged = uniqueStrings([
+    readStringList(value.filesChanged),
+    readStringList(value.changedFiles),
+    readStringList(value.files),
+  ]);
+  const filesCreated = readStringList(value.filesCreated) ?? readStringList(value.createdFiles);
+  const stat: ToolActivityDiffStat = {
+    filesChanged,
+    filesCreated,
+    fileCount: readNumberField(value, ['fileCount', 'filesChangedCount', 'changedFileCount']),
+    additions: readNumberField(value, ['additions', 'added', 'insertions']),
+    deletions: readNumberField(value, ['deletions', 'removed', 'deleted']),
+  };
+  return hasDiffStatContent(stat) ? stat : undefined;
 }
 
-function buildTrailingLabels(tool: SessionRenderToolCard, title: string): ToolActivityTrailingLabel[] {
-  const labels: ToolActivityTrailingLabel[] = [];
-  if (tool.status === 'running' && title !== '运行中') {
-    labels.push({ text: '运行中', tone: 'muted' });
+function readInferredDiffStat(value: JsonRecord): ToolActivityDiffStat | undefined {
+  const filesChanged = uniqueStrings([
+    readStringList(value.changed),
+    readPathListFromDiffValue(value.diff),
+    readPathListFromDiffValue(value.patch),
+  ]);
+  const filesCreated = readStringList(value.created);
+  const lineStat = countDiffLines(readDiffText(value.diff) ?? readDiffText(value.patch));
+  const stat: ToolActivityDiffStat = {
+    filesChanged,
+    filesCreated,
+    additions: lineStat?.additions,
+    deletions: lineStat?.deletions,
+  };
+  return hasDiffStatContent(stat) ? stat : undefined;
+}
+
+function readDiffStat(details: unknown): ToolActivityDiffStat | undefined {
+  if (!isRecord(details)) return undefined;
+  return readExplicitDiffStat(details.diffStat)
+    ?? readExplicitDiffStat(details.stat)
+    ?? readExplicitDiffStat(details)
+    ?? readInferredDiffStat(details);
+}
+
+function readLiveDiffStat(details: unknown): ToolActivityDiffStat | undefined {
+  if (!isRecord(details)) return undefined;
+  return readExplicitDiffStat(details.liveDiffStat);
+}
+
+function readCanvasPreview(details: unknown): ToolActivityCanvasPreview | undefined {
+  const preview = readMcpAppPreview(details);
+  if (!preview?.url) return undefined;
+  return {
+    title: preview.title ?? preview.mcpApp?.toolName ?? 'MCP App',
+    url: preview.url,
+    preferredHeight: preview.preferredHeight,
+    mcpApp: preview.mcpApp,
+  };
+}
+
+function readPublicDetails(details: unknown): Record<string, ToolActivityPublicDetailValue> | undefined {
+  const summary = readPublicDetailSummary(details);
+  if (!summary) return undefined;
+  const publicDetails: Record<string, ToolActivityPublicDetailValue> = {};
+  for (const [key, value] of Object.entries(summary)) {
+    if (SPECIAL_PUBLIC_DETAIL_KEYS.has(key)) continue;
+    publicDetails[key] = value as ToolActivityPublicDetailValue;
   }
-  if (tool.status === 'missing_result' && title !== '无结果') {
-    labels.push({ text: '无结果', tone: 'muted' });
-  }
-  const durationLabel = formatToolDuration(tool.durationMs);
-  if (durationLabel) {
-    labels.push({ text: durationLabel, tone: 'muted' });
-  }
-  return labels;
+  return Object.keys(publicDetails).length > 0 ? publicDetails : undefined;
+}
+
+function readReviewOutcome(details: unknown): ToolActivityApprovalReviewOutcome | undefined {
+  const status = readApprovalReviewOutcome(details);
+  return status ? { label: '结果', status } : undefined;
+}
+
+function readProgressView(tool: SessionRenderToolCard): ToolActivityProgressReceipt | undefined {
+  const receipt = readProgressReceipt(tool);
+  if (!receipt) return undefined;
+  if (receipt.total === 0 && !receipt.currentLabel && !receipt.markdown) return undefined;
+  return {
+    completedCount: receipt.completed,
+    totalCount: receipt.total,
+    currentItem: receipt.currentLabel,
+    currentStatus: receipt.currentStatus,
+    markdownSummary: receipt.markdown,
+  };
+}
+
+function progressTextBlocks(receipt: ToolActivityProgressReceipt): ToolActivityTextBlock[] {
+  const lines = [`${receipt.completedCount}/${receipt.totalCount}`];
+  if (receipt.currentItem) lines.push(`当前：${receipt.currentItem}`);
+  if (receipt.markdownSummary) lines.push(receipt.markdownSummary);
+  return [{ kind: 'notice', title: '进度', text: lines.join('\n'), copyable: false }];
+}
+
+function mergeCanvasPreview(
+  base: ToolActivityCanvasPreview | undefined,
+  details: ToolActivityCanvasPreview | undefined,
+): ToolActivityCanvasPreview | undefined {
+  if (!details) return base;
+  if (!base) return details;
+  return {
+    title: details.title,
+    url: details.url,
+    preferredHeight: details.preferredHeight ?? base.preferredHeight,
+    rawText: base.rawText,
+    mcpApp: details.mcpApp,
+  };
+}
+
+function hasStructuredProjection(input: {
+  canvasPreview?: ToolActivityCanvasPreview;
+  browserTabPreview?: ToolActivityBrowserTabPreview;
+  approvalReviews: ToolActivityApprovalReview[];
+  approvalReviewOutcome?: ToolActivityApprovalReviewOutcome;
+  progressReceipt?: ToolActivityProgressReceipt;
+  publicDetails?: Record<string, ToolActivityPublicDetailValue>;
+  diffStat?: ToolActivityDiffStat;
+  liveDiffStat?: ToolActivityDiffStat;
+}): boolean {
+  return input.canvasPreview != null
+    || input.browserTabPreview != null
+    || input.approvalReviews.length > 0
+    || input.approvalReviewOutcome != null
+    || input.progressReceipt != null
+    || input.publicDetails != null
+    || input.diffStat != null
+    || input.liveDiffStat != null;
+}
+
+function mergeOpenClawDetails(tool: SessionRenderToolCard, viewModel: ToolActivityViewModel): ToolActivityViewModel {
+  const canvasPreview = readCanvasPreview(tool.details);
+  const browserTabPreview = readBrowserTabPreview(tool.details);
+  const approvalReviews = readApprovalReviews(tool.details);
+  const approvalReviewOutcome = readReviewOutcome(tool.details);
+  const progressReceipt = readProgressView(tool);
+  const publicDetails = readPublicDetails(tool.details);
+  const diffStat = readDiffStat(tool.details);
+  const liveDiffStat = readLiveDiffStat(tool.details);
+  const textBlocks = progressReceipt ? progressTextBlocks(progressReceipt) : viewModel.textBlocks;
+  const mergedCanvasPreview = mergeCanvasPreview(viewModel.canvasPreview, canvasPreview);
+  const hasStructured = hasStructuredProjection({
+    canvasPreview: mergedCanvasPreview,
+    browserTabPreview,
+    approvalReviews,
+    approvalReviewOutcome,
+    progressReceipt,
+    publicDetails,
+    diffStat,
+    liveDiffStat,
+  });
+
+  return {
+    ...viewModel,
+    title: progressReceipt ? '进度' : viewModel.title,
+    textBlocks,
+    canvasPreview: mergedCanvasPreview,
+    canExpand: textBlocks.length > 0 || hasStructured,
+    ...(browserTabPreview ? { browserTabPreview } : {}),
+    ...(approvalReviews.length > 0 ? { approvalReviews } : {}),
+    ...(approvalReviewOutcome ? { approvalReviewOutcome } : {}),
+    ...(progressReceipt ? { progressReceipt } : {}),
+    ...(publicDetails ? { publicDetails } : {}),
+    ...(diffStat ? { diffStat } : {}),
+    ...(liveDiffStat ? { liveDiffStat } : {}),
+  };
 }
 
 export function buildToolActivityViewModel(tool: SessionRenderToolCard): ToolActivityViewModel {
-  const inputText = tool.inputText?.trim() ?? '';
-  const result = tool.result;
-  const command = readToolCommand(tool.input, inputText).trim();
-  const outputPreview = (
-    result.kind === 'text' || result.kind === 'json' || result.kind === 'canvas'
-  ) ? result.collapsedPreview.trim() : '';
-  const outputText = result.kind === 'text' || result.kind === 'json'
-    ? result.bodyText.trim()
-    : result.kind === 'canvas' ? result.rawText?.trim() ?? '' : '';
-  const primaryTitle = tool.displayTitle?.trim() || tool.name?.trim() || '';
-  const languageLabel = resolveToolLanguageLabel(tool.name || primaryTitle, command);
-  const title = resolveActivityTitle({
-    primaryTitle,
-    detailTitle: tool.displayDetail?.trim() ?? '',
-    summary: tool.summary,
-    command,
-    languageLabel,
-  });
-  const hasAssistantCanvas = result.kind === 'canvas' && result.preview.kind === 'canvas' && !!result.preview.url;
-  const canvasPreview = hasAssistantCanvas
-    ? {
-      title: result.preview.title?.trim() || tool.name || title,
-      url: result.preview.url,
-      preferredHeight: result.preview.preferredHeight,
-      rawText: result.rawText?.trim() || undefined,
-    }
-    : undefined;
-  const textBlocks: ToolActivityTextBlock[] = [];
-  if (command) {
-    textBlocks.push({
-      kind: 'input',
-      title: languageLabel,
-      text: command,
-      copyable: true,
-    });
-  }
-  if (hasAssistantCanvas) {
-    textBlocks.push({
-      kind: 'notice',
-      text: '预览已显示在助手消息里。',
-      copyable: false,
-    });
-  }
-  if (outputText || outputPreview) {
-    textBlocks.push({
-      kind: 'output',
-      text: outputText || outputPreview,
-      copyable: false,
-    });
-  }
-
-  return {
-    title,
-    tone: resolveToolTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
-    canExpand: textBlocks.length > 0 || canvasPreview != null,
-    trailingLabels: buildTrailingLabels(tool, title),
-    textBlocks,
-    canvasPreview,
-  };
+  const viewModel = buildToolActivityViewModelFromRegistry(tool);
+  return isOpenClawTool(tool) ? mergeOpenClawDetails(tool, viewModel) : viewModel;
 }
 
 export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleToolResult): ToolActivityViewModel | null {

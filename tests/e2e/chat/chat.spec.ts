@@ -1,24 +1,11 @@
-import { expect, readE2EOpenClawState, test } from '../fixtures/electron';
+import { enterLocalWorkspace, expect, readE2EOpenClawState, test } from '../fixtures/electron';
 import type { Page } from '@playwright/test';
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5KQAAAABJRU5ErkJggg==';
 
 async function bootChat(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const storageKey = 'matchaclaw-settings';
-    const raw = window.localStorage.getItem(storageKey);
-    let parsed: { state?: Record<string, unknown>; version?: number };
-    try {
-      parsed = raw ? JSON.parse(raw) as { state?: Record<string, unknown>; version?: number } : {};
-    } catch {
-      parsed = {};
-    }
-    parsed.state = { ...(parsed.state ?? {}), setupComplete: true };
-    parsed.version = typeof parsed.version === 'number' ? parsed.version : 0;
-    window.localStorage.setItem(storageKey, JSON.stringify(parsed));
-    window.location.hash = '#/';
-  });
-  await page.reload({ waitUntil: 'domcontentloaded' });
+  await enterLocalWorkspace(page);
+  await page.evaluate(() => { window.location.hash = '#/'; });
   await expect(page.locator('textarea')).toBeVisible({ timeout: 15_000 });
 }
 

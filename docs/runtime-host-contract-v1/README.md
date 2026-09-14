@@ -58,7 +58,7 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 - `INVALID_TRANSPORT_PAYLOAD` 是 Electron 解析非法 child 响应时的本地错误；Rust 不主动返回该码。
 - child health lifecycle 与 Electron process-manager lifecycle 分层处理，不强行统一枚举。
 - **旧 generic RuntimeJob public contract 已删除，不是待办：** 不存在 `runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；文档中的这些名称只用于标识已删除项，禁止重新引入。
-- **Toolchain final path 已冻结：** `hostUvInstallAll` 直接调用 `platform.runtime` / `toolchain.installUv`，target 为 `platform-runtime`；Electron public adapter 调用 Rust private `openclaw.toolchain.install-uv`，等待真实结果后才返回。
+- **Toolchain final path 已冻结：** Setup 已退休；Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 调 Rust private `host.toolchain.prepare`，等待 `external/toolchain::NativeToolchain` 真实结果后返回；`GET /api/toolchain/uv/check` 调 `host.toolchain.status` 并只投影 `{ installed }`。
 - **ClawHub marketplace route 不变：** `POST /api/clawhub/search` 由 Rust external `ClawHubRegistryClient` 执行 registry HTTP search，不经 RuntimeDriver 或 OpenClaw Gateway；`POST /api/skills/clawhub/install` 仍经 Skills runtime ops，但底层执行 legacy ClawHub CLI + registry fallback。
 
 ## 当前迁移决定

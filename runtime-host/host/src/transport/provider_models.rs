@@ -9,8 +9,9 @@ use openclaw::port::{
 use crate::{
     provider::accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
     provider::models::{
-        ProviderModelDraft, ProviderModelListOutcome, ProviderModelReplaceOutcome,
-        ProviderModelSelectableOutcome, ProviderModelView, SelectableProviderModelView,
+        ProviderModelDiscoverOutcome, ProviderModelDraft, ProviderModelListOutcome,
+        ProviderModelReplaceOutcome, ProviderModelSelectableOutcome, ProviderModelView,
+        SelectableProviderModelView,
     },
     transport::authorization::CapabilityDecisionVerifier,
 };
@@ -58,6 +59,10 @@ enum Input {
     Selectable {
         capability: String,
     },
+    Discover {
+        #[serde(rename = "accountId")]
+        account_id: String,
+    },
     Replace {
         #[serde(rename = "accountId")]
         account_id: String,
@@ -81,6 +86,7 @@ struct ModelDraft {
 pub(crate) enum ProviderModelsCommand {
     List,
     Selectable(environment::ProviderModelCapability),
+    Discover(String),
     Replace {
         account_id: String,
         models: Vec<ProviderModelDraft>,
@@ -102,6 +108,7 @@ impl ProviderModelsRequest {
                     *operation,
                     "providerModels.list"
                         | "providerModels.listSelectable"
+                        | "providerModels.discover"
                         | "providerModels.replace"
                 )
             })
@@ -125,6 +132,7 @@ impl ProviderModelsRequest {
         let valid_operation = match (&self.operation_id, &self.input) {
             (operation, Input::List) => operation == "providerModels.list",
             (operation, Input::Selectable { .. }) => operation == "providerModels.listSelectable",
+            (operation, Input::Discover { .. }) => operation == "providerModels.discover",
             (operation, Input::Replace { .. }) => operation == "providerModels.replace",
         };
         (self.id == CAPABILITY_ID
@@ -141,6 +149,12 @@ impl ProviderModelsRequest {
             Input::Selectable { capability } => capability_for(&capability)
                 .map(ProviderModelsCommand::Selectable)
                 .ok_or(RequestError::Invalid),
+            Input::Discover { account_id } => {
+                if account_id.trim().is_empty() {
+                    return Err(RequestError::Invalid);
+                }
+                Ok(ProviderModelsCommand::Discover(account_id))
+            }
             Input::Replace { account_id, models } => {
                 if account_id.trim().is_empty() {
                     return Err(RequestError::Invalid);
@@ -180,6 +194,7 @@ impl TryFrom<ModelDraft> for ProviderModelDraft {
 pub(crate) enum ProviderModelsDelivery {
     List(ProviderModelListOutcome),
     Selectable(ProviderModelSelectableOutcome),
+    Discover(ProviderModelDiscoverOutcome),
     Replace(ProviderModelReplaceOutcome),
     Unavailable,
 }
@@ -188,14 +203,17 @@ impl ProviderModelsDelivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
             Self::List(ProviderModelListOutcome::Available(_))
-            | Self::Selectable(ProviderModelSelectableOutcome::Available(_)) => 200,
+            | Self::Selectable(ProviderModelSelectableOutcome::Available(_))
+            | Self::Discover(ProviderModelDiscoverOutcome::Discovered(_)) => 200,
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored {
                 persisted, commit, ..
             }) if !mutation_unknown(*persisted, *commit) => 200,
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored { .. }) => 409,
-            Self::Replace(ProviderModelReplaceOutcome::Rejected) => 422,
+            Self::Discover(ProviderModelDiscoverOutcome::Rejected)
+            | Self::Replace(ProviderModelReplaceOutcome::Rejected) => 422,
             Self::List(ProviderModelListOutcome::Unavailable)
             | Self::Selectable(ProviderModelSelectableOutcome::Unavailable)
+            | Self::Discover(ProviderModelDiscoverOutcome::Unavailable)
             | Self::Replace(ProviderModelReplaceOutcome::Unavailable)
             | Self::Unavailable => 503,
         }
@@ -208,6 +226,9 @@ impl ProviderModelsDelivery {
             }),
             Self::Selectable(ProviderModelSelectableOutcome::Available(models)) => json!({
                 "models": models.iter().map(selectable_model_json).collect::<Vec<_>>(),
+            }),
+            Self::Discover(ProviderModelDiscoverOutcome::Discovered(models)) => json!({
+                "models": models.iter().map(draft_json).collect::<Vec<_>>(),
             }),
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored {
                 persisted,
@@ -237,14 +258,16 @@ impl ProviderModelsDelivery {
                     })
                 }
             }
+            Self::Discover(ProviderModelDiscoverOutcome::Rejected)
+            | Self::Replace(ProviderModelReplaceOutcome::Rejected) => {
+                fixed_error("Provider model request was rejected")
+            }
             Self::Replace(ProviderModelReplaceOutcome::Unavailable) => {
                 fixed_error("Provider models are unavailable")
             }
-            Self::Replace(ProviderModelReplaceOutcome::Rejected) => {
-                fixed_error("Provider model request was rejected")
-            }
             Self::List(ProviderModelListOutcome::Unavailable)
             | Self::Selectable(ProviderModelSelectableOutcome::Unavailable)
+            | Self::Discover(ProviderModelDiscoverOutcome::Unavailable)
             | Self::Unavailable => fixed_error("Provider models are unavailable"),
         }
     }
@@ -348,6 +371,23 @@ fn model_json(model: &ProviderModelView) -> Value {
         "capabilities": model.capabilities.iter().map(capability_name).collect::<Vec<_>>(),
     });
     let object = value.as_object_mut().expect("model JSON is an object");
+    insert_optional_number(object, "contextWindow", model.context_window);
+    insert_optional_number(object, "maxTokens", model.max_tokens);
+    insert_optional_number(object, "timeoutMs", model.timeout_ms);
+    insert_optional_text(object, "aspectRatio", model.aspect_ratio.as_deref());
+    insert_optional_text(object, "resolution", model.resolution.as_deref());
+    insert_optional_text(object, "quality", model.quality.as_deref());
+    value
+}
+
+fn draft_json(model: &ProviderModelDraft) -> Value {
+    let mut value = json!({
+        "modelId": model.model_id,
+        "capabilities": model.capabilities.iter().map(capability_name).collect::<Vec<_>>(),
+    });
+    let object = value
+        .as_object_mut()
+        .expect("model draft JSON is an object");
     insert_optional_number(object, "contextWindow", model.context_window);
     insert_optional_number(object, "maxTokens", model.max_tokens);
     insert_optional_number(object, "timeoutMs", model.timeout_ms);
@@ -465,6 +505,33 @@ mod tests {
     }
 
     #[test]
+    fn strict_request_decoding_accepts_public_discover_payload() {
+        let request = json!({
+            "id": "provider.models",
+            "operationId": "providerModels.discover",
+            "scope": { "kind": "provider-model-catalog" },
+            "target": { "kind": "provider-models" },
+            "input": { "kind": "discover", "accountId": "account-main" },
+        });
+        assert!(ProviderModelsRequest::decode_semantics_for_test(request).is_ok());
+    }
+
+    #[test]
+    fn strict_discover_request_decoding_rejects_secret_and_unknown_fields() {
+        let invalid = json!({
+            "id": "provider.models",
+            "operationId": "providerModels.discover",
+            "scope": { "kind": "provider-model-catalog" },
+            "target": { "kind": "provider-models" },
+            "input": { "kind": "discover", "accountId": "account-main", "apiKey": "sk-private" },
+        });
+        assert!(matches!(
+            ProviderModelsRequest::decode_semantics_for_test(invalid),
+            Err(RequestError::Invalid)
+        ));
+    }
+
+    #[test]
     fn strict_request_decoding_rejects_secret_and_unknown_fields() {
         let invalid = json!({
             "id": "provider.models",
@@ -481,6 +548,53 @@ mod tests {
             ProviderModelsRequest::decode_semantics_for_test(invalid),
             Err(RequestError::Invalid)
         ));
+    }
+
+    #[test]
+    fn discovery_response_is_draft_only_and_redacted() {
+        let response =
+            ProviderModelsDelivery::Discover(ProviderModelDiscoverOutcome::Discovered(vec![
+                ProviderModelDraft {
+                    model_id: "gpt-test".into(),
+                    capabilities: vec![environment::ProviderModelCapability::Chat],
+                    context_window: Some(128000),
+                    max_tokens: Some(4096),
+                    timeout_ms: None,
+                    aspect_ratio: None,
+                    resolution: None,
+                    quality: None,
+                },
+            ]));
+
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(
+            response.body(),
+            json!({
+                "models": [{
+                    "modelId": "gpt-test",
+                    "capabilities": ["chat"],
+                    "contextWindow": 128000,
+                    "maxTokens": 4096,
+                }],
+            })
+        );
+        let encoded = response.body().to_string();
+        assert!(!encoded.contains("accountId"));
+        assert!(!encoded.contains("label"));
+        assert!(!encoded.contains("baseUrl"));
+        assert!(!encoded.contains("header"));
+        assert!(!encoded.contains("apiKey"));
+    }
+
+    #[test]
+    fn discovery_rejection_uses_public_error_only() {
+        let response = ProviderModelsDelivery::Discover(ProviderModelDiscoverOutcome::Rejected);
+
+        assert_eq!(response.status_code(), 422);
+        assert_eq!(
+            response.body(),
+            json!({ "success": false, "error": "Provider model request was rejected" })
+        );
     }
 
     #[test]

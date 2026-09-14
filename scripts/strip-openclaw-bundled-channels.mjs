@@ -9,4 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const OPENCLAW_DIR = path.join(REPO_ROOT, 'node_modules', 'openclaw');
 
-applyOpenClawBundlePatches(OPENCLAW_DIR, { allowMissing: true });
+applyOpenClawBundlePatches(OPENCLAW_DIR, {
+  allowMissing: true,
+  patchIds: ['strip-bundled-channel-plugins'],
+});

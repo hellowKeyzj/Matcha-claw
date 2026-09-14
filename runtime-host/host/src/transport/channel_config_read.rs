@@ -28,33 +28,43 @@ pub(crate) fn decode(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<Request, DecodeError> {
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            AUTHORIZATION_SCOPE,
-            OPERATION_ID,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    let Value::Object(body) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if !((body.len() == 1 && body.contains_key("channel"))
-        || (body.len() == 2 && body.contains_key("channel") && body.contains_key("accountId")))
-    {
-        return Err(DecodeError::Invalid);
-    }
-    let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
-    let account_id = body
-        .get("accountId")
-        .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
-        .transpose()?;
-    Ok(Request {
-        channel,
-        account_id,
-    })
+    let mut span =
+        crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_config_read.decode");
+    let result = (|| {
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                AUTHORIZATION_SCOPE,
+                OPERATION_ID,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let Value::Object(body) = value else {
+            return Err(DecodeError::Invalid);
+        };
+        if !((body.len() == 1 && body.contains_key("channel"))
+            || (body.len() == 2 && body.contains_key("channel") && body.contains_key("accountId")))
+        {
+            return Err(DecodeError::Invalid);
+        }
+        let channel = identity(body.get("channel")).ok_or(DecodeError::Invalid)?;
+        let account_id = body
+            .get("accountId")
+            .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
+            .transpose()?;
+        Ok(Request {
+            channel,
+            account_id,
+        })
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 fn identity(value: Option<&Value>) -> Option<String> {

@@ -8,11 +8,13 @@ use super::{
         SessionIdentityFacts, SessionRuntimeFacts,
     },
     protocol::{
-        ChatState, MessageActivityLifecycle, MessageId, RunId, SessionActivityKind,
+        ApprovalId, ApprovalOptionId, ChatState, MessageActivityLifecycle, MessageId, RunId,
+        RuntimeActivityPhase, RuntimeFallbackDetail, RuntimeGuardianNotice, SessionActivityKind,
         SessionErrorKind, SessionEventEnvelope, SessionEventKind, SessionKey, SessionSummary,
         ToolActivityPhase, ToolId,
     },
 };
+use crate::session_window::Message;
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum CanonicalIngressResult {
@@ -29,6 +31,67 @@ impl fmt::Debug for CanonicalIngressResult {
                 .field("provenance", provenance)
                 .finish(),
         }
+    }
+}
+
+impl CanonicalIngressResult {
+    pub(crate) fn from_transcript_message(
+        session_key: SessionKey,
+        source_epoch: Option<u64>,
+        route_key: Option<String>,
+        message: Message,
+    ) -> Option<Self> {
+        let run_id = message
+            .run_id()
+            .and_then(|run_id| RunId::try_new(run_id.to_owned()).ok());
+        let message_id = message
+            .message_id()
+            .and_then(|message_id| MessageId::try_new(message_id.to_owned()).ok());
+        let source_cursor = message.sequence();
+        let provenance = SessionEventProvenance::from_replay_source(
+            session_key.clone(),
+            run_id.clone(),
+            source_epoch,
+            source_cursor,
+            route_key.clone(),
+            message_id,
+        );
+        Some(Self::Produced(CanonicalSessionDelta {
+            session_key,
+            route_key,
+            source_epoch: provenance.source_epoch(),
+            source_cursor: provenance.source_cursor(),
+            run_id,
+            provenance,
+            changes: vec![CanonicalSessionChange::TranscriptMessage { message }],
+        }))
+    }
+
+    pub(crate) fn from_replay_recovery(
+        session_key: SessionKey,
+        source_epoch: Option<u64>,
+        source_cursor: u64,
+        route_key: Option<String>,
+    ) -> Self {
+        let provenance = SessionEventProvenance::from_replay_source(
+            session_key.clone(),
+            None,
+            source_epoch,
+            Some(source_cursor),
+            route_key.clone(),
+            None,
+        );
+        Self::Produced(CanonicalSessionDelta {
+            session_key,
+            route_key,
+            source_epoch: provenance.source_epoch(),
+            source_cursor: provenance.source_cursor(),
+            run_id: None,
+            provenance,
+            changes: vec![CanonicalSessionChange::RecoveryRequired {
+                reason: CanonicalRecoveryReason::NativeUnknown,
+            }],
+        })
     }
 }
 
@@ -88,21 +151,166 @@ impl fmt::Debug for CanonicalSessionDelta {
     }
 }
 
-/// Typed changes that OpenClaw actually emitted. No change is a Renderer item
-/// snapshot or a transcript accumulator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssistantTurnStatus {
+    Streaming,
+    WaitingForTool,
+    Final,
+    Aborted,
+    Error,
+}
+
+impl AssistantTurnStatus {
+    pub const fn from_terminal_outcome(outcome: TerminalOutcome) -> Self {
+        match outcome {
+            TerminalOutcome::Completed => Self::Final,
+            TerminalOutcome::Aborted => Self::Aborted,
+            TerminalOutcome::Error => Self::Error,
+        }
+    }
+
+    pub const fn from_message_lifecycle(lifecycle: MessageActivityLifecycle) -> Self {
+        match lifecycle {
+            MessageActivityLifecycle::Started | MessageActivityLifecycle::Delta => Self::Streaming,
+            MessageActivityLifecycle::Completed => Self::Final,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssistantTurnChunkKind {
+    Text,
+    Thinking,
+}
+
 #[derive(Clone, Eq, PartialEq)]
-pub enum CanonicalSessionChange {
-    RunDelta {
+pub enum AssistantTurnSegment {
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolUse {
+        tool_id: ToolId,
+        tool_name: Option<String>,
+    },
+    ToolResult {
+        tool_id: ToolId,
+        summary: Option<String>,
+        is_error: bool,
+    },
+}
+
+impl fmt::Debug for AssistantTurnSegment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { text } => formatter
+                .debug_struct("Text")
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::Thinking { text } => formatter
+                .debug_struct("Thinking")
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::ToolUse { tool_name, .. } => formatter
+                .debug_struct("ToolUse")
+                .field("has_tool_name", &tool_name.is_some())
+                .finish(),
+            Self::ToolResult {
+                summary, is_error, ..
+            } => formatter
+                .debug_struct("ToolResult")
+                .field("has_summary", &summary.is_some())
+                .field("summary_bytes", &summary.as_ref().map_or(0, String::len))
+                .field("is_error", is_error)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct AssistantTurnSnapshot {
+    pub run_id: RunId,
+    pub message_id: Option<MessageId>,
+    pub segments: Vec<AssistantTurnSegment>,
+    pub text: String,
+    pub thinking: Option<String>,
+    pub status: AssistantTurnStatus,
+}
+
+impl AssistantTurnSnapshot {
+    pub fn new(
         run_id: RunId,
         message_id: Option<MessageId>,
+        segments: Vec<AssistantTurnSegment>,
+        text: impl Into<String>,
+        thinking: Option<String>,
+        status: AssistantTurnStatus,
+    ) -> Self {
+        Self {
+            run_id,
+            message_id,
+            segments,
+            text: text.into(),
+            thinking,
+            status,
+        }
+    }
+
+    pub fn from_text_parts(
+        run_id: RunId,
+        message_id: Option<MessageId>,
+        text: impl Into<String>,
+        thinking: Option<String>,
+        status: AssistantTurnStatus,
+    ) -> Self {
+        let text = text.into();
+        let thinking = thinking.filter(|thinking| !thinking.is_empty());
+        let mut segments =
+            Vec::with_capacity(usize::from(thinking.is_some()) + usize::from(!text.is_empty()));
+        if let Some(thinking) = &thinking {
+            segments.push(AssistantTurnSegment::Thinking {
+                text: thinking.clone(),
+            });
+        }
+        if !text.is_empty() {
+            segments.push(AssistantTurnSegment::Text { text: text.clone() });
+        }
+        Self::new(run_id, message_id, segments, text, thinking, status)
+    }
+}
+
+impl fmt::Debug for AssistantTurnSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AssistantTurnSnapshot")
+            .field("has_message_id", &self.message_id.is_some())
+            .field("segment_count", &self.segments.len())
+            .field("text_bytes", &self.text.len())
+            .field(
+                "thinking_bytes",
+                &self.thinking.as_ref().map_or(0, String::len),
+            )
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+/// Typed changes that OpenClaw actually emitted. Assistant deltas carry only
+/// newly observed text; full snapshots keep ordered non-text segments intact.
+#[derive(Clone, Eq, PartialEq)]
+pub enum CanonicalSessionChange {
+    AssistantTurnChunk {
+        run_id: RunId,
+        message_id: Option<MessageId>,
+        kind: AssistantTurnChunkKind,
         text: String,
         replace: bool,
+        status: AssistantTurnStatus,
     },
-    MessageActivity {
-        run_id: RunId,
-        message_id: MessageId,
-        lifecycle: MessageActivityLifecycle,
-        text: Option<String>,
+    AssistantTurnSnapshot {
+        snapshot: AssistantTurnSnapshot,
     },
     ToolActivity {
         run_id: RunId,
@@ -113,35 +321,82 @@ pub enum CanonicalSessionChange {
         input_text: Option<String>,
         summary: Option<String>,
         output: Option<Value>,
+        details: Option<Value>,
         is_error: Option<bool>,
+    },
+    ApprovalRequested {
+        run_id: RunId,
+        approval_id: ApprovalId,
+        option_ids: Vec<ApprovalOptionId>,
+    },
+    ApprovalResolved {
+        run_id: RunId,
+        approval_id: ApprovalId,
+        option_ids: Vec<ApprovalOptionId>,
+    },
+    RuntimeActivity {
+        run_id: RunId,
+        activity: CanonicalRuntimeActivity,
+    },
+    RuntimeActivityCleared {
+        run_id: RunId,
+        activity: CanonicalRuntimeActivity,
+        retrying_cleanup: bool,
+    },
+    RuntimeFallback {
+        run_id: RunId,
+        detail: RuntimeFallbackDetail,
+    },
+    RuntimeFallbackCleared {
+        run_id: RunId,
+    },
+    GuardianNotice {
+        run_id: RunId,
+        notice: RuntimeGuardianNotice,
     },
     Terminal {
         run_id: RunId,
         outcome: TerminalOutcome,
         message_id: Option<MessageId>,
-        message_text: Option<String>,
         error_kind: Option<SessionErrorKind>,
+        error_message: Option<String>,
         stop_reason: Option<String>,
+        error_detail: Option<Value>,
     },
     RecoveryRequired {
         reason: CanonicalRecoveryReason,
     },
+    TranscriptMessage {
+        message: Message,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanonicalRuntimeActivity {
+    Compacting,
 }
 
 impl fmt::Debug for CanonicalSessionChange {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RunDelta { replace, text, .. } => formatter
-                .debug_struct("RunDelta")
-                .field("replace", replace)
-                .field("text_bytes", &text.len())
-                .finish(),
-            Self::MessageActivity {
-                lifecycle, text, ..
+            Self::AssistantTurnChunk {
+                kind,
+                text,
+                replace,
+                status,
+                message_id,
+                ..
             } => formatter
-                .debug_struct("MessageActivity")
-                .field("lifecycle", lifecycle)
-                .field("has_text", &text.is_some())
+                .debug_struct("AssistantTurnChunk")
+                .field("has_message_id", &message_id.is_some())
+                .field("kind", kind)
+                .field("text_bytes", &text.len())
+                .field("replace", replace)
+                .field("status", status)
+                .finish(),
+            Self::AssistantTurnSnapshot { snapshot } => formatter
+                .debug_tuple("AssistantTurnSnapshot")
+                .field(snapshot)
                 .finish(),
             Self::ToolActivity {
                 phase,
@@ -150,6 +405,7 @@ impl fmt::Debug for CanonicalSessionChange {
                 input_text,
                 summary,
                 output,
+                details,
                 is_error,
                 ..
             } => formatter
@@ -163,24 +419,79 @@ impl fmt::Debug for CanonicalSessionChange {
                 )
                 .field("has_summary", &summary.is_some())
                 .field("has_output", &output.is_some())
+                .field("has_details", &details.is_some())
                 .field("is_error", is_error)
+                .finish(),
+            Self::ApprovalRequested { option_ids, .. } => formatter
+                .debug_struct("ApprovalRequested")
+                .field("option_count", &option_ids.len())
+                .finish(),
+            Self::ApprovalResolved { option_ids, .. } => formatter
+                .debug_struct("ApprovalResolved")
+                .field("option_count", &option_ids.len())
+                .finish(),
+            Self::RuntimeActivity { activity, .. } => formatter
+                .debug_struct("RuntimeActivity")
+                .field("activity", activity)
+                .finish(),
+            Self::RuntimeActivityCleared { activity, .. } => formatter
+                .debug_struct("RuntimeActivityCleared")
+                .field("activity", activity)
+                .finish(),
+            Self::RuntimeFallback { detail, .. } => formatter
+                .debug_struct("RuntimeFallback")
+                .field("has_failover_reason", &detail.failover_reason.is_some())
+                .field(
+                    "has_provider_runtime_failure_kind",
+                    &detail.provider_runtime_failure_kind.is_some(),
+                )
+                .field(
+                    "has_provider_error_type",
+                    &detail.provider_error_type.is_some(),
+                )
+                .field(
+                    "has_provider_error_message_preview",
+                    &detail.provider_error_message_preview.is_some(),
+                )
+                .field("has_http_status", &detail.http_status.is_some())
+                .finish(),
+            Self::RuntimeFallbackCleared { .. } => {
+                formatter.debug_struct("RuntimeFallbackCleared").finish()
+            }
+            Self::GuardianNotice { notice, .. } => formatter
+                .debug_struct("GuardianNotice")
+                .field("phase", &notice.phase)
+                .field("has_command", &notice.command.is_some())
+                .field("has_risk_level", &notice.risk_level.is_some())
+                .field("has_rationale", &notice.rationale.is_some())
+                .field("has_message", &notice.message.is_some())
                 .finish(),
             Self::Terminal {
                 outcome,
                 message_id,
                 error_kind,
+                error_message,
                 stop_reason,
+                error_detail,
                 ..
             } => formatter
                 .debug_struct("Terminal")
                 .field("outcome", outcome)
                 .field("has_message_id", &message_id.is_some())
                 .field("error_kind", error_kind)
+                .field("has_error_message", &error_message.is_some())
                 .field("has_stop_reason", &stop_reason.is_some())
+                .field("has_error_detail", &error_detail.is_some())
                 .finish(),
             Self::RecoveryRequired { reason } => formatter
                 .debug_struct("RecoveryRequired")
                 .field("reason", reason)
+                .finish(),
+            Self::TranscriptMessage { message } => formatter
+                .debug_struct("TranscriptMessage")
+                .field("role", &message.role())
+                .field("has_message_id", &message.message_id().is_some())
+                .field("content_count", &message.content().len())
                 .finish(),
         }
     }
@@ -235,6 +546,31 @@ impl CanonicalSessionDeltaProducer {
         )
     }
 
+    pub(crate) fn from_native_changes(
+        event: &SessionEventEnvelope,
+        source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
+        route_key: Option<String>,
+        changes: Vec<CanonicalSessionChange>,
+    ) -> Option<CanonicalSessionDelta> {
+        if changes.is_empty() {
+            return None;
+        }
+        let provenance = SessionEventProvenance::from_native_event(
+            event,
+            source_epoch.map(crate::gateway::ingress::GatewayEpoch::as_u64),
+            route_key.clone(),
+        );
+        Some(CanonicalSessionDelta {
+            session_key: event.session_key.clone(),
+            route_key,
+            source_epoch: provenance.source_epoch(),
+            source_cursor: provenance.source_cursor(),
+            run_id: event.run_id.clone(),
+            provenance,
+            changes,
+        })
+    }
+
     pub(crate) fn from_native_event(
         event: &SessionEventEnvelope,
         source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
@@ -248,23 +584,50 @@ impl CanonicalSessionDeltaProducer {
                     return None;
                 }
                 match chat.state {
-                    ChatState::Delta => CanonicalSessionChange::RunDelta {
-                        run_id: chat.run_id.clone(),
-                        message_id: event.message_id.clone(),
-                        text: chat.delta_text.clone()?,
-                        replace: chat.replace,
-                    },
-                    state => CanonicalSessionChange::Terminal {
-                        run_id: chat.run_id.clone(),
-                        outcome: terminal_outcome(state)?,
-                        message_id: event.message_id.clone(),
-                        message_text: chat.message_text.clone(),
-                        error_kind: chat.error_kind,
-                        stop_reason: chat.stop_reason.clone(),
-                    },
+                    ChatState::Status => return None,
+                    ChatState::Delta => {
+                        if chat.message_text.is_some() || chat.message_thinking.is_some() {
+                            return Self::from_native_changes(
+                                event,
+                                source_epoch,
+                                route_key,
+                                chat_snapshot_chunks(event, chat),
+                            );
+                        }
+                        CanonicalSessionChange::AssistantTurnChunk {
+                            run_id: chat.run_id.clone(),
+                            message_id: native_message_id(event),
+                            kind: AssistantTurnChunkKind::Text,
+                            text: chat.delta_text.clone()?,
+                            replace: chat.replace,
+                            status: AssistantTurnStatus::Streaming,
+                        }
+                    }
+                    state => {
+                        let terminal = CanonicalSessionChange::Terminal {
+                            run_id: chat.run_id.clone(),
+                            outcome: terminal_outcome(state)?,
+                            message_id: native_message_id(event),
+                            error_kind: chat.error_kind,
+                            error_message: chat.error_message.clone(),
+                            stop_reason: chat.stop_reason.clone(),
+                            error_detail: chat.error_detail.clone(),
+                        };
+                        if chat.message_text.is_some() || chat.message_thinking.is_some() {
+                            let mut changes = chat_snapshot_chunks(event, chat);
+                            changes.push(terminal);
+                            return Self::from_native_changes(
+                                event,
+                                source_epoch,
+                                route_key,
+                                changes,
+                            );
+                        }
+                        terminal
+                    }
                 }
             }
-            SessionEventKind::Message | SessionEventKind::Tool => {
+            SessionEventKind::Message | SessionEventKind::Tool | SessionEventKind::Agent => {
                 let activity = event.activity.as_ref()?;
                 if event.session_key != activity.session_key
                     || run_id.as_ref() != Some(&activity.run_id)
@@ -276,11 +639,13 @@ impl CanonicalSessionDeltaProducer {
                         message_id,
                         lifecycle,
                         text,
-                    } => CanonicalSessionChange::MessageActivity {
+                    } => CanonicalSessionChange::AssistantTurnChunk {
                         run_id: activity.run_id.clone(),
-                        message_id: message_id.clone(),
-                        lifecycle: *lifecycle,
-                        text: text.clone(),
+                        message_id: Some(message_id.clone()),
+                        kind: AssistantTurnChunkKind::Text,
+                        text: text.clone().unwrap_or_default(),
+                        replace: false,
+                        status: AssistantTurnStatus::from_message_lifecycle(*lifecycle),
                     },
                     SessionActivityKind::Tool {
                         tool_id,
@@ -296,26 +661,96 @@ impl CanonicalSessionDeltaProducer {
                         input_text: activity.input_text().map(str::to_owned),
                         summary: summary.clone(),
                         output: activity.output().cloned(),
+                        details: activity.details().cloned(),
                         is_error: activity.is_error(),
                     },
+                    SessionActivityKind::Thinking { text } => {
+                        CanonicalSessionChange::AssistantTurnChunk {
+                            run_id: activity.run_id.clone(),
+                            message_id: event
+                                .message_id
+                                .clone()
+                                .or_else(|| event.embedded_message_id.clone()),
+                            kind: AssistantTurnChunkKind::Thinking,
+                            text: text.clone(),
+                            replace: false,
+                            status: AssistantTurnStatus::Streaming,
+                        }
+                    }
+                    SessionActivityKind::Compaction { phase } => match phase {
+                        RuntimeActivityPhase::Started => CanonicalSessionChange::RuntimeActivity {
+                            run_id: activity.run_id.clone(),
+                            activity: CanonicalRuntimeActivity::Compacting,
+                        },
+                        RuntimeActivityPhase::Retrying => return None,
+                        RuntimeActivityPhase::Completed
+                        | RuntimeActivityPhase::CompletedIfRetrying => {
+                            CanonicalSessionChange::RuntimeActivityCleared {
+                                run_id: activity.run_id.clone(),
+                                activity: CanonicalRuntimeActivity::Compacting,
+                                retrying_cleanup: matches!(
+                                    phase,
+                                    RuntimeActivityPhase::CompletedIfRetrying
+                                ),
+                            }
+                        }
+                    },
+                    SessionActivityKind::Fallback { detail } => {
+                        CanonicalSessionChange::RuntimeFallback {
+                            run_id: activity.run_id.clone(),
+                            detail: detail.clone(),
+                        }
+                    }
+                    SessionActivityKind::FallbackCleared => {
+                        CanonicalSessionChange::RuntimeFallbackCleared {
+                            run_id: activity.run_id.clone(),
+                        }
+                    }
+                    SessionActivityKind::Guardian { notice } => {
+                        CanonicalSessionChange::GuardianNotice {
+                            run_id: activity.run_id.clone(),
+                            notice: notice.clone(),
+                        }
+                    }
+                }
+            }
+            SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved => {
+                let approval = event.approval.as_ref()?;
+                if event.session_key != approval.session_key
+                    || !matches!(
+                        (event.kind, approval.lifecycle),
+                        (
+                            SessionEventKind::ApprovalRequested,
+                            super::protocol::SessionApprovalLifecycle::Requested
+                        ) | (
+                            SessionEventKind::ApprovalResolved,
+                            super::protocol::SessionApprovalLifecycle::Resolved
+                        )
+                    )
+                {
+                    return None;
+                }
+                let run_id = approval.run_id.clone().or_else(|| event.run_id.clone())?;
+                match approval.lifecycle {
+                    super::protocol::SessionApprovalLifecycle::Requested => {
+                        CanonicalSessionChange::ApprovalRequested {
+                            run_id,
+                            approval_id: approval.approval_id.clone(),
+                            option_ids: approval.option_ids.clone(),
+                        }
+                    }
+                    super::protocol::SessionApprovalLifecycle::Resolved => {
+                        CanonicalSessionChange::ApprovalResolved {
+                            run_id,
+                            approval_id: approval.approval_id.clone(),
+                            option_ids: approval.option_ids.clone(),
+                        }
+                    }
                 }
             }
             SessionEventKind::Changed => return None,
         };
-        let provenance = SessionEventProvenance::from_native_event(
-            event,
-            source_epoch.map(crate::gateway::ingress::GatewayEpoch::as_u64),
-            route_key.clone(),
-        );
-        Some(CanonicalSessionDelta {
-            session_key: event.session_key.clone(),
-            route_key,
-            source_epoch: provenance.source_epoch(),
-            source_cursor: provenance.source_cursor(),
-            run_id,
-            provenance,
-            changes: vec![change],
-        })
+        Self::from_native_changes(event, source_epoch, route_key, vec![change])
     }
 
     pub(crate) fn recovery(
@@ -346,8 +781,43 @@ fn terminal_outcome(state: ChatState) -> Option<TerminalOutcome> {
         ChatState::Final => Some(TerminalOutcome::Completed),
         ChatState::Aborted => Some(TerminalOutcome::Aborted),
         ChatState::Error => Some(TerminalOutcome::Error),
-        ChatState::Delta => None,
+        ChatState::Status | ChatState::Delta => None,
     }
+}
+
+fn chat_snapshot_chunks(
+    event: &SessionEventEnvelope,
+    chat: &super::protocol::ChatEvent,
+) -> Vec<CanonicalSessionChange> {
+    let mut changes = Vec::with_capacity(2);
+    if let Some(text) = chat.message_thinking.clone() {
+        changes.push(CanonicalSessionChange::AssistantTurnChunk {
+            run_id: chat.run_id.clone(),
+            message_id: native_message_id(event),
+            kind: AssistantTurnChunkKind::Thinking,
+            text,
+            replace: chat.replace,
+            status: AssistantTurnStatus::Streaming,
+        });
+    }
+    if let Some(text) = chat.message_text.clone() {
+        changes.push(CanonicalSessionChange::AssistantTurnChunk {
+            run_id: chat.run_id.clone(),
+            message_id: native_message_id(event),
+            kind: AssistantTurnChunkKind::Text,
+            text,
+            replace: chat.replace,
+            status: AssistantTurnStatus::Streaming,
+        });
+    }
+    changes
+}
+
+fn native_message_id(event: &SessionEventEnvelope) -> Option<MessageId> {
+    event
+        .message_id
+        .clone()
+        .or_else(|| event.embedded_message_id.clone())
 }
 
 /// A field needed by the public Renderer snapshot.
@@ -765,6 +1235,8 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(false),
             model: Some("provider/model".into()),
+            permission_mode: None,
+            permission_mode_pending: None,
         }
     }
 
@@ -917,11 +1389,13 @@ mod tests {
         assert_eq!(delta.provenance().source_cursor(), Some(8));
         assert!(matches!(
             delta.changes(),
-            [CanonicalSessionChange::RunDelta {
+            [CanonicalSessionChange::AssistantTurnChunk {
                 run_id,
                 message_id: None,
+                kind: AssistantTurnChunkKind::Text,
                 text,
-                replace: false
+                replace: false,
+                status: AssistantTurnStatus::Streaming,
             }] if run_id.as_str() == "run-1" && text == "private delta"
         ));
         let debug = format!("{delta:?}");
@@ -950,11 +1424,13 @@ mod tests {
                 .expect("native message activity has a typed change");
         assert!(matches!(
             message_delta.changes(),
-            [CanonicalSessionChange::MessageActivity {
+            [CanonicalSessionChange::AssistantTurnChunk {
                 run_id,
-                message_id,
-                lifecycle: MessageActivityLifecycle::Delta,
-                text: Some(text)
+                message_id: Some(message_id),
+                kind: AssistantTurnChunkKind::Text,
+                text,
+                replace: false,
+                status: AssistantTurnStatus::Streaming,
             }] if run_id.as_str() == "run-1"
                 && message_id.as_str() == "message-1"
                 && text == "message text"
@@ -989,6 +1465,7 @@ mod tests {
                 input_text,
                 summary: Some(summary),
                 output,
+                details,
                 is_error,
             }] if run_id.as_str() == "run-1"
                 && tool_id.as_str() == "tool-1"
@@ -997,7 +1474,34 @@ mod tests {
                 && input_text.is_none()
                 && summary == "tool summary"
                 && output.is_none()
+                && details.is_none()
                 && is_error == &None
+        ));
+
+        let detailed_tool = LiveSessionFacts::from_native_at_epoch(
+            event(
+                "session.tool",
+                json!({
+                    "sessionKey":"agent:main:session-1",
+                    "runId":"run-1",
+                    "phase":"result",
+                    "toolCallId":"tool-1",
+                    "result":{"details":{"browserTab":{"title":"safe"},"privatePayload":{"secret":true}}},
+                    "output":""
+                }),
+            ),
+            Some(GatewayEpoch::try_new(5).unwrap()),
+        );
+        let detailed_tool_delta =
+            CanonicalSessionDeltaProducer::from_facts(detailed_tool.facts().unwrap(), None)
+                .expect("native tool result details have a typed change");
+        assert!(matches!(
+            detailed_tool_delta.changes(),
+            [CanonicalSessionChange::ToolActivity {
+                phase: ToolActivityPhase::Completed,
+                details: Some(details),
+                ..
+            }] if details == &json!({"browserTab":{"title":"safe"}})
         ));
 
         let terminal = LiveSessionFacts::from_native_at_epoch(
@@ -1021,10 +1525,107 @@ mod tests {
                 run_id,
                 outcome: TerminalOutcome::Completed,
                 message_id: None,
-                message_text: None,
                 error_kind: None,
-                stop_reason: None
+                error_message: None,
+                stop_reason: None,
+                error_detail: None
             }] if run_id.as_str() == "run-1"
+        ));
+
+        let compacting = LiveSessionFacts::from_native_at_epoch(
+            event(
+                "agent",
+                json!({
+                    "sessionKey":"agent:main:session-1",
+                    "runId":"run-1",
+                    "stream":"compaction",
+                    "data":{"phase":"start"}
+                }),
+            ),
+            Some(GatewayEpoch::try_new(5).unwrap()),
+        );
+        let compacting_delta =
+            CanonicalSessionDeltaProducer::from_facts(compacting.facts().unwrap(), None)
+                .expect("native compaction stream has a typed change");
+        assert!(matches!(
+            compacting_delta.changes(),
+            [CanonicalSessionChange::RuntimeActivity {
+                run_id,
+                activity: CanonicalRuntimeActivity::Compacting,
+            }] if run_id.as_str() == "run-1"
+        ));
+
+        let message_only_error_terminal = LiveSessionFacts::from_native_at_epoch(
+            event(
+                "chat",
+                json!({
+                    "sessionKey":"agent:main:session-1",
+                    "runId":"run-1",
+                    "seq":9,
+                    "state":"error",
+                    "errorMessage":"provider overloaded",
+                    "errorKind":"rate_limit",
+                    "stopReason":"gateway_error"
+                }),
+            ),
+            Some(GatewayEpoch::try_new(5).unwrap()),
+        );
+        let message_only_error_terminal_delta = CanonicalSessionDeltaProducer::from_facts(
+            message_only_error_terminal.facts().unwrap(),
+            None,
+        )
+        .expect("native terminal error message has a typed change");
+        assert!(matches!(
+            message_only_error_terminal_delta.changes(),
+            [CanonicalSessionChange::Terminal {
+                outcome: TerminalOutcome::Error,
+                error_kind: Some(SessionErrorKind::RateLimit),
+                error_message: Some(error_message),
+                stop_reason: Some(stop_reason),
+                error_detail: None,
+                ..
+            }] if error_message == "provider overloaded" && stop_reason == "gateway_error"
+        ));
+
+        let error_terminal = LiveSessionFacts::from_native_at_epoch(
+            event(
+                "chat",
+                json!({
+                    "sessionKey":"agent:main:session-1",
+                    "runId":"run-1",
+                    "seq":10,
+                    "state":"error",
+                    "errorMessage":"provider overloaded",
+                    "errorKind":"rate_limit",
+                    "stopReason":"gateway_error",
+                    "errorDetail":{
+                        "provider":"private-provider",
+                        "failoverReason":"rate_limit",
+                        "providerErrorType":"overloaded",
+                        "providerErrorMessagePreview":"safe preview",
+                        "httpStatus":429
+                    }
+                }),
+            ),
+            Some(GatewayEpoch::try_new(5).unwrap()),
+        );
+        let error_terminal_delta =
+            CanonicalSessionDeltaProducer::from_facts(error_terminal.facts().unwrap(), None)
+                .expect("native terminal error detail has a typed change");
+        assert!(matches!(
+            error_terminal_delta.changes(),
+            [CanonicalSessionChange::Terminal {
+                outcome: TerminalOutcome::Error,
+                error_kind: Some(SessionErrorKind::RateLimit),
+                error_message: Some(error_message),
+                stop_reason: Some(stop_reason),
+                error_detail: Some(error_detail),
+                ..
+            }] if error_message == "provider overloaded"
+                && stop_reason == "gateway_error"
+                && error_detail.get("provider").is_none()
+                && error_detail.get("failoverReason").and_then(Value::as_str) == Some("rate_limit")
+                && error_detail.get("httpStatus").and_then(Value::as_u64) == Some(429)
         ));
     }
 
@@ -1050,6 +1651,69 @@ mod tests {
         assert_eq!(delta.source_cursor(), None);
         assert_eq!(delta.provenance().source_epoch(), None);
         assert_eq!(delta.provenance().source_cursor(), None);
+    }
+
+    #[test]
+    fn chat_snapshot_delta_projects_text_and_thinking_deltas_without_raw_payload() {
+        let delta = CanonicalSessionDeltaProducer::from_native_event(
+            &event(
+                "chat",
+                json!({
+                    "sessionKey":"agent:main:session-1",
+                    "runId":"run-1",
+                    "seq":7,
+                    "state":"delta",
+                    "message":{
+                        "id":"message-1",
+                        "role":"assistant",
+                        "content":[
+                            {"type":"thinking","thinking":"plan"},
+                            {"type":"text","text":"answer"}
+                        ]
+                    }
+                }),
+            ),
+            None,
+            None,
+        )
+        .expect("chat message snapshot has typed deltas");
+
+        assert!(matches!(
+            delta.changes(),
+            [
+                CanonicalSessionChange::AssistantTurnChunk {
+                    run_id: thinking_run_id,
+                    message_id: Some(thinking_message_id),
+                    kind: AssistantTurnChunkKind::Thinking,
+                    text: thinking,
+                    replace: false,
+                    status: AssistantTurnStatus::Streaming,
+                },
+                CanonicalSessionChange::AssistantTurnChunk {
+                    run_id: text_run_id,
+                    message_id: Some(text_message_id),
+                    kind: AssistantTurnChunkKind::Text,
+                    text,
+                    replace: false,
+                    status: AssistantTurnStatus::Streaming,
+                }
+            ] if thinking_run_id.as_str() == "run-1"
+                && text_run_id.as_str() == "run-1"
+                && thinking_message_id.as_str() == "message-1"
+                && text_message_id.as_str() == "message-1"
+                && thinking == "plan"
+                && text == "answer"
+        ));
+        let debug = format!("{:?}", delta.changes());
+        for private_value in [
+            "plan",
+            "answer",
+            "agent:main:session-1",
+            "run-1",
+            "message-1",
+        ] {
+            assert!(!debug.contains(private_value));
+        }
     }
 
     #[test]

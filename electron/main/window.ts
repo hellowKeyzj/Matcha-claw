@@ -67,8 +67,8 @@ function reconcileWindowRightDockState(win: BrowserWindow, bounds: Rectangle = w
   }
   const nextState = {
     ...state,
+    width: Math.max(state.width, bounds.width - state.baseWidth),
     baseX: bounds.x,
-    baseWidth: Math.max(1, bounds.width - state.width),
     dockedX: bounds.x,
     dockedWidth: bounds.width,
   };
@@ -101,7 +101,7 @@ function getPersistableBounds(win: BrowserWindow): Rectangle {
   return {
     ...bounds,
     x: rightDockState.baseX,
-    width: Math.max(1, bounds.width - rightDockState.width),
+    width: rightDockState.baseWidth,
   };
 }
 

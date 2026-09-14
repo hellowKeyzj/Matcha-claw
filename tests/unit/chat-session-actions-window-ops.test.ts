@@ -17,6 +17,8 @@ import {
 } from '@/stores/chat/store-state-helpers';
 import type { SessionWireItem } from '@/types/session/snapshot';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import {
@@ -86,6 +88,29 @@ function buildView(input: {
   });
 }
 
+function createRuntimeCatalog(sessionKey: string): ChatStoreState['sessionRuntimeCatalog'] {
+  const endpoint = createOpenClawTestSessionIdentity(sessionKey).endpoint;
+  const testScope = { kind: 'agent' as const, endpoint, agentId: 'test' };
+  return {
+    status: 'ready',
+    error: null,
+    endpoints: [{
+      endpointId: 'openclaw-default',
+      protocolId: 'openclaw',
+      endpoint,
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'default',
+      displayName: 'OpenClaw',
+      agentIds: ['test'],
+      acceptsDynamicAgents: true,
+      agentCatalog: { source: 'runtime-endpoint', agents: [{ id: 'test' }] },
+      sessionPromptScopes: [testScope],
+      defaultSessionPromptScope: testScope,
+    }],
+    defaultSessionPromptScope: testScope,
+  };
+}
+
 function createStateHarness(input: {
   currentSessionKey: string;
   items: SessionWireItem[];
@@ -94,49 +119,46 @@ function createStateHarness(input: {
   loadHistory?: ChatStoreState['loadHistory'];
   loadSessions?: ChatStoreState['loadSessions'];
 }) {
+  const sessionRuntimeCatalog = createRuntimeCatalog(input.currentSessionKey);
+  const loadedSessions: ChatStoreState['loadedSessions'] = {
+    [input.currentSessionKey]: {
+      ...createEmptySessionRecord(),
+      meta: {
+        ...createEmptySessionRecord().meta,
+        runtimeScopeKey: buildRuntimeScopeKey(createOpenClawTestSessionIdentity(input.currentSessionKey).endpoint),
+        agentId: input.currentSessionKey.split(':')[1] ?? null,
+        kind: input.currentSessionKey.endsWith(':main') ? 'main' : 'session',
+        preferred: input.currentSessionKey.endsWith(':main'),
+        titleSource: 'none',
+        sessionIdentity: createOpenClawTestSessionIdentity(input.currentSessionKey),
+        ...input.meta,
+      },
+      items: projectSessionViewItems(buildView({ sessionKey: input.currentSessionKey, items: input.items })),
+      window: input.window,
+    },
+  };
   let state = {
     currentSessionKey: input.currentSessionKey,
-    loadedSessions: {
-      [input.currentSessionKey]: {
-        ...createEmptySessionRecord(),
-        meta: {
-          ...createEmptySessionRecord().meta,
-          agentId: input.currentSessionKey.split(':')[1] ?? null,
-          kind: input.currentSessionKey.endsWith(':main') ? 'main' : 'session',
-          preferred: input.currentSessionKey.endsWith(':main'),
-          titleSource: 'none',
-          sessionIdentity: createOpenClawTestSessionIdentity(input.currentSessionKey),
-          ...input.meta,
-        },
-        items: projectSessionViewItems(buildView({ sessionKey: input.currentSessionKey, items: input.items })),
-        window: input.window,
-      },
-    },
+    currentConversation: null,
+    lastSelectedSessionKeyByRuntimeScopeKey: {},
+    sessionRuntimeCatalog,
+    sessionRuntimeGraph: buildSessionRuntimeGraph(sessionRuntimeCatalog, loadedSessions),
+    sessionCatalogLoadedAtByRuntimeScopeKey: {},
+    sessionCatalogLoadedRevisionByRuntimeScopeKey: {},
+    loadedSessions,
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
     pendingApprovalsBySession: {},
-    sessionRecordKeyByIdentityKey: {},
-    sessionRuntimeCatalog: {
-      status: 'ready' as const,
-      error: null,
-      endpoints: [{
-        endpointId: 'openclaw-default',
-        protocolId: 'openclaw',
-        endpoint: createOpenClawTestSessionIdentity(input.currentSessionKey).endpoint,
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'default',
-        displayName: 'OpenClaw',
-        agentIds: ['test'],
-        acceptsDynamicAgents: true,
-        sessionPromptScopes: [{ kind: 'agent' as const, endpoint: createOpenClawTestSessionIdentity(input.currentSessionKey).endpoint, agentId: 'test' }],
-        defaultSessionPromptScope: { kind: 'agent' as const, endpoint: createOpenClawTestSessionIdentity(input.currentSessionKey).endpoint, agentId: 'test' },
-      }],
-      defaultSessionPromptScope: { kind: 'agent' as const, endpoint: createOpenClawTestSessionIdentity(input.currentSessionKey).endpoint, agentId: 'test' },
-    },
+    dismissedRuntimeErrorBySession: {},
+    foregroundHistorySessionKey: null,
     sessionCatalogStatus: {
       status: 'ready' as const,
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: null,
     },
+    mutating: false,
+    error: null,
+    showThinking: true,
     loadHistory: input.loadHistory ?? vi.fn().mockResolvedValue(undefined),
     loadSessions: input.loadSessions ?? vi.fn().mockResolvedValue(undefined),
   } as ChatStoreState;
@@ -342,49 +364,28 @@ describe('chat session window ops', () => {
       hasNewer: true,
       isAtLatest: false,
     });
-    let state = {
+    const { set, get } = createStateHarness({
       currentSessionKey: sessionKey,
+      items: [assistantItem('assistant-local-stream', 'draft preview', {
+        status: 'streaming',
+        runId: 'run-1',
+      })],
+      window: viewport,
+    });
+    set((state) => ({
       loadedSessions: {
+        ...state.loadedSessions,
         [sessionKey]: {
-          ...createEmptySessionRecord(),
-          meta: {
-            ...createEmptySessionRecord().meta,
-            sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
-          },
-          items: projectSessionViewItems(buildView({
-            sessionKey,
-            items: [assistantItem('assistant-local-stream', 'draft preview', {
-              status: 'streaming',
-              runId: 'run-1',
-            })],
-          })),
-
+          ...state.loadedSessions[sessionKey]!,
           runtime: {
             ...createEmptySessionRecord().runtime,
             activeRunId: 'run-1',
             runPhase: 'streaming' as const,
             activeTurnItemKey: 'session:agent:test:main|assistant-turn:main:assistant-local-stream:main',
           },
-          window: viewport,
         },
       },
-      pendingApprovalsBySession: {},
-      sessionCatalogStatus: {
-        status: 'ready' as const,
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: null,
-      },
-      loadHistory: vi.fn().mockResolvedValue(undefined),
-    } as ChatStoreState;
-
-    const set = (
-      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
-    ) => {
-      const patch = typeof partial === 'function' ? partial(state) : partial;
-      state = { ...state, ...patch } as ChatStoreState;
-    };
-    const get = () => state;
+    }));
     const actions = createSessionHarness({
       set,
       get,
@@ -405,10 +406,10 @@ describe('chat session window ops', () => {
 
     await actions.jumpViewportToLatest(sessionKey);
 
-    expect(getSessionItems(state, sessionKey).map((item) => item.key)).toEqual(
+    expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
       ['assistant-final-1'],
     );
-    expect(selectViewportItems(state.loadedSessions[sessionKey]!).map((item) => item.key)).toEqual(
+    expect(selectViewportItems(get().loadedSessions[sessionKey]!).map((item) => item.key)).toEqual(
       ['assistant-final-1'],
     );
   });
@@ -450,10 +451,9 @@ describe('chat session window ops', () => {
     await Promise.resolve();
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
-      sessionKey,
       sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
       limit: 200,
-    });
+    }, { traceId: null });
     expect(loadHistoryMock).not.toHaveBeenCalled();
     for (let index = 0; index < 5; index += 1) {
       const currentItemKeys = getSessionItems(get(), sessionKey).map((item) => item.key);
@@ -543,7 +543,6 @@ describe('chat session window ops', () => {
     }, sessionKey);
 
     expect(hostSessionDeleteMock).toHaveBeenCalledWith({
-      sessionKey,
       sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
     });
     expect(get().loadedSessions[sessionKey]).toBeDefined();
@@ -623,15 +622,13 @@ describe('chat session window ops', () => {
     expect(historyRuntime.historyRenderFingerprintBySession.has(deletedSessionKey)).toBe(false);
     await Promise.resolve();
     expect(hostSessionDeleteMock).toHaveBeenCalledWith({
-      sessionKey: deletedSessionKey,
       sessionIdentity: createOpenClawTestSessionIdentity(deletedSessionKey),
     });
     expect(hostSessionDeleteMock.mock.calls[0]?.[0]).not.toHaveProperty('endpointSessionId');
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
-      sessionKey: nextSessionKey,
       sessionIdentity: createOpenClawTestSessionIdentity(nextSessionKey),
       limit: 200,
-    });
+    }, { traceId: undefined });
     expect(loadHistoryMock).not.toHaveBeenCalled();
     expect(loadSessionsMock).toHaveBeenCalledOnce();
   });
@@ -639,51 +636,38 @@ describe('chat session window ops', () => {
   it('switchSession marks a cold target session as loading before foreground history reconcile', () => {
     const currentSessionKey = 'agent:test:session-1';
     const targetSessionKey = 'agent:test:session-2';
-    let state = {
+    const { set, get } = createStateHarness({
       currentSessionKey,
-      loadedSessions: {
-        [currentSessionKey]: {
-          ...createEmptySessionRecord(),
-          meta: {
-            ...createEmptySessionRecord().meta,
-            historyStatus: 'ready' as const,
-            sessionIdentity: createOpenClawTestSessionIdentity(currentSessionKey),
-          },
-          window: createViewportWindowState({
-            ...createEmptySessionViewportState(),
-            totalItemCount: 2,
-            windowStartOffset: 0,
-            windowEndOffset: 2,
-            hasMore: false,
-            hasNewer: false,
-            isAtLatest: true,
-          }),
-        },
+      items: [],
+      window: createViewportWindowState({
+        ...createEmptySessionViewportState(),
+        totalItemCount: 2,
+        windowStartOffset: 0,
+        windowEndOffset: 2,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      }),
+      meta: { historyStatus: 'ready' },
+    });
+    set((state) => {
+      const loadedSessions = {
+        ...state.loadedSessions,
         [targetSessionKey]: {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
+            runtimeScopeKey: buildRuntimeScopeKey(createOpenClawTestSessionIdentity(targetSessionKey).endpoint),
             sessionIdentity: createOpenClawTestSessionIdentity(targetSessionKey),
           },
         },
-      },
-      pendingApprovalsBySession: {},
-      sessionCatalogStatus: {
-        status: 'ready' as const,
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: null,
-      },
-      loadHistory: vi.fn().mockResolvedValue(undefined),
-    } as ChatStoreState;
-
-    const set = (
-      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
-    ) => {
-      const patch = typeof partial === 'function' ? partial(state) : partial;
-      state = { ...state, ...patch } as ChatStoreState;
-    };
-    const get = () => state;
+      };
+      return {
+        loadedSessions,
+        sessionRuntimeGraph: buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions),
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      };
+    });
 
     const actions = createSessionHarness({
       set,
@@ -694,7 +678,7 @@ describe('chat session window ops', () => {
 
     actions.switchSession(targetSessionKey);
 
-    expect(state.currentSessionKey).toBe(targetSessionKey);
-    expect(state.loadedSessions[targetSessionKey]?.meta.historyStatus).toBe('loading');
+    expect(get().currentSessionKey).toBe(targetSessionKey);
+    expect(get().loadedSessions[targetSessionKey]?.meta.historyStatus).toBe('loading');
   });
 });

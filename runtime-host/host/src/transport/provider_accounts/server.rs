@@ -1,7 +1,7 @@
 use std::{
     io,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -22,7 +22,7 @@ const AUTHORIZATION_SUBJECT: &str = "provider-accounts";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -62,20 +62,55 @@ async fn serve(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::provider::ProviderHandle,
 ) -> io::Result<()> {
-    let response = match timeout(REQUEST_DEADLINE, async {
-        let request = read_request(&mut stream).await?;
-        Ok::<_, io::Error>(match request {
-            Ok(request) => handle(request, verifier, owner).await,
-            Err(response) => response,
-        })
-    })
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+    let started = Instant::now();
+    let response = match timeout(REQUEST_READ_DEADLINE, read_request(&mut stream)).await {
+        Ok(Ok(Ok(request))) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=request-read detail=received elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            let handling_started = Instant::now();
+            let response = handle(request, verifier, owner).await;
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=request-handle detail=completed status={} elapsed_ms={}",
+                response.status,
+                handling_started.elapsed().as_millis()
+            );
+            response
+        }
+        Ok(Ok(Err(response))) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=request-read detail=invalid elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            response
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=request-read detail=io-error elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            return Err(error);
+        }
+        Err(_) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=request-read detail=timeout elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            Response::fixed(408, "Request reception timed out")
+        }
     };
-    write_response(&mut stream, response).await
+    let write_started = Instant::now();
+    let result = write_response(&mut stream, response).await;
+    eprintln!(
+        "[startup-trace] source=provider-accounts-transport phase=response-write detail={} elapsed_ms={}",
+        match &result {
+            Ok(()) => "written",
+            Err(_) => "io-error",
+        },
+        write_started.elapsed().as_millis()
+    );
+    result
 }
 
 async fn handle(
@@ -112,14 +147,29 @@ async fn handle(
         Err(_) => return Response::bad_request(),
     };
     let mut verifier = verifier.lock().await;
-    let command =
-        match ProviderAccountsRequest::decode(value, authorization, &mut verifier, now_millis())
-            .and_then(ProviderAccountsRequest::into_command)
-        {
-            Ok(command) => command,
-            Err(RequestError::Invalid) => return Response::bad_request(),
-            Err(RequestError::Unauthorized) => return Response::unauthorized(),
-        };
+    let command = match ProviderAccountsRequest::decode(
+        value,
+        authorization,
+        &mut verifier,
+        now_millis(),
+    )
+    .and_then(ProviderAccountsRequest::into_command)
+    {
+        Ok(command) => command,
+        Err(RequestError::Invalid) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=decode detail=invalid-request"
+            );
+            return Response::bad_request();
+        }
+        Err(RequestError::Unauthorized) => {
+            eprintln!(
+                "[startup-trace] source=provider-accounts-transport phase=decode detail=unauthorized"
+            );
+            return Response::unauthorized();
+        }
+    };
+    log_command("decode", &command);
     drop(verifier);
     let delivery = match command {
         super::ProviderAccountsCommand::List => owner.list_provider_accounts().await,
@@ -221,6 +271,34 @@ fn authorization(headers: &[(String, String)]) -> Option<&str> {
         .iter()
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+}
+
+fn log_command(phase: &str, command: &super::ProviderAccountsCommand) {
+    match command {
+        super::ProviderAccountsCommand::List => eprintln!(
+            "[startup-trace] source=provider-accounts-transport phase={phase} detail=command operation=list"
+        ),
+        super::ProviderAccountsCommand::Get(id) => eprintln!(
+            "[startup-trace] source=provider-accounts-transport phase={phase} detail=command operation=get account_id_len={}",
+            id.as_str().len()
+        ),
+        super::ProviderAccountsCommand::Replace(draft) => eprintln!(
+            "[startup-trace] source=provider-accounts-transport phase={phase} detail=command operation=replace provider={} auth_mode={} kind={} enabled={} revision={} endpoint_present={} protocol={} media_protocol={}",
+            draft.trace_provider(),
+            draft.trace_auth_mode(),
+            draft.trace_kind(),
+            draft.trace_enabled(),
+            draft.revision(),
+            draft.trace_endpoint_present(),
+            draft.trace_protocol().unwrap_or("none"),
+            draft.trace_media_protocol().unwrap_or("none")
+        ),
+        super::ProviderAccountsCommand::Delete(id, revision) => eprintln!(
+            "[startup-trace] source=provider-accounts-transport phase={phase} detail=command operation=delete account_id_len={} revision={}",
+            id.as_str().len(),
+            revision.get()
+        ),
+    }
 }
 
 struct Request {
@@ -373,6 +451,7 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        408 => "Request Timeout",
         409 => "Conflict",
         422 => "Unprocessable Content",
         503 => "Service Unavailable",

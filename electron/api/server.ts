@@ -10,6 +10,7 @@ import { handleBillingRoutes } from './routes/billing';
 import { handleCapabilityRoutes } from './routes/capabilities';
 import { handleAgentsRoutes } from './routes/agents';
 import { handleAppRoutes } from './routes/app';
+import { handleChannelAuthorizationRoutes } from './routes/channel-authorization';
 import { handleChannelCatalogRoutes } from './routes/channel-catalog';
 import { handleChannelConfigureRoutes } from './routes/channel-configure';
 import { handleChannelCredentialsRoutes } from './routes/channel-credentials';
@@ -27,11 +28,12 @@ import { handleExternalConnectorsRoutes } from './routes/external-connectors';
 import { handleFileRoutes } from './routes/files';
 import { handleFleetRoutes } from './routes/fleet';
 import { handleGatewayRoutes } from './routes/gateway';
-import { handleLicenseRoutes } from './routes/license';
 import { handleLogRoutes } from './routes/logs';
 import { handleManualTeamRoutes } from './routes/manual-team';
 import { handleMatchaAgentAppServerRoutes } from './routes/matcha-agent-app-server';
 import { handleOpenClawRoutes } from './routes/openclaw';
+import { handleOpenClawMcpServersRoutes } from './routes/openclaw-mcp-servers';
+import { handlePackageRoutes } from './routes/packages';
 import { handlePluginsRoutes } from './routes/plugins';
 import { handleProviderAccountsRoutes } from './routes/provider-accounts';
 import { handleProviderModelsRoutes } from './routes/provider-models';
@@ -42,6 +44,7 @@ import { handleRuntimeDirectoryRoutes } from './routes/runtime-directory';
 import { handleSecurityEmergencyRoutes } from './routes/security-emergency';
 import { handleSecurityPolicyRoutes } from './routes/security-policy';
 import { handleSecurityRoutes } from './routes/security';
+import { handleSealedSkillsRoutes } from './routes/sealed-skills';
 import { handleSettingsDesiredRoutes } from './routes/settings-desired';
 import { handleSettingsRoutes } from './routes/settings';
 import { handleSkillBundleRoutes } from './routes/skill-bundle';
@@ -83,6 +86,7 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.agentsTransport),
   (req, res, url, deps) => handleBillingRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.channelAuthorizationTransport),
   (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.channelCatalogTransport),
   (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.channelCatalogTransport),
   (req, res, url, deps) => handleChannelCredentialsRoutes(req, res, url, deps.channelCredentialsTransport),
@@ -112,11 +116,12 @@ const routeHandlers: readonly RouteHandler[] = [
     deps.credentialWriteAdapter ?? createFleetCredentialWriteAdapter(deps.runtimeHost),
   ),
   (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleLicenseRoutes(req, res, url, deps),
   (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
   (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.manualTeamTransport),
   (req, res, url, deps) => handleMatchaAgentAppServerRoutes(req, res, url, deps),
   (req, res, url, deps) => handleOpenClawRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleOpenClawMcpServersRoutes(req, res, url, deps.openClawMcpServersTransport),
+  (req, res, url, deps) => handlePackageRoutes(req, res, url, deps),
   (req, res, url, deps) => handlePluginsRoutes(req, res, url, deps.pluginsTransport),
   (req, res, url, deps) => handleProviderAccountsRoutes(
     req,
@@ -143,6 +148,7 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleSettingsRoutes(req, res, url, deps.settingsDesiredTransport),
   (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.skillBundleTransport),
   (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.skillsManagementTransport),
+  (req, res, url, deps) => handleSealedSkillsRoutes(req, res, url, deps.sealedSkillsTransport),
   (req, res, url, deps) => handleSubscriptionRoutes(req, res, url, deps),
   (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.teamApprovalsTransport),
   (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.teamHumanDecisionTransport),

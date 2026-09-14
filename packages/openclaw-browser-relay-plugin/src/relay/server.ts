@@ -1,6 +1,7 @@
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from '../plugin-types.js'
 import { createCipheriv, createDecipheriv, privateDecrypt, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import type { BrowserCookieInput } from '../browser-action-contract.js'
 import { relayDebugInfo } from '../debug-logging.js'
@@ -22,6 +23,7 @@ const AES_GCM_TAG_BYTES = 16
 const EXTENSION_HELLO_TIMEOUT_MS = 5_000
 const EXTENSION_REQUEST_TIMEOUT_MS = 15_000
 const TARGET_ATTACH_TIMEOUT_MS = 5_000
+const HTTP_SERVER_CLOSE_GRACE_MS = 1_000
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
 const SESSION_ID_MARKER = '|sid|'
@@ -320,6 +322,7 @@ export class BrowserRelayServer {
   private cdpWss: WebSocketServer | null = null
   private extensionClients = new Map<string, ExtensionClient>()
   private cdpClients = new Set<WebSocket>()
+  private httpSockets = new Set<Socket>()
   private cdpClientState = new WeakMap<WebSocket, CdpClientState>()
   private browserSessions = new Map<string, BrowserSession>()
   private attachedClientSessions = new Map<string, AttachedClientSession>()
@@ -498,6 +501,11 @@ export class BrowserRelayServer {
     this.extensionWss = new WebSocketServer({ noServer: true })
     this.cdpWss = new WebSocketServer({ noServer: true })
 
+    this.httpServer.on('connection', (socket) => {
+      this.httpSockets.add(socket)
+      socket.once('close', () => this.httpSockets.delete(socket))
+    })
+
     this.httpServer.on('upgrade', (req, socket, head) => {
       if (!isLoopback(req.socket.remoteAddress)) {
         socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
@@ -603,25 +611,7 @@ export class BrowserRelayServer {
     }
     this.cdpClients.clear()
 
-    await new Promise<void>((resolve) => {
-      this.extensionWss?.close()
-      this.cdpWss?.close()
-      this.extensionWss = null
-      this.cdpWss = null
-
-      if (!this.httpServer) {
-        this.actualPort = null
-        resolve()
-        return
-      }
-
-      const server = this.httpServer
-      this.httpServer = null
-      server.close(() => {
-        this.actualPort = null
-        resolve()
-      })
-    })
+    await this.closeServers()
 
     await releaseRelayPortOwnership({
       port: this.requestedPort,
@@ -639,24 +629,45 @@ export class BrowserRelayServer {
     this.attachedClientSessions.clear()
     this.cdpClients.clear()
 
+    await this.closeServers()
+  }
+
+  private async closeServers(): Promise<void> {
+    this.extensionWss?.close()
+    this.cdpWss?.close()
+    this.extensionWss = null
+    this.cdpWss = null
+
+    const server = this.httpServer
+    this.httpServer = null
+    if (!server) {
+      this.actualPort = null
+      return
+    }
+
     await new Promise<void>((resolve) => {
-      this.extensionWss?.close()
-      this.cdpWss?.close()
-      this.extensionWss = null
-      this.cdpWss = null
-
-      if (!this.httpServer) {
-        this.actualPort = null
-        resolve()
-        return
+      const sockets = new Set(this.httpSockets)
+      let finished = false
+      let timer: NodeJS.Timeout | null = null
+      const clearClosedSockets = () => {
+        for (const socket of sockets) this.httpSockets.delete(socket)
       }
-
-      const server = this.httpServer
-      this.httpServer = null
-      server.close(() => {
+      const finish = () => {
+        if (finished) return
+        finished = true
+        if (timer) clearTimeout(timer)
+        clearClosedSockets()
         this.actualPort = null
         resolve()
-      })
+      }
+      timer = setTimeout(() => {
+        for (const socket of sockets) socket.destroy()
+        server.closeAllConnections?.()
+        finish()
+      }, HTTP_SERVER_CLOSE_GRACE_MS)
+
+      server.closeIdleConnections?.()
+      server.close(finish)
     })
   }
 

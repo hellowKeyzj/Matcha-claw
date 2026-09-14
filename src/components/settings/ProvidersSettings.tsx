@@ -73,6 +73,28 @@ function stripUserAgentHeader(headers?: Record<string, string>): Record<string, 
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
+function getProviderConflictToastKey(type: ProviderType, existingVendorIds: Set<string>): string | null {
+  const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
+  if ((type === 'minimax-portal' || type === 'minimax-portal-cn') && hasMinimax) {
+    return 'aiProviders.toast.minimaxConflict';
+  }
+  const hasZai = existingVendorIds.has('zai') || existingVendorIds.has('zai-global');
+  if ((type === 'zai' || type === 'zai-global') && hasZai) {
+    return 'aiProviders.toast.zaiConflict';
+  }
+  return null;
+}
+
+function resolveCodePlanBaseUrl(type: ProviderType | string, enabled: boolean): string | undefined {
+  if (!enabled) return undefined;
+  return PROVIDER_TYPE_INFO.find((info) => info.id === type)?.codePlan?.baseUrl;
+}
+
+function isCodePlanBaseUrl(type: ProviderType | string, baseUrl: string | undefined): boolean {
+  const codePlanBaseUrl = PROVIDER_TYPE_INFO.find((info) => info.id === type)?.codePlan?.baseUrl;
+  return Boolean(codePlanBaseUrl && baseUrl === codePlanBaseUrl);
+}
+
 function getAuthModeLabel(authMode: ProviderCredential['authMode'], t: (key: string) => string): string {
   switch (authMode) {
     case 'api_key':
@@ -81,6 +103,10 @@ function getAuthModeLabel(authMode: ProviderCredential['authMode'], t: (key: str
       return t('aiProviders.authModes.oauthDevice');
     case 'oauth_browser':
       return t('aiProviders.authModes.oauthBrowser');
+    case 'token':
+      return t('aiProviders.authModes.token');
+    case 'cli_reuse':
+      return t('aiProviders.authModes.cliReuse');
     case 'local':
       return t('aiProviders.authModes.local');
     default:
@@ -125,7 +151,6 @@ export function ProvidersSettings() {
     createAccount,
     removeAccount,
     updateAccount,
-    validateAccountApiKey,
   } = useProviderStore();
   const modelCatalogModels = useProviderModelCatalogStore((state) => state.models);
   const modelCatalogReady = useProviderModelCatalogStore((state) => state.ready);
@@ -207,6 +232,7 @@ export function ProvidersSettings() {
     name: string,
     apiKey: string,
     options?: {
+      token?: string;
       baseUrl?: string;
       apiProtocol?: ProviderCredential['apiProtocol'];
       headers?: Record<string, string>;
@@ -226,15 +252,13 @@ export function ProvidersSettings() {
         label: name,
         authMode: options?.authMode || vendor?.defaultAuthMode || (type === 'ollama' ? 'local' : 'api_key'),
         baseUrl: options?.baseUrl,
-        apiProtocol: (options?.providerKind ?? 'chat') === 'chat' && (type === 'custom' || type === 'ollama')
-          ? (options?.apiProtocol || 'openai-completions')
-          : undefined,
+        apiProtocol: (options?.providerKind ?? 'chat') === 'chat' ? options?.apiProtocol : undefined,
         mediaApiProtocol: options?.mediaApiProtocol,
         headers: options?.headers,
         enabled: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      }, effectiveApiKey);
+      }, effectiveApiKey, options?.token);
       setShowAddDialog(false);
       toast.success(t('aiProviders.toast.added'));
     } catch (addError) {
@@ -272,7 +296,6 @@ export function ProvidersSettings() {
                 setOpen(true);
                 setShowAddDialog(true);
               }}
-              disabled={!gatewayOperational}
             >
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.add')}
@@ -331,7 +354,7 @@ export function ProvidersSettings() {
             <p className="text-muted-foreground text-center mb-4">
               {t('aiProviders.empty.desc')}
             </p>
-            <Button onClick={() => setShowAddDialog(true)} disabled={!gatewayOperational}>
+            <Button onClick={() => setShowAddDialog(true)}>
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.empty.cta')}
             </Button>
@@ -363,10 +386,9 @@ export function ProvidersSettings() {
                 }
               }}
               onSaveEdits={async (payload) => {
-                await updateAccount(item.account.id, payload.updates ?? {}, payload.newApiKey);
+                await updateAccount(item.account.id, payload.updates ?? {}, payload.newApiKey, payload.token);
                 setEditingProvider(null);
               }}
-              onValidateKey={(key, options) => validateAccountApiKey(item.account.id, key, options)}
               onReplaceModels={(next) => replaceAccountModels(item.account.id, next)}
             />
           ))}
@@ -380,7 +402,6 @@ export function ProvidersSettings() {
           vendors={vendors}
           onClose={() => setShowAddDialog(false)}
           onAdd={handleAddProvider}
-          onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
         />
       ) : null}
     </Card>
@@ -401,15 +422,7 @@ interface ProviderCardProps {
   onEdit: () => void;
   onCancelEdit: () => void;
   onDelete: () => void;
-  onSaveEdits: (payload: { newApiKey?: string; updates?: Partial<ProviderCredential> }) => Promise<void>;
-  onValidateKey: (
-    key: string,
-    options?: {
-      baseUrl?: string;
-      apiProtocol?: ProviderCredential['apiProtocol'];
-      headers?: Record<string, string>;
-    },
-  ) => Promise<{ valid: boolean; error?: string }>;
+  onSaveEdits: (payload: { newApiKey?: string; token?: string; updates?: Partial<ProviderCredential> }) => Promise<void>;
   onReplaceModels: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
 }
 
@@ -428,20 +441,18 @@ function ProviderCard({
   onCancelEdit,
   onDelete,
   onSaveEdits,
-  onValidateKey,
   onReplaceModels,
 }: ProviderCardProps) {
   const { t, i18n } = useTranslation('settings');
   const { account, vendor, status } = item;
   const [newKey, setNewKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(account.baseUrl || '');
+  const [codePlanEnabled, setCodePlanEnabled] = useState(() => isCodePlanBaseUrl(account.vendorId, account.baseUrl));
   const [apiProtocol, setApiProtocol] = useState<ProviderCredential['apiProtocol']>(
     account.apiProtocol || 'openai-completions',
   );
   const [showKey, setShowKey] = useState(false);
-  const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const typeInfo = PROVIDER_TYPE_INFO.find((type) => type.id === account.vendorId);
   const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
@@ -471,9 +482,9 @@ function ProviderCard({
     setNewKey('');
     setShowKey(false);
     setBaseUrl(account.baseUrl || '');
+    setCodePlanEnabled(isCodePlanBaseUrl(account.vendorId, account.baseUrl));
     setApiProtocol(account.apiProtocol || 'openai-completions');
-    setValidationError(null);
-  }, [account.apiProtocol, account.baseUrl, isEditing]);
+  }, [account.apiProtocol, account.baseUrl, account.vendorId, isEditing]);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -487,34 +498,25 @@ function ProviderCard({
   }, [isEditing, onCancelEdit]);
 
   const canEditRuntimeConfig = Boolean(!isMediaCredential && (typeInfo?.showBaseUrl || account.vendorId === 'custom' || account.vendorId === 'ollama'));
-  const hasConfigChanges = (typeInfo?.showBaseUrl && (baseUrl.trim() || undefined) !== (account.baseUrl || undefined))
+  const effectiveBaseUrl = resolveCodePlanBaseUrl(account.vendorId, codePlanEnabled) ?? (baseUrl.trim() || undefined);
+  const hasConfigChanges = (typeInfo?.showBaseUrl && effectiveBaseUrl !== (account.baseUrl || undefined))
     || (!isMediaCredential && (account.vendorId === 'custom' || account.vendorId === 'ollama')
       && (apiProtocol || 'openai-completions') !== (account.apiProtocol || 'openai-completions'))
+    || (!isMediaCredential && Boolean(typeInfo?.apiProtocol && typeInfo.apiProtocol !== account.apiProtocol))
     || hasLegacyUserAgentHeader;
 
   const handleSaveEdits = async () => {
     setSaving(true);
-    setValidationError(null);
     try {
-    const payload: { newApiKey?: string; updates?: Partial<ProviderCredential> } = {};
+      const payload: { newApiKey?: string; token?: string; updates?: Partial<ProviderCredential> } = {};
       if (normalizedNewKey) {
-        setValidating(true);
-        const result = await onValidateKey(normalizedNewKey, {
-          baseUrl: baseUrl.trim() || undefined,
-          apiProtocol: (!isMediaCredential && (account.vendorId === 'custom' || account.vendorId === 'ollama')) ? apiProtocol : undefined,
-          headers: sanitizedHeaders,
-        });
-        setValidating(false);
-        if (!result.valid) {
-          setValidationError(result.error || t('aiProviders.toast.invalidKey'));
-          return;
-        }
-        payload.newApiKey = normalizedNewKey;
+        if (account.authMode === 'token') payload.token = normalizedNewKey;
+        else payload.newApiKey = normalizedNewKey;
       }
 
       const updates: Partial<ProviderCredential> = {};
-      if (typeInfo?.showBaseUrl && (baseUrl.trim() || undefined) !== (account.baseUrl || undefined)) {
-        updates.baseUrl = baseUrl.trim() || undefined;
+      if (typeInfo?.showBaseUrl && effectiveBaseUrl !== (account.baseUrl || undefined)) {
+        updates.baseUrl = effectiveBaseUrl;
       }
       if (
         !isMediaCredential
@@ -522,6 +524,9 @@ function ProviderCard({
         && (apiProtocol || 'openai-completions') !== (account.apiProtocol || 'openai-completions')
       ) {
         updates.apiProtocol = apiProtocol || 'openai-completions';
+      }
+      if (!isMediaCredential && typeInfo?.apiProtocol && typeInfo.apiProtocol !== account.apiProtocol) {
+        updates.apiProtocol = typeInfo.apiProtocol;
       }
       if (hasLegacyUserAgentHeader) {
         updates.headers = sanitizedHeaders;
@@ -532,7 +537,7 @@ function ProviderCard({
       if (account.vendorId === 'ollama' && !status?.hasKey && !payload.newApiKey) {
         payload.newApiKey = resolveProviderApiKeyForSave(account.vendorId, '') as string;
       }
-      if (!payload.newApiKey && !payload.updates) {
+      if (!payload.newApiKey && !payload.token && !payload.updates && account.authMode !== 'cli_reuse') {
         onCancelEdit();
         return;
       }
@@ -543,7 +548,6 @@ function ProviderCard({
       toast.error(`${t('aiProviders.toast.failedUpdate')}: ${saveError}`);
     } finally {
       setSaving(false);
-      setValidating(false);
     }
   };
 
@@ -619,6 +623,27 @@ function ProviderCard({
             {canEditRuntimeConfig ? (
               <div className="space-y-3 rounded-lg border border-border/80 bg-muted/20 p-3">
                 <p className="text-sm font-medium">{t('aiProviders.sections.credentials')}</p>
+                {typeInfo?.codePlan?.baseUrl ? (
+                  <label className="flex items-center justify-between gap-3 rounded-md bg-background px-3 py-2 text-sm">
+                    <span>{t('aiProviders.dialog.codePlanMode')}</span>
+                    <input
+                      type="checkbox"
+                      checked={codePlanEnabled}
+                      onChange={(event) => {
+                        setCodePlanEnabled(event.target.checked);
+                      }}
+                    />
+                  </label>
+                ) : null}
+                {typeInfo?.endpointPresets?.length ? (
+                  <div className="space-y-1">
+                    <Label htmlFor={`provider-edit-endpoint-${account.id}`} className="text-xs">{t('aiProviders.dialog.endpointPreset')}</Label>
+                    <Select id={`provider-edit-endpoint-${account.id}`} value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)}>
+                      {!typeInfo.endpointPresets.some((preset) => preset.baseUrl === baseUrl) ? <option value={baseUrl}>{t('aiProviders.custom')}</option> : null}
+                      {typeInfo.endpointPresets.map((preset) => <option key={preset.id} value={preset.baseUrl}>{preset.label}</option>)}
+                    </Select>
+                  </div>
+                ) : null}
                 {typeInfo?.showBaseUrl ? (
                   <div className="space-y-1">
                     <Label htmlFor={`provider-edit-base-url-${account.id}`} className="text-xs">
@@ -626,9 +651,10 @@ function ProviderCard({
                     </Label>
                     <Input
                       id={`provider-edit-base-url-${account.id}`}
-                      value={baseUrl}
+                      value={codePlanEnabled ? typeInfo?.codePlan?.baseUrl ?? '' : baseUrl}
                       onChange={(event) => setBaseUrl(event.target.value)}
                       placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
+                      disabled={codePlanEnabled}
                       className="h-9 text-sm"
                     />
                   </div>
@@ -656,7 +682,7 @@ function ProviderCard({
             <div className="space-y-3 rounded-lg border border-border/80 bg-muted/20 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="space-y-1">
-                  <Label className="text-xs">{t('aiProviders.dialog.apiKey')}</Label>
+                  <Label className="text-xs">{getAuthModeLabel(account.authMode, t)}</Label>
                   <p className="text-xs text-muted-foreground">
                     {status?.hasKey ? t('aiProviders.dialog.apiKeyConfigured') : t('aiProviders.dialog.apiKeyMissing')}
                   </p>
@@ -674,18 +700,26 @@ function ProviderCard({
                   {t('aiProviders.oauth.getApiKey')} <ExternalLink className="h-3 w-3" />
                 </a>
               ) : null}
-              <div className="space-y-1">
-                <Label className="text-xs">{t('aiProviders.dialog.replaceApiKey')}</Label>
+              {account.authMode === 'cli_reuse' ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">{t('aiProviders.dialog.cliReuseHelp')}</p>
+                  <Button size="sm" onClick={handleSaveEdits} disabled={saving}>
+                    {saving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+                    {t('aiProviders.dialog.save')}
+                  </Button>
+                </div>
+              ) : <div className="space-y-1">
+                <Label className="text-xs">{account.authMode === 'token' ? t('aiProviders.dialog.replaceToken') : t('aiProviders.dialog.replaceApiKey')}</Label>
                 <div className="flex gap-2">
                   <div className="relative flex-1">
                     <Input
                       data-testid={`provider-edit-key-input-${account.id}`}
                       type={showKey ? 'text' : 'password'}
                       placeholder={typeInfo?.requiresApiKey ? typeInfo?.placeholder : (typeInfo?.id === 'ollama' ? t('aiProviders.notRequired') : t('aiProviders.card.editKey'))}
+                      disabled={account.authMode === 'oauth_browser' || account.authMode === 'oauth_device'}
                       value={newKey}
                       onChange={(event) => {
                         setNewKey(event.target.value);
-                        setValidationError(null);
                       }}
                       className="h-9 pr-10 text-sm"
                     />
@@ -702,25 +736,13 @@ function ProviderCard({
                     variant="outline"
                     size="sm"
                     onClick={handleSaveEdits}
-                    disabled={validating || saving || (!normalizedNewKey && !hasConfigChanges)}
+                    disabled={saving || (!normalizedNewKey && !hasConfigChanges)}
                   >
-                    {validating || saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                    {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                   </Button>
                 </div>
-                {validationError ? (
-                  <p
-                    data-testid={`provider-edit-validation-error-${account.id}`}
-                    className="mt-1 flex items-start gap-1 text-xs text-destructive"
-                  >
-                    <XCircle className="mt-0.5 h-3 w-3 shrink-0" />
-                    <span>
-                      <span className="font-medium">{t('aiProviders.dialog.failed')}:</span>{' '}
-                      {validationError}
-                    </span>
-                  </p>
-                ) : null}
                 <p className="text-xs text-muted-foreground">{t('aiProviders.dialog.replaceApiKeyHelp')}</p>
-              </div>
+              </div>}
             </div>
           </div>
           ) : (
@@ -798,6 +820,7 @@ interface AddProviderDialogProps {
     name: string,
     apiKey: string,
     options?: {
+      token?: string;
       baseUrl?: string;
       apiProtocol?: ProviderCredential['apiProtocol'];
       headers?: Record<string, string>;
@@ -806,15 +829,6 @@ interface AddProviderDialogProps {
       mediaApiProtocol?: ProviderCredential['mediaApiProtocol'];
     },
   ) => Promise<void>;
-  onValidateKey: (
-    type: string,
-    apiKey: string,
-    options?: {
-      baseUrl?: string;
-      apiProtocol?: ProviderCredential['apiProtocol'];
-      headers?: Record<string, string>;
-    },
-  ) => Promise<{ valid: boolean; error?: string }>;
 }
 
 function AddProviderDialog({
@@ -822,13 +836,13 @@ function AddProviderDialog({
   vendors,
   onClose,
   onAdd,
-  onValidateKey,
 }: AddProviderDialogProps) {
   const { t, i18n } = useTranslation('settings');
   const [selectedType, setSelectedType] = useState<ProviderType | null>(null);
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
+  const [codePlanEnabled, setCodePlanEnabled] = useState(false);
   const [apiProtocol, setApiProtocol] = useState<ProviderCredential['apiProtocol']>('openai-completions');
   const [customKind, setCustomKind] = useState<ProviderCredential['providerKind']>('chat');
   const [mediaApiProtocol, setMediaApiProtocol] = useState<ProviderCredential['mediaApiProtocol']>('openai');
@@ -848,38 +862,24 @@ function AddProviderDialog({
   } | null>(null);
   const [manualCodeInput, setManualCodeInput] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
-  const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('apikey');
+  const [authMode, setAuthMode] = useState<ProviderCredential['authMode']>('api_key');
 
   const typeInfo = PROVIDER_TYPE_INFO.find((type) => type.id === selectedType);
   const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
-  const isOAuth = typeInfo?.isOAuth ?? false;
-  const supportsApiKey = typeInfo?.supportsApiKey ?? false;
-  const oauthUiHidden = typeInfo?.hideOAuthUi ?? false;
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
   const selectedMediaContract = getCustomMediaContract(mediaApiProtocol);
   const isCustomMedia = selectedType === 'custom' && customKind === 'media';
-  const preferredOAuthMode = selectedVendor?.supportedAuthModes.includes('oauth_browser')
-    ? 'oauth_browser'
-    : (selectedVendor?.supportedAuthModes.includes('oauth_device')
-      ? 'oauth_device'
-      : (selectedType === 'google' ? 'oauth_browser' : null));
-  const useOAuthFlow = isOAuth && !oauthUiHidden && (!supportsApiKey || authMode === 'oauth');
+  const useOAuthFlow = authMode === 'oauth_browser' || authMode === 'oauth_device';
+  const effectiveBaseUrl = selectedType
+    ? resolveCodePlanBaseUrl(selectedType, codePlanEnabled) ?? (baseUrl.trim() || undefined)
+    : undefined;
   const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
 
   useEffect(() => {
     if (!selectedMediaContract) return;
     setBaseUrl(selectedMediaContract.defaultBaseUrl ?? '');
   }, [mediaApiProtocol, selectedMediaContract]);
-
-  useEffect(() => {
-    if (!selectedVendor || !isOAuth || !supportsApiKey) return;
-    if (oauthUiHidden) {
-      setAuthMode('apikey');
-      return;
-    }
-    setAuthMode(selectedVendor.defaultAuthMode === 'api_key' ? 'apikey' : 'oauth');
-  }, [selectedVendor, isOAuth, supportsApiKey, oauthUiHidden]);
 
   const latestRef = useRef({ selectedType, typeInfo, onClose, t });
   const [pendingOAuth, setPendingOAuth] = useState<{ flowId: string; accountId: string; vendorId: string; label: string } | null>(null);
@@ -942,8 +942,7 @@ function AddProviderDialog({
   }, [latestRef]);
 
   const availableTypes = PROVIDER_TYPE_INFO.filter((type) => {
-    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
-    if ((type.id === 'minimax-portal' || type.id === 'minimax-portal-cn') && hasMinimax) {
+    if (getProviderConflictToastKey(type.id, existingVendorIds)) {
       return false;
     }
     const vendor = vendorMap.get(type.id);
@@ -953,11 +952,24 @@ function AddProviderDialog({
     return vendor.supportsMultipleAccounts || !existingVendorIds.has(type.id);
   });
 
+  const brandGroups = new Map<ProviderType, typeof availableTypes>();
+  for (const type of availableTypes) {
+    const brandId = type.brandId ?? type.id;
+    const group = brandGroups.get(brandId) ?? [];
+    group.push(type);
+    brandGroups.set(brandId, group);
+  }
+  const brandVariants = typeInfo ? brandGroups.get(typeInfo.brandId ?? typeInfo.id) ?? [] : [];
+  const availableBrands = Array.from(brandGroups, ([brandId, variants]) => ({
+    brand: PROVIDER_TYPE_INFO.find((type) => type.id === brandId)!,
+    type: variants.find((type) => type.id === brandId) ?? variants[0],
+  }));
+
   const handleStartOAuth = async () => {
     if (!selectedType) return;
-    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
-    if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
-      toast.error(t('aiProviders.toast.minimaxConflict'));
+    const conflictToastKey = getProviderConflictToastKey(selectedType, existingVendorIds);
+    if (conflictToastKey) {
+      toast.error(t(conflictToastKey));
       return;
     }
 
@@ -977,7 +989,8 @@ function AddProviderDialog({
         return;
       }
       setPendingOAuth({ flowId, accountId, vendorId: selectedType, label });
-      await hostProviderStartOAuth({ provider: selectedType, flowId, accountId, label });
+      if (authMode !== 'oauth_browser' && authMode !== 'oauth_device') return;
+      await hostProviderStartOAuth({ provider: selectedType, flowId, accountId, label, mode: authMode });
     } catch (oauthStartError) {
       setOauthError(String(oauthStartError));
       setOauthFlowing(false);
@@ -1019,9 +1032,9 @@ function AddProviderDialog({
 
   const handleAdd = async () => {
     if (!selectedType) return;
-    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
-    if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
-      toast.error(t('aiProviders.toast.minimaxConflict'));
+    const conflictToastKey = getProviderConflictToastKey(selectedType, existingVendorIds);
+    if (conflictToastKey) {
+      toast.error(t(conflictToastKey));
       return;
     }
     const vendor = vendorMap.get(selectedType);
@@ -1033,38 +1046,22 @@ function AddProviderDialog({
     setSaving(true);
     setValidationError(null);
     try {
-      const requiresKey = typeInfo?.requiresApiKey ?? false;
+      const requiresKey = authMode === 'api_key' || authMode === 'token';
       if (requiresKey && !normalizedApiKey) {
         setValidationError(t('aiProviders.toast.invalidKey'));
         return;
       }
-      if (requiresKey && normalizedApiKey && !isCustomMedia) {
-        const result = await onValidateKey(selectedType, normalizedApiKey, {
-          baseUrl: baseUrl.trim() || undefined,
-          apiProtocol: (selectedType === 'custom' || selectedType === 'ollama') ? apiProtocol : undefined,
-        });
-        if (!result.valid) {
-          setValidationError(result.error || t('aiProviders.toast.invalidKey'));
-          return;
-        }
-      }
-
       await onAdd(
         selectedType,
         name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType,
-        normalizedApiKey,
+        authMode === 'token' || authMode === 'cli_reuse' ? '' : normalizedApiKey,
         {
-          baseUrl: baseUrl.trim() || undefined,
-          apiProtocol: (!isCustomMedia && (selectedType === 'custom' || selectedType === 'ollama')) ? apiProtocol : undefined,
+          baseUrl: effectiveBaseUrl,
+          apiProtocol: isCustomMedia ? undefined : typeInfo?.apiProtocol ?? (selectedType === 'custom' || selectedType === 'ollama' ? apiProtocol : undefined),
+          token: authMode === 'token' ? normalizedApiKey : undefined,
           providerKind: isCustomMedia ? 'media' : 'chat',
           mediaApiProtocol: isCustomMedia ? mediaApiProtocol : undefined,
-          authMode: useOAuthFlow
-            ? (preferredOAuthMode || 'oauth_device')
-            : selectedType === 'ollama'
-              ? 'local'
-              : (isOAuth && supportsApiKey && authMode === 'apikey')
-                ? 'api_key'
-                : vendorMap.get(selectedType)?.defaultAuthMode || 'api_key',
+          authMode,
         },
       );
     } finally {
@@ -1094,14 +1091,17 @@ function AddProviderDialog({
         <div className="mt-5 space-y-4">
           {!selectedType ? (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-              {availableTypes.map((type) => (
+              {availableBrands.map(({ brand, type }) => (
                 <button
                   key={type.id}
                   onClick={() => {
                     setSelectedType(type.id);
                     setName(type.id === 'custom' ? t('aiProviders.custom') : type.name);
                     setBaseUrl(type.defaultBaseUrl || '');
-                    setApiProtocol('openai-completions');
+                    setCodePlanEnabled(false);
+                    setApiProtocol(type.apiProtocol ?? 'openai-completions');
+                    setAuthMode(vendorMap.get(type.id)?.defaultAuthMode ?? 'api_key');
+                    setApiKey('');
                     setCustomKind('chat');
                     setMediaApiProtocol('openai');
                   }}
@@ -1116,7 +1116,7 @@ function AddProviderDialog({
                   ) : (
                     <span className="text-2xl">{type.icon}</span>
                   )}
-                  <p className="mt-2 font-medium">{type.id === 'custom' ? t('aiProviders.custom') : type.name}</p>
+                  <p className="mt-2 font-medium">{brand.id === 'custom' ? t('aiProviders.custom') : brand.name}</p>
                 </button>
               ))}
             </div>
@@ -1139,6 +1139,7 @@ function AddProviderDialog({
                       setSelectedType(null);
                       setValidationError(null);
                       setBaseUrl('');
+                      setCodePlanEnabled(false);
                       setApiProtocol('openai-completions');
                       setCustomKind('chat');
                     }}
@@ -1163,6 +1164,34 @@ function AddProviderDialog({
                 </div>
               </div>
 
+              {brandVariants.length > 1 ? (
+                <div className="space-y-2">
+                  <Label htmlFor="provider-variant">{t('aiProviders.dialog.variant')}</Label>
+                  <Select id="provider-variant" value={selectedType} disabled={oauthFlowing} onChange={(event) => {
+                    const next = brandVariants.find((variant) => variant.id === event.target.value)!;
+                    setSelectedType(next.id);
+                    setName(next.name);
+                    setBaseUrl(next.defaultBaseUrl ?? '');
+                    setApiProtocol(next.apiProtocol ?? 'openai-completions');
+                    setAuthMode(vendorMap.get(next.id)?.defaultAuthMode ?? 'api_key');
+                    setCodePlanEnabled(false);
+                    setApiKey('');
+                    setValidationError(null);
+                  }}>
+                    {brandVariants.map((variant) => <option key={variant.id} value={variant.id}>{variant.name}</option>)}
+                  </Select>
+                </div>
+              ) : null}
+              {typeInfo?.endpointPresets?.length ? (
+                <div className="space-y-2">
+                  <Label htmlFor="provider-endpoint-preset">{t('aiProviders.dialog.endpointPreset')}</Label>
+                  <Select id="provider-endpoint-preset" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)}>
+                    {!typeInfo.endpointPresets.some((preset) => preset.baseUrl === baseUrl) ? <option value={baseUrl}>{t('aiProviders.custom')}</option> : null}
+                    {typeInfo.endpointPresets.map((preset) => <option key={preset.id} value={preset.baseUrl}>{preset.label}</option>)}
+                  </Select>
+                </div>
+              ) : null}
+
               <div className="space-y-2">
                 <Label htmlFor="name">{t('aiProviders.dialog.displayName')}</Label>
                 <Input
@@ -1180,6 +1209,7 @@ function AddProviderDialog({
                     onClick={() => {
                       setCustomKind('chat');
                       setBaseUrl('');
+                      setCodePlanEnabled(false);
                       setApiProtocol('openai-completions');
                     }}
                     className={cn(
@@ -1195,6 +1225,7 @@ function AddProviderDialog({
                       setCustomKind('media');
                       const contract = getCustomMediaContract(mediaApiProtocol);
                       setBaseUrl(contract?.defaultBaseUrl ?? '');
+                      setCodePlanEnabled(false);
                     }}
                     className={cn(
                       'px-3 py-2 transition-colors',
@@ -1206,33 +1237,26 @@ function AddProviderDialog({
                 </div>
               ) : null}
 
-              {isOAuth && supportsApiKey && !oauthUiHidden ? (
-                <div className="flex overflow-hidden rounded-lg border text-sm">
-                  <button
-                    onClick={() => setAuthMode('oauth')}
-                    className={cn(
-                      'flex-1 px-3 py-2 transition-colors',
-                      authMode === 'oauth' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
-                    )}
-                  >
-                    {t('aiProviders.oauth.loginMode')}
-                  </button>
-                  <button
-                    onClick={() => setAuthMode('apikey')}
-                    className={cn(
-                      'flex-1 px-3 py-2 transition-colors',
-                      authMode === 'apikey' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
-                    )}
-                  >
-                    {t('aiProviders.oauth.apikeyMode')}
-                  </button>
+              {selectedVendor && selectedVendor.supportedAuthModes.length > 1 ? (
+                <div className="space-y-2">
+                  <Label htmlFor="provider-auth-mode">{t('aiProviders.dialog.authMode')}</Label>
+                  <Select id="provider-auth-mode" value={authMode} disabled={oauthFlowing} onChange={(event) => {
+                    setAuthMode(event.target.value as ProviderCredential['authMode']);
+                    setApiKey('');
+                    setValidationError(null);
+                  }}>
+                    {selectedVendor.supportedAuthModes.map((mode) => (
+                      <option key={mode} value={mode}>{getAuthModeLabel(mode, t)}</option>
+                    ))}
+                  </Select>
                 </div>
               ) : null}
+              {authMode === 'cli_reuse' ? <p className="text-sm text-muted-foreground">{t('aiProviders.dialog.cliReuseHelp')}</p> : null}
 
-              {(!isOAuth || (supportsApiKey && authMode === 'apikey')) ? (
+              {(authMode === 'api_key' || authMode === 'token' || authMode === 'local') ? (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="apiKey">{t('aiProviders.dialog.apiKey')}</Label>
+                    <Label htmlFor="apiKey">{authMode === 'token' ? t('aiProviders.authModes.token') : t('aiProviders.dialog.apiKey')}</Label>
                     {typeInfo?.apiKeyUrl ? (
                       <a
                         href={typeInfo.apiKeyUrl}
@@ -1266,8 +1290,22 @@ function AddProviderDialog({
                     </button>
                   </div>
                   {validationError ? <p className="text-xs text-destructive">{validationError}</p> : null}
-                  <p className="text-xs text-muted-foreground">{t('aiProviders.dialog.apiKeyStored')}</p>
+                  <p className="text-xs text-muted-foreground">{t(authMode === 'token' ? 'aiProviders.dialog.tokenHelp' : 'aiProviders.dialog.apiKeyStored')}</p>
                 </div>
+              ) : null}
+
+              {typeInfo?.codePlan?.baseUrl ? (
+                <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
+                  <span>{t('aiProviders.dialog.codePlanMode')}</span>
+                  <input
+                    type="checkbox"
+                    checked={codePlanEnabled}
+                    onChange={(event) => {
+                      setCodePlanEnabled(event.target.checked);
+                      setValidationError(null);
+                    }}
+                  />
+                </label>
               ) : null}
 
               {isCustomMedia ? (
@@ -1293,8 +1331,9 @@ function AddProviderDialog({
                   <Input
                     id="baseUrl"
                     placeholder={isCustomMedia ? selectedMediaContract?.defaultBaseUrl || 'https://api.example.com/v1' : getProtocolBaseUrlPlaceholder(apiProtocol)}
-                    value={baseUrl}
+                    value={codePlanEnabled ? typeInfo?.codePlan?.baseUrl ?? '' : baseUrl}
                     onChange={(event) => setBaseUrl(event.target.value)}
+                    disabled={codePlanEnabled}
                   />
                 </div>
               ) : null}
@@ -1397,7 +1436,7 @@ function OAuthPanel(props: {
         </Button>
       </div>
 
-      {oauthFlowing ? (
+      {oauthFlowing || oauthError ? (
         <div className="relative mt-4 overflow-hidden rounded-xl border bg-card p-4">
           <div className="absolute inset-0 bg-primary/5 animate-pulse" />
           <div className="relative z-10 flex flex-col items-center justify-center space-y-4 text-center">
@@ -1407,7 +1446,7 @@ function OAuthPanel(props: {
                 <p className="font-medium">{t('aiProviders.oauth.authFailed')}</p>
                 <p className="text-sm opacity-80">{oauthError}</p>
                 <Button variant="outline" size="sm" onClick={onCancel} className="mt-2 text-foreground">
-                  Try Again
+                  {t('aiProviders.oauth.tryAgain')}
                 </Button>
               </div>
             ) : !oauthData ? (
@@ -1418,9 +1457,9 @@ function OAuthPanel(props: {
             ) : oauthData.mode === 'manual' ? (
               <div className="w-full space-y-4">
                 <div className="space-y-2 text-left">
-                  <h3 className="text-lg font-medium text-foreground">Complete OpenAI Login</h3>
+                  <h3 className="text-lg font-medium text-foreground">{t('aiProviders.oauth.completeLogin')}</h3>
                   <p className="text-sm text-muted-foreground">
-                    {oauthData.message || 'Open the authorization page, complete login, then paste the callback URL or code below.'}
+                    {oauthData.message || t('aiProviders.oauth.manualHelp')}
                   </p>
                 </div>
                 <Button
@@ -1429,15 +1468,15 @@ function OAuthPanel(props: {
                   onClick={() => invokeIpc('shell:openExternal', oauthData.authorizationUrl)}
                 >
                   <ExternalLink className="h-4 w-4 mr-2" />
-                  Open Authorization Page
+                  {t('aiProviders.oauth.openLoginPage')}
                 </Button>
                 <Input
-                  placeholder="Paste callback URL or code"
+                  placeholder={t('aiProviders.oauth.callbackPlaceholder')}
                   value={manualCodeInput}
                   onChange={(event) => onManualCodeChange(event.target.value)}
                 />
                 <Button className="w-full" onClick={onSubmitManualCode} disabled={!manualCodeInput.trim()}>
-                  Submit Code
+                  {t('aiProviders.oauth.submitCode')}
                 </Button>
                 <Button variant="ghost" size="sm" className="w-full mt-2" onClick={onCancel}>
                   Cancel

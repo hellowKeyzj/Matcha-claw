@@ -224,3 +224,9 @@ You're successful when:
 - Implement texture atlases generated at runtime from dynamic data sources (minimap compositing, custom UI backgrounds)
 - Use `AsyncGPUReadback` to retrieve GPU-generated texture data on the CPU without blocking the render thread
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -18,9 +18,7 @@ use foundation::process::TerminationOutcome;
 use foundation::process::supervision::SupervisorPhase;
 #[cfg(windows)]
 use foundation::process::supervision::{RestartOutcome, TerminationCompletion};
-use foundation::toolchain::{
-    NativeToolchainRuntime, ToolchainPlatform, UnsupportedToolchainCommandPort,
-};
+use toolchain::{NativeToolchain, ToolchainPlatform, UnsupportedToolchainCommandPort};
 
 use super::*;
 use crate::{
@@ -87,8 +85,8 @@ fn secret() -> Secret {
     Secret::new(entropy.to_string()).unwrap()
 }
 
-fn toolchain() -> Arc<NativeToolchainRuntime> {
-    Arc::new(NativeToolchainRuntime::new(
+fn toolchain() -> Arc<NativeToolchain> {
+    Arc::new(NativeToolchain::new(
         ToolchainPlatform::current(),
         std::env::consts::ARCH,
         absolute_path("runtime"),

@@ -12,13 +12,13 @@ const DEFAULT_MAX_PENDING_COMMANDS = 64;
 
 type RuntimeHostJsonPrimitive = null | boolean | number | string;
 
-interface RuntimeHostJsonObject {
+export interface RuntimeHostJsonObject {
   readonly [key: string]: RuntimeHostJsonValue;
 }
 
 type RuntimeHostJsonArray = ReadonlyArray<RuntimeHostJsonValue>;
 
-type RuntimeHostJsonValue =
+export type RuntimeHostJsonValue =
   | RuntimeHostJsonPrimitive
   | RuntimeHostJsonArray
   | RuntimeHostJsonObject;
@@ -68,8 +68,8 @@ export type RuntimeHostControlCommand =
       readonly name: 'openclaw.tool-permission.set';
       readonly input: { readonly mode: 'default' | 'fullAccess' };
     }
-  | { readonly name: 'openclaw.toolchain.status' }
-  | { readonly name: 'openclaw.toolchain.install-uv' }
+  | { readonly name: 'host.toolchain.status' }
+  | { readonly name: 'host.toolchain.prepare' }
   | { readonly name: 'openclaw.subagent-templates.list' }
   | { readonly name: 'openclaw.subagent-templates.get'; readonly input: { readonly id: string } }
   | { readonly name: 'openclaw.lifecycle.start' }
@@ -81,11 +81,31 @@ export type RuntimeHostControlCommand =
   | { readonly name: 'openclaw.gateway.status' }
   | { readonly name: 'openclaw.control-ui.url' }
   | {
+      readonly name: 'openclaw.browser.request';
+      readonly input: {
+        readonly method: string;
+        readonly path: string;
+        readonly query?: RuntimeHostJsonObject;
+        readonly body?: RuntimeHostJsonValue;
+        readonly timeoutMs?: number;
+        readonly target?: 'host' | 'node';
+        readonly node?: string;
+      };
+    }
+  | {
+      readonly name: 'openclaw.mcp-app.request';
+      readonly input: {
+        readonly operationId: string;
+        readonly sessionKey: string;
+        readonly viewId: string;
+        readonly standalone?: boolean;
+      };
+    }
+  | {
       readonly name: 'openclaw.cron.manual-trigger';
       readonly input: { readonly jobId: string };
     }
   | { readonly name: 'openclaw.sessions.patch-model'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'openclaw.chat.history'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'openclaw.chat.send'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'openclaw.chat.abort'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'openclaw.skills.execute'; readonly input: RuntimeHostJsonObject }
@@ -601,6 +621,10 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
     case 'openclaw.gateway.status':
     case 'openclaw.control-ui.url':
       return hasExactKeys(value, ['name']);
+    case 'openclaw.browser.request':
+      return isOpenClawBrowserRequestCommand(value);
+    case 'openclaw.mcp-app.request':
+      return isOpenClawMcpAppRequestCommand(value);
     case 'openclaw.logs':
       return isOpenClawLogsCommand(value);
     case 'openclaw.control.ready':
@@ -609,13 +633,12 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
       return isOpenClawManualCronTriggerCommand(value);
     case 'openclaw.tool-permission.set':
       return isOpenClawToolPermissionSetCommand(value);
-    case 'openclaw.toolchain.status':
-    case 'openclaw.toolchain.install-uv':
+    case 'host.toolchain.status':
+    case 'host.toolchain.prepare':
       return hasExactKeys(value, ['name']);
     case 'openclaw.subagent-templates.get':
       return isSubagentTemplateCommand(value);
     case 'openclaw.sessions.patch-model':
-    case 'openclaw.chat.history':
     case 'openclaw.chat.send':
     case 'openclaw.chat.abort':
     case 'openclaw.skills.execute':
@@ -687,6 +710,51 @@ function isOpenClawLogsCommand(value: Record<string, unknown>): boolean {
     || (hasExactKeys(value.input, ['cursor']) && isNonNegativeSafeInteger(value.input.cursor));
 }
 
+function isOpenClawBrowserRequestCommand(value: Record<string, unknown>): boolean {
+  if (!hasExactKeys(value, ['name', 'input'])
+    || value.name !== 'openclaw.browser.request'
+    || !isRecord(value.input)
+    || !hasOnlyKeys(value.input, ['method', 'path', 'query', 'body', 'timeoutMs', 'target', 'node'])
+    || !hasOwn(value.input, 'method')
+    || !hasOwn(value.input, 'path')) {
+    return false;
+  }
+  return isBoundedCommandText(value.input.method)
+    && isBoundedCommandText(value.input.path)
+    && (value.input.query === undefined || isJsonObject(value.input.query))
+    && (value.input.body === undefined || isJsonValue(value.input.body))
+    && (value.input.timeoutMs === undefined || isPositiveSafeInteger(value.input.timeoutMs))
+    && (value.input.target === undefined || value.input.target === 'host' || value.input.target === 'node')
+    && (value.input.node === undefined || (value.input.target === 'node' && isBoundedCommandText(value.input.node)));
+}
+
+function isOpenClawMcpAppRequestCommand(value: Record<string, unknown>): boolean {
+  if (!hasExactKeys(value, ['name', 'input'])
+    || value.name !== 'openclaw.mcp-app.request'
+    || !isRecord(value.input)
+    || !hasOnlyKeys(value.input, ['operationId', 'sessionKey', 'viewId', 'standalone'])
+    || !hasOwn(value.input, 'operationId')
+    || !hasOwn(value.input, 'sessionKey')
+    || !hasOwn(value.input, 'viewId')) {
+    return false;
+  }
+  return isMcpAppOperationId(value.input.operationId)
+    && isBoundedCommandText(value.input.sessionKey)
+    && isBoundedCommandText(value.input.viewId)
+    && (value.input.standalone === undefined || typeof value.input.standalone === 'boolean');
+}
+
+function isMcpAppOperationId(value: unknown): value is string {
+  return isBoundedCommandText(value) && value.startsWith('mcp.app.');
+}
+
+function isBoundedCommandText(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && Buffer.byteLength(value, 'utf8') <= 4_096
+    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
+}
+
 function isOpenClawManualCronTriggerCommand(value: Record<string, unknown>): boolean {
   return hasExactKeys(value, ['name', 'input'])
     && value.name === 'openclaw.cron.manual-trigger'
@@ -722,7 +790,9 @@ function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
     || command.name === 'openclaw.lifecycle.stop'
     || command.name === 'openclaw.lifecycle.restart'
     || command.name === 'openclaw.tool-permission.set'
-    || command.name === 'openclaw.toolchain.install-uv'
+    || command.name === 'host.toolchain.prepare'
+    || command.name === 'openclaw.browser.request'
+    || command.name === 'openclaw.mcp-app.request'
     || command.name === 'openclaw.cron.manual-trigger'
     || command.name === 'openclaw.sessions.patch-model'
     || command.name === 'team.runtime.execute'
@@ -1009,6 +1079,10 @@ function hasOwn(value: object, key: string): boolean {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function isRequestId(value: unknown): value is string {

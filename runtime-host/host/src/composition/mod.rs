@@ -24,7 +24,7 @@ pub use admission::{
 };
 pub use events::{HostEvent, HostEvents};
 pub use host::{
-    ConstructionError, Host, HostHandles, HostInput, HostShutdownError, OwnerShutdownFailure,
+    ConstructionError, Host, HostInput, HostShutdownError, OwnerShutdownFailure,
     RuntimeLifecycleFailure, RuntimeStartFailure, ShutdownFailures, ShutdownReport,
     WorkspaceBinaryError, WorkspaceListError, WorkspaceMediaError, WorkspaceReadError,
     WorkspaceStatError, WorkspaceWriteError,
@@ -36,8 +36,8 @@ pub(crate) use openclaw::{
     OpenClawInstance, OpenClawLogSnapshot,
 };
 pub(crate) use peer::{
-    PeerHandle, PeerOwner, RestartMatchaError, RestartOpenClawError, StartMatchaError,
-    StartOpenClawError, StopMatchaError, StopOpenClawError,
+    PeerHandle, RestartMatchaError, RestartOpenClawError, StartMatchaError, StartOpenClawError,
+    StopMatchaError, StopOpenClawError,
 };
 pub use session::{RuntimeSessionError, SessionShutdownFailure};
 pub(crate) use team::{
@@ -49,7 +49,7 @@ pub use team_decision::{
     TeamDecisionRequest,
 };
 
-use crate::transport::{authorization::CapabilityDecisionVerifier, mcp_stdio};
+use crate::transport::mcp_stdio;
 use std::{
     io::{BufRead, Write},
     path::Path,
@@ -69,36 +69,27 @@ pub fn open_organization_store(state_dir: &Path) -> Result<OrganizationStore, St
 
 pub fn run_team_run_mcp<R: BufRead, W: Write>(
     state_dir: &Path,
-    verification_key: &str,
     input: R,
     output: W,
 ) -> Result<(), TeamRunMcpConstructionError> {
-    let (facade, verifier) = compose_team_run_mcp(state_dir, verification_key)?;
-    mcp_stdio::run(facade, verifier, input, output).map_err(|_| TeamRunMcpConstructionError)
+    let facade = compose_team_run_mcp(state_dir)?;
+    mcp_stdio::run(facade, input, output).map_err(|_| TeamRunMcpConstructionError)
 }
 
 fn compose_team_run_mcp(
     state_dir: &Path,
-    verification_key: &str,
-) -> Result<(team_run_mcp::TeamRunMcpFacade, CapabilityDecisionVerifier), TeamRunMcpConstructionError>
-{
+) -> Result<team_run_mcp::TeamRunMcpFacade, TeamRunMcpConstructionError> {
     let store = open_organization_store(state_dir).map_err(|_| TeamRunMcpConstructionError)?;
-    let verifier = CapabilityDecisionVerifier::try_new(verification_key)
-        .map_err(|_| TeamRunMcpConstructionError)?;
-    Ok((
-        team_run_mcp::TeamRunMcpFacade::from_canonical_store(store),
-        verifier,
-    ))
+    Ok(team_run_mcp::TeamRunMcpFacade::from_canonical_store(store))
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct TeamRunMcpConstructionError;
 
 pub(crate) use team_run::{
-    MatchaDeliveryError, MatchaDeliveryOutcome, MatchaDeliveryStartOutcome,
-    MatchaTerminalObservationError, MatchaTerminalObservationOutcome, OpenClawDeliveryError,
-    OpenClawDeliveryOutcome, OpenClawDeliveryStart, TeamNodePromptSettledResult,
-    TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunDeliveryTarget, TeamRunTriggerOutcome,
+    MatchaTerminalObservationError, MatchaTerminalObservationOutcome, TeamNodePromptSettledResult,
+    TeamNodeTerminalResult, TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart,
+    TeamRunActivityTarget, TeamRunCommandOutcome, TeamRunTriggerOutcome,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

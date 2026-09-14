@@ -13,7 +13,7 @@ use crate::{
     cron::{
         CronBrokerContext, CronBrokerOperation, CronBrokerOutcome, CronBrokerRequest,
         CronBrokerResult, CronCreateCommand, CronDeleteCommand, CronDeliveryCommand,
-        CronHistoryCommand, CronUpdateCommand,
+        CronHistoryCommand, CronScheduleCommand, CronUpdateCommand,
     },
     facade::CronHandle,
     transport::authorization::CapabilityDecisionVerifier,
@@ -372,7 +372,7 @@ struct CreateInput {
     name: String,
     agent_id: String,
     message: String,
-    schedule: String,
+    schedule: ScheduleInput,
     delivery: DeliveryInput,
     enabled: bool,
 }
@@ -383,9 +383,53 @@ struct UpdateInput {
     name: Option<String>,
     agent_id: Option<String>,
     message: Option<String>,
-    schedule: Option<String>,
+    schedule: Option<ScheduleInput>,
     delivery: Option<DeliveryInput>,
     enabled: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScheduleInput {
+    CronExpression(String),
+    Schedule(ScheduleObjectInput),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum ScheduleObjectInput {
+    Cron {
+        expr: String,
+        tz: Option<String>,
+    },
+    At {
+        at: String,
+    },
+    Every {
+        #[serde(rename = "everyMs")]
+        every_ms: u64,
+        #[serde(rename = "anchorMs")]
+        anchor_ms: Option<u64>,
+    },
+}
+
+impl ScheduleInput {
+    fn into_command(self) -> CronScheduleCommand {
+        match self {
+            Self::CronExpression(expr) => CronScheduleCommand::cron(expr),
+            Self::Schedule(ScheduleObjectInput::Cron { expr, tz }) => {
+                CronScheduleCommand::Cron { expr, tz }
+            }
+            Self::Schedule(ScheduleObjectInput::At { at }) => CronScheduleCommand::At { at },
+            Self::Schedule(ScheduleObjectInput::Every {
+                every_ms,
+                anchor_ms,
+            }) => CronScheduleCommand::Every {
+                every_ms,
+                anchor_ms,
+            },
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -417,13 +461,28 @@ impl DeliveryInput {
     }
 }
 
+fn reject_null_schedule_fields(value: &Value) -> Result<(), DecodeError> {
+    let Some(schedule) = value.get("schedule") else {
+        return Ok(());
+    };
+    if schedule.is_null()
+        || schedule.pointer("/tz").is_some_and(Value::is_null)
+        || schedule.pointer("/anchorMs").is_some_and(Value::is_null)
+    {
+        return Err(DecodeError::Invalid);
+    }
+    Ok(())
+}
+
 fn create_command(value: Value) -> Result<CronCreateCommand, DecodeError> {
+    reject_null_schedule_fields(&value)?;
     let input = serde_json::from_value::<CreateInput>(value).map_err(|_| DecodeError::Invalid)?;
     CronCreateCommand::try_new(
         input.name,
         input.agent_id,
         input.message,
-        input.schedule,
+        None,
+        input.schedule.into_command(),
         input.delivery.into_command(),
         input.enabled,
     )
@@ -431,6 +490,7 @@ fn create_command(value: Value) -> Result<CronCreateCommand, DecodeError> {
 }
 
 fn update_command(job_id: String, value: Value) -> Result<CronUpdateCommand, DecodeError> {
+    reject_null_schedule_fields(&value)?;
     let input =
         serde_json::from_value::<UpdateInput>(value.clone()).map_err(|_| DecodeError::Invalid)?;
     let object = value.as_object().ok_or(DecodeError::Invalid)?;
@@ -446,7 +506,8 @@ fn update_command(job_id: String, value: Value) -> Result<CronUpdateCommand, Dec
         input.name,
         input.agent_id,
         input.message,
-        input.schedule,
+        None,
+        input.schedule.map(ScheduleInput::into_command),
         input.delivery.map(DeliveryInput::into_command),
         input.enabled,
     )

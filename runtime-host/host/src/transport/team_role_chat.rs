@@ -31,16 +31,20 @@ pub(crate) enum Delivery {
 
 impl Delivery {
     pub(crate) const fn status_code(&self) -> u16 {
-        200
+        match self {
+            Self::Accepted | Self::Rejected => 200,
+            Self::OutcomeUnknown => 409,
+        }
     }
 
     pub(crate) fn body(&self) -> Value {
-        let outcome = match self {
-            Self::Accepted => "accepted",
-            Self::Rejected => "rejected",
-            Self::OutcomeUnknown => "outcome-unknown",
-        };
-        json!({ "success": true, "outcome": outcome })
+        match self {
+            Self::Accepted => json!({ "success": true, "outcome": "accepted" }),
+            Self::Rejected => json!({ "success": true, "outcome": "rejected" }),
+            Self::OutcomeUnknown => {
+                json!({ "success": false, "outcome": "outcome-unknown", "error": "Team role chat outcome is unknown" })
+            }
+        }
     }
 }
 

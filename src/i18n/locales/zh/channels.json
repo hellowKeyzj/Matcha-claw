@@ -55,16 +55,24 @@
         "existingDesc": "更新您现有的配置",
         "selectDesc": "选择要配置的频道类型",
         "qrCode": "二维码",
-        "token": "令牌",
+        "token": "密钥",
+        "authorization": "授权",
+        "webhook": "Webhook",
         "scanQR": "使用 {{name}} 扫描此二维码",
+        "openAuthorization": "打开 {{name}} 授权链接",
+        "openAuthorizationLink": "打开授权链接",
         "qrImageAlt": "{{name}} 登录二维码",
-        "refreshCode": "刷新代码",
+        "waitingForScan": "等待扫码或授权完成...",
+        "refreshCode": "刷新二维码",
         "loadingConfig": "正在加载配置...",
         "existingHint": "您已配置过此频道",
         "howToConnect": "如何连接",
         "viewDocs": "查看文档",
         "channelName": "频道名称",
         "channelNamePlaceholder": "我的 {{name}}",
+        "agent": "智能体",
+        "agentDefault": "默认（main）/ 保留现有",
+        "mainAgent": "主智能体",
         "enableChannel": "启用频道",
         "enableChannelDesc": "关闭后会保存配置，但不会启动该频道",
         "credentialsVerified": "凭证已验证",
@@ -74,9 +82,13 @@
         "validating": "正在验证...",
         "validateConfig": "验证配置",
         "generatingQR": "正在生成二维码...",
+        "startingAuthorization": "正在启动授权...",
         "validatingAndSaving": "正在验证并保存...",
         "advancedSettings": "高级设置（可选）",
+        "setupModeGuided": "通过扫码/授权连接",
+        "setupModeCredential": "通过配置连接",
         "generateQRCode": "生成二维码",
+        "startAuthorization": "开始授权",
         "updateAndReconnect": "更新并重新连接",
         "saveAndConnect": "保存并连接",
         "envVar": "环境变量: {{var}}"
@@ -234,21 +246,21 @@
             ]
         },
         "wecom": {
-            "description": "通过插件连接企业微信机器人",
+            "description": "通过官方插件连接企业微信 Bot（使用 Bot ID 和 Bot Secret）。",
             "fields": {
                 "botId": {
-                    "label": "机器人 Bot ID",
-                    "placeholder": "ww_xxxxxx"
+                    "label": "Bot ID",
+                    "placeholder": "请输入企业微信 Bot ID"
                 },
                 "secret": {
-                    "label": "应用 Secret",
-                    "placeholder": "您的企业微信机器人 Secret"
+                    "label": "Bot Secret",
+                    "placeholder": "请输入企业微信 Bot Secret"
                 }
             },
             "instructions": [
-                "您可以在企业微信管理后台创建应用并获取配置信息",
-                "确保已启用接收消息服务器配置",
-                "填写 Bot ID（可选企业 ID 或者直接使用机器人专属 ID）及 Secret 即可建立连接"
+                "在企业微信管理后台创建或打开智能机器人，获取 Bot ID 和 Bot Secret。",
+                "本页面使用默认 WebSocket Bot 模式，无需扫码、OAuth 或回调 URL。",
+                "填写 Bot ID 和 Bot Secret 后保存，网关会使用凭据完成非交互授权并启动频道。"
             ]
         },
         "imessage": {

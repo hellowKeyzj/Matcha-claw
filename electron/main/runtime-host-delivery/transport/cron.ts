@@ -313,7 +313,7 @@ function isSuccessResponse(value: unknown, operation: CronCrudOperation): boolea
 function isCronJob(value: unknown): boolean {
   return isRecord(value)
     && hasAllowedKeys(value, [
-      'id', 'name', 'agentId', 'message', 'schedule', 'delivery', 'target', 'enabled',
+      'id', 'name', 'agentId', 'message', 'model', 'schedule', 'delivery', 'target', 'enabled',
       'createdAt', 'updatedAt', 'lastRun', 'nextRun', 'runningAt',
     ], [
       'id', 'name', 'agentId', 'message', 'schedule', 'delivery', 'enabled', 'createdAt', 'updatedAt',
@@ -322,6 +322,7 @@ function isCronJob(value: unknown): boolean {
     && isNonEmptyString(value.name)
     && isNonEmptyString(value.agentId)
     && typeof value.message === 'string'
+    && (value.model === undefined || isNonEmptyString(value.model))
     && isSchedule(value.schedule)
     && isDelivery(value.delivery)
     && (value.target === undefined || isTargetProjection(value.target))

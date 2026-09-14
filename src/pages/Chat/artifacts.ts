@@ -34,6 +34,7 @@ export function collectChatArtifactGroups(
   items: ReadonlyArray<ChatRenderItem>,
 ): ChatArtifactGroup[] {
   const groups: ChatArtifactGroup[] = [];
+  const groupedReplyItemKeys = new Set<string>();
 
   for (const item of items) {
     if (!isExecutionGraphItem(item)) {
@@ -47,11 +48,29 @@ export function collectChatArtifactGroups(
     if (files.length === 0) {
       continue;
     }
+    if (item.replyItemKey) {
+      groupedReplyItemKeys.add(item.replyItemKey);
+    }
     groups.push({
       graphItemKey: item.key,
       ...(item.anchorItemKey ? { anchorItemKey: item.anchorItemKey } : {}),
       ...(item.triggerItemKey ? { triggerItemKey: item.triggerItemKey } : {}),
       ...(item.replyItemKey ? { replyItemKey: item.replyItemKey } : {}),
+      files,
+    });
+  }
+
+  for (const item of items) {
+    if (!isAssistantTurnItem(item) || groupedReplyItemKeys.has(item.key)) {
+      continue;
+    }
+    const files = extractGeneratedFilesFromToolCards(item.tools);
+    if (files.length === 0) {
+      continue;
+    }
+    groups.push({
+      graphItemKey: item.key,
+      replyItemKey: item.key,
       files,
     });
   }

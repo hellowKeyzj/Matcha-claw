@@ -23,6 +23,7 @@ import {
 } from '@/lib/agent-avatar';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
 import { fetchSelectableProviderModels } from '@/lib/provider-models';
+import { useChatStore } from '@/stores/chat';
 import {
   type AgentWaitResult,
   waitAgentRunWithProgress,
@@ -49,8 +50,13 @@ import type {
   DraftByFile,
   ModelCatalogEntry,
   PreviewDiffByFile,
+  SubagentCloudPackage,
+  SubagentCloudPackageDownloadResult,
+  SubagentCloudPackageInstallResult,
+  SubagentCloudPackageUploadResult,
   SubagentConfigPackage,
   SubagentImportResult,
+  SubagentPackageExportResult,
   SubagentSummary,
   SubagentTemplateDetail,
   SubagentTargetFile,
@@ -62,14 +68,13 @@ const DRAFT_HISTORY_READ_TIMEOUT_MS = 180000;
 const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
-const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
-const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const SUBAGENT_AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
 const SUBAGENT_CONFIG_PACKAGE_SCHEMA = 'matchaclaw.agent-config' as const;
 const SUBAGENT_CONFIG_PACKAGE_VERSION = 1 as const;
+type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
 let configDisplayCache:
   | { snapshot: ConfigDisplaySnapshot; cachedAt: number; requestSeq: number }
   | null = null;
@@ -79,6 +84,8 @@ let configDisplayReadSeq = 0;
 let configDisplayGeneration = 0;
 let queuedLoadAgentsTask: Promise<void> | null = null;
 let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let availableModelsLoaded = false;
+let inflightAvailableModelsTask: Promise<void> | null = null;
 
 function buildSubagentScope(scope: AgentScope, agentId: string): AgentScope {
   return agentScope(scope.endpoint, agentId);
@@ -119,7 +126,9 @@ interface AgentsCreateResult {
   workspace?: unknown;
 }
 
-type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
+interface CreateAgentOptions {
+  workspaceInitialization?: SubagentWorkspaceInitialization;
+}
 
 interface SubagentCreateResult {
   agentId: string;
@@ -192,6 +201,7 @@ function buildSubagentTarget(_scope: AgentScope, subagentId: string): Capability
 interface SubagentsState {
   agents: SubagentSummary[];
   agentsResource: ResourceStateMeta<SubagentSummary[]>;
+  cloudPackages: SubagentCloudPackage[];
   availableModels: ModelCatalogEntry[];
   modelsLoading: boolean;
   mutating: boolean;
@@ -210,6 +220,7 @@ interface SubagentsState {
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
   loadAgents: (options?: LoadAgentsOptions) => Promise<void>;
+  loadCloudPackages: () => Promise<void>;
   loadAvailableModels: () => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
@@ -224,14 +235,17 @@ interface SubagentsState {
     model?: string;
     avatarSeed?: string;
     avatarStyle?: AgentAvatarStyle;
-    workspaceInitialization?: SubagentWorkspaceInitialization;
-  }) => Promise<SubagentCreateResult>;
+  }, options?: CreateAgentOptions) => Promise<SubagentCreateResult>;
   createAgentFromTemplate: (input: {
     template: SubagentTemplateDetail;
     model: string;
     localizedName?: string;
   }) => Promise<SubagentCreateResult>;
   exportAgentConfig: (agentId: string) => Promise<SubagentConfigPackage>;
+  exportAgentPackage: (agentId: string) => Promise<SubagentPackageExportResult>;
+  uploadAgentPackageToCloud: (agentId: string) => Promise<SubagentCloudPackageUploadResult>;
+  downloadAgentPackageFromCloud: (packageVersionId: string) => Promise<SubagentCloudPackageDownloadResult>;
+  installAgentPackageFromCloud: (packageVersionId: string) => Promise<SubagentCloudPackageInstallResult>;
   importAgentConfig: (input: unknown) => Promise<SubagentImportResult>;
   updateAgent: (input: {
     agentId: string;
@@ -278,12 +292,14 @@ function buildSubagentCapabilityInput(
   if (operationId === 'subagents.list') return { kind: 'list', endpoint };
   if (operationId === 'subagents.displayConfig.get') return { kind: 'displayConfiguration', endpoint };
   if (operationId === 'subagents.create') {
+    const workspaceInitialization = readWorkspaceInitialization(params.workspaceInitialization);
     return {
       kind: 'create',
       endpoint,
       name: getRequiredString(params.name, 'Subagent name is required'),
       workspace: getRequiredString(params.workspace, 'Subagent workspace is required'),
       model: getOptionalString(params.model) ?? null,
+      ...(workspaceInitialization ? { workspaceInitialization } : {}),
     };
   }
 
@@ -303,9 +319,9 @@ function buildSubagentCapabilityInput(
       kind: 'update',
       endpoint,
       agentId,
-      name: getOptionalString(params.name) ?? null,
-      workspace: getOptionalString(params.workspace) ?? null,
-      model: getOptionalString(params.model) ?? null,
+      ...(Object.hasOwn(params, 'name') ? { name: getRequiredString(params.name, 'Subagent name is required') } : {}),
+      ...(Object.hasOwn(params, 'workspace') ? { workspace: getRequiredString(params.workspace, 'Subagent workspace is required') } : {}),
+      ...(Object.hasOwn(params, 'model') ? { model: getOptionalString(params.model) ?? null } : {}),
     };
   }
   if (operationId === 'subagents.delete') {
@@ -324,6 +340,7 @@ function buildSubagentCapabilityInput(
     };
   }
   if (operationId === 'subagents.files.list') return { kind: 'filesList', endpoint, agentId };
+  if (operationId === 'subagents.package.export') return { kind: 'packageExport', endpoint, agentId };
   return params;
 }
 
@@ -359,6 +376,8 @@ function resolveSubagentCapabilityOperation(method: string): string | null {
       return 'subagents.files.set';
     case 'agents.files.list':
       return 'subagents.files.list';
+    case 'agents.package.export':
+      return 'subagents.package.export';
     default:
       return null;
   }
@@ -368,6 +387,10 @@ function readRpcParams(params: unknown): Record<string, unknown> {
   return params && typeof params === 'object' && !Array.isArray(params)
     ? params as Record<string, unknown>
     : {};
+}
+
+function readWorkspaceInitialization(value: unknown): SubagentWorkspaceInitialization | undefined {
+  return value === 'mainAgentTemplate' || value === 'emptyWorkspace' ? value : undefined;
 }
 
 function getOptionalString(value: unknown): string | undefined {
@@ -847,6 +870,10 @@ function readAgentsFromState(
 }
 
 function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void {
+  const agent = agents.find((entry) => entry.id === agentId);
+  if (agent?.kind === 'system') {
+    throw new Error('System agent cannot be deleted');
+  }
   const defaultAgent = resolveDefaultAgentFromState(agents);
   if (defaultAgent && defaultAgent.id === agentId) {
     throw new Error('Default agent cannot be deleted');
@@ -898,23 +925,12 @@ async function updateAgentDescriptionConfig(scope: AgentScope, agentId: string, 
   });
 }
 
-async function updateAgentModelConfig(scope: AgentScope, agentId: string, model: string | undefined): Promise<void> {
-  await rpc('model.set', { agentId, model }, {
-    scope,
-    target: buildSubagentTarget(scope, agentId),
-  });
-}
-
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 function buildCreateWarning(agentId: string, message: string): string {
   return `智能体 "${agentId}" 已创建，但${message}。请在编辑中重新确认`;
-}
-
-function buildCreateModelWarning(agentId: string, error: unknown): string {
-  return buildCreateWarning(agentId, `模型配置写入失败：${getErrorMessage(error)}`);
 }
 
 function buildCreateAvatarWarning(agentId: string, error: unknown): string {
@@ -945,79 +961,6 @@ function toSubagentCreateResult(agentId: string, warnings: string[]): SubagentCr
     agentId,
     warning: warnings.join('；'),
   };
-}
-
-function isAgentNotFoundErrorForId(error: unknown, agentId: string): boolean {
-  const message = getErrorMessage(error).toLowerCase();
-  const normalizedId = normalizeSubagentNameToSlug(agentId).toLowerCase();
-  if (!normalizedId) {
-    return false;
-  }
-  const quotedPattern = new RegExp(`agent\\s+["']${normalizedId}["']\\s+not\\s+found`);
-  const plainPattern = new RegExp(`agent\\s+${normalizedId}\\s+not\\s+found`);
-  if (quotedPattern.test(message) || plainPattern.test(message)) {
-    return true;
-  }
-  return message.includes('not found') && message.includes(normalizedId);
-}
-
-function runtimeListContainsAgent(result: AgentsListResult, agentId: string): boolean {
-  const normalizedAgentId = normalizeSubagentNameToSlug(agentId);
-  if (!normalizedAgentId) {
-    return false;
-  }
-  return result.agents.some((agent) => {
-    const runtimeId = getOptionalString(agent?.id);
-    return runtimeId != null && normalizeSubagentNameToSlug(runtimeId) === normalizedAgentId;
-  });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitUntilAgentVisibleInRuntimeList(
-  agentId: string,
-  timeoutMs: number = CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS,
-): Promise<void> {
-  const normalizedAgentId = normalizeSubagentNameToSlug(agentId);
-  if (!normalizedAgentId) {
-    throw new Error('Invalid agentId');
-  }
-  const startedAt = Date.now();
-  while ((Date.now() - startedAt) < timeoutMs) {
-    const result = await rpc<AgentsListResult>('agents.list', {});
-    if (runtimeListContainsAgent(result, normalizedAgentId)) {
-      return;
-    }
-    await sleep(CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS);
-  }
-  throw new Error(`Timed out waiting for agent "${normalizedAgentId}" to appear in agents.list`);
-}
-
-async function updateAgentWithCreateBarrier(params: {
-  scope: AgentScope;
-  agentId: string;
-  model?: string;
-}): Promise<void> {
-  const { scope, agentId, ...updates } = params;
-  await waitUntilAgentVisibleInRuntimeList(agentId);
-  try {
-    await rpc('agents.update', { agentId, ...updates }, {
-      scope,
-      target: buildSubagentTarget(scope, agentId),
-    });
-    return;
-  } catch (error) {
-    if (!isAgentNotFoundErrorForId(error, agentId)) {
-      throw error;
-    }
-  }
-  await waitUntilAgentVisibleInRuntimeList(agentId);
-  await rpc('agents.update', { agentId, ...updates }, {
-    scope,
-    target: buildSubagentTarget(scope, agentId),
-  });
 }
 
 async function waitForDraftOutputFromHistory(
@@ -1135,6 +1078,8 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   agentMutationChain = Promise.resolve();
   activeMutatingOperationCount = 0;
   inflightLoadAgentsTask = null;
+  availableModelsLoaded = false;
+  inflightAvailableModelsTask = null;
 }
 
 function normalizeAgentIdForComparison(agentId: string): string {
@@ -1229,6 +1174,8 @@ function areSubagentSummariesEqual(left: SubagentSummary, right: SubagentSummary
     && (left.description ?? '') === (right.description ?? '')
     && (left.workspace ?? '') === (right.workspace ?? '')
     && (left.model ?? '') === (right.model ?? '')
+    && (left.kind ?? 'agent') === (right.kind ?? 'agent')
+    && Boolean(left.sealed) === Boolean(right.sealed)
     && (left.avatarSeed ?? '') === (right.avatarSeed ?? '')
     && (left.avatarStyle ?? '') === (right.avatarStyle ?? '')
     && areStringArraysEqual(left.skills, right.skills)
@@ -1255,6 +1202,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     return readAgentsFromState(this);
   },
   agentsResource: createIdleResourceState<SubagentSummary[]>([]),
+  cloudPackages: [],
   availableModels: [],
   modelsLoading: false,
   mutating: false,
@@ -1272,6 +1220,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   draftError: null,
   previewDiffByFile: {},
   selectedAgentId: null,
+
+  loadCloudPackages: async () => {
+    const result = await hostApiFetch<{ items?: SubagentCloudPackage[] }>('/api/packages/market?packageType=agent');
+    set({ cloudPackages: Array.isArray(result.items) ? result.items : [] });
+  },
 
   loadAgents: async (options) => {
     const silent = options?.silent === true;
@@ -1346,6 +1299,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
+        useChatStore.getState().reconcileAgentSessionTombstones(
+          result.agents
+            .map((agent) => agent.id)
+            .filter((agentId) => !isAgentPendingDeletion(agentId)),
+        );
         try {
           pruneStoredAvatarPresentations(result.agents.map((agent) => agent.id));
         } catch {
@@ -1365,7 +1323,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
         const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
-        const nextSelectedAgentId = hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null);
+        const defaultAgentId = normalizedAgents.find((agent) => agent.isDefault)?.id ?? normalizedAgents[0]?.id ?? null;
+        const nextSelectedAgentId = hasSelected
+          ? selectedAgentId
+          : result.selectionRequired === true
+            ? null
+            : defaultAgentId;
         const nextManagedAgentId = hasManaged ? managedAgentId : null;
         const shouldPatchAgents = (
           !areAgentListsEquivalent(currentAgents, normalizedAgents)
@@ -1413,21 +1376,40 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   loadAvailableModels: async () => {
-    set({ modelsLoading: true });
-    try {
-      const normalizedModels = await fetchSelectableProviderModels();
-      set({
-        availableModels: normalizedModels,
-        modelsLoading: false,
-        error: null,
-      });
-    } catch (error) {
-      set({
-        availableModels: [],
-        modelsLoading: false,
-        error: getErrorMessage(error) || 'Failed to load models',
-      });
+    if (availableModelsLoaded) {
+      return;
     }
+    if (inflightAvailableModelsTask) {
+      await inflightAvailableModelsTask;
+      return;
+    }
+
+    set({ modelsLoading: true });
+    let currentTask: Promise<void> | null = null;
+    const task = (async () => {
+      try {
+        const normalizedModels = await fetchSelectableProviderModels();
+        availableModelsLoaded = true;
+        set({
+          availableModels: normalizedModels,
+          modelsLoading: false,
+          error: null,
+        });
+      } catch (error) {
+        set({
+          modelsLoading: false,
+          error: getErrorMessage(error) || 'Failed to load models',
+        });
+      } finally {
+        if (inflightAvailableModelsTask === currentTask) {
+          inflightAvailableModelsTask = null;
+        }
+      }
+    })();
+
+    currentTask = task;
+    inflightAvailableModelsTask = task;
+    await task;
   },
 
   selectAgent: (agentId) => set({ selectedAgentId: agentId }),
@@ -1511,11 +1493,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     model,
     avatarSeed,
     avatarStyle,
-    workspaceInitialization = 'mainAgentTemplate',
-  }) => runSerializedAgentMutation(async () => {
+  }, options) => runSerializedAgentMutation(async () => {
     beginGlobalMutating(set);
     try {
-      void workspace;
       const managementScope = await resolveSubagentManagementScope();
       const trimmedName = name.trim();
       if (!trimmedName) {
@@ -1544,14 +1524,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       const createResult = await rpc<AgentsCreateResult>('agents.create', {
         name: trimmedName,
         workspace: resolvedWorkspace,
-        workspaceInitialization,
+        model: modelId || null,
+        ...(options?.workspaceInitialization ? { workspaceInitialization: options.workspaceInitialization } : {}),
       }, {
         scope: managementScope,
         target: { kind: 'subagent' },
       });
       const createdAgentId = getOptionalString(createResult?.agentId) ?? getOptionalString(createResult?.agent?.id);
       if (!createdAgentId) {
-        throw new Error('agents.create returned missing agentId');
+        throw new Error('Subagent creation returned an invalid receipt');
       }
       const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
       if (normalizedCreatedAgentId) {
@@ -1564,17 +1545,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           await updateAgentDescriptionConfig(managementScope, createdAgentId, nextDescription);
         } catch (error) {
           warnings.push(buildCreateDescriptionWarning(createdAgentId, error));
-        }
-      }
-      if (modelId) {
-        try {
-          await updateAgentWithCreateBarrier({
-            scope: managementScope,
-            agentId: createdAgentId,
-            model: modelId,
-          });
-        } catch (error) {
-          warnings.push(buildCreateModelWarning(createdAgentId, error));
         }
       }
       try {
@@ -1620,8 +1590,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       model: modelId,
       avatarSeed: buildTemplateAvatarSeed(template.id),
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
-      workspaceInitialization: 'emptyWorkspace',
-    });
+    }, { workspaceInitialization: 'emptyWorkspace' });
     const createdAgentId = createResult.agentId;
     const warnings = createResult.warning ? [createResult.warning] : [];
     if (localizedTemplateName && localizedTemplateName !== templateName) {
@@ -1684,6 +1653,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (!agent) {
       throw new Error('Agent not found');
     }
+    if (agent.kind === 'system') {
+      throw new Error('System agent cannot be exported');
+    }
+    if (agent.sealed) {
+      throw new Error('Sealed agent config cannot be exported');
+    }
     const files = await fetchPersistedFilesForAgent(agentId);
     const skills = normalizeSkillAllowlist(agent.skills);
     const skillBundles = skills ? await exportSkillBundles(skills) : undefined;
@@ -1700,6 +1675,75 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     };
   },
 
+  exportAgentPackage: async (agentId) => {
+    const agent = readAgentsFromState(get()).find((entry) => entry.id === agentId);
+    if (!agent) {
+      throw new Error('Agent not found');
+    }
+    if (agent.kind === 'system') {
+      throw new Error('System agent package cannot be exported');
+    }
+    const managementScope = await resolveSubagentManagementScope();
+    const result = await rpc<{ success?: boolean; package?: SubagentPackageExportResult; error?: string }>('agents.package.export', { agentId }, {
+      scope: managementScope,
+      target: buildSubagentTarget(managementScope, agentId),
+    });
+    if (!result.success || !result.package) {
+      throw new Error(result.error || 'Failed to export agent package');
+    }
+    return result.package;
+  },
+
+  uploadAgentPackageToCloud: async (agentId) => {
+    const exported = await get().exportAgentPackage(agentId);
+    const uploaded = await hostApiFetch<{ packageId?: string; packageVersionId?: string; name?: string; fileName?: string; bytes?: number }>('/api/packages/upload', {
+      method: 'POST',
+      body: JSON.stringify({ packagePath: exported.packagePath }),
+      timeoutMs: 120000,
+    });
+    return {
+      agentId: exported.agentId,
+      packageId: uploaded.packageId,
+      packageVersionId: uploaded.packageVersionId,
+      fileName: uploaded.fileName ?? exported.fileName,
+      size: uploaded.bytes ?? exported.size,
+      uploadedAtMs: Date.now(),
+    };
+  },
+
+  downloadAgentPackageFromCloud: async (packageVersionId) => {
+    const result = await hostApiFetch<{ packagePath?: string; packageId?: string; packageVersionId?: string; filename?: string; bytes?: number }>('/api/packages/download', {
+      method: 'POST',
+      body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
+      timeoutMs: 120000,
+    });
+    return {
+      agentId: result.packageVersionId ?? packageVersionId,
+      packageId: result.packageId,
+      packageVersionId: result.packageVersionId,
+      fileName: result.filename ?? result.packagePath ?? packageVersionId,
+      size: result.bytes,
+      downloadedAtMs: Date.now(),
+    };
+  },
+
+  installAgentPackageFromCloud: async (packageVersionId) => {
+    const result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } }>('/api/packages/install', {
+      method: 'POST',
+      body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
+      timeoutMs: 120000,
+    });
+    if (result.install?.outcome !== 'accepted' || !result.install.agentId) {
+      throw new Error('Failed to install agent package');
+    }
+    await get().loadAgents({ silent: true });
+    return {
+      agentId: result.install.agentId,
+      packageId: result.packageId,
+      packageVersionId: result.packageVersionId ?? packageVersionId,
+    };
+  },
+
   importAgentConfig: async (input) => {
     const managementScope = await resolveSubagentManagementScope();
     const packageData = normalizeSubagentConfigPackage(input);
@@ -1707,7 +1751,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       name: packageData.agent.name,
       description: packageData.agent.description,
       workspace: '',
-    });
+    }, { workspaceInitialization: 'emptyWorkspace' });
     const createdAgentId = createResult.agentId;
     const warnings = createResult.warning ? [createResult.warning] : [];
     const fileEntries = Object.entries(packageData.agent.files)
@@ -1809,7 +1853,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     beginGlobalMutating(set);
     try {
-      if (identityChanged || (modelChanged && nextModel !== undefined)) {
+      if (identityChanged || modelChanged) {
         const updatePayload: Record<string, unknown> = {
           agentId,
         };
@@ -1817,16 +1861,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           updatePayload.name = nextName;
           updatePayload.workspace = nextWorkspace;
         }
-        if (modelChanged && nextModel !== undefined) {
-          updatePayload.model = nextModel;
+        if (modelChanged) {
+          updatePayload.model = nextModel ?? null;
         }
         await rpc('agents.update', updatePayload, {
           scope: managementScope,
           target: buildSubagentTarget(managementScope, agentId),
         });
-      }
-      if (modelChanged && nextModel === undefined) {
-        await updateAgentModelConfig(managementScope, agentId, undefined);
       }
       if (descriptionChanged) {
         await updateAgentDescriptionConfig(managementScope, agentId, nextDescription);
@@ -1895,9 +1936,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         scope: managementScope,
         target: buildSubagentTarget(managementScope, agentId),
       });
+      useChatStore.getState().forgetAgentSessions(agentId);
       try {
         persistAvatarPresentation(agentId, undefined);
       } catch {
+        // Ignore local presentation cleanup failures during delete.
       }
     } catch (error) {
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);

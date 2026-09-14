@@ -137,7 +137,7 @@ impl SessionModelSelectionRequest {
         SessionModelSelectionCommand::try_new(
             self.scope.endpoint.parse().ok_or(RequestError::Invalid)?,
             self.input.session_key,
-            self.input.endpoint_session_id,
+            None,
             self.input.model_selection_id,
         )
         .map(|command| command.with_trace_id(trace_id))
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_endpoint_session_binding() {
+    fn ignores_public_endpoint_session_binding_on_active_model_selection() {
         let mut value = request("matcha-agent");
         value["input"]["endpointSessionId"] = json!("native-session-1");
 
@@ -273,10 +273,7 @@ mod tests {
             .into_command(None)
             .unwrap();
         assert_eq!(command.session_key, "agent:main:demo");
-        assert_eq!(
-            command.endpoint_session_id.as_deref(),
-            Some("native-session-1")
-        );
+        assert_eq!(command.endpoint_session_id, None);
     }
 
     #[test]

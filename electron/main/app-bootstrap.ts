@@ -33,8 +33,9 @@ import {
 } from './runtime-host-delivery/direct-host';
 import { createParentCallbackReceiver, type ParentCallbackReceiver } from './runtime-host-delivery/parent-callback';
 import { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
-import { composeLicenseService } from './license/composition';
+import { createCloudAccountClient } from './cloud-account/client';
 import { createCloudAccountService } from './cloud-account/service';
+import { createCloudProviderSync } from './cloud-account/provider-sync';
 import { createSessionListTransport } from './runtime-host-delivery/transport/sessions/list';
 import { createRuntimeEndpointDirectoryTransport } from './runtime-host-delivery/transport/runtime-directory';
 import { createFleetTransport } from './runtime-host-delivery/transport/fleet';
@@ -55,7 +56,9 @@ import { createSessionRenameTransport } from './runtime-host-delivery/transport/
 import { createSessionApprovalTransport } from './runtime-host-delivery/transport/sessions/approvals';
 import { createSessionSendTransport } from './runtime-host-delivery/transport/sessions/send';
 import { createSessionModelSelectionTransport } from './runtime-host-delivery/transport/sessions/model-selection';
+import { createSessionPermissionTransport } from './runtime-host-delivery/transport/sessions/permission';
 import { createSecurityEmergencyTransport } from './runtime-host-delivery/transport/security/emergency';
+import { createChannelAuthorizationTransport } from './runtime-host-delivery/transport/channels/authorization';
 import { createChannelCatalogTransport } from './runtime-host-delivery/transport/channels/catalog';
 import { createChannelConfigReadTransport } from './runtime-host-delivery/transport/channels/config-read';
 import { createChannelCredentialsTransport } from './runtime-host-delivery/transport/channels/credentials';
@@ -92,13 +95,14 @@ import { createTeamRoleChatTransport } from './runtime-host-delivery/transport/t
 import { createProviderAccountsTransport } from './runtime-host-delivery/transport/providers/accounts';
 import { createProviderModelsTransport } from './runtime-host-delivery/transport/providers/models';
 import { createExternalConnectorsTransport } from './runtime-host-delivery/transport/connectors/external';
+import { createOpenClawMcpServersTransport } from './runtime-host-delivery/transport/connectors/openclaw-mcp-servers';
 import { createProviderRoutingTransport } from './runtime-host-delivery/transport/providers/routing';
 import { createClawHubSkillInstallTransport } from './runtime-host-delivery/transport/skills/clawhub-install';
 import { createClawHubSkillSearchTransport } from './runtime-host-delivery/transport/skills/clawhub-search';
 import { createSkillBundleTransport } from './runtime-host-delivery/transport/skills/bundle';
 import { createSkillsManagementTransport } from './runtime-host-delivery/transport/skills/management';
+import { createSealedSkillsTransport } from './runtime-host-delivery/transport/skills/sealed';
 import { createPluginsTransport } from './runtime-host-delivery/transport/plugins';
-import { createOpenClawHistoryTransport } from './runtime-host-delivery/transport/sessions/openclaw-history';
 import { createUsageTransport } from './runtime-host-delivery/transport/usage';
 import { createMatchaAgentHistoryTransport } from './runtime-host-delivery/transport/sessions/matcha-history';
 
@@ -250,6 +254,8 @@ export async function bootstrapMainApplication(deps: {
     logger.info('E2E mode enabled: startup side effects are minimized');
   }
 
+  const cloudAccountClient = createCloudAccountClient();
+
   createMenu();
 
   const mainWindow = createMainWindow({ showOnReady: !isE2EMode });
@@ -272,7 +278,6 @@ export async function bootstrapMainApplication(deps: {
     registerUpdateHandlers(appUpdater, mainWindow);
   }
   loadMainWindowContent(mainWindow);
-  let licenseService: ReturnType<typeof composeLicenseService>;
   const rendererEventRoutes = new RendererEventRouteRegistry();
   let directRuntimeHost: RuntimeHostLifecycleOwner;
   let startedRuntimeHost: DirectRuntimeHost | undefined;
@@ -296,8 +301,10 @@ export async function bootstrapMainApplication(deps: {
   let sessionApprovalTransport: ReturnType<typeof createSessionApprovalTransport>;
   let sessionSendTransport: ReturnType<typeof createSessionSendTransport>;
   let sessionModelSelectionTransport: ReturnType<typeof createSessionModelSelectionTransport>;
+  let sessionPermissionTransport: ReturnType<typeof createSessionPermissionTransport>;
   let securityEmergencyTransport: ReturnType<typeof createSecurityEmergencyTransport>;
   let channelStatusTransport: ReturnType<typeof createChannelStatusTransport>;
+  let channelAuthorizationTransport: ReturnType<typeof createChannelAuthorizationTransport>;
   let channelCatalogTransport: ReturnType<typeof createChannelCatalogTransport>;
   let channelConfigReadTransport: ReturnType<typeof createChannelConfigReadTransport>;
   let channelCredentialsTransport: ReturnType<typeof createChannelCredentialsTransport>;
@@ -326,28 +333,20 @@ export async function bootstrapMainApplication(deps: {
   let providerAccountsTransport: ReturnType<typeof createProviderAccountsTransport>;
   let providerCredentialStatusTransport: ProviderCredentialStatusTransport;
   let providerModelsTransport: ReturnType<typeof createProviderModelsTransport>;
+  let cloudAccountService: ReturnType<typeof createCloudAccountService>;
   let externalConnectorsTransport: ReturnType<typeof createExternalConnectorsTransport>;
+  let openClawMcpServersTransport: ReturnType<typeof createOpenClawMcpServersTransport>;
   let providerRoutingTransport: ReturnType<typeof createProviderRoutingTransport>;
   let clawHubSkillInstallTransport: ReturnType<typeof createClawHubSkillInstallTransport>;
   let clawHubSkillSearchTransport: ReturnType<typeof createClawHubSkillSearchTransport>;
   let skillBundleTransport: ReturnType<typeof createSkillBundleTransport>;
   let skillsManagementTransport: ReturnType<typeof createSkillsManagementTransport>;
+  let sealedSkillsTransport: ReturnType<typeof createSealedSkillsTransport>;
   let pluginsTransport: ReturnType<typeof createPluginsTransport>;
-  let openClawHistoryTransport: ReturnType<typeof createOpenClawHistoryTransport>;
   let usageTransport: ReturnType<typeof createUsageTransport>;
   let matchaAgentHistoryTransport: ReturnType<typeof createMatchaAgentHistoryTransport>;
   let delivery: RuntimeHostDelivery;
   try {
-    licenseService = composeLicenseService({
-      onGateChanged: (snapshot) => {
-        const payload = snapshot;
-        deps.hostEventBus.emit('license:gate-changed', payload);
-        deps.getMainWindow()?.webContents.send('host:event', {
-          eventName: 'license:gate-changed',
-          payload,
-        });
-      },
-    });
     delivery = await createRuntimeHostDelivery(deps.hostEventBus, deps.getMainWindow);
     closeRuntimeHostDelivery = delivery.close;
     const initialRuntimeHost = await delivery.launchRuntimeHost();
@@ -420,6 +419,10 @@ export async function bootstrapMainApplication(deps: {
       delivery.issuer,
       delivery.sessionModelSelectionTransportPort
     );
+    sessionPermissionTransport = createSessionPermissionTransport(
+      delivery.issuer,
+      delivery.sessionTransportPort
+    );
     securityEmergencyTransport = createSecurityEmergencyTransport(
       delivery.issuer,
       delivery.securityEmergencyTransportPort
@@ -432,6 +435,7 @@ export async function bootstrapMainApplication(deps: {
       delivery.issuer,
       delivery.channelCatalogTransportPort
     );
+    channelAuthorizationTransport = createChannelAuthorizationTransport(channelCatalogTransport);
     channelConfigReadTransport = createChannelConfigReadTransport(
       delivery.issuer,
       delivery.channelCatalogTransportPort
@@ -519,7 +523,18 @@ export async function bootstrapMainApplication(deps: {
       delivery.issuer,
       delivery.providerModelsTransportPort
     );
+    const cloudProviderSync = createCloudProviderSync({
+      fetchClientBootstrap: (token) => cloudAccountClient.fetchClientBootstrap(token),
+      providerAccountsTransport,
+      providerModelsTransport,
+    });
+    cloudAccountService = createCloudAccountService(cloudAccountClient, cloudProviderSync);
+    cloudAccountService.prewarm();
     externalConnectorsTransport = createExternalConnectorsTransport(
+      delivery.issuer,
+      delivery.providerModelsTransportPort
+    );
+    openClawMcpServersTransport = createOpenClawMcpServersTransport(
       delivery.issuer,
       delivery.providerModelsTransportPort
     );
@@ -543,11 +558,11 @@ export async function bootstrapMainApplication(deps: {
       delivery.issuer,
       delivery.providerModelsTransportPort
     );
-    pluginsTransport = createPluginsTransport(delivery.issuer, delivery.providerModelsTransportPort);
-    openClawHistoryTransport = createOpenClawHistoryTransport(
+    sealedSkillsTransport = createSealedSkillsTransport(
       delivery.issuer,
-      delivery.openclawHistoryTransportPort
+      delivery.providerModelsTransportPort
     );
+    pluginsTransport = createPluginsTransport(delivery.issuer, delivery.providerModelsTransportPort);
     usageTransport = createUsageTransport(delivery.issuer, delivery.usageTransportPort);
     matchaAgentHistoryTransport = createMatchaAgentHistoryTransport(
       delivery.issuer,
@@ -569,8 +584,7 @@ export async function bootstrapMainApplication(deps: {
   try {
     await waitForHostApiServerListening(
       startHostApiServer({
-        licenseService,
-        cloudAccountService: createCloudAccountService(),
+        cloudAccountService,
         eventBus: deps.hostEventBus,
         runtimeHost: directRuntimeHost,
         sessionListTransport,
@@ -592,9 +606,11 @@ export async function bootstrapMainApplication(deps: {
         workspaceMediaTransport,
         sessionSendTransport,
         sessionModelSelectionTransport,
+        sessionPermissionTransport,
         rendererEventRoutes,
         securityEmergencyTransport,
         channelStatusTransport,
+        channelAuthorizationTransport,
         channelCatalogTransport,
         channelConfigReadTransport,
         channelCredentialsTransport,
@@ -624,13 +640,14 @@ export async function bootstrapMainApplication(deps: {
         providerCredentialStatusTransport,
         providerModelsTransport,
         externalConnectorsTransport,
+        openClawMcpServersTransport,
         providerRoutingTransport,
         clawHubSkillInstallTransport,
         clawHubSkillSearchTransport,
         skillBundleTransport,
         skillsManagementTransport,
+        sealedSkillsTransport,
         pluginsTransport,
-        openClawHistoryTransport,
         matchaAgentHistoryTransport,
         usageTransport,
       }, undefined, delivery.fleetTransportPort)
@@ -714,7 +731,6 @@ type RuntimeHostDelivery = Readonly<{
   readonly sessionAbortTransportPort: number;
   readonly sessionApprovalTransportPort: number;
   readonly sessionModelSelectionTransportPort: number;
-  readonly openclawHistoryTransportPort: number;
   readonly matchaHistoryTransportPort: number;
   readonly usageTransportPort: number;
   readonly securityEmergencyTransportPort: number;
@@ -765,7 +781,6 @@ async function createRuntimeHostDelivery(
   let sessionAbortTransportPort: number;
   let sessionApprovalTransportPort: number;
   let sessionModelSelectionTransportPort: number;
-  let openclawHistoryTransportPort: number;
   let matchaHistoryTransportPort: number;
   let usageTransportPort: number;
   let securityEmergencyTransportPort: number;
@@ -816,7 +831,6 @@ async function createRuntimeHostDelivery(
     sessionAbortTransportPort = bootstrap.sessionAbortTransportPort;
     sessionApprovalTransportPort = bootstrap.sessionApprovalTransportPort;
     sessionModelSelectionTransportPort = bootstrap.sessionModelSelectionTransportPort;
-    openclawHistoryTransportPort = bootstrap.openclawHistoryTransportPort;
     matchaHistoryTransportPort = bootstrap.matchaHistoryTransportPort;
     usageTransportPort = bootstrap.usageTransportPort;
     securityEmergencyTransportPort = bootstrap.securityEmergencyTransportPort;
@@ -897,7 +911,6 @@ async function createRuntimeHostDelivery(
     sessionAbortTransportPort,
     sessionApprovalTransportPort,
     sessionModelSelectionTransportPort,
-    openclawHistoryTransportPort,
       matchaHistoryTransportPort,
       usageTransportPort,
       securityEmergencyTransportPort,

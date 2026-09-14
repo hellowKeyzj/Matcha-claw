@@ -53,7 +53,6 @@ pub(crate) struct SessionAdmission {
     endpoint: RuntimeEndpoint,
     provider: SessionProvider,
     generated_key_namespace: &'static str,
-    endpoint_binding: EndpointBinding,
 }
 
 impl SessionAdmission {
@@ -66,20 +65,6 @@ impl SessionAdmission {
             endpoint,
             provider,
             generated_key_namespace,
-            endpoint_binding: EndpointBinding::AgentScoped,
-        }
-    }
-
-    pub(crate) fn native_session_key(
-        endpoint: RuntimeEndpoint,
-        provider: SessionProvider,
-        generated_key_namespace: &'static str,
-    ) -> Self {
-        Self {
-            endpoint,
-            provider,
-            generated_key_namespace,
-            endpoint_binding: EndpointBinding::SessionKey,
         }
     }
 
@@ -91,29 +76,20 @@ impl SessionAdmission {
         if input.endpoint != self.endpoint || !valid_identity(&input.agent_id, MAX_AGENT_ID_BYTES) {
             return Err(InvalidSessionCreate);
         }
-        let (session_key, endpoint_session_id) = match input.endpoint_session_id {
+        let endpoint_session_id = match input.endpoint_session_id {
             Some(endpoint_session_id) => {
                 if !valid_identity(&endpoint_session_id, MAX_ENDPOINT_SESSION_ID_BYTES) {
                     return Err(InvalidSessionCreate);
                 }
-                let session_key = self
-                    .session_key_for_explicit_endpoint_id(&input.agent_id, &endpoint_session_id);
-                (session_key, endpoint_session_id)
+                endpoint_session_id
             }
-            None => {
-                let endpoint_session_id = generated_endpoint_session_id(now_ms)?;
-                let session_key = generated_local_session_key(
-                    self.generated_key_namespace,
-                    &input.agent_id,
-                    &endpoint_session_id,
-                );
-                let native_endpoint_session_id = match self.endpoint_binding {
-                    EndpointBinding::AgentScoped => endpoint_session_id,
-                    EndpointBinding::SessionKey => session_key.clone(),
-                };
-                (session_key, native_endpoint_session_id)
-            }
+            None => generated_endpoint_session_id(now_ms)?,
         };
+        let session_key = generated_local_session_key(
+            self.generated_key_namespace,
+            &input.agent_id,
+            &endpoint_session_id,
+        );
         SessionCreateCommand::from_prepared(
             self.endpoint.clone(),
             self.provider,
@@ -122,26 +98,6 @@ impl SessionAdmission {
             session_key,
         )
     }
-
-    fn session_key_for_explicit_endpoint_id(
-        &self,
-        agent_id: &str,
-        endpoint_session_id: &str,
-    ) -> String {
-        match self.endpoint_binding {
-            EndpointBinding::AgentScoped => format!(
-                "{}:{agent_id}:{endpoint_session_id}",
-                self.generated_key_namespace
-            ),
-            EndpointBinding::SessionKey => endpoint_session_id.to_owned(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EndpointBinding {
-    AgentScoped,
-    SessionKey,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -386,7 +342,7 @@ mod tests {
     }
 
     fn matcha_admission() -> SessionAdmission {
-        SessionAdmission::native_session_key(
+        SessionAdmission::agent_scoped(
             RuntimeDriverIdentity::matcha_agent().endpoint(),
             SessionProvider::MatchaAgent,
             "matcha-agent",
@@ -442,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_matcha_session_key_keeps_endpoint_namespace() {
+    fn generated_matcha_session_key_keeps_native_id_unprefixed() {
         let command = matcha_admission()
             .prepare_create(
                 SessionCreateAdmissionInput::new(
@@ -454,9 +410,11 @@ mod tests {
             )
             .unwrap();
         let key = command.session_key().to_owned();
+        let native_id = command.clone().into_matcha_session_id().unwrap();
 
-        assert!(key.starts_with("matcha-agent:main:session-7-"));
-        assert_eq!(command.into_matcha_session_id().unwrap().as_str(), key);
+        assert!(native_id.as_str().starts_with("session-7-"));
+        assert!(!native_id.as_str().contains(':'));
+        assert_eq!(key, format!("matcha-agent:main:{}", native_id.as_str()));
     }
 
     #[test]
@@ -503,14 +461,18 @@ mod tests {
     #[test]
     fn serializes_success_as_the_session_view_contract() {
         let value = to_value(project_matcha_create(
+            "matcha-agent:main:matcha-session-1".into(),
             "matcha-session-1".into(),
-            "matcha-session-1".into(),
-            None,
+            Some("main".into()),
             1,
         ))
         .unwrap();
-        assert_eq!(value["sessionKey"], json!("matcha-session-1"));
+        assert_eq!(
+            value["sessionKey"],
+            json!("matcha-agent:main:matcha-session-1")
+        );
         assert_eq!(value["endpointSessionId"], json!("matcha-session-1"));
+        assert_eq!(value["identity"]["agentId"], json!("main"));
         assert_eq!(
             value["identity"]["endpoint"]["runtimeAdapterId"],
             json!("matcha-agent")

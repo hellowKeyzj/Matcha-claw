@@ -27,6 +27,19 @@ async function collectTsFiles(dir) {
 }
 
 async function main() {
+  let applicationDir;
+  try {
+    applicationDir = await stat(APPLICATION_DIR);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    console.log('Trait boundary check passed (0 files).');
+    return;
+  }
+  if (!applicationDir.isDirectory()) {
+    console.log('Trait boundary check passed (0 files).');
+    return;
+  }
+
   const files = await collectTsFiles(APPLICATION_DIR);
   const violations = [];
 

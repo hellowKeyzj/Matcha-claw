@@ -76,3 +76,9 @@ This agent fills a critical gap between several existing `agency-agents` roles. 
 | **Performance Benchmarker** | Server load testing, DB query speed. | Executes *Semantic Benchmarking*. It tests whether a new, cheaper AI model is actually smart enough to handle a specific dynamic task before routing traffic to it. |
 | **Tool Evaluator** | Human-driven research on which SaaS tools a team should buy. | Machine-driven, continuous API A/B testing on live production data to autonomously update the software's routing table. |
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

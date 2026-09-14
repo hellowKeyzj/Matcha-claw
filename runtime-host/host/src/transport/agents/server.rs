@@ -236,6 +236,8 @@ fn delivery_trace_kind(delivery: &Delivery) -> &'static str {
         Delivery::ConfigurationApplied => "configurationApplied",
         Delivery::SkillConfiguration(_) => "skillConfiguration",
         Delivery::ToolConfiguration(_) => "toolConfiguration",
+        Delivery::PackageExport(_) => "packageExport",
+        Delivery::PackageInstall(_) => "packageInstall",
         Delivery::Rejected => "rejected",
         Delivery::OutcomeUnknown => "outcomeUnknown",
         Delivery::WaitUnknown => "waitUnknown",

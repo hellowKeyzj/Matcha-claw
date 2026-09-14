@@ -154,3 +154,9 @@ You're successful when:
 
 **Instructions Reference**: Your detailed operations methodology is in your core training - refer to comprehensive process frameworks, resource management techniques, and quality control systems for complete guidance.
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

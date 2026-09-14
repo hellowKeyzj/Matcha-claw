@@ -19,7 +19,8 @@ use crate::{
     },
 };
 
-const LEGACY_MANAGED_SERVER_IDS: &[&str] = &["matcha-system", "matcha-system-runtime"];
+use super::preset::{PRESET_TEAM_RUN_MCP_SERVER_ID, PresetMcpProjection};
+
 const MANAGED_EXTERNAL_SERVER_PREFIX: &str = "matcha-external.";
 const DEFAULT_MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -34,6 +35,10 @@ pub fn managed_external_server_id(connector_id: &str) -> String {
     } else {
         format!("{MANAGED_EXTERNAL_SERVER_PREFIX}{connector_id}")
     }
+}
+
+pub fn connector_id_for_managed_external_server(server_id: &str) -> Option<&str> {
+    server_id.strip_prefix(MANAGED_EXTERNAL_SERVER_PREFIX)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,11 +88,27 @@ pub fn project_external_connectors(
     catalog: &ConnectorCatalog,
     secrets: &dyn ConnectorSecretResolverPort,
 ) -> Result<(ConnectorProjectionEffect, ConnectorProjectionReport), ConnectorProjectionError> {
+    project_runtime_mcp_connectors(state_dir, None, catalog, secrets)
+}
+
+pub fn project_runtime_mcp_connectors(
+    state_dir: CanonicalStateDir,
+    preset: Option<PresetMcpProjection<'_>>,
+    catalog: &ConnectorCatalog,
+    secrets: &dyn ConnectorSecretResolverPort,
+) -> Result<(ConnectorProjectionEffect, ConnectorProjectionReport), ConnectorProjectionError> {
     let mut report = ConnectorProjectionReport {
         projected: Vec::new(),
         skipped: Vec::new(),
     };
     let mut servers = Map::new();
+    if let Some(preset) = preset {
+        let Some(server) = preset.team_run_server() else {
+            return Ok((ConnectorProjectionEffect::Unavailable, report));
+        };
+        report.projected.push(PRESET_TEAM_RUN_MCP_SERVER_ID.into());
+        servers.insert(PRESET_TEAM_RUN_MCP_SERVER_ID.into(), server);
+    }
     for connector in catalog.connectors() {
         if !connector.enabled() {
             report
@@ -188,9 +209,7 @@ fn projection_readback_matches(store: &OpenClawConfigStore, expected: &Map<Strin
 }
 
 fn is_stale_managed_server_id(id: &str, projected: &Map<String, Value>) -> bool {
-    !projected.contains_key(id)
-        && (LEGACY_MANAGED_SERVER_IDS.contains(&id)
-            || id.starts_with(MANAGED_EXTERNAL_SERVER_PREFIX))
+    !projected.contains_key(id) && id.starts_with(MANAGED_EXTERNAL_SERVER_PREFIX)
 }
 
 pub(crate) fn projection_effect(error: OpenClawConfigStoreError) -> ConnectorProjectionEffect {

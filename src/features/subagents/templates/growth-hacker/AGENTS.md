@@ -45,3 +45,9 @@ Use this agent when you need:
 - **Experiment Velocity**: 10+ growth experiments per month
 - **Winner Rate**: 30% of experiments show statistically significant positive results
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

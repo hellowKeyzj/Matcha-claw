@@ -1,43 +1,34 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const resolveApiKeyForProviderMock = vi.fn();
 const postJsonRequestMock = vi.fn();
 const fetchWithTimeoutGuardedMock = vi.fn();
 const assertOkOrThrowHttpErrorMock = vi.fn();
-const resolveProviderHttpRequestConfigMock = vi.fn();
 
-vi.mock('openclaw/plugin-sdk/provider-auth-runtime', () => ({
-  resolveApiKeyForProvider: resolveApiKeyForProviderMock,
-}));
-
-vi.mock('openclaw/plugin-sdk/provider-http', () => ({
-  assertOkOrThrowHttpError: assertOkOrThrowHttpErrorMock,
-  fetchWithTimeoutGuarded: fetchWithTimeoutGuardedMock,
-  postJsonRequest: postJsonRequestMock,
-  resolveProviderHttpRequestConfig: (input: {
-    baseUrl: string;
-    allowPrivateNetwork?: boolean;
-    dispatcherPolicy?: unknown;
-  }) => resolveProviderHttpRequestConfigMock(input) ?? ({
-    baseUrl: input.baseUrl,
-    allowPrivateNetwork: input.allowPrivateNetwork,
-    dispatcherPolicy: input.dispatcherPolicy,
-  }),
-}));
+vi.mock('../../packages/openclaw-matchaclaw-media-plugin/src/http-runtime.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../packages/openclaw-matchaclaw-media-plugin/src/http-runtime.js')>();
+  return {
+    ...actual,
+    assertOkOrThrowHttpError: assertOkOrThrowHttpErrorMock,
+    fetchWithTimeoutGuarded: fetchWithTimeoutGuardedMock,
+    postJsonRequest: postJsonRequestMock,
+  };
+});
 
 describe('matchaclaw-media OpenClaw plugin', () => {
+  const originalApiKey = process.env.MATCHACLAW_MEDIA_CUSTOM_592A8424_API_KEY;
+
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
-    resolveApiKeyForProviderMock.mockResolvedValue({ apiKey: 'sk-test' });
+    process.env.MATCHACLAW_MEDIA_CUSTOM_592A8424_API_KEY = 'sk-test';
     assertOkOrThrowHttpErrorMock.mockResolvedValue(undefined);
-    resolveProviderHttpRequestConfigMock.mockImplementation((input) => ({
-      baseUrl: input.baseUrl,
-      allowPrivateNetwork: input.allowPrivateNetwork,
-      dispatcherPolicy: input.dispatcherPolicy,
-    }));
+  });
+
+  afterAll(() => {
+    if (originalApiKey === undefined) delete process.env.MATCHACLAW_MEDIA_CUSTOM_592A8424_API_KEY;
+    else process.env.MATCHACLAW_MEDIA_CUSTOM_592A8424_API_KEY = originalApiKey;
   });
 
   async function loadImageProvider(pluginConfig?: Record<string, unknown>) {
@@ -96,7 +87,6 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       models: ['custom-592a8424/gpt-image-1'],
     });
     expect(postJsonRequestMock).not.toHaveBeenCalled();
-    expect(resolveApiKeyForProviderMock).not.toHaveBeenCalled();
   });
 
   function mockRemoteImageDownload(bytes = new Uint8Array([137, 80, 78, 71])) {
@@ -192,6 +182,39 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       }),
     );
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('resolves API keys from the prepared auth store before env fallback', async () => {
+    const provider = await loadImageProvider();
+
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({
+          data: [{ b64_json: Buffer.from('png').toString('base64') }],
+        }),
+      },
+      release: vi.fn(),
+    });
+
+    await provider.generateImage({
+      model: 'custom-592a8424/gpt-image-1',
+      prompt: 'red apple',
+      cfg: makeConfig('openai', 'gpt-image-1'),
+      authStore: {
+        version: 1,
+        profiles: {
+          selected: {
+            type: 'api_key',
+            provider: 'custom-592a8424',
+            key: 'sk-store',
+          },
+        },
+        order: { 'custom-592a8424': ['selected'] },
+      },
+    });
+
+    const headers = postJsonRequestMock.mock.calls[0]?.[0]?.headers as Headers;
+    expect(headers.get('Authorization')).toBe('Bearer sk-store');
   });
 
   it('turns OpenAI-compatible image URLs into generated image assets', async () => {
@@ -354,14 +377,8 @@ describe('matchaclaw-media OpenClaw plugin', () => {
     );
   });
 
-  it('does not reuse direct provider dispatcher policy for returned image URLs', async () => {
+  it('does not attach private dispatcher policy to provider or returned image URL requests', async () => {
     const provider = await loadImageProvider();
-    const directDispatcherPolicy = { mode: 'direct', connect: { servername: 'api.example.test' } };
-    resolveProviderHttpRequestConfigMock.mockImplementation((input) => ({
-      baseUrl: input.baseUrl,
-      allowPrivateNetwork: input.allowPrivateNetwork,
-      dispatcherPolicy: directDispatcherPolicy,
-    }));
 
     postJsonRequestMock.mockResolvedValue({
       response: {
@@ -402,8 +419,8 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       },
     });
 
-    expect(postJsonRequestMock).toHaveBeenCalledWith(expect.objectContaining({
-      dispatcherPolicy: directDispatcherPolicy,
+    expect(postJsonRequestMock).toHaveBeenCalledWith(expect.not.objectContaining({
+      dispatcherPolicy: expect.anything(),
     }));
     expect(fetchWithTimeoutGuardedMock).toHaveBeenCalledWith(
       'https://media.example.test/output.png',
@@ -411,7 +428,7 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       expect.any(Number),
       expect.any(Function),
       expect.not.objectContaining({
-        dispatcherPolicy: directDispatcherPolicy,
+        dispatcherPolicy: expect.anything(),
       }),
     );
   });

@@ -25,6 +25,10 @@ impl NodeExecutionId {
         Self(attempt_id.as_str().to_owned())
     }
 
+    pub(crate) fn from_durable(value: String) -> Self {
+        Self(value)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

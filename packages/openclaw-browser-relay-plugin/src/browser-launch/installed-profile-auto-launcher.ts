@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import os from 'node:os'
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from '../plugin-types.js'
 import type { BrowserRelayExtensionConnection, BrowserRelayServer } from '../relay/server.js'
 import {
   discoverInstalledBrowserRelayProfiles,

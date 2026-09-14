@@ -3,8 +3,9 @@ use serde_json::{Map, Value};
 use crate::session::protocol::{ChatHistoryResult, HistoryRole};
 
 use super::model::{
-    Direction, Message, MessageContent, MessageRole, MessageToolDeliveryMedia, OmittedContentKind,
-    PageRequest, SessionWindow, window_range,
+    Direction, InFlightRun, InputReceipt, Message, MessageContent, MessageRole,
+    MessageToolDeliveryMedia, OmittedContentKind, PageMetadata, PageRequest, PendingInput,
+    PendingInputState, RunState, SessionState, SessionWindow, WindowRange, window_range,
 };
 
 const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -17,15 +18,19 @@ const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MESSAGE_TOOL_NAME: &str = "message";
 const OUTGOING_MEDIA_PREFIX: &str = "/api/chat/media/outgoing/";
 const OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH: &str = "api/chat/media/outgoing/";
+const TEXT_BLOCK_TYPES: &[&str] = &["text", "input_text", "output_text"];
 const TOOL_CALL_BLOCK_TYPES: &[&str] = &[
     "toolCall",
     "toolUse",
     "functionCall",
+    "toolcall",
+    "tooluse",
     "tool_call",
     "tool_use",
     "function_call",
 ];
-const TOOL_RESULT_BLOCK_TYPES: &[&str] = &["toolResult", "tool_result"];
+const TOOL_RESULT_BLOCK_TYPES: &[&str] =
+    &["toolResult", "toolresult", "tool_result", "tool_use_result"];
 const TOOL_NAME_FIELDS: &[&str] = &["name", "toolName"];
 const ROLE_TOOL_NAME_FIELDS: &[&str] = &["toolName", "name"];
 const TOOL_CALL_ID_FIELDS: &[&str] = &[
@@ -182,7 +187,7 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         .filter(|value| !value.is_empty());
     let native_session_id = envelope
         .as_ref()
-        .map(|envelope| optional_string(envelope, "sessionId"))
+        .map(decode_native_session_id)
         .transpose()?
         .flatten()
         .filter(|value| !value.is_empty());
@@ -191,15 +196,284 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         Err(_) if is_text_history(&payload) => decode_text_history(payload)?,
         Err(error) => return Err(error),
     };
-    let total_item_count = messages.len();
-    let range = window_range(total_item_count, request);
+    let pagination = envelope
+        .as_ref()
+        .map(|envelope| decode_pagination(envelope, request))
+        .transpose()?
+        .flatten();
+    let total_item_count = pagination
+        .map(|pagination| pagination.total_messages())
+        .unwrap_or(messages.len());
+    let range = pagination
+        .map(|pagination| page_range(pagination, messages.len()))
+        .unwrap_or_else(|| window_range(total_item_count, request));
+    let messages = if pagination.is_some() {
+        messages
+    } else {
+        messages[range.start()..range.end()].to_vec()
+    };
+    let state = envelope
+        .as_ref()
+        .map(decode_session_state)
+        .transpose()?
+        .unwrap_or_else(empty_session_state);
     Ok(SessionWindow::new(
-        messages[range.start()..range.end()].to_vec(),
+        messages,
         range,
         total_item_count,
+        pagination,
         session_key,
         native_session_id,
+        state,
     ))
+}
+
+fn decode_native_session_id(envelope: &Map<String, Value>) -> Result<Option<String>, HistoryError> {
+    if let Some(session_id) = optional_string(envelope, "sessionId")? {
+        return Ok(Some(session_id));
+    }
+    let Some(value) = envelope.get("sessionInfo") else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| payload_error("sessionInfo", "expected_object", value_kind(value)))?;
+    optional_bounded_id(object, "sessionId")
+}
+
+fn decode_pagination(
+    envelope: &Map<String, Value>,
+    request: PageRequest,
+) -> Result<Option<PageMetadata>, HistoryError> {
+    let Some(total_messages) = optional_usize(envelope, "totalMessages")? else {
+        return Ok(None);
+    };
+    let offset =
+        optional_usize(envelope, "offset")?.unwrap_or_else(|| request.offset().unwrap_or(0));
+    let next_offset = optional_usize(envelope, "nextOffset")?;
+    let has_more = optional_bool(envelope, "hasMore")?;
+    if offset > total_messages {
+        return Err(payload_error("offset", "exceeds_total_messages", "number"));
+    }
+    if next_offset.is_some_and(|next_offset| next_offset > total_messages) {
+        return Err(payload_error(
+            "nextOffset",
+            "exceeds_total_messages",
+            "number",
+        ));
+    }
+    if next_offset.is_some_and(|next_offset| next_offset < offset) {
+        return Err(payload_error("nextOffset", "before_offset", "number"));
+    }
+    Ok(Some(PageMetadata::new(
+        offset,
+        total_messages,
+        next_offset,
+        has_more,
+    )))
+}
+
+fn page_range(pagination: PageMetadata, message_count: usize) -> WindowRange {
+    let total = pagination.total_messages();
+    let end = total.saturating_sub(pagination.offset());
+    let start = pagination
+        .next_offset()
+        .map(|next_offset| total.saturating_sub(next_offset))
+        .unwrap_or_else(|| end.saturating_sub(message_count));
+    WindowRange::new(start, end)
+}
+
+fn empty_session_state() -> SessionState {
+    SessionState::new(Vec::new(), Vec::new(), None, None, None)
+}
+
+fn decode_session_state(envelope: &Map<String, Value>) -> Result<SessionState, HistoryError> {
+    Ok(SessionState::new(
+        decode_pending_inputs(envelope)?,
+        decode_input_receipts(envelope)?,
+        decode_in_flight_run(envelope)?,
+        decode_delta_cursor(envelope)?,
+        optional_bool(envelope, "completeSnapshot")?,
+    ))
+}
+
+fn decode_pending_inputs(envelope: &Map<String, Value>) -> Result<Vec<PendingInput>, HistoryError> {
+    let Some(value) = envelope.get("pendingInputs") else {
+        return Ok(Vec::new());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| payload_error("pendingInputs", "expected_object", value_kind(value)))?;
+    let items = object
+        .get("items")
+        .ok_or_else(|| payload_error("pendingInputs.items", "missing", "missing"))?;
+    let values = items
+        .as_array()
+        .ok_or_else(|| payload_error("pendingInputs.items", "expected_array", value_kind(items)))?;
+    values
+        .iter()
+        .map(|value| {
+            let object = value.as_object().ok_or_else(|| {
+                payload_error(
+                    "pendingInputs.items[]",
+                    "expected_object",
+                    value_kind(value),
+                )
+            })?;
+            Ok(PendingInput::new(
+                Some(required_bounded_id(object, "id")?),
+                optional_bounded_id(object, "runId")?,
+                decode_pending_input_state(object.get("state").ok_or_else(|| {
+                    payload_error("pendingInputs.items[].state", "missing", "missing")
+                })?)?,
+            ))
+        })
+        .collect()
+}
+
+fn decode_pending_input_state(value: &Value) -> Result<PendingInputState, HistoryError> {
+    match value.as_str() {
+        Some("queued") => Ok(PendingInputState::Queued),
+        Some("cancelled" | "canceled") => Ok(PendingInputState::Cancelled),
+        Some("interrupted") => Ok(PendingInputState::Interrupted),
+        Some(_) => Err(payload_error(
+            "pendingInputs.items[].state",
+            "unsupported_state",
+            "string",
+        )),
+        None => Err(payload_error(
+            "pendingInputs.items[].state",
+            "expected_string",
+            value_kind(value),
+        )),
+    }
+}
+
+fn decode_input_receipts(envelope: &Map<String, Value>) -> Result<Vec<InputReceipt>, HistoryError> {
+    let mut receipts = Vec::new();
+    append_input_receipts(envelope, "inputReceipts", false, &mut receipts)?;
+    append_input_receipts(envelope, "inputConsumptions", true, &mut receipts)?;
+    Ok(receipts)
+}
+
+fn append_input_receipts(
+    envelope: &Map<String, Value>,
+    field: &'static str,
+    consumed: bool,
+    receipts: &mut Vec<InputReceipt>,
+) -> Result<(), HistoryError> {
+    let Some(value) = envelope.get(field) else {
+        return Ok(());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| payload_error(field, "expected_array", value_kind(value)))?;
+    for value in values {
+        let object = value
+            .as_object()
+            .ok_or_else(|| payload_error(field, "expected_object", value_kind(value)))?;
+        receipts.push(InputReceipt::new(
+            optional_bounded_id(object, "inputId")?,
+            optional_bounded_id(object, "runId")?,
+            consumed,
+        ));
+    }
+    Ok(())
+}
+
+fn decode_in_flight_run(
+    envelope: &Map<String, Value>,
+) -> Result<Option<InFlightRun>, HistoryError> {
+    let Some(value) = envelope.get("inFlightRun") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| payload_error("inFlightRun", "expected_object", value_kind(value)))?;
+    let run_id = required_bounded_id(object, "runId")?;
+    let state = object
+        .get("state")
+        .or_else(|| object.get("status"))
+        .or_else(|| object.get("phase"))
+        .map(decode_run_state)
+        .transpose()?
+        .unwrap_or(RunState::Started);
+    Ok(Some(InFlightRun::new(run_id, state)))
+}
+
+fn decode_run_state(value: &Value) -> Result<RunState, HistoryError> {
+    match value.as_str() {
+        Some("queued" | "pending") => Ok(RunState::Queued),
+        Some("started" | "running" | "inFlight" | "in_flight" | "streaming") => {
+            Ok(RunState::Started)
+        }
+        Some("waitingForApproval" | "waiting_for_approval" | "waitingApproval") => {
+            Ok(RunState::WaitingForApproval)
+        }
+        Some("cancellationRequested" | "cancellation_requested" | "stopping") => {
+            Ok(RunState::CancellationRequested)
+        }
+        Some("cancelled" | "canceled") => Ok(RunState::Cancelled),
+        Some("completed" | "complete" | "done" | "ok") => Ok(RunState::Completed),
+        Some("failed" | "error") => Ok(RunState::Failed),
+        Some("interrupted") => Ok(RunState::Interrupted),
+        Some(_) => Err(payload_error(
+            "inFlightRun.state",
+            "unsupported_state",
+            "string",
+        )),
+        None => Err(payload_error(
+            "inFlightRun.state",
+            "expected_string",
+            value_kind(value),
+        )),
+    }
+}
+
+fn decode_delta_cursor(envelope: &Map<String, Value>) -> Result<Option<String>, HistoryError> {
+    let Some(value) = envelope.get("deltaCursor") else {
+        return Ok(None);
+    };
+    let cursor = value
+        .as_str()
+        .ok_or_else(|| payload_error("deltaCursor", "expected_string", value_kind(value)))?;
+    if cursor.is_empty() || cursor.len() > MAX_METADATA_BYTES {
+        return Err(payload_error("deltaCursor", "invalid", "string"));
+    }
+    Ok(Some(cursor.to_owned()))
+}
+
+fn required_bounded_id(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<String, HistoryError> {
+    let value = object
+        .get(field)
+        .ok_or_else(|| payload_error(field, "missing", "missing"))?;
+    bounded_id(value, field)
+}
+
+fn optional_bounded_id(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<String>, HistoryError> {
+    object
+        .get(field)
+        .map(|value| bounded_id(value, field))
+        .transpose()
+}
+
+fn bounded_id(value: &Value, field: &'static str) -> Result<String, HistoryError> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| payload_error(field, "expected_string", value_kind(value)))?;
+    if text.is_empty() || text.len() > MAX_METADATA_BYTES {
+        return Err(payload_error(field, "invalid", "string"));
+    }
+    Ok(text.to_owned())
 }
 
 fn decode_native_window(payload: Value) -> Result<Vec<Message>, HistoryError> {
@@ -278,6 +552,56 @@ fn decode_text_history(payload: Value) -> Result<Vec<Message>, HistoryError> {
             )
         })
         .collect())
+}
+
+pub(crate) fn decode_transcript_event_message(
+    source_sequence: u64,
+    object: &Map<String, Value>,
+) -> Result<Message, HistoryError> {
+    if source_sequence > MAX_SAFE_SEQUENCE {
+        return Err(payload_error("seq", "exceeds_safe_integer", "number"));
+    }
+    let value = object
+        .get("message")
+        .ok_or_else(|| payload_error("message", "missing", "missing"))?;
+    let mut message = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| payload_error("message", "expected_object", value_kind(value)))?;
+    insert_missing_string_alias(&mut message, "messageId", "id", object.get("id"))?;
+    insert_missing_string_alias(
+        &mut message,
+        "parentId",
+        "parentMessageId",
+        object.get("parentId"),
+    )?;
+    if !message.contains_key("seq") && !message.contains_key("sequence") {
+        message.insert("seq".to_owned(), Value::from(source_sequence));
+    }
+    decode_message(0, &Value::Object(message))
+}
+
+fn insert_missing_string_alias(
+    message: &mut Map<String, Value>,
+    first: &'static str,
+    second: &str,
+    value: Option<&Value>,
+) -> Result<(), HistoryError> {
+    if message.contains_key(first) || message.contains_key(second) {
+        return Ok(());
+    }
+    match value {
+        Some(Value::String(text)) if !text.is_empty() => {
+            message.insert(first.to_owned(), Value::String(text.to_owned()));
+            Ok(())
+        }
+        Some(Value::String(_)) | Some(Value::Null) | None => Ok(()),
+        Some(value) => Err(payload_error(
+            first,
+            "expected_string_or_null",
+            value_kind(value),
+        )),
+    }
 }
 
 fn validate_envelope(envelope: &Map<String, Value>) -> Result<(), HistoryError> {
@@ -400,7 +724,7 @@ fn decode_content(
             ));
         };
         match block.get("type").and_then(Value::as_str) {
-            Some("text") => {
+            Some(block_type) if TEXT_BLOCK_TYPES.contains(&block_type) => {
                 let text_value = required_block(block, message_index, block_index, "text")?;
                 let text = bounded_block_text(
                     message_index,
@@ -411,7 +735,17 @@ fn decode_content(
                 text_parts.push(text.clone());
                 content.push(MessageContent::Text { text });
             }
-            Some("thinking") | Some("redacted_thinking") => {
+            Some("thinking") => {
+                let text_value = required_block(block, message_index, block_index, "thinking")?;
+                let text = bounded_block_text(
+                    message_index,
+                    block_index,
+                    "thinking",
+                    string_block(text_value, message_index, block_index, "thinking")?,
+                )?;
+                content.push(MessageContent::Thinking { text });
+            }
+            Some("redacted_thinking") => {
                 content.push(MessageContent::Omitted {
                     kind: OmittedContentKind::Thinking,
                 });
@@ -443,12 +777,13 @@ fn decode_content(
                 });
             }
             Some(block_type) if TOOL_RESULT_BLOCK_TYPES.contains(&block_type) => {
-                let output_value = first_alias_value(block, TOOL_RESULT_OUTPUT_FIELDS);
+                let output_value = tool_result_output(block);
                 let summary = first_alias_value(block, TOOL_RESULT_SUMMARY_FIELDS)
                     .or(output_value)
                     .and_then(safe_summary)
                     .transpose()?;
                 let output = output_value.and_then(project_tool_payload);
+                let details = tool_details(block, output_value);
                 let tool_name = bounded_optional_block_alias_string(
                     message_index,
                     block_index,
@@ -477,6 +812,7 @@ fn decode_content(
                     tool_call_id,
                     summary,
                     output,
+                    details,
                     is_error,
                 });
             }
@@ -542,13 +878,15 @@ fn append_role_tool_result_content(
     )?;
     let is_error =
         optional_alias_bool_message(message, message_index, TOOL_ERROR_FIELD, TOOL_ERROR_FIELDS)?;
-    let output_value = first_alias_value(message, &["result", "output", "content"]);
+    let output_value = tool_result_output(message);
     let output = output_value.and_then(project_tool_payload);
+    let details = tool_details(message, output_value);
     content.push(MessageContent::ToolResult {
         tool_name,
         tool_call_id: tool_call_id.map(str::to_owned),
         summary: non_empty_summary(text),
         output,
+        details,
         is_error,
     });
     Ok(())
@@ -831,6 +1169,21 @@ fn first_alias_value<'a>(
     fields: &[&'static str],
 ) -> Option<&'a Value> {
     fields.iter().find_map(|field| object.get(*field))
+}
+
+fn tool_result_output(object: &Map<String, Value>) -> Option<&Value> {
+    let result = object.get("result");
+    if result
+        .and_then(Value::as_object)
+        .is_some_and(|result| result.len() == 1 && result.contains_key("details"))
+    {
+        return object.get("content").or_else(|| object.get("output"));
+    }
+    result
+        .or_else(|| object.get("output"))
+        .or_else(|| object.get("partialResult"))
+        .or_else(|| object.get("partial_result"))
+        .or_else(|| object.get("content"))
 }
 
 fn bounded_optional_alias_string_message(
@@ -1155,6 +1508,147 @@ fn tool_payload(object: &Map<String, Value>, fields: &[&'static str]) -> Option<
     first_alias_value(object, fields).and_then(project_tool_payload)
 }
 
+fn tool_details(object: &Map<String, Value>, output_value: Option<&Value>) -> Option<Value> {
+    project_tool_details([
+        object
+            .get("result")
+            .and_then(|result| result.get("details")),
+        output_value.and_then(|output| output.get("details")),
+        object.get("details"),
+    ])
+}
+
+fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
+    let mut details = Map::new();
+    for value in values.into_iter().flatten() {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        for key in [
+            "browserTab",
+            "changed",
+            "created",
+            "diff",
+            "patch",
+            "approvalReviews",
+            "approvalReviewOutcome",
+            "mcpAppPreview",
+            "truncation",
+            "fullOutputPath",
+            "exitCode",
+        ] {
+            let projected = if key == "mcpAppPreview" {
+                object.get(key).and_then(project_mcp_app_preview_value)
+            } else {
+                object.get(key).and_then(project_tool_detail_value)
+            };
+            if let Some(projected) = projected {
+                details.insert(key.to_owned(), projected);
+            }
+        }
+    }
+    if details.is_empty() {
+        return None;
+    }
+    let value = Value::Object(details);
+    if tool_payload_contains_nul(&value) {
+        return None;
+    }
+    let text = serde_json::to_string(&value).ok()?;
+    (text.len() <= MAX_TOOL_PAYLOAD_BYTES).then_some(value)
+}
+
+fn project_mcp_app_preview_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut projected = Map::new();
+    for key in [
+        "kind",
+        "surface",
+        "render",
+        "title",
+        "preferredHeight",
+        "url",
+        "viewId",
+        "sandbox",
+        "boardWidgetName",
+    ] {
+        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
+            projected.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(value) = object
+        .get("mcpApp")
+        .and_then(project_mcp_app_descriptor_value)
+    {
+        projected.insert("mcpApp".to_owned(), value);
+    }
+    (!projected.is_empty()).then_some(Value::Object(projected))
+}
+
+fn project_mcp_app_descriptor_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut projected = Map::new();
+    for key in [
+        "viewId",
+        "serverName",
+        "toolName",
+        "uiResourceUri",
+        "toolCallId",
+        "originSessionKey",
+        "resultMetaState",
+    ] {
+        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
+            projected.insert(key.to_owned(), value);
+        }
+    }
+    (!projected.is_empty()).then_some(Value::Object(projected))
+}
+
+fn project_tool_detail_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Some(value.clone()),
+        Value::Array(values) => Some(Value::Array(
+            values
+                .iter()
+                .filter_map(project_tool_detail_value)
+                .collect(),
+        )),
+        Value::Object(object) => {
+            let mut projected = Map::new();
+            for (key, value) in object {
+                if key.contains('\0') || raw_tool_detail_key(key) {
+                    continue;
+                }
+                if let Some(value) = project_tool_detail_value(value) {
+                    projected.insert(key.clone(), value);
+                }
+            }
+            Some(Value::Object(projected))
+        }
+    }
+}
+
+fn raw_tool_detail_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|char| *char != '_' && *char != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "rawassistanttext"
+            | "toolinput"
+            | "tooloutput"
+            | "toolresult"
+            | "privatepayload"
+            | "html"
+            | "input"
+            | "output"
+    ) || normalized.contains("secret")
+        || normalized.starts_with("raw")
+        || normalized.starts_with("private")
+}
+
 fn project_tool_payload(value: &Value) -> Option<Value> {
     if !is_allowed_tool_payload(value) || tool_payload_contains_nul(value) {
         return None;
@@ -1254,6 +1748,35 @@ fn optional_string(
     object
         .get(field)
         .map(|value| string(value).map(str::to_owned))
+        .transpose()
+}
+
+fn optional_usize(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<usize>, HistoryError> {
+    object
+        .get(field)
+        .map(|value| {
+            let value = value
+                .as_u64()
+                .ok_or_else(|| payload_error(field, "expected_u64", value_kind(value)))?;
+            usize::try_from(value).map_err(|_| payload_error(field, "too_large", "number"))
+        })
+        .transpose()
+}
+
+fn optional_bool(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<bool>, HistoryError> {
+    object
+        .get(field)
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| payload_error(field, "expected_boolean", value_kind(value)))
+        })
         .transpose()
 }
 

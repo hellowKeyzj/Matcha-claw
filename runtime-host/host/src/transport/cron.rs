@@ -7,7 +7,7 @@ use crate::{
     cron::{
         CronCreateCommand, CronDeleteCommand, CronDeleteOutcome, CronDeliveryCommand,
         CronHistoryCommand, CronHistoryOutcome, CronJobMutationOutcome, CronListOutcome,
-        CronUpdateCommand,
+        CronScheduleCommand, CronUpdateCommand,
     },
     transport::authorization::CapabilityDecisionVerifier,
 };
@@ -122,7 +122,8 @@ struct CreateInput {
     name: String,
     agent_id: String,
     message: String,
-    schedule: String,
+    model: Option<String>,
+    schedule: ScheduleInput,
     delivery: DeliveryInput,
     enabled: bool,
 }
@@ -134,9 +135,19 @@ struct UpdateInput {
     name: Option<String>,
     agent_id: Option<String>,
     message: Option<String>,
-    schedule: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_model_patch")]
+    model: Option<Option<String>>,
+    schedule: Option<ScheduleInput>,
     delivery: Option<DeliveryInput>,
     enabled: Option<bool>,
+}
+
+fn deserialize_model_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Missing uses serde's default; a present null must remain an explicit clear.
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -156,6 +167,50 @@ struct ToggleInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TriggerInput {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScheduleInput {
+    CronExpression(String),
+    Schedule(ScheduleObjectInput),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum ScheduleObjectInput {
+    Cron {
+        expr: String,
+        tz: Option<String>,
+    },
+    At {
+        at: String,
+    },
+    Every {
+        #[serde(rename = "everyMs")]
+        every_ms: u64,
+        #[serde(rename = "anchorMs")]
+        anchor_ms: Option<u64>,
+    },
+}
+
+impl ScheduleInput {
+    fn into_command(self) -> CronScheduleCommand {
+        match self {
+            Self::CronExpression(expr) => CronScheduleCommand::cron(expr),
+            Self::Schedule(ScheduleObjectInput::Cron { expr, tz }) => {
+                CronScheduleCommand::Cron { expr, tz }
+            }
+            Self::Schedule(ScheduleObjectInput::At { at }) => CronScheduleCommand::At { at },
+            Self::Schedule(ScheduleObjectInput::Every {
+                every_ms,
+                anchor_ms,
+            }) => CronScheduleCommand::Every {
+                every_ms,
+                anchor_ms,
+            },
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -330,6 +385,7 @@ impl CronRequest {
 }
 
 fn decode_create(value: Value) -> Result<CronRequest, DecodeError> {
+    reject_null_schedule_fields(&value)?;
     let request =
         serde_json::from_value::<CreateRequest>(value).map_err(|_| DecodeError::Invalid)?;
     if request.id != CAPABILITY_ID
@@ -344,7 +400,8 @@ fn decode_create(value: Value) -> Result<CronRequest, DecodeError> {
         request.input.name,
         request.input.agent_id,
         request.input.message,
-        request.input.schedule,
+        request.input.model,
+        request.input.schedule.into_command(),
         request.input.delivery.into_command(),
         request.input.enabled,
     )
@@ -353,6 +410,7 @@ fn decode_create(value: Value) -> Result<CronRequest, DecodeError> {
 }
 
 fn decode_update(value: Value) -> Result<CronRequest, DecodeError> {
+    reject_null_schedule_fields(&value)?;
     let request =
         serde_json::from_value::<UpdateRequest>(value).map_err(|_| DecodeError::Invalid)?;
     if request.id != CAPABILITY_ID
@@ -369,12 +427,26 @@ fn decode_update(value: Value) -> Result<CronRequest, DecodeError> {
         request.input.name,
         request.input.agent_id,
         request.input.message,
-        request.input.schedule,
+        request.input.model,
+        request.input.schedule.map(ScheduleInput::into_command),
         request.input.delivery.map(DeliveryInput::into_command),
         request.input.enabled,
     )
     .map(CronRequest::Update)
     .map_err(|_| DecodeError::Invalid)
+}
+
+fn reject_null_schedule_fields(value: &Value) -> Result<(), DecodeError> {
+    let Some(schedule) = value.pointer("/input/schedule") else {
+        return Ok(());
+    };
+    if schedule.is_null()
+        || schedule.pointer("/tz").is_some_and(Value::is_null)
+        || schedule.pointer("/anchorMs").is_some_and(Value::is_null)
+    {
+        return Err(DecodeError::Invalid);
+    }
+    Ok(())
 }
 
 fn decode_delete(value: Value) -> Result<CronRequest, DecodeError> {
@@ -413,6 +485,7 @@ fn decode_toggle(value: Value) -> Result<CronRequest, DecodeError> {
         None,
         None,
         None,
+        None,
         Some(request.input.enabled),
     )
     .map(CronRequest::Update)
@@ -442,6 +515,8 @@ pub(crate) struct JobResponse {
     name: String,
     agent_id: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     schedule: ScheduleResponse,
     delivery: DeliveryResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,20 +586,20 @@ struct LastRunResponse {
 }
 
 impl TryFrom<openclaw::gateway::wire::CronJob> for JobResponse {
-    type Error = ();
+    type Error = &'static str;
 
     fn try_from(job: openclaw::gateway::wire::CronJob) -> Result<Self, Self::Error> {
         use openclaw::gateway::wire::{CronDeliveryView, CronRunStatus, CronScheduleView};
 
-        let agent_id = job.agent_id.as_ref().ok_or(())?.clone();
-        let message = job.message.as_ref().ok_or(())?.clone();
+        let agent_id = job.agent_id.as_ref().ok_or("agentId.missing")?.clone();
+        let message = job.message.as_ref().ok_or("message.missing")?.clone();
         let state = job.state();
         let last_run = state
             .last_run_at_ms
             .filter(|time| *time > 0)
-            .map(|time| {
+            .map(|time| -> Result<LastRunResponse, &'static str> {
                 Ok(LastRunResponse {
-                    time: iso_timestamp(time)?,
+                    time: iso_timestamp(time).map_err(|_| "lastRun.time.invalid")?,
                     success: matches!(state.last_run_status, Some(CronRunStatus::Ok)),
                     error: state.last_error.clone(),
                     duration: state.last_duration_ms,
@@ -534,12 +609,12 @@ impl TryFrom<openclaw::gateway::wire::CronJob> for JobResponse {
         let next_run = state
             .next_run_at_ms
             .filter(|time| *time > 0)
-            .map(iso_timestamp)
+            .map(|time| iso_timestamp(time).map_err(|_| "nextRun.invalid"))
             .transpose()?;
         let running_at = state
             .running_at_ms
             .filter(|time| *time > 0)
-            .map(iso_timestamp)
+            .map(|time| iso_timestamp(time).map_err(|_| "runningAt.invalid"))
             .transpose()?;
         let (delivery, target) = match job.delivery {
             CronDeliveryView::None => (DeliveryResponse::None, None),
@@ -569,6 +644,7 @@ impl TryFrom<openclaw::gateway::wire::CronJob> for JobResponse {
             name: job.name,
             agent_id,
             message,
+            model: job.model,
             schedule: match job.schedule {
                 CronScheduleView::At { at } => ScheduleResponse::At { at },
                 CronScheduleView::Every {
@@ -583,8 +659,8 @@ impl TryFrom<openclaw::gateway::wire::CronJob> for JobResponse {
             delivery,
             target,
             enabled: job.enabled,
-            created_at: iso_timestamp(job.created_at_ms)?,
-            updated_at: iso_timestamp(job.updated_at_ms)?,
+            created_at: iso_timestamp(job.created_at_ms).map_err(|_| "createdAt.invalid")?,
+            updated_at: iso_timestamp(job.updated_at_ms).map_err(|_| "updatedAt.invalid")?,
             last_run,
             next_run,
             running_at,
@@ -629,7 +705,7 @@ pub(crate) fn list_body(outcome: CronListOutcome) -> (u16, Value) {
                     }))
                     .expect("Cron list response is serializable"),
                 ),
-                Err(()) => fixed(502, "Cron list response is invalid"),
+                Err(_) => fixed(502, "Cron list response is invalid"),
             }
         }
         CronListOutcome::Unavailable => unavailable(),
@@ -659,7 +735,7 @@ pub(crate) fn job_body(outcome: CronJobMutationOutcome) -> (u16, Value) {
                 200,
                 serde_json::to_value(job).expect("Cron job response is serializable"),
             ),
-            Err(()) => fixed(409, "Cron operation outcome is unknown"),
+            Err(_) => fixed(409, "Cron operation outcome is unknown"),
         },
         CronJobMutationOutcome::Rejected => fixed(422, "Cron operation was rejected"),
         CronJobMutationOutcome::OutcomeUnknown => fixed(409, "Cron operation outcome is unknown"),
@@ -691,16 +767,17 @@ pub(crate) fn trigger_body(
                 openclaw::port::CronRunDisposition::AlreadyRunning => "already-running",
                 openclaw::port::CronRunDisposition::NotDue => "not-due",
                 openclaw::port::CronRunDisposition::InvalidSpec => "invalid-spec",
+                openclaw::port::CronRunDisposition::Disabled => "disabled",
+                openclaw::port::CronRunDisposition::Stopped => "stopped",
             };
             (
                 200,
                 serde_json::json!({ "success": true, "result": { "outcome": "skipped", "reason": reason } }),
             )
         }
-        Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown) => (
-            200,
-            serde_json::json!({ "success": true, "result": { "outcome": "outcome-unknown" } }),
-        ),
+        Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown) => {
+            fixed(409, "Cron operation outcome is unknown")
+        }
         Err(_) => unavailable(),
     }
 }
@@ -735,27 +812,71 @@ mod tests {
             "id": "job-1",
             "name": "Morning reminder",
             "agentId": "main",
+            "sessionKey": "agent:main:cron:job-1",
+            "description": "Internal native description",
             "enabled": true,
+            "deleteAfterRun": false,
             "createdAtMs": 1,
             "updatedAtMs": 2,
-            "schedule": { "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" },
+            "schedule": { "kind": "cron", "expr": "0 9 * * *", "tz": "UTC", "staggerMs": 30_000 },
             "sessionTarget": "isolated",
             "wakeMode": "next-heartbeat",
-            "payload": { "kind": "agentTurn", "message": "Review the dashboard." },
+            "payload": {
+                "kind": "agentTurn",
+                "message": "Review the dashboard.",
+                "model": "model-primary",
+                "fallbacks": ["model-fallback"],
+                "thinking": "enabled",
+                "timeoutSeconds": 30,
+                "allowUnsafeExternalContent": false,
+                "externalContentSource": "webhook",
+                "lightContext": true,
+                "toolsAllow": ["web_search"],
+            },
             "delivery": {
                 "mode": "announce",
                 "channel": "telegram",
+                "threadId": "thread-1",
+                "bestEffort": true,
+                "failureDestination": {
+                    "mode": "announce",
+                    "channel": "telegram",
+                    "to": "ops",
+                    "accountId": "account",
+                },
                 "to": "recipient",
                 "accountId": "account",
             },
-            "failureAlert": false,
+            "failureAlert": {
+                "after": 2,
+                "channel": "telegram",
+                "to": "ops",
+                "cooldownMs": 60_000,
+                "includeSkipped": true,
+                "mode": "announce",
+                "accountId": "account",
+            },
             "state": {
                 "nextRunAtMs": 3,
                 "runningAtMs": 4,
                 "lastRunAtMs": 5,
                 "lastRunStatus": "error",
+                "lastStatus": "ok",
                 "lastError": "Cron command failed",
+                "lastDiagnostics": { "raw": true },
+                "lastDiagnosticSummary": "Native diagnostic summary",
+                "lastErrorReason": "native-error",
                 "lastDurationMs": 6,
+                "consecutiveErrors": 1,
+                "consecutiveSkipped": 0,
+                "lastDelivered": true,
+                "lastDeliveryStatus": "delivered",
+                "lastDeliveryError": "Native delivery error",
+                "lastFailureNotificationDelivered": true,
+                "lastFailureNotificationDeliveryStatus": "delivered",
+                "lastFailureNotificationDeliveryError": "Native failure delivery error",
+                "lastFailureAlertAtMs": 7,
+                "scheduleErrorCount": 0,
             },
         })
     }
@@ -765,16 +886,30 @@ mod tests {
     }
 
     fn jobs() -> CronJobs {
+        let mut native_webhook_job = job_json();
+        native_webhook_job["id"] = json!("job-webhook");
+        native_webhook_job["delivery"] = json!({
+            "mode": "webhook",
+            "to": "https://example.invalid/hook",
+        });
+        let mut native_system_job = job_json();
+        native_system_job["id"] = json!("job-system");
+        native_system_job["sessionTarget"] = json!("main");
+        native_system_job["payload"] =
+            json!({ "kind": "systemEvent", "text": "Native system event" });
+
         wire::decode_list(response(
             "cron-list-test",
             json!({
-                "jobs": [job_json()],
-                "total": 1,
+                "jobs": [job_json(), native_webhook_job, native_system_job],
+                "total": 3,
                 "offset": 0,
                 "limit": 50,
                 "hasMore": false,
                 "nextOffset": null,
-                "deliveryPreviews": {},
+                "deliveryPreviews": {
+                    "job-1": { "privateChannelBody": { "accountId": "account" } },
+                },
             }),
         ))
         .expect("valid Cron list fixture")
@@ -824,6 +959,39 @@ mod tests {
             decode_create(wrong_endpoint),
             Err(DecodeError::Invalid)
         ));
+    }
+
+    #[test]
+    fn accepts_structured_create_and_update_schedules() {
+        let mut at_create = create_request();
+        at_create["input"]["schedule"] = json!({ "kind": "at", "at": "2026-09-04T09:00:00.000Z" });
+        assert!(matches!(
+            decode_create(at_create),
+            Ok(CronRequest::Create(_))
+        ));
+
+        let update = json!({
+            "id": "scheduler.cron",
+            "operationId": "cron.update",
+            "scope": {
+                "kind": "runtime-instance",
+                "endpoint": {
+                    "kind": "native-runtime",
+                    "runtimeAdapterId": "openclaw",
+                    "runtimeInstanceId": "local",
+                },
+            },
+            "target": { "kind": "cron-job", "jobId": "job-a" },
+            "input": {
+                "jobId": "job-a",
+                "schedule": { "kind": "every", "everyMs": 60_000, "anchorMs": 1_000 },
+            },
+        });
+        assert!(matches!(decode_update(update), Ok(CronRequest::Update(_))));
+
+        let mut invalid = create_request();
+        invalid["input"]["schedule"] = json!({ "kind": "stream", "command": ["tail"] });
+        assert!(matches!(decode_create(invalid), Err(DecodeError::Invalid)));
     }
 
     #[test]
@@ -904,6 +1072,7 @@ mod tests {
                 "name": "Morning reminder",
                 "agentId": "main",
                 "message": "Review the dashboard.",
+                "model": "model-primary",
                 "schedule": { "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" },
                 "delivery": {
                     "mode": "announce",
@@ -933,38 +1102,69 @@ mod tests {
     }
 
     #[test]
-    fn list_projection_returns_the_legacy_snapshot_and_fails_closed() {
+    fn list_projection_returns_the_legacy_snapshot_and_skips_non_ui_jobs() {
         let (status, snapshot) = list_body(CronListOutcome::Listed(jobs()));
 
         assert_eq!(status, 200);
+        let snapshot_keys = snapshot.as_object().unwrap();
+        assert_eq!(snapshot_keys.len(), 6);
+        for key in [
+            "success",
+            "ready",
+            "refreshing",
+            "updatedAt",
+            "error",
+            "jobs",
+        ] {
+            assert!(snapshot_keys.contains_key(key));
+        }
         assert_eq!(snapshot["success"], true);
         assert_eq!(snapshot["ready"], true);
         assert_eq!(snapshot["refreshing"], false);
         assert!(snapshot["updatedAt"].as_u64().is_some());
         assert_eq!(snapshot["error"], serde_json::Value::Null);
+        assert_eq!(snapshot["jobs"].as_array().unwrap().len(), 1);
         assert_eq!(snapshot["jobs"][0]["createdAt"], "1970-01-01T00:00:00.001Z");
+        assert!(snapshot.get("deliveryPreviews").is_none());
+        assert!(snapshot.get("snapshotRevision").is_none());
+        assert!(snapshot.get("configRevision").is_none());
         assert!(snapshot["jobs"][0].get("createdAtMs").is_none());
-
-        let mut invalid = job_json();
-        invalid["agentId"] = serde_json::Value::Null;
-        assert_eq!(
-            list_body(CronListOutcome::Listed(
-                wire::decode_list(response(
-                    "cron-list-invalid",
-                    json!({
-                        "jobs": [invalid],
-                        "total": 1,
-                        "offset": 0,
-                        "limit": 50,
-                        "hasMore": false,
-                        "nextOffset": null,
-                        "deliveryPreviews": {},
-                    }),
-                ))
-                .expect("wire list remains valid"),
-            )),
-            fixed(502, "Cron list response is invalid")
+        assert!(snapshot["jobs"][0].get("sessionKey").is_none());
+        assert!(snapshot["jobs"][0].get("description").is_none());
+        assert!(snapshot["jobs"][0].get("deleteAfterRun").is_none());
+        assert!(snapshot["jobs"][0]["schedule"].get("staggerMs").is_none());
+        assert!(snapshot["jobs"][0]["delivery"].get("threadId").is_none());
+        assert!(snapshot["jobs"][0]["delivery"].get("bestEffort").is_none());
+        assert!(
+            snapshot["jobs"][0]["delivery"]
+                .get("failureDestination")
+                .is_none()
         );
+        assert!(snapshot["jobs"][0].get("payload").is_none());
+        assert!(snapshot["jobs"][0].get("failureAlert").is_none());
+        assert!(snapshot["jobs"][0].get("state").is_none());
+
+        let mut native_without_agent = job_json();
+        native_without_agent["id"] = json!("job-native-command");
+        native_without_agent["agentId"] = serde_json::Value::Null;
+        native_without_agent["payload"] = json!({ "kind": "command", "argv": ["node", "task.js"] });
+        let (status, snapshot) = list_body(CronListOutcome::Listed(
+            wire::decode_list(response(
+                "cron-list-native-without-agent",
+                json!({
+                    "jobs": [native_without_agent],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "hasMore": false,
+                    "nextOffset": null,
+                    "deliveryPreviews": {},
+                }),
+            ))
+            .expect("wire list remains valid"),
+        ));
+        assert_eq!(status, 200);
+        assert!(snapshot["jobs"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -987,21 +1187,30 @@ mod tests {
                 json!({ "success": true, "result": { "outcome": "accepted" } })
             )
         );
-        assert_eq!(
-            trigger_body(Ok(openclaw::port::CronTriggerOutcome::Skipped(
-                openclaw::port::CronRunDisposition::AlreadyRunning,
-            ))),
+        for (disposition, reason) in [
             (
-                200,
-                json!({ "success": true, "result": { "outcome": "skipped", "reason": "already-running" } })
-            )
-        );
+                openclaw::port::CronRunDisposition::AlreadyRunning,
+                "already-running",
+            ),
+            (openclaw::port::CronRunDisposition::NotDue, "not-due"),
+            (
+                openclaw::port::CronRunDisposition::InvalidSpec,
+                "invalid-spec",
+            ),
+            (openclaw::port::CronRunDisposition::Disabled, "disabled"),
+            (openclaw::port::CronRunDisposition::Stopped, "stopped"),
+        ] {
+            assert_eq!(
+                trigger_body(Ok(openclaw::port::CronTriggerOutcome::Skipped(disposition))),
+                (
+                    200,
+                    json!({ "success": true, "result": { "outcome": "skipped", "reason": reason } })
+                )
+            );
+        }
         assert_eq!(
             trigger_body(Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown)),
-            (
-                200,
-                json!({ "success": true, "result": { "outcome": "outcome-unknown" } })
-            )
+            fixed(409, "Cron operation outcome is unknown")
         );
     }
 

@@ -9,6 +9,7 @@ import {
   createCloudAccountClient,
   type CloudAccountClient,
 } from './client';
+import type { CloudProviderSync } from './provider-sync';
 import type {
   AccountSessionProjection,
   AuthLogin2FARequest,
@@ -20,6 +21,13 @@ import type {
   AuthTokenResult,
   BillingCheckoutInfo,
   BillingPlan,
+  CloudPackageDownloadRecord,
+  CloudPackageDownloadRecordRequest,
+  CloudPackageDownloadRequest,
+  CloudPackageListPage,
+  CloudPackageListQuery,
+  CloudPackageLocalDownload,
+  CloudPackageVersion,
   CloudUser,
   CreatePaymentOrderRequest,
   CreatePaymentOrderResult,
@@ -32,6 +40,7 @@ import type {
 } from './types';
 
 export type CloudAccountService = Readonly<{
+  prewarm(): void;
   getPublicSettings(): Promise<PublicCloudSettings>;
   getSession(): Promise<AccountSessionProjection>;
   login(request: AuthLoginRequest): Promise<AccountSessionProjection | Extract<AuthLoginResult, { state: 'requires2FA' }>>;
@@ -49,69 +58,135 @@ export type CloudAccountService = Readonly<{
   getActiveSubscriptions(): Promise<UserSubscription[]>;
   getSubscriptionProgress(): Promise<SubscriptionProgress[]>;
   getPlatformQuotas(): Promise<PlatformQuota[]>;
+  listOwnedPackages(query: CloudPackageListQuery): Promise<CloudPackageListPage>;
+  listMarketPackages(query: CloudPackageListQuery): Promise<CloudPackageListPage>;
+  uploadPackage(packagePath: string): Promise<CloudPackageVersion>;
+  recordPackageDownload(request: CloudPackageDownloadRecordRequest): Promise<CloudPackageDownloadRecord>;
+  downloadPackage(request: CloudPackageDownloadRequest): Promise<CloudPackageLocalDownload>;
 }>;
 
-export function createCloudAccountService(client: CloudAccountClient = createCloudAccountClient()): CloudAccountService {
+export function createCloudAccountService(
+  client: CloudAccountClient = createCloudAccountClient(),
+  providerSync?: CloudProviderSync,
+): CloudAccountService {
+  let publicSettingsTask: Promise<PublicCloudSettings> | undefined;
+  let sessionTask: Promise<AccountSessionProjection> | undefined;
+
+  const setSessionProjection = (projection: AccountSessionProjection) => {
+    sessionTask = Promise.resolve(projection);
+  };
+  const getPublicSettings = () => {
+    if (!publicSettingsTask) {
+      let task: Promise<PublicCloudSettings>;
+      task = client.fetchPublicSettings().catch((error) => {
+        if (publicSettingsTask === task) publicSettingsTask = undefined;
+        throw error;
+      });
+      publicSettingsTask = task;
+    }
+    return publicSettingsTask;
+  };
+  const getSession = () => {
+    if (!sessionTask) {
+      let task: Promise<AccountSessionProjection>;
+      task = sessionProjection(client, providerSync, (projection) => {
+        if (sessionTask === task) setSessionProjection(projection);
+      }).catch((error) => {
+        if (sessionTask === task) sessionTask = undefined;
+        throw error;
+      });
+      sessionTask = task;
+    }
+    return sessionTask;
+  };
+  const storeSession = async (session: CloudAccountSession) => {
+    await writeCloudAccountSession(session);
+    void providerSync?.reconcile(session);
+    const projection = toSessionProjection(session);
+    setSessionProjection(projection);
+    return projection;
+  };
+
   return {
-    getPublicSettings: () => client.fetchPublicSettings(),
-    getSession: () => sessionProjection(client),
+    prewarm: () => {
+      void getPublicSettings().catch(() => undefined);
+      void getSession().catch(() => undefined);
+    },
+    getPublicSettings,
+    getSession,
     login: async (request) => {
       const result = await client.login(request);
       if (!isAuthTokenResult(result)) return result;
-      const session = sessionFromAuth(result);
-      await writeCloudAccountSession(session);
-      return toSessionProjection(session);
+      return storeSession(sessionFromAuth(result));
     },
-    login2FA: async (request) => {
-      const result = await client.login2FA(request);
-      const session = sessionFromAuth(result);
-      await writeCloudAccountSession(session);
-      return toSessionProjection(session);
-    },
-    register: async (request) => {
-      const result = await client.register(request);
-      const session = sessionFromAuth(result);
-      await writeCloudAccountSession(session);
-      return toSessionProjection(session);
-    },
+    login2FA: async (request) => storeSession(sessionFromAuth(await client.login2FA(request))),
+    register: async (request) => storeSession(sessionFromAuth(await client.register(request))),
     sendVerifyCode: (request) => client.sendVerifyCode(request),
-    refreshSession: () => refreshSession(client),
+    refreshSession: async () => {
+      const projection = await refreshSession(client, providerSync);
+      setSessionProjection(projection);
+      return projection;
+    },
     logout: async () => {
       const session = await readCloudAccountSession();
       try {
         if (session?.refreshToken) await client.logout(session.refreshToken);
       } finally {
         await clearCloudAccountSession();
+        await providerSync?.reconcile(null);
+        setSessionProjection({ state: 'anonymous' });
       }
     },
-    getCheckoutInfo: () => withValidSession(client, (session) => client.fetchCheckoutInfo(session.accessToken)),
-    getPlans: () => withValidSession(client, (session) => client.fetchPlans(session.accessToken)),
-    createPaymentOrder: (request) => withValidSession(client, (session) => client.createPaymentOrder(session.accessToken, request)),
-    verifyPaymentOrder: (outTradeNo) => withValidSession(client, (session) => client.verifyPaymentOrder(session.accessToken, outTradeNo)),
-    getPaymentOrder: (orderId) => withValidSession(client, (session) => client.fetchPaymentOrder(session.accessToken, orderId)),
-    getSubscriptionSummary: () => withValidSession(client, (session) => client.fetchSubscriptionSummary(session.accessToken)),
-    getActiveSubscriptions: () => withValidSession(client, (session) => client.fetchActiveSubscriptions(session.accessToken)),
-    getSubscriptionProgress: () => withValidSession(client, (session) => client.fetchSubscriptionProgress(session.accessToken)),
-    getPlatformQuotas: () => withValidSession(client, (session) => client.fetchPlatformQuotas(session.accessToken)),
+    getCheckoutInfo: () => withValidSession(client, providerSync, (session) => client.fetchCheckoutInfo(session.accessToken)),
+    getPlans: () => withValidSession(client, providerSync, (session) => client.fetchPlans(session.accessToken)),
+    createPaymentOrder: (request) => withValidSession(client, providerSync, (session) => client.createPaymentOrder(session.accessToken, request)),
+    verifyPaymentOrder: (outTradeNo) => withValidSession(client, providerSync, (session) => client.verifyPaymentOrder(session.accessToken, outTradeNo)),
+    getPaymentOrder: (orderId) => withValidSession(client, providerSync, (session) => client.fetchPaymentOrder(session.accessToken, orderId)),
+    getSubscriptionSummary: () => withValidSession(client, providerSync, (session) => client.fetchSubscriptionSummary(session.accessToken)),
+    getActiveSubscriptions: () => withValidSession(client, providerSync, (session) => client.fetchActiveSubscriptions(session.accessToken)),
+    getSubscriptionProgress: () => withValidSession(client, providerSync, (session) => client.fetchSubscriptionProgress(session.accessToken)),
+    getPlatformQuotas: () => withValidSession(client, providerSync, (session) => client.fetchPlatformQuotas(session.accessToken)),
+    listOwnedPackages: (query) => withValidSession(client, providerSync, (session) => client.listOwnedPackages(session.accessToken, query)),
+    listMarketPackages: (query) => withValidSession(client, providerSync, (session) => client.listMarketPackages(session.accessToken, query)),
+    uploadPackage: (packagePath) => withValidSession(client, providerSync, (session) => client.uploadPackage(session.accessToken, packagePath)),
+    recordPackageDownload: (request) => withValidSession(client, providerSync, (session) => client.recordPackageDownload(session.accessToken, request)),
+    downloadPackage: (request) => withValidSession(client, providerSync, (session) => client.downloadPackage(session.accessToken, request)),
   };
 }
 
-async function sessionProjection(client: CloudAccountClient): Promise<AccountSessionProjection> {
+async function sessionProjection(
+  client: CloudAccountClient,
+  providerSync: CloudProviderSync | undefined,
+  onFreshProfile: (projection: AccountSessionProjection) => void,
+): Promise<AccountSessionProjection> {
   const session = await validSession(client);
-  if (!session) return { state: 'anonymous' };
-  void syncStoredProfile(client, session);
+  if (!session) {
+    void providerSync?.reconcile(null);
+    return { state: 'anonymous' };
+  }
+  void providerSync?.reconcile(session);
+  void syncStoredProfile(client, providerSync, session, onFreshProfile);
   return toSessionProjection(session);
 }
 
-async function syncStoredProfile(client: CloudAccountClient, session: CloudAccountSession): Promise<void> {
+async function syncStoredProfile(
+  client: CloudAccountClient,
+  providerSync: CloudProviderSync | undefined,
+  session: CloudAccountSession,
+  onFreshProfile: (projection: AccountSessionProjection) => void,
+): Promise<void> {
   try {
     const user = await client.fetchProfile(session.accessToken);
     if (await isCurrentStoredSession(session)) {
-      await writeCloudAccountSession({ ...session, user });
+      const nextSession = { ...session, user };
+      await writeCloudAccountSession(nextSession);
+      void providerSync?.reconcile(nextSession);
+      onFreshProfile(toSessionProjection(nextSession));
     }
   } catch (error) {
-    if (isUnauthorized(error)) {
-      await clearCurrentStoredSession(session);
+    if (isUnauthorized(error) && await clearCurrentStoredSession(session)) {
+      await providerSync?.reconcile(null);
+      onFreshProfile({ state: 'anonymous' });
     }
   }
 }
@@ -121,20 +196,26 @@ async function isCurrentStoredSession(session: CloudAccountSession): Promise<boo
   return currentSession?.accessToken === session.accessToken;
 }
 
-async function clearCurrentStoredSession(session: CloudAccountSession): Promise<void> {
+async function clearCurrentStoredSession(session: CloudAccountSession): Promise<boolean> {
   try {
     if (await isCurrentStoredSession(session)) {
       await clearCloudAccountSession();
+      return true;
     }
   } catch {
     // Ignore background profile sync cleanup failures.
   }
+  return false;
 }
 
-async function refreshSession(client: CloudAccountClient): Promise<AccountSessionProjection> {
+async function refreshSession(
+  client: CloudAccountClient,
+  providerSync: CloudProviderSync | undefined,
+): Promise<AccountSessionProjection> {
   const session = await readCloudAccountSession();
   if (!session?.refreshToken) {
     await clearCloudAccountSession();
+    void providerSync?.reconcile(null);
     return { state: 'anonymous' };
   }
   try {
@@ -147,10 +228,12 @@ async function refreshSession(client: CloudAccountClient): Promise<AccountSessio
       tokenType: refreshed.tokenType,
     };
     await writeCloudAccountSession(nextSession);
+    void providerSync?.reconcile(nextSession);
     return toSessionProjection(nextSession);
   } catch (error) {
     if (isUnauthorized(error)) {
       await clearCloudAccountSession();
+      await providerSync?.reconcile(null);
       return { state: 'anonymous' };
     }
     throw error;
@@ -159,14 +242,21 @@ async function refreshSession(client: CloudAccountClient): Promise<AccountSessio
 
 async function withValidSession<T>(
   client: CloudAccountClient,
+  providerSync: CloudProviderSync | undefined,
   run: (session: CloudAccountSession) => Promise<T>,
 ): Promise<T> {
   const session = await validSession(client);
-  if (!session) throw new CloudAccountClientError(401, 401, 'Cloud account session is not authenticated');
+  if (!session) {
+    void providerSync?.reconcile(null);
+    throw new CloudAccountClientError(401, 401, 'Cloud account session is not authenticated');
+  }
   try {
     return await run(session);
   } catch (error) {
-    if (isUnauthorized(error)) await clearCloudAccountSession();
+    if (isUnauthorized(error)) {
+      await clearCloudAccountSession();
+      await providerSync?.reconcile(null);
+    }
     throw error;
   }
 }

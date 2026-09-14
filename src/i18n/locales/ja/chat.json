@@ -5,6 +5,17 @@
         "title": "ワークスペースを準備中",
         "description": "OpenClaw を起動して接続しています。まもなく会話を開始できます。"
     },
+    "workspaceUnavailable": {
+        "title": "ワークスペースを利用できません",
+        "description": "このセッションのワークスペースを開けません: {{path}}。フォルダを復元するか、新しいワークスペースを選んで新しいセッションを開始してください。",
+        "unknownPath": "不明なワークスペース",
+        "chooseWorkspaceAndNewSession": "ワークスペースを選んで新しいセッションを開始",
+        "updating": "更新中…",
+        "pickTitle": "新しい Agent ワークスペースを選択",
+        "pickButton": "ワークスペースを選択",
+        "updateSuccess": "Agent ワークスペースを更新し、新しいセッションを開始しました。",
+        "updateFailed": "ワークスペースの更新に失敗しました: {{error}}"
+    },
     "welcome": {
         "title": "MatchaClaw チャット",
         "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
@@ -31,7 +42,8 @@
         "attachmentReady": "添付 {{count}} 件を追加済み",
         "attachmentsReady": "添付 {{count}} 件を追加済み",
         "contextUsageLabel": "コンテキスト使用 {{pct}}%",
-        "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）"
+        "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）",
+        "imageGenerationActive": "画像を生成中"
     },
     "noLogs": "（ログはまだありません）",
     "toolbar": {
@@ -39,7 +51,6 @@
         "openSidePanel": "右側パネルを開く",
         "closeSidePanel": "右側パネルを閉じる",
         "skillConfig": "スキル設定",
-        "skillShortLabel": "スキル",
         "showThinking": "思考を表示",
         "hideThinking": "思考を非表示",
         "exportMarkdown": "Markdown をエクスポート"
@@ -57,6 +68,16 @@
         "typing": "思考中",
         "activity": "ツールを実行中",
         "compacting": "コンテキストを圧縮中です。完了後に返信を続けます"
+    },
+    "runtimeStatus": {
+        "providerFallback": "代替 Provider に切り替えました",
+        "guardian": {
+            "reviewing": "Guardian が操作を確認中です",
+            "approved": "Guardian が操作を許可しました",
+            "denied": "Guardian が操作をブロックしました",
+            "warning": "Guardian の警告",
+            "strictReviewRequired": "Guardian の厳格な確認が必要です"
+        }
     },
     "imageGeneration": {
         "previewLoading": "画像プレビューを読み込み中…",
@@ -139,6 +160,8 @@
         "changesTab": "変更",
         "previewTab": "プレビュー",
         "workspaceTab": "ワークスペース",
+        "collapseWorkspaceTree": "ワークスペースツリーを折りたたむ",
+        "expandWorkspaceTree": "ワークスペースツリーを展開",
         "openExternal": "外部で開く",
         "openDirectly": "直接開く",
         "reveal": "場所を表示",
@@ -165,6 +188,7 @@
         "directoryPreviewDescription": "フォルダ自体は右側で直接描画しません。ワークスペースツリーで引き続き参照するか、システムのファイルマネージャーで開いてください。",
         "created": "新規作成",
         "modified": "更新",
+        "deleted": "削除",
         "revealFailed": "ファイルマネージャーで場所を表示できませんでした",
         "workspaceEmpty": "参照できるワークスペースディレクトリがありません。",
         "workspaceLoadFailed": "ワークスペースの読み込みに失敗しました: {{error}}"

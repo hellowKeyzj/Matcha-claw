@@ -460,6 +460,16 @@ impl ParentCallbackClient {
 }
 
 impl ParentCallbackHandle {
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        parent_api_base_url: impl AsRef<str>,
+        dispatch_token: impl AsRef<str>,
+    ) -> Self {
+        ParentCallbackClient::new(parent_api_base_url, dispatch_token)
+            .expect("test parent callback must be valid")
+            .handle()
+    }
+
     pub async fn request_parent_shell_action(
         &self,
         action: ParentShellAction,

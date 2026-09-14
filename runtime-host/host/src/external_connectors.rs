@@ -5,6 +5,8 @@ use openclaw::projection::connector::{
 };
 use serde::{Deserialize, Serialize};
 
+pub(crate) use openclaw::projection::connector::config::OpenClawMcpServerKind;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ListOutcome {
     Available(Vec<Connector>),
@@ -50,6 +52,37 @@ pub enum CatalogOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OpenClawMcpServerSource {
+    Preset,
+    External,
+    Openclaw,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenClawMcpServerSummary {
+    pub(crate) server_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) connector_id: Option<String>,
+    pub(crate) display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    pub(crate) kind: OpenClawMcpServerKind,
+    pub(crate) source: OpenClawMcpServerSource,
+    pub(crate) enabled: bool,
+    pub(crate) managed: bool,
+    pub(crate) editable: bool,
+    pub(crate) removable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpenClawMcpServersOutcome {
+    Available(Vec<OpenClawMcpServerSummary>),
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum SessionEndpoint {
@@ -79,6 +112,12 @@ pub(crate) struct SessionIdentity {
     pub(crate) session_key: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionStatusTarget {
+    pub(crate) session_identity: SessionIdentity,
+}
+
 impl SessionIdentity {
     pub(crate) fn is_valid(&self) -> bool {
         valid_session_text(&self.agent_id)
@@ -104,6 +143,12 @@ impl SessionIdentity {
     }
 }
 
+impl SessionStatusTarget {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.session_identity.is_valid()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SessionConnectorResultType {
@@ -126,6 +171,10 @@ pub(crate) struct SessionConnectorStatusDetails {
     pub(crate) tool_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) launch_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled_next_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled_configurable: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -146,6 +195,26 @@ pub(crate) struct SessionConnectorStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionStatusOutcome {
     Available(Vec<SessionConnectorStatus>),
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionMcpServerEnabledTarget {
+    pub(crate) session_identity: SessionIdentity,
+    pub(crate) server_id: String,
+    pub(crate) enabled: bool,
+}
+
+impl SessionMcpServerEnabledTarget {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.session_identity.is_valid() && valid_session_text(&self.server_id)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionMcpServerEnabledOutcome {
+    Applied,
     Unavailable,
 }
 

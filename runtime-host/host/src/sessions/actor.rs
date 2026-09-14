@@ -1,5 +1,11 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use arc_swap::ArcSwap;
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
@@ -23,9 +29,11 @@ use super::{
     query::SessionQuery,
     rename::SessionRenameOutcome,
     send::{SessionSendCommand, SessionSendOutcome},
+    session_permission::SessionPermissionOutcome,
     state::{
-        RunPhase, RuntimeIssue, RuntimeView, SessionChange, SessionDelta, SessionFacts,
-        SessionIdentity, SessionProvider, SessionSourceBinding, SessionState, SessionView,
+        MAX_SAFE_INTEGER, RunPhase, RuntimeIssue, RuntimeView, SessionChange, SessionDelta,
+        SessionFacts, SessionIdentity, SessionProvider, SessionSourceBinding, SessionState,
+        SessionView,
     },
     timeline::{self, ContentCommand, ContentOutcome},
 };
@@ -37,7 +45,7 @@ use crate::{
 };
 use matcha_agent::session::{
     client::AppServerClientError as MatchaAppServerClientError,
-    model::WorkerRuntimeState as MatchaWorkerRuntimeState,
+    model::{SessionId as MatchaSessionId, WorkerRuntimeState as MatchaWorkerRuntimeState},
 };
 use openclaw::{
     port::OpenClawSessionError,
@@ -70,6 +78,7 @@ pub(crate) struct SessionLane {
     state: Option<SessionState>,
 }
 
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 impl SessionOwner {
     pub(crate) fn new(
         runtime_directory: Arc<RuntimeDriverDirectory>,
@@ -85,7 +94,7 @@ impl SessionOwner {
             snapshot: Arc::clone(&snapshot),
             snapshot_writer: Arc::new(Mutex::new(())),
             session_delta,
-            epoch: 1,
+            epoch: next_session_epoch(),
         };
 
         (Self { shared }, snapshot)
@@ -93,6 +102,32 @@ impl SessionOwner {
 
     pub(crate) fn lane_retention() -> LaneRetention {
         LaneRetention::LowFrequency
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_epoch_for_test(&self) -> u64 {
+        self.shared.epoch
+    }
+}
+
+fn next_session_epoch() -> u64 {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_micros()).unwrap_or(MAX_SAFE_INTEGER))
+        .unwrap_or(1)
+        .clamp(1, MAX_SAFE_INTEGER);
+    let mut current = NEXT_SESSION_EPOCH.load(Ordering::Relaxed);
+    loop {
+        let next = current.max(micros);
+        match NEXT_SESSION_EPOCH.compare_exchange(
+            current,
+            next.saturating_add(1).min(MAX_SAFE_INTEGER),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(observed) => current = observed,
+        }
     }
 }
 
@@ -300,7 +335,42 @@ impl SessionShared {
         let Some(ops) = driver.session_ops() else {
             return crate::matcha_session_catalog::Outcome::Unavailable;
         };
-        ops.list_matcha_sessions().await
+        let outcome = ops.list_matcha_sessions().await;
+        if let crate::matcha_session_catalog::Outcome::Listed(sessions) = &outcome {
+            self.store_matcha_catalog_bindings(sessions).await;
+        }
+        outcome
+    }
+
+    async fn store_matcha_catalog_bindings(
+        &self,
+        sessions: &[crate::matcha_session_catalog::Session],
+    ) {
+        let states = sessions
+            .iter()
+            .filter_map(|session| matcha_catalog_state(&session.endpoint_session_id, self.epoch))
+            .collect::<Vec<_>>();
+        if states.is_empty() {
+            return;
+        }
+
+        let _guard = self.snapshot_writer.lock().await;
+        let mut snapshot = self.snapshot.load().states.clone();
+        for state in states {
+            let lane_key =
+                session_lane_key(state.identity().provider(), state.identity().session_key());
+            let endpoint_session_id = state.native_session_id().map(str::to_owned);
+            let state = match snapshot.remove(&lane_key) {
+                Some(existing) if existing.native_session_id().is_some() => existing,
+                Some(existing) => existing
+                    .with_endpoint_session_id(endpoint_session_id)
+                    .unwrap_or(state),
+                None => state,
+            };
+            snapshot.insert(lane_key, state);
+        }
+        self.snapshot
+            .store(Arc::new(SessionSnapshot { states: snapshot }));
     }
 
     async fn handle_matcha_history(
@@ -326,8 +396,7 @@ impl SessionShared {
         if command.endpoint != super::send::NativeEndpoint::MatchaAgentLocal {
             return Ok(());
         }
-        let session_id = command
-            .matcha_session_id()
+        let session_id = matcha_session_id(command.endpoint_session_id.as_deref())
             .map_err(|_| SessionSendOutcome::Rejected)?;
         let driver = self
             .running_session_driver(command.endpoint.runtime_endpoint())
@@ -486,6 +555,10 @@ impl SessionLane {
             }
             ModelSelection { command, reply } => {
                 let outcome = self.handle_model_selection(shared, command).await;
+                let _ = reply.send(outcome);
+            }
+            Permission { command, reply } => {
+                let outcome = self.handle_permission(shared, command).await;
                 let _ = reply.send(outcome);
             }
         }
@@ -730,6 +803,155 @@ impl SessionLane {
         }
     }
 
+    fn session_identity(
+        &self,
+        provider: SessionProvider,
+        session_key: &str,
+    ) -> Option<SessionIdentity> {
+        match &self.state {
+            Some(state)
+                if state.identity().provider() == provider
+                    && state.identity().session_key() == session_key =>
+            {
+                Some(state.identity().clone())
+            }
+            _ => SessionIdentity::new(session_key.to_owned(), provider, None),
+        }
+    }
+
+    fn matcha_native_session_id(
+        &mut self,
+        shared: &SessionShared,
+        session_key: &str,
+    ) -> Option<String> {
+        if let Some(session_id) = self
+            .state
+            .as_ref()
+            .filter(|state| {
+                state.identity().provider() == SessionProvider::MatchaAgent
+                    && state.identity().session_key() == session_key
+            })
+            .and_then(SessionState::native_session_id)
+        {
+            return Some(session_id.to_owned());
+        }
+
+        let lane_key = session_lane_key(SessionProvider::MatchaAgent, session_key);
+        let state = shared.snapshot.load().states.get(&lane_key).cloned()?;
+        let session_id = state.native_session_id()?.to_owned();
+        self.state = Some(state);
+        Some(session_id)
+    }
+
+    fn bind_matcha_send_command(
+        &mut self,
+        shared: &SessionShared,
+        command: super::send::SessionSendCommand,
+    ) -> Result<super::send::SessionSendCommand, SessionSendOutcome> {
+        if command.endpoint != super::send::NativeEndpoint::MatchaAgentLocal {
+            return Ok(command);
+        }
+        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
+            return Err(SessionSendOutcome::Rejected);
+        };
+        command
+            .with_endpoint_session_id(session_id)
+            .map_err(|_| SessionSendOutcome::Rejected)
+    }
+
+    fn bind_matcha_abort_command(
+        &mut self,
+        shared: &SessionShared,
+        command: super::abort::SessionAbortCommand,
+    ) -> Result<super::abort::SessionAbortCommand, SessionAbortOutcome> {
+        if command.endpoint != super::abort::NativeEndpoint::MatchaAgentLocal {
+            return Ok(command);
+        }
+        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
+            return Err(SessionAbortOutcome::Rejected);
+        };
+        command
+            .with_endpoint_session_id(session_id)
+            .map_err(|_| SessionAbortOutcome::Rejected)
+    }
+
+    fn bind_matcha_model_selection_command(
+        &mut self,
+        shared: &SessionShared,
+        command: super::model_selection::SessionModelSelectionCommand,
+    ) -> Result<super::model_selection::SessionModelSelectionCommand, SessionModelSelectionOutcome>
+    {
+        if command.endpoint != super::model_selection::NativeEndpoint::MatchaAgentLocal {
+            return Ok(command);
+        }
+        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
+            return Err(SessionModelSelectionOutcome::target_rejected(
+                SessionModelSelectionRejection::InvalidSessionKey,
+            ));
+        };
+        command.with_endpoint_session_id(session_id).map_err(|_| {
+            SessionModelSelectionOutcome::target_rejected(
+                SessionModelSelectionRejection::InvalidSessionKey,
+            )
+        })
+    }
+
+    fn bind_matcha_timeline_command(
+        &mut self,
+        shared: &SessionShared,
+        command: timeline::Command,
+    ) -> Result<timeline::Command, timeline::Outcome> {
+        if command.provider() != timeline::Provider::Matcha {
+            return Ok(command);
+        }
+        let session_id = self
+            .matcha_native_session_id(shared, command.session_key())
+            .ok_or_else(|| {
+                timeline::Outcome::unavailable(
+                    timeline::UnavailableReason::MatchaMissingNativeSessionId,
+                )
+            })?;
+        command.with_endpoint_session_id(session_id).ok_or_else(|| {
+            timeline::Outcome::unavailable(timeline::UnavailableReason::MatchaIdentityInvalid)
+        })
+    }
+
+    fn bind_matcha_content_command(
+        &mut self,
+        shared: &SessionShared,
+        command: ContentCommand,
+    ) -> Result<ContentCommand, ContentOutcome> {
+        if command.provider() != timeline::Provider::Matcha {
+            return Ok(command);
+        }
+        let session_id = self
+            .matcha_native_session_id(shared, command.session_key())
+            .ok_or_else(|| {
+                ContentOutcome::unavailable(
+                    timeline::UnavailableReason::MatchaMissingNativeSessionId,
+                )
+            })?;
+        command.with_endpoint_session_id(session_id).ok_or_else(|| {
+            ContentOutcome::unavailable(timeline::UnavailableReason::MatchaIdentityInvalid)
+        })
+    }
+
+    async fn store_timeline_outcome(
+        &mut self,
+        shared: &SessionShared,
+        outcome: &timeline::Outcome,
+    ) {
+        let view = match outcome {
+            timeline::Outcome::Complete(view) | timeline::Outcome::Incomplete(view) => view,
+            timeline::Outcome::Unavailable(_) => return,
+        };
+        let Some(state) = state_from_view_seeded(view, self.state.as_ref()) else {
+            return;
+        };
+        self.state = Some(state.clone());
+        shared.store_snapshot_state(state).await;
+    }
+
     async fn handle_create(
         &mut self,
         shared: &SessionShared,
@@ -780,8 +1002,24 @@ impl SessionLane {
             }
             super::send::NativeEndpoint::Unsupported => None,
         };
-        let identity = SessionIdentity::new(session_key.clone(), provider, None);
+        let identity = self.session_identity(provider, &session_key);
         let binding = SessionSourceBinding::new(session_key.clone(), Some(route_key), None);
+        let command = match self.bind_matcha_send_command(shared, command) {
+            Ok(command) => command,
+            Err(outcome) => {
+                self.apply_send_outcome(
+                    shared,
+                    &session_key,
+                    provider,
+                    identity,
+                    binding,
+                    &outcome,
+                    failure_run_id,
+                )
+                .await;
+                return outcome;
+            }
+        };
 
         let outcome = match shared.prepare_matcha_send_model_runtime(&command).await {
             Ok(()) => match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
@@ -848,6 +1086,10 @@ impl SessionLane {
         shared: &SessionShared,
         command: super::abort::SessionAbortCommand,
     ) -> SessionAbortOutcome {
+        let command = match self.bind_matcha_abort_command(shared, command) {
+            Ok(command) => command,
+            Err(outcome) => return outcome,
+        };
         let driver = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
             Ok(driver) => driver,
             Err(RuntimeOperationFailure::Unsupported) => return SessionAbortOutcome::Unsupported,
@@ -925,11 +1167,41 @@ impl SessionLane {
         ops.respond_to_approval(command).await
     }
 
+    async fn handle_permission(
+        &mut self,
+        shared: &SessionShared,
+        command: super::session_permission::SessionPermissionCommand,
+    ) -> SessionPermissionOutcome {
+        let Some(endpoint) = command.endpoint.runtime_endpoint() else {
+            return SessionPermissionOutcome::unsupported();
+        };
+        let driver = match shared.running_session_driver(Some(endpoint)) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => {
+                return SessionPermissionOutcome::unsupported();
+            }
+            Err(RuntimeOperationFailure::Unavailable) => {
+                return SessionPermissionOutcome::Unavailable;
+            }
+            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
+                return SessionPermissionOutcome::Unavailable;
+            }
+        };
+        let Some(ops) = driver.session_ops() else {
+            return SessionPermissionOutcome::unsupported();
+        };
+        ops.session_permission(command).await
+    }
+
     async fn handle_model_selection(
         &mut self,
         shared: &SessionShared,
         command: super::model_selection::SessionModelSelectionCommand,
     ) -> SessionModelSelectionOutcome {
+        let command = match self.bind_matcha_model_selection_command(shared, command) {
+            Ok(command) => command,
+            Err(outcome) => return outcome,
+        };
         let Some(endpoint) = command.endpoint.runtime_endpoint() else {
             return SessionModelSelectionOutcome::Unsupported;
         };
@@ -982,7 +1254,7 @@ impl SessionLane {
             .with_diagnostic(diagnostic)
     }
 
-    async fn handle_query(&self, shared: &SessionShared, query: SessionQuery) {
+    async fn handle_query(&mut self, shared: &SessionShared, query: SessionQuery) {
         match query {
             SessionQuery::ListSessions { reply } => {
                 let _ = reply.send(shared.list_session_views());
@@ -995,11 +1267,18 @@ impl SessionLane {
                 let _ = reply.send(outcome);
             }
             SessionQuery::Timeline { command, reply } => {
-                let outcome = shared.handle_timeline(command).await;
+                let outcome = match self.bind_matcha_timeline_command(shared, command) {
+                    Ok(command) => shared.handle_timeline(command).await,
+                    Err(outcome) => outcome,
+                };
+                self.store_timeline_outcome(shared, &outcome).await;
                 let _ = reply.send(outcome);
             }
             SessionQuery::Content { command, reply } => {
-                let outcome = shared.handle_content(command).await;
+                let outcome = match self.bind_matcha_content_command(shared, command) {
+                    Ok(command) => shared.handle_content(command).await,
+                    Err(outcome) => outcome,
+                };
                 let _ = reply.send(outcome);
             }
             SessionQuery::OpenClawHistory { params, reply } => {
@@ -1190,6 +1469,8 @@ fn send_outcome_runtime(
             phase,
             active_run_id,
             issue,
+            runtime_activity: None,
+            error_detail: None,
         },
     ))
 }
@@ -1210,6 +1491,13 @@ fn adapter_id_str(provider: &SessionProvider) -> &'static str {
 }
 
 fn state_from_view(view: &SessionView) -> Option<SessionState> {
+    state_from_view_seeded(view, None)
+}
+
+fn state_from_view_seeded(
+    view: &SessionView,
+    previous: Option<&SessionState>,
+) -> Option<SessionState> {
     let facts = SessionFacts {
         items: view.items.clone(),
         tools: view.tools.clone(),
@@ -1218,8 +1506,34 @@ fn state_from_view(view: &SessionView) -> Option<SessionState> {
         window: view.window.clone(),
         completeness: view.completeness.clone(),
     };
-    SessionState::from_facts(view.identity.clone(), view.epoch, view.cursor, facts)
+    let (seq, cursor) = match previous {
+        Some(state) if state.epoch() == view.epoch => {
+            (state.seq().max(view.seq), state.cursor().max(view.cursor))
+        }
+        _ => (view.seq, view.cursor),
+    };
+    SessionState::from_view_parts(view.identity.clone(), view.epoch, seq, cursor, facts)
         .ok()?
         .with_endpoint_session_id(view.endpoint_session_id.clone())
         .ok()
+}
+
+fn matcha_catalog_state(endpoint_session_id: &str, epoch: u64) -> Option<SessionState> {
+    let identity = SessionIdentity::new(
+        matcha_catalog_session_key(endpoint_session_id),
+        SessionProvider::MatchaAgent,
+        Some("matcha".to_owned()),
+    )?;
+    SessionState::new(identity, epoch)
+        .ok()?
+        .with_endpoint_session_id(Some(endpoint_session_id.to_owned()))
+        .ok()
+}
+
+fn matcha_catalog_session_key(endpoint_session_id: &str) -> String {
+    format!("matcha-agent:matcha:{endpoint_session_id}")
+}
+
+fn matcha_session_id(session_id: Option<&str>) -> Result<MatchaSessionId, ()> {
+    MatchaSessionId::try_new(session_id.ok_or(())?.to_owned()).map_err(|_| ())
 }

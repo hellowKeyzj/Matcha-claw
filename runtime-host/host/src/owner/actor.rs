@@ -5,7 +5,10 @@ use matcha_agent::{
     },
     session::recovery::RecoveryReason as MatchaRecoveryReason,
 };
-use openclaw::port::CanonicalIngressResult;
+use openclaw::{
+    port::CanonicalIngressResult,
+    session::projection::{AssistantTurnChunkKind, AssistantTurnSegment, CanonicalSessionChange},
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -16,13 +19,204 @@ use crate::{
         matcha::matcha_event_changes,
         openclaw::openclaw_canonical_changes,
         state::{
-            RecoveryReason, SessionChange, SessionIdentity, SessionProvider, SessionSourceBinding,
+            RecoveryReason, SessionChange, SessionContent, SessionIdentity, SessionItem,
+            SessionProvider, SessionSourceBinding,
         },
     },
     transport::session_trace,
 };
 
 use super::{ActorExit, HostStatePublisher, ShutdownAttempt, ShutdownRequest};
+
+#[derive(Default)]
+struct OpenClawChangeTrace {
+    assistant_turn_chunk_count: usize,
+    assistant_turn_snapshot_count: usize,
+    tool_activity_count: usize,
+    runtime_activity_count: usize,
+    terminal_count: usize,
+    approval_requested_count: usize,
+    approval_resolved_count: usize,
+    recovery_required_count: usize,
+    transcript_message_count: usize,
+    assistant_text_length: usize,
+    assistant_thinking_length: usize,
+    assistant_segment_count: usize,
+    assistant_text_segment_count: usize,
+    assistant_text_segment_length: usize,
+    assistant_thinking_segment_count: usize,
+    assistant_tool_segment_count: usize,
+}
+
+impl OpenClawChangeTrace {
+    fn observe(&mut self, change: &CanonicalSessionChange) {
+        match change {
+            CanonicalSessionChange::AssistantTurnChunk { kind, text, .. } => {
+                self.assistant_turn_chunk_count += 1;
+                self.assistant_segment_count += 1;
+                match kind {
+                    AssistantTurnChunkKind::Text => {
+                        self.assistant_text_length += text.len();
+                        self.assistant_text_segment_count += 1;
+                        self.assistant_text_segment_length += text.len();
+                    }
+                    AssistantTurnChunkKind::Thinking => {
+                        self.assistant_thinking_length += text.len();
+                        self.assistant_thinking_segment_count += 1;
+                    }
+                }
+            }
+            CanonicalSessionChange::AssistantTurnSnapshot { snapshot } => {
+                self.assistant_turn_snapshot_count += 1;
+                self.assistant_text_length += snapshot.text.len();
+                self.assistant_thinking_length += snapshot.thinking.as_ref().map_or(0, String::len);
+                self.assistant_segment_count += snapshot.segments.len();
+                for segment in &snapshot.segments {
+                    self.observe_segment(segment);
+                }
+            }
+            CanonicalSessionChange::ToolActivity { .. } => self.tool_activity_count += 1,
+            CanonicalSessionChange::RuntimeActivity { .. }
+            | CanonicalSessionChange::RuntimeActivityCleared { .. }
+            | CanonicalSessionChange::RuntimeFallback { .. }
+            | CanonicalSessionChange::RuntimeFallbackCleared { .. }
+            | CanonicalSessionChange::GuardianNotice { .. } => self.runtime_activity_count += 1,
+            CanonicalSessionChange::Terminal { .. } => self.terminal_count += 1,
+            CanonicalSessionChange::ApprovalRequested { .. } => self.approval_requested_count += 1,
+            CanonicalSessionChange::ApprovalResolved { .. } => self.approval_resolved_count += 1,
+            CanonicalSessionChange::RecoveryRequired { .. } => self.recovery_required_count += 1,
+            CanonicalSessionChange::TranscriptMessage { .. } => self.transcript_message_count += 1,
+        }
+    }
+
+    fn observe_segment(&mut self, segment: &AssistantTurnSegment) {
+        match segment {
+            AssistantTurnSegment::Text { text } => {
+                self.assistant_text_segment_count += 1;
+                self.assistant_text_segment_length += text.len();
+            }
+            AssistantTurnSegment::Thinking { .. } => self.assistant_thinking_segment_count += 1,
+            AssistantTurnSegment::ToolUse { .. } | AssistantTurnSegment::ToolResult { .. } => {
+                self.assistant_tool_segment_count += 1;
+            }
+        }
+    }
+}
+
+fn openclaw_change_trace(changes: &[CanonicalSessionChange]) -> serde_json::Value {
+    let mut trace = OpenClawChangeTrace::default();
+    for change in changes {
+        trace.observe(change);
+    }
+    serde_json::json!({
+        "changeCount": changes.len(),
+        "assistantTurnChunkCount": trace.assistant_turn_chunk_count,
+        "assistantTurnSnapshotCount": trace.assistant_turn_snapshot_count,
+        "toolActivityCount": trace.tool_activity_count,
+        "runtimeActivityCount": trace.runtime_activity_count,
+        "terminalCount": trace.terminal_count,
+        "approvalRequestedCount": trace.approval_requested_count,
+        "approvalResolvedCount": trace.approval_resolved_count,
+        "recoveryRequiredCount": trace.recovery_required_count,
+        "transcriptMessageCount": trace.transcript_message_count,
+        "assistantTextLength": trace.assistant_text_length,
+        "assistantThinkingLength": trace.assistant_thinking_length,
+        "assistantSegmentCount": trace.assistant_segment_count,
+        "assistantTextSegmentCount": trace.assistant_text_segment_count,
+        "assistantTextSegmentLength": trace.assistant_text_segment_length,
+        "assistantThinkingSegmentCount": trace.assistant_thinking_segment_count,
+        "assistantToolSegmentCount": trace.assistant_tool_segment_count,
+    })
+}
+
+#[derive(Default)]
+struct SessionChangeTrace {
+    message_delta_count: usize,
+    message_delta_length: usize,
+    message_updated_count: usize,
+    tool_updated_count: usize,
+    runtime_changed_count: usize,
+    assistant_turn_count: usize,
+    assistant_text_length: usize,
+    assistant_segment_count: usize,
+    assistant_text_segment_count: usize,
+    assistant_text_segment_length: usize,
+    assistant_thinking_segment_count: usize,
+    assistant_tool_segment_count: usize,
+}
+
+impl SessionChangeTrace {
+    fn observe(&mut self, change: &SessionChange) {
+        match change {
+            SessionChange::MessageDelta { text, .. } => {
+                self.message_delta_count += 1;
+                self.message_delta_length += text.len();
+            }
+            SessionChange::MessageUpdated { item } | SessionChange::MessageReplaced { item } => {
+                self.message_updated_count += 1;
+                self.observe_item(item);
+            }
+            SessionChange::ToolUpdated { .. } => self.tool_updated_count += 1,
+            SessionChange::RuntimeChanged { .. } | SessionChange::RuntimeNoticeUpdated { .. } => {
+                self.runtime_changed_count += 1;
+            }
+            SessionChange::RunPhaseChanged { .. }
+            | SessionChange::ApprovalUpdated { .. }
+            | SessionChange::WindowChanged { .. }
+            | SessionChange::RecoveryRequired { .. } => {}
+        }
+    }
+
+    fn observe_item(&mut self, item: &SessionItem) {
+        if let SessionItem::AssistantTurn { text, segments, .. } = item {
+            self.assistant_turn_count += 1;
+            self.assistant_text_length += text.len();
+            self.assistant_segment_count += segments.len();
+            for segment in segments {
+                self.observe_segment(segment);
+            }
+        }
+    }
+
+    fn observe_segment(&mut self, segment: &SessionContent) {
+        match segment {
+            SessionContent::Text { text } => {
+                self.assistant_text_segment_count += 1;
+                self.assistant_text_segment_length += text.len();
+            }
+            SessionContent::Thinking { .. } => self.assistant_thinking_segment_count += 1,
+            SessionContent::ToolUse { .. } | SessionContent::ToolResult { .. } => {
+                self.assistant_tool_segment_count += 1;
+            }
+            SessionContent::LargeText { .. }
+            | SessionContent::Media { .. }
+            | SessionContent::Omitted { .. } => {}
+        }
+    }
+}
+
+fn session_change_trace(changes: &[SessionChange]) -> serde_json::Value {
+    let mut trace = SessionChangeTrace::default();
+    for change in changes {
+        trace.observe(change);
+    }
+    serde_json::json!({
+        "changeCount": changes.len(),
+        "changeKinds": matcha_change_kinds(changes),
+        "messageDeltaCount": trace.message_delta_count,
+        "messageDeltaLength": trace.message_delta_length,
+        "messageUpdatedCount": trace.message_updated_count,
+        "toolUpdatedCount": trace.tool_updated_count,
+        "runtimeChangedCount": trace.runtime_changed_count,
+        "assistantTurnCount": trace.assistant_turn_count,
+        "assistantTextLength": trace.assistant_text_length,
+        "assistantSegmentCount": trace.assistant_segment_count,
+        "assistantTextSegmentCount": trace.assistant_text_segment_count,
+        "assistantTextSegmentLength": trace.assistant_text_segment_length,
+        "assistantThinkingSegmentCount": trace.assistant_thinking_segment_count,
+        "assistantToolSegmentCount": trace.assistant_tool_segment_count,
+    })
+}
 
 enum Next {
     Shutdown(ShutdownRequest),
@@ -45,55 +239,186 @@ pub(super) async fn run(
                 return shutdown_after_operations(&mut host, reply, &mut shutdown).await;
             }
             Next::Event(Some(HostEvent::OpenClawCanonical(ingress))) => {
-                let (session_key, binding, cursor, changes) = match ingress {
+                let (session_key, binding, run_id, cursor, changes) = match ingress {
                     CanonicalIngressResult::Produced(delta) => {
                         let session_key = delta.session_key().as_str().to_owned();
-                        let binding = SessionSourceBinding::new(
-                            session_key.clone(),
-                            delta.route_key().map(str::to_owned),
-                            delta.source_epoch(),
-                        )
-                        .expect("valid binding");
+                        let route_key = delta.route_key().map(str::to_owned);
+                        let source_epoch = delta.source_epoch();
+                        let run_id = delta.run_id().map(|id| id.as_str().to_owned());
                         let cursor = delta.source_cursor();
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.received",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": route_key.as_deref(),
+                                "runId": run_id.as_deref(),
+                                "sourceCursor": cursor,
+                                "sourceEpoch": source_epoch,
+                                "canonical": openclaw_change_trace(delta.changes()),
+                            }),
+                        );
+                        let binding =
+                            SessionSourceBinding::new(session_key.clone(), route_key, source_epoch)
+                                .expect("valid binding");
                         let changes = openclaw_canonical_changes(
                             delta.changes(),
                             delta.run_id().map(|id| id.as_str()),
                         );
-                        (session_key, binding, cursor, changes)
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.projected",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": binding.route_key(),
+                                "runId": run_id.as_deref(),
+                                "sourceCursor": cursor,
+                                "sourceEpoch": source_epoch,
+                                "host": session_change_trace(&changes),
+                            }),
+                        );
+                        (session_key, binding, run_id, cursor, changes)
                     }
                     CanonicalIngressResult::Unknown { provenance } => {
                         let session_key = provenance.session_key().as_str().to_owned();
-                        let binding = SessionSourceBinding::new(
-                            session_key.clone(),
-                            provenance.route_key().map(str::to_owned),
-                            provenance.source_epoch(),
-                        )
-                        .expect("valid binding");
+                        let route_key = provenance.route_key().map(str::to_owned);
+                        let source_epoch = provenance.source_epoch();
                         let cursor = provenance.source_cursor();
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.unknown",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": route_key.as_deref(),
+                                "sourceCursor": cursor,
+                                "sourceEpoch": source_epoch,
+                            }),
+                        );
+                        let binding =
+                            SessionSourceBinding::new(session_key.clone(), route_key, source_epoch)
+                                .expect("valid binding");
                         let changes = vec![SessionChange::RecoveryRequired {
                             reason: RecoveryReason::NativeUnknown,
                         }];
-                        (session_key, binding, cursor, changes)
+                        (session_key, binding, None, cursor, changes)
                     }
                 };
 
-                let identity = SessionIdentity::new(session_key, SessionProvider::OpenClaw, None)
-                    .expect("valid identity");
+                let identity =
+                    SessionIdentity::new(session_key.clone(), SessionProvider::OpenClaw, None)
+                        .expect("valid identity");
                 let event = SessionEvent {
-                    binding,
-                    run_id: None,
+                    binding: binding.clone(),
+                    run_id: run_id.clone(),
                     cursor,
                     changes,
                 };
                 let outcome = host.sessions().ingest_event(identity, event).await;
                 match outcome {
                     Ok(SessionIngestOutcome::Applied(delta)) => {
-                        if !host.publish_session_delta(delta) {
+                        let delta_seq = delta.seq;
+                        let delta_cursor = delta.cursor;
+                        let delta_trace = session_change_trace(&delta.changes);
+                        let published = host.publish_session_delta(delta);
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.published",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": binding.route_key(),
+                                "runId": run_id.as_deref(),
+                                "sourceCursor": cursor,
+                                "sourceEpoch": binding.source_epoch(),
+                                "deltaSeq": delta_seq,
+                                "deltaCursor": delta_cursor,
+                                "host": delta_trace,
+                                "published": published,
+                            }),
+                        );
+                        if !published {
                             return host.shutdown().await.map(|_| ());
                         }
                     }
-                    Ok(SessionIngestOutcome::Rejected { .. }) => {}
-                    _ => {}
+                    Ok(SessionIngestOutcome::Duplicate { cursor }) => session_trace::log_unscoped(
+                        "runtime.openclaw.event.ingest-dropped",
+                        serde_json::json!({
+                            "sessionKey": &session_key,
+                            "routeKey": binding.route_key(),
+                            "runId": run_id.as_deref(),
+                            "sourceCursor": cursor,
+                            "sourceEpoch": binding.source_epoch(),
+                            "reason": "duplicate",
+                        }),
+                    ),
+                    Ok(SessionIngestOutcome::Stale { cursor, received }) => {
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.ingest-dropped",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": binding.route_key(),
+                                "runId": run_id.as_deref(),
+                                "sourceCursor": cursor,
+                                "receivedCursor": received,
+                                "sourceEpoch": binding.source_epoch(),
+                                "reason": "stale",
+                            }),
+                        )
+                    }
+                    Ok(SessionIngestOutcome::Gap { expected, received }) => {
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.ingest-dropped",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": binding.route_key(),
+                                "runId": run_id.as_deref(),
+                                "expectedCursor": expected,
+                                "receivedCursor": received,
+                                "sourceEpoch": binding.source_epoch(),
+                                "reason": "gap",
+                            }),
+                        )
+                    }
+                    Ok(SessionIngestOutcome::Rejected { reason }) => session_trace::log_unscoped(
+                        "runtime.openclaw.event.ingest-dropped",
+                        serde_json::json!({
+                            "sessionKey": &session_key,
+                            "routeKey": binding.route_key(),
+                            "runId": run_id.as_deref(),
+                            "sourceCursor": cursor,
+                            "sourceEpoch": binding.source_epoch(),
+                            "reason": reason,
+                        }),
+                    ),
+                    Ok(SessionIngestOutcome::RuntimeNotFound) => session_trace::log_unscoped(
+                        "runtime.openclaw.event.ingest-dropped",
+                        serde_json::json!({
+                            "sessionKey": &session_key,
+                            "routeKey": binding.route_key(),
+                            "runId": run_id.as_deref(),
+                            "sourceCursor": cursor,
+                            "sourceEpoch": binding.source_epoch(),
+                            "reason": "runtime-not-found",
+                        }),
+                    ),
+                    Ok(SessionIngestOutcome::RuntimeNoSessionSupport) => {
+                        session_trace::log_unscoped(
+                            "runtime.openclaw.event.ingest-dropped",
+                            serde_json::json!({
+                                "sessionKey": &session_key,
+                                "routeKey": binding.route_key(),
+                                "runId": run_id.as_deref(),
+                                "sourceCursor": cursor,
+                                "sourceEpoch": binding.source_epoch(),
+                                "reason": "runtime-no-session-support",
+                            }),
+                        )
+                    }
+                    Err(_) => session_trace::log_unscoped(
+                        "runtime.openclaw.event.ingest-error",
+                        serde_json::json!({
+                            "sessionKey": &session_key,
+                            "routeKey": binding.route_key(),
+                            "runId": run_id.as_deref(),
+                            "sourceCursor": cursor,
+                            "sourceEpoch": binding.source_epoch(),
+                        }),
+                    ),
                 }
             }
             Next::Event(Some(HostEvent::Matcha(SessionSubscriptionItem::Event(event)))) => {
@@ -576,6 +901,7 @@ fn matcha_change_kinds(changes: &[SessionChange]) -> Vec<&'static str> {
             SessionChange::ToolUpdated { .. } => "toolUpdated",
             SessionChange::ApprovalUpdated { .. } => "approvalUpdated",
             SessionChange::RuntimeChanged { .. } => "runtimeChanged",
+            SessionChange::RuntimeNoticeUpdated { .. } => "runtimeNoticeUpdated",
             SessionChange::WindowChanged { .. } => "windowChanged",
             SessionChange::RecoveryRequired { .. } => "recoveryRequired",
         })
@@ -638,6 +964,23 @@ mod tests {
             assert!(!branch.contains("Ok(SessionIngestOutcome::Rejected { .. }) => {\n                        return host.shutdown()"));
             assert!(!branch.contains("Ok(SessionIngestOutcome::Rejected { reason }) => {\n                        return host.shutdown()"));
         }
+    }
+
+    #[test]
+    fn openclaw_canonical_run_id_reaches_session_ingest() {
+        let source = include_str!("actor.rs");
+        let openclaw_branch = source
+            .split_once("Next::Event(Some(HostEvent::OpenClawCanonical(ingress)))")
+            .and_then(|(_, source)| source.split_once("Next::Event(Some(HostEvent::Matcha("))
+            .map(|(branch, _)| branch)
+            .expect("actor must retain the OpenClaw canonical event branch");
+
+        assert!(
+            openclaw_branch
+                .contains("let run_id = delta.run_id().map(|id| id.as_str().to_owned());")
+        );
+        assert!(openclaw_branch.contains("run_id,"));
+        assert!(!openclaw_branch.contains("run_id: None,"));
     }
 
     #[test]

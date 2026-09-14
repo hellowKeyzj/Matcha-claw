@@ -26,8 +26,8 @@ use crate::{
     session::{
         canonical::{CanonicalSessionReadResult, read as read_canonical_session},
         client::{
-            AppServerClient, AppServerClientError, AppServerEndpoint, EventSubscription,
-            EventSubscriptionCursor, RawEvent,
+            AppServerClient, AppServerClientError, AppServerEndpoint, EventSubscriptionCursor,
+            RawEvent,
         },
         close::SessionCloseParams,
         events::{
@@ -37,8 +37,8 @@ use crate::{
         },
         history::{HistoryContentResult, HistoryListResult, HistoryLoadResult},
         hydration::HydrationWindowRequest,
-        model::{ApprovalId, OptionId, RunId, Sequence, SessionId},
-        receipt::{TerminalRunReceipt, TerminalRunReceiptConsumer, TerminalRunStatus},
+        model::{ApprovalId, OptionId, RunId, RunStatus, Sequence, SessionId},
+        receipt::{TerminalRunReceipt, TerminalRunStatus},
         recovery::{ProjectionRecoveryReason, SessionRecovery},
         request::{
             SessionCancelParams, SessionLoadParams, SessionSetModelParams, SessionSnapshotParams,
@@ -413,25 +413,86 @@ async fn watch_terminal(
     run_id: RunId,
 ) -> Option<TerminalRunStatus> {
     let mut events = client.raw_events();
-    terminal_watch_subscription(
-        client
-            .subscribe_events(session_id.clone(), None)
-            .await
-            .ok()?,
-    )?;
-    watch_terminal_events(&mut events, TerminalEventWatcher::new(session_id, run_id)).await
+    let EventSubscriptionCursor::Subscribed(replay) = client
+        .subscribe_events_with_cursor(session_id.clone(), None)
+        .await
+        .ok()?
+    else {
+        return None;
+    };
+    let mut cursor = replay.cursor();
+    match read_terminal_receipt_with_cursor(client, session_id.clone(), run_id.clone())
+        .await
+        .ok()?
+    {
+        (TerminalRunReceipt::Found { status }, _) => return Some(status),
+        (TerminalRunReceipt::Pending, snapshot_cursor) => {
+            cursor = max_sequence(cursor, snapshot_cursor);
+        }
+        (TerminalRunReceipt::NotFound, _) => return None,
+    }
+    watch_terminal_events(
+        &mut events,
+        TerminalEventWatcher::resume_after(session_id, run_id, cursor),
+        cursor,
+    )
+    .await
 }
 
-fn terminal_watch_subscription(subscription: EventSubscription) -> Option<()> {
-    (subscription == EventSubscription::Subscribed).then_some(())
+async fn read_terminal_receipt_with_cursor(
+    client: &AppServerClient,
+    session_id: SessionId,
+    run_id: RunId,
+) -> Result<(TerminalRunReceipt, Sequence), AppServerClientError> {
+    let snapshot = client
+        .snapshot_session(SessionSnapshotParams::new(session_id))
+        .await?;
+    let receipt = snapshot
+        .runs
+        .into_iter()
+        .find(|run| run.run_id == run_id)
+        .map(|run| terminal_receipt_from_status(run.status))
+        .unwrap_or(TerminalRunReceipt::NotFound);
+    Ok((receipt, snapshot.session.last_seq))
+}
+
+fn terminal_receipt_from_status(status: RunStatus) -> TerminalRunReceipt {
+    match status {
+        RunStatus::Queued { .. }
+        | RunStatus::Running { .. }
+        | RunStatus::WaitingForApproval { .. } => TerminalRunReceipt::Pending,
+        RunStatus::Completed { .. } => TerminalRunReceipt::Found {
+            status: TerminalRunStatus::Completed,
+        },
+        RunStatus::Cancelled { .. } => TerminalRunReceipt::Found {
+            status: TerminalRunStatus::Cancelled,
+        },
+        RunStatus::Failed { .. } => TerminalRunReceipt::Found {
+            status: TerminalRunStatus::Failed,
+        },
+        RunStatus::Interrupted { .. } => TerminalRunReceipt::Found {
+            status: TerminalRunStatus::Interrupted,
+        },
+    }
+}
+
+fn max_sequence(left: Sequence, right: Sequence) -> Sequence {
+    if right.get() > left.get() {
+        right
+    } else {
+        left
+    }
 }
 
 async fn watch_terminal_events(
     events: &mut broadcast::Receiver<crate::session::client::RawEvent>,
     mut watcher: TerminalEventWatcher,
+    cursor: Sequence,
 ) -> Option<TerminalRunStatus> {
     loop {
         match events.recv().await {
+            Ok(crate::session::client::RawEvent::Envelope(event))
+                if event.seq.get() <= cursor.get() => {}
             Ok(crate::session::client::RawEvent::Envelope(event)) => match watcher.observe(event) {
                 TerminalWatchStep::Pending => {}
                 TerminalWatchStep::Terminal(status) => return Some(status),
@@ -1011,9 +1072,9 @@ impl MatchaPeer {
             AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events)
                 .await
                 .map_err(TerminalReceiptReadError::Client)?;
-        let receipt = TerminalRunReceiptConsumer::new(&client)
-            .read(session_id, run_id)
+        let receipt = read_terminal_receipt_with_cursor(&client, session_id, run_id)
             .await
+            .map(|(receipt, _)| receipt)
             .map_err(TerminalReceiptReadError::Client);
         client.finish_with_cleanup(receipt).await
     }
@@ -1698,9 +1759,11 @@ impl MatchaPeerSessionHandle {
         &self,
     ) -> crate::session::history::HistoryResult<crate::session::history::local::LocalHistoryCatalog>
     {
-        crate::session::history::local::LocalHistoryReader::from_environment()
-            .list()
-            .await
+        crate::session::history::local::LocalHistoryReader::for_workspace(
+            self.working_directory.clone(),
+        )
+        .list()
+        .await
     }
 
     pub async fn load_local_history(
@@ -2406,13 +2469,48 @@ mod receipt_tests {
         sender
             .send(crate::session::client::RawEvent::Closed)
             .unwrap();
-        assert_eq!(watch_terminal_events(&mut receiver, watcher()).await, None);
+        assert_eq!(
+            watch_terminal_events(&mut receiver, watcher(), Sequence::try_new(0).unwrap()).await,
+            None
+        );
 
         let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
         sender
             .send(crate::session::client::RawEvent::Overflow)
             .unwrap();
-        assert_eq!(watch_terminal_events(&mut receiver, watcher()).await, None);
+        assert_eq!(
+            watch_terminal_events(&mut receiver, watcher(), Sequence::try_new(0).unwrap()).await,
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_watcher_resumes_after_the_receipt_snapshot_cursor() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(8);
+        sender
+            .send(crate::session::client::RawEvent::Envelope(
+                renderer_envelope(1, json!({"type":"run.completed","runId":"run-1"})),
+            ))
+            .unwrap();
+        sender
+            .send(crate::session::client::RawEvent::Envelope(
+                renderer_envelope(4, json!({"type":"run.completed","runId":"run-1"})),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            watch_terminal_events(
+                &mut receiver,
+                TerminalEventWatcher::resume_after(
+                    SessionId::try_new("session-1").unwrap(),
+                    RunId::try_new("run-1").unwrap(),
+                    Sequence::try_new(3).unwrap(),
+                ),
+                Sequence::try_new(3).unwrap(),
+            )
+            .await,
+            Some(TerminalRunStatus::Completed)
+        );
     }
 
     #[test]

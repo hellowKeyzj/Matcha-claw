@@ -90,19 +90,14 @@ impl OpenClawConfigStore {
 
     #[cfg(windows)]
     pub(crate) fn ensure_canonical_document(&self) -> Result<(), OpenClawConfigStoreError> {
-        let state_dir = self
-            .state_dir
-            .open()
-            .map_err(|_| OpenClawConfigStoreError::StateDirectoryRejected)?;
-        if state_dir
-            .read_regular_file_bounded(CANONICAL_CONFIG_FILE, MAX_CONFIG_DOCUMENT_BYTES)
-            .map_err(|_| OpenClawConfigStoreError::ReadFailed)?
-            .is_none()
-        {
-            persist::create_if_missing(&state_dir, b"{}\n")
-                .map_err(OpenClawConfigStoreError::from)?;
-        }
-        Ok(())
+        self.update_private_document(|document| {
+            if super::config_defaults::apply_gateway_startup_defaults(document) {
+                OpenClawConfigMutation::changed()
+            } else {
+                OpenClawConfigMutation::unchanged()
+            }
+        })
+        .map(|_| ())
     }
 
     pub(crate) fn update(
@@ -358,6 +353,7 @@ struct WorkspaceSelectionDocument {
 #[derive(Deserialize)]
 struct WorkspaceSelectionAgents {
     defaults: Option<WorkspaceSelectionDefaults>,
+    entries: Option<std::collections::BTreeMap<String, WorkspaceSelectionAgentEntry>>,
     list: Option<Vec<WorkspaceSelectionAgent>>,
 }
 
@@ -369,6 +365,16 @@ impl WorkspaceSelectionAgents {
             .and_then(WorkspaceSelectionDefaults::into_value)
         {
             agents.insert("defaults".into(), defaults);
+        }
+        if let Some(entries) = self.entries {
+            let entries = entries
+                .into_iter()
+                .filter_map(|(id, agent)| Some((id, agent.into_value()?)))
+                .collect::<Map<_, _>>();
+            if !entries.is_empty() {
+                agents.insert("entries".into(), Value::Object(entries));
+                return Value::Object(agents);
+            }
         }
         if let Some(list) = self.list {
             let list = list
@@ -391,6 +397,26 @@ struct WorkspaceSelectionDefaults {
 impl WorkspaceSelectionDefaults {
     fn into_value(self) -> Option<Value> {
         Some(json_object([("workspace", self.workspace?)]))
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSelectionAgentEntry {
+    workspace: Option<String>,
+    #[serde(rename = "isDefault")]
+    is_default: Option<bool>,
+    #[serde(rename = "default")]
+    default_agent: Option<bool>,
+}
+
+impl WorkspaceSelectionAgentEntry {
+    fn into_value(self) -> Option<Value> {
+        let mut agent = Map::new();
+        agent.insert("workspace".into(), Value::String(self.workspace?));
+        if let Some(is_default) = self.is_default.or(self.default_agent) {
+            agent.insert("isDefault".into(), Value::Bool(is_default));
+        }
+        Some(Value::Object(agent))
     }
 }
 

@@ -1,14 +1,12 @@
 use std::{path::PathBuf, sync::Arc};
 
-use foundation::{
-    process::{
-        ShutdownOutcome,
-        supervision::{RestartOutcome, StartOutcome, SupervisorSnapshot, TerminationCompletion},
-    },
-    toolchain::NativeToolchainRuntime,
+use foundation::process::{
+    ShutdownOutcome,
+    supervision::{RestartOutcome, StartOutcome, SupervisorSnapshot, TerminationCompletion},
 };
 use platform::exchange::InvocationOutcome;
 use tokio::sync::mpsc;
+use toolchain::NativeToolchain;
 
 use matcha_agent::{
     lifecycle::{output::StartupDiagnosticCategory, secret::Secret},
@@ -47,6 +45,7 @@ use crate::{
         SessionModelSelectionOutcome, SessionModelSelectionRejection,
     },
     sessions::send::{Attachment, SessionSendCommand, SessionSendOutcome, SessionSendStatus},
+    sessions::session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     sessions::timeline,
     transport::session_trace,
 };
@@ -178,7 +177,7 @@ impl RuntimeDriver for MatchaRuntimeDriver {
 
 impl SessionOps for MatchaRuntimeDriver {
     fn admission(&self) -> SessionAdmission {
-        SessionAdmission::native_session_key(
+        SessionAdmission::agent_scoped(
             RuntimeDriverIdentity::matcha_agent().endpoint(),
             crate::sessions::state::SessionProvider::MatchaAgent,
             "matcha-agent",
@@ -276,6 +275,13 @@ impl SessionOps for MatchaRuntimeDriver {
     ) -> crate::runtime_driver::SessionFuture<'a, SessionModelSelectionOutcome> {
         let session = self.session.clone();
         Box::pin(async move { select_session_model_with_handle(session, command).await })
+    }
+
+    fn session_permission<'a>(
+        &'a self,
+        _command: SessionPermissionCommand,
+    ) -> crate::runtime_driver::SessionFuture<'a, SessionPermissionOutcome> {
+        Box::pin(async { SessionPermissionOutcome::unsupported() })
     }
 }
 
@@ -636,15 +642,8 @@ fn map_matcha_lifecycle_failure(
     }
 }
 
-fn matcha_native_session_id(
-    session_key: &str,
-    endpoint_session_id: Option<&str>,
-) -> Result<SessionId, ()> {
-    let session_id = match endpoint_session_id {
-        Some(session_id) => session_id,
-        None if session_key.starts_with("matcha-agent:") => return Err(()),
-        None => session_key,
-    };
+fn matcha_native_session_id(endpoint_session_id: Option<&str>) -> Result<SessionId, ()> {
+    let session_id = endpoint_session_id.ok_or(())?;
     SessionId::try_new(session_id.to_owned()).map_err(|_| ())
 }
 
@@ -652,10 +651,7 @@ pub(super) async fn abort_session_with_handle(
     session: MatchaPeerSessionHandle,
     command: SessionAbortCommand,
 ) -> SessionAbortOutcome {
-    let session_id = match matcha_native_session_id(
-        &command.session_key,
-        command.endpoint_session_id.as_deref(),
-    ) {
+    let session_id = match matcha_native_session_id(command.endpoint_session_id.as_deref()) {
         Ok(session_id) => session_id,
         Err(()) => return SessionAbortOutcome::Rejected,
     };
@@ -743,10 +739,7 @@ pub(super) async fn select_session_model_with_handle(
 ) -> SessionModelSelectionOutcome {
     let trace_id = command.trace_id.clone();
     let diagnostic = command.diagnostic.clone();
-    let session_id = match matcha_native_session_id(
-        &command.session_key,
-        command.endpoint_session_id.as_deref(),
-    ) {
+    let session_id = match matcha_native_session_id(command.endpoint_session_id.as_deref()) {
         Ok(session_id) => session_id,
         Err(()) => {
             session_trace::log(
@@ -952,18 +945,7 @@ pub(super) async fn list_matcha_sessions(
 ) -> matcha_session_catalog::Outcome {
     match session.list_local_history().await {
         HistoryResult::Complete(catalog) => {
-            return matcha_session_catalog::Outcome::Listed(matcha_session_catalog::project_local(
-                catalog,
-            ));
-        }
-        HistoryResult::NotFound | HistoryResult::Unavailable => {}
-        HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
-            return matcha_session_catalog::Outcome::Unavailable;
-        }
-    }
-    match session.list_history().await {
-        HistoryResult::Complete(catalog) => {
-            matcha_session_catalog::Outcome::Listed(matcha_session_catalog::project(catalog))
+            matcha_session_catalog::Outcome::Listed(matcha_session_catalog::project_local(catalog))
         }
         HistoryResult::NotFound
         | HistoryResult::Unavailable
@@ -1050,7 +1032,7 @@ pub(super) async fn send_session_with_handle(
         );
         return SessionSendOutcome::Unavailable;
     };
-    let session_id = match matcha_native_session_id(&session_key, endpoint_session_id.as_deref()) {
+    let session_id = match matcha_native_session_id(endpoint_session_id.as_deref()) {
         Ok(session_id) => session_id,
         Err(()) => {
             session_trace::log(
@@ -1075,7 +1057,7 @@ pub(super) async fn send_session_with_handle(
             return SessionSendOutcome::Rejected;
         }
     };
-    let params = match session_prompt_params(command) {
+    let params = match session_prompt_params(command, session_id.clone()) {
         Ok(params) => params,
         Err(()) => {
             session_trace::log(
@@ -1206,10 +1188,9 @@ fn renderer_subscription_failure_outcome(error: RendererSubscriptionError) -> Se
 
 fn session_prompt_params(
     command: SessionSendCommand,
+    session_id: SessionId,
 ) -> Result<matcha_agent::session::request::SessionPromptParams, ()> {
     let run_id = command.request_run_identity().ok_or(())?.to_owned();
-    let session_id =
-        matcha_native_session_id(&command.session_key, command.endpoint_session_id.as_deref())?;
     let run_id = matcha_agent::session::model::RunId::try_new(run_id).map_err(|_| ())?;
     let params =
         matcha_agent::session::request::SessionPromptParams::try_new(session_id, command.message)
@@ -1254,7 +1235,7 @@ pub struct MatchaAgentInput {
 pub(super) fn build_peer(
     input: MatchaAgentInput,
     secret: Secret,
-    toolchain: Arc<NativeToolchainRuntime>,
+    toolchain: Arc<NativeToolchain>,
     report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
 ) -> Result<MatchaPeer, ConstructionError> {
     Ok(MatchaPeerFactory::try_new(
@@ -1283,6 +1264,10 @@ mod tests {
     use super::*;
     use crate::sessions::send::NativeEndpoint;
 
+    fn native_session_id(value: &str) -> SessionId {
+        SessionId::try_new(value.to_owned()).unwrap()
+    }
+
     #[test]
     fn text_send_omits_the_app_server_attachment_payload() {
         let params = session_prompt_params(
@@ -1299,13 +1284,14 @@ mod tests {
                 None,
             )
             .unwrap(),
+            native_session_id("native-session-1"),
         )
         .unwrap();
 
         assert_eq!(
             to_value(params).unwrap(),
             json!({
-                "sessionId": "session-1",
+                "sessionId": "native-session-1",
                 "prompt": "describe this",
                 "runId": "run-1",
             })
@@ -1313,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn session_prompt_params_prefers_matcha_endpoint_session_binding() {
+    fn session_prompt_params_uses_resolved_matcha_session_binding() {
         let params = session_prompt_params(
             SessionSendCommand::try_new(
                 NativeEndpoint::MatchaAgentLocal,
@@ -1328,6 +1314,7 @@ mod tests {
                 None,
             )
             .unwrap(),
+            native_session_id("native-session-1"),
         )
         .unwrap();
 
@@ -1350,13 +1337,14 @@ mod tests {
                 None,
             )
             .unwrap(),
+            native_session_id("native-session-1"),
         )
         .unwrap();
 
         assert_eq!(
             to_value(params).unwrap(),
             json!({
-                "sessionId": "session-1",
+                "sessionId": "native-session-1",
                 "prompt": "describe this",
                 "runId": "idempotency-1",
             })
@@ -1383,6 +1371,7 @@ mod tests {
                 None,
             )
             .unwrap(),
+            native_session_id("native-session-1"),
         )
         .unwrap();
 
@@ -1390,7 +1379,7 @@ mod tests {
         assert_eq!(
             payload,
             json!({
-                "sessionId": "session-1",
+                "sessionId": "native-session-1",
                 "prompt": "describe this",
                 "runId": "run-1",
                 "payload": {

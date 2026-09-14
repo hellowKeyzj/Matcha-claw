@@ -47,11 +47,41 @@ export type ToolView = Readonly<{
   inputText: string | null;
   summary: string | null;
   output: unknown | null;
+  details: unknown | null;
   isError: boolean | null;
 }>;
 export type ApprovalView = Readonly<{ approvalId: string; runId?: string | null; phase: string }>;
-export type RuntimeView = Readonly<{ phase: string; activeRunId?: string | null }>;
-export type SessionWindow = Readonly<{ totalItemCount: number; windowStartOffset: number; windowEndOffset: number }>;
+export type RuntimeActivity = 'compacting';
+export type RuntimeErrorDetail = Readonly<{
+  failoverReason: string | null;
+  providerRuntimeFailureKind: string | null;
+  providerErrorType: string | null;
+  providerErrorMessagePreview: string | null;
+  httpStatus: number | null;
+}>;
+export type RuntimeNotice = Readonly<{
+  runId: string;
+  kind: 'guardian_reviewing' | 'guardian_approved' | 'guardian_denied' | 'guardian_warning' | 'guardian_strict_review_required';
+  command: string | null;
+  riskLevel: string | null;
+  rationale: string | null;
+  message: string | null;
+}>;
+export type RuntimeView = Readonly<{
+  phase: SessionRunPhase;
+  activeRunId: string | null;
+  issue: RuntimeIssue | null;
+  runtimeActivity: RuntimeActivity | null;
+  errorDetail: RuntimeErrorDetail | null;
+}>;
+export type SessionWindow = Readonly<{
+  totalItemCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isAtLatest: boolean;
+}>;
 export type SessionContentLoadResponse = Readonly<{
   contentRef: string;
   offset: number;
@@ -68,6 +98,7 @@ export type SessionChange =
   | Readonly<{ kind: 'toolUpdated'; tool: ToolView }>
   | Readonly<{ kind: 'approvalUpdated'; approval: ApprovalView }>
   | Readonly<{ kind: 'runtimeChanged'; runtime: RuntimeView }>
+  | Readonly<{ kind: 'runtimeNoticeUpdated'; notice: RuntimeNotice }>
   | Readonly<{ kind: 'windowChanged'; window: SessionWindow }>
   | Readonly<{ kind: 'recoveryRequired'; reason: SessionRecoveryReason }>;
 
@@ -100,6 +131,8 @@ type SessionRecoveryReason =
   | 'event_overflow'
   | 'native_unavailable'
   | 'native_unknown';
+
+type RuntimeIssue = 'unknown' | 'unavailable' | 'timeout' | 'rejected';
 
 export function isSessionView(value: unknown): value is SessionView {
   return decodeSessionView(value) !== null;
@@ -215,6 +248,10 @@ function isChange(value: unknown, outerRunId: string | undefined): boolean {
       if (!hasExactKeys(value, ['kind', 'runtime']) || !isRuntime(value.runtime)) return false;
       changeRunId = value.runtime.activeRunId ?? undefined;
       break;
+    case 'runtimeNoticeUpdated':
+      if (!hasExactKeys(value, ['kind', 'notice']) || !isRuntimeNotice(value.notice)) return false;
+      changeRunId = value.notice.runId;
+      break;
     case 'windowChanged':
       return hasExactKeys(value, ['kind', 'window']) && isWindow(value.window);
     case 'recoveryRequired':
@@ -319,7 +356,7 @@ function isContent(value: unknown): boolean {
 
 function isTool(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'isError'])
+    && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'details', 'isError'])
     && isId(value.toolCallId)
     && isNullableId(value.runId)
     && isNullableId(value.name)
@@ -328,6 +365,7 @@ function isTool(value: unknown): boolean {
     && isNullableText(value.inputText)
     && isNullableText(value.summary)
     && (value.output === null || isPayloadValue(value.output))
+    && (value.details === null || isPayloadValue(value.details))
     && (value.isError === null || typeof value.isError === 'boolean');
 }
 
@@ -342,12 +380,39 @@ function isApproval(value: unknown): boolean {
     && value.optionIds.every(isId);
 }
 
+function isRuntimeNotice(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['runId', 'kind', 'command', 'riskLevel', 'rationale', 'message'])
+    && isId(value.runId)
+    && (value.kind === 'guardian_reviewing'
+      || value.kind === 'guardian_approved'
+      || value.kind === 'guardian_denied'
+      || value.kind === 'guardian_warning'
+      || value.kind === 'guardian_strict_review_required')
+    && isNullableShortText(value.command)
+    && isNullableShortText(value.riskLevel)
+    && isNullableShortText(value.rationale)
+    && isNullableShortText(value.message);
+}
+
 function isRuntime(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['phase', 'activeRunId', 'issue'])
+    && hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runtimeActivity', 'errorDetail'])
     && isRunPhase(value.phase)
     && isNullableId(value.activeRunId)
-    && (value.issue === null || isRuntimeIssue(value.issue));
+    && (value.issue === null || isRuntimeIssue(value.issue))
+    && (value.runtimeActivity === null || value.runtimeActivity === 'compacting')
+    && (value.errorDetail === null || isRuntimeErrorDetail(value.errorDetail));
+}
+
+function isRuntimeErrorDetail(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+    && isNullableShortText(value.failoverReason)
+    && isNullableShortText(value.providerRuntimeFailureKind)
+    && isNullableShortText(value.providerErrorType)
+    && isNullableShortText(value.providerErrorMessagePreview)
+    && (value.httpStatus === null || (isSafeNonNegativeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599));
 }
 
 function isWindow(value: unknown): boolean {
@@ -464,6 +529,10 @@ function isText(value: unknown): value is string {
 
 function isNullableText(value: unknown): boolean {
   return value === null || isText(value);
+}
+
+function isNullableShortText(value: unknown): boolean {
+  return value === null || (typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= 300 && !value.includes('\0'));
 }
 
 function isPayloadValue(value: unknown): boolean {

@@ -51,6 +51,7 @@ export interface CronJob {
   name: string;
   agentId: string;
   message: string;
+  model?: string;
   schedule: string | CronSchedule;
   delivery?: CronJobDelivery;
   target?: CronJobTarget;
@@ -69,7 +70,8 @@ export interface CronJobCreateInput {
   name: string;
   agentId?: string;
   message: string;
-  schedule: string;
+  model?: string | null;
+  schedule: string | CronSchedule;
   delivery?: CronJobDelivery;
   enabled?: boolean;
 }
@@ -81,7 +83,9 @@ export interface CronJobUpdateInput {
   name?: string;
   agentId?: string;
   message?: string;
-  schedule?: string;
+  /** Omit to keep the override; null restores the agent's model policy. */
+  model?: string | null;
+  schedule?: string | CronSchedule;
   delivery?: CronJobDelivery;
   enabled?: boolean;
 }
@@ -89,4 +93,4 @@ export interface CronJobUpdateInput {
 /**
  * Schedule type for UI picker
  */
-export type ScheduleType = 'daily' | 'weekly' | 'monthly' | 'interval' | 'custom';
+export type ScheduleType = 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'custom';

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { SessionRecord, WorkerRuntimeState } from '../protocol/types.js'
+import { isNativeSessionId, nativeSessionIdErrorMessage } from './sessionId.js'
 
 export type SessionRegistryOptions = {
   createSessionId?: () => string
@@ -20,6 +21,7 @@ export type SessionCreateInput = {
 
 export type SessionCreateResult =
   | { resultType: 'created'; session: SessionRecord }
+  | { resultType: 'invalidSessionId'; sessionId: string; message: string }
   | { resultType: 'sessionAlreadyExists'; sessionId: string }
   | {
       resultType: 'workspaceUnavailable'
@@ -104,6 +106,13 @@ export class SessionRegistry {
 
   async create(input: SessionCreateInput): Promise<SessionCreateResult> {
     const sessionId = input.sessionId ?? this.createSessionId()
+    if (!isNativeSessionId(sessionId)) {
+      return {
+        resultType: 'invalidSessionId',
+        sessionId,
+        message: nativeSessionIdErrorMessage('sessionId'),
+      }
+    }
     if (this.sessions.has(sessionId)) {
       return { resultType: 'sessionAlreadyExists', sessionId }
     }

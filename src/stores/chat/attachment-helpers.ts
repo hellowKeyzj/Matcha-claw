@@ -88,6 +88,7 @@ function normalizeAttachedFiles(files: ReadonlyArray<SessionRenderAttachedFile>)
     ...(file.filePath ? { filePath: file.filePath } : {}),
     ...(file.gatewayUrl ? { gatewayUrl: file.gatewayUrl } : {}),
     ...(file.previewStatus ? { previewStatus: file.previewStatus } : {}),
+    ...(file.attachmentStatus ? { attachmentStatus: file.attachmentStatus } : {}),
   }));
 }
 
@@ -104,7 +105,10 @@ function getAttachmentRefKey(file: { filePath?: string; gatewayUrl?: string }): 
 function buildAttachedFileFromRef(ref: { filePath: string; mimeType: string }): AttachedFileMeta {
   const cached = imageCache.get(ref.filePath);
   if (cached) {
-    return { ...cached, filePath: ref.filePath };
+    return {
+      ...cached,
+      filePath: cached.source === 'user-upload' && cached.filePath ? cached.filePath : ref.filePath,
+    };
   }
   return {
     fileName: ref.filePath.split(/[\\/]/).pop() || 'file',
@@ -139,6 +143,7 @@ function areAttachedFilesEquivalent(
       || a.fileSize !== b.fileSize
       || a.preview !== b.preview
       || a.previewStatus !== b.previewStatus
+      || a.attachmentStatus !== b.attachmentStatus
       || a.filePath !== b.filePath
       || a.gatewayUrl !== b.gatewayUrl
       || a.source !== b.source
@@ -192,6 +197,7 @@ function hydrateFileFromCache(file: AttachedFileMeta): AttachedFileMeta {
     fileName: file.fileName || cached.fileName,
     mimeType: file.mimeType || cached.mimeType,
     source: file.source ?? cached.source,
+    ...(cached.source === 'user-upload' && cached.filePath ? { filePath: cached.filePath } : {}),
   } satisfies AttachedFileMeta;
 }
 
@@ -677,6 +683,7 @@ export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {
       mimeType: attachment.mimeType,
       fileSize: attachment.fileSize,
       preview: attachment.preview,
+      ...(attachment.sourcePath ? { filePath: attachment.sourcePath } : {}),
       source: 'user-upload',
     });
   }

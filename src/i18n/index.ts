@@ -14,7 +14,6 @@ import enChat from './locales/en/chat.json';
 import enChannels from './locales/en/channels.json';
 import enSkills from './locales/en/skills.json';
 import enCron from './locales/en/cron.json';
-import enSetup from './locales/en/setup.json';
 import enSubagents from './locales/en/subagents.json';
 import enSubagentTemplates from './locales/en/subagent-templates.json';
 import enTeams from './locales/en/teams.json';
@@ -30,7 +29,6 @@ import zhChat from './locales/zh/chat.json';
 import zhChannels from './locales/zh/channels.json';
 import zhSkills from './locales/zh/skills.json';
 import zhCron from './locales/zh/cron.json';
-import zhSetup from './locales/zh/setup.json';
 import zhSubagents from './locales/zh/subagents.json';
 import zhSubagentTemplates from './locales/zh/subagent-templates.json';
 import zhTeams from './locales/zh/teams.json';
@@ -46,7 +44,6 @@ import jaChat from './locales/ja/chat.json';
 import jaChannels from './locales/ja/channels.json';
 import jaSkills from './locales/ja/skills.json';
 import jaCron from './locales/ja/cron.json';
-import jaSetup from './locales/ja/setup.json';
 import jaSubagents from './locales/ja/subagents.json';
 import jaSubagentTemplates from './locales/ja/subagent-templates.json';
 import jaTeams from './locales/ja/teams.json';
@@ -62,7 +59,6 @@ import ruChat from './locales/ru/chat.json';
 import ruChannels from './locales/ru/channels.json';
 import ruSkills from './locales/ru/skills.json';
 import ruCron from './locales/ru/cron.json';
-import ruSetup from './locales/ru/setup.json';
 import ruSubagents from './locales/ru/subagents.json';
 import ruSubagentTemplates from './locales/ru/subagent-templates.json';
 import ruTeams from './locales/ru/teams.json';
@@ -88,7 +84,6 @@ const resources = {
         channels: enChannels,
         skills: enSkills,
         cron: enCron,
-        setup: enSetup,
         subagents: enSubagents,
         subagentTemplates: enSubagentTemplates,
         teams: enTeams,
@@ -104,7 +99,6 @@ const resources = {
         channels: zhChannels,
         skills: zhSkills,
         cron: zhCron,
-        setup: zhSetup,
         subagents: zhSubagents,
         subagentTemplates: zhSubagentTemplates,
         teams: zhTeams,
@@ -120,7 +114,6 @@ const resources = {
         channels: jaChannels,
         skills: jaSkills,
         cron: jaCron,
-        setup: jaSetup,
         subagents: jaSubagents,
         subagentTemplates: jaSubagentTemplates,
         teams: jaTeams,
@@ -136,7 +129,6 @@ const resources = {
         channels: ruChannels,
         skills: ruSkills,
         cron: ruCron,
-        setup: ruSetup,
         subagents: ruSubagents,
         subagentTemplates: ruSubagentTemplates,
         teams: ruTeams,
@@ -154,7 +146,7 @@ i18n
         fallbackLng: 'en',
         supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

@@ -6,6 +6,8 @@ import { runStartupAudit } from "./auditor.js";
 
 const ADVISORY_FEED_URL = "https://adversa-ai.github.io/secureclaw-advisories/feed.json";
 const COGNITIVE_FILES = ["SOUL.md", "IDENTITY.md", "TOOLS.md", "AGENTS.md", "SECURITY.md", "MEMORY.md"];
+const GATEWAY_BIND_ACTION_ID = "harden.gateway.bind.loopback";
+const GATEWAY_AUTH_ACTION_ID = "harden.gateway.auth.token";
 
 const SKILL_SCAN_PATTERNS: Array<{ id: string; severity: "CRITICAL" | "HIGH" | "MEDIUM"; regex: RegExp; message: string }> = [
   { id: "rce", severity: "CRITICAL", regex: /curl.*\|.*(?:sh|bash|python)|wget.*\|.*(?:sh|bash)/i, message: "Remote code execution pattern" },
@@ -43,11 +45,41 @@ type RemediationAction = {
   risk: "critical" | "high" | "medium" | "low";
 };
 
+type GatewayOperatorScope =
+  | "operator.admin"
+  | "operator.read"
+  | "operator.write"
+  | "operator.approvals"
+  | "operator.questions"
+  | "operator.pairing"
+  | "operator.talk"
+  | "operator.talk.secrets";
+
+type ConfigGateway = {
+  isAvailable?: () => Promise<boolean>;
+  request<T = unknown>(
+    method: string,
+    params?: Record<string, unknown>,
+    options?: { timeoutMs?: number; scopes?: GatewayOperatorScope[] },
+  ): Promise<T>;
+};
+
+export type RemediationRuntime = {
+  configGateway?: ConfigGateway;
+  loadConfig?: () => Promise<Record<string, unknown>>;
+};
+
+type ConfigRollbackPatch = {
+  actionId: string;
+  patch: Record<string, unknown>;
+};
+
 type SnapshotPayload = {
   id: string;
   ts: number;
   actions: string[];
   files: Record<string, string | null>;
+  configPatches?: ConfigRollbackPatch[];
 };
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -90,6 +122,153 @@ async function readJsonSafe<T>(filePath: string, fallback: T): Promise<T> {
 async function writeJson(filePath: string, payload: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+async function isConfigGatewayAvailable(gateway: ConfigGateway): Promise<boolean> {
+  return gateway.isAvailable ? await gateway.isAvailable() : true;
+}
+
+async function requireConfigGateway(gateway: ConfigGateway | undefined): Promise<ConfigGateway> {
+  if (!gateway || !await isConfigGatewayAvailable(gateway)) {
+    throw new Error("OpenClaw config gateway unavailable");
+  }
+  return gateway;
+}
+
+async function readGatewayConfigSnapshot(gateway: ConfigGateway): Promise<Record<string, unknown>> {
+  const snapshot = await gateway.request("config.get", {}, { scopes: ["operator.admin"] });
+  if (!isRecord(snapshot)) {
+    throw new Error("config.get returned invalid response");
+  }
+  return snapshot;
+}
+
+function readGatewayConfig(snapshot: Record<string, unknown>): Record<string, unknown> {
+  const config = asRecord(snapshot.sourceConfig) ?? asRecord(snapshot.config) ?? asRecord(snapshot.runtimeConfig);
+  if (!config) {
+    throw new Error("config.get returned invalid config");
+  }
+  return config;
+}
+
+function readGatewayBaseHash(snapshot: Record<string, unknown>): string {
+  const hash = snapshot.hash;
+  if (!hasNonEmptyString(hash)) {
+    throw new Error("config base hash unavailable; re-run config.get and retry");
+  }
+  return hash;
+}
+
+async function readGatewayConfigForPreview(gateway: ConfigGateway | undefined): Promise<Record<string, unknown> | null> {
+  if (!gateway || !await isConfigGatewayAvailable(gateway)) {
+    return null;
+  }
+  try {
+    return readGatewayConfig(await readGatewayConfigSnapshot(gateway));
+  } catch {
+    return null;
+  }
+}
+
+async function readRemediationConfig(
+  stateDir: string,
+  runtime?: RemediationRuntime,
+): Promise<Record<string, unknown>> {
+  const gatewayConfig = await readGatewayConfigForPreview(runtime?.configGateway);
+  if (gatewayConfig) {
+    return gatewayConfig;
+  }
+  if (runtime?.loadConfig) {
+    try {
+      const config = await runtime.loadConfig();
+      if (isRecord(config)) {
+        return config;
+      }
+    } catch {
+      // fall through to file read for preview only
+    }
+  }
+  const configPath = await resolveConfigPath(stateDir);
+  return await readJsonSafe<Record<string, unknown>>(configPath, {});
+}
+
+async function writeGatewayConfigPatch(
+  gateway: ConfigGateway,
+  snapshot: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await gateway.request("config.patch", {
+    raw: JSON.stringify(patch),
+    baseHash: readGatewayBaseHash(snapshot),
+  }, { scopes: ["operator.admin"] });
+}
+
+function isGatewayRemediationAction(actionId: string): boolean {
+  return actionId === GATEWAY_BIND_ACTION_ID || actionId === GATEWAY_AUTH_ACTION_ID;
+}
+
+function gatewayBindRollbackPatch(gatewayConfig: Record<string, unknown>): Record<string, unknown> {
+  return { gateway: { bind: typeof gatewayConfig.bind === "string" ? gatewayConfig.bind : null } };
+}
+
+function gatewayAuthPatch(auth: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (hasNonEmptyString(auth?.token)) {
+    return { mode: "token" };
+  }
+  return { mode: "token", token: randomBytes(24).toString("hex") };
+}
+
+function gatewayAuthRollbackPatch(auth: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!auth) {
+    return { gateway: { auth: null } };
+  }
+  const rollbackAuth: Record<string, unknown> = {
+    mode: typeof auth.mode === "string" ? auth.mode : null,
+  };
+  if (!hasNonEmptyString(auth.token)) {
+    rollbackAuth.token = null;
+  }
+  return { gateway: { auth: rollbackAuth } };
+}
+
+async function applyGatewayRemediationActions(
+  actionIds: string[],
+  configGateway: ConfigGateway | undefined,
+): Promise<ConfigRollbackPatch[]> {
+  const gateway = await requireConfigGateway(configGateway);
+  const snapshot = await readGatewayConfigSnapshot(gateway);
+  const config = readGatewayConfig(snapshot);
+  const gatewayConfig = asRecord(config.gateway) ?? {};
+  const auth = asRecord(gatewayConfig.auth);
+  const patchGateway: Record<string, unknown> = {};
+  const rollbackPatches: ConfigRollbackPatch[] = [];
+
+  if (actionIds.includes(GATEWAY_BIND_ACTION_ID)) {
+    patchGateway.bind = "loopback";
+    rollbackPatches.push({ actionId: GATEWAY_BIND_ACTION_ID, patch: gatewayBindRollbackPatch(gatewayConfig) });
+  }
+  if (actionIds.includes(GATEWAY_AUTH_ACTION_ID)) {
+    patchGateway.auth = gatewayAuthPatch(auth);
+    rollbackPatches.push({ actionId: GATEWAY_AUTH_ACTION_ID, patch: gatewayAuthRollbackPatch(auth) });
+  }
+
+  if (Object.keys(patchGateway).length === 0) {
+    return [];
+  }
+  await writeGatewayConfigPatch(gateway, snapshot, { gateway: patchGateway });
+  return rollbackPatches;
 }
 
 function hashContent(content: string): string {
@@ -435,28 +614,30 @@ async function readSoulFile(stateDir: string): Promise<{ path: string; content: 
   return { path: filePath, content };
 }
 
-export async function remediationPreview(stateDir: string): Promise<{ actions: RemediationAction[] }> {
+export async function remediationPreview(
+  stateDir: string,
+  runtime?: RemediationRuntime,
+): Promise<{ actions: RemediationAction[] }> {
   const actions: RemediationAction[] = [];
-  const configPath = await resolveConfigPath(stateDir);
-  const config = await readJsonSafe<Record<string, unknown>>(configPath, {});
-  const gateway = (config.gateway as Record<string, unknown> | undefined) ?? {};
+  const config = await readRemediationConfig(stateDir, runtime);
+  const gateway = asRecord(config.gateway) ?? {};
   const bind = typeof gateway.bind === "string" ? gateway.bind : "";
   if (bind !== "loopback" && bind !== "127.0.0.1" && bind !== "localhost") {
     actions.push({
-      id: "harden.gateway.bind.loopback",
+      id: GATEWAY_BIND_ACTION_ID,
       title: "限制网关绑定到本地环回",
       description: "将 gateway.bind 设为 loopback，降低外网暴露风险。",
       risk: "critical",
     });
   }
 
-  const auth = (gateway.auth as Record<string, unknown> | undefined) ?? {};
+  const auth = asRecord(gateway.auth) ?? {};
   const mode = typeof auth.mode === "string" ? auth.mode : "";
   const token = typeof auth.token === "string" ? auth.token : "";
   const password = typeof auth.password === "string" ? auth.password : "";
   if ((mode !== "token" && mode !== "password") || (!token && !password)) {
     actions.push({
-      id: "harden.gateway.auth.token",
+      id: GATEWAY_AUTH_ACTION_ID,
       title: "启用网关认证令牌",
       description: "设置 gateway.auth.mode=token 并生成强随机 token。",
       risk: "critical",
@@ -539,13 +720,14 @@ async function captureFileSnapshot(stateDir: string, snapshot: SnapshotPayload, 
 export async function remediationApply(
   stateDir: string,
   selectedActionIds?: string[],
+  runtime?: RemediationRuntime,
 ): Promise<{
   snapshotId: string;
   applied: string[];
   skipped: string[];
   snapshotPath: string;
 }> {
-  const preview = await remediationPreview(stateDir);
+  const preview = await remediationPreview(stateDir, runtime);
   const selected = Array.isArray(selectedActionIds) && selectedActionIds.length > 0
     ? selectedActionIds
     : preview.actions.map((item) => item.id);
@@ -558,29 +740,23 @@ export async function remediationApply(
     actions: [],
     files: {},
   };
+  const gatewayActionIds = [...new Set(selected.filter((actionId) => previewMap.has(actionId) && isGatewayRemediationAction(actionId)))];
+  const appliedGatewayActionIds = new Set(gatewayActionIds);
+  if (gatewayActionIds.length > 0) {
+    const rollbackPatches = await applyGatewayRemediationActions(gatewayActionIds, runtime?.configGateway);
+    snapshot.configPatches = rollbackPatches;
+    for (const actionId of gatewayActionIds) {
+      applied.push(actionId);
+      snapshot.actions.push(actionId);
+    }
+  }
 
   for (const actionId of selected) {
     if (!previewMap.has(actionId)) {
       skipped.push(actionId);
       continue;
     }
-    if (actionId === "harden.gateway.bind.loopback" || actionId === "harden.gateway.auth.token") {
-      const configPath = await resolveConfigPath(stateDir);
-      await captureFileSnapshot(stateDir, snapshot, configPath);
-      const config = await readJsonSafe<Record<string, unknown>>(configPath, {});
-      const gateway = (config.gateway as Record<string, unknown> | undefined) ?? {};
-      const auth = (gateway.auth as Record<string, unknown> | undefined) ?? {};
-      if (actionId === "harden.gateway.bind.loopback") {
-        gateway.bind = "loopback";
-      } else {
-        auth.mode = "token";
-        auth.token = randomBytes(24).toString("hex");
-        gateway.auth = auth;
-      }
-      config.gateway = gateway;
-      await writeJson(configPath, config);
-      applied.push(actionId);
-      snapshot.actions.push(actionId);
+    if (appliedGatewayActionIds.has(actionId)) {
       continue;
     }
 
@@ -638,9 +814,15 @@ export async function remediationApply(
   };
 }
 
+function isOpenClawConfigSnapshotPath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, "/");
+  return normalized === "openclaw.json" || normalized === "moltbot.json" || normalized === "clawdbot.json";
+}
+
 export async function remediationRollback(
   stateDir: string,
   snapshotId?: string,
+  runtime?: RemediationRuntime,
 ): Promise<{
   restored: number;
   snapshotId: string | null;
@@ -652,7 +834,18 @@ export async function remediationRollback(
     return { restored: 0, snapshotId: null };
   }
   let restored = 0;
+  const configPatches = [...(snapshot.configPatches ?? [])].reverse();
+  if (configPatches.length > 0) {
+    const gateway = await requireConfigGateway(runtime?.configGateway);
+    for (const configPatch of configPatches) {
+      await writeGatewayConfigPatch(gateway, await readGatewayConfigSnapshot(gateway), configPatch.patch);
+      restored += 1;
+    }
+  }
   for (const [relPath, content] of Object.entries(snapshot.files)) {
+    if (isOpenClawConfigSnapshotPath(relPath)) {
+      continue;
+    }
     const fullPath = path.join(stateDir, relPath);
     if (content == null) {
       await rm(fullPath, { force: true });

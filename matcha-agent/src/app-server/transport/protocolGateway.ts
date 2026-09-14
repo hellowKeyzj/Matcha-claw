@@ -9,6 +9,10 @@ import {
   parseJsonRpcMessage,
 } from '../protocol/jsonRpc.js'
 import { logProcessSessionTrace } from '../../query/runTrace.js'
+import {
+  isNativeSessionId,
+  nativeSessionIdErrorMessage,
+} from '../sessions/sessionId.js'
 import type {
   ApprovalRespondParams,
   EventsReplayParams,
@@ -291,7 +295,7 @@ function parseSessionCreateParams(
 
   const cwd = requiredString(parsed.params, 'cwd')
   if (cwd.resultType === 'invalidParams') return cwd
-  const sessionId = optionalString(parsed.params, 'sessionId')
+  const sessionId = optionalNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const title = optionalString(parsed.params, 'title')
   if (title.resultType === 'invalidParams') return title
@@ -352,7 +356,7 @@ function parseSessionPromptParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const prompt = requiredString(parsed.params, 'prompt')
   if (prompt.resultType === 'invalidParams') return prompt
@@ -378,7 +382,7 @@ function parseSessionCancelParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const runId = optionalString(parsed.params, 'runId')
   if (runId.resultType === 'invalidParams') return runId
@@ -401,7 +405,7 @@ function parseEventsReplayParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const afterSeq = optionalFiniteNumber(parsed.params, 'afterSeq')
   if (afterSeq.resultType === 'invalidParams') return afterSeq
@@ -424,7 +428,7 @@ function parseEventsSubscribeParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const afterSeq = optionalFiniteNumber(parsed.params, 'afterSeq')
   if (afterSeq.resultType === 'invalidParams') return afterSeq
@@ -444,7 +448,7 @@ function parseApprovalRespondParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const approvalId = requiredString(parsed.params, 'approvalId')
   if (approvalId.resultType === 'invalidParams') return approvalId
@@ -470,7 +474,7 @@ function parseModelsListParams(
   const parsed = requireOptionalObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = optionalString(parsed.params, 'sessionId')
+  const sessionId = optionalNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
 
   return {
@@ -487,7 +491,7 @@ function parseSessionSetModelParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const model = requiredString(parsed.params, 'model')
   if (model.resultType === 'invalidParams') return model
@@ -533,7 +537,7 @@ function parseSessionSetModeParams(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
   const mode = requiredString(parsed.params, 'mode')
   if (mode.resultType === 'invalidParams') return mode
@@ -550,7 +554,7 @@ function parseSessionIdOnlyParams<TParams extends { sessionId: string }>(
   const parsed = requireObjectParams(params)
   if (parsed.resultType === 'invalidParams') return parsed
 
-  const sessionId = requiredString(parsed.params, 'sessionId')
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
   if (sessionId.resultType === 'invalidParams') return sessionId
 
   return {
@@ -606,6 +610,21 @@ function optionalString(
   return { resultType: 'success', value }
 }
 
+function requiredNativeSessionId(
+  params: Record<string, unknown>,
+  key: string,
+): ScalarParseResult<string> {
+  const value = requiredString(params, key)
+  if (value.resultType === 'invalidParams') return value
+  if (!isNativeSessionId(value.value)) {
+    return {
+      resultType: 'invalidParams',
+      message: nativeSessionIdErrorMessage(key),
+    }
+  }
+  return value
+}
+
 function optionalNonEmptyString(
   params: Record<string, unknown>,
   key: string,
@@ -618,6 +637,23 @@ function optionalNonEmptyString(
     return {
       resultType: 'invalidParams',
       message: `${key} must be a non-empty string`,
+    }
+  }
+  return value
+}
+
+function optionalNativeSessionId(
+  params: Record<string, unknown>,
+  key: string,
+): ScalarParseResult<string | undefined> {
+  const value = optionalString(params, key)
+  if (value.resultType === 'invalidParams' || value.value === undefined) {
+    return value
+  }
+  if (!isNativeSessionId(value.value)) {
+    return {
+      resultType: 'invalidParams',
+      message: nativeSessionIdErrorMessage(key),
     }
   }
   return value

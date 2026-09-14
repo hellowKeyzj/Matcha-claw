@@ -35,7 +35,24 @@ pub enum ProviderModelProjectionError {
     AccountConfiguration,
     CredentialUnavailable,
     DuplicateProviderKey,
+    InvalidModelCapability,
+    InvalidModelIdentifier,
+    InvalidTokenLimit,
     Persistence,
+}
+
+impl ProviderModelProjectionError {
+    pub const fn diagnostic_reason(self) -> &'static str {
+        match self {
+            Self::AccountConfiguration => "provider-account-configuration-invalid",
+            Self::CredentialUnavailable => "provider-credential-unavailable",
+            Self::DuplicateProviderKey => "provider-key-duplicate",
+            Self::InvalidModelCapability => "provider-model-capability-invalid",
+            Self::InvalidModelIdentifier => "provider-model-identifier-invalid",
+            Self::InvalidTokenLimit => "provider-model-token-limit-invalid",
+            Self::Persistence => "provider-model-persistence-failed",
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderModelProjectionError {
@@ -44,6 +61,9 @@ impl std::fmt::Display for ProviderModelProjectionError {
             Self::AccountConfiguration => "OpenClaw provider account configuration is unavailable",
             Self::CredentialUnavailable => "OpenClaw provider credential is unavailable",
             Self::DuplicateProviderKey => "OpenClaw provider configuration is ambiguous",
+            Self::InvalidModelCapability => "OpenClaw provider model capability is invalid",
+            Self::InvalidModelIdentifier => "OpenClaw provider model identifier is invalid",
+            Self::InvalidTokenLimit => "OpenClaw provider model token limit is invalid",
             Self::Persistence => "OpenClaw provider-model configuration persistence failed",
         })
     }
@@ -83,7 +103,7 @@ pub fn public_provider_model_identities(
         .filter(|account| account.configuration().enabled())
         .map(|account| (account.id().as_str().to_owned(), account))
         .collect::<BTreeMap<_, _>>();
-    projection_keys(&enabled)?
+    projection_keys(&enabled, true)?
         .into_iter()
         .map(|(account_id, provider_key)| {
             Ok((account_id, ProviderModelRuntimeIdentity { provider_key }))
@@ -96,7 +116,7 @@ pub fn public_provider_model_identity(
 ) -> Result<ProviderModelRuntimeIdentity, ProviderModelProjectionError> {
     let account_id = account.id().as_str().to_owned();
     let accounts = BTreeMap::from([(account_id.clone(), account)]);
-    let provider_key = projection_keys(&accounts)?
+    let provider_key = projection_keys(&accounts, true)?
         .remove(&account_id)
         .ok_or(ProviderModelProjectionError::AccountConfiguration)?;
     Ok(ProviderModelRuntimeIdentity { provider_key })
@@ -117,10 +137,10 @@ pub(crate) fn canonical_provider_keys(
     for account in retired {
         all.insert(account.id().as_str().to_owned(), account);
     }
-    let mut keys = projection_keys(&active)?
+    let mut keys = projection_keys(&active, true)?
         .into_values()
         .collect::<BTreeSet<_>>();
-    keys.extend(projection_keys(&all)?.into_values());
+    keys.extend(projection_keys(&all, false)?.into_values());
     Ok(keys)
 }
 
@@ -211,12 +231,14 @@ struct ProjectionPlan<'a> {
     accounts: BTreeMap<String, &'a ProviderAccount>,
     keys: BTreeMap<String, ProviderKey>,
     removed_transport: Vec<ProviderKey>,
+    provider_plugins: BTreeMap<&'static str, bool>,
     text: Vec<agent_models::ProviderModels>,
     empty_text: Vec<agent_models::ProviderId>,
     empty_transport: Vec<ProviderKey>,
     media: media_models::MediaProviderCatalog,
     model_allowlist_providers: BTreeSet<String>,
     valid_model_references: BTreeSet<String>,
+    has_custom_chat_models: bool,
 }
 
 impl<'a> ProjectionPlan<'a> {
@@ -232,7 +254,7 @@ impl<'a> ProjectionPlan<'a> {
         {
             all_accounts.insert(account.id().as_str().to_owned(), account);
         }
-        let keys = projection_keys(&all_accounts)?;
+        let keys = projection_keys(&all_accounts, true)?;
         let accounts = all_accounts.clone();
         let keys = keys
             .into_iter()
@@ -243,6 +265,16 @@ impl<'a> ProjectionPlan<'a> {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let removed_transport = retired_transport(&all_accounts, retired)?;
+        let mut provider_plugins = retired
+            .iter()
+            .filter_map(|account| native_provider_plugin(account.provider().as_str()))
+            .map(|plugin| (plugin, false))
+            .collect::<BTreeMap<_, _>>();
+        for account in all_accounts.values() {
+            if let Some(plugin) = native_provider_plugin(account.provider().as_str()) {
+                provider_plugins.insert(plugin, true);
+            }
+        }
 
         let mut text = Vec::new();
         let mut empty_text = Vec::new();
@@ -250,6 +282,7 @@ impl<'a> ProjectionPlan<'a> {
         let mut media = Vec::new();
         let mut model_allowlist_providers = BTreeSet::new();
         let mut valid_model_references = BTreeSet::new();
+        let mut has_custom_chat_models = false;
         for (account_id, account) in &all_accounts {
             let key = keys
                 .get(account_id)
@@ -277,7 +310,10 @@ impl<'a> ProjectionPlan<'a> {
             }
             match account.configuration().kind() {
                 ProviderAccountKind::Chat => {
-                    let (provider, projected_models) = text_models(key.as_str(), &models)?;
+                    let custom_provider = account.provider().as_str() == "provider:custom";
+                    let context = TextModelProjectionContext { custom_provider };
+                    let (provider, projected_models) = text_models(key.as_str(), &models, context)?;
+                    has_custom_chat_models |= custom_provider;
                     model_allowlist_providers.insert(key.as_str().to_owned());
                     for model in &models {
                         valid_model_references.insert(format!(
@@ -286,10 +322,17 @@ impl<'a> ProjectionPlan<'a> {
                             model.model_id()
                         ));
                     }
-                    text.push(
-                        agent_models::ProviderModels::try_new(provider, projected_models)
-                            .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
-                    );
+                    if matches!(
+                        account.provider().as_str(),
+                        "provider:opencode" | "provider:opencode-go"
+                    ) {
+                        empty_text.push(provider);
+                    } else {
+                        text.push(
+                            agent_models::ProviderModels::try_new(provider, projected_models)
+                                .map_err(provider_model_error_from_agent_model)?,
+                        );
+                    }
                 }
                 ProviderAccountKind::Media => {
                     let provider = media_models(account, key.as_str(), &models)?;
@@ -309,13 +352,15 @@ impl<'a> ProjectionPlan<'a> {
             accounts,
             keys,
             removed_transport,
+            provider_plugins,
             text,
             empty_text,
             empty_transport,
             media: media_models::MediaProviderCatalog::try_new(media)
-                .map_err(|_| ProviderModelProjectionError::DuplicateProviderKey)?,
+                .map_err(provider_model_error_from_media_catalog)?,
             model_allowlist_providers,
             valid_model_references,
+            has_custom_chat_models,
         })
     }
 
@@ -327,9 +372,15 @@ impl<'a> ProjectionPlan<'a> {
                 .get(account_id)
                 .expect("every projected account receives a provider key");
             changed |= apply_transport(account, key, document);
+            changed |= apply_native_runtime(account, key, document);
+            changed |= apply_keyless_auth_profile(account, key, document);
+        }
+        for (&plugin, &enabled) in &self.provider_plugins {
+            changed |= set_provider_plugin_enabled(plugin, enabled, document);
         }
         for provider in &self.removed_transport {
             changed |= ProviderProjection::remove_from_document(provider, document);
+            changed |= remove_keyless_auth_profile(provider, document);
         }
         for models in &self.text {
             changed |= models.apply_to_document(document);
@@ -339,6 +390,7 @@ impl<'a> ProjectionPlan<'a> {
         }
         for provider in &self.empty_transport {
             changed |= ProviderProjection::remove_from_document(provider, document);
+            changed |= remove_keyless_auth_profile(provider, document);
         }
         changed |= self.media.apply_to_document(document);
         changed |= apply_model_allowlist(
@@ -346,6 +398,9 @@ impl<'a> ProjectionPlan<'a> {
             &self.model_allowlist_providers,
             &self.valid_model_references,
         );
+        if self.has_custom_chat_models {
+            changed |= apply_compaction_safeguard_default(document);
+        }
         changed | prune_unknown_model_references(document, &self.valid_model_references)
     }
 }
@@ -355,6 +410,84 @@ fn object(value: Option<&Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+fn apply_keyless_auth_profile(
+    account: &ProviderAccount,
+    key: &ProviderKey,
+    document: &mut OpenClawConfigDocument,
+) -> bool {
+    let Some(mode) = keyless_auth_mode(account) else {
+        return remove_keyless_auth_profile(key, document);
+    };
+    let profile_id = keyless_auth_profile_id(key);
+    let mut auth = object(document.get("auth"));
+    let before = auth.clone();
+    let mut profiles = object(auth.get("profiles"));
+    profiles.insert(
+        profile_id.clone(),
+        Value::Object(Map::from_iter([
+            ("provider".into(), Value::String(key.as_str().to_owned())),
+            ("mode".into(), Value::String(mode.into())),
+        ])),
+    );
+    auth.insert("profiles".into(), Value::Object(profiles));
+    let mut order = object(auth.get("order"));
+    let existing_order = order
+        .get(key.as_str())
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut next_order = Vec::with_capacity(existing_order.len() + 1);
+    next_order.push(Value::String(profile_id.clone()));
+    next_order.extend(
+        existing_order
+            .into_iter()
+            .filter(|profile| profile.as_str() != Some(profile_id.as_str())),
+    );
+    order.insert(key.as_str().to_owned(), Value::Array(next_order));
+    auth.insert("order".into(), Value::Object(order));
+    if auth == before {
+        return false;
+    }
+    document.insert("auth".into(), Value::Object(auth));
+    true
+}
+
+fn keyless_auth_mode(account: &ProviderAccount) -> Option<&'static str> {
+    match account.configuration().auth_mode() {
+        ProviderAccountAuthMode::ApiKey => Some("api_key"),
+        ProviderAccountAuthMode::Token => Some("token"),
+        ProviderAccountAuthMode::OAuthBrowser | ProviderAccountAuthMode::OAuthDevice => {
+            Some("oauth")
+        }
+        ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse => None,
+    }
+}
+
+fn keyless_auth_profile_id(key: &ProviderKey) -> String {
+    format!("{}:default", key.as_str())
+}
+
+fn remove_keyless_auth_profile(key: &ProviderKey, document: &mut OpenClawConfigDocument) -> bool {
+    let Some(Value::Object(mut auth)) = document.get("auth").cloned() else {
+        return false;
+    };
+    let before = auth.clone();
+    let profile_id = keyless_auth_profile_id(key);
+    if let Some(Value::Object(profiles)) = auth.get_mut("profiles") {
+        profiles.remove(&profile_id);
+    }
+    if let Some(Value::Object(order)) = auth.get_mut("order") {
+        if let Some(Value::Array(profiles)) = order.get_mut(key.as_str()) {
+            profiles.retain(|profile| profile.as_str() != Some(profile_id.as_str()));
+        }
+    }
+    if auth == before {
+        return false;
+    }
+    document.insert("auth".into(), Value::Object(auth));
+    true
 }
 
 fn apply_model_allowlist(
@@ -405,6 +538,12 @@ fn apply_transport(
     if !matches!(configuration.kind(), ProviderAccountKind::Chat) {
         return false;
     }
+    if matches!(
+        account.provider().as_str(),
+        "provider:opencode" | "provider:opencode-go"
+    ) {
+        return ProviderProjection::remove_from_document(key, document);
+    }
     let Some(protocol) = provider_protocol(account) else {
         return false;
     };
@@ -421,15 +560,106 @@ fn apply_transport(
     .apply_to_document(document)
 }
 
+fn apply_native_runtime(
+    account: &ProviderAccount,
+    key: &ProviderKey,
+    document: &mut OpenClawConfigDocument,
+) -> bool {
+    if account.provider().as_str() != "provider:anthropic" {
+        return false;
+    }
+    let mut models = object(document.get("models"));
+    let mut providers = object(models.get("providers"));
+    let mut entry = object(providers.get(key.as_str()));
+    let before = entry.clone();
+    if account.configuration().auth_mode() == ProviderAccountAuthMode::CliReuse {
+        entry.insert(
+            "agentRuntime".into(),
+            serde_json::json!({ "id": "claude-cli" }),
+        );
+    } else if entry
+        .get("agentRuntime")
+        .and_then(|runtime| runtime.get("id"))
+        .and_then(Value::as_str)
+        == Some("claude-cli")
+    {
+        entry.remove("agentRuntime");
+    }
+    if entry == before {
+        return false;
+    }
+    providers.insert(key.as_str().into(), Value::Object(entry));
+    models.insert("providers".into(), Value::Object(providers));
+    document.insert("models".into(), Value::Object(models));
+    true
+}
+
+pub fn native_provider_plugin(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "provider:anthropic" => "anthropic",
+        "provider:qianfan" => "qianfan",
+        "provider:stepfun" => "stepfun",
+        "provider:tencent-tokenhub" | "provider:tencent-tokenplan" => "tencent",
+        "provider:xiaomi" | "provider:xiaomi-token-plan" => "xiaomi",
+        "provider:qwen" | "provider:qwen-token-plan" => "qwen",
+        "provider:kimi" => "kimi",
+        "provider:volcengine-plan" => "volcengine",
+        "provider:opencode" => "opencode",
+        "provider:opencode-go" => "opencode-go",
+        "provider:github-copilot" => "github-copilot",
+        _ => return None,
+    })
+}
+
+fn set_provider_plugin_enabled(
+    plugin: &str,
+    enabled: bool,
+    document: &mut OpenClawConfigDocument,
+) -> bool {
+    let mut plugins = object(document.get("plugins"));
+    let before = plugins.clone();
+    if enabled
+        && plugins
+            .get("deny")
+            .and_then(Value::as_array)
+            .is_some_and(|deny| deny.iter().any(|id| id.as_str() == Some(plugin)))
+    {
+        return false;
+    }
+    let mut entries = object(plugins.get("entries"));
+    let mut entry = object(entries.get(plugin));
+    entry.insert("enabled".into(), Value::Bool(enabled));
+    entries.insert(plugin.into(), Value::Object(entry));
+    plugins.insert("entries".into(), Value::Object(entries));
+    if let Some(Value::Array(allow)) = plugins.get_mut("allow") {
+        if enabled {
+            if !allow.iter().any(|value| value.as_str() == Some(plugin)) {
+                allow.push(Value::String(plugin.into()));
+            }
+        } else {
+            allow.retain(|value| value.as_str() != Some(plugin));
+        }
+    }
+    if plugins == before {
+        return false;
+    }
+    document.insert("plugins".into(), Value::Object(plugins));
+    true
+}
+
 fn provider_protocol(account: &ProviderAccount) -> Option<ProviderProtocol> {
     if matches!(
         account.configuration().auth_mode(),
-        ProviderAccountAuthMode::OAuthBrowser
+        ProviderAccountAuthMode::OAuthBrowser | ProviderAccountAuthMode::OAuthDevice
     ) && account.provider().as_str() == "provider:openai"
     {
         return Some(ProviderProtocol::OpenAiChatGptResponses);
     }
-    match account.configuration().protocol()? {
+    match account
+        .configuration()
+        .protocol()
+        .or_else(|| default_provider_protocol(account.provider().as_str()))?
+    {
         environment::ProviderApiProtocol::AnthropicMessages => {
             Some(ProviderProtocol::AnthropicMessages)
         }
@@ -445,11 +675,44 @@ fn provider_protocol(account: &ProviderAccount) -> Option<ProviderProtocol> {
     }
 }
 
+pub fn default_provider_protocol(provider: &str) -> Option<environment::ProviderApiProtocol> {
+    match provider {
+        "provider:anthropic" | "provider:kimi" => {
+            Some(environment::ProviderApiProtocol::AnthropicMessages)
+        }
+        "provider:google" => Some(environment::ProviderApiProtocol::GoogleGenerativeAi),
+        "provider:openai" | "provider:github-copilot" => {
+            Some(environment::ProviderApiProtocol::OpenAiResponses)
+        }
+        "provider:qianfan"
+        | "provider:stepfun"
+        | "provider:tencent-tokenhub"
+        | "provider:tencent-tokenplan"
+        | "provider:xiaomi"
+        | "provider:xiaomi-token-plan"
+        | "provider:qwen"
+        | "provider:qwen-token-plan"
+        | "provider:volcengine-plan"
+        | "provider:opencode"
+        | "provider:opencode-go"
+        | "provider:ark"
+        | "provider:zai"
+        | "provider:zai-global"
+        | "provider:moonshot"
+        | "provider:moonshot-global"
+        | "provider:siliconflow"
+        | "provider:deepseek"
+        | "provider:openrouter"
+        | "provider:ollama" => Some(environment::ProviderApiProtocol::OpenAiCompletions),
+        _ => None,
+    }
+}
+
 fn provider_endpoint(account: &ProviderAccount) -> Option<ProviderEndpoint> {
     if account.provider().as_str() == "provider:openai"
         && matches!(
             account.configuration().auth_mode(),
-            ProviderAccountAuthMode::OAuthBrowser
+            ProviderAccountAuthMode::OAuthBrowser | ProviderAccountAuthMode::OAuthDevice
         )
     {
         return Some(
@@ -457,9 +720,36 @@ fn provider_endpoint(account: &ProviderAccount) -> Option<ProviderEndpoint> {
                 .expect("OpenAI Codex OAuth endpoint is valid"),
         );
     }
-    account.configuration().endpoint().map(|endpoint| {
-        ProviderEndpoint::try_new(endpoint.as_str().to_owned())
-            .expect("environment endpoint is valid OpenClaw endpoint")
+    account
+        .configuration()
+        .endpoint()
+        .map(|endpoint| endpoint.as_str())
+        .or_else(|| default_provider_endpoint(account.provider().as_str()))
+        .map(|endpoint| {
+            ProviderEndpoint::try_new(endpoint.to_owned())
+                .expect("environment endpoint is valid OpenClaw endpoint")
+        })
+}
+
+pub fn default_provider_endpoint(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "provider:anthropic" => "https://api.anthropic.com",
+        "provider:qianfan" => "https://qianfan.baidubce.com/v2",
+        "provider:stepfun" => "https://api.stepfun.ai/v1",
+        "provider:tencent-tokenhub" => "https://tokenhub.tencentmaas.com/v1",
+        "provider:tencent-tokenplan" => "https://api.lkeap.cloud.tencent.com/plan/v3",
+        "provider:xiaomi" => "https://api.xiaomimimo.com/v1",
+        "provider:xiaomi-token-plan" => "https://token-plan-sgp.xiaomimimo.com/v1",
+        "provider:qwen" => "https://coding-intl.dashscope.aliyuncs.com/v1",
+        "provider:qwen-token-plan" => {
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        }
+        "provider:kimi" => "https://api.kimi.com/coding/",
+        "provider:volcengine-plan" => "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "provider:opencode" => "https://opencode.ai/zen/v1",
+        "provider:opencode-go" => "https://opencode.ai/zen/go/v1",
+        "provider:github-copilot" => "https://api.individual.githubcopilot.com",
+        _ => return None,
     })
 }
 
@@ -481,7 +771,7 @@ fn legacy_transport_keys(account: &ProviderAccount) -> Vec<ProviderKey> {
     if account.provider().as_str() == "provider:openai"
         && matches!(
             account.configuration().auth_mode(),
-            ProviderAccountAuthMode::OAuthBrowser
+            ProviderAccountAuthMode::OAuthBrowser | ProviderAccountAuthMode::OAuthDevice
         )
     {
         vec![ProviderKey::try_new("openai-codex".into()).expect("legacy provider key is valid")]
@@ -490,23 +780,30 @@ fn legacy_transport_keys(account: &ProviderAccount) -> Vec<ProviderKey> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TextModelProjectionContext {
+    custom_provider: bool,
+}
+
 fn text_models(
     key: &str,
     models: &[&ProviderModel],
+    context: TextModelProjectionContext,
 ) -> Result<(agent_models::ProviderId, Vec<agent_models::Model>), ProviderModelProjectionError> {
     let provider = agent_models::ProviderId::try_new(key.to_owned())
         .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?;
     let projected = models
         .iter()
         .map(|model| {
+            let model_id = model.model_id();
             agent_models::Model::try_new(
-                agent_models::ModelId::try_new(model.model_id().to_owned())
-                    .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
+                agent_models::ModelId::try_new(model_id.to_owned())
+                    .map_err(|_| ProviderModelProjectionError::InvalidModelIdentifier)?,
                 model.context_window(),
                 model.max_tokens(),
-                text_input(model),
+                text_input(model, context),
             )
-            .map_err(|_| ProviderModelProjectionError::AccountConfiguration)
+            .map_err(provider_model_error_from_agent_model)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((provider, projected))
@@ -529,14 +826,14 @@ fn media_models(
         .map(|model| {
             media_models::Model::try_new(
                 media_models::ModelId::try_new(model.model_id().to_owned())
-                    .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
+                    .map_err(|_| ProviderModelProjectionError::InvalidModelIdentifier)?,
                 model.capabilities().to_vec(),
                 model.timeout_ms(),
                 model.aspect_ratio().map(str::to_owned),
                 model.resolution().map(str::to_owned),
                 model.quality().map(str::to_owned),
             )
-            .map_err(|_| ProviderModelProjectionError::AccountConfiguration)
+            .map_err(provider_model_error_from_media_catalog)
         })
         .collect::<Result<Vec<_>, _>>()?;
     media_models::ProviderModels::try_new(
@@ -548,21 +845,67 @@ fn media_models(
         media_protocol(protocol),
         projected,
     )
-    .map_err(|_| ProviderModelProjectionError::AccountConfiguration)
+    .map_err(provider_model_error_from_media_catalog)
+}
+
+fn provider_model_error_from_agent_model(
+    error: agent_models::ModelProjectionError,
+) -> ProviderModelProjectionError {
+    match error {
+        agent_models::ModelProjectionError::InvalidModelId => {
+            ProviderModelProjectionError::InvalidModelIdentifier
+        }
+        agent_models::ModelProjectionError::InvalidTokenLimit => {
+            ProviderModelProjectionError::InvalidTokenLimit
+        }
+        agent_models::ModelProjectionError::DuplicateModelId
+        | agent_models::ModelProjectionError::EmptyModelCatalog
+        | agent_models::ModelProjectionError::InvalidProviderId => {
+            ProviderModelProjectionError::AccountConfiguration
+        }
+    }
+}
+
+fn provider_model_error_from_media_catalog(
+    error: media_models::MediaCatalogError,
+) -> ProviderModelProjectionError {
+    match error {
+        media_models::MediaCatalogError::DuplicateProviderKey => {
+            ProviderModelProjectionError::DuplicateProviderKey
+        }
+        media_models::MediaCatalogError::InvalidCapabilities => {
+            ProviderModelProjectionError::InvalidModelCapability
+        }
+        media_models::MediaCatalogError::DuplicateModelId
+        | media_models::MediaCatalogError::InvalidModelId => {
+            ProviderModelProjectionError::InvalidModelIdentifier
+        }
+        media_models::MediaCatalogError::ConfigPersist => ProviderModelProjectionError::Persistence,
+        media_models::MediaCatalogError::EmptyModelCatalog
+        | media_models::MediaCatalogError::InvalidAspectRatio
+        | media_models::MediaCatalogError::InvalidEndpoint
+        | media_models::MediaCatalogError::InvalidLabel
+        | media_models::MediaCatalogError::InvalidProviderKey
+        | media_models::MediaCatalogError::InvalidQuality
+        | media_models::MediaCatalogError::InvalidResolution
+        | media_models::MediaCatalogError::InvalidTimeout => {
+            ProviderModelProjectionError::AccountConfiguration
+        }
+    }
 }
 
 fn retired_transport(
     accounts: &BTreeMap<String, &ProviderAccount>,
     retired: &[ProviderAccount],
 ) -> Result<Vec<ProviderKey>, ProviderModelProjectionError> {
-    let retained = projection_keys(accounts)?
+    let retained = projection_keys(accounts, true)?
         .into_values()
         .collect::<BTreeSet<_>>();
     let mut before = accounts.clone();
     for account in retired {
         before.insert(account.id().as_str().to_owned(), account);
     }
-    projection_keys(&before)?
+    projection_keys(&before, false)?
         .into_values()
         .filter(|key| !retained.contains(key))
         .map(|key| {
@@ -574,6 +917,7 @@ fn retired_transport(
 
 fn projection_keys(
     accounts: &BTreeMap<String, &ProviderAccount>,
+    reject_zai_alias_collision: bool,
 ) -> Result<BTreeMap<String, String>, ProviderModelProjectionError> {
     let mut grouped = BTreeMap::<String, Vec<&ProviderAccount>>::new();
     for account in accounts.values() {
@@ -588,6 +932,9 @@ fn projection_keys(
         if accounts.len() == 1 {
             keys.insert(accounts[0].id().as_str().to_owned(), base);
             continue;
+        }
+        if reject_zai_alias_collision && super::provider_key::is_single_slot_provider_key(&base) {
+            return Err(ProviderModelProjectionError::DuplicateProviderKey);
         }
         for account in accounts {
             keys.insert(
@@ -618,12 +965,138 @@ fn media_protocol(protocol: ProviderMediaApiProtocol) -> media_models::Protocol 
     }
 }
 
-fn text_input(model: &ProviderModel) -> Vec<agent_models::InputModality> {
+fn text_input(
+    model: &ProviderModel,
+    context: TextModelProjectionContext,
+) -> Vec<agent_models::InputModality> {
     let mut input = vec![agent_models::InputModality::Text];
-    if model.supports(ProviderModelCapability::ImageUnderstand) {
+    if model.supports(ProviderModelCapability::ImageUnderstand)
+        || (context.custom_provider && infer_model_supports_image_input(model.model_id()))
+    {
         input.push(agent_models::InputModality::Image);
     }
     input
+}
+
+fn infer_model_supports_image_input(model_id: &str) -> bool {
+    let normalized = NormalizedModelId::new(model_id);
+    normalized.matches(has_gpt_4x_or_o_series)
+        || normalized.matches(|value| has_model_family(value, "gpt-5"))
+        || normalized.matches(|value| {
+            value.contains("claude-3")
+                || value.contains("claude-4")
+                || value.contains("claude-fable")
+                || value.contains("claude-sonnet")
+                || value.contains("claude-opus")
+                || value.contains("claude-haiku")
+        })
+        || normalized.matches(|value| has_model_token(value, "gemini"))
+        || normalized.matches(|value| {
+            value.contains("qwen-vl") || (value.contains("qwen") && value.contains("vl"))
+        })
+        || normalized.matches(|value| {
+            [
+                "vision",
+                "llava",
+                "pixtral",
+                "internvl",
+                "mllama",
+                "minicpm-v",
+                "glm-4v",
+            ]
+            .iter()
+            .any(|pattern| value.contains(pattern))
+        })
+        || normalized.matches(has_vl_token)
+}
+
+struct NormalizedModelId {
+    bare: String,
+    full: String,
+}
+
+impl NormalizedModelId {
+    fn new(model_id: &str) -> Self {
+        let full = model_id.trim().to_ascii_lowercase();
+        let without_vendor = full.rsplit('/').next().unwrap_or(&full);
+        let bare = without_vendor.split(':').next().unwrap_or(without_vendor);
+        Self {
+            bare: if bare.is_empty() {
+                full.clone()
+            } else {
+                bare.to_owned()
+            },
+            full,
+        }
+    }
+
+    fn matches(&self, predicate: fn(&str) -> bool) -> bool {
+        predicate(&self.bare) || predicate(&self.full)
+    }
+}
+
+fn has_gpt_4x_or_o_series(value: &str) -> bool {
+    has_model_family(value, "gpt-4.1")
+        || has_model_family(value, "gpt-4o")
+        || has_model_token(value, "o1")
+        || has_model_token(value, "o3")
+        || has_model_token(value, "o4")
+}
+
+fn has_vl_token(value: &str) -> bool {
+    has_model_token(value, "vl")
+}
+
+fn has_model_family(value: &str, family: &str) -> bool {
+    let mut offset = 0;
+    while let Some(relative) = value[offset..].find(family) {
+        let index = offset + relative;
+        let end = index + family.len();
+        let before = index
+            .checked_sub(1)
+            .and_then(|previous| value.as_bytes().get(previous));
+        let after = value.as_bytes().get(end);
+        let before_ok = before.is_none() || before.is_some_and(|byte| !is_model_word_byte(*byte));
+        let after_ok = after.is_none_or(|byte| !is_model_word_byte(*byte));
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
+fn is_model_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn has_model_token(value: &str, token: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| part == token)
+}
+
+fn apply_compaction_safeguard_default(document: &mut OpenClawConfigDocument) -> bool {
+    let mut agents = object(document.get("agents"));
+    let mut defaults = object(agents.get("defaults"));
+    match defaults.get_mut("compaction") {
+        Some(Value::Object(compaction)) if !compaction.contains_key("mode") => {
+            compaction.insert("mode".into(), Value::String("safeguard".into()));
+        }
+        Some(_) => return false,
+        None => {
+            defaults.insert(
+                "compaction".into(),
+                Value::Object(Map::from_iter([(
+                    "mode".into(),
+                    Value::String("safeguard".into()),
+                )])),
+            );
+        }
+    }
+    agents.insert("defaults".into(), Value::Object(defaults));
+    document.insert("agents".into(), Value::Object(agents));
+    true
 }
 
 fn prune_unknown_model_references(
@@ -733,7 +1206,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::lifecycle::state_dir::{AgentId, PrivateAuthProfiles};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -764,6 +1236,46 @@ mod tests {
         }
     }
 
+    fn write_state_db_auth_profiles(root: &TestRoot, profiles: Value) {
+        let database_path = root
+            .state_dir
+            .as_path()
+            .join("state")
+            .join("openclaw.sqlite");
+        fs::create_dir_all(database_path.parent().expect("state-db parent"))
+            .expect("create state-db parent");
+        let connection = rusqlite::Connection::open(database_path).expect("open state-db");
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT",
+                [],
+            )
+            .expect("create config machine state table");
+        for (state_key, value) in [
+            ("auth.sharedStore", json!({ "location": "state-db" })),
+            (
+                "authProfiles.store",
+                json!({ "version": 1, "profiles": profiles }),
+            ),
+            ("authProfiles.state", json!({ "version": 1 })),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) \
+                     VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(state_key) DO UPDATE SET \
+                       value_json = excluded.value_json, \
+                       updated_at_ms = excluded.updated_at_ms",
+                    (
+                        state_key,
+                        serde_json::to_string(&value).expect("serialize auth state value"),
+                        1_800_000_000_000_i64,
+                    ),
+                )
+                .expect("write auth state value");
+        }
+    }
+
     impl Drop for TestRoot {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
@@ -776,6 +1288,22 @@ mod tests {
         auth_mode: ProviderAccountAuthMode,
         enabled: bool,
     ) -> ProviderAccount {
+        account_with_protocol(
+            id,
+            provider,
+            auth_mode,
+            enabled,
+            Some(ProviderApiProtocol::OpenAiResponses),
+        )
+    }
+
+    fn account_with_protocol(
+        id: &str,
+        provider: &str,
+        auth_mode: ProviderAccountAuthMode,
+        enabled: bool,
+        protocol: Option<ProviderApiProtocol>,
+    ) -> ProviderAccount {
         ProviderAccount::new(
             ProviderAccountId::try_new(id).expect("account identifier"),
             ProviderReference::try_new(format!("provider:{provider}")).expect("provider reference"),
@@ -787,7 +1315,7 @@ mod tests {
                 endpoint: Some(
                     ProviderEndpoint::try_new("https://api.example.com/v1").expect("endpoint"),
                 ),
-                protocol: Some(ProviderApiProtocol::OpenAiResponses),
+                protocol,
                 media_protocol: None,
                 auth_mode,
                 credential: (!matches!(auth_mode, ProviderAccountAuthMode::Local))
@@ -808,6 +1336,21 @@ mod tests {
             vec![ProviderModelCapability::Chat],
             Some(128_000),
             Some(16_000),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("model")
+    }
+
+    fn model_without_context(account: &ProviderAccount, id: &str) -> ProviderModel {
+        ProviderModel::try_new(
+            account.id().clone(),
+            id,
+            vec![ProviderModelCapability::Chat],
+            None,
+            None,
             None,
             None,
             None,
@@ -857,6 +1400,11 @@ mod tests {
             document.pointer("/models/providers/ollama-local-ollama/models/0/id"),
             Some(&json!("llama-3.3"))
         );
+        assert_eq!(
+            document.pointer("/auth/profiles/ollama-local-ollama:default"),
+            None
+        );
+        assert_eq!(document.pointer("/auth/order/ollama-local-ollama"), None);
     }
 
     #[test]
@@ -897,16 +1445,18 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
-        let agent = AgentId::try_new("main".into()).expect("agent");
-        root.state_dir
-            .replace_auth_profiles(
-                &agent,
-                &PrivateAuthProfiles::try_new(
-                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
-                )
-                .expect("legacy provider profile"),
-            )
-            .expect("store legacy provider profile");
+        write_state_db_auth_profiles(
+            &root,
+            json!({
+                "openai-oauth": {
+                    "type": "oauth",
+                    "provider": "openai-codex",
+                    "access": "access-token",
+                    "refresh": "refresh-token",
+                    "expires": 1_900_000_000_000_i64
+                }
+            }),
+        );
 
         assert_eq!(
             ProviderModelProjection::apply(
@@ -920,15 +1470,18 @@ mod tests {
             Err(ProviderModelProjectionError::CredentialUnavailable)
         );
 
-        root.state_dir
-            .replace_auth_profiles(
-                &agent,
-                &PrivateAuthProfiles::try_new(
-                    br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
-                )
-                .expect("canonical provider profile"),
-            )
-            .expect("store canonical provider profile");
+        write_state_db_auth_profiles(
+            &root,
+            json!({
+                "openai-oauth": {
+                    "type": "oauth",
+                    "provider": "openai",
+                    "access": "access-token",
+                    "refresh": "refresh-token",
+                    "expires": 1_900_000_000_000_i64
+                }
+            }),
+        );
 
         let effect = ProviderModelProjection::apply(
             root.state_dir.clone(),
@@ -950,6 +1503,14 @@ mod tests {
         assert_eq!(
             document.pointer("/models/providers/openai/models/0/id"),
             Some(&json!("gpt-5.6"))
+        );
+        assert_eq!(
+            document.pointer("/auth/profiles/openai:default"),
+            Some(&json!({ "provider": "openai", "mode": "oauth" }))
+        );
+        assert_eq!(
+            document.pointer("/auth/order/openai"),
+            Some(&json!(["openai:default"]))
         );
     }
 
@@ -973,16 +1534,16 @@ mod tests {
             model(&stale, "claude-fable-5"),
         ])
         .expect("catalog");
-        let agent = AgentId::try_new("main".into()).expect("agent");
-        root.state_dir
-            .replace_auth_profiles(
-                &agent,
-                &PrivateAuthProfiles::try_new(
-                    br#"{"version":1,"profiles":{"openai-main":{"type":"api_key","provider":"openai","key":"openai-key"}}}"#.to_vec(),
-                )
-                .expect("auth profiles"),
-            )
-            .expect("store auth profiles");
+        write_state_db_auth_profiles(
+            &root,
+            json!({
+                "openai:default": {
+                    "type": "api_key",
+                    "provider": "openai",
+                    "key": "openai-key"
+                }
+            }),
+        );
         let accounts = [changed, stale];
         let required = BTreeSet::from([accounts[0].id().clone()]);
         let mut document = OpenClawConfigDocument::empty();
@@ -1040,11 +1601,336 @@ mod tests {
                 "defaults": {
                     "models": {
                         "openai/gpt-5.6": {}
-                    }
+                    }                }
+            }))
+        );
+        assert_eq!(
+            document.get("auth"),
+            Some(&json!({
+                "profiles": {
+                    "openai:default": { "provider": "openai", "mode": "api_key" }
+                },
+                "order": {
+                    "openai": ["openai:default"]
                 }
             }))
         );
+        assert_eq!(
+            document
+                .as_value()
+                .pointer("/models/providers/openai/apiKey"),
+            None
+        );
         assert!(!plan.apply_to_document(&mut document));
+    }
+
+    #[test]
+    fn custom_provider_projects_explicit_context_window_and_compaction_safeguard() {
+        let account = account(
+            "custom-12345678",
+            "custom",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            ProviderModel::try_new(
+                account.id().clone(),
+                "explicit-context-window",
+                vec![ProviderModelCapability::Chat],
+                Some(64_000),
+                Some(8_000),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("model"),
+            ProviderModel::try_new(
+                account.id().clone(),
+                "gpt-5.5",
+                vec![ProviderModelCapability::Chat],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("model"),
+            ProviderModel::try_new(
+                account.id().clone(),
+                "private-context-tokens",
+                vec![ProviderModelCapability::Chat],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("model"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "models".into(),
+            json!({
+                "providers": {
+                    "custom-12345678": {
+                        "models": [{
+                            "id": "private-context-tokens",
+                            "name": "private-context-tokens",
+                            "contextTokens": 32_000
+                        }]
+                    }
+                }
+            }),
+        );
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "temperature": 0.2
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/custom-12345678/models/0/contextWindow"),
+            Some(&json!(64_000))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/custom-12345678/models/0/maxTokens"),
+            Some(&json!(8_000))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/custom-12345678/models/1/contextWindow"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/models/providers/custom-12345678/models/2/contextTokens"),
+            Some(&json!(32_000))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/custom-12345678/models/2/contextWindow"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/compaction"),
+            Some(&json!({ "mode": "safeguard" }))
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/compaction/reserveTokensFloor"),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_provider_infers_image_input_without_context_window_backfill() {
+        let account = account(
+            "custom-12345678",
+            "custom",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            model_without_context(&account, "unknown-private-model"),
+            model_without_context(&account, "openai/gpt-5.6-sol"),
+            model_without_context(&account, "gpt-5.5"),
+            model_without_context(&account, "gpt-5.6-mini"),
+            model_without_context(&account, "gpt-5"),
+            model_without_context(&account, "gpt-5.56"),
+            model_without_context(&account, "qwen3:latest"),
+            model_without_context(&account, "moonshotai/kimi-k2.6"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        let models = value
+            .pointer("/models/providers/custom-12345678/models")
+            .and_then(Value::as_array)
+            .expect("projected models");
+        let model = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(id))
+                .expect("projected model")
+        };
+        for model in models {
+            assert_eq!(model.get("contextWindow"), None);
+        }
+        assert_eq!(model("unknown-private-model")["input"], json!(["text"]));
+        assert_eq!(
+            model("openai/gpt-5.6-sol")["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(model("gpt-5.5")["input"], json!(["text", "image"]));
+        assert_eq!(model("gpt-5.6-mini")["input"], json!(["text", "image"]));
+        assert_eq!(model("gpt-5")["input"], json!(["text", "image"]));
+        assert_eq!(model("gpt-5.56")["input"], json!(["text", "image"]));
+        assert_eq!(model("qwen3:latest")["input"], json!(["text"]));
+        assert_eq!(model("moonshotai/kimi-k2.6")["input"], json!(["text"]));
+    }
+
+    #[test]
+    fn chatgpt_oauth_transport_keeps_api_without_context_window_backfill() {
+        let account = account(
+            "openai-oauth",
+            "openai",
+            ProviderAccountAuthMode::OAuthBrowser,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            model_without_context(&account, "gpt-5.6-sol"),
+            model_without_context(&account, "gpt-4o"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/openai/api"),
+            Some(&json!("openai-chatgpt-responses"))
+        );
+        let models = value
+            .pointer("/models/providers/openai/models")
+            .and_then(Value::as_array)
+            .expect("projected models");
+        for model in models {
+            assert_eq!(model.get("contextWindow"), None);
+        }
+    }
+
+    #[test]
+    fn ollama_keeps_model_tag_without_context_window_backfill() {
+        let account = account(
+            "ollama-local",
+            "ollama",
+            ProviderAccountAuthMode::Local,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            model_without_context(&account, "deepseek-v4-flash"),
+            model_without_context(&account, "qwen3:latest"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/ollama-local/models/0/id"),
+            Some(&json!("deepseek-v4-flash"))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/ollama-local/models/1/id"),
+            Some(&json!("qwen3:latest"))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/ollama-local/models/0/contextWindow"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/models/providers/ollama-local/models/1/contextWindow"),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_image_capability_remains_highest_priority_for_custom_provider() {
+        let account = account(
+            "custom-12345678",
+            "custom",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            ProviderModel::try_new(
+                account.id().clone(),
+                "unknown-private-model",
+                vec![
+                    ProviderModelCapability::Chat,
+                    ProviderModelCapability::ImageUnderstand,
+                ],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("model"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert!(plan.apply_to_document(&mut document));
+        assert_eq!(
+            document
+                .as_value()
+                .pointer("/models/providers/custom-12345678/models/0/input"),
+            Some(&json!(["text", "image"]))
+        );
+    }
+
+    #[test]
+    fn custom_provider_preserves_explicit_compaction_mode() {
+        let account = account(
+            "custom-12345678",
+            "custom",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            ProviderModel::try_new(
+                account.id().clone(),
+                "private-model",
+                vec![ProviderModelCapability::Chat],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("model"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "compaction": {
+                        "mode": "default",
+                        "keepRecentTokens": 123
+                    }
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        assert_eq!(
+            document.as_value().pointer("/agents/defaults/compaction"),
+            Some(&json!({ "mode": "default", "keepRecentTokens": 123 }))
+        );
     }
 
     #[test]
@@ -1141,8 +2027,7 @@ mod tests {
                     "models": {
                         "anthropic/claude-fable-5": { "alias": "fable" },
                         "openai/gpt-5.6": {}
-                    }
-                }
+                    }                }
             }))
         );
     }
@@ -1184,6 +2069,37 @@ mod tests {
                 }
             }))
         );
+        assert_eq!(
+            document.get("auth"),
+            Some(&json!({
+                "profiles": {
+                    "minimax-portal:default": { "provider": "minimax-portal", "mode": "oauth" },
+                    "openai:default": { "provider": "openai", "mode": "oauth" }
+                },
+                "order": {
+                    "minimax-portal": ["minimax-portal:default"],
+                    "openai": ["openai:default"]
+                }
+            }))
+        );
+        assert_eq!(
+            document
+                .as_value()
+                .pointer("/auth/profiles/openai:default/key"),
+            None
+        );
+        assert_eq!(
+            document
+                .as_value()
+                .pointer("/auth/profiles/openai:default/token"),
+            None
+        );
+        assert_eq!(
+            document
+                .as_value()
+                .pointer("/auth/profiles/openai:default/credentialReference"),
+            None
+        );
     }
 
     #[test]
@@ -1217,6 +2133,18 @@ mod tests {
                 }
             }),
         );
+        document.insert(
+            "auth".into(),
+            json!({
+                "profiles": {
+                    "custom-12345678:default": { "provider": "custom-12345678", "mode": "api_key" },
+                    "custom-12345678:manual": { "provider": "custom-12345678", "mode": "api_key" }
+                },
+                "order": {
+                    "custom-12345678": ["custom-12345678:default", "custom-12345678:manual"]
+                }
+            }),
+        );
 
         assert!(plan.apply_to_document(&mut document));
         assert_eq!(document.get("models"), Some(&json!({ "providers": {} })));
@@ -1226,7 +2154,17 @@ mod tests {
                 "defaults": {
                     "models": {
                         "anthropic/claude-fable-5": {}
-                    }
+                    }                }
+            }))
+        );
+        assert_eq!(
+            document.get("auth"),
+            Some(&json!({
+                "profiles": {
+                    "custom-12345678:manual": { "provider": "custom-12345678", "mode": "api_key" }
+                },
+                "order": {
+                    "custom-12345678": ["custom-12345678:manual"]
                 }
             }))
         );
@@ -1253,6 +2191,20 @@ mod tests {
                 }
             }),
         );
+        document.insert(
+            "auth".into(),
+            json!({
+                "profiles": {
+                    "openai:default": { "provider": "openai", "mode": "api_key" },
+                    "openai:custom": { "provider": "openai", "mode": "api_key" },
+                    "unmanaged:default": { "provider": "unmanaged", "mode": "api_key" }
+                },
+                "order": {
+                    "openai": ["openai:default", "openai:custom"],
+                    "unmanaged": ["unmanaged:default"]
+                }
+            }),
+        );
 
         assert!(plan.apply_to_document(&mut document));
         assert_eq!(
@@ -1262,6 +2214,143 @@ mod tests {
                     "unmanaged": { "baseUrl": "https://unmanaged.example.com/v1" }
                 }
             }))
+        );
+        assert_eq!(
+            document.get("auth"),
+            Some(&json!({
+                "profiles": {
+                    "openai:custom": { "provider": "openai", "mode": "api_key" },
+                    "unmanaged:default": { "provider": "unmanaged", "mode": "api_key" }
+                },
+                "order": {
+                    "openai": ["openai:custom"],
+                    "unmanaged": ["unmanaged:default"]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn zai_global_uses_zai_runtime_key_and_default_protocol() {
+        let account = account_with_protocol(
+            "zai-global-main",
+            "zai-global",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+            None,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![
+            ProviderModel::try_new(
+                account.id().clone(),
+                "glm-5.2",
+                vec![ProviderModelCapability::Chat],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("glm 5 model"),
+            ProviderModel::try_new(
+                account.id().clone(),
+                "glm-4.6",
+                vec![ProviderModelCapability::Chat],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("glm 4 model"),
+        ])
+        .expect("catalog");
+        let accounts = [account];
+        let identities = public_provider_model_identities(&accounts).expect("public identities");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert_eq!(identities["zai-global-main"].provider_key(), "zai");
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/zai/models/0/id"),
+            Some(&json!("glm-4.6"))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/zai/models/0/contextWindow"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/models/providers/zai/models/1/id"),
+            Some(&json!("glm-5.2"))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/zai/models/1/contextWindow"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/models/providers/zai/api"),
+            Some(&json!("openai-completions"))
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/models/zai~1glm-5.2"),
+            Some(&json!({}))
+        );
+    }
+
+    #[test]
+    fn builtin_provider_transport_uses_runtime_default_protocol_when_account_has_none() {
+        let account = account_with_protocol(
+            "zai-main",
+            "zai",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+            None,
+        );
+        let catalog =
+            ProviderModelCatalog::try_new(vec![model(&account, "glm-5")]).expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/models/providers/zai/api"),
+            Some(&json!("openai-completions"))
+        );
+        assert_eq!(
+            value.pointer("/models/providers/zai/baseUrl"),
+            Some(&json!("https://api.example.com/v1"))
+        );
+    }
+
+    #[test]
+    fn repeated_single_slot_provider_key_is_ambiguous_instead_of_suffixing() {
+        let first = account("zai-main", "zai", ProviderAccountAuthMode::ApiKey, true);
+        let second = account("zai-alt", "zai", ProviderAccountAuthMode::ApiKey, true);
+
+        assert_eq!(
+            public_provider_model_identities(&[first, second]),
+            Err(ProviderModelProjectionError::DuplicateProviderKey)
+        );
+    }
+
+    #[test]
+    fn zai_and_zai_global_are_ambiguous_instead_of_suffixing() {
+        let zai = account("zai-main", "zai", ProviderAccountAuthMode::ApiKey, true);
+        let global = account(
+            "zai-global-main",
+            "zai-global",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+
+        assert_eq!(
+            public_provider_model_identities(&[zai, global]),
+            Err(ProviderModelProjectionError::DuplicateProviderKey)
         );
     }
 

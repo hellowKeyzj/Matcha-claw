@@ -5,10 +5,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
-
 use super::*;
 
+const MATCHA_IDENTITY: &str = "# IDENTITY.md\n\n- **名字：** Matcha\n";
+const OPENCLAW_IDENTITY_TEMPLATE: &str = "# IDENTITY.md - Who Am I?\n\n_Fill this in during your first conversation. Make it yours._\n\n- **Name:**\n  _(pick something you like)_\n- **Emoji:**\n  _(your signature — pick one that feels right)_\n";
 const SECRET_CANARY: &str = "workspace-private-content-canary";
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -16,7 +16,6 @@ struct TestRoot {
     path: PathBuf,
     workspace: PathBuf,
     templates: PathBuf,
-    managed_templates: PathBuf,
     context: PathBuf,
 }
 
@@ -28,64 +27,55 @@ impl TestRoot {
             .expect("clock must follow Unix epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "openclaw-workspace-projection-{}-{nanos}-{sequence}",
+            "openclaw-workspace-overlay-{}-{nanos}-{sequence}",
             std::process::id()
         ));
-        let templates = path.join("templates");
-        let managed_templates = path.join("managed-templates");
-        let context = path.join("context");
+        let templates = path.join("resources/agent-workspace-templates/main-agent");
+        let context = path.join("resources/context");
         fs::create_dir_all(&templates).expect("create templates");
-        fs::create_dir_all(&managed_templates).expect("create managed templates");
         fs::create_dir_all(&context).expect("create context");
-        for file in WorkspaceTemplateFile::ALL {
-            fs::write(
-                templates.join(file.file_name()),
-                format!("---\ntitle: template\n---\n{} template\n", file.file_name()),
-            )
-            .expect("write template");
-            fs::write(
-                managed_templates.join(file.file_name()),
-                format!("managed {}\n", file.file_name()),
-            )
-            .expect("write managed template");
-        }
+        fs::write(
+            templates.join(WorkspaceTemplateFile::Identity.file_name()),
+            format!("---\ntitle: identity\n---\n{MATCHA_IDENTITY}"),
+        )
+        .expect("write identity template");
         Self {
             workspace: path.join("workspace"),
             templates,
-            managed_templates,
             context,
             path,
         }
     }
 
-    fn request(&self) -> AgentWorkspaceMaterializationRequest {
-        AgentWorkspaceMaterializationRequest::new(
-            AgentWorkspaceDirectory::try_new(self.workspace.clone()).expect("workspace path"),
-            WorkspaceTemplateDirectory::try_new(self.templates.clone()).expect("template path"),
-        )
+    fn workspace(&self) -> AgentWorkspaceDirectory {
+        AgentWorkspaceDirectory::try_new(self.workspace.clone()).expect("workspace path")
     }
 
-    fn state_path(&self) -> PathBuf {
-        self.workspace
-            .join(WORKSPACE_STATE_DIRECTORY)
-            .join(WORKSPACE_STATE_FILE)
+    fn templates(&self) -> MatchaWorkspaceTemplateDirectory {
+        MatchaWorkspaceTemplateDirectory::try_new(self.templates.clone()).expect("template path")
     }
 
-    fn materialize(&self) -> AgentWorkspaceMaterialization {
-        AgentWorkspaceProjection::materialize(self.request()).expect("materialize workspace")
+    fn context(&self) -> WorkspaceContextDirectory {
+        WorkspaceContextDirectory::try_new(self.context.clone()).expect("context path")
     }
 
-    fn request_with_managed_templates(&self) -> AgentWorkspaceMaterializationRequest {
-        self.request().with_managed_templates(
-            ManagedWorkspaceTemplateDirectory::try_new(self.managed_templates.clone())
-                .expect("managed template path"),
-        )
+    fn preseed_identity(&self) {
+        MatchaWorkspaceOverlay::preseed_identity(self.workspace(), self.templates())
+            .expect("preseed workspace identity");
     }
 
-    fn request_with_context(&self) -> AgentWorkspaceMaterializationRequest {
-        self.request().with_context(
-            WorkspaceContextDirectory::try_new(self.context.clone()).expect("context path"),
-        )
+    fn write_template(&self, file: WorkspaceTemplateFile, content: &str) {
+        fs::write(self.templates.join(file.file_name()), content).expect("write template");
+    }
+
+    fn write_main_agent_templates(&self) {
+        self.write_template(WorkspaceTemplateFile::Agents, "# AGENTS.md\n");
+        self.write_template(
+            WorkspaceTemplateFile::Soul,
+            "---\ntitle: soul\n---\n# SOUL.md\n",
+        );
+        self.write_template(WorkspaceTemplateFile::User, "# USER.md\n");
+        self.write_template(WorkspaceTemplateFile::Heartbeat, "# HEARTBEAT.md\n");
     }
 }
 
@@ -95,255 +85,12 @@ impl Drop for TestRoot {
     }
 }
 
-fn state(root: &TestRoot) -> Value {
-    serde_json::from_slice(&fs::read(root.state_path()).expect("read workspace state"))
-        .expect("parse workspace state")
-}
-
 fn assert_missing(path: &Path) {
     assert!(!path.exists(), "path must be absent");
 }
 
 #[test]
-fn new_workspace_materializes_core_files_then_seeds_pending_bootstrap() {
-    let root = TestRoot::new();
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.initialized_files(),
-        [
-            WorkspaceTemplateFile::Agents,
-            WorkspaceTemplateFile::Soul,
-            WorkspaceTemplateFile::Tools,
-            WorkspaceTemplateFile::Identity,
-            WorkspaceTemplateFile::User,
-            WorkspaceTemplateFile::Heartbeat,
-            WorkspaceTemplateFile::Bootstrap,
-        ]
-    );
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Pending
-    );
-    for file in WorkspaceTemplateFile::ALL {
-        assert_eq!(
-            fs::read_to_string(root.workspace.join(file.file_name())).expect("read workspace file"),
-            format!("{} template\n", file.file_name())
-        );
-    }
-    let state = state(&root);
-    assert!(state["bootstrapSeededAt"].as_str().is_some());
-    assert!(state["setupCompletedAt"].is_null());
-}
-
-#[test]
-fn completed_workspace_never_recreates_bootstrap_when_a_core_file_is_restored() {
-    let root = TestRoot::new();
-    root.materialize();
-    fs::write(
-        root.workspace
-            .join(WorkspaceTemplateFile::Identity.file_name()),
-        "configured identity\n",
-    )
-    .expect("configure identity");
-    fs::remove_file(
-        root.workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    )
-    .expect("remove bootstrap");
-    fs::remove_file(
-        root.workspace
-            .join(WorkspaceTemplateFile::Tools.file_name()),
-    )
-    .expect("remove core file");
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.initialized_files(),
-        [WorkspaceTemplateFile::Tools]
-    );
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Complete
-    );
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    assert_eq!(
-        fs::read_to_string(
-            root.workspace
-                .join(WorkspaceTemplateFile::Tools.file_name())
-        )
-        .expect("restored core file"),
-        "TOOLS.md template\n"
-    );
-    assert!(state(&root)["setupCompletedAt"].as_str().is_some());
-}
-
-#[test]
-fn configured_legacy_workspace_is_completed_without_seeding_bootstrap() {
-    let root = TestRoot::new();
-    fs::create_dir_all(&root.workspace).expect("create workspace");
-    fs::write(
-        root.workspace
-            .join(WorkspaceTemplateFile::Identity.file_name()),
-        "configured identity\n",
-    )
-    .expect("write identity");
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Complete
-    );
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    let state = state(&root);
-    assert!(state["bootstrapSeededAt"].is_null());
-    assert!(state["setupCompletedAt"].as_str().is_some());
-}
-
-#[test]
-fn user_content_prevents_bootstrap_seeding_without_modifying_the_content() {
-    let root = TestRoot::new();
-    fs::create_dir_all(&root.workspace).expect("create workspace");
-    fs::write(root.workspace.join("notes.md"), SECRET_CANARY).expect("write user content");
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Complete
-    );
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    assert_eq!(
-        fs::read_to_string(root.workspace.join("notes.md")).expect("read user content"),
-        SECRET_CANARY
-    );
-    assert!(state(&root)["setupCompletedAt"].as_str().is_some());
-}
-
-#[test]
-fn configured_core_template_completes_workspace_without_overwriting_user_content() {
-    let root = TestRoot::new();
-    fs::create_dir_all(&root.workspace).expect("create workspace");
-    fs::write(
-        root.workspace
-            .join(WorkspaceTemplateFile::Agents.file_name()),
-        SECRET_CANARY,
-    )
-    .expect("configure agents");
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Complete
-    );
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    assert_eq!(
-        fs::read_to_string(
-            root.workspace
-                .join(WorkspaceTemplateFile::Agents.file_name())
-        )
-        .expect("read configured agents"),
-        SECRET_CANARY
-    );
-    assert!(state(&root)["setupCompletedAt"].as_str().is_some());
-}
-
-#[test]
-fn malformed_workspace_state_fails_closed_without_writing_bootstrap() {
-    let root = TestRoot::new();
-    fs::create_dir_all(root.state_path().parent().expect("state parent"))
-        .expect("create state parent");
-    fs::write(root.state_path(), SECRET_CANARY).expect("write malformed state");
-
-    let error = AgentWorkspaceProjection::materialize(root.request())
-        .expect_err("malformed state must reject materialization");
-
-    assert_eq!(error, WorkspaceProjectionError::StateUnavailable);
-    for file in WorkspaceTemplateFile::CORE {
-        assert_missing(&root.workspace.join(file.file_name()));
-    }
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    assert_eq!(
-        fs::read_to_string(root.state_path()).expect("read malformed state"),
-        SECRET_CANARY
-    );
-}
-
-#[test]
-fn canonical_state_write_replaces_existing_state_without_temporary_files() {
-    let root = TestRoot::new();
-    fs::create_dir_all(root.state_path().parent().expect("state parent"))
-        .expect("create state parent");
-    fs::write(
-        root.state_path(),
-        "{\n  \"version\": 1,\n  \"onboardingCompletedAt\": \"2026-03-15T02:30:00.000Z\"\n}\n",
-    )
-    .expect("write legacy state");
-
-    root.materialize();
-
-    let entries = fs::read_dir(root.state_path().parent().expect("state parent"))
-        .expect("read state directory")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect state entries");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].file_name(), WORKSPACE_STATE_FILE);
-}
-
-#[test]
-fn legacy_onboarding_completion_marker_is_canonicalized_without_bootstrap() {
-    let root = TestRoot::new();
-    let completed_at = "2026-03-15T02:30:00.000Z";
-    fs::create_dir_all(root.state_path().parent().expect("state parent"))
-        .expect("create state parent");
-    fs::write(
-        root.state_path(),
-        format!("{{\n  \"version\": 1,\n  \"onboardingCompletedAt\": \"{completed_at}\"\n}}\n"),
-    )
-    .expect("write legacy state");
-
-    let materialization = root.materialize();
-
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Complete
-    );
-    assert_missing(
-        &root
-            .workspace
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
-    );
-    let state = state(&root);
-    assert_eq!(state["setupCompletedAt"], completed_at);
-    assert!(state.get("onboardingCompletedAt").is_none());
-}
-
-#[test]
-fn existing_bootstrap_without_marker_is_recorded_as_pending_without_rewriting_it() {
+fn preseed_identity_creates_workspace_writes_matcha_identity_and_removes_bootstrap() {
     let root = TestRoot::new();
     fs::create_dir_all(&root.workspace).expect("create workspace");
     fs::write(
@@ -353,115 +100,221 @@ fn existing_bootstrap_without_marker_is_recorded_as_pending_without_rewriting_it
     )
     .expect("write bootstrap");
 
-    let materialization = root.materialize();
+    root.preseed_identity();
 
-    assert_eq!(
-        materialization.bootstrap(),
-        WorkspaceBootstrapStatus::Pending
-    );
-    assert!(
-        !materialization
-            .initialized_files()
-            .contains(&WorkspaceTemplateFile::Bootstrap)
-    );
     assert_eq!(
         fs::read_to_string(
             root.workspace
-                .join(WorkspaceTemplateFile::Bootstrap.file_name())
+                .join(WorkspaceTemplateFile::Identity.file_name())
         )
-        .expect("read bootstrap"),
-        SECRET_CANARY
+        .expect("read identity"),
+        MATCHA_IDENTITY
     );
-    assert!(state(&root)["bootstrapSeededAt"].as_str().is_some());
+    assert_missing(
+        &root
+            .workspace
+            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
+    );
 }
 
 #[test]
-fn managed_template_migration_replaces_only_unchanged_upstream_files_idempotently() {
+fn seed_main_agent_templates_writes_missing_template_files_and_removes_bootstrap() {
     let root = TestRoot::new();
-    root.materialize();
+    root.write_main_agent_templates();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
     fs::write(
         root.workspace
-            .join(WorkspaceTemplateFile::Identity.file_name()),
+            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
         SECRET_CANARY,
     )
-    .expect("customize identity");
+    .expect("write bootstrap");
 
-    AgentWorkspaceProjection::materialize(root.request_with_managed_templates())
-        .expect("migrate managed templates");
-    AgentWorkspaceProjection::materialize(root.request_with_managed_templates())
-        .expect("repeat managed template migration");
+    MatchaWorkspaceOverlay::seed_main_agent_templates(root.workspace(), root.templates())
+        .expect("seed main agent templates");
 
     assert_eq!(
         fs::read_to_string(
             root.workspace
                 .join(WorkspaceTemplateFile::Agents.file_name())
         )
-        .expect("read migrated agents"),
-        "managed AGENTS.md\n"
+        .expect("read agents"),
+        "# AGENTS.md\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.workspace.join(WorkspaceTemplateFile::Soul.file_name()))
+            .expect("read soul"),
+        "# SOUL.md\n"
     );
     assert_eq!(
         fs::read_to_string(
             root.workspace
                 .join(WorkspaceTemplateFile::Identity.file_name())
         )
-        .expect("read customized identity"),
-        SECRET_CANARY
+        .expect("read identity"),
+        MATCHA_IDENTITY
+    );
+    assert_eq!(
+        fs::read_to_string(root.workspace.join(WorkspaceTemplateFile::User.file_name()))
+            .expect("read user"),
+        "# USER.md\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            root.workspace
+                .join(WorkspaceTemplateFile::Heartbeat.file_name())
+        )
+        .expect("read heartbeat"),
+        "# HEARTBEAT.md\n"
+    );
+    assert_missing(
+        &root
+            .workspace
+            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
     );
 }
 
 #[test]
-fn context_merge_replaces_only_managed_section_and_preserves_user_content() {
+fn seed_main_agent_templates_preserves_existing_workspace_files() {
     let root = TestRoot::new();
-    root.materialize();
-    let agents = root
-        .workspace
-        .join(WorkspaceTemplateFile::Agents.file_name());
-    fs::write(&agents, format!("user heading\n\n{SECRET_CANARY}\n"))
-        .expect("write user workspace content");
-    fs::write(root.context.join("AGENTS.matchaclaw.md"), "first context")
-        .expect("write first context");
+    root.write_main_agent_templates();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
+    fs::write(
+        root.workspace
+            .join(WorkspaceTemplateFile::Agents.file_name()),
+        SECRET_CANARY,
+    )
+    .expect("write custom agents");
 
-    let first = AgentWorkspaceProjection::materialize(root.request_with_context())
-        .expect("merge first context");
-    fs::write(root.context.join("AGENTS.matchaclaw.md"), "updated context")
-        .expect("update context");
-    let second = AgentWorkspaceProjection::materialize(root.request_with_context())
-        .expect("merge updated context");
+    MatchaWorkspaceOverlay::seed_main_agent_templates(root.workspace(), root.templates())
+        .expect("seed main agent templates");
 
-    let content = fs::read_to_string(&agents).expect("read merged agents");
-    assert_eq!(first.initialized_files(), []);
-    assert_eq!(second.initialized_files(), []);
-    assert!(content.contains("user heading"));
-    assert!(content.contains(SECRET_CANARY));
-    assert!(content.contains("updated context"));
-    assert!(!content.contains("first context"));
+    assert_eq!(
+        fs::read_to_string(
+            root.workspace
+                .join(WorkspaceTemplateFile::Agents.file_name())
+        )
+        .expect("read preserved agents"),
+        SECRET_CANARY
+    );
+    assert_eq!(
+        fs::read_to_string(root.workspace.join(WorkspaceTemplateFile::Soul.file_name()))
+            .expect("read seeded soul"),
+        "# SOUL.md\n"
+    );
 }
 
 #[test]
-fn context_merge_removes_the_gateway_first_run_section_before_preserving_user_content() {
+fn preseed_identity_replaces_only_openclaw_native_identity_template() {
     let root = TestRoot::new();
-    root.materialize();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
+    fs::write(
+        root.workspace
+            .join(WorkspaceTemplateFile::Identity.file_name()),
+        OPENCLAW_IDENTITY_TEMPLATE,
+    )
+    .expect("write OpenClaw identity template");
+
+    root.preseed_identity();
+
+    assert_eq!(
+        fs::read_to_string(
+            root.workspace
+                .join(WorkspaceTemplateFile::Identity.file_name())
+        )
+        .expect("read replaced identity"),
+        MATCHA_IDENTITY
+    );
+
+    fs::write(
+        root.workspace
+            .join(WorkspaceTemplateFile::Identity.file_name()),
+        SECRET_CANARY,
+    )
+    .expect("write custom identity");
+    fs::write(
+        root.workspace
+            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
+        SECRET_CANARY,
+    )
+    .expect("write bootstrap");
+
+    root.preseed_identity();
+
+    assert_eq!(
+        fs::read_to_string(
+            root.workspace
+                .join(WorkspaceTemplateFile::Identity.file_name())
+        )
+        .expect("read preserved identity"),
+        SECRET_CANARY
+    );
+    assert_missing(
+        &root
+            .workspace
+            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
+    );
+}
+
+#[test]
+fn context_merge_updates_only_matcha_section_and_preserves_first_run_content() {
+    let root = TestRoot::new();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
     let agents = root
         .workspace
         .join(WorkspaceTemplateFile::Agents.file_name());
     fs::write(
         &agents,
         format!(
-            "user heading\n\n## First Run\nopen this workspace and follow setup.\n\n{SECRET_CANARY}\n\n## Rules\nkeep this rule\n"
+            "user heading\n\n## First Run\nopen this workspace and follow setup.\n\n{SECRET_CANARY}\n"
         ),
     )
-    .expect("write gateway first-run content");
-    fs::write(root.context.join("AGENTS.matchaclaw.md"), "managed context").expect("write context");
+    .expect("write agents");
+    fs::write(root.context.join("AGENTS.matchaclaw.md"), "first context").expect("write context");
 
-    AgentWorkspaceProjection::materialize(root.request_with_context()).expect("merge context");
+    let first = MatchaWorkspaceOverlay::merge_context(root.workspace(), root.context())
+        .expect("merge first context");
+    fs::write(root.context.join("AGENTS.matchaclaw.md"), "updated context")
+        .expect("update context");
+    let second = MatchaWorkspaceOverlay::merge_context(root.workspace(), root.context())
+        .expect("merge updated context");
 
     let content = fs::read_to_string(&agents).expect("read merged agents");
-    assert!(content.contains("user heading"));
+    assert_eq!(first.merged_files(), &["AGENTS.md".to_owned()]);
+    assert_eq!(second.merged_files(), &["AGENTS.md".to_owned()]);
+    assert_eq!(second.skipped_missing(), 0);
+    assert!(content.contains("## First Run"));
+    assert!(content.contains("open this workspace and follow setup."));
     assert!(content.contains(SECRET_CANARY));
-    assert!(content.contains("## Rules\nkeep this rule"));
-    assert!(content.contains("managed context"));
-    assert!(!content.contains("## First Run"));
-    assert!(!content.contains("open this workspace and follow setup"));
+    assert!(content.contains("updated context"));
+    assert!(!content.contains("first context"));
+}
+
+#[test]
+fn context_merge_skips_missing_targets_without_creating_workspace_files() {
+    let root = TestRoot::new();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
+    fs::write(root.context.join("SOUL.matchaclaw.md"), SECRET_CANARY).expect("write context");
+
+    let merge = MatchaWorkspaceOverlay::merge_context(root.workspace(), root.context())
+        .expect("merge context");
+
+    assert!(merge.merged_files().is_empty());
+    assert_eq!(merge.skipped_missing(), 1);
+    assert_missing(&root.workspace.join(WorkspaceTemplateFile::Soul.file_name()));
+}
+
+#[test]
+fn context_merge_ignores_retired_tools_context() {
+    let root = TestRoot::new();
+    fs::create_dir_all(&root.workspace).expect("create workspace");
+    fs::write(root.context.join("TOOLS.matchaclaw.md"), SECRET_CANARY).expect("write context");
+
+    let merge = MatchaWorkspaceOverlay::merge_context(root.workspace(), root.context())
+        .expect("merge context");
+
+    assert!(merge.merged_files().is_empty());
+    assert_eq!(merge.skipped_missing(), 0);
+    assert_missing(&root.workspace.join("TOOLS.md"));
 }
 
 #[cfg(unix)]
@@ -474,28 +327,24 @@ fn symlinked_workspace_or_template_is_rejected_without_writing_through() {
     fs::create_dir_all(&target).expect("create outside workspace");
     symlink(&target, &root.workspace).expect("link workspace");
 
-    let error = AgentWorkspaceProjection::materialize(root.request())
+    let error = MatchaWorkspaceOverlay::preseed_identity(root.workspace(), root.templates())
         .expect_err("symlinked workspace must be rejected");
     assert_eq!(error, WorkspaceProjectionError::WorkspaceUnavailable);
-    assert!(
-        !target
-            .join(WorkspaceTemplateFile::Agents.file_name())
-            .exists()
-    );
+    assert_missing(&target.join(WorkspaceTemplateFile::Identity.file_name()));
 
     let root = TestRoot::new();
     fs::remove_file(
         root.templates
-            .join(WorkspaceTemplateFile::Agents.file_name()),
+            .join(WorkspaceTemplateFile::Identity.file_name()),
     )
     .expect("remove template");
     symlink(
         root.path.join("outside-template"),
         root.templates
-            .join(WorkspaceTemplateFile::Agents.file_name()),
+            .join(WorkspaceTemplateFile::Identity.file_name()),
     )
     .expect("link template");
-    let error = AgentWorkspaceProjection::materialize(root.request())
+    let error = MatchaWorkspaceOverlay::preseed_identity(root.workspace(), root.templates())
         .expect_err("symlinked template must be rejected");
     assert_eq!(error, WorkspaceProjectionError::TemplateUnavailable);
 }
@@ -511,35 +360,32 @@ fn relative_and_escaping_workspace_inputs_are_rejected() {
         .join("..")
         .join("escape");
     assert_eq!(
-        WorkspaceTemplateDirectory::try_new(escape),
+        MatchaWorkspaceTemplateDirectory::try_new(escape.clone()),
+        Err(WorkspaceProjectionError::InvalidPath)
+    );
+    assert_eq!(
+        WorkspaceContextDirectory::try_new(escape),
         Err(WorkspaceProjectionError::InvalidPath)
     );
 }
 
 #[test]
-fn requests_and_errors_do_not_expose_private_paths_or_template_content() {
+fn directory_debug_and_errors_do_not_expose_private_paths_or_template_content() {
     let root = TestRoot::new();
-    let request = root.request();
-    let request_debug = format!("{request:?}");
-    assert_eq!(
-        request_debug,
-        "AgentWorkspaceMaterializationRequest([REDACTED])"
-    );
-    assert!(!request_debug.contains(root.workspace.to_string_lossy().as_ref()));
-    assert!(!request_debug.contains(root.templates.to_string_lossy().as_ref()));
+    let workspace = root.workspace();
+    let templates = root.templates();
+    let context = root.context();
+    let rendered = format!("{workspace:?} {templates:?} {context:?}");
+    assert!(!rendered.contains(root.workspace.to_string_lossy().as_ref()));
+    assert!(!rendered.contains(root.templates.to_string_lossy().as_ref()));
+    assert!(!rendered.contains(root.context.to_string_lossy().as_ref()));
 
     fs::remove_file(
         root.templates
-            .join(WorkspaceTemplateFile::Bootstrap.file_name()),
+            .join(WorkspaceTemplateFile::Identity.file_name()),
     )
     .expect("remove template");
-    fs::write(
-        root.templates
-            .join(WorkspaceTemplateFile::Agents.file_name()),
-        SECRET_CANARY,
-    )
-    .expect("overwrite template");
-    let error = AgentWorkspaceProjection::materialize(root.request())
+    let error = MatchaWorkspaceOverlay::preseed_identity(root.workspace(), root.templates())
         .expect_err("missing template must fail");
     let rendered = format!("{error:?} {error}");
     assert_eq!(error, WorkspaceProjectionError::TemplateUnavailable);

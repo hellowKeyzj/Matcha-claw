@@ -220,3 +220,9 @@ You're successful when:
 - Design avatar customization as a core gameplay loop: earn cosmetics through play, display them in social spaces
 - Build cross-experience avatar state: use Roblox's Outfit APIs to let players carry their experience-earned cosmetics into the avatar editor
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

@@ -2,12 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from '@testing-library/react';
 
 const fetchProviderSnapshotMock = vi.fn();
-const normalizeProviderSnapshotMock = vi.fn(() => ({
-  credentials: [],
-  statuses: [],
-  vendors: [],
-  revisions: {},
-}));
+const normalizeProviderSnapshotMock = vi.fn((value: unknown) => value);
 const trackUiEventMock = vi.hoisted(() => vi.fn());
 const startUiTimingMock = vi.hoisted(() => vi.fn(() => () => 1));
 
@@ -21,7 +16,6 @@ vi.mock('@/lib/provider-projection', () => ({
   hostProviderDeleteAccount: vi.fn(),
   hostProviderReadApiKey: vi.fn(),
   hostProviderUpdateAccount: vi.fn(),
-  hostProviderValidate: vi.fn(),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -97,7 +91,7 @@ describe('useProviderStore.init', () => {
     });
 
     expect(useProviderStore.getState().providerSnapshot).toEqual(snapshot);
-    expect(normalizeProviderSnapshotMock).not.toHaveBeenCalled();
+    expect(normalizeProviderSnapshotMock).toHaveBeenCalledWith(snapshot);
   });
 
   it('快照失败时会收敛到 error 状态', async () => {

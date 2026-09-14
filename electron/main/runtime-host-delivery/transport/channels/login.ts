@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './catalog';
 
 const DECISION_TTL_MS = 30_000;
 const MAX_TIMEOUT_MS = 300_000;
@@ -14,6 +15,7 @@ export type ChannelLoginRequest = Readonly<{
   action: ChannelLoginAction;
   channel: string;
   accountId?: string;
+  agentId?: string;
   sessionKey?: string;
   config?: Record<string, unknown>;
   force?: boolean;
@@ -41,7 +43,7 @@ export type ChannelLoginTransportResponse = Readonly<{
 }>;
 
 export interface ChannelLoginTransport {
-  login(input: ChannelLoginRequest): Promise<ChannelLoginTransportResponse>;
+  login(input: ChannelLoginRequest, traceId?: string): Promise<ChannelLoginTransportResponse>;
 }
 
 export function createChannelLoginTransport(
@@ -53,8 +55,12 @@ export function createChannelLoginTransport(
   const pending = new Map<string, AbortController>();
 
   return {
-    async login(input): Promise<ChannelLoginTransportResponse> {
+    async login(input, traceId): Promise<ChannelLoginTransportResponse> {
       if (!isRequest(input)) return { status: 503, body: UNKNOWN };
+      const finish = beginChannelTrace(`transport.login.${input.action}`, traceId);
+      let status = 503;
+      let outcome: unknown;
+      let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
       const key = JSON.stringify([input.channel, input.accountId ?? '']);
       if (input.action === 'cancel') {
         pending.get(key)?.abort();
@@ -81,18 +87,25 @@ export function createChannelLoginTransport(
               revision: '1',
             })}`,
             'Content-Type': 'application/json',
+            ...channelTraceHeaders(traceId),
           },
           body: JSON.stringify(input),
         });
+        status = response.status;
         const body: unknown = await response.json();
+        outcome = body;
         if (response.status === 400 && isRejected(body)) return { status: 400, body };
         if (response.status === 503 && isUnknown(body)) return { status: 503, body };
         if (response.status === 200 && isExpectedResponse(body, input)) {
           return { status: 200, body };
         }
-      } catch {
-        // Native errors, secrets, and QR data never cross the delivery error boundary.
+        outcome = UNKNOWN;
+        errorCode = 'INVALID_RESPONSE';
+      } catch (error) {
+        outcome = UNKNOWN;
+        errorCode = channelTraceError(error);
       } finally {
+        finish(status, outcome, errorCode);
         if (pending.get(key) === controller) pending.delete(key);
       }
       return { status: 503, body: UNKNOWN };
@@ -110,7 +123,8 @@ function isRequest(value: unknown): value is ChannelLoginRequest {
       && keys.length <= 3;
   }
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'config', 'force', 'timeoutMs'].includes(key))
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs'].includes(key))
+      && (value.agentId === undefined || isIdentity(value.agentId))
       && (value.config === undefined || isConfig(value.config))
       && (value.force === undefined || typeof value.force === 'boolean')
       && (value.timeoutMs === undefined || isTimeout(value.timeoutMs));
@@ -131,6 +145,9 @@ function isExpectedResponse(value: unknown, input: ChannelLoginRequest): value i
 
 function isProgress(value: unknown): value is LoginProgress {
   if (!isRecord(value)
+    || !hasOnlyKeys(value, ['outcome', 'channel', 'accountId', 'qrDataUrl', 'sessionKey'])
+    || !Object.hasOwn(value, 'outcome')
+    || !Object.hasOwn(value, 'channel')
     || (value.outcome !== 'progress'
       && value.outcome !== 'connected'
       && value.outcome !== 'target_rejected'
@@ -157,6 +174,10 @@ function isLogoutOutcome(value: unknown): value is LogoutOutcome {
 
 function isRejected(value: unknown): value is RejectedResponse {
   return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'rejected';
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

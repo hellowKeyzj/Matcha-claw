@@ -5,12 +5,16 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
+import { posix, win32 } from 'node:path';
+import { shell } from 'electron';
 import type { HostEventBus } from '../../api/event-bus';
 import { parseJsonBody, sendJson } from '../../api/route-utils';
 
 const CALLBACK_VERSION = 1;
 const DISPATCH_TOKEN_HEADER = 'x-runtime-host-dispatch-token';
 const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
+const SHELL_ACTION_PATH = '/internal/runtime-host/shell-actions';
+const SHELL_OPEN_PATH_ACTION = 'shell_open_path';
 
 const GATEWAY_EVENT_NAMES = new Set([
   'gateway:lifecycle',
@@ -25,6 +29,12 @@ const GATEWAY_EVENT_NAMES = new Set([
 type ParentCallbackEvent = Readonly<{
   readonly version: number;
   readonly eventName: string;
+  readonly payload: unknown;
+}>;
+
+type ParentShellAction = Readonly<{
+  readonly version: number;
+  readonly action: string;
   readonly payload: unknown;
 }>;
 
@@ -66,7 +76,7 @@ async function handleParentCallbackRequest(
   eventBus: HostEventBus,
 ): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
-  if (pathname !== GATEWAY_EVENT_PATH) {
+  if (pathname !== GATEWAY_EVENT_PATH && pathname !== SHELL_ACTION_PATH) {
     sendJson(res, 404, { version: CALLBACK_VERSION, success: false, status: 404 });
     return;
   }
@@ -91,6 +101,11 @@ async function handleParentCallbackRequest(
     return;
   }
 
+  if (pathname === SHELL_ACTION_PATH) {
+    await handleParentShellAction(res, body);
+    return;
+  }
+
   if (!isParentCallbackEvent(body)) {
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
@@ -110,12 +125,76 @@ async function handleParentCallbackRequest(
   });
 }
 
+async function handleParentShellAction(
+  res: ServerResponse,
+  body: unknown,
+): Promise<void> {
+  if (!isParentShellAction(body)) {
+    sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
+    return;
+  }
+
+  if (body.action !== SHELL_OPEN_PATH_ACTION) {
+    sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
+    return;
+  }
+
+  const pathToOpen = parseShellOpenPathPayload(body.payload);
+  if (!pathToOpen) {
+    sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
+    return;
+  }
+
+  const openError = await shell.openPath(pathToOpen);
+  if (openError) {
+    sendJson(res, 500, {
+      version: CALLBACK_VERSION,
+      success: false,
+      status: 500,
+      error: { code: 'SHELL_OPEN_PATH_FAILED', message: 'Failed to open path.' },
+    });
+    return;
+  }
+
+  sendJson(res, 200, {
+    version: CALLBACK_VERSION,
+    success: true,
+    status: 200,
+    data: { opened: true },
+  });
+}
+
 function isParentCallbackEvent(value: unknown): value is ParentCallbackEvent {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return record.version === CALLBACK_VERSION
-    && typeof record.eventName === 'string'
-    && Object.prototype.hasOwnProperty.call(record, 'payload');
+  return isRecord(value)
+    && hasExactKeys(value, ['version', 'eventName', 'payload'])
+    && value.version === CALLBACK_VERSION
+    && typeof value.eventName === 'string';
+}
+
+function isParentShellAction(value: unknown): value is ParentShellAction {
+  return isRecord(value)
+    && hasExactKeys(value, ['version', 'action', 'payload'])
+    && value.version === CALLBACK_VERSION
+    && typeof value.action === 'string';
+}
+
+function parseShellOpenPathPayload(payload: unknown): string | null {
+  if (!isRecord(payload) || !hasExactKeys(payload, ['path'])) return null;
+  const pathValue = payload.path;
+  if (typeof pathValue !== 'string') return null;
+  const trimmedPath = pathValue.trim();
+  if (!trimmedPath || trimmedPath.includes('\0')) return null;
+  if (!win32.isAbsolute(trimmedPath) && !posix.isAbsolute(trimmedPath)) return null;
+  return trimmedPath;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasDispatchToken(req: IncomingMessage, expected: string): boolean {

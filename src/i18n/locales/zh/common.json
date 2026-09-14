@@ -1,4 +1,9 @@
 {
+    "auth": {
+        "boot": {
+            "title": "正在检查登录状态"
+        }
+    },
     "sidebar": {
         "chat": "聊天",
         "newChat": "新对话",
@@ -88,6 +93,8 @@
                 "subscriptionWeekly": "套餐周额度",
                 "subscriptionMonthly": "套餐月额度",
                 "platformMonthly": "{{platform}} 月度",
+                "availableBalance": "可用余额",
+                "frozenBalance": "冻结金额",
                 "totalUsage": "总用量"
             }
         }
@@ -117,10 +124,18 @@
         "current": {
             "subscriptionCount": "{{count}} 个 Matcha 订阅",
             "noSubscription": "暂无 Matcha 订阅",
+            "noActiveSubscription": "暂无有效订阅",
+            "freePlan": "Free",
             "expiresAt": "到期时间：{{date}}",
             "quotaTitle": "订阅额度",
             "emptyQuota": "当前订阅没有返回额度详情。",
-            "platformQuotaTitle": "平台额度"
+            "balanceTitle": "账户余额"
+        },
+        "balance": {
+            "details": "余额明细",
+            "available": "可用余额",
+            "frozen": "冻结金额",
+            "total": "总余额"
         },
         "quota": {
             "daily": "日额度",
@@ -128,6 +143,7 @@
             "monthly": "月额度",
             "platformMonthly": "{{platform}} 月度",
             "unlimited": "不限量",
+            "usedOnly": "已用 {{used}}",
             "usedOfLimit": "已用 {{used}} / {{limit}}",
             "remaining": "剩余 {{amount}}",
             "resetsAt": "重置：{{date}}"
@@ -223,6 +239,18 @@
         "configured": "已配置",
         "loading": "加载中...",
         "saving": "保存中..."
+    },
+    "switchboard": {
+        "quickSwitch": "快速切换",
+        "runtime": "运行时",
+        "teamSession": "团队会话",
+        "tabs": {
+            "agents": "Agent",
+            "teams": "团队",
+            "sessions": "会话"
+        },
+        "normalSessions": "普通",
+        "automationSessions": "自动化"
     },
     "gateway": {
         "notRunning": "网关未运行",

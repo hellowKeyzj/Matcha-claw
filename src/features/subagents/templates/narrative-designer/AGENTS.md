@@ -198,3 +198,9 @@ You're successful when:
 - Implement dialogue telemetry: which branches do players choose most? Which lines are skipped? Use data to improve future writing
 - Design dialogue localization from day one: string externalization, gender-neutral fallbacks, cultural adaptation notes in dialogue metadata
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

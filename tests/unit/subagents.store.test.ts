@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   capabilityExecuteMock,
   gatewayClientRpcMock,
@@ -358,7 +358,6 @@ describe('subagents store', () => {
           agentId: 'writer',
           name: 'Writer Renamed',
           workspace: '/workspace/writer',
-          model: null,
         });
         return { success: true, result: {} };
       }
@@ -519,9 +518,9 @@ describe('subagents store', () => {
     expect(rpc.mock.calls.some(([method]) => method === 'agents.update')).toBe(false);
   });
 
-  it('updateAgent 清空 model 时通过 model.set 明确写入 null', async () => {
+  it('updateAgent 清空 model 时通过 agents.update 明确写入 null', async () => {
     const rpc = gatewayClientRpcMock;
-    let modelSetParams: Record<string, unknown> | undefined;
+    let agentsUpdateParams: Record<string, unknown> | undefined;
 
     useSubagentsStore.setState({
       agents: [
@@ -537,8 +536,8 @@ describe('subagents store', () => {
     });
 
     rpc.mockImplementation(async (method, params) => {
-      if (method === 'model.set') {
-        modelSetParams = params as Record<string, unknown>;
+      if (method === 'agents.update') {
+        agentsUpdateParams = params as Record<string, unknown>;
         return { success: true, result: {} };
       }
       if (method === 'agents.list') {
@@ -568,13 +567,13 @@ describe('subagents store', () => {
       model: '',
     });
 
-    expect(modelSetParams).toEqual({
-      kind: 'setConfigurationModel',
+    expect(agentsUpdateParams).toEqual({
+      kind: 'update',
       endpoint: runtimeEndpoint,
       agentId: 'writer',
       model: null,
     });
-    expect(rpc.mock.calls.some(([method]) => method === 'agents.update')).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === 'model.set')).toBe(false);
   });
 
   it('updateAgent 清空 skills 时通过 skills.set 明确写入空 allowlist', async () => {
@@ -983,14 +982,116 @@ describe('subagents store', () => {
         files: {
           'AGENTS.md': 'AGENTS.md shared content',
           'SOUL.md': 'SOUL.md shared content',
-          'TOOLS.md': 'TOOLS.md shared content',
-          'IDENTITY.md': 'IDENTITY.md shared content',
           'USER.md': 'USER.md shared content',
+          'MEMORY.md': 'MEMORY.md shared content',
         },
       },
     });
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/subagents/files/get', expect.anything());
     expect(JSON.stringify(exported)).not.toContain('/home/dev/.openclaw');
+  });
+
+  it('exportAgentPackage 通过 sealed package capability 返回公开 receipt', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'writer', name: 'Writer', sealed: true, isDefault: false },
+      ],
+    });
+    hostApiFetchMock.mockImplementation(async (path, options) => {
+      expect(path).toBe('/api/subagents/agents');
+      expect(JSON.parse(String(options?.body))).toEqual({
+        id: 'subagent.management',
+        operationId: 'subagents.package.export',
+        scope: { kind: 'agent', endpoint: runtimeEndpoint, agentId: 'default' },
+        target: { kind: 'subagent', subagentId: 'writer' },
+        input: { kind: 'packageExport', endpoint: runtimeEndpoint, agentId: 'writer' },
+      });
+      return {
+        success: true,
+        package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 },
+      };
+    });
+
+    await expect(useSubagentsStore.getState().exportAgentPackage('writer')).resolves.toEqual({
+      agentId: 'writer',
+      fileName: 'writer.matcha-agentpkg',
+      packagePath: 'C:/sealed/writer.matcha-agentpkg',
+      size: 1024,
+      exportedAtMs: 1,
+    });
+  });
+
+  it('agent package cloud actions use the package registry endpoints', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'writer', name: 'Writer', isDefault: false },
+      ],
+      loadAgents,
+    });
+    hostApiFetchMock.mockImplementation(async (path, options) => {
+      if (path === '/api/subagents/agents') {
+        expect(JSON.parse(String(options?.body))).toEqual({
+          id: 'subagent.management',
+          operationId: 'subagents.package.export',
+          scope: { kind: 'agent', endpoint: runtimeEndpoint, agentId: 'default' },
+          target: { kind: 'subagent', subagentId: 'writer' },
+          input: { kind: 'packageExport', endpoint: runtimeEndpoint, agentId: 'writer' },
+        });
+        return {
+          success: true,
+          package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 },
+        };
+      }
+      if (path === '/api/packages/upload') {
+        expect(JSON.parse(String(options?.body))).toEqual({ packagePath: 'C:/sealed/writer.matcha-agentpkg' });
+        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', fileName: 'writer.matcha-agentpkg', bytes: 1024 };
+      }
+      if (path === '/api/packages/download') {
+        expect(JSON.parse(String(options?.body))).toEqual({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' });
+        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', filename: 'writer.matcha-agentpkg', bytes: 1024 };
+      }
+      if (path === '/api/packages/install') {
+        expect(JSON.parse(String(options?.body))).toEqual({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' });
+        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', install: { outcome: 'accepted', agentId: 'writer', workspace: 'C:/private' } };
+      }
+      throw new Error(`Unexpected path in test: ${String(path)}`);
+    });
+
+    await expect(useSubagentsStore.getState().uploadAgentPackageToCloud('writer')).resolves.toEqual({
+      agentId: 'writer',
+      packageId: 'pkg-writer',
+      packageVersionId: 'version-writer',
+      fileName: 'writer.matcha-agentpkg',
+      size: 1024,
+      uploadedAtMs: expect.any(Number),
+    });
+    await expect(useSubagentsStore.getState().downloadAgentPackageFromCloud('version-writer')).resolves.toEqual({
+      agentId: 'version-writer',
+      packageId: 'pkg-writer',
+      packageVersionId: 'version-writer',
+      fileName: 'writer.matcha-agentpkg',
+      size: 1024,
+      downloadedAtMs: expect.any(Number),
+    });
+    await expect(useSubagentsStore.getState().installAgentPackageFromCloud('version-writer')).resolves.toEqual({
+      agentId: 'writer',
+      packageId: 'pkg-writer',
+      packageVersionId: 'version-writer',
+    });
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it('exportAgentConfig rejects sealed agents before reading editable files', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'writer', name: 'Writer', sealed: true, isDefault: false },
+      ],
+    });
+
+    await expect(useSubagentsStore.getState().exportAgentConfig('writer'))
+      .rejects.toThrow('Sealed agent config cannot be exported');
+    expect(gatewayClientRpcMock).not.toHaveBeenCalledWith('agents.files.get', expect.anything(), expect.anything());
   });
 
   it('importAgentConfig 从共享配置创建 agent 并写入人设文件', async () => {
@@ -1023,6 +1124,7 @@ describe('subagents store', () => {
           name: 'Writer',
           workspace: '/home/dev/.openclaw/workspace-subagents/writer',
           model: null,
+          workspaceInitialization: 'emptyWorkspace',
         });
         return { success: true, result: { agentId: 'writer' } };
       }

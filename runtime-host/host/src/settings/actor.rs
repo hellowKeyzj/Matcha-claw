@@ -70,7 +70,7 @@ impl SettingsGlobalState {
 
         match self.state.pending() {
             Some(pending) if pending.revision == revision => {
-                self.settle_pending(shared, pending, true).await
+                self.settle_pending(shared, pending).await
             }
             _ => Settlement::unknown(revision),
         }
@@ -78,23 +78,19 @@ impl SettingsGlobalState {
 
     async fn recover_pending(&mut self, shared: &SettingsShared) -> Option<Settlement> {
         let pending = self.state.pending()?;
-        Some(self.settle_pending(shared, pending, true).await)
+        Some(self.settle_pending(shared, pending).await)
     }
 
     async fn apply_saved_projection(&mut self, shared: &SettingsShared) -> Outcome {
-        self.apply_desired(shared, self.state.desired(), false)
-            .await
+        self.apply_desired(shared, self.state.desired()).await
     }
 
     async fn settle_pending(
         &mut self,
         shared: &SettingsShared,
         pending: PendingDesired,
-        restart_changed_projection: bool,
     ) -> Settlement {
-        let outcome = self
-            .apply_desired(shared, pending.desired, restart_changed_projection)
-            .await;
+        let outcome = self.apply_desired(shared, pending.desired).await;
         self.state.settle(pending.revision, outcome);
         self.publish_snapshot();
         Settlement {
@@ -103,12 +99,7 @@ impl SettingsGlobalState {
         }
     }
 
-    async fn apply_desired(
-        &self,
-        shared: &SettingsShared,
-        desired: Desired,
-        restart_changed_projection: bool,
-    ) -> Outcome {
+    async fn apply_desired(&self, shared: &SettingsShared, desired: Desired) -> Outcome {
         let Some(driver) = shared.runtime_directory.settings_driver() else {
             return Outcome::Unknown;
         };
@@ -120,19 +111,8 @@ impl SettingsGlobalState {
             .apply_settings_projection(browser_mode, proxy_endpoint)
             .await
         {
-            Ok(SettingsProjectionEffect::Unchanged) => Outcome::Confirmed,
-            Ok(SettingsProjectionEffect::Changed) => {
-                let Some(lifecycle) = driver.lifecycle_ops() else {
-                    return Outcome::Unknown;
-                };
-                if lifecycle.readiness() && !restart_changed_projection {
-                    return Outcome::Unknown;
-                }
-                if !lifecycle.readiness() || lifecycle.restart().await.is_ok() {
-                    Outcome::Confirmed
-                } else {
-                    Outcome::Unknown
-                }
+            Ok(SettingsProjectionEffect::Unchanged | SettingsProjectionEffect::Changed) => {
+                Outcome::Confirmed
             }
             Err(RuntimeOperationFailure::TargetRejected) => Outcome::Rejected,
             Err(_) => Outcome::Unknown,

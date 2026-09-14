@@ -2,6 +2,8 @@ use std::{fmt, net::Ipv6Addr};
 
 use serde_json::{Map, Value};
 
+use crate::gateway::config_patch::{destructive_array_replace_paths, merge_patch};
+
 use crate::lifecycle::state_dir::CanonicalStateDir;
 
 use super::config_store::{
@@ -98,6 +100,13 @@ pub fn readback_matches(
     Ok(projection.matches_document(&document))
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SettingsConfigPatch {
+    pub(crate) patch: Value,
+    pub(crate) replace_paths: Vec<String>,
+    pub(crate) changed: bool,
+}
+
 impl SettingsProjection {
     pub fn try_new(
         browser_mode: BrowserMode,
@@ -111,6 +120,32 @@ impl SettingsProjection {
             browser_mode,
             proxy,
         })
+    }
+
+    pub(crate) fn build_config_patch(
+        &self,
+        current: &OpenClawConfigDocument,
+    ) -> SettingsConfigPatch {
+        let current = current.as_value();
+        let mut target = OpenClawConfigDocument::from_value(current.clone())
+            .expect("cloned OpenClaw config document remains an object");
+        let changed = self.apply_to_document(&mut target);
+        let target = target.into_value();
+        let patch = if changed {
+            merge_patch(&current, &target)
+        } else {
+            Value::Object(Map::new())
+        };
+        let replace_paths = if changed {
+            destructive_array_replace_paths(&current, &target)
+        } else {
+            Vec::new()
+        };
+        SettingsConfigPatch {
+            patch,
+            replace_paths,
+            changed,
+        }
     }
 
     pub(crate) fn apply(
@@ -171,29 +206,7 @@ impl SettingsProjection {
         changed |= replace(&mut plugins, "entries", Value::Object(entries));
         changed |= replace_document(document, "plugins", Value::Object(plugins));
 
-        let mut channels = object(document.get("channels"));
-        let mut telegram = object(channels.get("telegram"));
-        let default_account = telegram
-            .get("defaultAccount")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("default")
-            .to_owned();
-        let mut accounts = object(telegram.get("accounts"));
-        let mut account = object(accounts.get(&default_account));
-        match &self.proxy {
-            Some(proxy) => changed |= replace(&mut account, "proxy", Value::String(proxy.clone())),
-            None => changed |= account.remove("proxy").is_some(),
-        }
-        changed |= replace(&mut accounts, &default_account, Value::Object(account));
-        changed |= replace(&mut telegram, "accounts", Value::Object(accounts));
-        changed |= replace(
-            &mut telegram,
-            "defaultAccount",
-            Value::String(default_account),
-        );
-        changed |= replace(&mut channels, "telegram", Value::Object(telegram));
-        changed |= replace_document(document, "channels", Value::Object(channels));
+        changed |= apply_telegram_proxy(document, self.proxy.as_deref());
         changed
     }
 
@@ -261,6 +274,92 @@ impl fmt::Display for SettingsProjectionError {
 }
 
 impl std::error::Error for SettingsProjectionError {}
+
+fn apply_telegram_proxy(document: &mut OpenClawConfigDocument, proxy: Option<&str>) -> bool {
+    match proxy {
+        Some(proxy) => apply_telegram_proxy_value(document, proxy),
+        None => remove_telegram_proxy_value(document),
+    }
+}
+
+fn apply_telegram_proxy_value(document: &mut OpenClawConfigDocument, proxy: &str) -> bool {
+    let mut channels = object(document.get("channels"));
+    let mut telegram = object(channels.get("telegram"));
+    let default_account = telegram
+        .get("defaultAccount")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default")
+        .to_owned();
+    let mut accounts = object(telegram.get("accounts"));
+    let mut account = object(accounts.get(&default_account));
+    let mut changed = replace(&mut account, "proxy", Value::String(proxy.to_owned()));
+    changed |= replace(&mut accounts, &default_account, Value::Object(account));
+    changed |= replace(&mut telegram, "accounts", Value::Object(accounts));
+    changed |= replace(
+        &mut telegram,
+        "defaultAccount",
+        Value::String(default_account),
+    );
+    changed |= replace(&mut channels, "telegram", Value::Object(telegram));
+    changed |= replace_document(document, "channels", Value::Object(channels));
+    changed
+}
+
+fn remove_telegram_proxy_value(document: &mut OpenClawConfigDocument) -> bool {
+    let Some(Value::Object(_)) = document.get("channels") else {
+        return false;
+    };
+    let mut channels = object(document.get("channels"));
+    let Some(Value::Object(_)) = channels.get("telegram") else {
+        return false;
+    };
+    let mut telegram = object(channels.get("telegram"));
+    let default_account = telegram
+        .get("defaultAccount")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default")
+        .to_owned();
+    let mut accounts = object(telegram.get("accounts"));
+    let mut changed = false;
+    if let Some(account) = accounts
+        .get_mut(&default_account)
+        .and_then(Value::as_object_mut)
+    {
+        changed |= account.remove("proxy").is_some();
+        if account.is_empty() {
+            accounts.remove(&default_account);
+            changed = true;
+        }
+    }
+    if !changed {
+        return false;
+    }
+
+    if accounts.is_empty() {
+        telegram.remove("accounts");
+        if telegram.get("defaultAccount").and_then(Value::as_str) == Some(default_account.as_str())
+        {
+            telegram.remove("defaultAccount");
+        }
+    } else {
+        if telegram.get("defaultAccount").and_then(Value::as_str) == Some(default_account.as_str())
+            && !accounts.contains_key(&default_account)
+        {
+            let replacement = accounts.keys().next().cloned().unwrap_or_default();
+            telegram.insert("defaultAccount".into(), Value::String(replacement));
+        }
+        telegram.insert("accounts".into(), Value::Object(accounts));
+    }
+
+    if telegram.is_empty() {
+        channels.remove("telegram");
+    } else {
+        channels.insert("telegram".into(), Value::Object(telegram));
+    }
+    replace_document(document, "channels", Value::Object(channels))
+}
 
 fn apply_default_session_idle(document: &mut OpenClawConfigDocument) -> bool {
     let session = object(document.get("session"));
@@ -515,6 +614,20 @@ mod tests {
     }
 
     #[test]
+    fn prelaunch_without_proxy_does_not_create_telegram_account() {
+        let root = TestRoot::new();
+        let state_dir = root.state_dir();
+
+        assert!(apply_prelaunch_desired(state_dir.clone(), BrowserMode::Native, None).unwrap());
+        let document = OpenClawConfigStore::new(state_dir)
+            .read()
+            .unwrap()
+            .as_value();
+        assert_eq!(document["browser"]["enabled"], true);
+        assert!(document["channels"].get("telegram").is_none());
+    }
+
+    #[test]
     fn applies_native_relay_and_off_with_readback() {
         for (mode, expected_browser, expected_relay) in [
             (
@@ -633,6 +746,252 @@ mod tests {
                 Some("http://proxy.internal:8080")
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn builds_config_patch_for_native_browser_and_telegram_proxy() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "browser": {
+                "enabled": false,
+                "profiles": { "custom": { "color": "#123456" } }
+            },
+            "plugins": {
+                "allow": ["other", BROWSER_RELAY_PLUGIN],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": true, "custom": true }
+                }
+            },
+            "channels": {
+                "telegram": {
+                    "defaultAccount": "work",
+                    "accounts": {
+                        "default": { "proxy": "http://default.proxy:80" },
+                        "work": { "label": "preserve" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Native, Some("proxy.internal:8080"))
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(patch.changed);
+        assert_eq!(patch.replace_paths, vec!["plugins.allow"]);
+        assert_eq!(
+            patch.patch,
+            serde_json::json!({
+                "browser": {
+                    "enabled": true,
+                    "defaultProfile": "openclaw"
+                },
+                "plugins": {
+                    "allow": ["other"],
+                    "entries": {
+                        BROWSER_RELAY_PLUGIN: { "enabled": false }
+                    }
+                },
+                "channels": {
+                    "telegram": {
+                        "accounts": {
+                            "work": { "proxy": "http://proxy.internal:8080" }
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn removes_orphaned_telegram_proxy_account_when_proxy_is_cleared() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "browser": {
+                "enabled": true,
+                "defaultProfile": "openclaw"
+            },
+            "plugins": {
+                "allow": [],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": false }
+                }
+            },
+            "channels": {
+                "telegram": {
+                    "defaultAccount": "default",
+                    "accounts": {
+                        "default": { "proxy": "http://proxy.internal:8080" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Native, None)
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(patch.changed);
+        assert_eq!(patch.patch["channels"]["telegram"], serde_json::json!(null));
+    }
+
+    #[test]
+    fn builds_config_patch_for_relay_browser_and_telegram_proxy_removal() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "browser": {
+                "enabled": true,
+                "defaultProfile": "openclaw",
+                "profiles": { "openclaw": { "color": "#abcdef" } }
+            },
+            "plugins": {
+                "allow": ["other"],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": false, "custom": true }
+                }
+            },
+            "channels": {
+                "telegram": {
+                    "defaultAccount": "work",
+                    "accounts": {
+                        "work": {
+                            "proxy": "http://proxy.internal:8080",
+                            "label": "preserve"
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Relay, None)
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(patch.changed);
+        assert_eq!(patch.replace_paths, Vec::<String>::new());
+        assert_eq!(
+            patch.patch,
+            serde_json::json!({
+                "browser": {
+                    "enabled": false,
+                    "defaultProfile": null
+                },
+                "plugins": {
+                    "allow": ["other", BROWSER_RELAY_PLUGIN],
+                    "entries": {
+                        BROWSER_RELAY_PLUGIN: { "enabled": true }
+                    }
+                },
+                "channels": {
+                    "telegram": {
+                        "accounts": {
+                            "work": { "proxy": null }
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn builds_config_patch_for_proxy_without_browser_or_plugin_changes() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "browser": {
+                "enabled": true,
+                "defaultProfile": "openclaw"
+            },
+            "plugins": {
+                "allow": ["other"],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": false }
+                }
+            },
+            "channels": {
+                "telegram": {
+                    "defaultAccount": "default",
+                    "accounts": {
+                        "default": { "label": "preserve" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Native, Some("proxy.internal:8080"))
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(patch.changed);
+        assert_eq!(patch.replace_paths, Vec::<String>::new());
+        assert_eq!(
+            patch.patch,
+            serde_json::json!({
+                "channels": {
+                    "telegram": {
+                        "accounts": {
+                            "default": { "proxy": "http://proxy.internal:8080" }
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn unchanged_config_patch_reports_no_change() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "browser": {
+                "enabled": false,
+                "profiles": { "custom": { "color": "#123456" } }
+            },
+            "plugins": {
+                "allow": ["other", BROWSER_RELAY_PLUGIN],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": true, "custom": true }
+                }
+            },
+            "channels": {
+                "telegram": {
+                    "defaultAccount": "work",
+                    "accounts": {
+                        "work": { "proxy": "http://proxy.internal:8080" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Relay, Some("proxy.internal:8080"))
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(!patch.changed);
+        assert_eq!(patch.patch, serde_json::json!({}));
+        assert_eq!(patch.replace_paths, Vec::<String>::new());
+    }
+
+    #[test]
+    fn config_patch_replace_paths_for_plugins_allow_are_stable_and_deduplicated() {
+        let current = OpenClawConfigDocument::from_value(serde_json::json!({
+            "plugins": {
+                "allow": ["other", BROWSER_RELAY_PLUGIN, BROWSER_RELAY_PLUGIN],
+                "entries": {
+                    BROWSER_RELAY_PLUGIN: { "enabled": false }
+                }
+            }
+        }))
+        .unwrap();
+
+        let patch = SettingsProjection::try_new(BrowserMode::Native, None)
+            .unwrap()
+            .build_config_patch(&current);
+
+        assert!(patch.changed);
+        assert_eq!(patch.replace_paths, vec!["plugins.allow"]);
+        assert_eq!(
+            patch.patch["plugins"]["allow"],
+            serde_json::json!(["other"])
         );
     }
 

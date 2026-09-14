@@ -4,6 +4,7 @@ import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { decodeFileHintHref } from './md-pipeline';
+import { handleMarkdownCodeBlockCopy } from './markdown-code-blocks';
 import { useLargeTextContent } from './large-text-loader';
 import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
 import type { SessionLargeTextMetadata } from '../../types/session/tool-card';
@@ -64,20 +65,25 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
   }, []);
 
   const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (handleMarkdownCodeBlockCopy(event)) {
+      return true;
+    }
+
     const target = getEventElement(event.target);
     if (!target) {
-      return;
+      return false;
     }
     const anchor = target.closest('a');
     if (!(anchor instanceof HTMLAnchorElement)) {
-      return;
+      return false;
     }
     const decodedHint = decodeFileHintHref(anchor.href);
     if (!decodedHint) {
-      return;
+      return false;
     }
     event.preventDefault();
     void handleOpenFileHint(decodedHint);
+    return true;
   }, [handleOpenFileHint]);
 
   const handleBodyClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -92,7 +98,9 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
   }, [onBodyClick]);
 
   const handleMarkdownBodyClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    handleMarkdownClick(event);
+    if (handleMarkdownClick(event)) {
+      return;
+    }
     handleBodyClick(event);
   }, [handleBodyClick, handleMarkdownClick]);
 

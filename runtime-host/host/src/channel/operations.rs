@@ -100,6 +100,7 @@ fn valid_identity(value: &str) -> bool {
 
 pub(super) enum ChannelMutation {
     Configure {
+        agent_id: Option<String>,
         values: Zeroizing<Vec<u8>>,
     },
     DeleteConfig,
@@ -122,6 +123,7 @@ pub(super) enum ChannelMutation {
         config: Zeroizing<Vec<u8>>,
     },
     FinalizeLogin {
+        agent_id: Option<String>,
         config: Zeroizing<Vec<u8>>,
     },
 }
@@ -156,6 +158,61 @@ pub(super) enum ChannelOperationKind {
     PairingApprove,
     ValidateCredentials,
     FinalizeLogin,
+}
+
+impl ChannelOperationKind {
+    pub(super) fn trace_phase(self) -> &'static str {
+        match self {
+            Self::Configure => "host.mutation.configure",
+            Self::DeleteConfig => "host.mutation.delete",
+            Self::Connect => "host.mutation.connect",
+            Self::Disconnect => "host.mutation.disconnect",
+            Self::LoginStart => "host.login.start",
+            Self::LoginWait => "host.login.wait",
+            Self::StopLogin => "host.login.cancel",
+            Self::Logout => "host.login.logout",
+            Self::PairingApprove => "host.mutation.pairing_approve",
+            Self::ValidateCredentials => "host.mutation.validate_credentials",
+            Self::FinalizeLogin => "host.mutation.finalize_login",
+        }
+    }
+}
+
+impl ChannelMutationEffect {
+    pub(super) fn trace_outcome(&self) -> &'static str {
+        use crate::channel::{
+            catalog::ChannelConfigureOutcome as Configure,
+            control::ChannelControlOutcome as Control, credentials::Outcome as Credentials,
+            delete::Outcome as Delete, status::ChannelPairingApprovalOutcome as Pairing,
+        };
+        match self {
+            Self::Configure(Configure::Confirmed)
+            | Self::DeleteConfig(Delete::Confirmed)
+            | Self::Control(Control::Confirmed)
+            | Self::PairingApprove(Pairing::Confirmed)
+            | Self::LoginFinalized(LoginFinalizationOutcome::Confirmed) => "confirmed",
+            Self::Configure(Configure::TargetRejected)
+            | Self::DeleteConfig(Delete::TargetRejected)
+            | Self::Control(Control::Rejected)
+            | Self::PairingApprove(Pairing::TargetRejected)
+            | Self::Credentials(Credentials::TargetRejected)
+            | Self::LoginFinalized(LoginFinalizationOutcome::Rejected) => "rejected",
+            Self::Credentials(Credentials::Validated(validation)) => {
+                if validation.valid {
+                    "valid"
+                } else {
+                    "invalid"
+                }
+            }
+            Self::Login(outcome) => outcome.trace_outcome(),
+            Self::Configure(Configure::Unknown)
+            | Self::DeleteConfig(Delete::Unknown)
+            | Self::Control(Control::OutcomeUnknown)
+            | Self::PairingApprove(Pairing::Unknown)
+            | Self::Credentials(Credentials::Unknown)
+            | Self::LoginFinalized(LoginFinalizationOutcome::Unknown) => "unknown",
+        }
+    }
 }
 
 pub(super) fn mutation_kind(mutation: &ChannelMutation) -> ChannelOperationKind {

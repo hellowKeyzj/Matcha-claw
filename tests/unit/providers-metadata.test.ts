@@ -1,12 +1,23 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  BUILTIN_PROVIDER_TYPES,
+  PROVIDER_TYPES,
   PROVIDER_TYPE_INFO,
   getProviderDocsUrl,
   normalizeProviderApiKeyInput,
 } from '@/lib/providers';
-import { buildProviderListItems } from '@/lib/provider-accounts';
+import { hostApiFetch } from '@/lib/host-api';
+import { buildProviderCredentialId, buildProviderListItems, fetchProviderSnapshot } from '@/lib/provider-accounts';
+
+vi.mock('@/lib/host-api', () => ({
+  hostApiFetch: vi.fn(),
+}));
 
 describe('provider metadata', () => {
+  beforeEach(() => {
+    vi.mocked(hostApiFetch).mockReset();
+  });
+
   it('keeps provider metadata about vendors and auth only', () => {
     const siliconflow = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'siliconflow');
     const deepseek = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'deepseek');
@@ -43,6 +54,48 @@ describe('provider metadata', () => {
       undefined as unknown as never[],
     );
     expect(items).toEqual([]);
+  });
+
+  it('registers Z.AI CN and Global as builtin provider types', () => {
+    expect(PROVIDER_TYPES).toContain('zai');
+    expect(PROVIDER_TYPES).toContain('zai-global');
+    expect(BUILTIN_PROVIDER_TYPES).toContain('zai');
+    expect(BUILTIN_PROVIDER_TYPES).toContain('zai-global');
+  });
+
+  it('Z.AI CN and Global share runtime key but keep separate frontend vendors', () => {
+    const zaiCn = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'zai');
+    const zaiGlobal = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'zai-global');
+
+    expect(zaiCn).toMatchObject({
+      name: 'Z.AI (CN)',
+      model: 'glm-5.2',
+      defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      codePlan: { baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', modelId: 'glm-5.2' },
+      runtimeProviderKey: 'zai',
+      apiKeyUrl: 'https://open.bigmodel.cn/user/apiKeys',
+    });
+    expect(zaiGlobal).toMatchObject({
+      name: 'Z.AI (Global)',
+      model: 'glm-5.2',
+      defaultBaseUrl: 'https://api.z.ai/api/paas/v4',
+      codePlan: { baseUrl: 'https://api.z.ai/api/coding/paas/v4', modelId: 'glm-5.2' },
+      runtimeProviderKey: 'zai',
+      apiKeyUrl: 'https://z.ai/manage-apikey/apikey-list',
+    });
+  });
+
+  it('Z.AI static vendor projection keeps env key and singleton credential id', async () => {
+    vi.mocked(hostApiFetch).mockResolvedValueOnce({ accounts: [] });
+
+    const snapshot = await fetchProviderSnapshot();
+    const zaiCn = snapshot.vendors.find((vendor) => vendor.id === 'zai');
+    const zaiGlobal = snapshot.vendors.find((vendor) => vendor.id === 'zai-global');
+
+    expect(zaiCn).toMatchObject({ envVar: 'ZAI_API_KEY', supportsMultipleAccounts: false });
+    expect(zaiGlobal).toMatchObject({ envVar: 'ZAI_API_KEY', supportsMultipleAccounts: false });
+    expect(buildProviderCredentialId('zai', null, snapshot.vendors)).toBe('zai');
+    expect(buildProviderCredentialId('zai-global', null, snapshot.vendors)).toBe('zai');
   });
 
   it('MiniMax provider metadata keeps console urls', () => {

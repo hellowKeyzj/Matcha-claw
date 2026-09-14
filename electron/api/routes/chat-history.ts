@@ -1,21 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MatchaAgentHistoryTransport } from '../../main/runtime-host-delivery/transport/sessions/matcha-history';
-import type { OpenClawHistoryTransport } from '../../main/runtime-host-delivery/transport/sessions/openclaw-history';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const UNAVAILABLE = {
-  '/api/openclaw/chat/history': {
-    success: false,
-    error: 'OpenClaw chat history is unavailable',
-  },
-  '/api/matcha-agent/chat/history': {
-    success: false,
-    error: 'Matcha Agent chat history is unavailable',
-  },
+  success: false,
+  error: 'Matcha Agent chat history is unavailable',
 } as const;
 
 type ChatHistoryRouteDeps = Readonly<{
-  openClawHistoryTransport: OpenClawHistoryTransport;
   matchaAgentHistoryTransport: MatchaAgentHistoryTransport;
 }>;
 
@@ -27,12 +19,8 @@ export async function handleChatHistoryRoutes(
 ): Promise<boolean> {
   if (req.method !== 'POST') return false;
 
-  const transport = url.pathname === '/api/openclaw/chat/history'
-    ? deps.openClawHistoryTransport
-    : url.pathname === '/api/matcha-agent/chat/history'
-      ? deps.matchaAgentHistoryTransport
-      : undefined;
-  if (!transport) return false;
+  if (url.pathname !== '/api/matcha-agent/chat/history') return false;
+  const transport = deps.matchaAgentHistoryTransport;
 
   let request: unknown;
   try {
@@ -45,7 +33,7 @@ export async function handleChatHistoryRoutes(
     const response = await transport.read(request);
     sendJson(res, response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE[url.pathname]);
+    sendJson(res, 503, UNAVAILABLE);
   }
   return true;
 }

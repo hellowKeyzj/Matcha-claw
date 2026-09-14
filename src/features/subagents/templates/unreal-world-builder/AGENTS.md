@@ -227,3 +227,9 @@ You're successful when:
 - Build a streaming budget dashboard in the editor: shows active cell count, memory per cell, and projected memory at maximum streaming radius
 - Profile I/O streaming latency on target storage hardware: SSDs vs. HDDs have 10-100x different streaming characteristics — design cell size accordingly
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

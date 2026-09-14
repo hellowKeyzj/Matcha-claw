@@ -8,8 +8,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer as _, SigningKey};
 use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use organization::{
     DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
@@ -54,6 +52,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
             "team_approval_resolve",
             "team_graph_patch",
             "team_graph_context",
+            "team_run_decision_submit",
             "team_evidence_record",
         ],
     );
@@ -61,7 +60,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         tools["result"]["tools"][0],
         json!({
             "name": "team_node_event",
-            "description": "Record an authorized TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
+            "description": "Record a TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -72,7 +71,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
                     "nodeExecutionId": { "type": "string", "minLength": 1 },
                     "roleId": { "type": ["string", "null"], "minLength": 1 },
                     "event": { "enum": ["progress", "request_input", "request_approval", "complete", "reject"] },
-                    "approvalAction": { "enum": ["approve", "deny", "abort"] },
+                    "approvalAction": { "enum": ["continue_node", "execute_tool", "publish_result", "external_action"] },
                     "deliveryId": { "type": "string", "minLength": 1 },
                     "receipt": { "type": "string", "minLength": 1 },
                     "nodeId": { "type": "string", "minLength": 1 },
@@ -87,8 +86,27 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
     assert_eq!(
         tools["result"]["tools"][4],
         json!({
+            "name": "team_run_decision_submit",
+            "description": "Submit a TeamRun continuation decision for a paused run stage.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "runId": { "type": "string", "minLength": 1 },
+                    "stageId": { "type": ["string", "null"], "minLength": 1 },
+                    "decision": { "enum": ["retry", "proceed_degraded", "abort"] },
+                    "note": { "type": ["string", "null"], "minLength": 1 },
+                    "idempotencyKey": { "type": "string", "minLength": 1 }
+                },
+                "required": ["runId", "decision", "idempotencyKey"]
+            }
+        })
+    );
+    assert_eq!(
+        tools["result"]["tools"][5],
+        json!({
             "name": "team_evidence_record",
-            "description": "Record an authorized opaque artifact evidence reference for a current TeamRun node execution.",
+            "description": "Record an opaque artifact evidence reference for a current TeamRun node execution.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -107,7 +125,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
 }
 
 #[test]
-fn records_and_replays_an_authorized_team_evidence_reference() {
+fn records_and_replays_a_standard_team_evidence_reference_call() {
     let home = Home::new();
     organization::OrganizationStore::open(home.0.join("state/organization-facts.log"))
         .unwrap()
@@ -127,7 +145,6 @@ fn records_and_replays_an_authorized_team_evidence_reference() {
             "jsonrpc": "2.0", "id": "recorded", "method": "tools/call",
             "params": {
                 "name": "team_evidence_record",
-                "authorization": authorization("teamrun.evidence.record", "evidence-record"),
                 "arguments": arguments
             }
         }),
@@ -135,7 +152,6 @@ fn records_and_replays_an_authorized_team_evidence_reference() {
             "jsonrpc": "2.0", "id": "replayed", "method": "tools/call",
             "params": {
                 "name": "team_evidence_record",
-                "authorization": authorization("teamrun.evidence.record", "evidence-replay"),
                 "arguments": arguments
             }
         }),
@@ -204,7 +220,6 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
         "method": "tools/call",
         "params": {
             "name": "team_graph_context",
-            "authorization": "invalid-authorization",
             "arguments": {
                 "teamId": "team:one",
                 "runId": "run:one",
@@ -227,76 +242,7 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
 }
 
 #[test]
-fn rejects_missing_invalid_and_replayed_mcp_authorization_without_leaking_it() {
-    let home = Home::new();
-    let secret = "mcp-authorization-sentinel";
-    let valid = authorization("teamrun.graph.context", "context-correlation");
-    let input = format!(
-        "{}\n{}\n{}\n{}\n",
-        json!({
-            "jsonrpc": "2.0",
-            "id": "missing",
-            "method": "tools/call",
-            "params": {
-                "name": "team_graph_context",
-                "arguments": { "teamId": "team:one", "runId": "run:one", "view": "graph_summary" }
-            }
-        }),
-        json!({
-            "jsonrpc": "2.0",
-            "id": "invalid",
-            "method": "tools/call",
-            "params": {
-                "name": "team_graph_context",
-                "authorization": secret,
-                "arguments": { "teamId": "team:one", "runId": "run:one", "view": "graph_summary" }
-            }
-        }),
-        json!({
-            "jsonrpc": "2.0",
-            "id": "accepted",
-            "method": "tools/call",
-            "params": {
-                "name": "team_graph_context",
-                "authorization": valid,
-                "arguments": { "teamId": "team:one", "runId": "run:one", "view": "graph_summary" }
-            }
-        }),
-        json!({
-            "jsonrpc": "2.0",
-            "id": "replayed",
-            "method": "tools/call",
-            "params": {
-                "name": "team_graph_context",
-                "authorization": valid,
-                "arguments": { "teamId": "team:one", "runId": "run:one", "view": "graph_summary" }
-            }
-        }),
-    );
-
-    let output = run(&home, input.as_bytes());
-
-    assert!(output.status.success());
-    let responses = decode_responses(&output.stdout);
-    assert_eq!(
-        responses[0]["error"],
-        json!({ "code": -32602, "message": "Invalid params" })
-    );
-    assert_eq!(
-        responses[1]["error"],
-        json!({ "code": -32001, "message": "Unauthorized" })
-    );
-    assert_eq!(responses[2]["id"], "accepted");
-    assert_eq!(
-        responses[3]["error"],
-        json!({ "code": -32001, "message": "Unauthorized" })
-    );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
-}
-
-#[test]
-fn artifact_contains_no_store_opening_or_static_authorization_material() {
+fn artifact_contains_no_store_opening_or_static_signing_material() {
     let source = include_str!("../src/bin/runtime-host-mcp.rs");
     for forbidden in [
         "open_organization_store",
@@ -314,7 +260,7 @@ fn artifact_contains_no_store_opening_or_static_authorization_material() {
 }
 
 #[test]
-fn rejects_terminal_event_without_authorized_resolution_fields() {
+fn rejects_terminal_event_without_resolution_fields() {
     let home = Home::new();
     let request = json!({
         "jsonrpc": "2.0",
@@ -322,7 +268,6 @@ fn rejects_terminal_event_without_authorized_resolution_fields() {
         "method": "tools/call",
         "params": {
             "name": "team_node_event",
-            "authorization": authorization("teamrun.node.event", "terminal-command"),
             "arguments": {
                 "runId": "run:one",
                 "commandId": "terminal-command",
@@ -367,8 +312,6 @@ fn run(home: &Home, input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-host-mcp"))
         .arg("--state-dir")
         .arg(home.0.join("state"))
-        .arg("--authorization-verification-key")
-        .arg(verification_key())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -504,39 +447,6 @@ fn evidence_run_facts() -> OrganizationFacts {
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
-}
-
-fn verification_key() -> String {
-    let mut spki = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    spki.extend_from_slice(
-        &SigningKey::from_bytes(&[7_u8; 32])
-            .verifying_key()
-            .to_bytes(),
-    );
-    URL_SAFE_NO_PAD.encode(spki)
-}
-
-fn authorization(capability: &str, correlation: &str) -> String {
-    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
-    let payload = URL_SAFE_NO_PAD.encode(
-        json!({
-            "version": 1,
-            "principal": "mcp-client:fixture",
-            "endpoint": "stdio://teamrun-mcp",
-            "scope": "teamrun:mcp",
-            "capability": capability,
-            "subject": "teamrun",
-            "expiresAt": u64::MAX,
-            "correlation": correlation,
-            "revision": "revision:fixture",
-        })
-        .to_string(),
-    );
-    let signed = format!("capability-decision.v1.{payload}");
-    let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(signed.as_bytes()).to_bytes());
-    format!("{signed}.{signature}")
 }
 
 fn decode_responses(bytes: &[u8]) -> Vec<Value> {

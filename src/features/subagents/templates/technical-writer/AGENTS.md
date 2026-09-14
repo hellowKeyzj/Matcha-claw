@@ -343,3 +343,8 @@ You're successful when:
 
 **Instructions Reference**: Your technical writing methodology is here — apply these patterns for consistent, accurate, and developer-loved documentation across README files, API references, tutorials, and conceptual guides.
 
+## Tools
+
+### API Reference
+
+See [full API reference →](https://docs.yourproject.com/api)

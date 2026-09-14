@@ -4,6 +4,7 @@ import { Cron } from '@/pages/Cron';
 import { useChatStore } from '@/stores/chat';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { CronJob } from '@/types/cron';
 
@@ -62,6 +63,12 @@ describe('cron card layout', () => {
         lastLoadedAt: 1,
       },
       loadAgents: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    useSkillsStore.setState({
+      skills: [],
+      snapshotReady: true,
+      initialLoading: false,
+      fetchSkills: vi.fn().mockResolvedValue(undefined),
     } as never);
     useCronStore.setState({
       jobs: [buildCronJob()],

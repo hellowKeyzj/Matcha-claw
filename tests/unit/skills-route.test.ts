@@ -88,15 +88,31 @@ describe('skills fixed host API routes', () => {
     expect(result.state).toEqual({ statusCode: 400, body: { outcome: 'rejected' } });
   });
 
+  it('dispatches ClawHub install through the skills management endpoint', async () => {
+    transport.installClawHub.mockResolvedValue({ status: 200, body: { outcome: 'accepted' } });
+    const result = response();
+
+    await handleSkillsRoutes(
+      incoming({ slug: 'weather' }),
+      result.raw as never,
+      new URL('http://127.0.0.1/api/skills/clawhub/install'),
+      transport,
+    );
+
+    expect(transport.installClawHub).toHaveBeenCalledWith({ slug: 'weather' });
+    expect(result.state).toEqual({ statusCode: 200, body: { outcome: 'accepted' } });
+  });
+
   it('dispatches readme and import routes without exposing paths', async () => {
     transport.importMarkdown.mockResolvedValue({ status: 200, body: { outcome: 'accepted' } });
-    transport.readme.mockResolvedValue({ status: 200, body: { success: true, content: '# Skill', filePath: 'C:\\skills\\skill\\SKILL.md' } });
+    transport.readme.mockResolvedValue({ status: 200, body: { success: true, content: '# Skill', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md' } });
     const imported = response();
     await handleSkillsRoutes(incoming({ content: '---\\nname: skill\\n---' }), imported.raw as never, new URL('http://127.0.0.1/api/skills/import/markdown'), transport);
     expect(imported.state.body).toEqual({ outcome: 'accepted' });
     const read = response();
-    await handleSkillsRoutes(incoming({ skillKey: 'skill', filePath: 'C:\\skills\\skill\\SKILL.md' }), read.raw as never, new URL('http://127.0.0.1/api/skills/readme'), transport);
-    expect(read.state.body).toEqual({ success: true, content: '# Skill', filePath: 'C:\\skills\\skill\\SKILL.md' });
+    await handleSkillsRoutes(incoming({ skillKey: 'Excel XLSX', slug: 'excel-xlsx', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md', baseDir: 'C:\\skills\\Excel XLSX' }), read.raw as never, new URL('http://127.0.0.1/api/skills/readme'), transport);
+    expect(transport.readme).toHaveBeenCalledWith({ skillKey: 'Excel XLSX', slug: 'excel-xlsx', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md', baseDir: 'C:\\skills\\Excel XLSX' });
+    expect(read.state.body).toEqual({ success: true, content: '# Skill', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md' });
     expect(JSON.stringify(read.state.body)).not.toContain('private');
   });
 

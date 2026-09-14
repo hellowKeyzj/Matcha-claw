@@ -8,9 +8,7 @@
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
- *   - @openclaw/discord -> build/openclaw-plugins/discord
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
- *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - memory-lancedb-pro -> build/openclaw-plugins/memory-lancedb-pro
  *
  * The output plugin directory contains:
@@ -26,6 +24,7 @@ import {
   LOCAL_OPENCLAW_PLUGIN_BUILD_TARGETS,
   buildManagedOpenClawPlugins,
 } from './lib/openclaw-local-plugin-builder.mjs';
+import { safeRmSync } from './lib/safe-delete.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -69,15 +68,25 @@ const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-  { npmName: '@openclaw/discord', pluginId: 'discord' },
   { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-  { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
+  { npmName: '@openclaw/qianfan-provider', pluginId: 'qianfan' },
+  { npmName: '@openclaw/stepfun-provider', pluginId: 'stepfun' },
+  { npmName: '@openclaw/tencent-provider', pluginId: 'tencent' },
+  { npmName: '@openclaw/xiaomi-provider', pluginId: 'xiaomi' },
+  { npmName: '@openclaw/qwen-provider', pluginId: 'qwen' },
+  { npmName: '@openclaw/kimi-provider', pluginId: 'kimi' },
+  { npmName: '@openclaw/volcengine-provider', pluginId: 'volcengine' },
+  { npmName: '@openclaw/opencode-provider', pluginId: 'opencode' },
   ...LOCAL_OPENCLAW_PLUGIN_BUILD_TARGETS.map((target) => ({
     localPath: path.join(ROOT, target.packageDir),
     pluginId: target.pluginId,
     runtimeFiles: target.runtimeFiles,
   })),
-  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
+  {
+    npmName: '@larksuite/openclaw-lark',
+    pluginId: 'feishu-openclaw-plugin',
+    sdkRootImportReplacement: 'openclaw/plugin-sdk/core',
+  },
 ];
 
 function readJson(filePath) {
@@ -226,7 +235,7 @@ function listPackages(nodeModulesDir) {
   return result;
 }
 
-function bundleOnePlugin({ npmName, pluginId }) {
+function bundleOnePlugin({ npmName, pluginId, sdkRootImportReplacement }) {
   const pkgPath = path.join(NODE_MODULES, ...npmName.split('/'));
   if (!fs.existsSync(pkgPath)) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
@@ -237,9 +246,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
 
   echo`📦 Bundling plugin ${npmName} -> ${outputDir}`;
 
-  if (fs.existsSync(outputDir)) {
-    fs.rmSync(outputDir, { recursive: true, force: true });
-  }
+  safeRmSync(outputDir, { root: OUTPUT_ROOT });
   fs.mkdirSync(outputDir, { recursive: true });
 
   // 1) Copy plugin package itself
@@ -289,8 +296,41 @@ function bundleOnePlugin({ npmName, pluginId }) {
   }
 
   patchPluginId(outputDir, pluginId);
+  if (sdkRootImportReplacement) {
+    rewriteSdkRootImports(outputDir, sdkRootImportReplacement);
+  }
 
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
+}
+
+function rewriteSdkRootImports(pluginDir, replacement) {
+  const stack = [pluginDir];
+  let patched = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(normWin(current), { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue;
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile() || !['.js', '.mjs', '.cjs'].includes(path.extname(entry.name))) {
+        continue;
+      }
+      const content = fs.readFileSync(normWin(entryPath), 'utf8');
+      const rewritten = content.replace(/(['"])openclaw\/plugin-sdk\1/g, `$1${replacement}$1`);
+      if (rewritten === content) continue;
+      fs.writeFileSync(normWin(entryPath), rewritten, 'utf8');
+      patched += 1;
+    }
+  }
+
+  if (patched === 0) {
+    throw new Error(`Expected root OpenClaw SDK import to rewrite in ${pluginDir}.`);
+  }
+  echo`   🩹 Rewriting root SDK import -> ${replacement} (${patched} file(s))`;
 }
 
 function patchPluginId(pluginDir, expectedId) {
@@ -372,9 +412,7 @@ function bundleLocalPlugin({ localPath, pluginId, runtimeFiles }) {
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
   echo`📦 Bundling local plugin ${localPath} -> ${outputDir}`;
 
-  if (fs.existsSync(outputDir)) {
-    fs.rmSync(outputDir, { recursive: true, force: true });
-  }
+  safeRmSync(outputDir, { root: OUTPUT_ROOT });
   fs.mkdirSync(outputDir, { recursive: true });
   if (Array.isArray(runtimeFiles) && runtimeFiles.length > 0) {
     copyLocalPluginRuntimeFiles(localPath, outputDir, runtimeFiles);
@@ -402,6 +440,7 @@ ensureBundledLocalMiniLmModel();
 await buildManagedOpenClawPlugins({ rootDir: ROOT, refreshMirrors: false });
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;
+safeRmSync(OUTPUT_ROOT, { root: ROOT });
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {

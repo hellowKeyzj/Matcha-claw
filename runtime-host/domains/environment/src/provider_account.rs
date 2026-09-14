@@ -53,6 +53,8 @@ pub enum ProviderAccountAuthMode {
     ApiKey,
     OAuthBrowser,
     OAuthDevice,
+    Token,
+    CliReuse,
     Local,
 }
 
@@ -164,10 +166,18 @@ impl ProviderAccountConfiguration {
         {
             return Err(InvalidProviderAccountConfiguration::InvalidLabel);
         }
-        if matches!(auth_mode, ProviderAccountAuthMode::Local) && credential.is_some() {
+        if matches!(
+            auth_mode,
+            ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse
+        ) && credential.is_some()
+        {
             return Err(InvalidProviderAccountConfiguration::LocalCredential);
         }
-        if !matches!(auth_mode, ProviderAccountAuthMode::Local) && credential.is_none() {
+        if !matches!(
+            auth_mode,
+            ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse
+        ) && credential.is_none()
+        {
             return Err(InvalidProviderAccountConfiguration::CredentialRequired);
         }
         if !valid_timestamp(&created_at) || !valid_timestamp(&updated_at) {

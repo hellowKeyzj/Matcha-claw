@@ -275,3 +275,9 @@ You're successful when:
 - Design a network object pooling system: NGO NetworkObjects are expensive to spawn/despawn — pool and reconfigure instead
 - Profile bandwidth per-client using NGO's built-in network statistics API and set per-NetworkObject update frequency budgets
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

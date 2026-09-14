@@ -162,18 +162,12 @@ describe('main quit lifecycle coordination', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mockProcessManagersForMainIndex();
     hoisted.appHandlers.clear();
     hoisted.hostEventBusInstances.length = 0;
-    hoisted.gatewayManagerInstances.length = 0;
     hoisted.electronAppMock.isPackaged = false;
     hoisted.electronAppMock.whenReady.mockReturnValue(Promise.resolve());
-    hoisted.runtimeHostManagerMock.stop.mockResolvedValue(undefined);
-    hoisted.runtimeHostManagerMock.forceTerminate.mockResolvedValue(undefined);
-    hoisted.gatewayProcessRunnerMock.stop.mockResolvedValue(undefined);
-    hoisted.gatewayProcessRunnerMock.forceTerminate.mockResolvedValue(undefined);
-    hoisted.matchaAgentAppServerManagerMock.stop.mockResolvedValue(undefined);
-    hoisted.matchaAgentAppServerManagerMock.forceTerminate.mockResolvedValue(undefined);
+    hoisted.directRuntimeHostMock.stop.mockResolvedValue(undefined);
+    hoisted.directRuntimeHostMock.forceKill.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -185,7 +179,7 @@ describe('main quit lifecycle coordination', () => {
     vi.useRealTimers();
   });
 
-  it('does not claim the installed Windows identity in development', async () => {
+  it('does not set a Windows identity in development', async () => {
     setPlatform('win32');
     processListeners = await importMainIndex();
 

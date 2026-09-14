@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use super::state::SessionProvider;
 use crate::runtime_driver::RuntimeDriverIdentity;
-use matcha_agent::session::model::SessionId as MatchaSessionId;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -163,13 +162,15 @@ impl SessionSendCommand {
         self.trace_id.as_deref()
     }
 
-    pub(crate) fn matcha_session_id(&self) -> Result<MatchaSessionId, InvalidCommand> {
-        let session_id = match self.endpoint_session_id.as_deref() {
-            Some(session_id) => session_id,
-            None if self.session_key.starts_with("matcha-agent:") => return Err(InvalidCommand),
-            None => &self.session_key,
-        };
-        MatchaSessionId::try_new(session_id.to_owned()).map_err(|_| InvalidCommand)
+    pub(crate) fn with_endpoint_session_id(
+        mut self,
+        session_id: String,
+    ) -> Result<Self, InvalidCommand> {
+        if !valid_bounded_text(&session_id, MAX_ENDPOINT_SESSION_ID_BYTES) {
+            return Err(InvalidCommand);
+        }
+        self.endpoint_session_id = Some(session_id);
+        Ok(self)
     }
 
     pub(crate) fn with_resolved_run_id(mut self, run_id: String) -> Result<Self, InvalidCommand> {

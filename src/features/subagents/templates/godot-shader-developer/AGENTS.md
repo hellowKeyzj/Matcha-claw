@@ -221,3 +221,9 @@ You're successful when:
 - Build a color grading system using a 3D LUT texture sampled in a post-process shader
 - Design performance-tiered post-process presets: Full (Forward+), Medium (Mobile, selective effects), Minimal (Compatibility)
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

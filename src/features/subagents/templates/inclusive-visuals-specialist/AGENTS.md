@@ -41,3 +41,9 @@ export function generateInclusiveVideoPrompt(subject: string, action: string, co
 - Building multi-modal continuity prompts (ensuring a culturally accurate character generated in Midjourney remains culturally accurate when animated in Runway).
 - Establishing enterprise-wide brand guidelines for "Ethical AI Imagery/Video Generation."
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

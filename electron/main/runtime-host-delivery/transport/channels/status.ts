@@ -39,6 +39,9 @@ type ChannelAccountSnapshot = Readonly<{
 
 export type ChannelSnapshot = Readonly<{
   ts: number;
+  ready?: boolean;
+  refreshing?: boolean;
+  error?: string;
   channelOrder: readonly string[];
   channels: Readonly<Record<string, ChannelSummarySnapshot>>;
   channelAccounts: Readonly<Record<string, readonly ChannelAccountSnapshot[]>>;
@@ -144,9 +147,17 @@ function isChannelAccount(value: unknown): value is ChannelAccount {
 
 export function isChannelSnapshot(value: unknown): value is ChannelSnapshot {
   if (!isRecord(value)
-    || !hasExactKeys(value, [
-      'ts', 'channelOrder', 'channels', 'channelAccounts', 'channelDefaultAccountId',
+    || !hasOnlyKeys(value, [
+      'ts', 'ready', 'refreshing', 'error', 'channelOrder', 'channels', 'channelAccounts', 'channelDefaultAccountId',
     ])
+    || !Object.hasOwn(value, 'ts')
+    || !Object.hasOwn(value, 'channelOrder')
+    || !Object.hasOwn(value, 'channels')
+    || !Object.hasOwn(value, 'channelAccounts')
+    || !Object.hasOwn(value, 'channelDefaultAccountId')
+    || !isOptionalSnapshotBoolean(value, 'ready')
+    || !isOptionalSnapshotBoolean(value, 'refreshing')
+    || !isOptionalPublicError(value, 'error')
     || !isSafeTimestamp(value.ts)
     || !Array.isArray(value.channelOrder)
     || !value.channelOrder.every(isIdentifier)
@@ -207,6 +218,10 @@ function isChannelAccountSnapshot(value: unknown): value is ChannelAccountSnapsh
 }
 
 function isOptionalBoolean(value: Record<string, unknown>, key: string): boolean {
+  return !Object.hasOwn(value, key) || typeof value[key] === 'boolean';
+}
+
+function isOptionalSnapshotBoolean(value: Record<string, unknown>, key: string): boolean {
   return !Object.hasOwn(value, key) || typeof value[key] === 'boolean';
 }
 

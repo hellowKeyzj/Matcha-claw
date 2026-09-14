@@ -1,30 +1,58 @@
 use matcha_agent::peer::TerminalReceiptReadError;
 use organization::{
-    BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, DeliveryPhase,
-    DeliveryReceipt, DeliveryReference, DeliveryRejection, DeliveryStart, GraphDefinition,
-    GraphRunFacts, GraphRunId, GraphRunPurgeOutcome, GraphState, IdempotencyKey,
-    MatchaDeliveryCorrelation, MatchaTerminalReceiptTarget, NativeRunReceiptReference,
-    NativeTerminalStatus, NodeDefinition, NodeId, OrganizationStore, PromptDeliveryOutcome,
-    PromptDeliveryRequest, PromptDispatchPayload, ResumeOutcome, RoleAbortOutcome, RoleId,
-    RoleSessionReceipt, RuntimeEndpointReference, SettleCancellationOutcome, StoreFault,
-    TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult,
-    TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunProjection, TeamRunQuery,
-    TeamRunQueryOutcome, TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
-    TriggerRegistration, plan_terminal_observations, query_team_run,
+    ActivityClaim, ActivityFailure, ActivityId, ActivityKind, ActivityPhase,
+    ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
+    BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId, DeliveryPhase, DeliveryReceipt,
+    DeliveryRejection, GraphDefinition, GraphRunFacts, GraphRunId, GraphRunPurgeOutcome,
+    GraphState, MatchaDeliveryCorrelation, MatchaTerminalReceiptTarget, NativeRunReceiptReference,
+    NativeTerminalStatus, NodeDefinition, NodeId, OrganizationStore, ResumeOutcome,
+    RoleAbortOutcome, RoleId, SettleCancellationOutcome, StoreFault, TeamDecisionCommand,
+    TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
+    TeamNodeEventOutcome, TeamRunProjection, TeamRunQuery, TeamRunQueryOutcome,
+    TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest, TriggerRegistration,
+    plan_terminal_observations, query_team_run,
     run::lifecycle::GraphRunLifecycleState,
     run::scheduler::{NodePromptRetryDueQuery, NodePromptRetryDueQueryOutcome},
 };
 
 use super::session::RuntimeSessionError;
+use crate::runtime_driver::{
+    ActivityExecutionRequest, ActivityExecutionRequestError, AgentTaskActivity,
+};
 
 /// The only Host-composed TeamRun semantic seam. It reads the existing Organization durable owner
 /// and deliberately has no materialization or recovery provider attached.
 pub(crate) struct TeamRunOwner;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TeamRunDeliveryTarget {
+pub(crate) enum TeamRunActivityTarget {
     OpenClaw { run_id: GraphRunId },
     Matcha { run_id: GraphRunId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TeamRunActivityError {
+    InvalidPrompt,
+    InvalidBinding,
+    SessionMismatch,
+    Store(StoreFault),
+}
+
+pub(crate) enum TeamRunActivityStart {
+    Claimed {
+        claim: ActivityClaim,
+        request: ActivityExecutionRequest,
+    },
+    Immediate(TeamRunActivityOutcome),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TeamRunActivityOutcome {
+    Dispatched(TeamRunCommandOutcome),
+    AlreadyClaimed(TeamRunCommandOutcome),
+    AwaitingRetry(TeamRunCommandOutcome),
+    Terminal(TeamRunCommandOutcome),
+    OutcomeUnknown(TeamRunCommandOutcome),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,87 +82,32 @@ pub(crate) enum TeamNodeTerminalResult {
     Replayed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchaDeliveryError {
-    InvalidPrompt,
-    InvalidSession,
-    SessionMismatch,
-    Store(StoreFault),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OpenClawDeliveryError {
-    InvalidPrompt,
-    InvalidBinding,
-    SessionMismatch,
-    Unavailable,
-    Store(StoreFault),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OpenClawDeliveryOutcome {
-    Delivered(TeamRunCommandOutcome),
-    AlreadyClaimed(TeamRunCommandOutcome),
-    AwaitingRetry(TeamRunCommandOutcome),
-    Terminal(TeamRunCommandOutcome),
-    OutcomeUnknown(TeamRunCommandOutcome),
-}
-
-pub(crate) enum OpenClawDeliveryStart {
-    Claimed {
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-    },
-    Immediate(OpenClawDeliveryOutcome),
-}
-
-pub(crate) enum MatchaDeliveryStartOutcome {
-    Claimed {
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-    },
-    AlreadyClaimed(TeamRunCommandOutcome),
-    AwaitingRetry(TeamRunCommandOutcome),
-    Terminal(TeamRunCommandOutcome),
-    OutcomeUnknown(TeamRunCommandOutcome),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchaDeliveryOutcome {
-    Delivered(TeamRunCommandOutcome),
-    AlreadyClaimed(TeamRunCommandOutcome),
-    AwaitingRetry(TeamRunCommandOutcome),
-    Terminal(TeamRunCommandOutcome),
-    OutcomeUnknown(TeamRunCommandOutcome),
-}
-
 impl TeamRunOwner {
     pub(crate) const fn new() -> Self {
         Self
     }
 
-    fn recover_delivery_run(
+    fn recover_activity_run(
         &self,
         store: &OrganizationStore,
-        delivery_id: &DeliveryId,
+        activity_id: &ActivityId,
     ) -> TeamRunCommandOutcome {
-        let run_id = organization::GraphRunId::new(
-            store
-                .facts()
-                .deliveries()
-                .delivery(delivery_id)
-                .expect("delivery command preserves its extant delivery")
-                .facts()
-                .run_id
-                .clone(),
-        );
+        let activity = store
+            .facts()
+            .activities()
+            .activity(activity_id)
+            .expect("activity command preserves its extant activity");
+        self.recover_run(store, &activity.facts().run_id)
+    }
+
+    fn recover_run(&self, store: &OrganizationStore, run_id: &GraphRunId) -> TeamRunCommandOutcome {
         let team = store
             .facts()
-            .run(&run_id)
-            .expect("delivery command preserves its extant TeamRun")
+            .run(run_id)
+            .expect("TeamRun command preserves its extant TeamRun")
             .team()
             .clone();
-        self.recover(store, TeamRunQuery::get(team, run_id))
+        self.recover(store, TeamRunQuery::get(team, run_id.clone()))
     }
 
     pub(crate) fn query(
@@ -386,6 +359,23 @@ impl TeamRunOwner {
         store.register_delivery(request)
     }
 
+    pub(crate) fn register_activity(
+        &self,
+        store: &mut OrganizationStore,
+        request: ActivityRequest,
+    ) -> Result<ActivityRegistrationOutcome, StoreFault> {
+        store.register_activity(request)
+    }
+
+    pub(crate) fn apply_control_execution_step(
+        &self,
+        store: &mut OrganizationStore,
+        run_id: &GraphRunId,
+        step: organization::ControlExecutionStep,
+    ) -> Result<(), StoreFault> {
+        store.apply_control_execution_step(run_id, step)
+    }
+
     pub(crate) fn recovery(
         &self,
         store: &OrganizationStore,
@@ -450,207 +440,131 @@ impl TeamRunOwner {
         })
     }
 
-    pub(crate) fn claim_delivery(
+    pub(crate) fn claim_agent_activity(
         &self,
         store: &mut OrganizationStore,
-        delivery_id: &DeliveryId,
+        activity_id: ActivityId,
         claimed_at: u64,
-    ) -> Result<organization::DeliveryStart, StoreFault> {
-        store.claim_delivery(delivery_id, claimed_at)
-    }
-
-    pub(crate) fn settle_delivery(
-        &self,
-        store: &mut OrganizationStore,
-        claim: &organization::DeliveryClaim,
-        receipt: organization::DeliveryReceipt,
-        retry_at: u64,
-    ) -> Result<organization::DeliveryResolution, StoreFault> {
-        store.settle_delivery(claim, receipt, retry_at)
-    }
-
-    pub(crate) fn claim_matcha_delivery(
-        &self,
-        store: &mut OrganizationStore,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
-    ) -> Result<MatchaDeliveryStartOutcome, MatchaDeliveryError> {
-        let (binding, prompt) = matcha_role_delivery(store, &delivery_id)?;
-        let delivery = PromptDeliveryRequest::new(
-            DeliveryReference::try_new(delivery_id.as_str().to_owned())
-                .map_err(|_| MatchaDeliveryError::SessionMismatch)?,
-            binding,
-            IdempotencyKey::try_new(delivery_id.as_str().to_owned())
-                .map_err(|_| MatchaDeliveryError::InvalidSession)?,
-            PromptDispatchPayload::try_new(prompt)
-                .map_err(|_| MatchaDeliveryError::InvalidPrompt)?,
-        );
-        match self
-            .claim_delivery(store, &delivery_id, claimed_at)
-            .map_err(MatchaDeliveryError::Store)?
-        {
-            DeliveryStart::Claimed(claim) => {
-                Ok(MatchaDeliveryStartOutcome::Claimed { claim, delivery })
+    ) -> Result<TeamRunActivityStart, TeamRunActivityError> {
+        let activity = store
+            .facts()
+            .activities()
+            .activity(&activity_id)
+            .cloned()
+            .ok_or(TeamRunActivityError::SessionMismatch)?;
+        let request = agent_task_execution_request(store, activity.facts())?;
+        match activity.phase() {
+            ActivityPhase::Claimed(_) | ActivityPhase::Dispatched(_) => {
+                return Ok(TeamRunActivityStart::Immediate(
+                    TeamRunActivityOutcome::AlreadyClaimed(
+                        self.recover_activity_run(store, &activity_id),
+                    ),
+                ));
             }
-            DeliveryStart::AlreadyClaimed(_) => Ok(MatchaDeliveryStartOutcome::AlreadyClaimed(
-                self.recover_delivery_run(store, &delivery_id),
-            )),
-            DeliveryStart::AwaitingRetry { .. } => Ok(MatchaDeliveryStartOutcome::AwaitingRetry(
-                self.recover_delivery_run(store, &delivery_id),
-            )),
-            DeliveryStart::Terminal(phase) => Ok(match phase {
-                DeliveryPhase::OutcomeUnknown { .. } => MatchaDeliveryStartOutcome::OutcomeUnknown(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-                _ => MatchaDeliveryStartOutcome::Terminal(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-            }),
+            ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at > claimed_at => {
+                return Ok(TeamRunActivityStart::Immediate(
+                    TeamRunActivityOutcome::AwaitingRetry(
+                        self.recover_activity_run(store, &activity_id),
+                    ),
+                ));
+            }
+            phase if activity.is_terminal() => {
+                return Ok(TeamRunActivityStart::Immediate(match phase {
+                    ActivityPhase::OutcomeUnknown { .. } => TeamRunActivityOutcome::OutcomeUnknown(
+                        self.recover_activity_run(store, &activity_id),
+                    ),
+                    _ => TeamRunActivityOutcome::Terminal(
+                        self.recover_activity_run(store, &activity_id),
+                    ),
+                }));
+            }
+            _ => {}
         }
+        let claim = store
+            .claim_agent_activity(&activity_id, request.delivery_request().clone(), claimed_at)
+            .map_err(TeamRunActivityError::Store)?;
+        Ok(TeamRunActivityStart::Claimed { claim, request })
     }
 
-    pub(crate) fn claim_openclaw_delivery(
+    pub(crate) fn settle_agent_activity_dispatch(
         &self,
         store: &mut OrganizationStore,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
-    ) -> Result<OpenClawDeliveryStart, OpenClawDeliveryError> {
-        let (binding, prompt) = openclaw_role_delivery(store, &delivery_id)?;
-        let delivery = PromptDeliveryRequest::new(
-            DeliveryReference::try_new(delivery_id.as_str().to_owned())
-                .map_err(|_| OpenClawDeliveryError::SessionMismatch)?,
-            binding,
-            IdempotencyKey::try_new(delivery_id.as_str().to_owned())
-                .map_err(|_| OpenClawDeliveryError::InvalidBinding)?,
-            PromptDispatchPayload::try_new(prompt)
-                .map_err(|_| OpenClawDeliveryError::InvalidPrompt)?,
-        );
-        match self
-            .claim_delivery(store, &delivery_id, claimed_at)
-            .map_err(OpenClawDeliveryError::Store)?
-        {
-            DeliveryStart::Claimed(claim) => Ok(OpenClawDeliveryStart::Claimed { claim, delivery }),
-            DeliveryStart::AlreadyClaimed(_) => Ok(OpenClawDeliveryStart::Immediate(
-                OpenClawDeliveryOutcome::AlreadyClaimed(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-            )),
-            DeliveryStart::AwaitingRetry { .. } => Ok(OpenClawDeliveryStart::Immediate(
-                OpenClawDeliveryOutcome::AwaitingRetry(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-            )),
-            DeliveryStart::Terminal(phase) => Ok(OpenClawDeliveryStart::Immediate(match phase {
-                DeliveryPhase::OutcomeUnknown { .. } => OpenClawDeliveryOutcome::OutcomeUnknown(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-                _ => OpenClawDeliveryOutcome::Terminal(
-                    self.recover_delivery_run(store, &delivery_id),
-                ),
-            })),
-        }
-    }
-
-    pub(crate) fn settle_openclaw_delivery(
-        &self,
-        store: &mut OrganizationStore,
-        claim: DeliveryClaim,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<OpenClawDeliveryOutcome, OpenClawDeliveryError> {
-        let delivery_id = claim.delivery_id().clone();
-        let claimed_at = claim.claimed_at();
-        let receipt = match outcome {
-            PromptDeliveryOutcome::Delivered { receipt } => DeliveryReceipt::Accepted {
-                receipt,
-                matcha_correlation: None,
-                accepted_at: claimed_at,
-            },
-            PromptDeliveryOutcome::Rejected { rejection } => DeliveryReceipt::Rejected {
-                failure: match rejection {
-                    DeliveryRejection::Permanent => organization::DeliveryFailure::PolicyRejected,
-                    DeliveryRejection::Retryable => organization::DeliveryFailure::Unavailable,
-                },
-                observed_at: claimed_at,
-            },
-            PromptDeliveryOutcome::OutcomeUnknown => DeliveryReceipt::OutcomeUnknown {
-                observed_at: claimed_at,
-            },
-        };
-        let resolution = self
-            .settle_delivery(store, &claim, receipt, retry_at)
-            .map_err(OpenClawDeliveryError::Store)?;
-        Ok(match resolution {
-            organization::DeliveryResolution::Delivered => {
-                OpenClawDeliveryOutcome::Delivered(self.recover_delivery_run(store, &delivery_id))
-            }
-            organization::DeliveryResolution::RetryScheduled { .. } => {
-                OpenClawDeliveryOutcome::AwaitingRetry(
-                    self.recover_delivery_run(store, &delivery_id),
-                )
-            }
-            organization::DeliveryResolution::Failed => {
-                OpenClawDeliveryOutcome::Terminal(self.recover_delivery_run(store, &delivery_id))
-            }
-            organization::DeliveryResolution::OutcomeUnknown => {
-                OpenClawDeliveryOutcome::OutcomeUnknown(
-                    self.recover_delivery_run(store, &delivery_id),
-                )
-            }
-        })
-    }
-
-    pub(crate) fn settle_matcha_delivery(
-        &self,
-        store: &mut OrganizationStore,
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<MatchaDeliveryOutcome, MatchaDeliveryError> {
-        let delivery_id = claim.delivery_id().clone();
+        claim: ActivityClaim,
+        outcome: crate::runtime_driver::ActivityExecutionOutcome,
+    ) -> Result<TeamRunActivityOutcome, TeamRunActivityError> {
+        let activity_id = claim.activity_id().clone();
         let observed_at = claim.claimed_at();
-        let receipt = match outcome {
-            PromptDeliveryOutcome::Delivered { receipt } => DeliveryReceipt::Accepted {
-                receipt,
-                matcha_correlation: Some(MatchaDeliveryCorrelation::new(
-                    delivery.binding().external_session().clone(),
-                    NativeRunReceiptReference::try_new(
-                        delivery.idempotency_key().as_str().to_owned(),
-                    )
-                    .expect("validated Matcha delivery id must be a valid native run receipt"),
-                )),
-                accepted_at: observed_at,
-            },
-            PromptDeliveryOutcome::Rejected { rejection } => DeliveryReceipt::Rejected {
-                failure: match rejection {
-                    DeliveryRejection::Permanent => organization::DeliveryFailure::PolicyRejected,
-                    DeliveryRejection::Retryable => organization::DeliveryFailure::Unavailable,
+        let (delivery_receipt, activity_settlement) = match outcome {
+            crate::runtime_driver::ActivityExecutionOutcome::Accepted { receipt } => (
+                DeliveryReceipt::Accepted {
+                    receipt,
+                    matcha_correlation: matcha_activity_correlation(store, &activity_id),
+                    accepted_at: observed_at,
                 },
-                observed_at,
-            },
-            PromptDeliveryOutcome::OutcomeUnknown => {
-                DeliveryReceipt::OutcomeUnknown { observed_at }
-            }
-        };
-        let resolution = self
-            .settle_delivery(store, &claim, receipt, retry_at)
-            .map_err(MatchaDeliveryError::Store)?;
-        Ok(match resolution {
-            organization::DeliveryResolution::Delivered => {
-                MatchaDeliveryOutcome::Delivered(self.recover_delivery_run(store, &delivery_id))
-            }
-            organization::DeliveryResolution::RetryScheduled { .. } => {
-                MatchaDeliveryOutcome::AwaitingRetry(self.recover_delivery_run(store, &delivery_id))
-            }
-            organization::DeliveryResolution::Failed => {
-                MatchaDeliveryOutcome::Terminal(self.recover_delivery_run(store, &delivery_id))
-            }
-            organization::DeliveryResolution::OutcomeUnknown => {
-                MatchaDeliveryOutcome::OutcomeUnknown(
-                    self.recover_delivery_run(store, &delivery_id),
+                None,
+            ),
+            crate::runtime_driver::ActivityExecutionOutcome::Rejected { rejection } => {
+                let failure = match rejection {
+                    DeliveryRejection::Permanent => ActivityFailure::Rejected,
+                    DeliveryRejection::Retryable => ActivityFailure::Unavailable,
+                };
+                (
+                    DeliveryReceipt::Rejected {
+                        failure: match rejection {
+                            DeliveryRejection::Permanent => {
+                                organization::DeliveryFailure::PolicyRejected
+                            }
+                            DeliveryRejection::Retryable => {
+                                organization::DeliveryFailure::Unavailable
+                            }
+                        },
+                        observed_at,
+                    },
+                    Some(if failure.is_retryable() {
+                        ActivitySettlement::RetryScheduled {
+                            retry_at: organization::run::delivery::delivery_retry_at(observed_at),
+                            observed_at,
+                            failure,
+                        }
+                    } else {
+                        ActivitySettlement::Failed {
+                            failed_at: observed_at,
+                            failure,
+                        }
+                    }),
                 )
             }
+            crate::runtime_driver::ActivityExecutionOutcome::Unknown => (
+                DeliveryReceipt::OutcomeUnknown { observed_at },
+                Some(ActivitySettlement::OutcomeUnknown { observed_at }),
+            ),
+        };
+        let (_delivery, activity) = store
+            .settle_agent_activity_dispatch(&claim, delivery_receipt, activity_settlement)
+            .map_err(TeamRunActivityError::Store)?;
+        Ok(match activity {
+            None => {
+                TeamRunActivityOutcome::Dispatched(self.recover_activity_run(store, &activity_id))
+            }
+            Some(ActivitySettlementOutcome::RetryScheduled) => {
+                TeamRunActivityOutcome::AwaitingRetry(
+                    self.recover_activity_run(store, &activity_id),
+                )
+            }
+            Some(ActivitySettlementOutcome::Failed)
+            | Some(ActivitySettlementOutcome::Completed)
+            | Some(ActivitySettlementOutcome::Cancelled)
+            | Some(ActivitySettlementOutcome::TerminalObserved) => {
+                TeamRunActivityOutcome::Terminal(self.recover_activity_run(store, &activity_id))
+            }
+            Some(ActivitySettlementOutcome::OutcomeUnknown) => {
+                TeamRunActivityOutcome::OutcomeUnknown(
+                    self.recover_activity_run(store, &activity_id),
+                )
+            }
+            Some(ActivitySettlementOutcome::Replayed) => TeamRunActivityOutcome::AlreadyClaimed(
+                self.recover_activity_run(store, &activity_id),
+            ),
         })
     }
 
@@ -661,50 +575,6 @@ impl TeamRunOwner {
         plan_terminal_observations(&store.facts().deliveries().snapshot())
             .delivery_ids()
             .to_vec()
-    }
-
-    pub(crate) fn pending_delivery_ids(
-        &self,
-        store: &OrganizationStore,
-        now: u64,
-    ) -> Vec<DeliveryId> {
-        store
-            .facts()
-            .deliveries()
-            .deliveries()
-            .filter_map(|delivery| match delivery.phase() {
-                DeliveryPhase::Pending => Some(delivery.facts().delivery_id.clone()),
-                DeliveryPhase::RetryScheduled { retry_at, .. } if *retry_at <= now => {
-                    Some(delivery.facts().delivery_id.clone())
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    pub(crate) fn delivery_target(
-        &self,
-        store: &OrganizationStore,
-        delivery_id: &DeliveryId,
-        open_claw_endpoint: &RuntimeEndpointReference,
-        matcha_endpoint: &RuntimeEndpointReference,
-    ) -> Option<TeamRunDeliveryTarget> {
-        let delivery = store.facts().deliveries().delivery(delivery_id)?;
-        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
-        let run = store.facts().run(&run_id)?;
-        let role = RoleId::try_new(delivery.facts().role_id.clone()).ok()?;
-        let binding = run
-            .runtime()?
-            .bindings()
-            .iter()
-            .find(|binding| binding.role() == &role)?;
-        if binding.endpoint() == open_claw_endpoint {
-            Some(TeamRunDeliveryTarget::OpenClaw { run_id })
-        } else if binding.endpoint() == matcha_endpoint {
-            Some(TeamRunDeliveryTarget::Matcha { run_id })
-        } else {
-            None
-        }
     }
 
     pub(crate) fn matcha_terminal_target(
@@ -986,44 +856,80 @@ impl TeamRunCommandOutcome {
     }
 }
 
-fn openclaw_role_delivery(
+fn agent_task_execution_request(
     store: &OrganizationStore,
-    delivery_id: &DeliveryId,
-) -> Result<(RoleSessionReceipt, String), OpenClawDeliveryError> {
-    role_delivery_binding(store, delivery_id)
-        .ok_or(OpenClawDeliveryError::SessionMismatch)
-        .and_then(|(binding, prompt)| {
-            if binding.agent().as_str().trim().is_empty()
-                || binding.external_session().as_str().trim().is_empty()
-            {
-                return Err(OpenClawDeliveryError::InvalidBinding);
-            }
-            Ok((binding, prompt))
+    activity: &ActivityRequest,
+) -> Result<ActivityExecutionRequest, TeamRunActivityError> {
+    let run = store
+        .facts()
+        .run(&activity.run_id)
+        .ok_or(TeamRunActivityError::SessionMismatch)?;
+    let ActivityKind::AgentTask { role_id, .. } = &activity.activity_kind else {
+        return Err(TeamRunActivityError::InvalidPrompt);
+    };
+    let role =
+        RoleId::try_new(role_id.clone()).map_err(|_| TeamRunActivityError::SessionMismatch)?;
+    let binding = run
+        .runtime()
+        .and_then(|runtime| {
+            runtime
+                .bindings()
+                .iter()
+                .find(|binding| binding.role() == &role)
         })
+        .cloned()
+        .ok_or(TeamRunActivityError::SessionMismatch)?;
+    if binding.local_session().as_str() != activity.target.as_str() {
+        return Err(TeamRunActivityError::SessionMismatch);
+    }
+    if binding.agent().as_str().trim().is_empty()
+        || binding.external_session().as_str().trim().is_empty()
+    {
+        return Err(TeamRunActivityError::InvalidBinding);
+    }
+    Ok(ActivityExecutionRequest::agent_task(
+        AgentTaskActivity::from_activity_request(run.team(), activity, binding)
+            .map_err(team_run_activity_error)?,
+    ))
 }
 
-fn matcha_role_delivery(
+fn matcha_activity_correlation(
     store: &OrganizationStore,
-    delivery_id: &DeliveryId,
-) -> Result<(RoleSessionReceipt, String), MatchaDeliveryError> {
-    role_delivery_binding(store, delivery_id).ok_or(MatchaDeliveryError::SessionMismatch)
-}
-
-fn role_delivery_binding(
-    store: &OrganizationStore,
-    delivery_id: &DeliveryId,
-) -> Option<(RoleSessionReceipt, String)> {
-    let delivery = store.facts().deliveries().delivery(delivery_id)?;
-    let run = store.facts().run(&organization::GraphRunId::new(
-        delivery.facts().run_id.clone(),
-    ))?;
-    let role = RoleId::try_new(delivery.facts().role_id.clone()).ok()?;
+    activity_id: &ActivityId,
+) -> Option<MatchaDeliveryCorrelation> {
+    let activity = store.facts().activities().activity(activity_id)?;
+    let run = store.facts().run(&activity.facts().run_id)?;
+    let ActivityKind::AgentTask { role_id, .. } = &activity.facts().activity_kind else {
+        return None;
+    };
+    let role = RoleId::try_new(role_id.clone()).ok()?;
     let binding = run
         .runtime()?
         .bindings()
         .iter()
         .find(|binding| binding.role() == &role)?;
-    Some((binding.clone(), delivery.facts().message.clone()))
+    (binding.endpoint().as_str()
+        == crate::runtime_driver::RuntimeDriverIdentity::matcha_agent()
+            .runtime_endpoint_reference())
+    .then(|| {
+        MatchaDeliveryCorrelation::new(
+            binding.external_session().clone(),
+            NativeRunReceiptReference::try_new(activity.facts().idempotency_key.clone())
+                .expect("validated Matcha activity idempotency key must be a native run receipt"),
+        )
+    })
+}
+
+fn team_run_activity_error(error: ActivityExecutionRequestError) -> TeamRunActivityError {
+    match error {
+        ActivityExecutionRequestError::InvalidDeliveryReference => {
+            TeamRunActivityError::SessionMismatch
+        }
+        ActivityExecutionRequestError::InvalidIdempotencyKey => {
+            TeamRunActivityError::InvalidBinding
+        }
+        ActivityExecutionRequestError::InvalidPromptPayload => TeamRunActivityError::InvalidPrompt,
+    }
 }
 
 fn persisted_graph_template(

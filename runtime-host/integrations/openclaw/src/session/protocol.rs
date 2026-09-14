@@ -24,7 +24,9 @@ const MAX_SESSION_UPDATE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_SESSION_UPDATE_STOP_REASON_BYTES: usize = 256;
 const MAX_SESSION_ACTIVITY_TEXT_BYTES: usize = 16 * 1024;
 const MAX_SESSION_ACTIVITY_ID_BYTES: usize = 256;
+const MAX_SESSION_RUNTIME_DETAIL_TEXT_BYTES: usize = 300;
 const MAX_SESSION_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
+const MAX_SESSION_TOOL_DETAILS_BYTES: usize = 128 * 1024;
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MAX_CHAT_ATTACHMENTS: usize = 16;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -323,6 +325,8 @@ pub struct ChatHistoryParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_chars: Option<u64>,
 }
 
@@ -331,6 +335,7 @@ impl fmt::Debug for ChatHistoryParams {
         formatter
             .debug_struct("ChatHistoryParams")
             .field("has_limit", &self.limit.is_some())
+            .field("has_offset", &self.offset.is_some())
             .field("has_max_chars", &self.max_chars.is_some())
             .finish_non_exhaustive()
     }
@@ -341,6 +346,7 @@ impl ChatHistoryParams {
         Self {
             session_key,
             limit: None,
+            offset: None,
             max_chars: None,
         }
     }
@@ -356,6 +362,14 @@ impl ChatHistoryParams {
             ));
         }
         self.limit = Some(limit);
+        Ok(self)
+    }
+
+    pub fn try_with_offset(mut self, offset: u64) -> Result<Self, ValidationError> {
+        if offset > MAX_SAFE_SEQUENCE {
+            return Err(ValidationError("chat history offset exceeds safe integer"));
+        }
+        self.offset = Some(offset);
         Ok(self)
     }
 
@@ -384,6 +398,8 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
             #[serde(default)]
             limit: OptionalHistoryBound,
             #[serde(default)]
+            offset: OptionalHistoryBound,
+            #[serde(default)]
             max_chars: OptionalHistoryBound,
         }
 
@@ -391,6 +407,11 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
         let params = Self::new(raw.session_key);
         let params = match raw.limit {
             OptionalHistoryBound::Value(limit) => params.try_with_limit(limit),
+            OptionalHistoryBound::Missing => Ok(params),
+        }
+        .map_err(D::Error::custom)?;
+        let params = match raw.offset {
+            OptionalHistoryBound::Value(offset) => params.try_with_offset(offset),
             OptionalHistoryBound::Missing => Ok(params),
         }
         .map_err(D::Error::custom)?;
@@ -713,6 +734,15 @@ impl fmt::Debug for SessionIdentityReadback {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionPermissionMode {
+    ReadOnly,
+    Guarded,
+    Workspace,
+    Full,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionDeleteResult {
     pub deleted: bool,
@@ -726,9 +756,172 @@ pub struct SessionModelPatchParams {
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionPermissionPatchParams {
+    key: SessionKey,
+    permission_mode: Option<SessionPermissionMode>,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionLabelPatchParams {
     key: SessionKey,
     label: String,
+}
+
+impl SessionPermissionPatchParams {
+    pub fn new(key: SessionKey, selection: Option<SessionPermissionMode>) -> Self {
+        Self {
+            key,
+            permission_mode: selection,
+        }
+    }
+
+    pub fn key(&self) -> &SessionKey {
+        &self.key
+    }
+
+    pub const fn selection(&self) -> Option<SessionPermissionMode> {
+        self.permission_mode
+    }
+}
+
+impl fmt::Debug for SessionPermissionPatchParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionPermissionPatchParams")
+            .field("selection", &self.permission_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionPermissionPatchResult {
+    pub key: SessionKey,
+    pub mode: Option<SessionPermissionMode>,
+}
+
+impl<'de> Deserialize<'de> for SessionPermissionPatchResult {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Payload {
+            ok: bool,
+            key: SessionKey,
+            #[serde(default, rename = "path")]
+            _path: Option<IgnoredAny>,
+            entry: Option<PermissionPatchEntry>,
+        }
+
+        let payload = Payload::deserialize(deserializer)?;
+        payload
+            .ok
+            .then_some(Self {
+                key: payload.key,
+                mode: payload.entry.and_then(|entry| entry.permission_mode),
+            })
+            .ok_or_else(|| D::Error::custom("sessions.patch permission result must be successful"))
+    }
+}
+
+impl fmt::Debug for SessionPermissionPatchResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionPermissionPatchResult")
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionPatchEntry {
+    #[serde(default, deserialize_with = "deserialize_session_permission_mode")]
+    permission_mode: Option<SessionPermissionMode>,
+}
+
+fn deserialize_session_permission_mode<'de, D>(
+    deserializer: D,
+) -> Result<Option<SessionPermissionMode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    session_permission_mode(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+fn session_permission_mode(value: Value) -> Result<Option<SessionPermissionMode>, &'static str> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) if value == "default" => Ok(None),
+        value => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|_| "session permission mode is invalid"),
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionProjection {
+    pub supported: bool,
+    pub mode: Option<SessionPermissionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<SessionPermissionMode>,
+    pub pending: bool,
+    pub can_select_full: bool,
+    pub options: Vec<SessionPermissionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl SessionPermissionProjection {
+    pub fn supported(
+        mode: Option<SessionPermissionMode>,
+        default_mode: Option<SessionPermissionMode>,
+        pending: bool,
+        can_select_full: bool,
+    ) -> Self {
+        Self {
+            supported: true,
+            mode,
+            default_mode,
+            pending,
+            can_select_full,
+            options: SessionPermissionMode::options().to_vec(),
+            reason: None,
+        }
+    }
+
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            supported: false,
+            mode: None,
+            default_mode: None,
+            pending: false,
+            can_select_full: false,
+            options: Vec::new(),
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+impl fmt::Debug for SessionPermissionProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionPermissionProjection")
+            .field("supported", &self.supported)
+            .field("mode", &self.mode)
+            .field("default_mode", &self.default_mode)
+            .field("pending", &self.pending)
+            .field("can_select_full", &self.can_select_full)
+            .field("option_count", &self.options.len())
+            .field("has_reason", &self.reason.is_some())
+            .finish()
+    }
+}
+
+impl SessionPermissionMode {
+    pub const fn options() -> &'static [Self; 4] {
+        &[Self::ReadOnly, Self::Guarded, Self::Workspace, Self::Full]
+    }
 }
 
 impl SessionLabelPatchParams {
@@ -761,7 +954,7 @@ pub struct SessionLabelPatchResult {
 impl<'de> Deserialize<'de> for SessionLabelPatchResult {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[serde(rename_all = "camelCase")]
         struct Payload {
             ok: bool,
             key: SessionKey,
@@ -819,6 +1012,8 @@ pub struct SessionsListParams {
     include_last_message: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search: Option<String>,
 }
 impl fmt::Debug for SessionsListParams {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -839,6 +1034,7 @@ impl fmt::Debug for SessionsListParams {
                 &self.include_last_message.is_some(),
             )
             .field("has_agent_id", &self.agent_id.is_some())
+            .field("has_search", &self.search.is_some())
             .finish()
     }
 }
@@ -850,7 +1046,7 @@ pub struct SessionModelPatchResult {
 impl<'de> Deserialize<'de> for SessionModelPatchResult {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[serde(rename_all = "camelCase")]
         struct Payload {
             ok: bool,
             key: SessionKey,
@@ -880,7 +1076,7 @@ impl fmt::Debug for SessionModelPatchResult {
     }
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedSessionModel {
     pub model_provider: ModelRef,
     pub model: ModelRef,
@@ -895,7 +1091,7 @@ impl fmt::Debug for ResolvedSessionModel {
     }
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionAgentRuntime {
     pub id: AgentRuntimeId,
     pub source: SessionAgentRuntimeSource,
@@ -945,6 +1141,13 @@ impl SessionsListParams {
         self.agent_id = Some(non_empty(value, "agent id must be a non-empty string")?);
         Ok(self)
     }
+    pub fn try_with_search(mut self, value: impl Into<String>) -> Result<Self, ValidationError> {
+        self.search = Some(non_empty(
+            value,
+            "sessions list search must be a non-empty string",
+        )?);
+        Ok(self)
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -954,7 +1157,7 @@ pub enum ChatSendStatus {
     Ok,
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatSendResult {
     pub run_id: RunId,
     pub status: ChatSendStatus,
@@ -968,7 +1171,7 @@ impl fmt::Debug for ChatSendResult {
     }
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatAbortResult {
     pub ok: bool,
     pub aborted: bool,
@@ -1012,6 +1215,8 @@ pub struct SessionSummary {
     pub status: Option<String>,
     pub has_active_run: Option<bool>,
     pub model: Option<String>,
+    pub permission_mode: Option<SessionPermissionMode>,
+    pub permission_mode_pending: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for SessionSummary {
@@ -1020,13 +1225,11 @@ impl<'de> Deserialize<'de> for SessionSummary {
         let object = payload
             .as_object_mut()
             .ok_or_else(|| D::Error::custom("session summary must be an object"))?;
-        let key = object
-            .get("key")
-            .cloned()
+        let session_info = object.get("sessionInfo").and_then(Value::as_object);
+        let metadata = object.get("metadata").and_then(Value::as_object);
+        let key = session_wire_field(object, session_info, metadata, &["key", "sessionKey"])
             .ok_or_else(|| D::Error::custom("session summary key is required"))?;
-        let kind = object
-            .get("kind")
-            .cloned()
+        let kind = session_wire_field(object, session_info, metadata, &["kind"])
             .ok_or_else(|| D::Error::custom("session summary kind is required"))?;
         for field in [
             "spawnedBy",
@@ -1090,18 +1293,51 @@ impl<'de> Deserialize<'de> for SessionSummary {
         Ok(Self {
             key: serde_json::from_value(key).map_err(D::Error::custom)?,
             kind: serde_json::from_value(kind).map_err(D::Error::custom)?,
-            agent_id: serde_json::from_value(read("agentId")).map_err(D::Error::custom)?,
+            agent_id: serde_json::from_value(
+                session_wire_field(object, session_info, metadata, &["agentId"])
+                    .unwrap_or(Value::Null),
+            )
+            .map_err(D::Error::custom)?,
             label: serde_json::from_value(read("label")).map_err(D::Error::custom)?,
             display_name: serde_json::from_value(read("displayName")).map_err(D::Error::custom)?,
             derived_title: serde_json::from_value(read("derivedTitle"))
                 .map_err(D::Error::custom)?,
-            updated_at: serde_json::from_value(read("updatedAt")).map_err(D::Error::custom)?,
+            updated_at: serde_json::from_value(
+                session_wire_field(object, session_info, metadata, &["updatedAt"])
+                    .unwrap_or(Value::Null),
+            )
+            .map_err(D::Error::custom)?,
             status: serde_json::from_value(read("status")).map_err(D::Error::custom)?,
             has_active_run: serde_json::from_value(read("hasActiveRun"))
                 .map_err(D::Error::custom)?,
             model: serde_json::from_value(read("model")).map_err(D::Error::custom)?,
+            permission_mode: session_permission_mode(read("permissionMode"))
+                .map_err(D::Error::custom)?,
+            permission_mode_pending: serde_json::from_value(read("permissionModePending"))
+                .map_err(D::Error::custom)?,
         })
     }
+}
+
+fn session_wire_field(
+    object: &Map<String, Value>,
+    session_info: Option<&Map<String, Value>>,
+    metadata: Option<&Map<String, Value>>,
+    names: &[&str],
+) -> Option<Value> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).cloned())
+        .or_else(|| {
+            session_info.and_then(|session_info| {
+                names
+                    .iter()
+                    .find_map(|name| session_info.get(*name).cloned())
+            })
+        })
+        .or_else(|| {
+            metadata.and_then(|metadata| names.iter().find_map(|name| metadata.get(*name).cloned()))
+        })
 }
 
 impl SessionSummary {
@@ -1143,6 +1379,8 @@ impl fmt::Debug for SessionSummary {
             .field("has_status", &self.status.is_some())
             .field("has_active_run", &self.has_active_run)
             .field("has_model", &self.model.is_some())
+            .field("permission_mode", &self.permission_mode)
+            .field("permission_mode_pending", &self.permission_mode_pending)
             .finish_non_exhaustive()
     }
 }
@@ -1202,6 +1440,7 @@ pub enum ProtocolError {
     InvalidChatAbortResult,
     InvalidSessionsListResult,
     InvalidSessionModelPatchResult,
+    InvalidSessionPermissionPatchResult,
     InvalidSessionLabelPatchResult,
     InvalidSessionCreateResult,
     InvalidSessionDeleteResult,
@@ -1217,6 +1456,9 @@ impl fmt::Display for ProtocolError {
             Self::InvalidChatAbortResult => "chat.abort result is invalid",
             Self::InvalidSessionsListResult => "sessions.list result is invalid",
             Self::InvalidSessionModelPatchResult => "sessions.patch model result is invalid",
+            Self::InvalidSessionPermissionPatchResult => {
+                "sessions.patch permission result is invalid"
+            }
             Self::InvalidSessionLabelPatchResult => "sessions.patch label result is invalid",
             Self::InvalidSessionCreateResult => "sessions.create result is invalid",
             Self::InvalidSessionDeleteResult => "sessions.delete result is invalid",
@@ -1284,6 +1526,21 @@ pub fn decode_session_label_patch_result(
         .ok_or(ProtocolError::InvalidSessionLabelPatchResult)
 }
 
+pub fn decode_session_permission_patch_result(
+    id: &str,
+    response: GatewayResponse,
+    expected_key: &SessionKey,
+) -> Result<SessionPermissionPatchResult, ProtocolError> {
+    let result: SessionPermissionPatchResult = decode_result(
+        id,
+        response,
+        ProtocolError::InvalidSessionPermissionPatchResult,
+    )?;
+    (result.key == *expected_key)
+        .then_some(result)
+        .ok_or(ProtocolError::InvalidSessionPermissionPatchResult)
+}
+
 pub fn decode_session_create_result(
     id: &str,
     response: GatewayResponse,
@@ -1293,7 +1550,7 @@ pub fn decode_session_create_result(
         decode_result(id, response, ProtocolError::InvalidSessionCreateResult)?;
     (result.ok && result.key == expected_key.as_str())
         .then_some(SessionCreateResult {
-            native_session_id: result.session_id,
+            native_session_id: result.native_session_id,
         })
         .ok_or(ProtocolError::InvalidSessionCreateResult)
 }
@@ -1322,21 +1579,44 @@ pub fn decode_chat_history_result(
     Ok(ChatHistoryResult::from_peer(peer.messages, limit))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PeerSessionCreateResult {
     ok: bool,
     key: String,
-    #[serde(rename = "sessionId")]
-    session_id: NativeSessionId,
-    #[serde(default, rename = "entry")]
-    _entry: Option<IgnoredAny>,
-    #[serde(default, rename = "runStarted")]
-    _run_started: Option<IgnoredAny>,
+    native_session_id: NativeSessionId,
+}
+
+impl<'de> Deserialize<'de> for PeerSessionCreateResult {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let payload = Value::deserialize(deserializer)?;
+        let object = payload
+            .as_object()
+            .ok_or_else(|| D::Error::custom("sessions.create result must be an object"))?;
+        let session_info = object.get("sessionInfo").and_then(Value::as_object);
+        let metadata = object.get("metadata").and_then(Value::as_object);
+        let ok = object
+            .get("ok")
+            .cloned()
+            .ok_or_else(|| D::Error::custom("sessions.create ok is required"))?;
+        let key = session_wire_field(object, session_info, metadata, &["key", "sessionKey"])
+            .ok_or_else(|| D::Error::custom("sessions.create key is required"))?;
+        let native_session_id = session_wire_field(
+            object,
+            session_info,
+            metadata,
+            &["nativeSessionId", "sessionId"],
+        )
+        .ok_or_else(|| D::Error::custom("sessions.create native session id is required"))?;
+        Ok(Self {
+            ok: serde_json::from_value(ok).map_err(D::Error::custom)?,
+            key: serde_json::from_value(key).map_err(D::Error::custom)?,
+            native_session_id: serde_json::from_value(native_session_id)
+                .map_err(D::Error::custom)?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct PeerSessionDeleteResult {
     ok: bool,
     key: String,
@@ -1364,22 +1644,48 @@ fn decode_result<T: for<'de> Deserialize<'de>>(
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatState {
+    Status,
     Delta,
     Final,
     Aborted,
     Error,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChatStatusPhase {
+    Other,
+}
+
+impl ChatStatusPhase {
+    fn parse(value: Option<&Value>) -> Option<Self> {
+        match value.and_then(Value::as_str)? {
+            "preparing_workspace"
+            | "naming_worktree"
+            | "creating_worktree"
+            | "running_setup"
+            | "provisioning_environment"
+            | "preparing_context"
+            | "starting_model" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct ChatEvent {
     pub run_id: RunId,
     pub session_key: SessionKey,
     pub sequence: u64,
     pub state: ChatState,
+    pub status_phase: Option<ChatStatusPhase>,
     pub delta_text: Option<String>,
     pub replace: bool,
     pub message_text: Option<String>,
+    pub message_thinking: Option<String>,
     pub error_kind: Option<SessionErrorKind>,
+    pub error_message: Option<String>,
     pub stop_reason: Option<String>,
+    pub error_detail: Option<Value>,
 }
 impl fmt::Debug for ChatEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1387,11 +1693,15 @@ impl fmt::Debug for ChatEvent {
             .debug_struct("ChatEvent")
             .field("sequence", &self.sequence)
             .field("state", &self.state)
+            .field("status_phase", &self.status_phase)
             .field("has_delta_text", &self.delta_text.is_some())
             .field("replace", &self.replace)
             .field("has_message_text", &self.message_text.is_some())
+            .field("has_message_thinking", &self.message_thinking.is_some())
             .field("error_kind", &self.error_kind)
+            .field("has_error_message", &self.error_message.is_some())
             .field("has_stop_reason", &self.stop_reason.is_some())
+            .field("has_error_detail", &self.error_detail.is_some())
             .finish()
     }
 }
@@ -1427,39 +1737,63 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
         .as_object()
         .ok_or(ProtocolError::InvalidSessionEvent)?;
     let state = match object.get("state").and_then(Value::as_str) {
+        Some("status") => ChatState::Status,
         Some("delta") => ChatState::Delta,
         Some("final") => ChatState::Final,
         Some("aborted") => ChatState::Aborted,
         Some("error") => ChatState::Error,
         _ => return Err(ProtocolError::InvalidSessionEvent),
     };
+    let status_phase = if state == ChatState::Status {
+        Some(
+            ChatStatusPhase::parse(object.get("phase"))
+                .ok_or(ProtocolError::InvalidSessionEvent)?,
+        )
+    } else {
+        None
+    };
     if object.keys().any(|key| !allowed_chat_field(state, key))
-        || (state == ChatState::Delta && !matches!(object.get("deltaText"), Some(Value::String(_))))
-        || object
-            .get("spawnedBy")
-            .is_some_and(|value| !matches!(value, Value::String(text) if !text.is_empty()))
+        || (state == ChatState::Delta
+            && object.get("message").is_none()
+            && !matches!(object.get("deltaText"), Some(Value::String(_))))
+        || ["agentId", "spawnedBy"].into_iter().any(|key| {
+            object
+                .get(key)
+                .is_some_and(|value| !non_empty_string(value))
+        })
         || object
             .get("replace")
             .is_some_and(|value| !value.is_boolean())
+        || object
+            .get("yielded")
+            .is_some_and(|value| !matches!(value, Value::Bool(true)))
         || ["stopReason", "errorMessage"]
             .into_iter()
             .any(|key| object.get(key).is_some_and(|value| !value.is_string()))
         || object
             .get("errorKind")
             .is_some_and(|value| SessionErrorKind::parse(value).is_none())
+        || object
+            .get("errorDetail")
+            .is_some_and(|value| !valid_error_detail(value))
     {
         return Err(ProtocolError::InvalidSessionEvent);
     }
     let delta_text = bounded_text(object.get("deltaText"), MAX_SESSION_UPDATE_TEXT_BYTES)?;
-    let message_text = object
-        .get("message")
+    let message = object.get("message");
+    let message_text = message
         .and_then(message_content_text)
-        .map(|text| bounded_text_value(text, MAX_SESSION_UPDATE_TEXT_BYTES))
+        .map(|text| bounded_text_value(&text, MAX_SESSION_UPDATE_TEXT_BYTES))
+        .transpose()?;
+    let message_thinking = message
+        .and_then(message_content_thinking)
+        .map(|text| bounded_text_value(&text, MAX_SESSION_UPDATE_TEXT_BYTES))
         .transpose()?;
     let sequence: u64 = required(object, "seq")?;
     if sequence > MAX_SAFE_SEQUENCE {
         return Err(ProtocolError::InvalidSessionEvent);
     }
+    let error_message = runtime_detail_text(object.get("errorMessage"))?;
     let stop_reason = bounded_text(
         object.get("stopReason"),
         MAX_SESSION_UPDATE_STOP_REASON_BYTES,
@@ -1469,14 +1803,18 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
         session_key: required(object, "sessionKey")?,
         sequence,
         state,
+        status_phase,
         delta_text,
         replace: object
             .get("replace")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         message_text,
+        message_thinking,
         error_kind: object.get("errorKind").and_then(SessionErrorKind::parse),
+        error_message,
         stop_reason,
+        error_detail: safe_error_detail(object.get("errorDetail")),
     })
 }
 
@@ -1498,15 +1836,75 @@ fn bounded_text_value(text: &str, limit: usize) -> Result<String, ProtocolError>
     Ok(text.to_owned())
 }
 
-fn message_content_text(message: &Value) -> Option<&str> {
-    message.get("content").and_then(|content| {
-        content.as_str().or_else(|| {
-            content.as_array().and_then(|blocks| {
-                let first = blocks.first()?;
-                first.get("text").and_then(Value::as_str)
-            })
+fn message_content_text(message: &Value) -> Option<String> {
+    message_content_blocks(message, "text", "text")
+}
+
+fn message_content_thinking(message: &Value) -> Option<String> {
+    message_content_blocks(message, "thinking", "thinking")
+}
+
+fn message_content_blocks(message: &Value, block_type: &str, text_key: &str) -> Option<String> {
+    let content = message.get("content")?;
+    if block_type == "text"
+        && let Some(text) = content.as_str()
+    {
+        return Some(text.to_owned());
+    }
+    let text = content
+        .as_array()?
+        .iter()
+        .filter_map(|block| {
+            let object = block.as_object()?;
+            if object.get("type").and_then(Value::as_str) != Some(block_type) {
+                return None;
+            }
+            object.get(text_key).and_then(Value::as_str)
         })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn non_empty_string(value: &Value) -> bool {
+    matches!(value, Value::String(text) if !text.is_empty())
+}
+
+fn valid_error_detail(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.iter().all(|(key, value)| match key.as_str() {
+        "provider"
+        | "model"
+        | "failoverReason"
+        | "providerRuntimeFailureKind"
+        | "providerErrorType"
+        | "providerErrorMessagePreview" => value.as_str().is_some_and(|text| text.len() <= 300),
+        "httpStatus" => value
+            .as_u64()
+            .is_some_and(|status| (100..=599).contains(&status)),
+        _ => false,
     })
+}
+
+fn safe_error_detail(value: Option<&Value>) -> Option<Value> {
+    let object = value?.as_object()?;
+    let mut detail = Map::new();
+    for key in [
+        "failoverReason",
+        "providerRuntimeFailureKind",
+        "providerErrorType",
+        "providerErrorMessagePreview",
+        "httpStatus",
+    ] {
+        if let Some(value) = object.get(key) {
+            detail.insert(key.to_owned(), value.clone());
+        }
+    }
+    (!detail.is_empty()).then_some(Value::Object(detail))
 }
 
 fn message_activity_text(message: &Value) -> Option<String> {
@@ -1593,6 +1991,156 @@ fn tool_payload_value(value: Option<&Value>) -> Result<Option<Value>, ProtocolEr
         return Err(ProtocolError::InvalidSessionEvent);
     }
     Ok(Some(value.clone()))
+}
+
+fn tool_result_output(object: &Map<String, Value>) -> Option<&Value> {
+    let result = object.get("result");
+    if result
+        .and_then(Value::as_object)
+        .is_some_and(|result| result.len() == 1 && result.contains_key("details"))
+    {
+        return object.get("content").or_else(|| object.get("output"));
+    }
+    result
+        .or_else(|| object.get("content"))
+        .or_else(|| object.get("output"))
+}
+
+fn tool_details_value(values: [Option<&Value>; 2]) -> Result<Option<Value>, ProtocolError> {
+    let mut details = Map::new();
+    for value in values.into_iter().flatten() {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        for key in [
+            "browserTab",
+            "changed",
+            "created",
+            "diff",
+            "patch",
+            "approvalReviews",
+            "approvalReviewOutcome",
+            "mcpAppPreview",
+            "truncation",
+            "fullOutputPath",
+            "exitCode",
+        ] {
+            let projected = if key == "mcpAppPreview" {
+                object.get(key).and_then(project_mcp_app_preview_value)
+            } else {
+                object.get(key).and_then(project_tool_detail_value)
+            };
+            if let Some(projected) = projected {
+                details.insert(key.to_owned(), projected);
+            }
+        }
+    }
+    if details.is_empty() {
+        return Ok(None);
+    }
+    let value = Value::Object(details);
+    if payload_contains_nul(&value) {
+        return Err(ProtocolError::InvalidSessionEvent);
+    }
+    let encoded = serde_json::to_vec(&value).map_err(|_| ProtocolError::InvalidSessionEvent)?;
+    if encoded.len() > MAX_SESSION_TOOL_DETAILS_BYTES {
+        return Err(ProtocolError::InvalidSessionEvent);
+    }
+    Ok(Some(value))
+}
+
+fn project_mcp_app_preview_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut projected = Map::new();
+    for key in [
+        "kind",
+        "surface",
+        "render",
+        "title",
+        "preferredHeight",
+        "url",
+        "viewId",
+        "sandbox",
+        "boardWidgetName",
+    ] {
+        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
+            projected.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(value) = object
+        .get("mcpApp")
+        .and_then(project_mcp_app_descriptor_value)
+    {
+        projected.insert("mcpApp".to_owned(), value);
+    }
+    (!projected.is_empty()).then_some(Value::Object(projected))
+}
+
+fn project_mcp_app_descriptor_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut projected = Map::new();
+    for key in [
+        "viewId",
+        "serverName",
+        "toolName",
+        "uiResourceUri",
+        "toolCallId",
+        "originSessionKey",
+        "resultMetaState",
+    ] {
+        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
+            projected.insert(key.to_owned(), value);
+        }
+    }
+    (!projected.is_empty()).then_some(Value::Object(projected))
+}
+
+fn project_tool_detail_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Some(value.clone()),
+        Value::Array(values) => Some(Value::Array(
+            values
+                .iter()
+                .filter_map(project_tool_detail_value)
+                .collect(),
+        )),
+        Value::Object(object) => {
+            let mut projected = Map::new();
+            for (key, value) in object {
+                if key.contains('\0') {
+                    return None;
+                }
+                if raw_tool_detail_key(key) {
+                    continue;
+                }
+                if let Some(value) = project_tool_detail_value(value) {
+                    projected.insert(key.clone(), value);
+                }
+            }
+            Some(Value::Object(projected))
+        }
+    }
+}
+
+fn raw_tool_detail_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|char| *char != '_' && *char != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "rawassistanttext"
+            | "toolinput"
+            | "tooloutput"
+            | "toolresult"
+            | "privatepayload"
+            | "html"
+            | "input"
+            | "output"
+    ) || normalized.contains("secret")
+        || normalized.starts_with("raw")
+        || normalized.starts_with("private")
 }
 
 fn tool_payload_text(
@@ -1714,12 +2262,15 @@ fn project_tool_activity(
             .get("partialResult")
             .or_else(|| object.get("partial_result"))
             .or_else(|| object.get("output")),
-        ToolActivityPhase::Completed | ToolActivityPhase::Failed => object
-            .get("result")
-            .or_else(|| object.get("content"))
-            .or_else(|| object.get("output")),
+        ToolActivityPhase::Completed | ToolActivityPhase::Failed => tool_result_output(object),
         ToolActivityPhase::Started => None,
     })?;
+    let details = tool_details_value([
+        object
+            .get("result")
+            .and_then(|result| result.get("details")),
+        object.get("details"),
+    ])?;
     let summary = activity_text(object.get("summary").or_else(|| object.get("text")))?;
     Ok(Some(ProjectedSessionActivity {
         kind: SessionActivityKind::Tool {
@@ -1732,28 +2283,391 @@ fn project_tool_activity(
             input,
             input_text,
             output,
+            details,
             is_error,
         }),
     }))
 }
 
+struct ProjectedAgentEvent {
+    activity: Option<ProjectedSessionActivity>,
+    approval: Option<SessionApprovalEvent>,
+}
+
+fn project_agent_event(
+    object: &Map<String, Value>,
+    session_key: SessionKey,
+    run_id: Option<RunId>,
+) -> Result<ProjectedAgentEvent, ProtocolError> {
+    let stream = object
+        .get("stream")
+        .and_then(Value::as_str)
+        .ok_or(ProtocolError::InvalidSessionEvent)?;
+    let data = object
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or(ProtocolError::InvalidSessionEvent)?;
+    match stream {
+        "tool" => Ok(ProjectedAgentEvent {
+            activity: project_tool_activity(data)?,
+            approval: None,
+        }),
+        "thinking" => {
+            let Some(text) = activity_text(
+                data.get("thinking")
+                    .or_else(|| data.get("text"))
+                    .or_else(|| data.get("content")),
+            )?
+            else {
+                return Ok(ProjectedAgentEvent {
+                    activity: None,
+                    approval: None,
+                });
+            };
+            Ok(ProjectedAgentEvent {
+                activity: Some(ProjectedSessionActivity {
+                    kind: SessionActivityKind::Thinking { text },
+                    tool_payload: None,
+                }),
+                approval: None,
+            })
+        }
+        "approval" => Ok(ProjectedAgentEvent {
+            activity: None,
+            approval: project_agent_approval_event(data, session_key, run_id)?,
+        }),
+        "compaction" => Ok(ProjectedAgentEvent {
+            activity: project_compaction_activity(data)?,
+            approval: None,
+        }),
+        "lifecycle" | "fallback" => Ok(ProjectedAgentEvent {
+            activity: project_lifecycle_activity(stream, data)?,
+            approval: None,
+        }),
+        "codex_app_server.guardian" => Ok(ProjectedAgentEvent {
+            activity: project_guardian_activity(data)?,
+            approval: None,
+        }),
+        _ => Ok(ProjectedAgentEvent {
+            activity: None,
+            approval: None,
+        }),
+    }
+}
+
+fn project_compaction_activity(
+    data: &Map<String, Value>,
+) -> Result<Option<ProjectedSessionActivity>, ProtocolError> {
+    match data.get("phase").and_then(Value::as_str) {
+        Some("start") => Ok(Some(ProjectedSessionActivity {
+            kind: SessionActivityKind::Compaction {
+                phase: RuntimeActivityPhase::Started,
+            },
+            tool_payload: None,
+        })),
+        Some("end")
+            if data.get("completed").and_then(Value::as_bool) == Some(true)
+                && data.get("willRetry").and_then(Value::as_bool) == Some(true) =>
+        {
+            Ok(Some(ProjectedSessionActivity {
+                kind: SessionActivityKind::Compaction {
+                    phase: RuntimeActivityPhase::Retrying,
+                },
+                tool_payload: None,
+            }))
+        }
+        Some("end") => Ok(Some(ProjectedSessionActivity {
+            kind: SessionActivityKind::Compaction {
+                phase: RuntimeActivityPhase::Completed,
+            },
+            tool_payload: None,
+        })),
+        Some(_) | None => Ok(None),
+    }
+}
+
+fn project_lifecycle_activity(
+    stream: &str,
+    data: &Map<String, Value>,
+) -> Result<Option<ProjectedSessionActivity>, ProtocolError> {
+    let phase = if stream == "fallback" {
+        Some("fallback")
+    } else {
+        data.get("phase").and_then(Value::as_str)
+    };
+    match phase {
+        Some("fallback") => {
+            let Some(detail) = project_runtime_fallback_detail(data)? else {
+                return Ok(None);
+            };
+            Ok(Some(ProjectedSessionActivity {
+                kind: SessionActivityKind::Fallback { detail },
+                tool_payload: None,
+            }))
+        }
+        Some("fallback_cleared") => Ok(Some(ProjectedSessionActivity {
+            kind: SessionActivityKind::FallbackCleared,
+            tool_payload: None,
+        })),
+        Some("end") | Some("error") => Ok(Some(ProjectedSessionActivity {
+            kind: SessionActivityKind::Compaction {
+                phase: RuntimeActivityPhase::CompletedIfRetrying,
+            },
+            tool_payload: None,
+        })),
+        Some(_) | None => Ok(None),
+    }
+}
+
+fn project_runtime_fallback_detail(
+    data: &Map<String, Value>,
+) -> Result<Option<RuntimeFallbackDetail>, ProtocolError> {
+    let detail = RuntimeFallbackDetail {
+        failover_reason: runtime_detail_text(
+            data.get("reasonSummary")
+                .or_else(|| data.get("reason"))
+                .or_else(|| data.get("failoverReason")),
+        )?,
+        provider_runtime_failure_kind: runtime_detail_text(data.get("providerRuntimeFailureKind"))?,
+        provider_error_type: runtime_detail_text(data.get("providerErrorType"))?,
+        provider_error_message_preview: runtime_detail_text(
+            data.get("providerErrorMessagePreview"),
+        )?,
+        http_status: data
+            .get("httpStatus")
+            .and_then(Value::as_u64)
+            .filter(|status| (100..=599).contains(status))
+            .and_then(|status| u16::try_from(status).ok()),
+    };
+    Ok((detail.failover_reason.is_some()
+        || detail.provider_runtime_failure_kind.is_some()
+        || detail.provider_error_type.is_some()
+        || detail.provider_error_message_preview.is_some()
+        || detail.http_status.is_some())
+    .then_some(detail))
+}
+
+fn project_guardian_activity(
+    data: &Map<String, Value>,
+) -> Result<Option<ProjectedSessionActivity>, ProtocolError> {
+    let phase = match data.get("phase").and_then(Value::as_str) {
+        Some("started") => RuntimeGuardianPhase::Reviewing,
+        Some("completed") => match data.get("status").and_then(Value::as_str) {
+            Some("approved") => RuntimeGuardianPhase::Approved,
+            Some("denied") => RuntimeGuardianPhase::Denied,
+            _ => return Ok(None),
+        },
+        Some("warning") => RuntimeGuardianPhase::Warning,
+        Some("strict_review_required") => RuntimeGuardianPhase::StrictReviewRequired,
+        _ => return Ok(None),
+    };
+    Ok(Some(ProjectedSessionActivity {
+        kind: SessionActivityKind::Guardian {
+            notice: RuntimeGuardianNotice {
+                phase,
+                command: runtime_detail_text(data.get("command"))?,
+                risk_level: runtime_detail_text(data.get("riskLevel"))?,
+                rationale: runtime_detail_text(data.get("rationale"))?,
+                message: runtime_detail_text(data.get("message"))?,
+            },
+        },
+        tool_payload: None,
+    }))
+}
+
+fn runtime_detail_text(value: Option<&Value>) -> Result<Option<String>, ProtocolError> {
+    value
+        .map(|value| {
+            let text = value.as_str().ok_or(ProtocolError::InvalidSessionEvent)?;
+            if text.contains('\0') {
+                return Err(ProtocolError::InvalidSessionEvent);
+            }
+            bounded_text_value(text, MAX_SESSION_RUNTIME_DETAIL_TEXT_BYTES)
+        })
+        .transpose()
+}
+
+fn project_agent_approval_event(
+    data: &Map<String, Value>,
+    session_key: SessionKey,
+    run_id: Option<RunId>,
+) -> Result<Option<SessionApprovalEvent>, ProtocolError> {
+    if data.get("phase").and_then(Value::as_str) != Some("requested")
+        || data.get("kind").and_then(Value::as_str) != Some("exec")
+        || data.get("status").and_then(Value::as_str) != Some("pending")
+    {
+        return Ok(None);
+    }
+    Ok(Some(SessionApprovalEvent {
+        source: SessionApprovalSource::Exec,
+        lifecycle: SessionApprovalLifecycle::Requested,
+        approval_id: bounded_activity_id(
+            data.get("approvalId").or_else(|| data.get("id")),
+            ProtocolError::InvalidSessionEvent,
+        )?,
+        session_key,
+        run_id,
+        option_ids: approval_option_ids(data)?,
+    }))
+}
+
+fn project_approval_event(
+    source: SessionApprovalSource,
+    lifecycle: SessionApprovalLifecycle,
+    object: &Map<String, Value>,
+    session_key: SessionKey,
+    run_id: Option<RunId>,
+) -> Result<SessionApprovalEvent, ProtocolError> {
+    let request = object.get("request").and_then(Value::as_object);
+    Ok(SessionApprovalEvent {
+        source,
+        lifecycle,
+        approval_id: bounded_activity_id(
+            object
+                .get("id")
+                .or_else(|| object.get("approvalId"))
+                .or_else(|| object.get("requestId"))
+                .or_else(|| request.and_then(|request| request.get("approvalId")))
+                .or_else(|| request.and_then(|request| request.get("id"))),
+            ProtocolError::InvalidSessionEvent,
+        )?,
+        session_key,
+        run_id,
+        option_ids: approval_option_ids(object)?,
+    })
+}
+
+fn approval_option_ids(
+    object: &Map<String, Value>,
+) -> Result<Vec<ApprovalOptionId>, ProtocolError> {
+    let request = object.get("request").and_then(Value::as_object);
+    let mut option_ids = Vec::new();
+    for value in [
+        object.get("allowedDecisions"),
+        request.and_then(|request| request.get("allowedDecisions")),
+        object.get("options"),
+        request.and_then(|request| request.get("options")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        collect_approval_option_ids(value, &mut option_ids)?;
+    }
+    if option_ids.is_empty() {
+        for option_id in ["allow-once", "deny"] {
+            option_ids.push(
+                ApprovalOptionId::try_new(option_id.to_owned())
+                    .map_err(|_| ProtocolError::InvalidSessionEvent)?,
+            );
+        }
+    }
+    Ok(option_ids)
+}
+
+fn collect_approval_option_ids(
+    value: &Value,
+    option_ids: &mut Vec<ApprovalOptionId>,
+) -> Result<(), ProtocolError> {
+    let options = value.as_array().ok_or(ProtocolError::InvalidSessionEvent)?;
+    for option in options {
+        let id = option.as_str().or_else(|| {
+            option
+                .as_object()
+                .and_then(|object| object.get("optionId").or_else(|| object.get("id")))
+                .and_then(Value::as_str)
+        });
+        let Some(id) = id else {
+            return Err(ProtocolError::InvalidSessionEvent);
+        };
+        if option_ids.iter().any(|option| option.as_str() == id) {
+            continue;
+        }
+        option_ids.push(
+            ApprovalOptionId::try_new(id.to_owned())
+                .map_err(|_| ProtocolError::InvalidSessionEvent)?,
+        );
+    }
+    Ok(())
+}
+
+fn session_key_for_event(
+    kind: SessionEventKind,
+    object: &Map<String, Value>,
+) -> Result<Option<SessionKey>, ProtocolError> {
+    if !matches!(
+        kind,
+        SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved
+    ) {
+        return required(object, "sessionKey").map(Some);
+    }
+    if let Some(session_key) = optional_value(object.get("sessionKey"))? {
+        return Ok(Some(session_key));
+    }
+    object
+        .get("request")
+        .and_then(Value::as_object)
+        .map(|request| optional_value(request.get("sessionKey")))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn run_id_for_event(
+    kind: SessionEventKind,
+    object: &Map<String, Value>,
+) -> Result<Option<RunId>, ProtocolError> {
+    let run_id = optional_value(object.get("runId"))?;
+    if run_id.is_some()
+        || !matches!(
+            kind,
+            SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved
+        )
+    {
+        return Ok(run_id);
+    }
+    object
+        .get("request")
+        .and_then(Value::as_object)
+        .map(|request| optional_value(request.get("runId")))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn optional_value<T>(value: Option<&Value>) -> Result<Option<T>, ProtocolError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    value
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ProtocolError::InvalidSessionEvent)
+}
+
 fn allowed_chat_field(state: ChatState, field: &str) -> bool {
     matches!(
         field,
-        "runId" | "sessionKey" | "spawnedBy" | "seq" | "state" | "message"
-    ) || (state == ChatState::Delta && matches!(field, "deltaText" | "replace" | "usage"))
-        || (matches!(state, ChatState::Final | ChatState::Error) && field == "usage")
-        || (matches!(
-            state,
-            ChatState::Final | ChatState::Aborted | ChatState::Error
-        ) && field == "stopReason")
-        || (state == ChatState::Error && matches!(field, "errorMessage" | "errorKind"))
+        "runId" | "sessionKey" | "agentId" | "spawnedBy" | "seq" | "state"
+    ) || (state == ChatState::Status && field == "phase")
+        || (state == ChatState::Delta
+            && matches!(field, "message" | "deltaText" | "replace" | "usage"))
+        || (state == ChatState::Final
+            && matches!(field, "message" | "usage" | "stopReason" | "yielded"))
+        || (state == ChatState::Aborted
+            && matches!(field, "message" | "errorMessage" | "stopReason"))
+        || (state == ChatState::Error
+            && matches!(
+                field,
+                "message" | "errorMessage" | "errorKind" | "errorDetail" | "usage" | "stopReason"
+            ))
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionEventKind {
     Chat,
     Message,
     Tool,
+    Agent,
+    ApprovalRequested,
+    ApprovalResolved,
     Changed,
 }
 
@@ -1772,7 +2686,24 @@ pub enum ToolActivityPhase {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionApprovalSource {
+    Exec,
+    Plugin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionApprovalLifecycle {
+    Requested,
+    Resolved,
+}
+
 identity!(ToolId, "tool id must be a non-empty string");
+identity!(ApprovalId, "approval id must be a non-empty string");
+identity!(
+    ApprovalOptionId,
+    "approval option id must be a non-empty string"
+);
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum SessionActivityKind {
@@ -1787,6 +2718,54 @@ pub enum SessionActivityKind {
         phase: ToolActivityPhase,
         summary: Option<String>,
     },
+    Thinking {
+        text: String,
+    },
+    Compaction {
+        phase: RuntimeActivityPhase,
+    },
+    Fallback {
+        detail: RuntimeFallbackDetail,
+    },
+    FallbackCleared,
+    Guardian {
+        notice: RuntimeGuardianNotice,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeActivityPhase {
+    Started,
+    Retrying,
+    Completed,
+    CompletedIfRetrying,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct RuntimeFallbackDetail {
+    pub failover_reason: Option<String>,
+    pub provider_runtime_failure_kind: Option<String>,
+    pub provider_error_type: Option<String>,
+    pub provider_error_message_preview: Option<String>,
+    pub http_status: Option<u16>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct RuntimeGuardianNotice {
+    pub phase: RuntimeGuardianPhase,
+    pub command: Option<String>,
+    pub risk_level: Option<String>,
+    pub rationale: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeGuardianPhase {
+    Reviewing,
+    Approved,
+    Denied,
+    Warning,
+    StrictReviewRequired,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1794,6 +2773,7 @@ pub struct ToolActivityPayload {
     input: Option<Value>,
     input_text: Option<String>,
     output: Option<Value>,
+    details: Option<Value>,
     is_error: Option<bool>,
 }
 
@@ -1806,6 +2786,16 @@ pub struct SessionActivity {
     tool_payload: Option<ToolActivityPayload>,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionApprovalEvent {
+    pub source: SessionApprovalSource,
+    pub lifecycle: SessionApprovalLifecycle,
+    pub approval_id: ApprovalId,
+    pub session_key: SessionKey,
+    pub run_id: Option<RunId>,
+    pub option_ids: Vec<ApprovalOptionId>,
+}
+
 impl ToolActivityPayload {
     pub fn input(&self) -> Option<&Value> {
         self.input.as_ref()
@@ -1815,6 +2805,9 @@ impl ToolActivityPayload {
     }
     pub fn output(&self) -> Option<&Value> {
         self.output.as_ref()
+    }
+    pub fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
     }
     pub fn is_error(&self) -> Option<bool> {
         self.is_error
@@ -1831,6 +2824,7 @@ impl fmt::Debug for ToolActivityPayload {
                 &self.input_text.as_ref().map_or(0, String::len),
             )
             .field("has_output", &self.output.is_some())
+            .field("has_details", &self.details.is_some())
             .field("is_error", &self.is_error)
             .finish()
     }
@@ -1867,6 +2861,11 @@ impl SessionActivity {
             .as_ref()
             .and_then(ToolActivityPayload::output)
     }
+    pub fn details(&self) -> Option<&Value> {
+        self.tool_payload
+            .as_ref()
+            .and_then(ToolActivityPayload::details)
+    }
     pub fn is_error(&self) -> Option<bool> {
         self.tool_payload
             .as_ref()
@@ -1878,31 +2877,56 @@ impl SessionActivityKind {
     pub fn message_id(&self) -> Option<&MessageId> {
         match self {
             Self::Message { message_id, .. } => Some(message_id),
-            Self::Tool { .. } => None,
+            Self::Tool { .. }
+            | Self::Thinking { .. }
+            | Self::Compaction { .. }
+            | Self::Fallback { .. }
+            | Self::FallbackCleared
+            | Self::Guardian { .. } => None,
         }
     }
     pub fn tool_id(&self) -> Option<&ToolId> {
         match self {
-            Self::Message { .. } => None,
             Self::Tool { tool_id, .. } => Some(tool_id),
+            Self::Message { .. }
+            | Self::Thinking { .. }
+            | Self::Compaction { .. }
+            | Self::Fallback { .. }
+            | Self::FallbackCleared
+            | Self::Guardian { .. } => None,
         }
     }
     pub fn message_lifecycle(&self) -> Option<MessageActivityLifecycle> {
         match self {
             Self::Message { lifecycle, .. } => Some(*lifecycle),
-            Self::Tool { .. } => None,
+            Self::Tool { .. }
+            | Self::Thinking { .. }
+            | Self::Compaction { .. }
+            | Self::Fallback { .. }
+            | Self::FallbackCleared
+            | Self::Guardian { .. } => None,
         }
     }
     pub fn tool_phase(&self) -> Option<ToolActivityPhase> {
         match self {
-            Self::Message { .. } => None,
             Self::Tool { phase, .. } => Some(*phase),
+            Self::Message { .. }
+            | Self::Thinking { .. }
+            | Self::Compaction { .. }
+            | Self::Fallback { .. }
+            | Self::FallbackCleared
+            | Self::Guardian { .. } => None,
         }
     }
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Message { text, .. } => text.as_deref(),
             Self::Tool { summary, .. } => summary.as_deref(),
+            Self::Thinking { text } => Some(text),
+            Self::Compaction { .. }
+            | Self::Fallback { .. }
+            | Self::FallbackCleared
+            | Self::Guardian { .. } => None,
         }
     }
 }
@@ -1939,6 +2963,40 @@ impl fmt::Debug for SessionActivityKind {
                 .field("has_tool_name", &tool_name.is_some())
                 .field("has_summary", &summary.is_some())
                 .finish(),
+            Self::Thinking { text } => formatter
+                .debug_struct("Thinking")
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::Compaction { phase } => formatter
+                .debug_struct("Compaction")
+                .field("phase", phase)
+                .finish(),
+            Self::Fallback { detail } => formatter
+                .debug_struct("Fallback")
+                .field("has_failover_reason", &detail.failover_reason.is_some())
+                .field(
+                    "has_provider_runtime_failure_kind",
+                    &detail.provider_runtime_failure_kind.is_some(),
+                )
+                .field(
+                    "has_provider_error_type",
+                    &detail.provider_error_type.is_some(),
+                )
+                .field(
+                    "has_provider_error_message_preview",
+                    &detail.provider_error_message_preview.is_some(),
+                )
+                .field("has_http_status", &detail.http_status.is_some())
+                .finish(),
+            Self::FallbackCleared => formatter.debug_struct("FallbackCleared").finish(),
+            Self::Guardian { notice } => formatter
+                .debug_struct("Guardian")
+                .field("phase", &notice.phase)
+                .field("has_command", &notice.command.is_some())
+                .field("has_risk_level", &notice.risk_level.is_some())
+                .field("has_rationale", &notice.rationale.is_some())
+                .field("has_message", &notice.message.is_some())
+                .finish(),
         }
     }
 }
@@ -1953,6 +3011,7 @@ pub struct SessionEventEnvelope {
     pub(crate) embedded_message_id: Option<MessageId>,
     pub chat: Option<ChatEvent>,
     pub activity: Option<SessionActivity>,
+    pub approval: Option<SessionApprovalEvent>,
 }
 impl fmt::Debug for SessionEventEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1968,10 +3027,33 @@ impl fmt::Debug for SessionEventEnvelope {
 pub fn decode_session_event(
     event: GatewayEvent,
 ) -> Result<Option<SessionEventEnvelope>, ProtocolError> {
-    let kind = match event.name.as_str() {
+    let mut approval_source = None;
+    let mut approval_lifecycle = None;
+    let mut kind = match event.name.as_str() {
         "chat" => SessionEventKind::Chat,
         "session.message" => SessionEventKind::Message,
         "session.tool" => SessionEventKind::Tool,
+        "agent" => SessionEventKind::Agent,
+        "exec.approval.requested" => {
+            approval_source = Some(SessionApprovalSource::Exec);
+            approval_lifecycle = Some(SessionApprovalLifecycle::Requested);
+            SessionEventKind::ApprovalRequested
+        }
+        "exec.approval.resolved" => {
+            approval_source = Some(SessionApprovalSource::Exec);
+            approval_lifecycle = Some(SessionApprovalLifecycle::Resolved);
+            SessionEventKind::ApprovalResolved
+        }
+        "plugin.approval.requested" => {
+            approval_source = Some(SessionApprovalSource::Plugin);
+            approval_lifecycle = Some(SessionApprovalLifecycle::Requested);
+            SessionEventKind::ApprovalRequested
+        }
+        "plugin.approval.resolved" => {
+            approval_source = Some(SessionApprovalSource::Plugin);
+            approval_lifecycle = Some(SessionApprovalLifecycle::Resolved);
+            SessionEventKind::ApprovalResolved
+        }
         "sessions.changed" => SessionEventKind::Changed,
         _ => return Ok(None),
     };
@@ -1987,15 +3069,42 @@ pub fn decode_session_event(
         .transpose()?;
     let message_id = optional(object, "messageId")?;
     let embedded_message_id = embedded_message_id(object)?;
-    let session_key: SessionKey = required(object, "sessionKey")?;
-    let run_id: Option<RunId> = optional(object, "runId")?;
+    let Some(session_key) = session_key_for_event(kind, object)? else {
+        return Ok(None);
+    };
+    let run_id = run_id_for_event(kind, object)?;
+    let mut approval = match (approval_source, approval_lifecycle) {
+        (Some(source), Some(lifecycle)) => Some(project_approval_event(
+            source,
+            lifecycle,
+            object,
+            session_key.clone(),
+            run_id.clone(),
+        )?),
+        _ => None,
+    };
     let activity = match kind {
         SessionEventKind::Message if run_id.is_some() && object.get("lifecycle").is_some() => {
             project_message_activity(object, message_id.as_ref(), embedded_message_id.as_ref())?
         }
         SessionEventKind::Tool if run_id.is_some() => project_tool_activity(object)?,
-        SessionEventKind::Message | SessionEventKind::Tool => None,
-        SessionEventKind::Chat | SessionEventKind::Changed => None,
+        SessionEventKind::Agent => {
+            let agent = project_agent_event(object, session_key.clone(), run_id.clone())?;
+            if let Some(agent_approval) = agent.approval {
+                kind = match agent_approval.lifecycle {
+                    SessionApprovalLifecycle::Requested => SessionEventKind::ApprovalRequested,
+                    SessionApprovalLifecycle::Resolved => SessionEventKind::ApprovalResolved,
+                };
+                approval = Some(agent_approval);
+            }
+            agent.activity
+        }
+        SessionEventKind::Message
+        | SessionEventKind::Tool
+        | SessionEventKind::Chat
+        | SessionEventKind::ApprovalRequested
+        | SessionEventKind::ApprovalResolved
+        | SessionEventKind::Changed => None,
     };
     let activity = match (activity, run_id.as_ref()) {
         (Some(activity), Some(run_id)) => {
@@ -2025,6 +3134,7 @@ pub fn decode_session_event(
         embedded_message_id,
         chat,
         activity,
+        approval,
     };
     Ok(Some(envelope))
 }
@@ -2182,24 +3292,49 @@ mod tests {
             json(r#"{"key":"agent:main:session-1","model":null}"#)
         );
         assert_eq!(
+            serde_json::to_value(SessionPermissionPatchParams::new(
+                key(),
+                Some(SessionPermissionMode::Full),
+            ))
+            .unwrap(),
+            json(r#"{"key":"agent:main:session-1","permissionMode":"full"}"#)
+        );
+        assert_eq!(
+            serde_json::to_value(SessionPermissionPatchParams::new(key(), None)).unwrap(),
+            json(r#"{"key":"agent:main:session-1","permissionMode":null}"#)
+        );
+        assert_eq!(
             serde_json::to_value(ChatHistoryParams::new(key())).unwrap(),
             json(r#"{"sessionKey":"agent:main:session-1"}"#)
         );
         let history = ChatHistoryParams::new(key())
             .try_with_limit(25)
             .unwrap()
+            .try_with_offset(40)
+            .unwrap()
             .try_with_max_chars(10_000)
             .unwrap();
         assert_eq!(
             serde_json::to_value(&history).unwrap(),
-            json(r#"{"sessionKey":"agent:main:session-1","limit":25,"maxChars":10000}"#)
+            json(
+                r#"{"sessionKey":"agent:main:session-1","limit":25,"offset":40,"maxChars":10000}"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<ChatHistoryParams>(
+                r#"{"sessionKey":"agent:main:session-1","limit":25,"offset":40,"maxChars":10000}"#,
+            )
+            .unwrap(),
+            history,
         );
         for raw in [
             r#"{"sessionKey":"agent:main:session-1","limit":0,"maxChars":1}"#,
             r#"{"sessionKey":"agent:main:session-1","limit":1001,"maxChars":1}"#,
             r#"{"sessionKey":"agent:main:session-1","limit":1,"maxChars":0}"#,
             r#"{"sessionKey":"agent:main:session-1","limit":1,"maxChars":500001}"#,
+            r#"{"sessionKey":"agent:main:session-1","limit":1,"offset":9007199254740992}"#,
             r#"{"sessionKey":"agent:main:session-1","limit":null}"#,
+            r#"{"sessionKey":"agent:main:session-1","offset":null}"#,
             r#"{"sessionKey":"agent:main:session-1","maxChars":null}"#,
             r#"{"sessionKey":"agent:main:session-1","limit":1,"maxChars":1,"future":true}"#,
         ] {
@@ -2213,14 +3348,17 @@ mod tests {
             .configured_agents_only()
             .include_titles_and_last_message()
             .try_for_agent("main")
+            .unwrap()
+            .try_with_search("agent:main:session-1")
             .unwrap();
         assert_eq!(
             serde_json::to_value(list).unwrap(),
             json(
-                r#"{"limit":25,"activeMinutes":120,"configuredAgentsOnly":true,"includeDerivedTitles":true,"includeLastMessage":true,"agentId":"main"}"#
+                r#"{"limit":25,"activeMinutes":120,"configuredAgentsOnly":true,"includeDerivedTitles":true,"includeLastMessage":true,"agentId":"main","search":"agent:main:session-1"}"#
             )
         );
         assert!(SessionsListParams::default().try_with_limit(0).is_err());
+        assert!(SessionsListParams::default().try_with_search("").is_err());
         assert!(
             ChatSendParams::try_new(SessionKey::try_new("x".repeat(513)).unwrap(), "x", run())
                 .is_err()
@@ -2260,7 +3398,6 @@ mod tests {
                 && RunId::try_new("").is_err()
         );
         for raw in [
-            r#"{"runId":"run-7","sessionKey":"agent:main:session-1","seq":8,"state":"delta"}"#,
             r#"{"runId":"run-7","sessionKey":"agent:main:session-1","seq":8,"state":"final","future":true}"#,
             r#"{"runId":"run-7","sessionKey":"agent:main:session-1","seq":8,"state":"error","errorKind":"future"}"#,
         ] {
@@ -2359,18 +3496,21 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_send_result_rejects_unknown_fields() {
-        assert!(
-            decode_chat_send_result(
+    fn native_chat_send_result_accepts_additive_fields() {
+        let result = decode_chat_send_result(
+            "s",
+            success(
                 "s",
-                success("s", r#"{"runId":"run-7","status":"started","future":true}"#),
-            )
-            .is_err()
-        );
+                r#"{"runId":"run-7","status":"started","idempotencyReceipt":{"key":"run-7"},"future":true}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result.run_id, run());
+        assert_eq!(result.status, ChatSendStatus::Started);
     }
 
     #[test]
-    fn native_response_schemas_reject_unknown_fields() {
+    fn native_response_schemas_accept_additive_fields() {
         let expected_key = SessionCreateParams::try_new(
             AgentId::try_new("mct-team").unwrap(),
             EndpointSessionId::try_new("team-session").unwrap(),
@@ -2379,45 +3519,173 @@ mod tests {
         .key()
         .clone();
 
-        assert!(
-            decode_chat_abort_result(
+        let abort = decode_chat_abort_result(
+            "abort",
+            success(
                 "abort",
-                success(
-                    "abort",
-                    r#"{"ok":true,"aborted":true,"runIds":["run-7"],"future":true}"#,
-                ),
-            )
-            .is_err()
-        );
+                r#"{"ok":true,"aborted":true,"runIds":["run-7"],"future":true}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(abort.run_ids, [run()]);
         let list = decode_sessions_list_result(
             "list",
             success(
                 "list",
-                r#"{"ts":42,"count":1,"future":true,"sessions":[{"key":"agent:main:session-1","kind":"direct","future":true}]}"#,
+                r#"{"ts":42,"count":1,"future":true,"sessions":[{"key":"agent:main:session-1","kind":"direct","derivedTitles":{"short":"hello"},"lastMessage":{"role":"user","content":"private"},"people":[{"id":"u1"}],"permissionMode":"guarded","permissionModePending":true,"toolOverrides":{},"lifecycleRevision":"rev-1","future":true}]}"#,
             ),
         )
         .unwrap();
         assert_eq!(list.sessions[0].key.as_str(), "agent:main:session-1");
-        assert!(
+        assert_eq!(
+            list.sessions[0].permission_mode,
+            Some(SessionPermissionMode::Guarded)
+        );
+        assert_eq!(list.sessions[0].permission_mode_pending, Some(true));
+        let nested_list = decode_sessions_list_result(
+            "list",
+            success(
+                "list",
+                r#"{"ts":43,"count":2,"filter":{"agentId":"main"},"defaults":{"cwd":"private"},"sessions":[{"sessionInfo":{"key":"agent:main:nested","kind":"direct","agentId":"main","updatedAt":70,"nativeSessionId":"native-private"},"metadata":{"cwd":"private","defaults":{"model":"private"}},"archive":{"path":"private"}},{"metadata":{"sessionKey":"worker-session","kind":"direct","agentId":"worker","updatedAt":60,"nativeSessionId":"worker-private"},"defaults":{"cwd":"private"}}]}"#,
+            ),
+        )
+        .unwrap();
+        let nested = nested_list.sessions[0]
+            .agent_scoped_catalog_entry()
+            .unwrap();
+        assert_eq!(nested.session_key.as_str(), "agent:main:nested");
+        assert_eq!(nested.agent_id.as_str(), "main");
+        assert_eq!(nested.endpoint_session_id, "nested");
+        let metadata = nested_list.sessions[1]
+            .agent_scoped_catalog_entry()
+            .unwrap();
+        assert_eq!(metadata.session_key.as_str(), "agent:worker:worker-session");
+        assert_eq!(metadata.agent_id.as_str(), "worker");
+        assert_eq!(metadata.endpoint_session_id, "worker-session");
+        assert_eq!(nested_list.sessions[0].updated_at, Some(70));
+        assert_eq!(nested_list.sessions[1].updated_at, Some(60));
+        let create = decode_session_create_result(
+            "create",
+            success(
+                "create",
+                r#"{"ok":true,"key":"agent:mct-team:team-session","sessionId":"private-id","worktree":{"path":"private"},"messageSeq":1,"runId":"run-7","idempotencyReceipt":{"key":"run-7"},"future":true}"#,
+            ),
+            &expected_key,
+        )
+        .unwrap();
+        assert_eq!(create.native_session_id().as_str(), "private-id");
+        let nested_create = decode_session_create_result(
+            "create",
+            success(
+                "create",
+                r#"{"ok":true,"sessionInfo":{"key":"agent:mct-team:team-session","nativeSessionId":"native-private-id","defaults":{"cwd":"private"}},"metadata":{"key":"wrong","nativeSessionId":"wrong"},"archive":{"path":"private"},"future":true}"#,
+            ),
+            &expected_key,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_create.native_session_id().as_str(),
+            "native-private-id"
+        );
+        assert_eq!(
+            decode_session_delete_result(
+                "delete",
+                success(
+                    "delete",
+                    r#"{"ok":true,"key":"agent:mct-team:team-session","deleted":true,"archived":["private-path"],"worktreePreserved":{"path":"private"},"future":true}"#,
+                ),
+                &expected_key,
+            ),
+            Ok(SessionDeleteResult { deleted: true })
+        );
+    }
+
+    #[test]
+    fn native_response_schemas_reject_missing_core_fields() {
+        let expected_key = SessionCreateParams::try_new(
+            AgentId::try_new("mct-team").unwrap(),
+            EndpointSessionId::try_new("team-session").unwrap(),
+        )
+        .unwrap()
+        .key()
+        .clone();
+
+        assert_eq!(
+            decode_chat_send_result(
+                "send",
+                success("send", r#"{"status":"started","future":true}"#)
+            ),
+            Err(ProtocolError::InvalidChatSendResult)
+        );
+        assert_eq!(
+            decode_chat_send_result(
+                "send",
+                success("send", r#"{"runId":"run-7","future":true}"#)
+            ),
+            Err(ProtocolError::InvalidChatSendResult)
+        );
+        assert_eq!(
+            decode_chat_abort_result(
+                "abort",
+                success("abort", r#"{"ok":true,"aborted":true,"future":true}"#),
+            ),
+            Err(ProtocolError::InvalidChatAbortResult)
+        );
+        assert_eq!(
+            decode_chat_abort_result(
+                "abort",
+                success(
+                    "abort",
+                    r#"{"ok":false,"aborted":true,"runIds":["run-7"],"future":true}"#,
+                ),
+            ),
+            Err(ProtocolError::InvalidChatAbortResult)
+        );
+        assert_eq!(
+            decode_session_label_patch_result(
+                "label",
+                success("label", r#"{"ok":true,"future":true}"#),
+                &key(),
+            ),
+            Err(ProtocolError::InvalidSessionLabelPatchResult)
+        );
+        assert_eq!(
+            decode_session_model_patch_result(
+                "patch",
+                success(
+                    "patch",
+                    r#"{"ok":true,"key":"agent:main:session-1","future":true}"#
+                ),
+                &key(),
+            ),
+            Err(ProtocolError::InvalidSessionModelPatchResult)
+        );
+        assert_eq!(
             decode_session_create_result(
                 "create",
                 success(
                     "create",
-                    r#"{"ok":true,"key":"agent:mct-team:team-session","future":true}"#,
+                    r#"{"ok":true,"key":"agent:mct-team:team-session","future":true}"#
                 ),
                 &expected_key,
-            )
-            .is_err()
-        );
-        assert!(decode_session_delete_result(
-            "delete",
-            success(
-                "delete",
-                r#"{"ok":true,"key":"agent:mct-team:team-session","deleted":true,"future":true}"#,
             ),
-            &expected_key,
-        )
-        .is_err());
+            Err(ProtocolError::InvalidSessionCreateResult)
+        );
+        assert_eq!(
+            decode_session_delete_result(
+                "delete",
+                success(
+                    "delete",
+                    r#"{"ok":true,"key":"agent:mct-team:team-session","future":true}"#
+                ),
+                &expected_key,
+            ),
+            Err(ProtocolError::InvalidSessionDeleteResult)
+        );
+        assert_eq!(
+            decode_chat_history_result("history", success("history", r#"{"future":true}"#), 1),
+            Err(ProtocolError::InvalidChatHistoryResult)
+        );
     }
 
     #[test]
@@ -2621,6 +3889,55 @@ mod tests {
         );
         assert_eq!(completed_payload.is_error(), Some(false));
 
+        let details = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","result":{"details":{"browserTab":{"title":"safe","rawAssistantText":"secret nested"},"changed":["a.txt"],"created":["b.txt"],"diff":{"path":"a.txt"},"approvalReviews":[{"status":"approved"}],"approvalReviewOutcome":"approved","mcpAppPreview":{"url":"https://preview.test","html":"secret html","toolResult":{"secret":"result"},"private":{"secret":true},"mcpApp":{"viewId":"view-1","toolResult":{"secret":"nested"}}},"truncation":{"truncated":true},"fullOutputPath":"C:/tmp/output.txt","exitCode":0,"rawAssistantText":"secret assistant","toolInput":{"secret":"input"},"toolOutput":"secret output","privatePayload":{"secret":true}}}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(details.activity.as_ref().unwrap().output(), None);
+        let projected = details.activity.as_ref().unwrap().details().unwrap();
+        assert_eq!(
+            projected,
+            &serde_json::json!({
+                "browserTab":{"title":"safe"},
+                "changed":["a.txt"],
+                "created":["b.txt"],
+                "diff":{"path":"a.txt"},
+                "approvalReviews":[{"status":"approved"}],
+                "approvalReviewOutcome":"approved",
+                "mcpAppPreview":{"url":"https://preview.test","mcpApp":{"viewId":"view-1"}},
+                "truncation":{"truncated":true},
+                "fullOutputPath":"C:/tmp/output.txt",
+                "exitCode":0
+            })
+        );
+        assert!(projected.get("rawAssistantText").is_none());
+        assert!(projected.get("toolInput").is_none());
+        assert!(projected.get("toolOutput").is_none());
+        assert!(projected.get("privatePayload").is_none());
+        assert_debug_redacts(
+            details.activity.as_ref().unwrap(),
+            &[
+                "secret assistant",
+                "secret nested",
+                "secret output",
+                "secret html",
+                "secret result",
+            ],
+        );
+
+        let top_level_details = decode_session_event(event(
+            "session.tool",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","result":{"details":{"browserTab":{"title":"result"}}},"details":{"browserTab":{"title":"top"}}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            top_level_details.activity.as_ref().unwrap().details(),
+            Some(&serde_json::json!({"browserTab":{"title":"top"}}))
+        );
+
         let failed = decode_session_event(event(
             "session.tool",
             r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","output":{"error":"bad"},"isError":true}"#,
@@ -2672,6 +3989,80 @@ mod tests {
     }
 
     #[test]
+    fn agent_tool_thinking_and_approval_events_decode() {
+        let tool = decode_session_event(event(
+            "agent",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","stream":"tool","data":{"phase":"start","toolCallId":"tool-9","name":"read","args":{"path":"README.md"}}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(tool.kind, SessionEventKind::Agent);
+        let activity = tool.activity.as_ref().unwrap();
+        assert!(matches!(
+            activity.kind(),
+            SessionActivityKind::Tool { phase: ToolActivityPhase::Started, tool_name: Some(name), .. }
+                if name == "read"
+        ));
+        assert_eq!(
+            activity.input(),
+            Some(&serde_json::json!({"path":"README.md"}))
+        );
+
+        let thinking = decode_session_event(event(
+            "agent",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","stream":"thinking","data":{"thinking":"plan"}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(thinking.kind, SessionEventKind::Agent);
+        assert!(matches!(
+            thinking.activity.as_ref().unwrap().kind(),
+            SessionActivityKind::Thinking { text } if text == "plan"
+        ));
+
+        let legacy_approval = decode_session_event(event(
+            "agent",
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","stream":"approval","data":{"phase":"requested","kind":"exec","status":"pending","approvalId":"approval-1","allowedDecisions":["allow-always","deny"]}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(legacy_approval.kind, SessionEventKind::ApprovalRequested);
+        let approval = legacy_approval.approval.as_ref().unwrap();
+        assert_eq!(approval.approval_id.as_str(), "approval-1");
+        assert_eq!(approval.run_id.as_ref().unwrap().as_str(), "run-7");
+        assert_eq!(
+            approval
+                .option_ids
+                .iter()
+                .map(ApprovalOptionId::as_str)
+                .collect::<Vec<_>>(),
+            ["allow-always", "deny"]
+        );
+
+        let structured_approval = decode_session_event(event(
+            "exec.approval.requested",
+            r#"{"id":"approval-2","request":{"sessionKey":"agent:main:session-1","runId":"run-7","command":"git status"}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            structured_approval.kind,
+            SessionEventKind::ApprovalRequested
+        );
+        assert_eq!(
+            structured_approval
+                .approval
+                .as_ref()
+                .unwrap()
+                .option_ids
+                .iter()
+                .map(ApprovalOptionId::as_str)
+                .collect::<Vec<_>>(),
+            ["allow-once", "deny"]
+        );
+    }
+
+    #[test]
     fn results_events_and_projection_evolution() {
         let send =
             decode_chat_send_result("s", success("s", r#"{"runId":"run-7","status":"started"}"#))
@@ -2692,7 +4083,7 @@ mod tests {
             "p",
             success(
                 "p",
-                r#"{"ok":true,"path":"not-projected","key":"agent:main:session-1","entry":{"not":"projected"},"resolved":{"modelProvider":"anthropic","model":"anthropic/claude-opus-4-7","agentRuntime":{"id":"acpx","source":"session-key"}}}"#,
+                r#"{"ok":true,"path":"not-projected","key":"agent:main:session-1","entry":{"not":"projected"},"expectedLifecycleRevision":"rev-1","permissionMode":"default","toolOverrides":{},"resolved":{"modelProvider":"anthropic","model":"anthropic/claude-opus-4-7","agentRuntime":{"id":"acpx","source":"session-key","lifecycleRevision":"rev-1","future":true},"permissionMode":"default","toolOverrides":{},"future":true},"future":true}"#,
             ),
             &key(),
         )
@@ -2703,6 +4094,16 @@ mod tests {
             patch.resolved.agent_runtime.source,
             SessionAgentRuntimeSource::SessionKey
         );
+        let label = decode_session_label_patch_result(
+            "label",
+            success(
+                "label",
+                r#"{"ok":true,"key":"agent:main:session-1","path":"not-projected","entry":{"not":"projected"},"expectedMarkedUnreadAt":null,"lifecycleRevision":"rev-1","future":true}"#,
+            ),
+            &key(),
+        )
+        .unwrap();
+        assert_eq!(label.key, key());
         assert!(decode_session_model_patch_result(
             "p",
             success(
@@ -2716,10 +4117,50 @@ mod tests {
         assert_eq!(projection.kind, SessionEventKind::Message);
         assert_eq!(projection.run_id.unwrap().as_str(), "run-7");
         assert_eq!(projection.message_id.unwrap().as_str(), "message-3");
-        let chat = decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","seq":8,"state":"delta","deltaText":"hi","replace":false}"#)).unwrap().unwrap().chat.unwrap();
+        let chat = decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":8,"state":"delta","replace":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan"},{"type":"text","text":"hi"}]}}"#)).unwrap().unwrap().chat.unwrap();
         assert_eq!(
-            (chat.session_key.as_str(), chat.run_id.as_str()),
-            ("agent:main:session-1", "run-7")
+            (
+                chat.session_key.as_str(),
+                chat.run_id.as_str(),
+                chat.message_text.as_deref(),
+                chat.message_thinking.as_deref()
+            ),
+            ("agent:main:session-1", "run-7", Some("hi"), Some("plan"))
+        );
+        assert_eq!(
+            decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":9,"state":"status","phase":"preparing_context"}"#)).unwrap().unwrap().chat.unwrap().state,
+            ChatState::Status
+        );
+        assert!(decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":9,"state":"status","phase":"compacting"}"#)).is_err());
+        assert!(decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":10,"state":"final","yielded":true,"message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#)).is_ok());
+        assert!(decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":11,"state":"aborted","errorMessage":"cancelled"}"#)).is_ok());
+        let error_detail_chat = decode_session_event(event("chat", r#"{"runId":"run-7","sessionKey":"agent:main:session-1","agentId":"main","seq":12,"state":"error","errorKind":"timeout","errorMessage":"provider timeout","stopReason":"gateway_error","errorDetail":{"provider":"anthropic","httpStatus":504}}"#)).unwrap().unwrap().chat.unwrap();
+        assert_eq!(
+            error_detail_chat
+                .error_detail
+                .as_ref()
+                .and_then(|value| value.get("httpStatus"))
+                .and_then(Value::as_u64),
+            Some(504)
+        );
+        assert_eq!(
+            error_detail_chat.error_message.as_deref(),
+            Some("provider timeout")
+        );
+        assert_eq!(
+            error_detail_chat.error_kind,
+            Some(SessionErrorKind::Timeout)
+        );
+        assert_eq!(
+            error_detail_chat.stop_reason.as_deref(),
+            Some("gateway_error")
+        );
+        assert!(
+            error_detail_chat
+                .error_detail
+                .as_ref()
+                .and_then(|value| value.get("provider"))
+                .is_none()
         );
         assert!(
             decode_session_event(event("sessions.changed", r#"{"reason":"cleanup"}"#))
@@ -2825,11 +4266,29 @@ mod tests {
 
         let history = decode_chat_history_result(
             "future",
-            success("future", r#"{"messages":[],"future":true}"#),
+            success(
+                "future",
+                r#"{
+                    "messages":[],
+                    "pendingInputs":{"items":[{"id":"input-1","acceptedAt":2000,"state":"queued","message":{"role":"user","content":"private"}}],"total":1},
+                    "inputReceipts":[{"runId":"run-0","state":"pending"}],
+                    "inputConsumptions":[{"runId":"run-1","consumedByEventId":"event-1"}],
+                    "inFlightRun":{"runId":"run-1","state":"started"},
+                    "deltaCursor":"eyJhZ2VudElkIjoibWFpbiIsImxhc3RTZXEiOjQyLCJ2ZXJzaW9uIjoxfQ",
+                    "sessionInfo":{"sessionId":"native-session-1"},
+                    "metadata":{"cwd":"C:/secret"},
+                    "defaults":{"model":"private"},
+                    "completeSnapshot":true
+                }"#,
+            ),
             1,
         )
         .unwrap();
         assert!(history.messages.is_empty());
+        assert_eq!(
+            serde_json::to_value(&history).unwrap(),
+            serde_json::json!({"messages":[]})
+        );
         assert!(
             decode_chat_history_result(
                 "invalid",
@@ -2854,6 +4313,7 @@ mod tests {
                         details: None,
                         retryable: None,
                         startup_sidecars: false,
+                        restart_required: false,
                         retry_after_ms: None,
                     },
                 },
@@ -2948,6 +4408,8 @@ mod tests {
             status: Some(TEXT.into()),
             has_active_run: Some(true),
             model: Some(RUN.into()),
+            permission_mode: None,
+            permission_mode_pending: None,
         };
         assert_debug_redacts(&summary, CANARIES);
         assert_debug_redacts(
@@ -2996,6 +4458,7 @@ mod tests {
                 embedded_message_id: None,
                 chat: Some(chat),
                 activity: None,
+                approval: None,
             },
             CANARIES,
         );
@@ -3032,6 +4495,7 @@ mod tests {
                     details: Some(json(r#"{"payload":"peer-payload-canary"}"#)),
                     retryable: None,
                     startup_sidecars: false,
+                    restart_required: false,
                     retry_after_ms: None,
                 },
             },

@@ -18,8 +18,8 @@ use crate::{
 use super::{
     command::{ProviderCommand, ProviderQuery},
     models::{
-        ProviderModelDraft, ProviderModelListOutcome, ProviderModelReplaceOutcome,
-        ProviderModelSelectableOutcome,
+        ProviderModelDiscoverOutcome, ProviderModelDraft, ProviderModelListOutcome,
+        ProviderModelReplaceOutcome, ProviderModelSelectableOutcome,
     },
     routing::{ProviderRoutingListOutcome, ProviderRoutingReplaceOutcome},
 };
@@ -117,6 +117,21 @@ impl ProviderHandle {
         rx.await.map_err(|_| ())
     }
 
+    pub(crate) async fn discover_provider_models(
+        &self,
+        account_id: String,
+    ) -> Result<ProviderModelDiscoverOutcome, ()> {
+        let Ok(account_id) = ProviderAccountId::try_new(account_id) else {
+            return Ok(ProviderModelDiscoverOutcome::Rejected);
+        };
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::DiscoverModels { account_id, reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    }
+
     pub(crate) async fn replace_provider_models(
         &self,
         account_id: String,
@@ -168,13 +183,19 @@ impl ProviderHandle {
             .is_err()
         {
             return openclaw::bootstrap::PrivateProjectionEffect {
-                providers: openclaw::bootstrap::ConfigWriteEffect::Unknown,
+                providers: openclaw::bootstrap::ConfigWriteEffect::unknown(
+                    "provider-owner-unavailable",
+                    "Provider owner is unavailable",
+                ),
                 restart: openclaw::bootstrap::RestartPreparation::Unknown,
             };
         }
         rx.await
             .unwrap_or(openclaw::bootstrap::PrivateProjectionEffect {
-                providers: openclaw::bootstrap::ConfigWriteEffect::Unknown,
+                providers: openclaw::bootstrap::ConfigWriteEffect::unknown(
+                    "provider-owner-response-unavailable",
+                    "Provider owner response is unavailable",
+                ),
                 restart: openclaw::bootstrap::RestartPreparation::Unknown,
             })
     }

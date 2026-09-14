@@ -14,8 +14,8 @@ describe('MarkdownPreview', () => {
     );
 
     const preview = screen.getByText('Gateway log:').parentElement;
-    expect(preview).toHaveClass('prose-pre:whitespace-pre-wrap');
-    expect(preview).toHaveClass('prose-pre:break-words');
-    expect(preview?.querySelector('pre')).toHaveTextContent(longLine);
+    expect(preview?.querySelector('[data-chat-code-block]')).toHaveClass('chat-code-block');
+    expect(preview?.querySelector('[data-chat-code-copy]')).toHaveClass('chat-code-copy');
+    expect(preview?.querySelector('pre code')).toHaveTextContent(longLine);
   });
 });

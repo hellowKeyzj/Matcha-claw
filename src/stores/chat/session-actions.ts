@@ -32,6 +32,7 @@ import {
   patchSessionRecord,
   patchSessionViewportState,
   removeSessionRecord,
+  resetSessionProjection,
   resolveSessionRecord,
 } from './store-state-helpers';
 import {
@@ -61,6 +62,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
+import { useComposerDraftStore } from '../composer-drafts';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import type { StoreHistoryCache } from './history-cache';
 import type {
@@ -89,6 +91,34 @@ type SessionDeleteReceipt = Readonly<{
 let sessionCatalogRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionCatalogLoadSequence = 0;
 let newSessionRequestSequence = 0;
+const forgottenAgentSessionIds = new Set<string>();
+
+function normalizeAgentSessionTombstoneId(agentId: unknown): string {
+  return typeof agentId === 'string' ? agentId.trim().toLowerCase() : '';
+}
+
+export function isAgentSessionTombstoned(agentId: unknown): boolean {
+  const normalized = normalizeAgentSessionTombstoneId(agentId);
+  return normalized.length > 0 && forgottenAgentSessionIds.has(normalized);
+}
+
+function isTombstonedCatalogSession(session: ChatSession): boolean {
+  return isAgentSessionTombstoned(session.sessionIdentity.agentId);
+}
+
+function isAgentSessionRecord(record: ChatStoreState['loadedSessions'][string], normalizedAgentId: string): boolean {
+  const agentId = record.meta.sessionIdentity?.agentId ?? record.meta.agentId;
+  return normalizeAgentSessionTombstoneId(agentId) === normalizedAgentId;
+}
+
+export function executeReconcileAgentSessionTombstones(agentIds: readonly string[]): void {
+  for (const agentId of agentIds) {
+    const normalized = normalizeAgentSessionTombstoneId(agentId);
+    if (normalized) {
+      forgottenAgentSessionIds.delete(normalized);
+    }
+  }
+}
 
 function clearSessionCatalogRetry(): void {
   if (!sessionCatalogRetryTimer) {
@@ -239,7 +269,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
         runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
         endpointSessionId: typeof session.endpointSessionId === 'string' ? session.endpointSessionId : undefined,
         sessionIdentity: session.sessionIdentity,
-        kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
+        kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'automation'
           ? session.kind
           : undefined,
         preferred: session.preferred === true,
@@ -640,6 +670,9 @@ async function executeLoadSessionsNow(
   const mergedSessions = new Map<string, ChatSession>();
   for (const result of results) {
     for (const session of result.sessions) {
+      if (isTombstonedCatalogSession(session)) {
+        continue;
+      }
       mergedSessions.set(session.key, session);
     }
   }
@@ -1202,6 +1235,111 @@ export function executeSetViewportAnchorItemKey(
       anchorItemKey: itemKey,
     }),
   }));
+}
+
+export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput, agentId: string): void {
+  const normalizedAgentId = normalizeAgentSessionTombstoneId(agentId);
+  if (!normalizedAgentId) {
+    return;
+  }
+  forgottenAgentSessionIds.add(normalizedAgentId);
+  useComposerDraftStore.getState().clearAgentDrafts(agentId);
+  const { set, get, historyRuntime } = input;
+  const state = get();
+  const removedSessionKeys = new Set(
+    Object.entries(state.loadedSessions)
+      .filter(([, record]) => isAgentSessionRecord(record, normalizedAgentId))
+      .map(([sessionKey]) => sessionKey),
+  );
+  const currentConversationMatchesDeletedAgent = normalizeAgentSessionTombstoneId(state.currentConversation?.agentId) === normalizedAgentId;
+  if (removedSessionKeys.size === 0 && !currentConversationMatchesDeletedAgent) {
+    return;
+  }
+  for (const sessionKey of removedSessionKeys) {
+    clearSessionHistoryFingerprints(historyRuntime, sessionKey);
+    resetSessionProjection(sessionKey);
+    useComposerDraftStore.getState().clearDraft(sessionKey);
+  }
+  const removedCurrentRecord = removedSessionKeys.has(state.currentSessionKey)
+    ? state.loadedSessions[state.currentSessionKey]
+    : null;
+  const removedCurrentEndpoint = removedCurrentRecord?.meta.sessionIdentity?.endpoint
+    ?? (currentConversationMatchesDeletedAgent ? state.currentConversation?.endpoint : null)
+    ?? null;
+  if (removedCurrentRecord || currentConversationMatchesDeletedAgent) {
+    clearHistoryPoll();
+    clearErrorRecoveryTimer();
+  }
+  set((stateValue) => {
+    const loadedSessions = Object.fromEntries(
+      Object.entries(stateValue.loadedSessions).filter(([sessionKey]) => !removedSessionKeys.has(sessionKey)),
+    );
+    const retainedSessionKeys = new Set(Object.keys(loadedSessions));
+    let lastSelectedSessionKeyByRuntimeScopeKey = stateValue.lastSelectedSessionKeyByRuntimeScopeKey;
+    for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
+      if (!removedSessionKeys.has(sessionKey)) {
+        continue;
+      }
+      if (lastSelectedSessionKeyByRuntimeScopeKey === stateValue.lastSelectedSessionKeyByRuntimeScopeKey) {
+        lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
+      }
+      delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
+    }
+    const currentWasRemoved = removedSessionKeys.has(stateValue.currentSessionKey);
+    const currentConversationWasRemoved = normalizeAgentSessionTombstoneId(stateValue.currentConversation?.agentId) === normalizedAgentId;
+    const sessionRuntimeGraph = buildSessionRuntimeGraph(stateValue.sessionRuntimeCatalog, loadedSessions);
+    let nextSessionKey = stateValue.currentSessionKey;
+    let currentConversation = stateValue.currentConversation;
+    let runtimeCatalogPatch: Pick<ChatStoreState, 'sessionRuntimeCatalog'> = {
+      sessionRuntimeCatalog: stateValue.sessionRuntimeCatalog,
+    };
+    if (currentWasRemoved || currentConversationWasRemoved) {
+      const endpoint = removedCurrentEndpoint;
+      const next = endpoint
+        ? readSessionsFromState({ loadedSessions }).find((session) => sameRuntimeEndpointScope(
+            session.sessionIdentity.endpoint,
+            endpoint,
+          ))
+        : null;
+      const targetRuntime = endpoint ? findRuntimeTargetForEndpoint(readSessionRuntimeTargets(stateValue), endpoint) : null;
+      nextSessionKey = next?.key ?? '';
+      currentConversation = next
+        ? buildCurrentConversationForSessionKey(loadedSessions, next.key)
+        : targetRuntime
+          ? createDraftCurrentConversation(
+              targetRuntime.defaultSessionPromptScope.endpoint,
+              targetRuntime.defaultSessionPromptScope.agentId,
+            )
+          : null;
+      runtimeCatalogPatch = targetRuntime ? buildRuntimeCatalogContextPatch(stateValue, targetRuntime) : runtimeCatalogPatch;
+      if (next && endpoint) {
+        const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
+        lastSelectedSessionKeyByRuntimeScopeKey = {
+          ...lastSelectedSessionKeyByRuntimeScopeKey,
+          [runtimeScopeKey]: next.key,
+        };
+      }
+    }
+    return {
+      ...runtimeCatalogPatch,
+      sessionRuntimeGraph,
+      currentSessionKey: nextSessionKey,
+      currentConversation,
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      pendingApprovalsBySession: Object.fromEntries(
+        Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
+      ),
+      dismissedRuntimeErrorBySession: Object.fromEntries(
+        Object.entries(stateValue.dismissedRuntimeErrorBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
+      ),
+      lastSelectedSessionKeyByRuntimeScopeKey,
+      foregroundHistorySessionKey: removedSessionKeys.has(stateValue.foregroundHistorySessionKey ?? '')
+        ? null
+        : stateValue.foregroundHistorySessionKey,
+      error: null,
+    };
+  });
 }
 
 export async function executeDeleteSession(input: CreateStoreSessionActionsInput, key: string): Promise<void> {

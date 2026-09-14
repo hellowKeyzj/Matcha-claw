@@ -4,17 +4,20 @@ use std::{
 };
 
 use crate::{
-    ControlAuthority, ControlNodeResolution, DeliveryClaimSnapshot, DeliveryFailure, DeliveryId,
-    DeliveryLedgerSnapshot, DeliveryPhaseSnapshot, DeliveryRequest, DeliverySnapshot, EdgeAction,
-    EvidenceId, EvidenceRecord, EvidenceReference, EvidenceReferenceKind, ExecutionFence,
-    GraphRunId, GraphState, IdempotencyKey, LocalSessionReference, ManagedAgentReference,
-    MatchaDeliveryCorrelation, MaterializationReceipt, MaterializationRejection,
-    MaterializationSource, MemberId, NodeDefinition, NodeId, NodeKind, RoleAgentMaterialization,
-    RoleAssignment, RoleId, RoleKind, RoleMaterializationAgent, RoleMaterializationReceipt,
-    RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference, StartTrigger, TeamDefinition,
-    TeamId, TeamMaterializationCleanup, TeamMaterializationIntent, TeamMaterializationLifecycle,
-    TeamMaterializationRemoval, TeamMaterializationRequest, TeamMember, TeamRevision, TeamRole,
-    TombstonedMaterialization, TriggerFireRequest, TriggerSource, WorkAssignment,
+    ActivityClaimSnapshot, ActivityDispatchSnapshot, ActivityFailure, ActivityId, ActivityKind,
+    ActivityLedgerSnapshot, ActivityPhaseSnapshot, ActivityRequest, ActivitySnapshot,
+    ActivityTarget, ControlAuthority, ControlNodeResolution, DeliveryClaimSnapshot,
+    DeliveryFailure, DeliveryId, DeliveryLedgerSnapshot, DeliveryPhaseSnapshot, DeliveryRequest,
+    DeliverySnapshot, EdgeAction, EvidenceId, EvidenceRecord, EvidenceReference,
+    EvidenceReferenceKind, ExecutionFence, GraphRunId, GraphState, IdempotencyKey,
+    LocalSessionReference, ManagedAgentReference, MatchaDeliveryCorrelation,
+    MaterializationReceipt, MaterializationRejection, MaterializationSource, MemberId,
+    NodeDefinition, NodeId, NodeKind, RoleAgentMaterialization, RoleAssignment, RoleId, RoleKind,
+    RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
+    RuntimeEndpointReference, StartTrigger, TeamDefinition, TeamId, TeamMaterializationCleanup,
+    TeamMaterializationIntent, TeamMaterializationLifecycle, TeamMaterializationRemoval,
+    TeamMaterializationRequest, TeamMember, TeamRevision, TeamRole, TombstonedMaterialization,
+    TriggerFireRequest, TriggerSource, WorkAssignment,
     run::task_board::{
         AutoRunnerFacts, MailboxKind, MailboxMessage, RunnerStatus, TaskBoardFacts, TaskId,
         TaskRecord, TaskRestoreInput, TaskStatus,
@@ -61,7 +64,7 @@ use super::{GraphRunFacts, OrganizationFacts, StoreFault, TeamFacts};
 pub(super) const HEADER_LEN: usize = 17;
 pub(super) const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_MAGIC: [u8; 8] = *b"MORGDU01";
-const CURRENT_SCHEMA_VERSION: u8 = 19;
+const CURRENT_SCHEMA_VERSION: u8 = 20;
 const FRAME_MARKER: u8 = 0xA1;
 const FRAME_METADATA_LEN: usize = 16;
 const MAX_FACTS_BYTES: usize = 1024 * 1024;
@@ -74,6 +77,7 @@ pub(super) struct RecoveredFacts {
     pub(super) committed_len: u64,
     pub(super) truncated_tail: bool,
     pub(super) had_interrupted_delivery: bool,
+    pub(super) had_interrupted_activity: bool,
 }
 
 pub(super) fn initialize_log(mut output: impl Write) -> Result<(), StoreFault> {
@@ -112,6 +116,7 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
     let mut committed_len = HEADER_LEN;
     let mut truncated_tail = false;
     let mut had_interrupted_delivery = false;
+    let mut had_interrupted_activity = false;
 
     while offset < content.len() {
         if content[offset] != FRAME_MARKER {
@@ -167,6 +172,12 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
             .deliveries()
             .deliveries()
             .any(|delivery| matches!(delivery.phase(), crate::DeliveryPhase::Delivering(_)));
+        had_interrupted_activity = decoded.activities().activities().any(|activity| {
+            matches!(
+                activity.phase(),
+                crate::ActivityPhase::Claimed(_) | crate::ActivityPhase::Dispatched(_)
+            )
+        });
         facts = decoded;
         epoch = frame_epoch;
         committed_len = offset;
@@ -178,6 +189,7 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
         committed_len: u64::try_from(committed_len).map_err(|_| StoreFault::LogFull)?,
         truncated_tail,
         had_interrupted_delivery,
+        had_interrupted_activity,
     })
 }
 
@@ -237,6 +249,7 @@ fn encode_facts(facts: &OrganizationFacts) -> Result<Vec<u8>, StoreFault> {
         encode_workflow_plan(&mut output, template.plan())?;
     }
     encode_deliveries(&mut output, &facts.deliveries().snapshot())?;
+    encode_activities(&mut output, &facts.activities().snapshot())?;
     encode_triggers(&mut output, facts.triggers())?;
     encode_control_resolutions(&mut output, facts.control_node_resolutions())?;
     encode_approvals(&mut output, facts.approvals())?;
@@ -305,6 +318,7 @@ fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
         })
         .collect::<Result<Vec<_>, StoreFault>>()?;
     let deliveries = reader.deliveries()?;
+    let activities = reader.activities()?;
     let triggers = reader.triggers()?;
     let control_resolutions = reader.control_resolutions()?;
     let approvals = reader.approvals()?;
@@ -332,6 +346,7 @@ fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
             pending_workflow_plan_admissions,
             templates,
             deliveries,
+            activities,
             triggers,
             control_resolutions,
             approvals,
@@ -781,6 +796,112 @@ fn encode_terminal_observation(
     output.push(native_terminal_tag(observation.native_terminal()));
     output.extend_from_slice(&observation.observed_at().to_le_bytes());
     encode_terminal_resolution(output, observation.resolution())
+}
+
+fn encode_activities(
+    output: &mut Vec<u8>,
+    ledger: &ActivityLedgerSnapshot,
+) -> Result<(), StoreFault> {
+    push_count(output, ledger.activities().len())?;
+    for snapshot in ledger.activities() {
+        let facts = snapshot.facts();
+        push_string(output, facts.activity_id.as_str())?;
+        push_string(output, facts.run_id.as_str())?;
+        push_string(output, facts.node_id.as_str())?;
+        push_string(output, facts.node_execution_id.as_str())?;
+        encode_fence(
+            output,
+            &DurableExecutionFence {
+                attempt_id: facts.fence.attempt_id().as_str().to_owned(),
+                node_execution_id: facts.fence.node_execution_id().as_str().to_owned(),
+            },
+        )?;
+        encode_activity_kind(output, &facts.activity_kind)?;
+        push_string(output, facts.target.as_str())?;
+        push_string(output, &facts.idempotency_key)?;
+        output.extend_from_slice(&facts.created_at.to_le_bytes());
+        output.extend_from_slice(&facts.max_attempts.to_le_bytes());
+        encode_activity_phase(output, snapshot.phase())?;
+        output.extend_from_slice(&snapshot.completed_attempts().to_le_bytes());
+        output.extend_from_slice(&snapshot.next_claim_generation().to_le_bytes());
+    }
+    Ok(())
+}
+
+fn encode_activity_kind(output: &mut Vec<u8>, kind: &ActivityKind) -> Result<(), StoreFault> {
+    match kind {
+        ActivityKind::AgentTask {
+            task_id,
+            role_id,
+            prompt,
+        } => {
+            output.push(0);
+            push_string(output, task_id)?;
+            push_string(output, role_id)?;
+            push_string(output, prompt)?;
+        }
+        ActivityKind::Control { action } => {
+            output.push(1);
+            push_string(output, action)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_activity_phase(
+    output: &mut Vec<u8>,
+    phase: &ActivityPhaseSnapshot,
+) -> Result<(), StoreFault> {
+    match phase {
+        ActivityPhaseSnapshot::Pending => output.push(0),
+        ActivityPhaseSnapshot::Claimed(claim) => {
+            output.push(1);
+            encode_activity_claim(output, claim)?;
+        }
+        ActivityPhaseSnapshot::Dispatched(dispatch) => {
+            output.push(2);
+            encode_activity_claim(output, dispatch.claim())?;
+            output.extend_from_slice(&dispatch.dispatched_at().to_le_bytes());
+        }
+        ActivityPhaseSnapshot::RetryScheduled { retry_at, failure } => {
+            output.push(8);
+            output.extend_from_slice(&retry_at.to_le_bytes());
+            output.push(activity_failure_tag(*failure));
+        }
+        ActivityPhaseSnapshot::TerminalObserved { observed_at } => {
+            output.push(3);
+            output.extend_from_slice(&observed_at.to_le_bytes());
+        }
+        ActivityPhaseSnapshot::Completed { completed_at } => {
+            output.push(4);
+            output.extend_from_slice(&completed_at.to_le_bytes());
+        }
+        ActivityPhaseSnapshot::Failed { failed_at, failure } => {
+            output.push(5);
+            output.extend_from_slice(&failed_at.to_le_bytes());
+            output.push(activity_failure_tag(*failure));
+        }
+        ActivityPhaseSnapshot::OutcomeUnknown { observed_at } => {
+            output.push(6);
+            output.extend_from_slice(&observed_at.to_le_bytes());
+        }
+        ActivityPhaseSnapshot::Cancelled { cancelled_at } => {
+            output.push(7);
+            output.extend_from_slice(&cancelled_at.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn encode_activity_claim(
+    output: &mut Vec<u8>,
+    claim: &ActivityClaimSnapshot,
+) -> Result<(), StoreFault> {
+    push_string(output, claim.activity_id().as_str())?;
+    output.extend_from_slice(&claim.attempt().to_le_bytes());
+    output.extend_from_slice(&claim.generation().to_le_bytes());
+    output.extend_from_slice(&claim.claimed_at().to_le_bytes());
+    Ok(())
 }
 
 fn encode_triggers(output: &mut Vec<u8>, ledger: &crate::TriggerLedger) -> Result<(), StoreFault> {
@@ -1951,6 +2072,105 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn activities(&mut self) -> Result<ActivityLedgerSnapshot, StoreFault> {
+        let snapshots = (0..self.count()?)
+            .map(|_| {
+                let activity_id =
+                    ActivityId::new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
+                let run_id = GraphRunId::new(self.string()?);
+                let node_id = NodeId::new(self.string()?);
+                let node_execution_id = crate::NodeExecutionId::from_durable(self.string()?);
+                let fence = self.fence()?;
+                let facts = ActivityRequest {
+                    activity_id,
+                    run_id,
+                    node_id,
+                    node_execution_id,
+                    fence: ExecutionFence::from_durable(fence.attempt_id, fence.node_execution_id),
+                    activity_kind: self.activity_kind()?,
+                    target: ActivityTarget::new(self.string()?)
+                        .map_err(|_| StoreFault::InvalidFacts)?,
+                    idempotency_key: self.string()?,
+                    created_at: self.u64()?,
+                    max_attempts: self.u32()?,
+                };
+                let phase = self.activity_phase()?;
+                let completed_attempts = self.u32()?;
+                let next_claim_generation = self.u64()?;
+                Ok(ActivitySnapshot::new(
+                    facts,
+                    phase,
+                    completed_attempts,
+                    next_claim_generation,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreFault>>()?;
+        Ok(ActivityLedgerSnapshot::new(snapshots))
+    }
+
+    fn activity_kind(&mut self) -> Result<ActivityKind, StoreFault> {
+        match self.byte()? {
+            0 => Ok(ActivityKind::AgentTask {
+                task_id: self.string()?,
+                role_id: self.string()?,
+                prompt: self.string()?,
+            }),
+            1 => Ok(ActivityKind::Control {
+                action: self.string()?,
+            }),
+            _ => Err(StoreFault::CorruptRecord),
+        }
+    }
+
+    fn activity_phase(&mut self) -> Result<ActivityPhaseSnapshot, StoreFault> {
+        match self.byte()? {
+            0 => Ok(ActivityPhaseSnapshot::Pending),
+            1 => Ok(ActivityPhaseSnapshot::Claimed(self.activity_claim()?)),
+            2 => Ok(ActivityPhaseSnapshot::Dispatched(
+                ActivityDispatchSnapshot::new(self.activity_claim()?, self.u64()?),
+            )),
+            8 => Ok(ActivityPhaseSnapshot::RetryScheduled {
+                retry_at: self.u64()?,
+                failure: self.activity_failure()?,
+            }),
+            3 => Ok(ActivityPhaseSnapshot::TerminalObserved {
+                observed_at: self.u64()?,
+            }),
+            4 => Ok(ActivityPhaseSnapshot::Completed {
+                completed_at: self.u64()?,
+            }),
+            5 => Ok(ActivityPhaseSnapshot::Failed {
+                failed_at: self.u64()?,
+                failure: self.activity_failure()?,
+            }),
+            6 => Ok(ActivityPhaseSnapshot::OutcomeUnknown {
+                observed_at: self.u64()?,
+            }),
+            7 => Ok(ActivityPhaseSnapshot::Cancelled {
+                cancelled_at: self.u64()?,
+            }),
+            _ => Err(StoreFault::CorruptRecord),
+        }
+    }
+
+    fn activity_claim(&mut self) -> Result<ActivityClaimSnapshot, StoreFault> {
+        Ok(ActivityClaimSnapshot::new(
+            ActivityId::new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?,
+            self.u32()?,
+            self.u64()?,
+            self.u64()?,
+        ))
+    }
+
+    fn activity_failure(&mut self) -> Result<ActivityFailure, StoreFault> {
+        match self.byte()? {
+            0 => Ok(ActivityFailure::Rejected),
+            1 => Ok(ActivityFailure::Unavailable),
+            2 => Ok(ActivityFailure::TimedOut),
+            _ => Err(StoreFault::CorruptRecord),
+        }
+    }
+
     fn terminal_observation(&mut self) -> Result<TerminalObservationSnapshot, StoreFault> {
         let delivery_id = DeliveryId::new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
         let graph_run_id = self.string()?;
@@ -3100,6 +3320,14 @@ fn attempt_status_tag(status: crate::AttemptStatus) -> u8 {
     }
 }
 
+fn activity_failure_tag(failure: ActivityFailure) -> u8 {
+    match failure {
+        ActivityFailure::Rejected => 0,
+        ActivityFailure::Unavailable => 1,
+        ActivityFailure::TimedOut => 2,
+    }
+}
+
 fn delivery_failure_tag(failure: DeliveryFailure) -> u8 {
     match failure {
         DeliveryFailure::ReceiverRejected => 0,
@@ -3698,6 +3926,7 @@ mod tests {
                 pending_workflow_plan_admissions: Vec::new(),
                 templates: Vec::new(),
                 deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+                activities: ActivityLedgerSnapshot::new(Vec::new()),
                 triggers: Vec::new(),
                 control_resolutions: Vec::new(),
                 approvals: Vec::new(),

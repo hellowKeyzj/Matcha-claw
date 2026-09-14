@@ -165,3 +165,9 @@ You're successful when:
 - Design for spectator clarity: key moments must be readable to observers who cannot control the camera
 - Test maps with organized play teams before shipping — pub play and organized play expose completely different design flaws
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

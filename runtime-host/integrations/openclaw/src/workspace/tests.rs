@@ -107,6 +107,32 @@ fn selects_the_main_workspace_from_default_then_main_or_default_agent_configurat
 }
 
 #[test]
+fn selects_agent_workspaces_from_entries_configuration() {
+    let root = FixtureRoot::new();
+    let config_directory = root.path().join("openclaw");
+    let reviewer_workspace = root.path().join("reviewer-workspace");
+    let selector = OpenClawWorkspaceSelector::new(
+        &config_directory,
+        &json!({
+            "agents": {
+                "entries": {
+                    "reviewer": { "workspace": reviewer_workspace }
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        selector
+            .select("agent:reviewer:session-1")
+            .expect("configured agent")
+            .as_path(),
+        reviewer_workspace
+    );
+}
+
+#[test]
 fn excludes_teambuddy_workspaces_from_maintenance_roots() {
     let root = FixtureRoot::new();
     let config_directory = root.path().join("openclaw");

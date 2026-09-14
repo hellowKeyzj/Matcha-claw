@@ -2,13 +2,12 @@
  * Cron Page
  * Manage scheduled tasks
  */
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Clock,
   Bot,
   Play,
-  Pause,
   Trash2,
   Edit,
   RefreshCw,
@@ -21,44 +20,70 @@ import {
   Loader2,
   Timer,
   History,
+  ChevronDown,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
-import { TaskCenterStatCard } from '@/components/task-center/stat-card';
-import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
+import {
+  TaskCenterEmptyState,
+  TaskCenterStatusFilter,
+  TaskCenterSurface,
+  TaskCenterToolbar,
+} from '@/components/task-center/surface';
 import { useChatStore } from '@/stores/chat';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
+import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';
-import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
-import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
+import type { CronJob, CronJobCreateInput, CronJobUpdateInput, ScheduleType } from '@/types/cron';
+import { CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
-// Common cron schedule presets
-const schedulePresets: { key: string; value: string; type: ScheduleType }[] = [
-  { key: 'everyMinute', value: '* * * * *', type: 'interval' },
-  { key: 'every5Min', value: '*/5 * * * *', type: 'interval' },
-  { key: 'every15Min', value: '*/15 * * * *', type: 'interval' },
-  { key: 'everyHour', value: '0 * * * *', type: 'interval' },
-  { key: 'daily9am', value: '0 9 * * *', type: 'daily' },
-  { key: 'daily6pm', value: '0 18 * * *', type: 'daily' },
-  { key: 'weeklyMon', value: '0 9 * * 1', type: 'weekly' },
-  { key: 'monthly1st', value: '0 9 1 * *', type: 'monthly' },
+const periodicOptions: { type: ScheduleType; expr: string }[] = [
+  { type: 'hourly', expr: '0 * * * *' },
+  { type: 'daily', expr: '0 9 * * *' },
+  { type: 'weekdays', expr: '0 9 * * 1-5' },
+  { type: 'weekly', expr: '0 9 * * 1' },
+  { type: 'custom', expr: '' },
 ];
+
+const DEFAULT_CRON_EXPR = '0 9 * * *';
+
+type ScheduleMode = 'periodic' | 'once';
+
+type ScheduleForm = {
+  mode: ScheduleMode;
+  periodicType: ScheduleType;
+  cronExpr: string;
+  onceDate: string;
+  onceTime: string;
+};
+
+type BuildScheduleResult =
+  | { ok: true; schedule: CronJobCreateInput['schedule']; previewExpr?: string }
+  | { ok: false; errorKey: 'toast.scheduleRequired' | 'toast.onceTimeRequired' | 'toast.onceFutureRequired' };
 
 type DeliveryChannelAccount = {
   accountId: string;
@@ -71,6 +96,8 @@ type DeliveryChannelGroup = {
   defaultAccountId?: string;
 };
 
+type CronStatusFilter = 'all' | 'active' | 'running' | 'paused' | 'failed';
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -81,6 +108,90 @@ function normalizeCronDeliveryChannel(channelType: string): string {
     return 'openclaw-weixin';
   }
   return normalized;
+}
+
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function toLocalDateInputValue(date: Date): string {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+}
+
+function toLocalTimeInputValue(date: Date): string {
+  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
+}
+
+function createDefaultOnceDateTime(): { onceDate: string; onceTime: string } {
+  const nextHour = new Date(Date.now() + 60 * 60_000);
+  return {
+    onceDate: toLocalDateInputValue(nextHour),
+    onceTime: toLocalTimeInputValue(nextHour),
+  };
+}
+
+function getCronExprFromSchedule(schedule: CronJob['schedule'] | undefined): string | null {
+  if (!schedule) {
+    return null;
+  }
+  if (typeof schedule === 'string') {
+    return schedule;
+  }
+  if (schedule.kind === 'cron') {
+    return schedule.expr;
+  }
+  return null;
+}
+
+function getPeriodicTypeFromCron(expr: string): ScheduleType {
+  const matched = periodicOptions.find((option) => option.expr === expr && option.type !== 'custom');
+  return matched?.type ?? 'custom';
+}
+
+function createScheduleForm(schedule: CronJob['schedule'] | undefined): ScheduleForm {
+  const defaultOnce = createDefaultOnceDateTime();
+  if (schedule && typeof schedule === 'object' && schedule.kind === 'at') {
+    const at = new Date(schedule.at);
+    if (!Number.isNaN(at.getTime())) {
+      return {
+        mode: 'once',
+        periodicType: 'daily',
+        cronExpr: DEFAULT_CRON_EXPR,
+        onceDate: toLocalDateInputValue(at),
+        onceTime: toLocalTimeInputValue(at),
+      };
+    }
+  }
+
+  const expr = getCronExprFromSchedule(schedule) ?? DEFAULT_CRON_EXPR;
+  return {
+    mode: 'periodic',
+    periodicType: getPeriodicTypeFromCron(expr),
+    cronExpr: expr,
+    onceDate: defaultOnce.onceDate,
+    onceTime: defaultOnce.onceTime,
+  };
+}
+
+function buildScheduleInput(form: ScheduleForm): BuildScheduleResult {
+  if (form.mode === 'periodic') {
+    const expr = form.periodicType === 'custom'
+      ? form.cronExpr.trim()
+      : periodicOptions.find((option) => option.type === form.periodicType)?.expr ?? DEFAULT_CRON_EXPR;
+    if (!expr) {
+      return { ok: false, errorKey: 'toast.scheduleRequired' };
+    }
+    return { ok: true, schedule: expr, previewExpr: expr };
+  }
+
+  if (!form.onceDate || !form.onceTime) {
+    return { ok: false, errorKey: 'toast.onceTimeRequired' };
+  }
+  const onceAt = new Date(`${form.onceDate}T${form.onceTime}`);
+  if (Number.isNaN(onceAt.getTime()) || onceAt.getTime() <= Date.now()) {
+    return { ok: false, errorKey: 'toast.onceFutureRequired' };
+  }
+  return { ok: true, schedule: { kind: 'at', at: onceAt.toISOString() } };
 }
 
 function isWeChatDeliveryChannel(channelType: string): boolean {
@@ -178,8 +289,13 @@ function parseCronSchedule(schedule: unknown, t: TFunction<'cron'>): string {
 
 // Parse a plain cron expression string to human-readable text
 function parseCronExpr(cron: string, t: TFunction<'cron'>): string {
-  const preset = schedulePresets.find((p) => p.value === cron);
-  if (preset) return t(`presets.${preset.key}` as const);
+  const option = periodicOptions.find((entry) => entry.expr === cron && entry.type !== 'custom');
+  if (option) return t(`periodic.${option.type}`);
+  if (cron === '* * * * *') return t('presets.everyMinute');
+  if (cron === '*/5 * * * *') return t('presets.every5Min');
+  if (cron === '*/15 * * * *') return t('presets.every15Min');
+  if (cron === '0 18 * * *') return t('presets.daily6pm');
+  if (cron === '0 9 1 * *') return t('presets.monthly1st');
 
   const parts = cron.split(' ');
   if (parts.length !== 5) return cron;
@@ -202,6 +318,41 @@ function parseCronExpr(cron: string, t: TFunction<'cron'>): string {
   return cron;
 }
 
+function isFailedCronJob(job: CronJob): boolean {
+  return Boolean(job.lastRun && !job.lastRun.success);
+}
+
+function matchesCronStatusFilter(job: CronJob, filter: CronStatusFilter): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'active') return job.enabled;
+  if (filter === 'running') return Boolean(job.runningAt);
+  if (filter === 'paused') return !job.enabled;
+  return isFailedCronJob(job);
+}
+
+function formatCronDateTime(value: string | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatCronDeliveryText(job: CronJob): string | null {
+  if (job.delivery?.mode === 'announce' && job.delivery.channel) {
+    const channelName = CHANNEL_NAMES[job.delivery.channel as ChannelType] || job.delivery.channel;
+    const account = job.delivery.accountId ? ` (${job.delivery.accountId})` : '';
+    const target = job.delivery.to ? ` -> ${job.delivery.to}` : '';
+    return `${channelName}${account}${target}`;
+  }
+
+  if (job.target) {
+    const channelName = job.target.channelName || CHANNEL_NAMES[job.target.channelType as ChannelType] || job.target.channelType;
+    const recipient = job.target.recipient ? ` -> ${job.target.recipient}` : '';
+    return `${channelName}${recipient}`;
+  }
+
+  return null;
+}
+
 function estimateNextRun(scheduleExpr: string): string | null {
   const now = new Date();
   const next = new Date(now.getTime());
@@ -213,16 +364,14 @@ function estimateNextRun(scheduleExpr: string): string | null {
   }
 
   if (scheduleExpr === '*/5 * * * *') {
-    const delta = 5 - (next.getMinutes() % 5 || 5);
     next.setSeconds(0, 0);
-    next.setMinutes(next.getMinutes() + delta);
+    next.setMinutes(Math.floor(next.getMinutes() / 5) * 5 + 5);
     return next.toLocaleString();
   }
 
   if (scheduleExpr === '*/15 * * * *') {
-    const delta = 15 - (next.getMinutes() % 15 || 15);
     next.setSeconds(0, 0);
-    next.setMinutes(next.getMinutes() + delta);
+    next.setMinutes(Math.floor(next.getMinutes() / 15) * 15 + 15);
     return next.toLocaleString();
   }
 
@@ -244,8 +393,10 @@ function estimateNextRun(scheduleExpr: string): string | null {
     next.setSeconds(0, 0);
     next.setHours(9, 0, 0, 0);
     const day = next.getDay();
-    const daysUntilMonday = day === 1 ? 7 : (8 - day) % 7;
-    next.setDate(next.getDate() + daysUntilMonday);
+    const daysUntilMonday = (8 - day) % 7;
+    if (daysUntilMonday > 0 || next <= now) {
+      next.setDate(next.getDate() + (daysUntilMonday || 7));
+    }
     return next.toLocaleString();
   }
 
@@ -266,7 +417,7 @@ interface TaskDialogProps {
   agents: Array<{ id: string; name: string }>;
   defaultAgentId: string;
   onClose: () => void;
-  onSave: (input: CronJobCreateInput) => Promise<void>;
+  onSave: (input: CronJobCreateInput | CronJobUpdateInput) => Promise<void>;
 }
 
 function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialogProps) {
@@ -276,30 +427,53 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
   const [name, setName] = useState(job?.name || '');
   const [agentId, setAgentId] = useState(job?.agentId || defaultAgentId);
   const [message, setMessage] = useState(job?.message || '');
-  // Extract cron expression string from CronSchedule object or use as-is if string
-  const initialSchedule = (() => {
-    const s = job?.schedule;
-    if (!s) return '0 9 * * *';
-    if (typeof s === 'string') return s;
-    if (typeof s === 'object' && 'expr' in s && typeof (s as { expr: string }).expr === 'string') {
-      return (s as { expr: string }).expr;
-    }
-    return '0 9 * * *';
-  })();
-  const [schedule, setSchedule] = useState(initialSchedule);
-  const [customSchedule, setCustomSchedule] = useState('');
-  const [useCustom, setUseCustom] = useState(false);
-  const [enabled, setEnabled] = useState(job?.enabled ?? true);
-  const [deliveryMode, setDeliveryMode] = useState<'none' | 'announce'>(
-    job?.delivery?.mode === 'announce' ? 'announce' : 'none',
-  );
-  const [deliveryChannel, setDeliveryChannel] = useState(job?.delivery?.channel?.trim() || '');
-  const [deliveryTarget, setDeliveryTarget] = useState(job?.delivery?.to || '');
-  const [selectedDeliveryAccountId, setSelectedDeliveryAccountId] = useState(job?.delivery?.accountId || '');
+  const [selectedModel, setSelectedModel] = useState(job?.model || '');
+  const [modelTouched, setModelTouched] = useState(false);
+  const availableModels = useSubagentsStore((state) => state.availableModels);
+  const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
+  const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
+  const selectedModelEntry = resolveModelCatalogEntry(availableModels, selectedModel);
+  const selectedModelLabel = selectedModelEntry?.displayLabel || selectedModel || t('dialog.followAgent');
+  const initialScheduleForm = useMemo(() => createScheduleForm(job?.schedule), [job?.schedule]);
+  const initialDelivery = job?.delivery
+    ? job.delivery.mode === 'announce' ? job.delivery : null
+    : job?.target
+      ? {
+        mode: 'announce' as const,
+        channel: normalizeCronDeliveryChannel(job.target.channelType),
+        to: job.target.recipient || job.target.channelId,
+        ...(job.target.channelId ? { accountId: job.target.channelId } : {}),
+      }
+      : null;
+  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>(initialScheduleForm.mode);
+  const [periodicType, setPeriodicType] = useState<ScheduleType>(initialScheduleForm.periodicType);
+  const [cronExpr, setCronExpr] = useState(initialScheduleForm.cronExpr);
+  const [onceDate, setOnceDate] = useState(initialScheduleForm.onceDate);
+  const [onceTime, setOnceTime] = useState(initialScheduleForm.onceTime);
+  const [scheduleTouched, setScheduleTouched] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<'none' | 'announce'>(initialDelivery?.mode === 'announce' ? 'announce' : 'none');
+  const [deliveryTouched, setDeliveryTouched] = useState(false);
+  const [deliveryChannel, setDeliveryChannel] = useState(initialDelivery?.channel?.trim() || '');
+  const [deliveryTarget, setDeliveryTarget] = useState(initialDelivery?.to || '');
+  const [selectedDeliveryAccountId, setSelectedDeliveryAccountId] = useState(initialDelivery?.accountId || '');
+  const [deliveryChannelTouched, setDeliveryChannelTouched] = useState(false);
+  const [deliveryAccountTouched, setDeliveryAccountTouched] = useState(false);
   const [deliveryChannels, setDeliveryChannels] = useState<DeliveryChannelGroup[]>([]);
   const [deliveryChannelsLoading, setDeliveryChannelsLoading] = useState(false);
-  const schedulePreview = estimateNextRun(useCustom ? customSchedule : schedule);
-  const deliveryChannelOptions = (() => {
+  const [deliveryChannelsLoaded, setDeliveryChannelsLoaded] = useState(false);
+  const skills = useSkillsStore((state) => state.skills);
+  const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const availableSkills = useMemo(() => skills.filter((skill) => (
+    skill.enabled
+    && skill.eligible === true
+    && skill.selectable !== false
+    && !skill.unavailableReason
+    && !skill.missingCategories?.length
+  )), [skills]);
+  const scheduleResult = buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime });
+  const schedulePreview = scheduleResult.ok && scheduleResult.previewExpr ? estimateNextRun(scheduleResult.previewExpr) : null;
+  const deliveryChannelOptions = useMemo(() => {
     const options = [...deliveryChannels];
     if (deliveryChannel && !options.some((entry) => entry.channelType === deliveryChannel)) {
       options.push({
@@ -308,7 +482,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
       });
     }
     return options;
-  })();
+  }, [deliveryChannel, deliveryChannels]);
   const selectedDeliveryChannelGroup = deliveryChannelOptions.find((entry) => entry.channelType === deliveryChannel);
   const deliveryAccountOptions = selectedDeliveryChannelGroup?.accounts ?? [];
   const requiresExplicitDeliveryAccount = deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel);
@@ -328,6 +502,18 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
     }
     return Array.from(options, ([id, name]) => ({ id, name }));
   }, [agents, defaultAgentId, job?.agentId]);
+  const selectedAgentName = agentOptions.find((agent) => agent.id === agentId)?.name ?? agentId ?? defaultAgentId;
+
+  useEffect(() => {
+    void loadAvailableModels();
+  }, [loadAvailableModels]);
+
+  useEffect(() => {
+    const { snapshotReady, initialLoading } = useSkillsStore.getState();
+    if (!snapshotReady && !initialLoading) {
+      void fetchSkills({ silent: true });
+    }
+  }, [fetchSkills]);
 
   useEffect(() => {
     let cancelled = false;
@@ -339,6 +525,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
         }
         const groups = parseDeliveryChannelGroups((result as { snapshot?: unknown }).snapshot);
         setDeliveryChannels(groups);
+        setDeliveryChannelsLoaded(true);
       })
       .catch((error) => {
         if (!cancelled) {
@@ -356,14 +543,14 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
   }, []);
 
   useEffect(() => {
-    if (deliveryMode !== 'announce' || deliveryChannel.trim()) {
+    if (job || !deliveryChannelsLoaded || deliveryMode !== 'announce' || deliveryChannel.trim()) {
       return;
     }
     const firstSupported = deliveryChannels.find((entry) => isSupportedCronDeliveryChannel(entry.channelType));
     if (firstSupported?.channelType) {
       setDeliveryChannel(firstSupported.channelType);
     }
-  }, [deliveryChannels, deliveryChannel, deliveryMode]);
+  }, [deliveryChannels, deliveryChannel, deliveryChannelsLoaded, deliveryMode, job]);
 
   useEffect(() => {
     if (!agentId) {
@@ -373,26 +560,34 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
 
   useEffect(() => {
     if (deliveryMode !== 'announce') {
-      if (selectedDeliveryAccountId) {
-        setSelectedDeliveryAccountId('');
-      }
+      return;
+    }
+    if (!deliveryChannelsLoaded || selectedDeliveryAccountId || deliveryAccountTouched) {
+      return;
+    }
+    if (job && !deliveryChannelTouched) {
       return;
     }
     const currentChannel = deliveryChannelOptions.find((entry) => entry.channelType === deliveryChannel);
-    const accounts = currentChannel?.accounts ?? [];
-    if (accounts.length === 0) {
-      if (selectedDeliveryAccountId) {
-        setSelectedDeliveryAccountId('');
-      }
-      return;
+    const nextDefault = currentChannel?.defaultAccountId || currentChannel?.accounts[0]?.accountId || '';
+    if (nextDefault) {
+      setSelectedDeliveryAccountId(nextDefault);
     }
-    const existed = accounts.some((entry) => entry.accountId === selectedDeliveryAccountId);
-    if (existed) {
-      return;
-    }
-    const nextDefault = currentChannel?.defaultAccountId || accounts[0]?.accountId || '';
-    setSelectedDeliveryAccountId(nextDefault);
-  }, [deliveryChannel, deliveryChannelOptions, deliveryMode, selectedDeliveryAccountId]);
+  }, [
+    deliveryAccountTouched,
+    deliveryChannel,
+    deliveryChannelOptions,
+    deliveryChannelTouched,
+    deliveryChannelsLoaded,
+    deliveryMode,
+    job,
+    selectedDeliveryAccountId,
+  ]);
+
+  const insertSkillInstruction = (skillName: string) => {
+    const instruction = t('dialog.useSkillInstruction', { name: skillName });
+    setMessage((current) => `${current}${current && !/\s$/.test(current) ? '\n' : ''}${instruction}`);
+  };
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -404,271 +599,458 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
       return;
     }
 
-    const finalSchedule = useCustom ? customSchedule : schedule;
-    if (!finalSchedule.trim()) {
-      toast.error(t('toast.scheduleRequired'));
+    const shouldSubmitSchedule = !job || scheduleTouched;
+    const finalSchedule = shouldSubmitSchedule
+      ? buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime })
+      : null;
+    if (finalSchedule && !finalSchedule.ok) {
+      toast.error(t(finalSchedule.errorKey));
       return;
     }
 
+    const shouldSubmitDelivery = !job || deliveryTouched;
+    const normalizedDeliveryChannel = normalizeCronDeliveryChannel(deliveryChannel);
     const finalDelivery = deliveryMode === 'announce'
       ? {
         mode: 'announce' as const,
-        channel: deliveryChannel.trim(),
+        channel: normalizedDeliveryChannel,
         to: deliveryTarget.trim(),
         ...(selectedDeliveryAccountId.trim() ? { accountId: selectedDeliveryAccountId.trim() } : {}),
       }
       : { mode: 'none' as const };
-    if (finalDelivery.mode === 'announce' && !finalDelivery.channel) {
+    if (shouldSubmitDelivery && finalDelivery.mode === 'announce' && !finalDelivery.channel) {
       toast.error(t('toast.deliveryChannelRequired'));
       return;
     }
-    if (finalDelivery.mode === 'announce' && !isSupportedCronDeliveryChannel(finalDelivery.channel)) {
+    if (shouldSubmitDelivery && finalDelivery.mode === 'announce' && !isSupportedCronDeliveryChannel(finalDelivery.channel)) {
       toast.error(t('toast.deliveryChannelUnsupported'));
       return;
     }
-    if (finalDelivery.mode === 'announce' && !finalDelivery.to) {
+    if (shouldSubmitDelivery && finalDelivery.mode === 'announce' && !finalDelivery.to) {
       toast.error(t('toast.deliveryTargetRequired'));
       return;
     }
-    if (finalDelivery.mode === 'announce' && isWeChatDeliveryChannel(finalDelivery.channel) && !selectedDeliveryAccountId.trim()) {
+    if (shouldSubmitDelivery && finalDelivery.mode === 'announce' && isWeChatDeliveryChannel(finalDelivery.channel) && !selectedDeliveryAccountId.trim()) {
       toast.error(t('toast.deliveryAccountRequiredWeChat'));
       return;
     }
 
+    const input: CronJobCreateInput | CronJobUpdateInput = {
+      name: name.trim(),
+      agentId: agentId.trim() || defaultAgentId,
+      message: message.trim(),
+      enabled: job?.enabled ?? true,
+      ...(!job || modelTouched ? { model: resolveModelRuntimeReference(availableModels, selectedModel) ?? null } : {}),
+      ...(shouldSubmitDelivery ? { delivery: finalDelivery } : {}),
+      ...(finalSchedule && finalSchedule.ok ? { schedule: finalSchedule.schedule } : {}),
+    };
+
     setSaving(true);
     try {
-      await onSave({
-        name: name.trim(),
-        agentId: agentId.trim() || defaultAgentId,
-        message: message.trim(),
-        schedule: finalSchedule,
-        delivery: finalDelivery,
-        enabled,
-      });
+      await onSave(input);
       onClose();
       toast.success(job ? t('toast.updated') : t('toast.created'));
     } catch (err) {
-      toast.error(String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
-      <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <CardHeader className="flex flex-row items-start justify-between">
-          <div>
-            <CardTitle>{job ? t('dialog.editTitle') : t('dialog.createTitle')}</CardTitle>
-            <CardDescription>{t('dialog.description')}</CardDescription>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <Card
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cron-task-dialog-title"
+        className="flex h-[94vh] max-h-[760px] w-full max-w-[1024px] flex-col overflow-hidden p-0 shadow-xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <CardHeader className="flex-row items-start justify-between space-y-0 border-b p-5">
+          <div className="min-w-0">
+            <CardTitle id="cron-task-dialog-title" className="text-lg">
+              {job ? t('dialog.editTitle') : t('dialog.createTitle')}
+            </CardTitle>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label={t('common:actions.close', 'Close')}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Name */}
-          <div className="space-y-2">
-            <Label htmlFor="name">{t('dialog.taskName')}</Label>
-            <Input
-              id="name"
-              placeholder={t('dialog.taskNamePlaceholder')}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
 
-          {/* Message */}
-          <div className="space-y-2">
-            <Label htmlFor="message">{t('dialog.message')}</Label>
-            <Textarea
-              id="message"
-              placeholder={t('dialog.messagePlaceholder')}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              rows={3}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="agent">{t('dialog.agent')}</Label>
-            <Select
-              id="agent"
-              value={agentId}
-              onChange={(event) => setAgentId(event.target.value)}
-            >
-              {agentOptions.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          {/* Schedule */}
-          <div className="space-y-2">
-            <Label>{t('dialog.schedule')}</Label>
-            {!useCustom ? (
-              <div className="grid grid-cols-2 gap-2">
-                {schedulePresets.map((preset) => (
-                  <Button
-                    key={preset.value}
-                    type="button"
-                    variant={schedule === preset.value ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => setSchedule(preset.value)}
-                    className="justify-start"
-                  >
-                    <Timer className="h-4 w-4 mr-2" />
-                    {t(`presets.${preset.key}` as const)}
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <Input
-                placeholder={t('dialog.cronPlaceholder')}
-                value={customSchedule}
-                onChange={(e) => setCustomSchedule(e.target.value)}
-              />
-            )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setUseCustom(!useCustom)}
-              className="text-xs"
-            >
-              {useCustom ? t('dialog.usePresets') : t('dialog.useCustomCron')}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {schedulePreview ? `${t('card.next')}: ${schedulePreview}` : t('dialog.cronPlaceholder')}
-            </p>
-          </div>
-
-          <div className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3">
-            <div className="space-y-1">
-              <Label>{t('dialog.deliveryTitle')}</Label>
-              <p className="text-xs text-muted-foreground">{t('dialog.deliveryDescription')}</p>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                type="button"
-                variant={deliveryMode === 'none' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setDeliveryMode('none')}
-                className="h-auto min-h-9 whitespace-normal break-words text-center leading-5 overflow-visible text-clip"
-              >
-                {t('dialog.deliveryModeNone')}
-              </Button>
-              <Button
-                type="button"
-                variant={deliveryMode === 'announce' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setDeliveryMode('announce')}
-                className="h-auto min-h-9 whitespace-normal break-words text-center leading-5 overflow-visible text-clip"
-              >
-                {t('dialog.deliveryModeAnnounce')}
-              </Button>
-            </div>
-
-            {deliveryMode === 'announce' && (
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label htmlFor="delivery-channel">{t('dialog.deliveryChannel')}</Label>
+        <CardContent className="min-h-0 flex-1 overflow-hidden p-0">
+          <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
+            <aside className="min-h-0 space-y-5 overflow-y-auto border-b bg-muted/20 p-5 lg:border-b-0 lg:border-r">
+              <section className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="agent">{t('dialog.agent')}</Label>
                   <Select
-                    id="delivery-channel"
-                    value={deliveryChannel}
-                    disabled={deliveryChannelsLoading}
-                    onChange={(event) => {
-                      setDeliveryChannel(event.target.value);
-                      setSelectedDeliveryAccountId('');
+                    id="agent"
+                    value={agentId}
+                    onChange={(event) => setAgentId(event.target.value)}
+                  >
+                    {agentOptions.map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="rounded-xl border bg-card p-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <p className="truncate text-sm font-medium text-foreground">{selectedAgentName}</p>
+                  </div>
+                  <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                    {agentId || defaultAgentId}
+                  </p>
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-sm font-semibold text-foreground">{t('dialog.deliveryTitle')}</h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant={deliveryMode === 'none' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => {
+                      setDeliveryMode('none');
+                      setDeliveryTouched(true);
                     }}
                   >
-                    <option value="">{t('dialog.selectDeliveryChannel')}</option>
-                    {deliveryChannelOptions.map((group) => (
-                      <option key={group.channelType} value={group.channelType}>
-                        {CHANNEL_NAMES[group.channelType as ChannelType] || group.channelType}
-                      </option>
-                    ))}
-                  </Select>
-                  {deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel) && (
-                    <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatRequirements')}</p>
-                  )}
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="delivery-account">{t('dialog.deliveryAccount')}</Label>
-                  <Select
-                    id="delivery-account"
-                    value={selectedDeliveryAccountId}
-                    disabled={deliveryAccountOptions.length === 0}
-                    onChange={(event) => setSelectedDeliveryAccountId(event.target.value)}
+                    {t('dialog.deliveryModeNone')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={deliveryMode === 'announce' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => {
+                      setDeliveryMode('announce');
+                      setDeliveryTouched(true);
+                    }}
                   >
-                    {!requiresExplicitDeliveryAccount && (
-                      <option value="">{t('dialog.deliveryAccountAuto')}</option>
-                    )}
-                    {deliveryAccountOptions.map((account) => (
-                      <option key={account.accountId} value={account.accountId}>
-                        {account.name}
-                      </option>
-                    ))}
-                  </Select>
-                  {requiresExplicitDeliveryAccount && (
-                    <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatAccountRequired')}</p>
+                    {t('dialog.deliveryModeAnnounce')}
+                  </Button>
+                </div>
+
+                {deliveryMode === 'announce' && (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="delivery-channel">{t('dialog.deliveryChannel')}</Label>
+                      <Select
+                        id="delivery-channel"
+                        value={deliveryChannel}
+                        disabled={deliveryChannelsLoading}
+                        onChange={(event) => {
+                          setDeliveryChannel(event.target.value);
+                          setSelectedDeliveryAccountId('');
+                          setDeliveryTouched(true);
+                          setDeliveryChannelTouched(true);
+                          setDeliveryAccountTouched(false);
+                        }}
+                      >
+                        <option value="">{t('dialog.selectDeliveryChannel')}</option>
+                        {deliveryChannelOptions.map((group) => (
+                          <option key={group.channelType} value={group.channelType}>
+                            {CHANNEL_NAMES[group.channelType as ChannelType] || group.channelType}
+                          </option>
+                        ))}
+                      </Select>
+                      {deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel) && (
+                        <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatRequirements')}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="delivery-account">{t('dialog.deliveryAccount')}</Label>
+                      <Select
+                        id="delivery-account"
+                        value={selectedDeliveryAccountId}
+                        disabled={deliveryAccountOptions.length === 0}
+                        onChange={(event) => {
+                          setSelectedDeliveryAccountId(event.target.value);
+                          setDeliveryTouched(true);
+                          setDeliveryAccountTouched(true);
+                        }}
+                      >
+                        {!requiresExplicitDeliveryAccount && (
+                          <option value="">{t('dialog.deliveryAccountAuto')}</option>
+                        )}
+                        {deliveryAccountOptions.map((account) => (
+                          <option key={account.accountId} value={account.accountId}>
+                            {account.name}
+                          </option>
+                        ))}
+                      </Select>
+                      {requiresExplicitDeliveryAccount && (
+                        <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatAccountRequired')}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="delivery-target">{t('dialog.deliveryTarget')}</Label>
+                      <Input
+                        id="delivery-target"
+                        placeholder={t('dialog.deliveryTargetPlaceholder')}
+                        value={deliveryTarget}
+                        onChange={(event) => {
+                          setDeliveryTarget(event.target.value);
+                          setDeliveryTouched(true);
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">{t('dialog.deliveryTargetDesc')}</p>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </aside>
+
+            <main className="min-h-0 overflow-y-auto p-5">
+              <div className="space-y-5">
+                <section className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="name">{t('dialog.taskName')}</Label>
+                    <Input
+                      id="name"
+                      placeholder={t('dialog.taskNamePlaceholder')}
+                      value={name}
+                      onChange={(event) => setName(event.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="message">{t('dialog.message')}</Label>
+                    <div className="rounded-[calc(var(--radius-interactive)+2px)] border border-input bg-card transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15 focus-within:shadow-[var(--shadow-focus)]">
+                      <Textarea
+                        id="message"
+                        placeholder={t('dialog.messagePlaceholder')}
+                        value={message}
+                        onChange={(event) => setMessage(event.target.value)}
+                        rows={7}
+                        className="min-h-[180px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:shadow-none"
+                      />
+                      <div className="flex min-w-0 items-center gap-2 px-3 pb-3 pt-1">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              disabled={modelsLoading}
+                              aria-label={t('dialog.model')}
+                              title={selectedModelLabel}
+                              className="h-8 min-w-0 max-w-[min(65%,16rem)] shrink rounded-full px-3 text-xs text-muted-foreground"
+                            >
+                              <span className="truncate">{selectedModelLabel}</span>
+                              {modelsLoading ? (
+                                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-label={t('common:status.loading')} />
+                              ) : (
+                                <ChevronDown className="h-3 w-3 shrink-0" />
+                              )}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="start"
+                            className="w-72 max-h-[min(16rem,var(--radix-dropdown-menu-content-available-height))] max-w-[calc(100vw-2rem)] overflow-y-auto"
+                          >
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setSelectedModel('');
+                                setModelTouched(true);
+                              }}
+                            >
+                              <span className="truncate">{t('dialog.followAgent')}</span>
+                            </DropdownMenuItem>
+                            {selectedModel && !selectedModelEntry && (
+                              <DropdownMenuItem
+                                onSelect={() => {
+                                  setSelectedModel(selectedModel);
+                                  setModelTouched(true);
+                                }}
+                              >
+                                <span className="truncate" title={selectedModel}>{selectedModel}</span>
+                              </DropdownMenuItem>
+                            )}
+                            {availableModels.map((model) => (
+                              <DropdownMenuItem
+                                key={model.id}
+                                onSelect={() => {
+                                  setSelectedModel(resolveModelRuntimeReference(availableModels, model.id) || '');
+                                  setModelTouched(true);
+                                }}
+                              >
+                                <span className="truncate" title={model.displayLabel}>{model.displayLabel}</span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              disabled={skillsInitialLoading || availableSkills.length === 0}
+                              className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs text-muted-foreground"
+                            >
+                              <Sparkles className="h-3.5 w-3.5" />
+                              {t('dialog.skills')}
+                              <ChevronDown className="h-3 w-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="start"
+                            className="max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] max-w-[min(24rem,calc(100vw-2rem))] overflow-y-auto"
+                          >
+                            {availableSkills.map((skill) => (
+                              <DropdownMenuItem key={skill.id} onSelect={() => insertSkillInstruction(skill.name)}>
+                                <span className="truncate" title={skill.name}>{skill.name}</span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="space-y-3 rounded-xl border bg-muted/20 p-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {t('dialog.schedulePlan', { defaultValue: 'Schedule plan' })}
+                    </h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {schedulePreview
+                        ? t('dialog.schedulePreview', { time: schedulePreview, defaultValue: `Next run: ${schedulePreview}` })
+                        : t('dialog.noSchedulePreview', { defaultValue: 'Next run appears after the schedule is saved.' })}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 rounded-full border bg-card p-1">
+                    <Button
+                      type="button"
+                      variant={scheduleMode === 'periodic' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="rounded-full shadow-none"
+                      onClick={() => {
+                        setScheduleMode('periodic');
+                        setScheduleTouched(true);
+                      }}
+                    >
+                      {t('dialog.periodicTab')}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={scheduleMode === 'once' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="rounded-full shadow-none"
+                      onClick={() => {
+                        setScheduleMode('once');
+                        setScheduleTouched(true);
+                      }}
+                    >
+                      {t('dialog.onceTab')}
+                    </Button>
+                  </div>
+                  {scheduleMode === 'periodic' ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2 xl:grid-cols-5">
+                        {periodicOptions.map((option) => (
+                          <Button
+                            key={option.type}
+                            type="button"
+                            variant={periodicType === option.type ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => {
+                              setPeriodicType(option.type);
+                              setScheduleTouched(true);
+                            }}
+                            className="justify-start px-3"
+                          >
+                            <Timer className="h-3.5 w-3.5" />
+                            <span className="truncate">{t(`periodic.${option.type}`)}</span>
+                          </Button>
+                        ))}
+                      </div>
+                      {periodicType === 'custom' && (
+                        <div className="space-y-1.5">
+                          <Label htmlFor="cron-expr">{t('dialog.cronPlaceholder')}</Label>
+                          <Input
+                            id="cron-expr"
+                            placeholder={t('dialog.cronPlaceholder')}
+                            value={cronExpr}
+                            onChange={(event) => {
+                              setCronExpr(event.target.value);
+                              setScheduleTouched(true);
+                            }}
+                            className="font-mono"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="once-date">{t('dialog.onceDate', { defaultValue: 'Date' })}</Label>
+                        <Input
+                          id="once-date"
+                          type="date"
+                          value={onceDate}
+                          onChange={(event) => {
+                            setOnceDate(event.target.value);
+                            setScheduleTouched(true);
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="once-time">{t('dialog.onceTime', { defaultValue: 'Time' })}</Label>
+                        <Input
+                          id="once-time"
+                          type="time"
+                          value={onceTime}
+                          onChange={(event) => {
+                            setOnceTime(event.target.value);
+                            setScheduleTouched(true);
+                          }}
+                        />
+                      </div>
+                    </div>
                   )}
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="delivery-target">{t('dialog.deliveryTarget')}</Label>
-                  <Input
-                    id="delivery-target"
-                    placeholder={t('dialog.deliveryTargetPlaceholder')}
-                    value={deliveryTarget}
-                    onChange={(event) => setDeliveryTarget(event.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">{t('dialog.deliveryTargetDesc')}</p>
-                </div>
+                </section>
               </div>
-            )}
-          </div>
-
-          {/* Enabled */}
-          <div className="flex items-center justify-between">
-            <div>
-              <Label>{t('dialog.enableImmediately')}</Label>
-              <p className="text-sm text-muted-foreground">
-                {t('dialog.enableImmediatelyDesc')}
-              </p>
-            </div>
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <Button variant="outline" onClick={onClose}>
-              {t('common:actions.cancel', 'Cancel')}
-            </Button>
-            <Button onClick={handleSubmit} disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  {t('common:status.saving', 'Saving...')}
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="h-4 w-4 mr-2" />
-                  {job ? t('dialog.saveChanges') : t('dialog.createTitle')}
-                </>
-              )}
-            </Button>
+            </main>
           </div>
         </CardContent>
+
+        <div className="flex shrink-0 justify-end gap-2 border-t bg-background p-4">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            {t('common:actions.cancel', 'Cancel')}
+          </Button>
+          <Button onClick={handleSubmit} disabled={saving}>
+            {saving ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t('common:status.saving', 'Saving...')}
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="h-4 w-4" />
+                {job ? t('dialog.saveChanges') : t('dialog.createTitle')}
+              </>
+            )}
+          </Button>
+        </div>
       </Card>
     </div>
   );
 }
 
-// Job Card Component
+// Job Row Component
 interface CronJobCardProps {
   job: CronJob;
   isMutating: boolean;
@@ -686,7 +1068,9 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
   ));
   const agentName = agents.find((agent) => agent.id === job.agentId)?.name ?? job.agentId;
   const isRunning = Boolean(job.runningAt);
+  const failedLastRun = isFailedCronJob(job);
   const actionsDisabled = isMutating || triggering;
+  const deliveryText = formatCronDeliveryText(job);
 
   const handleTrigger = async () => {
     setTriggering(true);
@@ -712,148 +1096,131 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
   };
 
   return (
-    <Card
+    <div
       data-testid={`cron-job-card-${job.id}`}
       className={cn(
-        TASK_CENTER_SURFACE_CARD_CLASS,
-        'transition-colors',
-        job.enabled && 'border-primary/30'
+        'grid grid-cols-[112px_minmax(0,1fr)_auto] items-center gap-5 border-b px-5 py-4 text-sm last:border-b-0 transition-colors hover:bg-muted/20',
+        job.enabled && 'bg-primary/[0.012]'
       )}
     >
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className={cn(
-              'shrink-0 rounded-full p-2',
-              job.enabled
-                ? 'bg-green-100 dark:bg-green-900/30'
-                : 'bg-muted'
-            )}>
-              <Clock className={cn(
-                'h-5 w-5',
-                job.enabled ? 'text-green-600' : 'text-muted-foreground'
-              )} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <CardTitle
-                data-testid={`cron-job-card-title-${job.id}`}
-                className="truncate text-lg"
-              >
-                {job.name}
-              </CardTitle>
-              <CardDescription className="flex min-w-0 items-center gap-2">
-                <Timer className="h-3 w-3 shrink-0" />
-                <span className="truncate">{parseCronSchedule(job.schedule, t)}</span>
-              </CardDescription>
-            </div>
-          </div>
-          <div
-            data-testid={`cron-job-card-switch-${job.id}`}
-            className="flex shrink-0 items-center gap-2"
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <Timer className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="truncate font-medium text-foreground">{parseCronSchedule(job.schedule, t)}</span>
+        </div>
+      </div>
+
+      <div className="min-w-0 space-y-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <p
+            data-testid={`cron-job-card-title-${job.id}`}
+            className="min-w-0 truncate text-[15px] font-semibold text-foreground"
+            title={job.name}
           >
-            <Badge variant={job.enabled ? 'success' : 'secondary'}>
-              {job.enabled ? t('stats.active') : t('stats.paused')}
-            </Badge>
-            {isRunning && (
+            {job.name}
+          </p>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {isRunning ? (
               <Badge variant="default">{t('stats.running')}</Badge>
-            )}
-            {isMutating && (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            )}
-            <Switch
-              checked={job.enabled}
-              disabled={isMutating}
-              onCheckedChange={onToggle}
-            />
+            ) : !job.enabled ? (
+              <Badge variant="secondary">{t('stats.paused')}</Badge>
+            ) : null}
+            {failedLastRun ? <Badge variant="destructive">{t('stats.failed')}</Badge> : null}
+            {isMutating ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" /> : null}
           </div>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Message Preview */}
-        <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50">
-          <MessageSquare className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-          <p className="min-w-0 flex-1 break-all text-sm text-muted-foreground line-clamp-2">
+
+        <div className="flex min-w-0 items-start gap-2 rounded-lg bg-muted/25 px-3 py-2">
+          <MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <p className="line-clamp-2 min-w-0 text-xs leading-5 text-muted-foreground" title={job.message}>
             {job.message}
           </p>
         </div>
 
-        {/* Metadata */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
-          {job.delivery?.mode === 'announce' && job.delivery.channel && (
-            <span className="flex items-center gap-1">
-              {CHANNEL_ICONS[job.delivery.channel as ChannelType]}
-              {CHANNEL_NAMES[job.delivery.channel as ChannelType] || job.delivery.channel}
-              {job.delivery.accountId ? `(${job.delivery.accountId})` : ''}
-              {job.delivery.to ? ` → ${job.delivery.to}` : ''}
-            </span>
-          )}
-
-          {(!job.delivery || job.delivery.mode !== 'announce') && job.target && (
-            <span className="flex items-center gap-1">
-              {CHANNEL_ICONS[job.target.channelType as ChannelType]}
-              {job.target.channelName}
-            </span>
-          )}
-
-          {job.lastRun && (
-            <span className="flex items-center gap-1">
-              <History className="h-4 w-4" />
-              {t('card.last')}: {formatRelativeTime(job.lastRun.time)}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Bot className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate text-foreground">{agentName}</span>
+          </span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Calendar className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{job.enabled ? formatCronDateTime(job.nextRun) : '-'}</span>
+          </span>
+          {job.lastRun ? (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <History className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{t('card.last')}: {formatRelativeTime(job.lastRun.time)}</span>
               {job.lastRun.success ? (
-                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
               ) : (
-                <XCircle className="h-4 w-4 text-red-500" />
+                <XCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
               )}
             </span>
-          )}
-
-          {job.nextRun && job.enabled && (
-            <span className="flex items-center gap-1">
-              <Calendar className="h-4 w-4" />
-              {t('card.next')}: {new Date(job.nextRun).toLocaleString()}
-            </span>
-          )}
-
-          <span className="flex items-center gap-1">
-            <Bot className="h-4 w-4" />
-            {agentName}
-          </span>
+          ) : null}
+          {isRunning && job.runningAt ? (
+            <span className="truncate">{t('stats.running')}: {formatRelativeTime(job.runningAt)}</span>
+          ) : null}
+          {deliveryText ? (
+            <span className="truncate" title={deliveryText}>{deliveryText}</span>
+          ) : null}
         </div>
 
-        {/* Last Run Error */}
-        {job.lastRun && !job.lastRun.success && job.lastRun.error && (
-          <div className="flex items-start gap-2 p-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-sm text-red-600 dark:text-red-400">
-            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            <span>{job.lastRun.error}</span>
-          </div>
-        )}
+        {failedLastRun && job.lastRun?.error ? (
+          <p className="line-clamp-1 text-xs text-destructive" title={job.lastRun.error}>
+            {job.lastRun.error}
+          </p>
+        ) : null}
+      </div>
 
-        {/* Actions */}
-        <div className="flex justify-end gap-1 pt-2 border-t">
+      <div className="flex shrink-0 items-center gap-3">
+        <div data-testid={`cron-job-card-switch-${job.id}`} className="flex shrink-0 items-center">
+          <Switch
+            checked={job.enabled}
+            disabled={isMutating}
+            onCheckedChange={onToggle}
+          />
+        </div>
+        <div className="flex justify-end gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={handleTrigger}
+          disabled={actionsDisabled || isRunning}
+          title={t('card.runNow')}
+          aria-label={t('card.runNow')}
+        >
+          {triggering ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Play className="h-4 w-4" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={onEdit}
+          disabled={isMutating}
+          title={t('common:actions.edit', 'Edit')}
+          aria-label={t('common:actions.edit', 'Edit')}
+        >
+          <Edit className="h-4 w-4" />
+        </Button>
           <Button
             variant="ghost"
-            size="sm"
-            onClick={handleTrigger}
-            disabled={actionsDisabled || isRunning}
+            size="icon"
+            className="h-8 w-8 text-destructive hover:text-destructive"
+            onClick={handleDelete}
+            disabled={isMutating}
+            title={t('common:actions.delete', 'Delete')}
+            aria-label={t('common:actions.delete', 'Delete')}
           >
-            {triggering ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-            <span className="ml-1">{t('card.runNow')}</span>
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onEdit} disabled={isMutating}>
-            <Edit className="h-4 w-4" />
-            <span className="ml-1">{t('common:actions.edit', 'Edit')}</span>
-          </Button>
-          <Button variant="ghost" size="sm" onClick={handleDelete} disabled={isMutating}>
-            <Trash2 className="h-4 w-4 text-destructive" />
-            <span className="ml-1 text-destructive">{t('common:actions.delete', 'Delete')}</span>
+            <Trash2 className="h-4 w-4" />
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -886,9 +1253,11 @@ export function Cron({ embedded = false }: CronProps) {
   });
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const requestedAgentsLoadRef = useRef(false);
   const [showDialog, setShowDialog] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | undefined>();
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
+  const [statusFilter, setStatusFilter] = useState<CronStatusFilter>('all');
 
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
@@ -908,27 +1277,71 @@ export function Cron({ embedded = false }: CronProps) {
 
   useEffect(() => {
     if (!isGatewayRunning) {
+      requestedAgentsLoadRef.current = false;
       return;
     }
-    if (agentsResource.status !== 'loading') {
-      void loadAgents({ silent: true });
+    if (agentsResource.status === 'ready') {
+      requestedAgentsLoadRef.current = false;
+      return;
     }
+    if (agentsResource.status !== 'idle' && agentsResource.status !== 'error') {
+      return;
+    }
+    if (requestedAgentsLoadRef.current) {
+      return;
+    }
+    requestedAgentsLoadRef.current = true;
+    void loadAgents({ silent: true });
   }, [agentsResource.status, isGatewayRunning, loadAgents]);
 
   // Statistics
-  const runningJobs = jobs.filter((j) => Boolean(j.runningAt));
-  const pausedJobs = jobs.filter((j) => !j.enabled);
-  const failedJobs = jobs.filter((j) => j.lastRun && !j.lastRun.success);
+  const cronStatusCounts = useMemo(() => ({
+    total: jobs.length,
+    active: jobs.filter((job) => job.enabled).length,
+    running: jobs.filter((job) => Boolean(job.runningAt)).length,
+    paused: jobs.filter((job) => !job.enabled).length,
+    failed: jobs.filter(isFailedCronJob).length,
+  }), [jobs]);
+  const statusFilterOptions = useMemo(() => ([
+    {
+      value: 'all' as const,
+      label: t('filters.all', { defaultValue: 'All' }),
+      count: cronStatusCounts.total,
+    },
+    {
+      value: 'active' as const,
+      label: t('filters.active', { defaultValue: 'Active' }),
+      count: cronStatusCounts.active,
+    },
+    {
+      value: 'running' as const,
+      label: t('filters.running', { defaultValue: 'Running' }),
+      count: cronStatusCounts.running,
+    },
+    {
+      value: 'paused' as const,
+      label: t('filters.paused', { defaultValue: 'Paused' }),
+      count: cronStatusCounts.paused,
+    },
+    {
+      value: 'failed' as const,
+      label: t('filters.failed', { defaultValue: 'Failed' }),
+      count: cronStatusCounts.failed,
+    },
+  ]), [cronStatusCounts, t]);
+  const filteredJobs = useMemo(
+    () => jobs.filter((job) => matchesCronStatusFilter(job, statusFilter)),
+    [jobs, statusFilter],
+  );
 
-  const handleSave = useCallback(async (input: CronJobCreateInput) => {
+  const handleSave = useCallback(async (input: CronJobCreateInput | CronJobUpdateInput) => {
     if (!isGatewayRunning) {
-      toast.error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
-      return;
+      throw new Error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
     }
     if (editingJob) {
       await updateJob(editingJob.id, input);
     } else {
-      await createJob(input);
+      await createJob(input as CronJobCreateInput);
     }
   }, [isGatewayRunning, editingJob, gatewayPreparing, createJob, updateJob, t]);
 
@@ -946,44 +1359,61 @@ export function Cron({ embedded = false }: CronProps) {
   }, [isGatewayRunning, gatewayPreparing, toggleJob, t]);
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className={cn('flex items-center', embedded ? 'justify-end' : 'justify-between')}>
-        {!embedded && (
+    <div className="space-y-5">
+      {!embedded && (
+        <header className="flex items-center justify-between">
           <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
-        )}
-        <div className="flex gap-2">
-          {showRefreshingHint && (
-            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {t('common:status.loading', 'Loading...')}
-            </span>
-          )}
-          <Button
-            variant="outline"
-            onClick={() => { void fetchJobs(); }}
-            disabled={!isGatewayRunning || manualRefreshBusy}
-          >
-            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
-            {manualRefreshBusy ? t('common:status.loading', 'Loading...') : t('refresh')}
-          </Button>
-          <Button
-            onClick={() => {
-              setEditingJob(undefined);
-              setShowDialog(true);
-            }}
-            disabled={!isGatewayRunning || mutating}
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            {t('newTask')}
-          </Button>
-        </div>
-      </div>
+        </header>
+      )}
 
-      {/* Gateway Warning */}
+      <TaskCenterToolbar
+        actions={(
+          <>
+            {showRefreshingHint && (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t('common:status.loading', 'Loading...')}
+              </span>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9"
+              aria-label={t('refresh')}
+              title={t('refresh')}
+              onClick={() => { void fetchJobs(); }}
+              disabled={!isGatewayRunning || manualRefreshBusy}
+            >
+              <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setEditingJob(undefined);
+                setShowDialog(true);
+              }}
+              disabled={!isGatewayRunning || mutating}
+            >
+              <Plus className="h-4 w-4" />
+              {t('newTask')}
+            </Button>
+          </>
+        )}
+      >
+        {statusFilterOptions.map((option) => (
+          <TaskCenterStatusFilter
+            key={option.value}
+            label={option.label}
+            count={option.count}
+            active={statusFilter === option.value}
+            onClick={() => setStatusFilter(option.value)}
+          />
+        ))}
+      </TaskCenterToolbar>
+
       {!isGatewayRunning && (
         <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
-          <CardContent className="py-4 flex items-center gap-3">
+          <CardContent className="flex items-center gap-3 py-4">
             {gatewayPreparing ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
@@ -996,64 +1426,43 @@ export function Cron({ embedded = false }: CronProps) {
         </Card>
       )}
 
-      {/* Statistics */}
-      <div className="grid grid-cols-4 gap-4">
-        <TaskCenterStatCard
-          value={jobs.length}
-          label={t('stats.total')}
-          icon={Clock}
-          iconWrapClassName="bg-primary/10"
-          iconClassName="text-primary"
-        />
-        <TaskCenterStatCard
-          value={runningJobs.length}
-          label={t('stats.running')}
-          icon={Play}
-          iconWrapClassName="bg-green-100 dark:bg-green-900/30"
-          iconClassName="text-green-600"
-        />
-        <TaskCenterStatCard
-          value={pausedJobs.length}
-          label={t('stats.paused')}
-          icon={Pause}
-          iconWrapClassName="bg-yellow-100 dark:bg-yellow-900/30"
-          iconClassName="text-yellow-600"
-        />
-        <TaskCenterStatCard
-          value={failedJobs.length}
-          label={t('stats.failed')}
-          icon={XCircle}
-          iconWrapClassName="bg-red-100 dark:bg-red-900/30"
-          iconClassName="text-red-600"
-        />
-      </div>
-
-      {/* Error Display */}
       {error && (
         <Card className="border-destructive">
-          <CardContent className="py-4 text-destructive flex items-center gap-2">
+          <CardContent className="flex items-center gap-2 py-4 text-destructive">
             <AlertCircle className="h-5 w-5" />
             {error}
           </CardContent>
         </Card>
       )}
 
-      {/* Jobs List */}
       {showInitialLoading ? (
-        <Card className={TASK_CENTER_SURFACE_CARD_CLASS}>
-          <CardContent className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span>{t('common:status.loading', 'Loading...')}</span>
-          </CardContent>
-        </Card>
+        <TaskCenterSurface>
+          <div className="overflow-x-auto">
+            <div className="min-w-[760px] divide-y">
+              {Array.from({ length: 5 }).map((_, index) => (
+                <div
+                  key={`cron-loading-row-${index}`}
+                  className="grid grid-cols-[112px_minmax(0,1fr)_140px] items-center gap-5 px-5 py-4"
+                >
+                  <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+                  <div className="space-y-2">
+                    <div className="h-4 w-64 animate-pulse rounded bg-muted" />
+                    <div className="h-10 w-full animate-pulse rounded-lg bg-muted" />
+                    <div className="h-3 w-80 animate-pulse rounded bg-muted" />
+                  </div>
+                  <div className="ml-auto h-8 w-28 animate-pulse rounded-full bg-muted" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </TaskCenterSurface>
       ) : jobs.length === 0 ? (
-        <Card className={TASK_CENTER_SURFACE_CARD_CLASS}>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Clock className="h-12 w-12 text-muted-foreground mb-4" />
-            <h3 className="text-lg font-medium mb-2">{t('empty.title')}</h3>
-            <p className="text-muted-foreground text-center mb-4 max-w-md">
-              {t('empty.description')}
-            </p>
+        <TaskCenterSurface>
+          <TaskCenterEmptyState
+            icon={Clock}
+            title={t('empty.title')}
+            description={t('empty.description')}
+          >
             <Button
               onClick={() => {
                 setEditingJob(undefined);
@@ -1061,28 +1470,44 @@ export function Cron({ embedded = false }: CronProps) {
               }}
               disabled={!isGatewayRunning}
             >
-              <Plus className="h-4 w-4 mr-2" />
+              <Plus className="h-4 w-4" />
               {t('empty.create')}
             </Button>
-          </CardContent>
-        </Card>
+          </TaskCenterEmptyState>
+        </TaskCenterSurface>
       ) : (
-        <div className="space-y-4">
-          {jobs.map((job) => (
-            <CronJobCard
-              key={job.id}
-              job={job}
-              isMutating={Boolean(mutatingByJobId[job.id])}
-              onToggle={(enabled) => handleToggle(job.id, enabled)}
-              onEdit={() => {
-                setEditingJob(job);
-                setShowDialog(true);
-              }}
-              onDelete={() => setJobToDelete({ id: job.id })}
-              onTrigger={() => isGatewayRunning ? triggerJob(job.id) : Promise.resolve({ ran: false, reason: 'gateway-not-running' })}
+        <TaskCenterSurface>
+          {filteredJobs.length === 0 ? (
+            <TaskCenterEmptyState
+              icon={Clock}
+              title={t('list.noMatches', { defaultValue: 'No scheduled tasks match this filter.' })}
             />
-          ))}
-        </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div className="min-w-[760px] divide-y">
+                {filteredJobs.map((job) => (
+                  <CronJobCard
+                    key={job.id}
+                    job={job}
+                    isMutating={Boolean(mutatingByJobId[job.id])}
+                    onToggle={(enabled) => handleToggle(job.id, enabled)}
+                    onEdit={() => {
+                      setEditingJob(job);
+                      setShowDialog(true);
+                    }}
+                    onDelete={() => setJobToDelete({ id: job.id })}
+                    onTrigger={async () => {
+                      if (!isGatewayRunning) {
+                        throw new Error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
+                      }
+                      return triggerJob(job.id);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </TaskCenterSurface>
       )}
 
       {/* Create/Edit Dialog */}
@@ -1112,6 +1537,9 @@ export function Cron({ embedded = false }: CronProps) {
             setJobToDelete(null);
             toast.success(t('toast.deleted'));
           }
+        }}
+        onError={(deleteError) => {
+          toast.error(t('toast.failedDelete', { error: deleteError instanceof Error ? deleteError.message : String(deleteError) }));
         }}
         onCancel={() => setJobToDelete(null)}
       />

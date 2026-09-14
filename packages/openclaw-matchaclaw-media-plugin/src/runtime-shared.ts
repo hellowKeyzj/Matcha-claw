@@ -1,5 +1,3 @@
-import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runtime'
-import { resolveProviderHttpRequestConfig } from 'openclaw/plugin-sdk/provider-http'
 import {
   findConfiguredModel,
   parseRouteModel,
@@ -11,7 +9,10 @@ import {
   protocolError,
 } from './errors.js'
 import {
-  PLUGIN_ID,
+  buildHeaders,
+  normalizeBaseUrl,
+} from './http-runtime.js'
+import {
   type CustomMediaProviderConfig,
   type ProviderHttpRuntime,
   type ResolvedImageRequest,
@@ -36,53 +37,53 @@ export function resolveImageRequest(req: ResolvedImageRequest['req']): ResolvedI
   }
 }
 
+function normalizeProviderKey(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function readAuthProfileApiKey(req: ResolvedImageRequest['req'], providerKey: string): string | undefined {
+  const normalizedProvider = normalizeProviderKey(providerKey)
+  const profiles = req.authStore?.profiles ?? {}
+  const configuredOrder = req.authStore?.order?.[providerKey] ?? req.authStore?.order?.[normalizedProvider] ?? []
+  const orderedIds = [
+    ...configuredOrder,
+    ...Object.keys(profiles).filter((profileId) => !configuredOrder.includes(profileId)),
+  ]
+  for (const profileId of orderedIds) {
+    const profile = profiles[profileId]
+    if (!profile || normalizeProviderKey(profile.provider ?? '') !== normalizedProvider) continue
+    const value = profile.type === 'token' ? profile.token : profile.key
+    const apiKey = typeof value === 'string' ? value.trim() : ''
+    if (apiKey) return apiKey
+  }
+  return undefined
+}
+
 export async function resolveApiKey(
   req: ResolvedImageRequest['req'],
   providerKey: string,
-  provider: CustomMediaProviderConfig,
+  _provider: CustomMediaProviderConfig,
 ): Promise<string> {
-  const auth = await resolveApiKeyForProvider({
-    provider: providerKey,
-    cfg: req.cfg,
-    agentDir: req.agentDir,
-    store: req.authStore,
-  })
-  if (auth.apiKey) return auth.apiKey
+  const storedApiKey = readAuthProfileApiKey(req, providerKey)
+  if (storedApiKey) return storedApiKey
   const envKey = `MATCHACLAW_MEDIA_${providerKey.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}_API_KEY`
   const apiKey = process.env[envKey]?.trim() || process.env.MATCHACLAW_MEDIA_API_KEY?.trim() || ''
   if (!apiKey) throw authError(`MatchaClaw media provider "${providerKey}" API key missing`)
   return apiKey
 }
 
-export function buildHeaders(provider: CustomMediaProviderConfig, defaults: Record<string, string>): Headers {
-  return new Headers({
-    ...defaults,
-    ...(provider.headers ?? {}),
-  })
-}
-
 export function resolveProviderHttpRuntime(
   provider: CustomMediaProviderConfig,
   input: {
     defaultHeaders: Record<string, string>
-    api: string
   },
 ): ProviderHttpRuntime {
-  const resolved = resolveProviderHttpRequestConfig({
-    baseUrl: provider.baseUrl,
-    defaultBaseUrl: provider.baseUrl,
-    defaultHeaders: input.defaultHeaders,
-    provider: PLUGIN_ID,
-    api: input.api,
-    capability: 'image',
-    transport: 'http',
-    allowPrivateNetwork: true,
-  })
+  const baseUrl = normalizeBaseUrl(provider.baseUrl, provider.baseUrl)
+  if (!baseUrl) throw protocolError('Missing MatchaClaw media provider baseUrl')
   return {
-    baseUrl: resolved.baseUrl,
-    headers: buildHeaders(provider, input.defaultHeaders),
-    allowPrivateNetwork: resolved.allowPrivateNetwork,
-    dispatcherPolicy: resolved.dispatcherPolicy,
+    baseUrl,
+    headers: buildHeaders(input.defaultHeaders, provider.headers),
+    allowPrivateNetwork: true,
   }
 }
 

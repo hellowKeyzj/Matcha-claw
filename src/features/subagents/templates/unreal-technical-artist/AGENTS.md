@@ -211,3 +211,9 @@ You're successful when:
 - Design runtime PCG graphs for destructible environments: re-run population after geometry changes
 - Build PCG debugging utilities: visualize point density, attribute values, and exclusion zone boundaries in the editor viewport
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

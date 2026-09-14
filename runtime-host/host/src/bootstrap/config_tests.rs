@@ -17,6 +17,7 @@ fn wire() -> serde_json::Value {
         "appVersion": "1.0.0",
         "appLogDir": format!("{ROOT}/userdata/logs"),
         "runtimeHostStateDir": format!("{ROOT}/runtime-host"),
+        "runtimeHostMcpExecutable": format!("{ROOT}/runtime-host-mcp"),
         "parentCallbackBaseUrl": "http://127.0.0.1:34100",
         "parentCallbackDispatchToken": "test-parent-dispatch-token",
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",
@@ -32,7 +33,6 @@ fn wire() -> serde_json::Value {
         "channelControlTransportPort": 34132,
         "channelPairingTransportPort": 34126,
         "sessionModelSelectionTransportPort": 34108,
-        "openclawHistoryTransportPort": 34109,
         "matchaHistoryTransportPort": 34141,
         "usageTransportPort": 34136,
         "diagnosticsTransportPort": 34104,
@@ -147,6 +147,7 @@ fn materializable_wire(root: &TestRoot) -> serde_json::Value {
     let mut value = wire();
     value["appLogDir"] = serde_json::Value::String(root.path("userdata/logs"));
     value["runtimeHostStateDir"] = serde_json::Value::String(root.runtime_host_state_dir());
+    value["runtimeHostMcpExecutable"] = serde_json::Value::String(root.path("runtime-host-mcp"));
     value["matcha"]["bunExecutable"] = serde_json::Value::String(root.path("bun"));
     value["matcha"]["entry"] = serde_json::Value::String(root.path("app-server.mjs"));
     value["matcha"]["workingDirectory"] = serde_json::Value::String(root.path("work"));
@@ -316,7 +317,6 @@ fn materializes_host_and_organization_runtime_input() {
     let channel_control_transport_port = parts.channel_control_transport_port;
     let channel_pairing_transport_port = parts.channel_pairing_transport_port;
     let session_model_selection_transport_port = parts.session_model_selection_transport_port;
-    let openclaw_history_transport_port = parts.openclaw_history_transport_port;
     let matcha_history_transport_port = parts.matcha_history_transport_port;
     let usage_transport_port = parts.usage_transport_port;
     let diagnostics_transport_port = parts.diagnostics_transport_port;
@@ -353,7 +353,6 @@ fn materializes_host_and_organization_runtime_input() {
     assert_eq!(channel_control_transport_port, 34132);
     assert_eq!(channel_pairing_transport_port, 34126);
     assert_eq!(session_model_selection_transport_port, 34108);
-    assert_eq!(openclaw_history_transport_port, 34109);
     assert_eq!(matcha_history_transport_port, 34141);
     assert_eq!(usage_transport_port, 34136);
     assert_eq!(diagnostics_transport_port, 34104);
@@ -389,6 +388,14 @@ fn materializes_host_and_organization_runtime_input() {
     );
     assert_eq!(input.matcha.storage_root, Path::new(&root.path("storage")));
     assert_eq!(input.matcha.port, 34102);
+    assert_eq!(
+        input.open_claw.team_run_mcp_executable,
+        Path::new(&root.path("runtime-host-mcp"))
+    );
+    assert_eq!(
+        input.open_claw.team_run_mcp_state_dir,
+        Path::new(&root.runtime_host_state_dir())
+    );
     assert_eq!(
         input.open_claw.electron_image,
         Path::new(&root.path("MatchaClaw"))

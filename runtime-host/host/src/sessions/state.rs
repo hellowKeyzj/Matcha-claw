@@ -265,7 +265,7 @@ pub enum SessionItem {
 }
 
 impl SessionItem {
-    fn item_id(&self) -> &str {
+    pub(crate) fn item_id(&self) -> &str {
         match self {
             Self::UserMessage { item_id, .. }
             | Self::AssistantTurn { item_id, .. }
@@ -301,6 +301,7 @@ pub struct ToolView {
     pub input_text: Option<String>,
     pub summary: Option<String>,
     pub output: Option<Value>,
+    pub details: Option<Value>,
     pub is_error: Option<bool>,
 }
 
@@ -319,6 +320,8 @@ pub struct RuntimeView {
     pub phase: RunPhase,
     pub active_run_id: Option<String>,
     pub issue: Option<RuntimeIssue>,
+    pub runtime_activity: Option<RuntimeActivity>,
+    pub error_detail: Option<RuntimeErrorDetail>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -328,6 +331,43 @@ pub enum RuntimeIssue {
     Unavailable,
     Timeout,
     Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeActivity {
+    Compacting,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeErrorDetail {
+    pub failover_reason: Option<String>,
+    pub provider_runtime_failure_kind: Option<String>,
+    pub provider_error_type: Option<String>,
+    pub provider_error_message_preview: Option<String>,
+    pub http_status: Option<u16>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeNotice {
+    pub run_id: String,
+    pub kind: RuntimeNoticeKind,
+    pub command: Option<String>,
+    pub risk_level: Option<String>,
+    pub rationale: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeNoticeKind {
+    GuardianReviewing,
+    GuardianApproved,
+    GuardianDenied,
+    GuardianWarning,
+    GuardianStrictReviewRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -566,6 +606,9 @@ pub enum SessionChange {
     },
     RuntimeChanged {
         runtime: RuntimeView,
+    },
+    RuntimeNoticeUpdated {
+        notice: RuntimeNotice,
     },
     WindowChanged {
         window: SessionWindow,
@@ -819,13 +862,23 @@ impl SessionState {
         cursor: u64,
         facts: SessionFacts,
     ) -> Result<Self, SessionStateError> {
+        Self::from_view_parts(identity, epoch, 0, cursor, facts)
+    }
+
+    pub fn from_view_parts(
+        identity: SessionIdentity,
+        epoch: u64,
+        seq: u64,
+        cursor: u64,
+        facts: SessionFacts,
+    ) -> Result<Self, SessionStateError> {
         if !valid_identity(&identity) {
             return Err(SessionStateError::InvalidIdentity);
         }
         if !valid_epoch(epoch) {
             return Err(SessionStateError::InvalidEpoch);
         }
-        if cursor > MAX_SAFE_INTEGER {
+        if seq > MAX_SAFE_INTEGER || cursor > MAX_SAFE_INTEGER {
             return Err(SessionStateError::InvalidCursor);
         }
         facts.validate()?;
@@ -834,7 +887,7 @@ impl SessionState {
             identity,
             endpoint_session_id: None,
             epoch,
-            seq: 0,
+            seq,
             cursor,
             items: facts.items,
             tools: facts.tools,
@@ -854,6 +907,10 @@ impl SessionState {
 
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
+    }
+
+    pub(crate) fn native_session_id(&self) -> Option<&str> {
+        self.endpoint_session_id.as_deref()
     }
 
     pub(crate) fn with_endpoint_session_id(
@@ -1047,6 +1104,7 @@ impl SessionState {
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
+        let run_id = run_id.or_else(|| sole_change_run_id(&changes).map(str::to_owned));
         if binding.session_key() != self.identity.session_key
             || self.native_source_epoch_changed(&binding)
         {
@@ -1267,6 +1325,13 @@ impl SessionState {
                 }
                 update_runtime_phase(&mut self.runtime, run_id, *phase);
                 if terminal_run_phase(*phase) {
+                    if !update_assistant_turn_status_for_run(
+                        &mut self.items,
+                        run_id,
+                        item_status_for_terminal_run_phase(*phase),
+                    ) {
+                        return false;
+                    }
                     self.terminal_run_ids.insert(run_id.clone());
                 }
                 true
@@ -1351,6 +1416,12 @@ impl SessionState {
                 self.runtime = event_runtime(runtime.clone());
                 true
             }
+            SessionChange::RuntimeNoticeUpdated { notice } => {
+                if self.terminal_run_ids.contains(&notice.run_id) {
+                    return false;
+                }
+                valid_runtime_notice(notice)
+            }
             SessionChange::WindowChanged { window } => {
                 if !valid_window(window) {
                     return false;
@@ -1391,6 +1462,54 @@ impl SessionState {
     }
 }
 
+fn update_assistant_turn_status_for_run(
+    fact: &mut SessionFact<Vec<SessionItem>>,
+    run_id: &str,
+    status: ItemStatus,
+) -> bool {
+    let current = mem::replace(fact, SessionFact::Unknown);
+    let (mut items, gaps) = match current {
+        SessionFact::Complete(items) => (items, Vec::new()),
+        SessionFact::Incomplete { facts, gaps } => (facts, gaps),
+        SessionFact::Unavailable | SessionFact::Unknown => {
+            *fact = current;
+            return true;
+        }
+    };
+    for item in &mut items {
+        if let SessionItem::AssistantTurn {
+            run_id: Some(item_run_id),
+            status: item_status,
+            ..
+        } = item
+            && item_run_id == run_id
+            && matches!(
+                item_status,
+                ItemStatus::Pending | ItemStatus::Streaming | ItemStatus::WaitingForTool
+            )
+        {
+            *item_status = status;
+        }
+    }
+    *fact = SessionFact::Incomplete {
+        facts: items,
+        gaps: with_gap(gaps, MissingFact::EventOnly),
+    };
+    true
+}
+
+fn item_status_for_terminal_run_phase(phase: RunPhase) -> ItemStatus {
+    match phase {
+        RunPhase::Cancelled | RunPhase::Interrupted => ItemStatus::Aborted,
+        RunPhase::Completed => ItemStatus::Final,
+        RunPhase::Failed => ItemStatus::Error,
+        RunPhase::Queued
+        | RunPhase::Started
+        | RunPhase::WaitingForApproval
+        | RunPhase::CancellationRequested => ItemStatus::Streaming,
+    }
+}
+
 fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase: RunPhase) {
     let current = mem::replace(fact, SessionFact::Unknown);
     let (mut runtime, mut gaps) = match current {
@@ -1401,6 +1520,8 @@ fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase
                 phase,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             },
             Vec::new(),
         ),
@@ -1411,6 +1532,8 @@ fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase
     } else {
         Some(run_id.to_owned())
     };
+    runtime.runtime_activity = None;
+    runtime.error_detail = None;
     gaps = with_gap(gaps, MissingFact::EventOnly);
     gaps = with_gap(gaps, MissingFact::PartialRuntime);
     *fact = SessionFact::Incomplete {
@@ -1490,15 +1613,10 @@ fn update_message_delta(
         if existing_message_id.is_none() {
             *existing_message_id = message_id.map(str::to_owned);
         }
-        if replace {
-            current_text.clear();
-            current_text.push_str(text);
-        } else {
-            current_text.push_str(text);
-        }
-        if !sync_assistant_text_segment(segments, current_text) {
+        if !sync_assistant_text_segment(segments, text, replace) {
             return false;
         }
+        *current_text = assistant_text_cache(segments);
         *current_status = status;
     } else {
         if items.len() >= MAX_ITEMS {
@@ -1581,21 +1699,46 @@ fn message_ids_can_merge(current: Option<&str>, incoming: Option<&str>) -> bool 
     }
 }
 
-fn sync_assistant_text_segment(segments: &mut Vec<SessionContent>, text: &str) -> bool {
-    segments.retain(|segment| !matches!(segment, SessionContent::Text { .. }));
+fn sync_assistant_text_segment(
+    segments: &mut Vec<SessionContent>,
+    text: &str,
+    replace: bool,
+) -> bool {
+    if replace {
+        segments.retain(|segment| !matches!(segment, SessionContent::Text { .. }));
+    }
     if text.is_empty() {
+        return true;
+    }
+    if !replace && let Some(SessionContent::Text { text: current }) = segments.last_mut() {
+        current.push_str(text);
         return true;
     }
     if segments.len() >= MAX_SEGMENTS {
         return false;
     }
-    segments.insert(
-        0,
-        SessionContent::Text {
-            text: text.to_owned(),
-        },
-    );
+    segments.push(SessionContent::Text {
+        text: text.to_owned(),
+    });
     true
+}
+
+fn assistant_text_cache(segments: &[SessionContent]) -> String {
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            SessionContent::Text { text: segment_text }
+            | SessionContent::LargeText {
+                text: segment_text, ..
+            } => text.push_str(segment_text),
+            SessionContent::Thinking { .. }
+            | SessionContent::ToolUse { .. }
+            | SessionContent::ToolResult { .. }
+            | SessionContent::Media { .. }
+            | SessionContent::Omitted { .. } => {}
+        }
+    }
+    text
 }
 
 fn tool_update_for_state(fact: &SessionFact<Vec<ToolView>>, tool: &ToolView) -> ToolView {
@@ -1618,6 +1761,7 @@ fn tool_update_for_state(fact: &SessionFact<Vec<ToolView>>, tool: &ToolView) -> 
             .or_else(|| existing.input_text.clone()),
         summary: tool.summary.clone().or_else(|| existing.summary.clone()),
         output: tool.output.clone().or_else(|| existing.output.clone()),
+        details: tool.details.clone().or_else(|| existing.details.clone()),
         is_error: tool.is_error.or(existing.is_error),
     }
 }
@@ -1779,9 +1923,17 @@ fn project_delta_changes(
                     push_message_updated_change(&mut projected, item.clone());
                 }
             }
-            SessionChange::RunPhaseChanged { .. }
-            | SessionChange::ApprovalUpdated { .. }
+            SessionChange::RunPhaseChanged { run_id, phase } => {
+                projected.push(change.clone());
+                if terminal_run_phase(*phase)
+                    && let Some(item) = assistant_turn_for_run_id(&state.items, run_id)
+                {
+                    push_message_updated_change(&mut projected, item.clone());
+                }
+            }
+            SessionChange::ApprovalUpdated { .. }
             | SessionChange::RuntimeChanged { .. }
+            | SessionChange::RuntimeNoticeUpdated { .. }
             | SessionChange::WindowChanged { .. }
             | SessionChange::RecoveryRequired { .. } => projected.push(change.clone()),
         }
@@ -1910,14 +2062,14 @@ fn replace_item(items: &mut Vec<SessionItem>, mut item: SessionItem) -> bool {
         .iter()
         .position(|existing| existing.item_id() == item.item_id())
     {
-        if !carry_forward_tool_segments(&mut item, &items[existing_index]) {
+        if !carry_forward_assistant_segments(&mut item, &items[existing_index]) {
             return false;
         }
         items[existing_index] = item;
         return true;
     }
     if let Some(existing_index) = tool_anchor_only_turn_index(items, &item) {
-        if !carry_forward_tool_segments(&mut item, &items[existing_index]) {
+        if !carry_forward_assistant_segments(&mut item, &items[existing_index]) {
             return false;
         }
         items[existing_index] = item;
@@ -1930,33 +2082,90 @@ fn replace_item(items: &mut Vec<SessionItem>, mut item: SessionItem) -> bool {
     true
 }
 
-fn carry_forward_tool_segments(item: &mut SessionItem, existing: &SessionItem) -> bool {
-    let SessionItem::AssistantTurn { segments, .. } = item else {
+fn carry_forward_assistant_segments(item: &mut SessionItem, existing: &SessionItem) -> bool {
+    let SessionItem::AssistantTurn { segments, text, .. } = item else {
         return true;
     };
     let SessionItem::AssistantTurn {
         segments: existing_segments,
+        text: existing_text,
         ..
     } = existing
     else {
         return true;
     };
-    for segment in existing_segments {
-        let Some(tool_call_id) = tool_segment_call_id(segment) else {
-            continue;
-        };
-        if segments
-            .iter()
-            .any(|candidate| tool_segment_call_id(candidate) == Some(tool_call_id))
-        {
-            continue;
-        }
-        if segments.len() >= MAX_SEGMENTS {
+    if merge_assistant_thinking_chunk(segments, text, existing_segments, existing_text) {
+        return true;
+    }
+    merge_assistant_segments(segments, text, existing_segments, existing_text)
+}
+
+fn merge_assistant_thinking_chunk(
+    segments: &mut Vec<SessionContent>,
+    text: &mut String,
+    existing_segments: &[SessionContent],
+    existing_text: &str,
+) -> bool {
+    if !text.is_empty() {
+        return false;
+    }
+    let [SessionContent::Thinking { text: incoming }] = segments.as_slice() else {
+        return false;
+    };
+    let mut merged = existing_segments.to_vec();
+    if let Some(SessionContent::Thinking { text }) = merged
+        .iter_mut()
+        .find(|segment| matches!(segment, SessionContent::Thinking { .. }))
+    {
+        text.push_str(incoming);
+    } else {
+        if merged.len() >= MAX_SEGMENTS {
             return false;
         }
-        segments.push(segment.clone());
+        merged.insert(
+            0,
+            SessionContent::Thinking {
+                text: incoming.clone(),
+            },
+        );
+    }
+    *segments = merged;
+    text.push_str(existing_text);
+    true
+}
+
+fn merge_assistant_segments(
+    segments: &mut Vec<SessionContent>,
+    text: &mut String,
+    existing_segments: &[SessionContent],
+    existing_text: &str,
+) -> bool {
+    if text.is_empty() && !existing_text.is_empty() {
+        text.push_str(existing_text);
+    }
+    for segment in existing_segments {
+        if should_carry_assistant_segment(segments, segment) {
+            if segments.len() >= MAX_SEGMENTS {
+                return false;
+            }
+            segments.push(segment.clone());
+        }
     }
     true
+}
+
+fn should_carry_assistant_segment(segments: &[SessionContent], segment: &SessionContent) -> bool {
+    match segment {
+        SessionContent::Text { .. } | SessionContent::LargeText { .. } => false,
+        SessionContent::Thinking { .. } => !segments
+            .iter()
+            .any(|candidate| matches!(candidate, SessionContent::Thinking { .. })),
+        SessionContent::ToolUse { tool_call_id, .. }
+        | SessionContent::ToolResult { tool_call_id, .. } => !segments
+            .iter()
+            .any(|candidate| tool_segment_call_id(candidate) == Some(tool_call_id.as_str())),
+        SessionContent::Media { .. } | SessionContent::Omitted { .. } => false,
+    }
 }
 
 fn tool_anchor_only_turn_index(items: &[SessionItem], item: &SessionItem) -> Option<usize> {
@@ -2222,6 +2431,10 @@ fn valid_tool(tool: &ToolView) -> bool {
             .output
             .as_ref()
             .is_none_or(|value| valid_payload(value, MAX_TEXT_BYTES))
+        && tool
+            .details
+            .as_ref()
+            .is_none_or(|value| valid_payload(value, MAX_TEXT_BYTES))
 }
 
 fn valid_approval(approval: &ApprovalView) -> bool {
@@ -2233,6 +2446,38 @@ fn valid_approval(approval: &ApprovalView) -> bool {
 
 fn valid_runtime(runtime: &RuntimeView) -> bool {
     runtime.active_run_id.as_deref().is_none_or(valid_id)
+        && runtime
+            .error_detail
+            .as_ref()
+            .is_none_or(valid_runtime_error_detail)
+}
+
+fn valid_runtime_notice(notice: &RuntimeNotice) -> bool {
+    valid_id(&notice.run_id)
+        && [
+            notice.command.as_deref(),
+            notice.risk_level.as_deref(),
+            notice.rationale.as_deref(),
+            notice.message.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|text| text.len() <= 300 && !text.contains('\0'))
+}
+
+fn valid_runtime_error_detail(detail: &RuntimeErrorDetail) -> bool {
+    [
+        detail.failover_reason.as_deref(),
+        detail.provider_runtime_failure_kind.as_deref(),
+        detail.provider_error_type.as_deref(),
+        detail.provider_error_message_preview.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|text| text.len() <= 300 && !text.contains('\0'))
+        && detail
+            .http_status
+            .is_none_or(|status| (100..=599).contains(&status))
 }
 
 fn valid_window(window: &SessionWindow) -> bool {
@@ -2288,8 +2533,23 @@ fn valid_changes(changes: &[SessionChange], outer_run_id: Option<&str>) -> bool 
         .all(|change| valid_change(change, outer_run_id))
 }
 
-fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
-    let change_run_id = match change {
+fn sole_change_run_id(changes: &[SessionChange]) -> Option<&str> {
+    let mut run_id = None;
+    for change in changes {
+        let Some(change_run_id) = change_run_id(change) else {
+            continue;
+        };
+        match run_id {
+            Some(current) if current != change_run_id => return None,
+            Some(_) => {}
+            None => run_id = Some(change_run_id),
+        }
+    }
+    run_id
+}
+
+fn change_run_id(change: &SessionChange) -> Option<&str> {
+    match change {
         SessionChange::RunPhaseChanged { run_id, .. } => Some(run_id.as_str()),
         SessionChange::MessageDelta { run_id, .. } => run_id.as_deref(),
         SessionChange::MessageUpdated { item } => item.run_id(),
@@ -2297,8 +2557,13 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
         SessionChange::ToolUpdated { tool } => tool.run_id.as_deref(),
         SessionChange::ApprovalUpdated { approval } => approval.run_id.as_deref(),
         SessionChange::RuntimeChanged { runtime } => runtime.active_run_id.as_deref(),
+        SessionChange::RuntimeNoticeUpdated { notice } => Some(notice.run_id.as_str()),
         SessionChange::WindowChanged { .. } | SessionChange::RecoveryRequired { .. } => None,
-    };
+    }
+}
+
+fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
+    let change_run_id = change_run_id(change);
     if outer_run_id
         .zip(change_run_id)
         .is_some_and(|(outer, change)| outer != change)
@@ -2325,12 +2590,13 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
             (runtime.active_run_id.is_some() || terminal_run_phase(runtime.phase))
                 && valid_runtime(runtime)
         }
+        SessionChange::RuntimeNoticeUpdated { notice } => valid_runtime_notice(notice),
         SessionChange::WindowChanged { window } => valid_window(window),
         SessionChange::RecoveryRequired { .. } => true,
     }
 }
 
-fn terminal_run_phase(phase: RunPhase) -> bool {
+pub(crate) fn terminal_run_phase(phase: RunPhase) -> bool {
     matches!(
         phase,
         RunPhase::Cancelled | RunPhase::Completed | RunPhase::Failed | RunPhase::Interrupted
@@ -2402,6 +2668,21 @@ mod tests {
         }
     }
 
+    fn tool(tool_call_id: &str, run_id: &str, name: Option<&str>, phase: ToolPhase) -> ToolView {
+        ToolView {
+            tool_call_id: tool_call_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            name: name.map(str::to_owned),
+            phase,
+            input: None,
+            input_text: None,
+            summary: None,
+            output: None,
+            details: None,
+            is_error: None,
+        }
+    }
+
     #[test]
     fn applies_ordered_delta_and_projects_view() {
         let mut state = SessionState::new(identity(), 1).expect("state");
@@ -2420,6 +2701,89 @@ mod tests {
         assert!(matches!(
             view.items,
             SessionFact::Incomplete { ref facts, .. } if facts.len() == 1
+        ));
+    }
+
+    #[test]
+    fn native_bound_derives_outer_run_id_from_single_run_changes() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        let binding =
+            SessionSourceBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(1))
+                .expect("binding");
+        let result = state.apply_native_bound(
+            binding,
+            None,
+            Some(1),
+            vec![SessionChange::MessageDelta {
+                item_id: "message-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                message_id: Some("message-1".to_owned()),
+                text: "hello".to_owned(),
+                replace: false,
+                status: ItemStatus::Streaming,
+            }],
+        );
+
+        assert!(matches!(
+            result,
+            SessionApplyResult::Applied(SessionDelta { run_id: Some(ref run_id), .. }) if run_id == "run-1"
+        ));
+    }
+
+    #[test]
+    fn terminal_run_phase_marks_existing_assistant_item_terminal() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                1,
+                vec![SessionChange::MessageDelta {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "partial".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        let result = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            2,
+            vec![SessionChange::RunPhaseChanged {
+                run_id: "run-1".to_owned(),
+                phase: RunPhase::Cancelled,
+            }],
+        );
+
+        assert!(matches!(
+            result,
+            SessionApplyResult::Applied(SessionDelta { changes, .. })
+                if matches!(
+                    changes.as_slice(),
+                    [
+                        SessionChange::RunPhaseChanged { .. },
+                        SessionChange::MessageUpdated {
+                            item: SessionItem::AssistantTurn {
+                                status: ItemStatus::Aborted,
+                                text,
+                                ..
+                            }
+                        }
+                    ] if text == "partial"
+                )
+        ));
+        assert!(matches!(
+            state.view().items,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [SessionItem::AssistantTurn { status: ItemStatus::Aborted, text, .. }] if text == "partial"
+                )
         ));
     }
 
@@ -2462,6 +2826,7 @@ mod tests {
                 input_text: Some("{\n  \"path\": \"src/main.rs\"\n}".to_owned()),
                 summary: Some("done".to_owned()),
                 output: Some(serde_json::json!({"ok":true})),
+                details: Some(serde_json::json!({"rows":1})),
                 is_error: Some(false),
             }]),
             approvals: SessionFact::Complete(Vec::new()),
@@ -2469,6 +2834,8 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             }),
             window: SessionFact::Complete(SessionWindow::latest(1)),
             completeness: SessionCompleteness::Complete,
@@ -2480,6 +2847,7 @@ mod tests {
         assert_eq!(item["content"][0]["toolCallId"], "tool-1");
         assert_eq!(item["content"][1]["isError"], false);
         assert_eq!(item["content"][2]["mediaType"], "image");
+        assert_eq!(encoded["tools"]["complete"][0]["details"]["rows"], 1);
         assert!(encoded.to_string().contains("toolCallId"));
         assert!(!encoded.to_string().contains("tool_call_id"));
         assert!(!encoded.to_string().contains("item_id"));
@@ -2547,6 +2915,8 @@ mod tests {
                         phase: RunPhase::Failed,
                         active_run_id: Some("ack-run-1".to_owned()),
                         issue: Some(RuntimeIssue::Rejected),
+                        runtime_activity: None,
+                        error_detail: None,
                     },
                 },
             ],
@@ -2563,6 +2933,7 @@ mod tests {
                     phase: RunPhase::Failed,
                     active_run_id: Some(ref run_id),
                     issue: Some(RuntimeIssue::Rejected),
+                    ..
                 },
                 ..
             } if run_id == "ack-run-1"
@@ -2682,6 +3053,8 @@ mod tests {
                 phase: RunPhase::Queued,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             }),
             window: SessionFact::Complete(SessionWindow::latest(0)),
             completeness: SessionCompleteness::Complete,
@@ -2820,6 +3193,7 @@ mod tests {
                         input_text: None,
                         summary: None,
                         output: None,
+                        details: None,
                         is_error: None,
                     },
                 }],
@@ -2856,6 +3230,8 @@ mod tests {
                         phase: RunPhase::Started,
                         active_run_id: Some("run-1".to_owned()),
                         issue: None,
+                        runtime_activity: None,
+                        error_detail: None,
                     },
                 }],
             ),
@@ -2873,6 +3249,8 @@ mod tests {
                         phase: RunPhase::Completed,
                         active_run_id: None,
                         issue: None,
+                        runtime_activity: None,
+                        error_detail: None,
                     },
                 }],
             ),
@@ -2916,6 +3294,7 @@ mod tests {
                     input_text: None,
                     summary: None,
                     output: None,
+                    details: None,
                     is_error: None,
                 },
             }],
@@ -2984,6 +3363,7 @@ mod tests {
                         input_text: Some("{\"file_path\":\"src/main.rs\"}".to_owned()),
                         summary: None,
                         output: None,
+                        details: Some(serde_json::json!({"rows":1})),
                         is_error: None,
                     },
                 }],
@@ -3005,6 +3385,7 @@ mod tests {
                     input_text: None,
                     summary: Some("done".to_owned()),
                     output: Some(serde_json::json!({"ok":true})),
+                    details: None,
                     is_error: Some(false),
                 },
             }],
@@ -3022,6 +3403,7 @@ mod tests {
                     && tool.input_text.as_deref() == Some("{\"file_path\":\"src/main.rs\"}")
                     && tool.summary.as_deref() == Some("done")
                     && tool.output == Some(serde_json::json!({"ok":true}))
+                    && tool.details == Some(serde_json::json!({"rows":1}))
                     && tool.is_error == Some(false)
         ));
     }
@@ -3060,6 +3442,7 @@ mod tests {
                         input_text: None,
                         summary: Some("done".to_owned()),
                         output: Some(serde_json::json!({"ok":true})),
+                        details: None,
                         is_error: Some(false),
                     },
                 }],
@@ -3116,6 +3499,7 @@ mod tests {
                         input_text: None,
                         summary: None,
                         output: None,
+                        details: None,
                         is_error: None,
                     },
                 }],
@@ -3158,9 +3542,414 @@ mod tests {
                 && matches!(
                     segments.as_slice(),
                     [
-                        SessionContent::Text { text },
-                        SessionContent::ToolUse { name, tool_call_id }
+                        SessionContent::ToolUse { name, tool_call_id },
+                        SessionContent::Text { text }
                     ] if text == "hello" && name == "read" && tool_call_id == "tool-1"
+                )
+        ));
+    }
+
+    #[test]
+    fn message_delta_preserves_tool_anchor_position_between_text_segments() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                1,
+                vec![SessionChange::MessageDelta {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "A".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                2,
+                vec![SessionChange::ToolUpdated {
+                    tool: tool("tool-1", "run-1", Some("write"), ToolPhase::Started),
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                3,
+                vec![SessionChange::MessageDelta {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "B".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        assert!(matches!(
+            state.view().items,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [SessionItem::AssistantTurn { text, segments, .. }]
+                        if text == "AB"
+                            && matches!(
+                                segments.as_slice(),
+                                [
+                                    SessionContent::Text { text: before },
+                                    SessionContent::ToolUse { name, tool_call_id },
+                                    SessionContent::Text { text: after },
+                                ] if before == "A"
+                                    && name == "write"
+                                    && tool_call_id == "tool-1"
+                                    && after == "B"
+                            )
+                )
+        ));
+    }
+
+    #[test]
+    fn completed_tool_update_does_not_move_anchor_after_later_text() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                1,
+                vec![SessionChange::MessageUpdated {
+                    item: SessionItem::AssistantTurn {
+                        item_id: "message-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        message_id: Some("message-1".to_owned()),
+                        status: ItemStatus::Streaming,
+                        segments: vec![
+                            SessionContent::Thinking {
+                                text: "thinking".to_owned(),
+                            },
+                            SessionContent::Text {
+                                text: "A".to_owned(),
+                            },
+                            SessionContent::ToolUse {
+                                name: "write".to_owned(),
+                                tool_call_id: "tool-1".to_owned(),
+                            },
+                            SessionContent::Text {
+                                text: "B".to_owned(),
+                            },
+                        ],
+                        text: "AB".to_owned(),
+                    },
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                2,
+                vec![SessionChange::ToolUpdated {
+                    tool: tool("tool-1", "run-1", Some("write"), ToolPhase::Started),
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        let result = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            3,
+            vec![SessionChange::ToolUpdated {
+                tool: ToolView {
+                    summary: Some("done".to_owned()),
+                    output: Some(serde_json::json!({"ok":true})),
+                    details: None,
+                    is_error: Some(false),
+                    ..tool("tool-1", "run-1", None, ToolPhase::Completed)
+                },
+            }],
+        );
+
+        assert!(matches!(result, SessionApplyResult::Applied(_)));
+        assert!(matches!(
+            state.view().items,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [SessionItem::AssistantTurn { text, segments, .. }]
+                        if text == "AB"
+                            && matches!(
+                                segments.as_slice(),
+                                [
+                                    SessionContent::Thinking { text: thinking },
+                                    SessionContent::Text { text: before },
+                                    SessionContent::ToolUse { name, tool_call_id },
+                                    SessionContent::Text { text: after },
+                                ] if thinking == "thinking"
+                                    && before == "A"
+                                    && name == "write"
+                                    && tool_call_id == "tool-1"
+                                    && after == "B"
+                            )
+                )
+        ));
+        assert!(matches!(
+            state.view().tools,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [tool] if tool.tool_call_id == "tool-1"
+                        && tool.name.as_deref() == Some("write")
+                        && tool.phase == ToolPhase::Completed
+                        && tool.summary.as_deref() == Some("done")
+                        && tool.output == Some(serde_json::json!({"ok":true}))
+                        && tool.is_error == Some(false)
+                )
+        ));
+    }
+
+    #[test]
+    fn openclaw_tool_delta_result_terminal_projection_keeps_text_and_tool_segment() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                1,
+                vec![SessionChange::ToolUpdated {
+                    tool: ToolView {
+                        tool_call_id: "tool-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        name: Some("read".to_owned()),
+                        phase: ToolPhase::Started,
+                        input: None,
+                        input_text: None,
+                        summary: None,
+                        output: None,
+                        details: None,
+                        is_error: None,
+                    },
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                2,
+                vec![SessionChange::MessageDelta {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "hello".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        let tool_result = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            3,
+            vec![SessionChange::ToolUpdated {
+                tool: ToolView {
+                    tool_call_id: "tool-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    name: None,
+                    phase: ToolPhase::Completed,
+                    input: None,
+                    input_text: None,
+                    summary: Some("done".to_owned()),
+                    output: None,
+                    details: None,
+                    is_error: Some(false),
+                },
+            }],
+        );
+        assert!(matches!(
+            tool_result,
+            SessionApplyResult::Applied(SessionDelta { changes, .. })
+                if matches!(
+                    changes.as_slice(),
+                    [
+                        SessionChange::ToolUpdated { tool },
+                        SessionChange::MessageUpdated {
+                            item: SessionItem::AssistantTurn { text, segments, .. }
+                        },
+                    ] if tool.phase == ToolPhase::Completed
+                        && tool.name.as_deref() == Some("read")
+                        && tool.summary.as_deref() == Some("done")
+                        && text == "hello"
+                        && matches!(
+                            segments.as_slice(),
+                            [
+                                SessionContent::ToolUse { name, tool_call_id },
+                                SessionContent::Text { text },
+                            ] if text == "hello" && name == "read" && tool_call_id == "tool-1"
+                        )
+                )
+        ));
+
+        let terminal = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            4,
+            vec![SessionChange::RunPhaseChanged {
+                run_id: "run-1".to_owned(),
+                phase: RunPhase::Completed,
+            }],
+        );
+        assert!(matches!(
+            terminal,
+            SessionApplyResult::Applied(SessionDelta { changes, .. })
+                if matches!(
+                    changes.as_slice(),
+                    [
+                        SessionChange::RunPhaseChanged { phase: RunPhase::Completed, .. },
+                        SessionChange::MessageUpdated {
+                            item: SessionItem::AssistantTurn {
+                                status: ItemStatus::Final,
+                                text,
+                                segments,
+                                ..
+                            }
+                        },
+                    ] if text == "hello"
+                        && matches!(
+                            segments.as_slice(),
+                            [
+                                SessionContent::ToolUse { name, tool_call_id },
+                                SessionContent::Text { text },
+                            ] if text == "hello" && name == "read" && tool_call_id == "tool-1"
+                        )
+                )
+        ));
+        assert!(matches!(
+            state.view().items,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [SessionItem::AssistantTurn {
+                        status: ItemStatus::Final,
+                        text,
+                        segments,
+                        ..
+                    }] if text == "hello"
+                        && matches!(
+                            segments.as_slice(),
+                            [
+                                SessionContent::ToolUse { name, tool_call_id },
+                                SessionContent::Text { text },
+                            ] if text == "hello" && name == "read" && tool_call_id == "tool-1"
+                        )
+                )
+        ));
+    }
+
+    #[test]
+    fn message_updated_replaces_tool_anchor_without_reordering_segments() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                1,
+                vec![SessionChange::ToolUpdated {
+                    tool: ToolView {
+                        tool_call_id: "tool-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        name: Some("read".to_owned()),
+                        phase: ToolPhase::Started,
+                        input: None,
+                        input_text: None,
+                        summary: None,
+                        output: None,
+                        details: None,
+                        is_error: None,
+                    },
+                }],
+            ),
+            SessionApplyResult::Applied(_)
+        ));
+
+        let ordered = SessionItem::AssistantTurn {
+            item_id: "message-1".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            message_id: Some("message-1".to_owned()),
+            status: ItemStatus::Streaming,
+            segments: vec![
+                SessionContent::Text {
+                    text: "before tool".to_owned(),
+                },
+                SessionContent::ToolUse {
+                    name: "read".to_owned(),
+                    tool_call_id: "tool-1".to_owned(),
+                },
+                SessionContent::Text {
+                    text: "after tool".to_owned(),
+                },
+            ],
+            text: "before tool after tool".to_owned(),
+        };
+        let result = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            2,
+            vec![SessionChange::MessageUpdated { item: ordered }],
+        );
+        let SessionApplyResult::Applied(delta) = result else {
+            panic!("expected applied delta")
+        };
+
+        assert!(matches!(
+            delta.changes.as_slice(),
+            [SessionChange::MessageUpdated {
+                item: SessionItem::AssistantTurn { item_id, segments, .. }
+            }] if item_id == "message-1"
+                && matches!(
+                    segments.as_slice(),
+                    [
+                        SessionContent::Text { text: before },
+                        SessionContent::ToolUse { name, tool_call_id },
+                        SessionContent::Text { text: after },
+                    ] if before == "before tool"
+                        && name == "read"
+                        && tool_call_id == "tool-1"
+                        && after == "after tool"
+                )
+        ));
+        assert!(matches!(
+            state.view().items,
+            SessionFact::Incomplete { ref facts, .. }
+                if matches!(
+                    facts.as_slice(),
+                    [SessionItem::AssistantTurn { item_id, segments, .. }]
+                        if item_id == "message-1"
+                            && matches!(
+                                segments.as_slice(),
+                                [
+                                    SessionContent::Text { text: before },
+                                    SessionContent::ToolUse { name, tool_call_id },
+                                    SessionContent::Text { text: after },
+                                ] if before == "before tool"
+                                    && name == "read"
+                                    && tool_call_id == "tool-1"
+                                    && after == "after tool"
+                            )
                 )
         ));
     }
@@ -3318,6 +4107,15 @@ mod tests {
     }
 
     #[test]
+    fn from_view_parts_preserves_seq_and_cursor() {
+        let state = SessionState::from_view_parts(identity(), 7, 9, 11, SessionFacts::unknown())
+            .expect("state");
+        assert_eq!(state.epoch(), 7);
+        assert_eq!(state.seq(), 9);
+        assert_eq!(state.cursor(), 11);
+    }
+
+    #[test]
     fn from_facts_rebuilds_terminal_run_fence_from_hydrated_items() {
         let facts = SessionFacts {
             items: SessionFact::Complete(vec![SessionItem::AssistantTurn {
@@ -3336,6 +4134,8 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             }),
             window: SessionFact::Complete(SessionWindow::latest(1)),
             completeness: SessionCompleteness::Complete,

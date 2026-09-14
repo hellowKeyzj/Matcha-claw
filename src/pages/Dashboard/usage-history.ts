@@ -12,6 +12,11 @@ export type UsageHistoryEntry = {
   costUsd?: number;
 };
 
+export type UsageSessionDetailEntry = UsageHistoryEntry & {
+  messageId?: string;
+  eventId?: string;
+};
+
 export type UsageWindow = '7d' | '30d' | 'all';
 export type UsageGroupBy = 'model' | 'day';
 

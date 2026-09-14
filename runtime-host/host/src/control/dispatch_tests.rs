@@ -80,44 +80,11 @@ fn control_payload_decoders_keep_the_fixed_product_dtos() {
         json!({ "sessionKey": "session-1" })
     );
     assert_eq!(
-        to_value(
-            decode_history(CommandInput(json!({
-                "sessionKey": "session-1",
-                "limit": 3,
-                "maxChars": 4,
-            })))
-            .unwrap(),
-        )
-        .unwrap(),
-        json!({ "sessionKey": "session-1", "limit": 3, "maxChars": 4 })
-    );
-    assert_eq!(
-        to_value(decode_history(CommandInput(json!({ "sessionKey": "session-1" }))).unwrap())
-            .unwrap(),
-        json!({ "sessionKey": "session-1" })
-    );
-    assert_eq!(
         decode_manual_cron_trigger(CommandInput(json!({ "jobId": "cron-job-1" })))
             .unwrap()
             .job_id,
         "cron-job-1"
     );
-    for payload in [
-        CommandInput(serde_json::Value::Null),
-        CommandInput(serde_json::Value::Null),
-        CommandInput(json!({ "sessionKey": "session-1", "limit": null })),
-        CommandInput(json!({ "sessionKey": "session-1", "maxChars": null })),
-        CommandInput(json!({ "sessionKey": "session-1", "limit": 0 })),
-        CommandInput(json!({ "sessionKey": "session-1", "limit": 1_001 })),
-        CommandInput(json!({ "sessionKey": "session-1", "maxChars": 0 })),
-        CommandInput(json!({ "sessionKey": "session-1", "maxChars": 500_001 })),
-        CommandInput(json!({
-            "sessionKey": "session-1",
-            "metadata": "must-not-pass",
-        })),
-    ] {
-        assert_eq!(decode_history(payload), Err(InvalidPayload));
-    }
     for payload in [
         CommandInput(serde_json::Value::Null),
         CommandInput(json!({
@@ -446,7 +413,8 @@ fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
             .collect::<Vec<_>>(),
         vec![
             "integration.channel",
-            "platform.runtime",
+            "openclaw.browser",
+            "openclaw.mcpApp",
             "plugin.runtime",
             "provider.routing",
             "scheduler.cron",
@@ -464,8 +432,14 @@ fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
         assert_eq!(descriptor["availability"], "available");
         assert!(descriptor["operations"].is_array());
     }
-    assert_eq!(capabilities[7]["scope"]["agentId"], "main");
-    assert_eq!(capabilities[4]["operations"].as_array().unwrap().len(), 5);
+    let browser = &capabilities[1];
+    assert_eq!(browser["kind"], "openclaw-browser");
+    assert_eq!(operation_ids(browser), vec!["browser.request"]);
+    let mcp_app = &capabilities[2];
+    assert_eq!(mcp_app["kind"], "openclaw-mcp-app");
+    assert_eq!(operation_ids(mcp_app), vec!["mcp.app.*"]);
+    assert_eq!(capabilities[8]["scope"]["agentId"], "main");
+    assert_eq!(capabilities[5]["operations"].as_array().unwrap().len(), 5);
     for private in [
         "token",
         "secret",
@@ -644,6 +618,22 @@ fn descriptor_operations_have_reachable_execute_or_transport_paths() {
     );
     assert_eq!(channel["routeOwnerId"], "openclaw");
 
+    let browser = capabilities
+        .iter()
+        .find(|descriptor| descriptor["id"] == "openclaw.browser")
+        .unwrap();
+    assert_eq!(operation_ids(browser), vec!["browser.request"]);
+    assert_eq!(browser["routeOwnerId"], "openclaw");
+    assert_eq!(browser["targetKinds"], json!(["none"]));
+
+    let mcp_app = capabilities
+        .iter()
+        .find(|descriptor| descriptor["id"] == "openclaw.mcpApp")
+        .unwrap();
+    assert_eq!(operation_ids(mcp_app), vec!["mcp.app.*"]);
+    assert_eq!(mcp_app["routeOwnerId"], "openclaw");
+    assert_eq!(mcp_app["targetKinds"], json!(["none"]));
+
     let cron = capabilities
         .iter()
         .find(|descriptor| descriptor["id"] == "scheduler.cron")
@@ -714,7 +704,7 @@ fn descriptor_operations_have_reachable_execute_or_transport_paths() {
         (
             "clawhub.openPath",
             json!({ "kind": "skill", "skillId": "browser-flow", "slug": "browser-flow" }),
-            json!({ "skillKey": "browser-flow", "filePath": "SKILL.md" }),
+            json!({ "skillKey": "browser-flow" }),
         ),
     ] {
         assert!(
@@ -722,6 +712,41 @@ fn descriptor_operations_have_reachable_execute_or_transport_paths() {
             "skill operation must reach execute branch: {operation}"
         );
     }
+    assert!(is_skill_capability_request(
+        "skills.updateState",
+        &json!({ "kind": "skill", "skillId": "Excel XLSX", "slug": "excel-xlsx" }),
+        &json!({ "skillKey": "Excel XLSX", "enabled": true })
+    ));
+    assert!(is_skill_capability_request(
+        "skills.updateBatchState",
+        &json!({ "kind": "skill" }),
+        &json!({ "skillKeys": ["Excel XLSX"], "enabled": true })
+    ));
+    assert!(is_skill_capability_request(
+        "clawhub.openReadme",
+        &json!({ "kind": "skill", "skillId": "Excel XLSX", "slug": "excel-xlsx" }),
+        &json!({ "skillKey": "Excel XLSX", "slug": "excel-xlsx" })
+    ));
+    assert!(is_skill_capability_request(
+        "clawhub.openPath",
+        &json!({ "kind": "skill", "skillId": "vendor/foo" }),
+        &json!({ "skillKey": "vendor/foo" })
+    ));
+    assert!(!is_skill_capability_request(
+        "clawhub.openPath",
+        &json!({ "kind": "skill", "skillId": "browser-flow", "slug": "browser-flow" }),
+        &json!({ "skillKey": "browser-flow", "filePath": "SKILL.md" })
+    ));
+    assert!(!is_skill_capability_request(
+        "clawhub.openPath",
+        &json!({ "kind": "skill", "skillId": "browser-flow", "slug": "browser-flow" }),
+        &json!({ "skillKey": "browser-flow", "filePath": "C:/skills/browser-flow/README.md" })
+    ));
+    assert!(!is_skill_capability_request(
+        "clawhub.openPath",
+        &json!({ "kind": "skill", "skillId": "browser-flow", "slug": "browser-flow" }),
+        &json!({ "skillKey": "browser-flow", "baseDir": "relative/path" })
+    ));
     assert!(!is_skill_capability_request(
         "skills.refreshStatus",
         &json!({ "kind": "skill" }),
@@ -777,6 +802,100 @@ fn operation_ids(descriptor: &Value) -> Vec<&str> {
 }
 
 #[test]
+fn openclaw_browser_and_mcp_app_decode_strict_private_dtos() {
+    let browser = decode_browser_request(CommandInput(json!({
+        "method": "GET",
+        "path": "/session/view",
+        "query": { "profile": "chrome" },
+        "body": { "viewId": "view-1" },
+        "timeoutMs": 1000,
+        "target": "node",
+        "node": "browser-node-1",
+    })))
+    .unwrap();
+    assert_eq!(browser.method, "GET");
+    assert_eq!(browser.path, "/session/view");
+    assert_eq!(browser.query, Some(json!({ "profile": "chrome" })));
+    assert_eq!(browser.body, Some(json!({ "viewId": "view-1" })));
+    assert_eq!(browser.timeout_ms, Some(1000));
+    assert_eq!(browser.target, Some("node".into()));
+    assert_eq!(browser.node, Some("browser-node-1".into()));
+
+    let mcp = decode_mcp_app_request(CommandInput(json!({
+        "operationId": "mcp.app.open",
+        "sessionKey": "agent:main:session-1",
+        "viewId": "view-1",
+        "standalone": true,
+    })))
+    .unwrap();
+    assert_eq!(mcp.operation_id, "mcp.app.open");
+    assert_eq!(mcp.session_key, "agent:main:session-1");
+    assert_eq!(mcp.view_id, "view-1");
+    assert_eq!(mcp.standalone, Some(true));
+
+    for input in [
+        json!({ "method": "GET", "path": "/session/view", "target": null }),
+        json!({ "method": "GET", "path": "/session/view", "target": "worker" }),
+        json!({ "method": "GET", "path": "/session/view", "node": "browser-node-1" }),
+        json!({ "method": "GET", "path": "/session/view", "query": [] }),
+        json!({ "method": "GET", "path": "/session/view", "timeoutMs": -1 }),
+        json!({ "method": "GET", "path": "/session/view", "timeoutMs": 0 }),
+        json!({ "method": "", "path": "/session/view" }),
+        json!({ "method": "GET\n", "path": "/session/view" }),
+        json!({ "method": "GET", "path": " " }),
+    ] {
+        assert!(matches!(
+            decode_browser_request(CommandInput(input)),
+            Err(InvalidPayload)
+        ));
+    }
+    for input in [
+        json!({ "operationId": "mcp.other", "sessionKey": "agent:main:session-1", "viewId": "view-1" }),
+        json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "body": {} }),
+        json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "standalone": "yes" }),
+        json!({ "operationId": "mcp.app.open", "sessionKey": "", "viewId": "view-1" }),
+    ] {
+        assert!(matches!(
+            decode_mcp_app_request(CommandInput(input)),
+            Err(InvalidPayload)
+        ));
+    }
+}
+
+#[test]
+fn openclaw_gateway_request_outcomes_project_without_private_payloads() {
+    assert_eq!(
+        to_value(openclaw_gateway_request_outcome(
+            openclaw::port::OpenClawGatewayRequestOutcome::Succeeded(json!({
+                "leaseId": "lease-1",
+            }))
+        ))
+        .unwrap(),
+        json!({ "kind": "succeeded", "result": { "leaseId": "lease-1" } })
+    );
+    assert_eq!(
+        to_value(openclaw_gateway_request_outcome(
+            openclaw::port::OpenClawGatewayRequestOutcome::CapacityExhausted
+        ))
+        .unwrap(),
+        json!({
+            "kind": "rejected",
+            "error": {
+                "code": "CAPACITY_EXHAUSTED",
+                "message": "OpenClaw Gateway request capacity is exhausted.",
+            }
+        })
+    );
+    assert_eq!(
+        to_value(openclaw_gateway_request_outcome(
+            openclaw::port::OpenClawGatewayRequestOutcome::OutcomeUnknown
+        ))
+        .unwrap(),
+        json!({ "kind": "unknown", "result": { "outcome": "unknown" } })
+    );
+}
+
+#[test]
 fn unknown_mutation_outcomes_remain_safe_and_distinguishable() {
     let send = CommandOutcome::succeeded(json!({
         "result": SendChatResponse::from(platform::exchange::InvocationOutcome::<
@@ -816,21 +935,7 @@ fn matcha_lifecycle_projection_is_exact_and_redacted() {
 }
 
 #[test]
-fn history_and_lifecycle_results_exclude_private_details() {
-    let history = CommandOutcome::succeeded(json!({
-        "result": ChatHistoryResponse::from(openclaw::session::protocol::ChatHistoryResult {
-            messages: vec![
-                openclaw::session::protocol::HistoryMessage {
-                    role: openclaw::session::protocol::HistoryRole::User,
-                    text: "private input".into(),
-                },
-                openclaw::session::protocol::HistoryMessage {
-                    role: openclaw::session::protocol::HistoryRole::Assistant,
-                    text: "private output".into(),
-                },
-            ],
-        }),
-    }));
+fn lifecycle_results_exclude_private_details() {
     let start = CommandOutcome::succeeded(json!({
         "result": {
             "lifecycle": crate::RuntimeLifecycle::Running,
@@ -839,7 +944,6 @@ fn history_and_lifecycle_results_exclude_private_details() {
         },
     }));
 
-    let history = to_value(history).unwrap().to_string();
     let start = to_value(start).unwrap().to_string();
     for private in [
         "sessionKey",
@@ -854,7 +958,6 @@ fn history_and_lifecycle_results_exclude_private_details() {
         "argv",
         "peer error",
     ] {
-        assert!(!history.contains(private));
         assert!(!start.contains(private));
     }
 }

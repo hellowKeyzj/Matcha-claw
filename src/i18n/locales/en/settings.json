@@ -35,7 +35,9 @@
       "apiKey": "API Key",
       "oauthDevice": "OAuth Device",
       "oauthBrowser": "OAuth Browser",
-      "local": "Local"
+      "local": "Local",
+      "token": "Token / setup-token",
+      "cliReuse": "Reuse CLI login"
     },
     "sections": {
       "credentials": "Credential Settings"
@@ -64,6 +66,7 @@
       "replaceApiKey": "Replace API Key",
       "replaceApiKeyHelp": "Leave this field empty if you want to keep the currently stored API key.",
       "baseUrl": "Base URL",
+      "codePlanMode": "Code Plan endpoint",
       "protocol": "Protocol",
       "chatProvider": "Chat provider",
       "mediaProvider": "Media provider",
@@ -74,7 +77,13 @@
       "save": "Save",
       "customDoc": "Documentation",
       "validate": "Validate",
-      "failed": "Failed"
+      "failed": "Failed",
+      "authMode": "Authentication",
+      "variant": "Service / plan",
+      "endpointPreset": "Endpoint region",
+      "cliReuseHelp": "Sign in to Claude Code first. MatchaClaw checks the local CLI credential before saving; no token needs to be pasted.",
+      "replaceToken": "Replace token",
+      "tokenHelp": "Run claude setup-token and paste the resulting token. It is stored locally."
     },
     "protocols": {
       "openai": "OpenAI Compatible",
@@ -97,7 +106,8 @@
       "updated": "Provider updated",
       "failedUpdate": "Failed to update provider",
       "invalidKey": "Invalid API key",
-      "minimaxConflict": "Cannot add both MiniMax (Global) and MiniMax (CN) providers."
+      "minimaxConflict": "Cannot add both MiniMax (Global) and MiniMax (CN) providers.",
+      "zaiConflict": "Cannot add both Z.AI (CN) and Z.AI (Global) providers."
     },
     "oauth": {
       "loginMode": "OAuth Login",
@@ -117,13 +127,33 @@
       "step1": "Copy the authorization code below.",
       "step2": "Open the login page in your browser.",
       "step3": "Paste the code to approve access.",
-      "requestingCode": "Requesting secure login code..."
+      "requestingCode": "Requesting secure login code...",
+      "completeLogin": "Complete login",
+      "manualHelp": "Open the authorization page, sign in, then paste the callback URL or code below.",
+      "callbackPlaceholder": "Paste callback URL or code",
+      "submitCode": "Submit code"
     },
     "projectionErrors": {
       "diagnostic": "OpenClaw config sync failed: {{reason}}",
       "readbackMismatch": "OpenClaw config readback does not match the saved provider settings.",
       "readbackUnavailable": "OpenClaw config was written but could not be read back for verification.",
       "outcomeUnknown": "OpenClaw config sync outcome is unknown.",
+      "providerAccountConfigurationInvalid": "OpenClaw provider account configuration is invalid. Check the provider, endpoint, and protocol, then try again.",
+      "providerCascadeUnavailable": "Provider configuration state is unavailable. Refresh and try again.",
+      "providerCredentialUnavailable": "The current provider credential is unavailable. Enter it again and save.",
+      "providerKeyDuplicate": "OpenClaw provider identifiers conflict. Remove duplicate accounts or use a custom configuration.",
+      "providerModelCapabilityInvalid": "The model capability configuration is invalid. Check the model type and save again.",
+      "providerModelIdentifierInvalid": "The model ID is invalid. Check it and save again.",
+      "providerModelPersistenceFailed": "Cannot write the OpenClaw model configuration. Check file permissions and try again.",
+      "providerModelTokenLimitInvalid": "The model token limits are invalid. Ensure max output tokens is not greater than the context window.",
+      "providerOwnerResponseUnavailable": "Provider configuration write returned no result. Refresh and try again.",
+      "providerOwnerUnavailable": "Provider configuration service is unavailable. Restart the app and try again.",
+      "providerRoutingAccountUnavailable": "Model routing references an unavailable provider account. Select the model again.",
+      "providerRoutingCredentialUnavailable": "Model routing references an unavailable provider credential. Enter the API key again and save.",
+      "providerRoutingInvalid": "Model routing is invalid. Check it and save again.",
+      "providerRoutingModelCapabilityUnavailable": "Model routing references a model that does not support this capability. Select another model.",
+      "providerRoutingModelUnavailable": "Model routing references a missing model. Select the model again.",
+      "providerRoutingPersistenceFailed": "Cannot write the OpenClaw model routing configuration. Check file permissions and try again.",
       "privateResolver": {
         "credentialMissing": "This account has no saved API key. Enter the API key again and save.",
         "credentialDecryptFailed": "The saved API key cannot be decrypted on this machine. Enter it again and save.",
@@ -135,44 +165,6 @@
         "invalidRequest": "The internal auth sync request is invalid. Try again.",
         "unknown": "OpenClaw auth sync failed. Enter the API key again and save."
       }
-    }
-  },
-  "license": {
-    "title": "License",
-    "description": "Activate and manage your local license authorization",
-    "gateStatus": "Gate Status",
-    "gateState": {
-      "checking": "Checking",
-      "granted": "Granted",
-      "blocked": "Blocked"
-    },
-    "renewAlert": {
-      "near_expiry_renew_failed": "Renewal failed near expiry. Please revalidate as soon as possible"
-    },
-    "inputLabel": "License Key",
-    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
-    "showKey": "Show license key",
-    "hideKey": "Hide license key",
-    "validate": "Validate License",
-    "revalidate": "Revalidate",
-    "clear": "Clear",
-    "messages": {
-      "valid": "License validated",
-      "cache_grace_valid": "License validated by cached grace period",
-      "empty": "Please enter a license key",
-      "format_invalid": "Invalid license key format",
-      "service_unconfigured": "License service is not configured",
-      "network_error": "Cannot reach license service, please check network and retry",
-      "server_rejected": "License was rejected by license service",
-      "expired": "License has expired",
-      "device_mismatch": "License device does not match this machine",
-      "not_allowed": "License is not allowed",
-      "checksum_invalid": "License checksum is invalid",
-      "unknown": "License validation failed"
-    },
-    "toast": {
-      "cleared": "Local license cleared",
-      "clearFailed": "Failed to clear local license: {{error}}"
     }
   },
   "diagnostics": {
@@ -439,9 +431,9 @@
     "refresh": "Refresh",
     "empty": "No models",
     "codePlan": {
-      "title": "Ark Code Plan",
-      "description": "Add ark-code-latest to the ark model catalog. Configure the Ark API key and coding base URL on the provider card.",
-      "add": "Add ark-code-latest",
+      "title": "Code Plan",
+      "description": "Add the Code Plan model to this provider catalog. Configure API key and Code Plan base URL on the provider card.",
+      "add": "Add {{model}}",
       "added": "Added"
     },
     "create": {
@@ -450,8 +442,25 @@
       "add": "Create"
     },
     "actions": {
+      "discover": "Fetch models",
       "add": "Add model",
-      "save": "Save"
+      "save": "Save changes",
+      "reset": "Discard"
+    },
+    "pending": {
+      "summary_one": "{{count}} unsaved change",
+      "summary_other": "{{count}} unsaved changes"
+    },
+    "discovery": {
+      "title": "Models available to import",
+      "loading": "Fetching models...",
+      "empty": "No available models discovered",
+      "error": "Failed to fetch models: {{error}}. Confirm this account can access the model list, then try again.",
+      "rejected": "Failed to fetch models: the backend rejected the model list request. Confirm this account's API key, permissions, group, and balance are available, then try again.",
+      "importSelected": "Import selected",
+      "duplicate": "Already in catalog",
+      "count_one": "· {{count}} model",
+      "count_other": "· {{count}} models"
     },
     "group": {
       "subtitle_one": "1 model registered",
@@ -469,6 +478,7 @@
       "resolutionLabel": "Resolution",
       "qualityLabel": "Quality",
       "defaultOption": "Default",
+      "advanced": "Advanced",
       "remove": "Remove"
     },
     "qualities": {

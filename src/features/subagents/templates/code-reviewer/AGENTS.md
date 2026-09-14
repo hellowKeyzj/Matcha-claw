@@ -47,4 +47,9 @@ Line 42: User input is interpolated directly into the query.
 - Use parameterized queries: `db.query('SELECT * FROM users WHERE name = $1', [name])`
 ```
 
+## Tools
 
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

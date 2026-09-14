@@ -33,11 +33,11 @@ pub(crate) fn decode_limit(
         )
         .map_err(|_| DecodeError::Unauthorized)?;
     match raw_limit {
-        None => Ok(openclaw::usage::UsageHistory::default_limit()),
+        None => Ok(openclaw::usage::UsageProjection::default_limit()),
         Some(value) => value
             .parse::<usize>()
             .ok()
-            .filter(|value| *value > 0 && *value <= openclaw::usage::UsageHistory::max_limit())
+            .filter(|value| *value > 0 && *value <= openclaw::usage::UsageProjection::max_limit())
             .ok_or(DecodeError::Invalid),
     }
 }
@@ -74,7 +74,7 @@ struct UsageEntry {
 
 impl UsageDelivery {
     pub(crate) fn from_native(
-        result: Result<Vec<openclaw::usage::UsageEntry>, openclaw::usage::UsageHistoryError>,
+        result: Result<Vec<openclaw::usage::UsageEntry>, openclaw::usage::UsageReadError>,
     ) -> Self {
         match result {
             Ok(entries) => Self::Ok(UsageResponse {
@@ -146,7 +146,7 @@ mod tests {
                 &mut verifier,
                 1
             ),
-            Ok(openclaw::usage::UsageHistory::default_limit()),
+            Ok(openclaw::usage::UsageProjection::default_limit()),
         );
     }
 
@@ -181,18 +181,19 @@ mod tests {
 
     #[test]
     fn public_projection_exposes_validated_identity_and_omits_private_transcript_data() {
-        let root = std::env::temp_dir().join(format!(
-            "runtime-host-usage-public-projection-{}",
-            std::process::id()
-        ));
-        let sessions = root.join("agents").join("main").join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(
-            sessions.join("session-1.jsonl"),
-            r#"{"timestamp":"2026-04-03T00:00:00.000Z","message":{"role":"assistant","usage":{"total":14}}}"#,
-        )
-        .unwrap();
-        let native = openclaw::usage::UsageHistory::new(&root).recent(1).unwrap();
+        let native = vec![
+            openclaw::usage::UsageEntry::new(
+                "main".to_owned(),
+                "session-1".to_owned(),
+                "2026-04-03T00:00:00.000Z".to_owned(),
+                1_775_174_400_000,
+                None,
+                None,
+                openclaw::usage::UsageTokens::new(0, 0, 0, 0, 14),
+                None,
+            )
+            .unwrap(),
+        ];
         let body = UsageDelivery::from_native(Ok(native)).body();
         let entry = body
             .get("entries")
@@ -206,13 +207,12 @@ mod tests {
         for private_field in ["transcript", "path", "raw"] {
             assert!(!serialized.contains(private_field));
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn unavailable_response_is_redacted() {
         let body =
-            UsageDelivery::from_native(Err(openclaw::usage::UsageHistoryError::Unavailable)).body();
+            UsageDelivery::from_native(Err(openclaw::usage::UsageReadError::Unavailable)).body();
         assert_eq!(
             body,
             json!({ "success": false, "error": "OpenClaw usage history is unavailable" })

@@ -10,20 +10,37 @@ describe('chat runtime event routing helpers', () => {
   it('ignores events for a different backend session', () => {
     expect(shouldIgnoreRuntimeEvent({
       eventSessionKey: 'agent:other:main',
-      targetBackendSessionKey: 'agent:main:main',
+      targetEventSessionKey: 'agent:main:main',
     })).toBe(true);
 
     expect(shouldIgnoreRuntimeEvent({
       eventSessionKey: 'agent:main:main',
-      targetBackendSessionKey: 'agent:main:main',
+      targetEventSessionKey: 'agent:main:main',
     })).toBe(false);
   });
 
   it('does not compare backend event keys against renderer record keys', () => {
     expect(shouldIgnoreRuntimeEvent({
       eventSessionKey: 'agent:main:session-1',
-      targetBackendSessionKey: 'agent:main:session-1',
+      targetEventSessionKey: 'agent:main:session-1',
     })).toBe(false);
+  });
+
+  it('routes cron base and run-scoped keys as the same session', () => {
+    expect(shouldIgnoreRuntimeEvent({
+      eventSessionKey: 'agent:main:cron:job-1:run:run-1',
+      targetEventSessionKey: 'agent:main:cron:job-1',
+    })).toBe(false);
+
+    expect(shouldIgnoreRuntimeEvent({
+      eventSessionKey: 'agent:main:cron:job-1:run:run-1',
+      targetEventSessionKey: 'agent:main:cron:job-2',
+    })).toBe(true);
+
+    expect(shouldIgnoreRuntimeEvent({
+      eventSessionKey: 'agent:main:main:run:run-1',
+      targetEventSessionKey: 'agent:main:main',
+    })).toBe(true);
   });
 
   it('only delta/final/error/aborted are useful for poll switching', () => {

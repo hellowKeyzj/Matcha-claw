@@ -1,4 +1,4 @@
-import { Brain, Download, PanelRightClose, PanelRightOpen, RefreshCw } from 'lucide-react';
+import { Brain, Download, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { memo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,8 +14,6 @@ const HEADER_TOOLTIP_PROPS = {
 };
 
 export const ChatHeaderBar = memo(function ChatHeaderBar({
-  onRefresh,
-  refreshBusy,
   showThinking,
   onToggleThinking,
   exportDisabled = false,
@@ -24,8 +22,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   unfinishedTaskCount,
   onToggleSidePanel,
 }: {
-  onRefresh: () => void;
-  refreshBusy: boolean;
   showThinking: boolean;
   onToggleThinking: () => void;
   exportDisabled?: boolean;
@@ -42,23 +38,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   return (
     <div className="flex items-start justify-end gap-2">
       <div className="flex items-center gap-1">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={HEADER_BUTTON_CLASSNAME}
-              onClick={onRefresh}
-              disabled={refreshBusy}
-            >
-              <RefreshCw className={cn('h-4 w-4', refreshBusy && 'animate-spin')} />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent {...HEADER_TOOLTIP_PROPS}>
-            <p>{t('toolbar.refresh')}</p>
-          </TooltipContent>
-        </Tooltip>
-
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

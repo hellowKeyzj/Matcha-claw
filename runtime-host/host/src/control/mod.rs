@@ -30,7 +30,7 @@ use crate::{
     Host, HostEvent, HostInput,
     composition::PeerHandle,
     event_output,
-    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     fleet::handle::FleetHandle,
     owner,
     sessions::SessionHandle,
@@ -63,6 +63,7 @@ where
         handles.session.clone(),
         handles.fleet.clone(),
         handles.platform_runtime.clone(),
+        handles.toolchain.clone(),
         handles.plugins.clone(),
         handles.skills.clone(),
         handles.cron.clone(),
@@ -93,7 +94,6 @@ pub struct DeliveryTransportInput<R, W> {
     pub channel_control_transport_port: u16,
     pub channel_pairing_transport_port: u16,
     pub session_model_selection_transport_port: u16,
-    pub openclaw_history_transport_port: u16,
     pub matcha_history_transport_port: u16,
     pub usage_transport_port: u16,
     pub diagnostics_transport_port: u16,
@@ -150,7 +150,6 @@ where
         channel_control_transport_port,
         channel_pairing_transport_port,
         session_model_selection_transport_port,
-        openclaw_history_transport_port,
         matcha_history_transport_port,
         usage_transport_port,
         diagnostics_transport_port,
@@ -192,6 +191,7 @@ where
         owner.handle(),
         handles.peer.clone(),
         handles.platform_runtime.clone(),
+        handles.toolchain.clone(),
         handles.plugins.clone(),
         handles.skills.clone(),
         handles.session.clone(),
@@ -385,19 +385,6 @@ where
                 return Err(ControlError::Transport("session model selection transport"));
             }
         };
-    let openclaw_history_transport = match crate::transport::openclaw_history::server::Server::bind(
-        openclaw_history_transport_port,
-        verifier.clone(),
-        handles.session.clone(),
-    )
-    .await
-    {
-        Ok(transport) => transport,
-        Err(_) => {
-            let _ = shutdown_host(&mut owner).await;
-            return Err(ControlError::Transport("openclaw history transport"));
-        }
-    };
     let matcha_history_transport = match crate::transport::matcha_history::server::Server::bind(
         matcha_history_transport_port,
         verifier.clone(),
@@ -664,6 +651,7 @@ where
         verifier.clone(),
         handles.provider.clone(),
         handles.skills.clone(),
+        handles.agents.clone(),
         handles.clawhub_registry.clone(),
         handles.plugins.clone(),
         handles.connector.clone(),
@@ -779,7 +767,6 @@ where
     let channel_control_transport = tokio::spawn(channel_control_transport.run());
     let channel_pairing_transport = tokio::spawn(channel_pairing_transport.run());
     let session_model_selection_transport = tokio::spawn(session_model_selection_transport.run());
-    let openclaw_history_transport = tokio::spawn(openclaw_history_transport.run());
     let matcha_history_transport = tokio::spawn(matcha_history_transport.run());
     let usage_transport = tokio::spawn(usage_transport.run());
     let diagnostics_transport = tokio::spawn(diagnostics_transport.run());
@@ -812,6 +799,7 @@ where
         handles.session.clone(),
         handles.fleet.clone(),
         handles.platform_runtime.clone(),
+        handles.toolchain.clone(),
         handles.plugins.clone(),
         handles.skills.clone(),
         handles.cron.clone(),
@@ -835,7 +823,6 @@ where
     channel_control_transport.abort();
     channel_pairing_transport.abort();
     session_model_selection_transport.abort();
-    openclaw_history_transport.abort();
     matcha_history_transport.abort();
     usage_transport.abort();
     diagnostics_transport.abort();
@@ -875,7 +862,6 @@ where
     let _ = channel_control_transport.await;
     let _ = channel_pairing_transport.await;
     let _ = session_model_selection_transport.await;
-    let _ = openclaw_history_transport.await;
     let _ = matcha_history_transport.await;
     let _ = usage_transport.await;
     let _ = diagnostics_transport.await;
@@ -911,6 +897,7 @@ async fn run_owner<R, W>(
     session: SessionHandle,
     fleet: FleetHandle,
     platform_runtime: PlatformRuntimeHandle,
+    toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
     cron: CronHandle,
@@ -989,6 +976,7 @@ where
                                 session.clone(),
                                 fleet.clone(),
                                 platform_runtime.clone(),
+                                toolchain.clone(),
                                 plugins.clone(),
                                 skills.clone(),
                                 cron.clone(),
@@ -1086,6 +1074,7 @@ fn spawn_command(
     session: SessionHandle,
     fleet: FleetHandle,
     platform_runtime: PlatformRuntimeHandle,
+    toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
     cron: CronHandle,
@@ -1147,6 +1136,7 @@ fn spawn_command(
                 &fleet,
                 &session,
                 &platform_runtime,
+                &toolchain,
                 &plugins,
                 &skills,
                 &cron,
@@ -1226,8 +1216,8 @@ fn command_kind(command: &wire::Command) -> &'static str {
         wire::Command::OpenClawCliCommand {} => "openclaw.cli.command",
         wire::Command::OpenClawToolPermissionGet {} => "openclaw.tool-permission.get",
         wire::Command::OpenClawToolPermissionSet { .. } => "openclaw.tool-permission.set",
-        wire::Command::OpenClawToolchainStatus {} => "openclaw.toolchain.status",
-        wire::Command::OpenClawToolchainInstallUv {} => "openclaw.toolchain.install-uv",
+        wire::Command::HostToolchainStatus {} => "host.toolchain.status",
+        wire::Command::HostToolchainPrepare {} => "host.toolchain.prepare",
         wire::Command::OpenClawSubagentTemplateCatalog {} => "openclaw.subagent-templates.list",
         wire::Command::OpenClawSubagentTemplate { .. } => "openclaw.subagent-templates.get",
         wire::Command::OpenClawStart {} => "openclaw.lifecycle.start",
@@ -1239,7 +1229,8 @@ fn command_kind(command: &wire::Command) -> &'static str {
         wire::Command::OpenClawGatewayStatus {} => "openclaw.gateway.status",
         wire::Command::OpenClawControlUiUrl {} => "openclaw.control-ui.url",
         wire::Command::OpenClawManualCronTrigger { .. } => "openclaw.cron.manual-trigger",
-        wire::Command::OpenClawChatHistory { .. } => "openclaw.chat.history",
+        wire::Command::OpenClawBrowserRequest { .. } => "openclaw.browser.request",
+        wire::Command::OpenClawMcpAppRequest { .. } => "openclaw.mcp-app.request",
         wire::Command::OpenClawChatSend { .. } => "openclaw.chat.send",
         wire::Command::OpenClawChatAbort { .. } => "openclaw.chat.abort",
         wire::Command::FleetCredentialsWrite { .. } => "fleet.credentials.write",

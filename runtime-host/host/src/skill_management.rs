@@ -40,6 +40,7 @@ pub(crate) enum Command {
     },
     Uninstall {
         skill_key: String,
+        slug: Option<String>,
     },
     ImportMarkdown {
         content: String,
@@ -49,6 +50,19 @@ pub(crate) enum Command {
     },
     Readme {
         skill_key: String,
+        slug: Option<String>,
+        file_path: Option<String>,
+        base_dir: Option<String>,
+    },
+    OpenReadme {
+        skill_key: String,
+        slug: Option<String>,
+        file_path: Option<String>,
+        base_dir: Option<String>,
+    },
+    OpenPath {
+        skill_key: String,
+        slug: Option<String>,
         file_path: Option<String>,
         base_dir: Option<String>,
     },
@@ -62,6 +76,7 @@ pub(crate) enum Outcome {
     Uninstall(RemoveOutcome),
     Import(ImportOutcome),
     Readme(Result<ReadmeReceipt, ReadmeError>),
+    OpenPath(Result<OpenPathReceipt, ReadmeError>),
     Unavailable,
     Rejected,
 }
@@ -145,9 +160,18 @@ pub(crate) struct ReadmeReceipt {
     pub(crate) file_path: String,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct OpenPathReceipt;
+
 impl fmt::Debug for ReadmeReceipt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ReadmeReceipt([REDACTED])")
+    }
+}
+
+impl fmt::Debug for OpenPathReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpenPathReceipt([REDACTED])")
     }
 }
 
@@ -177,7 +201,9 @@ impl Command {
         api_key: Option<String>,
         env: Option<BTreeMap<String, String>>,
     ) -> Result<Self, ()> {
-        if enabled.is_none() && api_key.is_none() && env.is_none() || !valid_name(&skill_key) {
+        if enabled.is_none() && api_key.is_none() && env.is_none()
+            || !valid_openclaw_skill_key(&skill_key)
+        {
             return Err(());
         }
         Ok(Self::Config {
@@ -239,10 +265,16 @@ impl Command {
             .then_some(Self::UploadCommit { upload_id, sha256 })
             .ok_or(())
     }
-    pub(crate) fn uninstall(skill_key: String) -> Result<Self, ()> {
-        (!skill_key.trim().is_empty())
-            .then_some(Self::Uninstall { skill_key })
-            .ok_or(())
+    pub(crate) fn uninstall(skill_key: String, slug: Option<String>) -> Result<Self, ()> {
+        if !valid_openclaw_skill_key(&skill_key)
+            || slug.as_deref().is_some_and(|value| !valid_slug(value))
+        {
+            return Err(());
+        }
+        Ok(Self::Uninstall {
+            skill_key: skill_key.trim().to_owned(),
+            slug: slug.map(|value| value.trim().to_owned()),
+        })
     }
     pub(crate) fn import_markdown(content: String) -> Result<Self, ()> {
         (!content.is_empty())
@@ -254,16 +286,65 @@ impl Command {
     }
     pub(crate) fn readme(
         skill_key: String,
+        slug: Option<String>,
         file_path: Option<String>,
         base_dir: Option<String>,
     ) -> Result<Self, ()> {
-        (!skill_key.trim().is_empty())
-            .then_some(Self::Readme {
-                skill_key,
-                file_path,
-                base_dir,
-            })
-            .ok_or(())
+        if !valid_openclaw_skill_key(&skill_key)
+            || slug
+                .as_deref()
+                .is_some_and(|value| !valid_openclaw_skill_key(value))
+        {
+            return Err(());
+        }
+        Ok(Self::Readme {
+            skill_key: skill_key.trim().to_owned(),
+            slug: slug.map(|value| value.trim().to_owned()),
+            file_path,
+            base_dir,
+        })
+    }
+
+    pub(crate) fn open_readme(
+        skill_key: String,
+        slug: Option<String>,
+        file_path: Option<String>,
+        base_dir: Option<String>,
+    ) -> Result<Self, ()> {
+        if !valid_openclaw_skill_key(&skill_key)
+            || slug
+                .as_deref()
+                .is_some_and(|value| !valid_openclaw_skill_key(value))
+        {
+            return Err(());
+        }
+        Ok(Self::OpenReadme {
+            skill_key: skill_key.trim().to_owned(),
+            slug: slug.map(|value| value.trim().to_owned()),
+            file_path,
+            base_dir,
+        })
+    }
+
+    pub(crate) fn open_path(
+        skill_key: String,
+        slug: Option<String>,
+        file_path: Option<String>,
+        base_dir: Option<String>,
+    ) -> Result<Self, ()> {
+        if !valid_openclaw_skill_key(&skill_key)
+            || slug
+                .as_deref()
+                .is_some_and(|value| !valid_openclaw_skill_key(value))
+        {
+            return Err(());
+        }
+        Ok(Self::OpenPath {
+            skill_key: skill_key.trim().to_owned(),
+            slug: slug.map(|value| value.trim().to_owned()),
+            file_path,
+            base_dir,
+        })
     }
 }
 
@@ -281,6 +362,10 @@ fn valid_slug(value: &str) -> bool {
             .bytes()
             .last()
             .is_some_and(|b| b.is_ascii_alphanumeric())
+}
+fn valid_openclaw_skill_key(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= 4096 && !value.contains('\0')
 }
 fn valid_name(value: &str) -> bool {
     let value = value.trim();

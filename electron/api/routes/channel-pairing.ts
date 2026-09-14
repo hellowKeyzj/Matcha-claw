@@ -20,7 +20,7 @@ export async function handleChannelPairingRoutes(
   const pairingChannel = readPairingChannel(url.pathname);
   if (pairingChannel && req.method === 'GET') {
     try {
-      const response = await transport.list(pairingChannel);
+      const response = await transport.list(pairingChannel, url.searchParams.get('accountId') ?? undefined);
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNAVAILABLE);
@@ -40,7 +40,7 @@ export async function handleChannelPairingRoutes(
 
   try {
     if (isListRequest(body)) {
-      const response = await transport.list(body.channel);
+      const response = await transport.list(body.channel, body.accountId);
       sendJson(res, response.status, response.body);
       return true;
     }
@@ -69,8 +69,11 @@ function readPairingChannel(pathname: string): string | null {
   return isIdentity(channel) ? channel : null;
 }
 
-function isListRequest(value: unknown): value is Readonly<{ channel: string }> {
-  return isRecord(value) && Object.keys(value).length === 1 && isIdentity(value.channel);
+function isListRequest(value: unknown): value is Readonly<{ channel: string; accountId?: string }> {
+  return isRecord(value)
+    && (hasExactKeys(value, ['channel']) || hasExactKeys(value, ['channel', 'accountId']))
+    && isIdentity(value.channel)
+    && (value.accountId === undefined || isIdentity(value.accountId));
 }
 
 function isApprovalRequest(value: unknown): value is Readonly<{

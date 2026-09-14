@@ -1,5 +1,5 @@
 import { definePluginEntry, type OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
-import type { ImageGenerationProvider } from 'openclaw/plugin-sdk/image-generation'
+import type { ImageGenerationProvider } from './types.js'
 import {
   createPluginConfigContext,
   getConfiguredProviderKeys,

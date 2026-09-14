@@ -1,3 +1,6 @@
+use super::trace::ChannelTraceSpan;
+use openclaw::operations::channel_config::{channel_trace, with_channel_trace};
+
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
@@ -33,6 +36,7 @@ pub(crate) struct ChannelLaneState {
 
 struct PendingLoginConfig {
     key: ChannelKey,
+    agent_id: Option<String>,
     config: Zeroizing<Vec<u8>>,
 }
 
@@ -82,7 +86,16 @@ impl OwnerSpec for ChannelOwner {
         lane: &mut Self::LaneState,
         command: Self::Command,
     ) {
-        handle_keyed_command(shared, lane, command).await;
+        let trace_id = command.trace().and_then(|trace| trace.trace_id.clone());
+        with_channel_trace(trace_id, async {
+            if let Some(trace) = command.trace() {
+                trace.received();
+            }
+            let mut span = ChannelTraceSpan::begin("host.actor.command");
+            handle_keyed_command(shared, lane, command).await;
+            span.finish("replied");
+        })
+        .await;
     }
 
     async fn handle_global_command(
@@ -126,17 +139,26 @@ impl OwnerSpec for ChannelOwner {
 }
 
 impl ChannelLaneState {
-    fn insert_login_config(&mut self, key: ChannelKey, config: Zeroizing<Vec<u8>>) {
+    fn insert_login_config(
+        &mut self,
+        key: ChannelKey,
+        agent_id: Option<String>,
+        config: Zeroizing<Vec<u8>>,
+    ) {
         if let Some(pending) = self
             .pending_login_configs
             .iter_mut()
             .find(|pending| pending.key == key)
         {
+            pending.agent_id = agent_id;
             pending.config = config;
             return;
         }
-        self.pending_login_configs
-            .push(PendingLoginConfig { key, config });
+        self.pending_login_configs.push(PendingLoginConfig {
+            key,
+            agent_id,
+            config,
+        });
     }
 
     fn remove_login_config(&mut self, key: &ChannelKey) {
@@ -163,8 +185,8 @@ impl ChannelLaneState {
         &mut self,
         requested_key: &ChannelKey,
         observed_account_id: Option<&str>,
-    ) -> Option<(ChannelKey, Zeroizing<Vec<u8>>)> {
-        let observed_key = observed_account_id.and_then(|observed_account_id| {
+    ) -> Option<(ChannelKey, Option<String>, Zeroizing<Vec<u8>>)> {
+        let connected_key = observed_account_id.and_then(|observed_account_id| {
             ChannelKey::try_new(
                 requested_key.endpoint().clone(),
                 requested_key.channel_id().to_owned(),
@@ -179,58 +201,84 @@ impl ChannelLaneState {
         )
         .ok();
 
-        if let Some(observed_key) = observed_key {
-            if let Some(config) = self.take_config_for_key(&observed_key) {
-                return Some((observed_key, config));
+        if let Some(connected_key) = connected_key {
+            if let Some((agent_id, config)) = self.take_config_for_key(&connected_key) {
+                return Some((connected_key, agent_id, config));
             }
+            if let Some((agent_id, config)) = self.take_config_for_key(requested_key) {
+                return Some((connected_key, agent_id, config));
+            }
+            if let Some(channel_default_key) = channel_default_key {
+                if let Some((agent_id, config)) = self.take_config_for_key(&channel_default_key) {
+                    return Some((connected_key, agent_id, config));
+                }
+            }
+            return None;
         }
-        if let Some(config) = self.take_config_for_key(requested_key) {
-            return Some((requested_key.clone(), config));
+
+        if let Some((agent_id, config)) = self.take_config_for_key(requested_key) {
+            return Some((requested_key.clone(), agent_id, config));
         }
         let channel_default_key = channel_default_key?;
         self.take_config_for_key(&channel_default_key)
-            .map(|config| (channel_default_key, config))
+            .map(|(agent_id, config)| (channel_default_key, agent_id, config))
     }
 
-    fn take_config_for_key(&mut self, key: &ChannelKey) -> Option<Zeroizing<Vec<u8>>> {
+    fn take_config_for_key(
+        &mut self,
+        key: &ChannelKey,
+    ) -> Option<(Option<String>, Zeroizing<Vec<u8>>)> {
         let index = self
             .pending_login_configs
             .iter()
             .position(|pending| pending.key == *key)?;
-        Some(self.pending_login_configs.remove(index).config)
+        let pending = self.pending_login_configs.remove(index);
+        Some((pending.agent_id, pending.config))
     }
 }
 
 async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
-    match query {
-        ChannelQuery::Catalog { reply } => {
-            let _ = reply.send(catalog(&shared.runtime_directory).await);
+    let trace_id = query.trace().trace_id.clone();
+    with_channel_trace(trace_id, async {
+        query.trace().received();
+        let mut span = ChannelTraceSpan::begin("host.actor.query");
+        match query {
+            ChannelQuery::Catalog { reply, .. } => {
+                let _ = reply.send(catalog(&shared.runtime_directory).await);
+            }
+            ChannelQuery::ConfigRead {
+                channel_id,
+                account_id,
+                reply,
+                ..
+            } => {
+                let _ = reply
+                    .send(config_read(&shared.runtime_directory, channel_id, account_id).await);
+            }
+            ChannelQuery::ConfigureForm {
+                channel_id, reply, ..
+            } => {
+                let _ = reply.send(configure_form(&shared.runtime_directory, channel_id).await);
+            }
+            ChannelQuery::Pairing {
+                channel_id,
+                account_id,
+                reply,
+                ..
+            } => {
+                let _ =
+                    reply.send(pairing(&shared.runtime_directory, channel_id, account_id).await);
+            }
+            ChannelQuery::Status { reply, .. } => {
+                let _ = reply.send(status(&shared.runtime_directory).await);
+            }
+            ChannelQuery::Snapshot { reply, .. } => {
+                let _ = reply.send(snapshot(&shared.runtime_directory).await);
+            }
         }
-        ChannelQuery::ConfigRead {
-            channel_id,
-            account_id,
-            reply,
-        } => {
-            let _ =
-                reply.send(config_read(&shared.runtime_directory, channel_id, account_id).await);
-        }
-        ChannelQuery::ConfigureForm { channel_id, reply } => {
-            let _ = reply.send(configure_form(&shared.runtime_directory, channel_id).await);
-        }
-        ChannelQuery::Pairing {
-            channel_id,
-            account_id,
-            reply,
-        } => {
-            let _ = reply.send(pairing(&shared.runtime_directory, channel_id, account_id).await);
-        }
-        ChannelQuery::Status { reply } => {
-            let _ = reply.send(status(&shared.runtime_directory).await);
-        }
-        ChannelQuery::Snapshot { reply } => {
-            let _ = reply.send(snapshot(&shared.runtime_directory).await);
-        }
-    }
+        span.finish("replied");
+    })
+    .await;
 }
 
 async fn handle_keyed_command(
@@ -240,13 +288,17 @@ async fn handle_keyed_command(
 ) {
     match command {
         ChannelCommand::Configure {
-            key, values, reply, ..
+            key,
+            agent_id,
+            values,
+            reply,
+            ..
         } => {
             let effect = execute_owner_mutation(
                 shared,
                 lane,
                 key,
-                ChannelMutation::Configure { values },
+                ChannelMutation::Configure { agent_id, values },
                 CancellationToken::new(),
             )
             .await;
@@ -275,11 +327,12 @@ async fn handle_keyed_command(
             key,
             force,
             timeout_ms,
+            agent_id,
             config,
             reply,
             ..
         } => {
-            lane.insert_login_config(key.clone(), config);
+            lane.insert_login_config(key.clone(), agent_id.clone(), config);
             let effect = execute_owner_mutation(
                 shared,
                 lane,
@@ -318,6 +371,7 @@ async fn handle_keyed_command(
                     let _ = reply.send(outcome);
                 }
                 _ = cancellation.cancelled() => {
+                    channel_trace("host.login.wait", "outcome=cancelled");
                     lane.clear_login_configs();
                     let _ = reply.send(Ok(ChannelLoginOutcome::Cancelled));
                 }
@@ -432,19 +486,22 @@ async fn finalize_login_effect(
     key: ChannelKey,
     effect: ChannelMutationEffect,
 ) -> ChannelMutationEffect {
-    let Some((config_key, config, connected_outcome)) =
+    let Some((config_key, agent_id, config, connected_outcome)) =
         check_login_finalization(lane, &key, &effect)
     else {
+        channel_trace("host.login.finalize", "outcome=skipped");
         lane.settle_login_effect(&key, &effect);
         return effect;
     };
+    let mut span = ChannelTraceSpan::begin("host.login.finalize");
     let finalize_effect = execute_mutation(
         &shared.runtime_directory,
         config_key,
-        ChannelMutation::FinalizeLogin { config },
+        ChannelMutation::FinalizeLogin { agent_id, config },
         CancellationToken::new(),
     )
     .await;
+    span.finish(finalize_effect.trace_outcome());
     project_finalization(finalize_effect, connected_outcome)
 }
 
@@ -452,16 +509,28 @@ fn check_login_finalization(
     lane: &mut ChannelLaneState,
     key: &ChannelKey,
     effect: &ChannelMutationEffect,
-) -> Option<(ChannelKey, Zeroizing<Vec<u8>>, ChannelLoginOutcome)> {
+) -> Option<(
+    ChannelKey,
+    Option<String>,
+    Zeroizing<Vec<u8>>,
+    ChannelLoginOutcome,
+)> {
     let ChannelMutationEffect::Login(ChannelLoginOutcome::Progress(progress)) = effect else {
         return None;
     };
     if progress.status != LoginProgressStatus::Connected {
         return None;
     }
-    let (config_key, config) = lane.take_login_config(key, progress.account_id.as_deref())?;
+    channel_trace("host.login.confirmed", "outcome=connected");
+    let Some((config_key, agent_id, config)) =
+        lane.take_login_config(key, progress.account_id.as_deref())
+    else {
+        channel_trace("host.login.finalize", "outcome=no_pending_config");
+        return None;
+    };
     Some((
         config_key,
+        agent_id,
         config,
         ChannelLoginOutcome::Progress(progress.clone()),
     ))
@@ -568,128 +637,140 @@ async fn execute_mutation(
     mutation: ChannelMutation,
     cancellation: CancellationToken,
 ) -> ChannelMutationEffect {
-    let Some(driver) = runtime_directory.lookup(key.endpoint()) else {
-        return unknown_effect(&mutation);
-    };
-    let Some(ops) = driver.channel_ops() else {
-        return unknown_effect(&mutation);
-    };
+    let kind = super::operations::mutation_kind(&mutation);
+    let mut span = ChannelTraceSpan::begin(kind.trace_phase());
+    let effect = async {
+        let Some(driver) = runtime_directory.lookup(key.endpoint()) else {
+            channel_trace("host.mutation.admission", "outcome=unavailable");
+            return unknown_effect(&mutation);
+        };
+        let Some(ops) = driver.channel_ops() else {
+            channel_trace("host.mutation.admission", "outcome=unavailable");
+            return unknown_effect(&mutation);
+        };
 
-    match mutation {
-        ChannelMutation::Configure { values } => {
-            let outcome = ops
-                .channel_configure(
-                    key.channel_id().to_owned(),
-                    key.account_id().unwrap_or_default().to_owned(),
-                    values,
-                )
-                .await;
-            ChannelMutationEffect::Configure(outcome)
-        }
-        ChannelMutation::DeleteConfig => {
-            let outcome = ops
-                .channel_delete_config(
-                    key.channel_id().to_owned(),
-                    key.account_id().unwrap_or_default().to_owned(),
-                )
-                .await;
-            ChannelMutationEffect::DeleteConfig(outcome)
-        }
-        ChannelMutation::Control(action) => {
-            let outcome = ops
-                .control_channel_account(
-                    action,
-                    key.channel_id().to_owned(),
-                    key.account_id().unwrap_or_default().to_owned(),
-                )
-                .await;
-            ChannelMutationEffect::Control(outcome)
-        }
-        ChannelMutation::LoginStart { force, timeout_ms } => {
-            let outcome = ops
-                .start_channel_login(
-                    key.channel_id().to_owned(),
-                    force,
-                    timeout_ms,
-                    key.account_id().map(str::to_owned),
-                )
-                .await;
-            ChannelMutationEffect::Login(outcome)
-        }
-        ChannelMutation::LoginWait {
-            timeout_ms,
-            session_key,
-            current_qr_data_url,
-        } => {
-            let outcome = ops
-                .wait_channel_login_owned(
-                    key.channel_id().to_owned(),
-                    timeout_ms,
-                    key.account_id().map(str::to_owned),
-                    session_key,
-                    current_qr_data_url,
-                    cancellation,
-                )
-                .await;
-            ChannelMutationEffect::Login(outcome)
-        }
-        ChannelMutation::StopLogin => {
-            let outcome = ops
-                .stop_channel_login(
-                    key.channel_id().to_owned(),
-                    key.account_id().map(str::to_owned),
-                )
-                .await;
-            ChannelMutationEffect::Login(outcome)
-        }
-        ChannelMutation::Logout => {
-            let outcome = ops
-                .logout_channel(
-                    key.channel_id().to_owned(),
-                    key.account_id().map(str::to_owned),
-                )
-                .await;
-            ChannelMutationEffect::Login(outcome)
-        }
-        ChannelMutation::PairingApprove { code } => {
-            let outcome = ops
-                .approve_channel_pairing(
-                    key.channel_id().to_owned(),
-                    key.account_id().map(str::to_owned),
-                    code,
-                )
-                .await;
-            ChannelMutationEffect::PairingApprove(outcome)
-        }
-        ChannelMutation::ValidateCredentials { config } => {
-            let outcome = ops
-                .validate_channel_credentials(key.channel_id().to_owned(), config)
-                .await;
-            ChannelMutationEffect::Credentials(outcome)
-        }
-        ChannelMutation::FinalizeLogin { mut config } => {
-            let values = match append_enabled(config.as_mut_slice()) {
-                Some(values) => values,
-                None => {
-                    return ChannelMutationEffect::LoginFinalized(
-                        LoginFinalizationOutcome::Rejected,
-                    );
-                }
-            };
-            let outcome = ops
-                .channel_configure(
-                    key.channel_id().to_owned(),
-                    key.account_id().unwrap_or_default().to_owned(),
-                    values,
-                )
-                .await;
-            ChannelMutationEffect::LoginFinalized(match outcome {
-                ChannelConfigureOutcome::Confirmed => LoginFinalizationOutcome::Confirmed,
-                ChannelConfigureOutcome::TargetRejected => LoginFinalizationOutcome::Rejected,
-                ChannelConfigureOutcome::Unknown => LoginFinalizationOutcome::Unknown,
-            })
+        match mutation {
+            ChannelMutation::Configure { agent_id, values } => {
+                let outcome = ops
+                    .channel_configure(
+                        key.channel_id().to_owned(),
+                        key.account_id().unwrap_or_default().to_owned(),
+                        agent_id,
+                        values,
+                    )
+                    .await;
+                ChannelMutationEffect::Configure(outcome)
+            }
+            ChannelMutation::DeleteConfig => {
+                let outcome = ops
+                    .channel_delete_config(
+                        key.channel_id().to_owned(),
+                        key.account_id().map(str::to_owned),
+                    )
+                    .await;
+                ChannelMutationEffect::DeleteConfig(outcome)
+            }
+            ChannelMutation::Control(action) => {
+                let outcome = ops
+                    .control_channel_account(
+                        action,
+                        key.channel_id().to_owned(),
+                        key.account_id().unwrap_or_default().to_owned(),
+                    )
+                    .await;
+                ChannelMutationEffect::Control(outcome)
+            }
+            ChannelMutation::LoginStart { force, timeout_ms } => {
+                let outcome = ops
+                    .start_channel_login(
+                        key.channel_id().to_owned(),
+                        force,
+                        timeout_ms,
+                        key.account_id().map(str::to_owned),
+                    )
+                    .await;
+                ChannelMutationEffect::Login(outcome)
+            }
+            ChannelMutation::LoginWait {
+                timeout_ms,
+                session_key,
+                current_qr_data_url,
+            } => {
+                let outcome = ops
+                    .wait_channel_login_owned(
+                        key.channel_id().to_owned(),
+                        timeout_ms,
+                        key.account_id().map(str::to_owned),
+                        session_key,
+                        current_qr_data_url,
+                        cancellation,
+                    )
+                    .await;
+                ChannelMutationEffect::Login(outcome)
+            }
+            ChannelMutation::StopLogin => {
+                let outcome = ops
+                    .stop_channel_login(
+                        key.channel_id().to_owned(),
+                        key.account_id().map(str::to_owned),
+                    )
+                    .await;
+                ChannelMutationEffect::Login(outcome)
+            }
+            ChannelMutation::Logout => {
+                let outcome = ops
+                    .logout_channel(
+                        key.channel_id().to_owned(),
+                        key.account_id().map(str::to_owned),
+                    )
+                    .await;
+                ChannelMutationEffect::Login(outcome)
+            }
+            ChannelMutation::PairingApprove { code } => {
+                let outcome = ops
+                    .approve_channel_pairing(
+                        key.channel_id().to_owned(),
+                        key.account_id().map(str::to_owned),
+                        code,
+                    )
+                    .await;
+                ChannelMutationEffect::PairingApprove(outcome)
+            }
+            ChannelMutation::ValidateCredentials { config } => {
+                let outcome = ops
+                    .validate_channel_credentials(key.channel_id().to_owned(), config)
+                    .await;
+                ChannelMutationEffect::Credentials(outcome)
+            }
+            ChannelMutation::FinalizeLogin {
+                agent_id,
+                mut config,
+            } => {
+                let values = match append_enabled(config.as_mut_slice()) {
+                    Some(values) => values,
+                    None => {
+                        return ChannelMutationEffect::LoginFinalized(
+                            LoginFinalizationOutcome::Rejected,
+                        );
+                    }
+                };
+                let channel = key.channel_id().to_owned();
+                let account = key.account_id().unwrap_or_default().to_owned();
+                let outcome = ops
+                    .finalize_channel_login(channel, account, agent_id, values)
+                    .await;
+                let outcome = match outcome {
+                    ChannelConfigureOutcome::Confirmed => LoginFinalizationOutcome::Confirmed,
+                    ChannelConfigureOutcome::TargetRejected => LoginFinalizationOutcome::Rejected,
+                    ChannelConfigureOutcome::Unknown => LoginFinalizationOutcome::Unknown,
+                };
+                ChannelMutationEffect::LoginFinalized(outcome)
+            }
         }
     }
+    .await;
+    span.finish(effect.trace_outcome());
+    effect
 }
 
 fn append_enabled(bytes: &mut [u8]) -> Option<Zeroizing<Vec<u8>>> {
@@ -758,5 +839,138 @@ fn project_finalization(
             ChannelMutationEffect::Login(ChannelLoginOutcome::Rejected)
         }
         _ => ChannelMutationEffect::Login(ChannelLoginOutcome::Unknown),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{channel::login::LoginProgress, runtime_driver::RuntimeDriverIdentity};
+
+    fn channel_key(account_id: Option<&str>) -> ChannelKey {
+        ChannelKey::try_new(
+            RuntimeDriverIdentity::open_claw().endpoint(),
+            "whatsapp",
+            account_id.map(str::to_owned),
+        )
+        .expect("test channel key is valid")
+    }
+
+    fn config_bytes(value: &str) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(value.as_bytes().to_vec())
+    }
+
+    fn lane_with_config(
+        key: ChannelKey,
+        agent_id: Option<&str>,
+        config: Zeroizing<Vec<u8>>,
+    ) -> ChannelLaneState {
+        let mut lane = ChannelLaneState {
+            pending_login_configs: Vec::new(),
+        };
+        lane.insert_login_config(key, agent_id.map(str::to_owned), config);
+        lane
+    }
+
+    fn connected_effect(account_id: Option<&str>) -> ChannelMutationEffect {
+        ChannelMutationEffect::Login(ChannelLoginOutcome::Progress(LoginProgress::new(
+            "whatsapp".to_owned(),
+            account_id.map(str::to_owned),
+            None,
+            LoginProgressStatus::Connected,
+            None,
+        )))
+    }
+
+    #[test]
+    fn connected_account_id_overrides_requested_login_finalization_key() {
+        let requested_key = channel_key(Some("requested"));
+        let mut lane = lane_with_config(
+            requested_key.clone(),
+            Some("agent-alpha"),
+            config_bytes("requested-config"),
+        );
+
+        let (config_key, agent_id, config, _) =
+            check_login_finalization(&mut lane, &requested_key, &connected_effect(Some("native")))
+                .expect("connected progress finalizes pending login config");
+
+        assert_eq!(config_key.account_id(), Some("native"));
+        assert_eq!(agent_id.as_deref(), Some("agent-alpha"));
+        assert_eq!(config.as_slice(), b"requested-config");
+        assert!(lane.pending_login_configs.is_empty());
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use openclaw::operations::channel_config::{
+                    current_channel_trace, with_channel_trace_sync,
+                };
+                let trace_id = "12345678-1234-4234-8234-123456789abc".to_owned();
+                let trace = with_channel_trace_sync(
+                    Some(trace_id.clone()),
+                    super::super::trace::CommandTrace::capture,
+                );
+                assert_eq!(trace.trace_id.as_deref(), Some(trace_id.as_str()));
+                assert_eq!(current_channel_trace(), None);
+                let (reply, received) = tokio::sync::oneshot::channel();
+                let command = ChannelCommand::Delete {
+                    trace,
+                    key: requested_key.clone(),
+                    reply,
+                };
+                let task = tokio::spawn(async move {
+                    let shared = ChannelShared {
+                        runtime_directory: Arc::new(RuntimeDriverDirectory::new()),
+                    };
+                    ChannelOwner::handle_keyed_command(shared, requested_key, &mut lane, command)
+                        .await;
+                    assert_eq!(current_channel_trace(), None);
+                });
+                assert!(matches!(
+                    received.await.unwrap(),
+                    Ok(crate::channel::delete::Outcome::Unknown)
+                ));
+                task.await.unwrap();
+            });
+    }
+
+    #[test]
+    fn connected_account_id_overrides_default_login_finalization_key() {
+        let default_key = channel_key(None);
+        let mut lane = lane_with_config(default_key.clone(), None, config_bytes("default-config"));
+
+        let (config_key, agent_id, config, _) =
+            check_login_finalization(&mut lane, &default_key, &connected_effect(Some("native")))
+                .expect("connected progress finalizes pending login config");
+
+        assert_eq!(config_key.account_id(), Some("native"));
+        assert_eq!(agent_id, None);
+        assert_eq!(config.as_slice(), b"default-config");
+        assert!(lane.pending_login_configs.is_empty());
+    }
+
+    #[test]
+    fn invalid_connected_account_id_keeps_requested_login_finalization_key() {
+        let requested_key = channel_key(Some("requested"));
+        let mut lane = lane_with_config(
+            requested_key.clone(),
+            None,
+            config_bytes("requested-config"),
+        );
+
+        let (config_key, agent_id, config, _) = check_login_finalization(
+            &mut lane,
+            &requested_key,
+            &connected_effect(Some("native account")),
+        )
+        .expect("connected progress finalizes pending login config");
+
+        assert_eq!(config_key.account_id(), Some("requested"));
+        assert_eq!(agent_id, None);
+        assert_eq!(config.as_slice(), b"requested-config");
+        assert!(lane.pending_login_configs.is_empty());
     }
 }

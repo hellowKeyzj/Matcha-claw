@@ -1,4 +1,4 @@
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from '../plugin-types.js'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import {
@@ -976,6 +976,25 @@ export class BrowserControlService {
           modifiers: payload.modifiers,
         })
         return { ok: true, action: 'act.click', targetId }
+      }
+      case 'clickCoords': {
+        const x = asNumber(payload.x)
+        const y = asNumber(payload.y)
+        if (x === undefined || y === undefined) {
+          return createErrorResult('invalid_request', 'x and y are required for request.kind=clickCoords')
+        }
+        await this.actions.click({
+          cdpUrl,
+          targetId,
+          mode,
+          x,
+          y,
+          timeoutMs,
+          doubleClick: payload.doubleClick,
+          button: asMouseButton(payload.button),
+          delayMs: asNumber(payload.delayMs),
+        })
+        return { ok: true, action: 'act.clickCoords', targetId }
       }
       case 'type':
         await this.actions.type({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), text: requiredString(payload.text, 'text'), submit: payload.submit, slowly: payload.slowly, clearFirst: payload.clearFirst, timeoutMs })

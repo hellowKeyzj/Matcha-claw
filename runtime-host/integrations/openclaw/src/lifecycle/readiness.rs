@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::gateway::client::GatewayClient;
 
-const STARTUP_PROBE_DEADLINE: Duration = Duration::from_secs(120);
+const STARTUP_PROBE_DEADLINE: Duration = Duration::from_secs(600);
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_PROBE_RETRY_DELAY: Duration = Duration::from_secs(1);
 

@@ -1,22 +1,31 @@
 use std::{
-    fs,
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
-    time::SystemTime,
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
+
+use crate::gateway::{
+    client::GatewayClient,
+    wire::{self, GatewayResponse},
+};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const SESSIONS_USAGE_METHOD: &str = "sessions.usage";
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageEntry {
     agent_id: String,
     session_id: String,
     timestamp: String,
-    instant_nanos: i128,
+    timestamp_millis: u64,
     model: Option<String>,
     provider: Option<String>,
     input_tokens: u64,
@@ -28,6 +37,40 @@ pub struct UsageEntry {
 }
 
 impl UsageEntry {
+    pub fn new(
+        agent_id: String,
+        session_id: String,
+        timestamp: String,
+        timestamp_millis: u64,
+        model: Option<String>,
+        provider: Option<String>,
+        tokens: UsageTokens,
+        cost_usd: Option<f64>,
+    ) -> Option<Self> {
+        if !safe_agent_id(&agent_id)
+            || !safe_session_id(&session_id)
+            || chrono::DateTime::parse_from_rfc3339(&timestamp).is_err()
+            || !tokens.is_safe()
+            || cost_usd.is_some_and(|value| !valid_cost(value))
+        {
+            return None;
+        }
+        Some(Self {
+            agent_id,
+            session_id,
+            timestamp,
+            timestamp_millis,
+            model: clean_optional_string(model),
+            provider: clean_optional_string(provider),
+            input_tokens: tokens.input,
+            output_tokens: tokens.output,
+            cache_read_tokens: tokens.cache_read,
+            cache_write_tokens: tokens.cache_write,
+            total_tokens: tokens.total,
+            cost_usd,
+        })
+    }
+
     pub fn agent_id(&self) -> &str {
         &self.agent_id
     }
@@ -74,30 +117,118 @@ impl UsageEntry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UsageHistoryError {
+pub struct UsageTokens {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total: u64,
+}
+
+impl UsageTokens {
+    pub const fn new(
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        total: u64,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            total,
+        }
+    }
+
+    const fn is_safe(self) -> bool {
+        self.input <= MAX_SAFE_INTEGER
+            && self.output <= MAX_SAFE_INTEGER
+            && self.cache_read <= MAX_SAFE_INTEGER
+            && self.cache_write <= MAX_SAFE_INTEGER
+            && self.total <= MAX_SAFE_INTEGER
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageReadError {
     Unavailable,
 }
 
-pub struct UsageHistory {
-    root: PathBuf,
+pub struct UsageProjection {
+    gateway: Arc<GatewayClient>,
+    session_keys: Mutex<HashMap<UsageSessionIdentity, String>>,
 }
 
-impl UsageHistory {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct UsageSessionIdentity {
+    agent_id: String,
+    session_id: String,
+}
+
+impl UsageProjection {
+    pub fn new(gateway: Arc<GatewayClient>) -> Self {
+        Self {
+            gateway,
+            session_keys: Mutex::new(HashMap::new()),
+        }
     }
 
-    pub fn recent(&self, limit: usize) -> Result<Vec<UsageEntry>, UsageHistoryError> {
+    pub async fn recent(&self, limit: usize) -> Result<Vec<UsageEntry>, UsageReadError> {
         let limit = limit.clamp(1, MAX_LIMIT);
-        let mut files = session_files(&self.root)?;
-        files.sort_by_key(|file| std::cmp::Reverse(file.modified));
-
-        let mut entries = Vec::with_capacity(limit);
-        for file in files {
-            read_usage_entries(&file, &mut entries, limit);
+        let request = sessions_usage_request(limit).map_err(|_| UsageReadError::Unavailable)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(|_| UsageReadError::Unavailable)?;
+        match response {
+            GatewayResponse::Success {
+                payload: Some(payload),
+                ..
+            } => project_sessions_usage_payload(payload, limit, &self.session_keys),
+            GatewayResponse::Success { payload: None, .. } | GatewayResponse::Failure { .. } => {
+                Err(UsageReadError::Unavailable)
+            }
         }
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.instant_nanos));
-        Ok(entries)
+    }
+
+    pub async fn session_timeseries(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<UsageEntry>, UsageReadError> {
+        if !safe_agent_id(agent_id) || !safe_session_id(session_id) {
+            return Err(UsageReadError::Unavailable);
+        }
+        let key = UsageSessionIdentity {
+            agent_id: agent_id.to_owned(),
+            session_id: session_id.to_owned(),
+        };
+        let session_key = self
+            .session_keys
+            .lock()
+            .map_err(|_| UsageReadError::Unavailable)?
+            .get(&key)
+            .cloned()
+            .ok_or(UsageReadError::Unavailable)?;
+        let request = sessions_usage_timeseries_request(&session_key)
+            .map_err(|_| UsageReadError::Unavailable)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(|_| UsageReadError::Unavailable)?;
+        match response {
+            GatewayResponse::Success {
+                payload: Some(payload),
+                ..
+            } => project_timeseries_payload(payload, agent_id, session_id),
+            GatewayResponse::Success { payload: None, .. } | GatewayResponse::Failure { .. } => {
+                Err(UsageReadError::Unavailable)
+            }
+        }
     }
 
     pub const fn default_limit() -> usize {
@@ -109,803 +240,448 @@ impl UsageHistory {
     }
 }
 
-struct SessionFile {
-    path: PathBuf,
-    modified: SystemTime,
-    agent_id: String,
-    session_id: String,
+fn sessions_usage_request(limit: usize) -> Result<wire::RpcRequest, wire::WireError> {
+    wire::operations_request(
+        next_request_id("sessions-usage"),
+        SESSIONS_USAGE_METHOD,
+        json!({
+            "agentScope": "all",
+            "range": "all",
+            "groupBy": "instance",
+            "limit": limit,
+            "includeContextWeight": false,
+        }),
+    )
 }
 
-fn session_files(root: &Path) -> Result<Vec<SessionFile>, UsageHistoryError> {
-    let agents = root.join("agents");
-    let agent_entries = match fs::read_dir(agents) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut files = Vec::new();
-    for agent in agent_entries.flatten() {
-        if !agent.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let agent_name = agent.file_name();
-        let Some(agent_id) = safe_agent_id(agent_name.to_str()) else {
-            continue;
-        };
-        let sessions_dir = agent.path().join("sessions");
-        let session_store = load_session_store(&sessions_dir);
-        let sessions = match fs::read_dir(&sessions_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in sessions.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                || !is_live_or_reset_transcript(&entry.file_name())
-            {
-                continue;
+fn sessions_usage_timeseries_request(key: &str) -> Result<wire::RpcRequest, wire::WireError> {
+    wire::operations_request(
+        next_request_id("sessions-usage-timeseries"),
+        "sessions.usage.timeseries",
+        json!({ "key": key }),
+    )
+}
+
+fn next_request_id(operation: &str) -> String {
+    let sequence = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("usage-{operation}-{sequence}")
+}
+
+fn project_sessions_usage_payload(
+    payload: Value,
+    limit: usize,
+    session_keys: &Mutex<HashMap<UsageSessionIdentity, String>>,
+) -> Result<Vec<UsageEntry>, UsageReadError> {
+    let sessions = payload
+        .as_object()
+        .and_then(|payload| payload.get("sessions"))
+        .and_then(Value::as_array)
+        .ok_or(UsageReadError::Unavailable)?;
+    let mut entries = Vec::with_capacity(limit.min(sessions.len()));
+    let mut next_keys = HashMap::with_capacity(sessions.len());
+    for session in sessions {
+        if let Some(projected) = project_session(session)? {
+            if let Some(session_key) = projected.session_key {
+                next_keys.insert(
+                    UsageSessionIdentity {
+                        agent_id: projected.entry.agent_id().to_owned(),
+                        session_id: projected.entry.session_id().to_owned(),
+                    },
+                    session_key,
+                );
             }
-            let Some(session_id) = session_id_for_file(
-                &sessions_dir,
-                &entry.path(),
-                &entry.file_name(),
-                &session_store,
-            ) else {
-                continue;
-            };
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            files.push(SessionFile {
-                path: entry.path(),
-                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                agent_id: agent_id.to_owned(),
-                session_id,
-            });
+            entries.push(projected.entry);
         }
     }
-    Ok(files)
+    *session_keys
+        .lock()
+        .map_err(|_| UsageReadError::Unavailable)? = next_keys;
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_millis));
+    entries.truncate(limit);
+    Ok(entries)
 }
 
-struct SessionStoreEntry {
-    session_id: Option<String>,
-    session_file: String,
-}
-
-fn load_session_store(sessions_dir: &Path) -> Vec<SessionStoreEntry> {
-    let Ok(bytes) = fs::read(sessions_dir.join("sessions.json")) else {
-        return Vec::new();
-    };
-    let Ok(Value::Object(store)) = serde_json::from_slice::<Value>(&bytes) else {
-        return Vec::new();
-    };
-    store
-        .into_values()
-        .filter_map(|value| {
-            let Value::Object(entry) = value else {
-                return None;
-            };
-            let session_file = entry
-                .get("sessionFile")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && value.len() <= 4_096)
-                .map(str::to_owned)?;
-            Some(SessionStoreEntry {
-                session_id: safe_session_id(entry.get("sessionId").and_then(Value::as_str))
-                    .map(str::to_owned),
-                session_file,
-            })
-        })
-        .collect()
-}
-
-fn session_id_for_file(
-    sessions_dir: &Path,
-    file_path: &Path,
-    file_name: &std::ffi::OsStr,
-    store: &[SessionStoreEntry],
-) -> Option<String> {
-    let mut matched_session_id = None;
-    let mut matched_store_file = false;
-    for entry in store {
-        if session_file_matches(sessions_dir, file_path, file_name, &entry.session_file) {
-            matched_store_file = true;
-            let Some(session_id) = entry.session_id.as_deref() else {
-                return None;
-            };
-            if matched_session_id.is_some_and(|existing| existing != session_id) {
-                return None;
-            }
-            matched_session_id = Some(session_id);
+fn project_timeseries_payload(
+    payload: Value,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Vec<UsageEntry>, UsageReadError> {
+    let points = payload
+        .as_object()
+        .and_then(|payload| payload.get("points"))
+        .and_then(Value::as_array)
+        .ok_or(UsageReadError::Unavailable)?;
+    let mut entries = Vec::with_capacity(points.len());
+    for point in points {
+        if let Some(entry) = project_timeseries_point(point, agent_id, session_id)? {
+            entries.push(entry);
         }
     }
-    if matched_store_file {
-        return matched_session_id.map(str::to_owned);
-    }
-    let name = file_name.to_str()?;
-    let session_id = if is_primary_transcript(name) {
-        name.strip_suffix(".jsonl")?
-    } else {
-        let marker = ".jsonl.reset.";
-        name.rfind(marker).map(|index| &name[..index])?
-    };
-    safe_session_id(Some(session_id)).map(str::to_owned)
+    Ok(entries)
 }
 
-fn session_file_matches(
-    sessions_dir: &Path,
-    file_path: &Path,
-    file_name: &std::ffi::OsStr,
-    session_file: &str,
-) -> bool {
-    let Ok(base) = fs::canonicalize(sessions_dir) else {
-        return false;
+fn project_timeseries_point(
+    value: &Value,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Option<UsageEntry>, UsageReadError> {
+    let point = value.as_object().ok_or(UsageReadError::Unavailable)?;
+    let Some(timestamp_millis) = u64_field(point, "timestamp") else {
+        return Ok(None);
     };
-    let candidate = Path::new(session_file);
-    let candidate = if candidate.is_absolute() {
-        candidate.to_owned()
-    } else {
-        sessions_dir.join(candidate)
-    };
-    let Some(candidate_name) = candidate.file_name() else {
-        return false;
-    };
-    let Some(candidate_parent) = candidate.parent() else {
-        return false;
-    };
-    let Ok(candidate_parent) = fs::canonicalize(candidate_parent) else {
-        return false;
-    };
-    if !candidate_parent.starts_with(&base) {
-        return false;
-    }
-    let candidate = candidate_parent.join(candidate_name);
-    let Ok(file_path) = fs::canonicalize(file_path) else {
-        return false;
-    };
-    if candidate == file_path {
-        return true;
-    }
-    if candidate.parent() != file_path.parent() {
-        return false;
-    }
-    let Some(file_name) = file_name.to_str() else {
-        return false;
-    };
-    let Some(candidate_name) = candidate_name.to_str() else {
-        return false;
-    };
-    file_name.starts_with(candidate_name)
-        && file_name
-            .strip_prefix(candidate_name)
-            .is_some_and(|suffix| is_archive(suffix, "reset"))
-}
-
-fn safe_agent_id(value: Option<&str>) -> Option<&str> {
-    let value = value?;
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 64 || !bytes[0].is_ascii_alphanumeric() {
-        return None;
-    }
-    if !bytes
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return None;
-    }
-    value
-        .bytes()
-        .all(|byte| !byte.is_ascii_uppercase())
-        .then_some(value)
-}
-
-fn safe_session_id(value: Option<&str>) -> Option<&str> {
-    let value = value?;
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 128 || !bytes[0].is_ascii_alphanumeric() {
-        return None;
-    }
-    if !bytes
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return None;
-    }
-    let checkpoint_name = format!("{value}.jsonl");
-    (!is_compaction_checkpoint(&checkpoint_name)).then_some(value)
-}
-
-fn is_live_or_reset_transcript(name: &std::ffi::OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    is_primary_transcript(name) || is_reset_archive(name)
-}
-
-fn is_primary_transcript(name: &str) -> bool {
-    name.ends_with(".jsonl")
-        && name != "sessions.json"
-        && !name.ends_with(".trajectory.jsonl")
-        && !name.contains(".deleted.")
-        && !name.contains(".deleted.jsonl")
-        && !is_archive(name, "deleted")
-        && !is_archive(name, "reset")
-        && !is_archive(name, "bak")
-        && !is_compaction_checkpoint(name)
-}
-
-fn is_reset_archive(name: &str) -> bool {
-    is_archive(name, "reset")
-}
-
-fn is_archive(name: &str, reason: &str) -> bool {
-    let marker = format!(".{reason}.");
-    let Some(index) = name.rfind(&marker) else {
-        return false;
-    };
-    is_archive_timestamp(&name[index + marker.len()..])
-}
-
-fn is_archive_timestamp(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if !matches!(bytes.len(), 20 | 24) {
-        return false;
-    }
-    let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b'-'), (16, b'-')];
-    let valid_prefix = separators
-        .iter()
-        .all(|(index, expected)| bytes[*index] == *expected)
-        && bytes[..19].iter().enumerate().all(|(index, byte)| {
-            separators.iter().any(|(separator, _)| *separator == index) || byte.is_ascii_digit()
-        });
-
-    match bytes.len() {
-        20 => valid_prefix && bytes[19] == b'Z',
-        24 => {
-            valid_prefix
-                && bytes[19] == b'.'
-                && bytes[20..23].iter().all(u8::is_ascii_digit)
-                && bytes[23] == b'Z'
-        }
-        _ => false,
-    }
-}
-
-fn is_compaction_checkpoint(name: &str) -> bool {
-    let Some(prefix) = name.strip_suffix(".jsonl") else {
-        return false;
-    };
-    let Some((_, checkpoint)) = prefix.rsplit_once(".checkpoint.") else {
-        return false;
-    };
-    is_uuid_v1_to_v5(checkpoint)
-}
-
-fn is_uuid_v1_to_v5(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 36
-        && [8, 13, 18, 23]
-            .into_iter()
-            .all(|index| bytes.get(index) == Some(&b'-'))
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
-        && matches!(bytes[14], b'1'..=b'5')
-        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
-}
-
-fn read_usage_entries(file: &SessionFile, entries: &mut Vec<UsageEntry>, limit: usize) {
-    let Ok(file_handle) = fs::File::open(&file.path) else {
-        return;
-    };
-    for line in BufReader::new(file_handle).lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(entry) = parse_entry(&value, &file.agent_id, &file.session_id) else {
-            continue;
-        };
-        insert_newest(entries, entry, limit);
-    }
-}
-
-fn insert_newest(entries: &mut Vec<UsageEntry>, entry: UsageEntry, limit: usize) {
-    let position = entries
-        .iter()
-        .position(|existing| entry.instant_nanos > existing.instant_nanos)
-        .unwrap_or(entries.len());
-    if position == entries.len() && entries.len() == limit {
-        return;
-    }
-    entries.insert(position, entry);
-    if entries.len() > limit {
-        entries.pop();
-    }
-}
-
-fn parse_entry(value: &Value, agent_id: &str, session_id: &str) -> Option<UsageEntry> {
-    let record = value.as_object()?;
-    let timestamp = non_empty_string(record.get("timestamp"))?;
-    let instant_nanos = parse_rfc3339_instant_nanos(&timestamp)?;
-    let message = record.get("message")?.as_object()?;
-    let role = message
-        .get("role")
-        .and_then(Value::as_str)?
-        .to_ascii_lowercase();
-    let (usage, model, provider) = if role == "assistant" && message.contains_key("usage") {
-        (
-            message.get("usage")?,
-            optional_string(message.get("model"))
-                .or_else(|| optional_string(message.get("modelRef"))),
-            optional_string(message.get("provider")),
-        )
-    } else if role == "toolresult" || role == "tool_result" {
-        let details = message.get("details")?.as_object()?;
-        (
-            details.get("usage")?,
-            optional_string(details.get("model"))
-                .or_else(|| optional_string(message.get("model")))
-                .or_else(|| optional_string(message.get("modelRef"))),
-            optional_string(details.get("provider"))
-                .or_else(|| {
-                    details
-                        .get("externalContent")
-                        .and_then(Value::as_object)
-                        .and_then(|value| optional_string(value.get("provider")))
-                })
-                .or_else(|| optional_string(message.get("provider"))),
-        )
-    } else {
-        return None;
-    };
-    let usage = usage.as_object()?;
-    let input_tokens = first_u64(
-        usage,
-        &[
-            "input",
-            "promptTokens",
-            "prompt_tokens",
-            "input_tokens",
-            "inputTokenCount",
-            "input_token_count",
-            "promptTokenCount",
-            "prompt_token_count",
-        ],
+    let timestamp = iso_timestamp(timestamp_millis).ok_or(UsageReadError::Unavailable)?;
+    let tokens = UsageTokens::new(
+        required_u64(point, "input")?,
+        required_u64(point, "output")?,
+        required_u64(point, "cacheRead")?,
+        u64_field(point, "cacheWrite").unwrap_or(0),
+        required_u64(point, "totalTokens")?,
     );
-    let output_tokens = first_u64(
-        usage,
-        &[
-            "output",
-            "completionTokens",
-            "completion_tokens",
-            "output_tokens",
-            "outputTokenCount",
-            "output_token_count",
-            "completionTokenCount",
-            "completion_token_count",
-        ],
-    );
-    let cache_read_tokens = first_u64(
-        usage,
-        &[
-            "cacheRead",
-            "cache_read",
-            "cacheReadTokens",
-            "cache_read_tokens",
-            "cacheReadTokenCount",
-            "cache_read_token_count",
-        ],
-    );
-    let cache_write_tokens = first_u64(
-        usage,
-        &[
-            "cacheWrite",
-            "cache_write",
-            "cacheWriteTokens",
-            "cache_write_tokens",
-            "cacheWriteTokenCount",
-            "cache_write_token_count",
-        ],
-    );
-    let explicit_total = first_u64(
-        usage,
-        &[
-            "total",
-            "totalTokens",
-            "total_tokens",
-            "totalTokenCount",
-            "total_token_count",
-        ],
-    );
-    let cost_usd = usage
-        .get("cost")
-        .and_then(Value::as_object)
-        .and_then(|cost| non_negative_f64(cost.get("total")));
-    if input_tokens.is_none()
-        && output_tokens.is_none()
-        && cache_read_tokens.is_none()
-        && cache_write_tokens.is_none()
-        && explicit_total.is_none()
-        && cost_usd.is_none()
-    {
-        return None;
-    }
-    let input_tokens = input_tokens.unwrap_or_default();
-    let output_tokens = output_tokens.unwrap_or_default();
-    let cache_read_tokens = cache_read_tokens.unwrap_or_default();
-    let cache_write_tokens = cache_write_tokens.unwrap_or_default();
-    let computed_total = input_tokens
-        .checked_add(output_tokens)?
-        .checked_add(cache_read_tokens)?
-        .checked_add(cache_write_tokens)?;
-    let total_tokens = explicit_total.unwrap_or(computed_total);
-    (total_tokens <= MAX_SAFE_INTEGER).then_some(UsageEntry {
-        agent_id: agent_id.to_owned(),
-        session_id: session_id.to_owned(),
+    let cost_usd = optional_cost(point.get("cost"))?;
+    Ok(UsageEntry::new(
+        agent_id.to_owned(),
+        session_id.to_owned(),
         timestamp,
-        instant_nanos,
+        timestamp_millis,
+        None,
+        None,
+        tokens,
+        cost_usd,
+    ))
+}
+
+struct ProjectedSession {
+    entry: UsageEntry,
+    session_key: Option<String>,
+}
+
+fn project_session(value: &Value) -> Result<Option<ProjectedSession>, UsageReadError> {
+    let session = value.as_object().ok_or(UsageReadError::Unavailable)?;
+    let Some(usage_value) = session.get("usage") else {
+        return Err(UsageReadError::Unavailable);
+    };
+    if usage_value.is_null() {
+        return Ok(None);
+    }
+    let usage = usage_value.as_object().ok_or(UsageReadError::Unavailable)?;
+    let Some(agent_id) = string_field(session, "agentId").filter(|value| safe_agent_id(value))
+    else {
+        return Ok(None);
+    };
+    let session_key = session_key_field(session, "key");
+    let Some(session_id) = string_field(session, "sessionId")
+        .or_else(|| string_field(session, "currentSessionId"))
+        .filter(|value| safe_session_id(value))
+    else {
+        return Ok(None);
+    };
+    let Some(timestamp_millis) = u64_field(usage, "lastActivity")
+        .or_else(|| u64_field(session, "updatedAt"))
+        .or_else(|| u64_field(usage, "firstActivity"))
+    else {
+        return Ok(None);
+    };
+    let timestamp = iso_timestamp(timestamp_millis).ok_or(UsageReadError::Unavailable)?;
+    let tokens = UsageTokens::new(
+        required_u64(usage, "input")?,
+        required_u64(usage, "output")?,
+        required_u64(usage, "cacheRead")?,
+        required_u64(usage, "cacheWrite")?,
+        required_u64(usage, "totalTokens")?,
+    );
+    if tokens.total == 0 {
+        return Ok(None);
+    }
+    let (usage_model, usage_provider) = primary_model_usage(usage.get("modelUsage"));
+    let model = string_field(session, "modelOverride")
+        .or_else(|| string_field(session, "model"))
+        .or(usage_model);
+    let provider = string_field(session, "providerOverride")
+        .or_else(|| string_field(session, "modelProvider"))
+        .or(usage_provider);
+    let cost_usd = optional_cost(usage.get("totalCost"))?;
+    Ok(UsageEntry::new(
+        agent_id.to_owned(),
+        session_id.to_owned(),
+        timestamp,
+        timestamp_millis,
         model,
         provider,
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-        total_tokens,
+        tokens,
         cost_usd,
-    })
+    )
+    .map(|entry| ProjectedSession { entry, session_key }))
 }
 
-fn parse_rfc3339_instant_nanos(value: &str) -> Option<i128> {
-    let bytes = value.as_bytes();
-    if bytes.len() < 20
-        || bytes.get(4) != Some(&b'-')
-        || bytes.get(7) != Some(&b'-')
-        || bytes.get(10) != Some(&b'T')
-        || bytes.get(13) != Some(&b':')
-        || bytes.get(16) != Some(&b':')
-    {
-        return None;
-    }
-    let year = decimal(bytes, 0, 4)?;
-    let month = decimal(bytes, 5, 2)?;
-    let day = decimal(bytes, 8, 2)?;
-    let hour = decimal(bytes, 11, 2)?;
-    let minute = decimal(bytes, 14, 2)?;
-    let second = decimal(bytes, 17, 2)?;
-    if !(1..=12).contains(&month)
-        || !(1..=days_in_month(year, month)).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-
-    let mut index = 19;
-    let mut nanos = 0_i128;
-    if bytes.get(index) == Some(&b'.') {
-        index += 1;
-        let fraction_start = index;
-        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
-            if index - fraction_start < 9 {
-                nanos = nanos * 10 + i128::from(bytes[index] - b'0');
-            }
-            index += 1;
-        }
-        let fraction_len = index - fraction_start;
-        if fraction_len == 0 {
-            return None;
-        }
-        for _ in fraction_len.min(9)..9 {
-            nanos *= 10;
-        }
-    }
-
-    let offset_seconds = match bytes.get(index) {
-        Some(b'Z') if index + 1 == bytes.len() => 0,
-        Some(sign @ (b'+' | b'-'))
-            if index + 6 == bytes.len() && bytes.get(index + 3) == Some(&b':') =>
-        {
-            let offset_hours = decimal(bytes, index + 1, 2)?;
-            let offset_minutes = decimal(bytes, index + 4, 2)?;
-            if offset_hours > 23 || offset_minutes > 59 {
-                return None;
-            }
-            let offset = offset_hours * 3_600 + offset_minutes * 60;
-            if *sign == b'+' { offset } else { -offset }
-        }
-        _ => return None,
+fn primary_model_usage(value: Option<&Value>) -> (Option<String>, Option<String>) {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return (None, None);
     };
-
-    i128::from(days_from_civil(year, month, day))
-        .checked_mul(86_400)?
-        .checked_add(i128::from(hour * 3_600 + minute * 60 + second))?
-        .checked_sub(i128::from(offset_seconds))?
-        .checked_mul(1_000_000_000)?
-        .checked_add(nanos)
-}
-
-fn decimal(bytes: &[u8], start: usize, length: usize) -> Option<i64> {
-    bytes
-        .get(start..start.checked_add(length)?)?
+    entries
         .iter()
-        .try_fold(0_i64, |value, digit| {
-            digit
-                .is_ascii_digit()
-                .then(|| value * 10 + i64::from(*digit - b'0'))
+        .filter_map(Value::as_object)
+        .find_map(|entry| {
+            let model = string_field(entry, "model");
+            let provider = string_field(entry, "provider");
+            (model.is_some() || provider.is_some()).then_some((model, provider))
         })
+        .unwrap_or((None, None))
 }
 
-const fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        _ => 0,
-    }
+fn required_u64(record: &Map<String, Value>, key: &str) -> Result<u64, UsageReadError> {
+    record
+        .get(key)
+        .and_then(safe_u64)
+        .ok_or(UsageReadError::Unavailable)
 }
 
-const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year / 400;
-    let year_of_era = year - era * 400;
-    let month_from_march = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
-    era * 146_097 + year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year - 719_468
+fn u64_field(record: &Map<String, Value>, key: &str) -> Option<u64> {
+    record.get(key).and_then(safe_u64)
 }
 
-fn first_u64(record: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| non_negative_u64(record.get(*key)))
+fn safe_u64(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|value| *value <= MAX_SAFE_INTEGER)
 }
 
-fn non_negative_u64(value: Option<&Value>) -> Option<u64> {
-    let value = match value? {
-        Value::Number(value) => value.as_u64()?,
-        Value::String(value) => value.trim().parse().ok()?,
-        _ => return None,
+fn optional_cost(value: Option<&Value>) -> Result<Option<f64>, UsageReadError> {
+    let Some(value) = value else {
+        return Ok(None);
     };
-    (value <= MAX_SAFE_INTEGER).then_some(value)
-}
-
-fn non_negative_f64(value: Option<&Value>) -> Option<f64> {
-    let value = match value? {
-        Value::Number(value) => value.as_f64()?,
-        Value::String(value) => value.trim().parse().ok()?,
-        _ => return None,
+    let Some(value) = value.as_f64().filter(|value| valid_cost(*value)) else {
+        return Err(UsageReadError::Unavailable);
     };
-    (value.is_finite() && value >= 0.0).then_some(value)
+    Ok(Some(value))
 }
 
-fn optional_string(value: Option<&Value>) -> Option<String> {
-    let value = value?.as_str()?.trim();
-    (!value.is_empty() && value.len() <= 256).then(|| value.to_owned())
+fn valid_cost(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
 }
 
-fn non_empty_string(value: Option<&Value>) -> Option<String> {
-    optional_string(value)
+fn string_field(record: &Map<String, Value>, key: &str) -> Option<String> {
+    clean_optional_string(record.get(key).and_then(Value::as_str).map(str::to_owned))
+}
+
+fn session_key_field(record: &Map<String, Value>, key: &str) -> Option<String> {
+    let value = record.get(key).and_then(Value::as_str)?.trim().to_owned();
+    safe_session_key(&value).then_some(value)
+}
+
+fn clean_optional_string(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_owned();
+    (!value.is_empty() && value.len() <= 256).then_some(value)
+}
+
+fn safe_agent_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && bytes.iter().all(|byte| !byte.is_ascii_uppercase())
+}
+
+fn safe_session_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn safe_session_key(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 512
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+        && !value.contains("..")
+}
+
+fn iso_timestamp(milliseconds: u64) -> Option<String> {
+    let milliseconds = i64::try_from(milliseconds).ok()?;
+    chrono::DateTime::from_timestamp_millis(milliseconds)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use serde_json::json;
 
     use super::*;
 
-    struct TestRoot(PathBuf);
-
-    impl TestRoot {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "openclaw-usage-test-{}",
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn session(&self, agent: &str, file: &str, content: &str) {
-            let directory = self.0.join("agents").join(agent).join("sessions");
-            fs::create_dir_all(&directory).unwrap();
-            fs::write(directory.join(file), content).unwrap();
-        }
-
-        fn session_store(&self, agent: &str, content: &str) {
-            let directory = self.0.join("agents").join(agent).join("sessions");
-            fs::create_dir_all(&directory).unwrap();
-            fs::write(directory.join("sessions.json"), content).unwrap();
-        }
-    }
-
-    impl Drop for TestRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
-    fn reads_safe_aliases_newest_first_excludes_deleted_and_includes_reset() {
-        let root = TestRoot::new();
-        root.session("main", "live.jsonl", concat!(
-            "{bad json}\n",
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","model":"m1","provider":"p1","usage":{"input_token_count":"11","output_tokens":5,"total":16}}}"#, "\n",
-            r#"{"timestamp":"2026-04-02T00:00:00.000Z","message":{"role":"tool_result","details":{"model":"m2","usage":{"input":2,"output":3}}}}"#, "\n"
-        ));
-        root.session("main", "old.jsonl.deleted.2026-04-01T00-00-00Z", r#"{"timestamp":"2099-01-01T00:00:00.000Z","message":{"role":"assistant","usage":{"total":99}}}"#);
-        root.session("main", "old.jsonl.reset.2026-04-01T00-00-00Z", r#"{"timestamp":"2026-04-03T00:00:00.000Z","message":{"role":"assistant","usage":{"total_tokens":7}}}"#);
-
-        let entries = UsageHistory::new(&root.0).recent(2).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].agent_id(), "main");
-        assert_eq!(entries[0].session_id(), "old");
-        assert_eq!(entries[1].agent_id(), "main");
-        assert_eq!(entries[1].session_id(), "live");
-        assert_eq!(entries[0].timestamp(), "2026-04-03T00:00:00.000Z");
-        assert_eq!(entries[1].timestamp(), "2026-04-02T00:00:00.000Z");
-        assert_eq!(entries[0].total_tokens(), 7);
-        assert_eq!(entries[1].total_tokens(), 5);
-        assert_eq!(entries[1].model(), Some("m2"));
-    }
-
-    #[test]
-    fn resolves_custom_session_file_from_authoritative_store_identity() {
-        let root = TestRoot::new();
-        root.session_store(
-            "main",
-            r#"{"agent:main:topic":{"sessionId":"authoritative-id","sessionFile":"custom-topic.jsonl"}}"#,
-        );
-        root.session(
-            "main",
-            "custom-topic.jsonl",
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":{"total":1}}}"#,
-        );
-        root.session(
-            "main",
-            "custom-topic.jsonl.reset.2026-04-02T00-00-00Z",
-            r#"{"timestamp":"2026-04-02T00:00:00.000Z","message":{"role":"assistant","usage":{"total":2}}}"#,
-        );
-
-        let entries = UsageHistory::new(&root.0).recent(1).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].agent_id(), "main");
-        assert_eq!(entries[0].session_id(), "authoritative-id");
-        assert_eq!(entries[0].total_tokens(), 2);
-    }
-
-    #[test]
-    fn skips_transcripts_without_a_safe_session_identity() {
-        let root = TestRoot::new();
-        root.session_store(
-            "main",
-            r#"{"agent:main:invalid":{"sessionId":"../unsafe","sessionFile":"bad space.jsonl"}}"#,
-        );
-        root.session(
-            "main",
-            "bad space.jsonl",
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":{"total":1}}}"#,
-        );
-        root.session(
-            "main",
-            "-unsafe.jsonl",
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":{"total":1}}}"#,
-        );
-        assert!(UsageHistory::new(&root.0).recent(1).unwrap().is_empty());
-    }
-
-    #[test]
-    fn accepts_only_openclaw_live_and_reset_filename_grammar() {
-        for name in [
-            "live.jsonl",
-            "custom-topic.jsonl",
-            "session.jsonl.reset.2026-04-01T00-00-00Z",
-            "session.jsonl.reset.2026-04-01T00-00-00.123Z",
-        ] {
-            assert!(
-                is_live_or_reset_transcript(std::ffi::OsStr::new(name)),
-                "{name}"
-            );
-        }
-        for name in [
-            "sessions.json",
-            "live.trajectory.jsonl",
-            "session.checkpoint.123e4567-e89b-42d3-a456-426614174000.jsonl",
-            "session.jsonl.deleted.2026-04-01T00-00-00Z",
-            "session.deleted.jsonl",
-            "session.jsonl.bak.2026-04-01T00-00-00Z",
-            "session.jsonl.reset.not-a-timestamp",
-            "session.jsonl.reset.2026-04-01T00-00-00Z.tmp",
-        ] {
-            assert!(
-                !is_live_or_reset_transcript(std::ffi::OsStr::new(name)),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn preserves_explicit_total_and_bounds_the_newest_projection() {
-        let root = TestRoot::new();
-        root.session("main", "live.jsonl", concat!(
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":{"input":2,"output":3,"cacheRead":5,"total":99}}}"#, "\n",
-            r#"{"timestamp":"2026-04-02T00:00:00.000Z","message":{"role":"assistant","usage":{"total":2}}}"#, "\n",
-            r#"{"timestamp":"2026-04-03T00:00:00.000Z","message":{"role":"assistant","usage":{"total":3}}}"#
-        ));
-
-        let entries = UsageHistory::new(&root.0).recent(2).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].total_tokens(), 3);
-        assert_eq!(entries[1].total_tokens(), 2);
-        let explicit_total = parse_entry(
-            &serde_json::json!({
-                "timestamp": "2026-04-01T00:00:00.000Z",
-                "message": { "role": "assistant", "usage": { "input": 2, "output": 3, "cacheRead": 5, "total": 99 } }
+    fn projects_sessions_usage_response_to_recent_entries() {
+        let session_keys = Mutex::new(HashMap::new());
+        let entries = project_sessions_usage_payload(
+            json!({
+                "sessions": [
+                    {
+                        "key": "agent:main:first",
+                        "sessionId": "session-1",
+                        "updatedAt": 1770000000000_u64,
+                        "agentId": "main",
+                        "model": "store-model",
+                        "modelProvider": "store-provider",
+                        "usage": {
+                            "input": 11,
+                            "output": 5,
+                            "cacheRead": 3,
+                            "cacheWrite": 2,
+                            "totalTokens": 21,
+                            "totalCost": 0.12,
+                            "lastActivity": 1770000000000_u64,
+                            "modelUsage": [{ "provider": "usage-provider", "model": "usage-model", "count": 1, "totals": {} }]
+                        }
+                    },
+                    {
+                        "key": "agent:main:second",
+                        "sessionId": "session-2",
+                        "updatedAt": 1780000000000_u64,
+                        "agentId": "main",
+                        "usage": {
+                            "input": 1,
+                            "output": 2,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 3,
+                            "lastActivity": 1780000000000_u64,
+                            "modelUsage": [{ "provider": "p2", "model": "m2", "count": 1, "totals": {} }]
+                        }
+                    }
+                ]
             }),
-            "main",
-            "live",
+            1,
+            &session_keys,
         )
         .unwrap();
-        assert_eq!(explicit_total.total_tokens(), 99);
-    }
 
-    #[test]
-    fn sorts_newest_entries_by_rfc3339_instant_across_offsets() {
-        let root = TestRoot::new();
-        root.session("main", "live.jsonl", concat!(
-            r#"{"timestamp":"2026-04-01T00:30:00+02:00","message":{"role":"assistant","usage":{"total":1}}}"#, "\n",
-            r#"{"timestamp":"2026-03-31T23:00:00Z","message":{"role":"assistant","usage":{"total":2}}}"#
-        ));
-
-        let entries = UsageHistory::new(&root.0).recent(1).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].timestamp(), "2026-03-31T23:00:00Z");
+        assert_eq!(
+            session_keys
+                .lock()
+                .unwrap()
+                .get(&UsageSessionIdentity {
+                    agent_id: "main".to_owned(),
+                    session_id: "session-2".to_owned(),
+                })
+                .map(String::as_str),
+            Some("agent:main:second")
+        );
+        assert_eq!(entries[0].session_id(), "session-2");
+        assert_eq!(entries[0].agent_id(), "main");
+        assert_eq!(entries[0].timestamp(), "2026-05-28T20:26:40.000Z");
+        assert_eq!(entries[0].model(), Some("m2"));
+        assert_eq!(entries[0].provider(), Some("p2"));
+        assert_eq!(entries[0].total_tokens(), 3);
     }
 
     #[test]
-    fn preserves_subsecond_ordering_within_the_same_millisecond() {
-        let root = TestRoot::new();
-        root.session("main", "live.jsonl", concat!(
-            r#"{"timestamp":"2026-04-01T00:00:00.000000001Z","message":{"role":"assistant","usage":{"total":1}}}"#, "\n",
-            r#"{"timestamp":"2026-04-01T00:00:00.000000002Z","message":{"role":"assistant","usage":{"total":2}}}"#
-        ));
+    fn skips_sessions_without_usage_safe_public_identity_or_token_cost() {
+        let session_keys = Mutex::new(HashMap::new());
+        let entries = project_sessions_usage_payload(
+            json!({
+                "sessions": [
+                    { "sessionId": "empty", "agentId": "main", "usage": null },
+                    {
+                        "key": "agent:main:zero",
+                        "sessionId": "zero",
+                        "agentId": "main",
+                        "updatedAt": 1770000000000_u64,
+                        "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0 }
+                    },
+                    {
+                        "sessionId": "../private",
+                        "agentId": "main",
+                        "updatedAt": 1770000000000_u64,
+                        "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2 }
+                    },
+                    {
+                        "sessionId": "session-1",
+                        "agentId": "Main",
+                        "updatedAt": 1770000000000_u64,
+                        "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2 }
+                    }
+                ]
+            }),
+            100,
+            &session_keys,
+        )
+        .unwrap();
 
-        let entries = UsageHistory::new(&root.0).recent(1).unwrap();
-        assert_eq!(entries[0].total_tokens(), 2);
+        assert!(entries.is_empty());
+        assert!(session_keys.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn rejects_unsafe_totals_and_overflowed_component_sums() {
-        for usage in [
-            serde_json::json!({ "total": MAX_SAFE_INTEGER + 1 }),
-            serde_json::json!({ "input": MAX_SAFE_INTEGER, "output": 1 }),
+    fn projects_timeseries_points_with_openclaw_shape() {
+        let entries = project_timeseries_payload(
+            json!({
+                "sessionId": "session-1",
+                "points": [{
+                    "timestamp": 1770000001000_u64,
+                    "input": 10,
+                    "output": 4,
+                    "cacheRead": 2,
+                    "totalTokens": 16,
+                    "cost": 0.02,
+                    "cumulativeTokens": 16,
+                    "cumulativeCost": 0.02
+                }]
+            }),
+            "main",
+            "session-1",
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id(), "session-1");
+        assert_eq!(entries[0].cache_write_tokens(), 0);
+        assert_eq!(entries[0].total_tokens(), 16);
+    }
+
+    #[test]
+    fn rejects_malformed_sessions_usage_payload() {
+        for payload in [
+            json!({}),
+            json!({ "sessions": [{}] }),
+            json!({ "sessions": [{ "sessionId": "session-1", "agentId": "main", "usage": "raw" }] }),
+            json!({
+                "sessions": [{
+                    "sessionId": "session-1",
+                    "agentId": "main",
+                    "updatedAt": 1770000000000_u64,
+                    "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2, "totalCost": -1 }
+                }]
+            }),
         ] {
-            assert!(
-                parse_entry(
-                    &serde_json::json!({
-                        "timestamp": "2026-04-01T00:00:00.000Z",
-                        "message": { "role": "assistant", "usage": usage },
-                    }),
-                    "main",
-                    "live",
-                )
-                .is_none()
+            assert_eq!(
+                project_sessions_usage_payload(payload, 100, &Mutex::new(HashMap::new())),
+                Err(UsageReadError::Unavailable)
             );
         }
     }
 
     #[test]
-    fn rejects_invalid_usage_shapes_without_projecting_raw_content() {
-        let root = TestRoot::new();
-        root.session("main", "live.jsonl", concat!(
-            r#"{"timestamp":"not-a-timestamp","message":{"role":"assistant","usage":{"total":1}}}"#, "\n",
-            r#"{"timestamp":"2026-04-01T00:00:00.000Z","message":{"role":"assistant","usage":"secret"}}"#, "\n",
-            r#"{"timestamp":"2026-04-02T00:00:00.000Z","message":{"role":"assistant","usage":{"total":-1}}}"#, "\n",
-            r#"{"timestamp":"2026-04-03T00:00:00.000Z","message":{"role":"assistant","usage":{"total":9007199254740992}}}"#
-        ));
-        assert!(UsageHistory::new(&root.0).recent(10).unwrap().is_empty());
+    fn usage_request_uses_gateway_session_usage_method() {
+        let request = sessions_usage_request(12).unwrap();
+        assert_eq!(request.method(), SESSIONS_USAGE_METHOD);
+        assert_eq!(
+            request.params().and_then(|value| value.get("agentScope")),
+            Some(&json!("all"))
+        );
+        assert_eq!(
+            request.params().and_then(|value| value.get("range")),
+            Some(&json!("all"))
+        );
+        assert_eq!(
+            request.params().and_then(|value| value.get("limit")),
+            Some(&json!(12))
+        );
     }
 }

@@ -3,6 +3,7 @@ import {
   sanitizeAssistantDisplayText,
   sanitizeCanonicalUserText,
 } from '../../../src/stores/chat/message-display';
+import { isInternalRuntimeDisplayMessage } from '../../../src/stores/chat/message-filter';
 import type {
   SessionMessageRole,
   SessionRenderAttachedFile,
@@ -113,10 +114,6 @@ function assistantTextSegments(message: RawMessage): string[] {
   return textBlocks.length ? textBlocks : [sanitizeAssistantDisplayText(message.content)].filter(Boolean);
 }
 
-function assistantText(message: RawMessage): string {
-  return assistantTextSegments(message).join('\n');
-}
-
 function assistantThinking(message: RawMessage): string | null {
   const parts = contentBlocks(message)
     .filter((block) => block.type === 'thinking' && typeof block.thinking === 'string')
@@ -182,6 +179,8 @@ function attachedFiles(message: RawMessage): SessionRenderAttachedFile[] {
         mimeType: file.mimeType,
         fileSize: file.fileSize,
         preview: typeof file.preview === 'string' ? file.preview : null,
+        ...(file.previewStatus === 'unavailable' ? { previewStatus: file.previewStatus } : {}),
+        ...(typeof file.attachmentStatus === 'string' ? { attachmentStatus: file.attachmentStatus as SessionRenderAttachedFile['attachmentStatus'] } : {}),
         ...(typeof file.filePath === 'string' ? { filePath: file.filePath } : {}),
         ...(file.source === 'user-upload' || file.source === 'tool-result' || file.source === 'message-ref'
           ? { source: file.source }
@@ -272,6 +271,7 @@ function toolCards(message: RawMessage): SessionRenderToolCard[] {
 
 function toItems(sessionKey: string, message: RawMessage, index: number): SessionRenderItem[] {
   if (message.role === 'toolresult' || message.role === 'tool_result') return [];
+  if (isInternalRuntimeDisplayMessage(message)) return [];
   const binding = identity(message, index);
   const key = `session:${sessionKey}|${message.role}:${binding.entryId}`;
   const createdAt = message.timestamp;

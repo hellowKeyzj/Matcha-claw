@@ -1647,6 +1647,8 @@ function sessionCreateErrorMessage(
   >,
 ): string {
   switch (result.resultType) {
+    case 'invalidSessionId':
+      return result.message
     case 'sessionAlreadyExists':
       return `Session already exists: ${result.sessionId}`
     case 'workspaceUnavailable':

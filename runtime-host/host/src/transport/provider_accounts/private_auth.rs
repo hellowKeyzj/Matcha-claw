@@ -295,6 +295,8 @@ impl std::fmt::Debug for Resolver {
 fn auth_mode_name(mode: ProviderAccountAuthMode) -> &'static str {
     match mode {
         ProviderAccountAuthMode::ApiKey => "apiKey",
+        ProviderAccountAuthMode::Token => "token",
+        ProviderAccountAuthMode::CliReuse => "cliReuse",
         ProviderAccountAuthMode::OAuthBrowser => "oauthBrowser",
         ProviderAccountAuthMode::OAuthDevice => "oauthDevice",
         ProviderAccountAuthMode::Local => "local",

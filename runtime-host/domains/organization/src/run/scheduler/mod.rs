@@ -13,22 +13,67 @@ pub use retry_due::{
 };
 pub use terminal_observation::{TerminalObservationPlan, plan_terminal_observations};
 
-use super::graph::{AttemptStatus, ExecutionFence, GraphState, GroupId, NodeId};
+use super::{
+    activity::{ActivityId, ActivityKind, ActivityRequest, ActivityRequestError, ActivityTarget},
+    graph::{AttemptStatus, ExecutionFence, GraphRunId, GraphState, GroupId, NodeId, NodeKind},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadyNodeSchedule {
+    activity_id: ActivityId,
+    run_id: GraphRunId,
     node_id: NodeId,
     fence: ExecutionFence,
+    activity_kind: ActivityKind,
+    idempotency_key: String,
     group_id: Option<GroupId>,
 }
 
 impl ReadyNodeSchedule {
+    pub fn activity_id(&self) -> &ActivityId {
+        &self.activity_id
+    }
+
+    pub fn run_id(&self) -> &GraphRunId {
+        &self.run_id
+    }
+
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
     }
 
     pub fn fence(&self) -> &ExecutionFence {
         &self.fence
+    }
+
+    pub fn activity_kind(&self) -> &ActivityKind {
+        &self.activity_kind
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn bind_activity_target(
+        &self,
+        target: ActivityTarget,
+        created_at: u64,
+        max_attempts: u32,
+    ) -> Result<ActivityRequest, ActivityRequestError> {
+        let request = ActivityRequest {
+            activity_id: self.activity_id.clone(),
+            run_id: self.run_id.clone(),
+            node_id: self.node_id.clone(),
+            node_execution_id: self.fence.node_execution_id().clone(),
+            fence: self.fence.clone(),
+            activity_kind: self.activity_kind.clone(),
+            target,
+            idempotency_key: self.idempotency_key.clone(),
+            created_at,
+            max_attempts,
+        };
+        request.validate()?;
+        Ok(request)
     }
 
     pub fn group_id(&self) -> Option<&GroupId> {
@@ -71,19 +116,70 @@ pub fn schedule_ready_nodes(
         if attempt.status() != AttemptStatus::Ready || attempt.fence() != item.fence() {
             return Err(ReadyScheduleError::StaleReadyQueue(item.node_id().clone()));
         }
-        let group_id = graph
-            .definition()
-            .node(item.node_id())
-            .and_then(|node| node.work_assignment())
+        let Some(node) = graph.definition().node(item.node_id()) else {
+            return Err(ReadyScheduleError::StaleReadyQueue(item.node_id().clone()));
+        };
+        let Some(activity_kind) = activity_kind_for_ready_node(node) else {
+            continue;
+        };
+        let idempotency_key = activity_idempotency_key(graph.definition().run_id(), item.fence());
+        let activity_id = ActivityId::new(idempotency_key.clone())
+            .map_err(|_| ReadyScheduleError::StaleReadyQueue(item.node_id().clone()))?;
+        let group_id = node
+            .work_assignment()
             .and_then(|work| work.group_id())
             .cloned();
         scheduled.push(ReadyNodeSchedule {
+            activity_id,
+            run_id: graph.definition().run_id().clone(),
             node_id: item.node_id().clone(),
             fence: item.fence().clone(),
+            activity_kind,
+            idempotency_key,
             group_id,
         });
     }
     Ok(scheduled)
+}
+
+fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<ActivityKind> {
+    match node.kind() {
+        NodeKind::Work => {
+            let work = node.work_assignment()?;
+            if work.prompt().trim().is_empty() {
+                return None;
+            }
+            Some(ActivityKind::AgentTask {
+                task_id: work.task_id().to_owned(),
+                role_id: work.role_id().to_owned(),
+                prompt: work.prompt().to_owned(),
+            })
+        }
+        NodeKind::Review => {
+            let review = node.review_assignment()?;
+            if review.prompt().trim().is_empty() {
+                return None;
+            }
+            Some(ActivityKind::AgentTask {
+                task_id: node.id().as_str().to_owned(),
+                role_id: review.role_id().to_owned(),
+                prompt: review.prompt().to_owned(),
+            })
+        }
+        NodeKind::Start
+        | NodeKind::HumanDecision
+        | NodeKind::ScriptReview
+        | NodeKind::Join
+        | NodeKind::End => None,
+    }
+}
+
+fn activity_idempotency_key(run_id: &GraphRunId, fence: &ExecutionFence) -> String {
+    format!(
+        "team-graph-activity:{}:{}",
+        run_id.as_str(),
+        fence.attempt_id().as_str()
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,8 +334,172 @@ mod tests {
         );
         let selected = schedule_ready_nodes(&graph, 2, 1).unwrap();
         assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].activity_id().as_str(),
+            "team-graph-activity:run-1:work-a:attempt:1"
+        );
+        assert_eq!(
+            selected[0].idempotency_key(),
+            selected[0].activity_id().as_str()
+        );
+        assert_eq!(selected[0].run_id().as_str(), "run-1");
         assert_eq!(selected[0].node_id().as_str(), "work-a");
         assert_eq!(selected[0].group_id().map(GroupId::as_str), Some("group-a"));
+        assert!(matches!(
+            selected[0].activity_kind(),
+            ActivityKind::AgentTask { task_id, role_id, prompt }
+                if task_id == "task-a" && role_id == "role-a" && prompt == "prompt"
+        ));
+        let request = selected[0]
+            .bind_activity_target(ActivityTarget::new("session-a").unwrap(), 3, 1)
+            .unwrap();
+        assert_eq!(request.activity_id, selected[0].activity_id().clone());
+        assert_eq!(request.run_id, selected[0].run_id().clone());
+        assert_eq!(request.node_id, selected[0].node_id().clone());
+        assert_eq!(request.fence, selected[0].fence().clone());
+        assert_eq!(request.target.as_str(), "session-a");
+        assert_eq!(request.created_at, 3);
+    }
+
+    #[test]
+    fn ready_scheduler_skips_agent_nodes_without_executable_prompt() {
+        use crate::run::graph::{GraphDefinition, GraphRunId, NodeDefinition, NodeId};
+        use std::num::NonZeroU32;
+
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph-1",
+                "plan-1",
+                GraphRunId::new("run-1"),
+                "graph",
+                vec![NodeDefinition::work(
+                    NodeId::new("work"),
+                    "work",
+                    NonZeroU32::new(1).unwrap(),
+                    crate::WorkAssignment::new("task", "role"),
+                )],
+                Vec::new(),
+            )
+            .unwrap(),
+            1,
+        );
+
+        assert!(schedule_ready_nodes(&graph, 1, 0).unwrap().is_empty());
+        assert_eq!(graph.ready_queue().len(), 1);
+    }
+
+    #[test]
+    fn ready_scheduler_skips_control_nodes_that_are_consumed_by_control_execution() {
+        use crate::run::graph::{
+            EdgeAction, EdgeDefinition, EdgeId, GraphDefinition, GraphEvent, GraphRunId,
+            NodeDefinition, NodeId, reduce,
+        };
+        use std::num::NonZeroU32;
+
+        let start = NodeId::new("start");
+        let work = NodeId::new("work");
+        let definition = GraphDefinition::new(
+            "graph-1",
+            "plan-1",
+            GraphRunId::new("run-1"),
+            "graph",
+            vec![
+                NodeDefinition::start(start.clone(), "start", NonZeroU32::new(1).unwrap(), None),
+                NodeDefinition::work(
+                    work.clone(),
+                    "work",
+                    NonZeroU32::new(1).unwrap(),
+                    crate::WorkAssignment::typed(
+                        "task",
+                        "prompt",
+                        crate::ExecutorPolicy::team_role("role"),
+                        None,
+                        None,
+                    ),
+                ),
+            ],
+            vec![EdgeDefinition::new(
+                EdgeId::new("start-work"),
+                start.clone(),
+                "completed",
+                work.clone(),
+                "input",
+                EdgeAction::Activate,
+            )],
+        )
+        .unwrap();
+        let graph = GraphState::initialize(definition, 1);
+
+        assert!(schedule_ready_nodes(&graph, 1, 0).unwrap().is_empty());
+        let fence = graph.current_attempt(&start).unwrap().fence().clone();
+        let graph = reduce(
+            graph,
+            GraphEvent::NodeCompleted {
+                node_id: start,
+                fence,
+                output_port: "completed".to_owned(),
+                completed_at: 2,
+            },
+        )
+        .unwrap();
+        let scheduled = schedule_ready_nodes(&graph, 1, 0).unwrap();
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].node_id(), &work);
+    }
+
+    #[test]
+    fn ready_scheduler_is_a_read_only_projection_and_does_not_start_work() {
+        use crate::run::graph::{
+            GraphDefinition, GraphEvent, GraphRunId, NodeDefinition, NodeId, reduce,
+        };
+        use std::num::NonZeroU32;
+
+        let node_id = NodeId::new("work");
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph-1",
+                "plan-1",
+                GraphRunId::new("run-1"),
+                "graph",
+                vec![NodeDefinition::work(
+                    node_id.clone(),
+                    "work",
+                    NonZeroU32::new(1).unwrap(),
+                    crate::WorkAssignment::typed(
+                        "task",
+                        "prompt",
+                        crate::ExecutorPolicy::team_role("role"),
+                        None,
+                        None,
+                    ),
+                )],
+                Vec::new(),
+            )
+            .unwrap(),
+            1,
+        );
+        let scheduled = schedule_ready_nodes(&graph, 1, 0).unwrap();
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(
+            graph.current_attempt(&node_id).unwrap().status(),
+            AttemptStatus::Ready
+        );
+        assert_eq!(graph.ready_queue().len(), 1);
+
+        let started = reduce(
+            graph,
+            GraphEvent::AttemptStarted {
+                node_id: node_id.clone(),
+                fence: scheduled[0].fence().clone(),
+                started_at: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            started.current_attempt(&node_id).unwrap().status(),
+            AttemptStatus::Running
+        );
+        assert!(started.ready_queue().is_empty());
     }
 
     #[test]

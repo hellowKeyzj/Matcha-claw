@@ -34,3 +34,9 @@ Aggregate and consolidate sales metrics from all territories, representatives, a
 - All active territories and reps represented
 - Zero data inconsistencies between detail and summary views
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

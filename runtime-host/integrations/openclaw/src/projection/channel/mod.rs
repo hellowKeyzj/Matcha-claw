@@ -28,8 +28,6 @@ fn channel_plugin_id(channel_type: &str) -> Option<&'static str> {
         "wecom" => Some("wecom"),
         "qqbot" => Some("openclaw-qqbot"),
         "wechat" | "openclaw-weixin" => Some("openclaw-weixin"),
-        "discord" => Some("discord"),
-        "whatsapp" => Some("whatsapp"),
         _ => None,
     }
 }
@@ -85,15 +83,14 @@ mod tests {
             "channels".into(),
             json!({
                 "feishu": {"appId": "app-id"},
-                "discord": {"accounts": {"primary": {"enabled": true}}},
                 "telegram": {"accounts": {"primary": {"enabled": true}}},
-                "whatsapp": {"enabled": false, "accounts": {"primary": {}}}
+                "wechat": {"accounts": {"primary": {}}}
             }),
         );
 
         assert_eq!(
             configured_plugin_ids(&document),
-            vec!["discord", "openclaw-lark"]
+            vec!["openclaw-lark", "openclaw-weixin"]
         );
     }
 

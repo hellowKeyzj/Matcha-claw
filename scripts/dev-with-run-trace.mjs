@@ -24,5 +24,4 @@ function run(command, args) {
   }
 }
 
-run('node', ['scripts/build-runtime-host-native.mjs', '--platform', process.platform, '--arch', process.arch]);
-run('vite', []);
+run('node', ['scripts/dev.mjs']);

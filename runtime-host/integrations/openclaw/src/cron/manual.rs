@@ -70,6 +70,18 @@ pub enum CronRunDisposition {
     AlreadyRunning,
     NotDue,
     InvalidSpec,
+    Disabled,
+    Stopped,
+}
+
+fn map_run_disposition(disposition: wire::cron::CronRunDisposition) -> CronRunDisposition {
+    match disposition {
+        wire::cron::CronRunDisposition::AlreadyRunning => CronRunDisposition::AlreadyRunning,
+        wire::cron::CronRunDisposition::NotDue => CronRunDisposition::NotDue,
+        wire::cron::CronRunDisposition::InvalidSpec => CronRunDisposition::InvalidSpec,
+        wire::cron::CronRunDisposition::Disabled => CronRunDisposition::Disabled,
+        wire::cron::CronRunDisposition::Stopped => CronRunDisposition::Stopped,
+    }
 }
 
 pub async fn admit(
@@ -94,29 +106,32 @@ pub async fn admit(
             return Ok(Err(CronTriggerOutcome::OutcomeUnknown));
         }
     };
-    if let Some(run_id) = receipt.run_id {
-        let terminal = drain_early_terminal(&mut events, &job_id, &run_id);
-        Ok(Ok(CronExecutionAdmission {
-            client,
-            job_id,
-            run_id,
-            dispatcher,
-            events,
-            terminal,
-        }))
-    } else {
-        dispatcher.close().await;
-        let disposition = receipt
-            .disposition
-            .map(|value| match value {
-                wire::cron::CronRunDisposition::AlreadyRunning => {
-                    CronRunDisposition::AlreadyRunning
-                }
-                wire::cron::CronRunDisposition::NotDue => CronRunDisposition::NotDue,
-                wire::cron::CronRunDisposition::InvalidSpec => CronRunDisposition::InvalidSpec,
-            })
-            .ok_or(GatewayClientError::Protocol)?;
-        Ok(Err(CronTriggerOutcome::Skipped(disposition)))
+    match receipt.into_outcome() {
+        wire::cron::CronRunReceiptOutcome::Enqueued { run_id } => {
+            let terminal = drain_early_terminal(&mut events, &job_id, &run_id);
+            Ok(Ok(CronExecutionAdmission {
+                client,
+                job_id,
+                run_id,
+                dispatcher,
+                events,
+                terminal,
+            }))
+        }
+        wire::cron::CronRunReceiptOutcome::Ran => {
+            dispatcher.close().await;
+            Ok(Err(CronTriggerOutcome::Accepted))
+        }
+        wire::cron::CronRunReceiptOutcome::Skipped(disposition) => {
+            dispatcher.close().await;
+            Ok(Err(CronTriggerOutcome::Skipped(map_run_disposition(
+                disposition,
+            ))))
+        }
+        wire::cron::CronRunReceiptOutcome::OutcomeUnknown => {
+            dispatcher.close().await;
+            Ok(Err(CronTriggerOutcome::OutcomeUnknown))
+        }
     }
 }
 

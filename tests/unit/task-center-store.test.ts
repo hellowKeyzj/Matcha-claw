@@ -16,8 +16,10 @@ const secondSessionIdentity = createOpenClawTestSessionIdentity('agent:main:seco
 
 const listTaskSnapshotMock = vi.fn<(payload: { sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }) => Promise<TaskListSnapshot>>();
 const updateTaskMock = vi.fn();
+const isTaskManagementAvailableMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
+  isTaskManagementAvailable: (...args: unknown[]) => isTaskManagementAvailableMock(...args),
   listTaskSnapshot: (...args: [{ sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }]) => listTaskSnapshotMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
@@ -54,6 +56,8 @@ describe('task center store', () => {
     vi.resetModules();
     listTaskSnapshotMock.mockReset();
     updateTaskMock.mockReset();
+    isTaskManagementAvailableMock.mockReset();
+    isTaskManagementAvailableMock.mockResolvedValue(true);
   });
 
   it('init loads session scoped task snapshot', async () => {
@@ -115,6 +119,25 @@ describe('task center store', () => {
     expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
   });
 
+  it('refreshTasks does not list unsupported task.management sessions', async () => {
+    isTaskManagementAvailableMock.mockResolvedValueOnce(false);
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+
+    useTaskSnapshotStore.getState().reportTodos('matcha-session', [
+      { content: '已有待办', status: 'pending' },
+    ]);
+
+    await useTaskCenterStore.getState().refreshTasks({
+      sessionKey: 'matcha-session',
+      sessionIdentity: { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' }, agentId: 'matcha', sessionKey: 'matcha-session' },
+    });
+
+    expect(listTaskSnapshotMock).not.toHaveBeenCalled();
+    expect(useTaskSnapshotStore.getState().getTaskDataList('matcha-session')).toEqual([]);
+    expect(useTaskCenterStore.getState().error).toBeNull();
+  });
+
   it('refreshTasks isolates in-flight requests by session key', async () => {
     let resolveFirst: ((snapshot: TaskListSnapshot) => void) | null = null;
     listTaskSnapshotMock.mockImplementation((payload) => {
@@ -142,6 +165,18 @@ describe('task center store', () => {
 
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:first').map((item) => item.subject)).toEqual(['first task']);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
+  });
+
+  it('deleteTaskById does not update unsupported task.management sessions', async () => {
+    isTaskManagementAvailableMock.mockResolvedValue(false);
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+
+    await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
+    isTaskManagementAvailableMock.mockClear();
+    await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
+
+    expect(updateTaskMock).not.toHaveBeenCalled();
+    expect(useTaskCenterStore.getState().error).toBe('Task management is not available for this session');
   });
 
   it('deleteTaskById 调用 TaskUpdate(status=deleted) 后用 TaskList 全量刷新', async () => {
@@ -174,7 +209,7 @@ describe('task center store', () => {
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '3']);
   });
 
-  it.each(['rejected', 'unknown'] as const)('deleteTaskById refreshes the authoritative task snapshot when TaskUpdate is %s', async (outcome) => {
+  it.each(['rejected', 'unknown'] as const)('deleteTaskById refreshes the authoritative task snapshot and reports failure when TaskUpdate is %s', async (outcome) => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
       task({ id: '1', status: 'pending' }),
       task({ id: '2', status: 'in_progress' }),
@@ -192,6 +227,6 @@ describe('task center store', () => {
 
     expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
-    expect(useTaskCenterStore.getState().error).toBeNull();
+    expect(useTaskCenterStore.getState().error).toBe(`Task delete was ${outcome}`);
   });
 });

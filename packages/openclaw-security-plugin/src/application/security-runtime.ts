@@ -1,4 +1,4 @@
-import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { runStartupAudit } from "../infrastructure/auditor.js";
 import { DEFAULT_POLICY, mergeRuntimeConfig, resolvePolicy, resolveRuntimeConfig } from "../core/policy.js";
 import { evaluateBeforeToolCall } from "../core/runtime-guard.js";
@@ -18,6 +18,7 @@ import {
   runIntegrityCheck,
   runQuickAudit,
   runSkillScan,
+  type RemediationRuntime,
 } from "../infrastructure/actions.js";
 import {
   projectPublicAdvisories,
@@ -80,6 +81,11 @@ type HookLatencySummary = {
   p95Ms: number;
   lastMs: number;
   maxMs: number;
+};
+
+type GatewayRequestHandlerOptions = {
+  params?: Record<string, unknown>;
+  respond(success: boolean, payload?: unknown): void;
 };
 
 type HookLatencyMap = Record<SecurityHookName, HookLatencySummary>;
@@ -351,23 +357,27 @@ function resolveOutputAction(
 
 const ADVISORY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+function loadCurrentConfig(api: OpenClawPluginApi): Record<string, unknown> {
+  return (
+    api.runtime?.config?.current?.() as Record<string, unknown> | undefined
+  ) ?? (api.config as Record<string, unknown>);
+}
+
+function createRemediationRuntime(api: OpenClawPluginApi): RemediationRuntime {
+  return {
+    configGateway: api.runtime?.gateway,
+    loadConfig: async () => loadCurrentConfig(api),
+  };
+}
 
 export function registerSecurityRuntime(api: OpenClawPluginApi): void {
     let runtimeConfig = freezeRuntimeConfigSnapshot(resolveRuntimeConfig(api.pluginConfig));
     const approvalBridge = new ApprovalBridgeService({
       logger: api.logger,
-      loadConfig: async () => {
-        if (api.runtime?.config?.loadConfig) {
-          try {
-            return await api.runtime.config.loadConfig();
-          } catch {
-            return api.config as Record<string, unknown>;
-          }
-        }
-        return api.config as Record<string, unknown>;
-      },
+      loadConfig: async () => loadCurrentConfig(api),
     });
     const stateDir = resolveStateDir();
+    const remediationRuntime = createRemediationRuntime(api);
     let monitorsStarted = false;
     let advisoryTimer: NodeJS.Timeout | null = null;
 
@@ -1068,7 +1078,7 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
     });
 
     api.registerGatewayMethod("security.remediation.preview", async (options: GatewayRequestHandlerOptions) => {
-      const result = await remediationPreview(stateDir);
+      const result = await remediationPreview(stateDir, remediationRuntime);
       options.respond(true, { backend: "security-core", ...projectPublicRemediationPreview(result) });
     });
 
@@ -1076,13 +1086,13 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
       const selectedActions = Array.isArray(options.params?.actions)
         ? options.params.actions.filter((item): item is string => typeof item === "string").slice(0, 64)
         : undefined;
-      const result = await remediationApply(stateDir, selectedActions);
+      const result = await remediationApply(stateDir, selectedActions, remediationRuntime);
       options.respond(true, { backend: "security-core", ...projectPublicRemediationApply(result) });
     });
 
     api.registerGatewayMethod("security.remediation.rollback", async (options: GatewayRequestHandlerOptions) => {
       const snapshotId = typeof options.params?.snapshotId === "string" ? options.params.snapshotId : undefined;
-      const result = await remediationRollback(stateDir, snapshotId);
+      const result = await remediationRollback(stateDir, snapshotId, remediationRuntime);
       options.respond(true, { backend: "security-core", ...projectPublicRemediationRollback(result) });
     });
 

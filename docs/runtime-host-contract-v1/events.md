@@ -33,7 +33,6 @@ These are existing observable recovery semantics. Rust must not assume events ar
 | `session:update` | legacy child session/gateway ingress sends parent gateway event; current Rust session canonical path additionally emits safe `session.delta` through private control and Electron bridge. | legacy union includes `session_info_update`, `session_item_chunk`, `session_item`, `plan`; Rust `session.delta` is strictly decoded and mechanically applied by Renderer store. [session-adapter-types.ts](../../runtime-host/shared/session-adapter-types.ts#L470-L512)、[control.ts](../../electron/main/runtime-host-delivery/control.ts)、[gateway.ts](../../src/stores/gateway.ts) |
 | `task:snapshot` | task runtime projection; OpenClaw task manager operations now have a Rust RuntimeDriver/Owner path, but this event remains a Renderer-visible projection, not a Task durable owner. | `{ sessionKey, scope?, tasks, todos?, source, enableEdit?, uri? }`; task center consumer. |
 | `gateway:channel-status` | child channel / gateway projection. | Renderer expects root `channelId` / `status`; see `OPEN` shape discrepancy below. |
-| `license:gate-changed` | license runtime sanitized gate snapshot. | Settings page consumes gate state/reason/cache/validation projection. |
 | `runtime-host:status` | Electron-generated observed child status. | `{ status, hostLifecycle, runtimeLifecycle, activePluginCount, pid?, error?, updatedAt }`. |
 | `runtime-host:error` | Electron-generated child status failure. | `{ status, message, pid?, updatedAt }`. |
 | `runtime-host:restart` | Electron detects child recovery. | `{ previousPid?, pid?, status, recoveredAt }`. |
@@ -50,7 +49,6 @@ session:update
 task:snapshot
 gateway:channel-status
 gateway:error
-license:gate-changed
 team:event
 ```
 
@@ -59,7 +57,7 @@ Source: [parent-transport-contracts.ts](../../runtime-host/shared/parent-transpo
 ### Confirmed transformations
 
 - `gateway:lifecycle` → Electron publishes `gateway:status`, not the raw child payload.
-- `gateway:error`, `session:update`, `task:snapshot`, `gateway:channel-status`, `license:gate-changed`, `team:event` are forwarded by host event bridge.
+- `gateway:error`, `session:update`, `task:snapshot`, `gateway:channel-status`, `team:event` are forwarded by host event bridge.
 - Rust `session.delta` is a safe event produced by Host canonical session apply path and bridged separately from legacy rich `session:update`; it does not carry raw peer transcript state.
 - Rust `matcha.lifecycle` is a safe lifecycle hint produced from Matcha peer supervisor state and bridged as `matcha-agent:status`; it does not carry app-server port, pid, path, token, stderr or peer-private payloads.
 - `team:event` is produced only from Organization-owned durable TeamRun events after projection through `TeamRunPublicEvent`; native/runtime-private TeamRun payloads are unsupported and must not be emitted.

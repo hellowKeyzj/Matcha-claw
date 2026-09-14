@@ -74,23 +74,35 @@ mod tests {
         .unwrap();
         let completion = TeamNodeCompletionReceipt::try_new(
             AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:one").unwrap(),
             "run:one",
             fence.clone(),
+            "node-event:one",
             [evidence],
         )
         .unwrap();
-        let resolution = AgentNodeEventResolution::complete_with_receipt(
+        let resolution = AgentNodeEventResolution::complete_activity(
             AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
             DeliveryId::new("delivery:one").unwrap(),
             "run:one",
             fence.clone(),
             completion.clone(),
-            None::<String>,
+            "completed safely".to_owned(),
+            "node-event:one",
+            Some("completed"),
             5,
         )
         .unwrap();
         assert_eq!(resolution.completion_receipt(), Some(&completion));
         assert_eq!(resolution.fence(), &fence);
+        assert_eq!(
+            resolution.artifact_source_envelope_id(),
+            Some("resolution:one")
+        );
+        assert_eq!(
+            resolution.artifact_idempotency_key(),
+            Some("node-event:one")
+        );
     }
 
     #[test]
@@ -152,6 +164,52 @@ mod tests {
     #[test]
     fn completion_resolution_rejects_receipt_from_another_fence() {
         let fence = fence();
+        let mismatched_delivery = TeamNodeCompletionReceipt::try_new(
+            AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:other").unwrap(),
+            "run:one",
+            fence.clone(),
+            "node-event:one",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            AgentNodeEventResolution::complete_activity(
+                AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+                DeliveryId::new("delivery:one").unwrap(),
+                "run:one",
+                fence.clone(),
+                mismatched_delivery,
+                "completed safely".to_owned(),
+                "node-event:one",
+                Some("completed"),
+                5,
+            ),
+            Err(AgentNodeEventResolutionError::CompletionReceiptIdentityMismatch)
+        );
+        let mismatched_idempotency = TeamNodeCompletionReceipt::try_new(
+            AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:one").unwrap(),
+            "run:one",
+            fence.clone(),
+            "node-event:other",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            AgentNodeEventResolution::complete_activity(
+                AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+                DeliveryId::new("delivery:one").unwrap(),
+                "run:one",
+                fence.clone(),
+                mismatched_idempotency,
+                "completed safely".to_owned(),
+                "node-event:one",
+                Some("completed"),
+                5,
+            ),
+            Err(AgentNodeEventResolutionError::CompletionReceiptIdentityMismatch)
+        );
         let other_fence = ExecutionFence::new(
             AttemptId::for_node(
                 &crate::NodeId::new("work"),
@@ -164,19 +222,23 @@ mod tests {
         );
         let completion = TeamNodeCompletionReceipt::try_new(
             AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
+            DeliveryId::new("delivery:one").unwrap(),
             "run:one",
             other_fence,
+            "node-event:one",
             [],
         )
         .unwrap();
         assert_eq!(
-            AgentNodeEventResolution::complete_with_receipt(
+            AgentNodeEventResolution::complete_activity(
                 AuthorizedGraphResolutionReceipt::try_new("resolution:one").unwrap(),
                 DeliveryId::new("delivery:one").unwrap(),
                 "run:one",
                 fence,
                 completion,
-                None::<String>,
+                "completed safely".to_owned(),
+                "node-event:one",
+                Some("completed"),
                 5,
             ),
             Err(AgentNodeEventResolutionError::CompletionReceiptMismatch)
@@ -258,6 +320,34 @@ impl AgentNodeEventResolution {
         )
     }
 
+    pub fn complete_activity(
+        receipt: AuthorizedGraphResolutionReceipt,
+        delivery_id: DeliveryId,
+        graph_run_id: impl Into<String>,
+        fence: ExecutionFence,
+        completion_receipt: TeamNodeCompletionReceipt,
+        summary: String,
+        idempotency_key: impl Into<String>,
+        output_port: Option<impl Into<String>>,
+        resolved_at: u64,
+    ) -> Result<Self, AgentNodeEventResolutionError> {
+        let idempotency_key = idempotency_key.into();
+        let source_envelope_id = completion_receipt.receipt().as_str().to_owned();
+        Self::new(
+            receipt,
+            delivery_id,
+            graph_run_id,
+            fence,
+            AgentNodeEvent::Complete,
+            Some(completion_receipt),
+            Some(summary),
+            Some(source_envelope_id),
+            Some(idempotency_key),
+            output_port,
+            resolved_at,
+        )
+    }
+
     pub fn reject(
         receipt: AuthorizedGraphResolutionReceipt,
         delivery_id: DeliveryId,
@@ -307,6 +397,34 @@ impl AgentNodeEventResolution {
         )
     }
 
+    pub fn reject_activity(
+        receipt: AuthorizedGraphResolutionReceipt,
+        delivery_id: DeliveryId,
+        graph_run_id: impl Into<String>,
+        fence: ExecutionFence,
+        completion_receipt: TeamNodeCompletionReceipt,
+        summary: String,
+        idempotency_key: impl Into<String>,
+        output_port: Option<impl Into<String>>,
+        resolved_at: u64,
+    ) -> Result<Self, AgentNodeEventResolutionError> {
+        let idempotency_key = idempotency_key.into();
+        let source_envelope_id = completion_receipt.receipt().as_str().to_owned();
+        Self::new(
+            receipt,
+            delivery_id,
+            graph_run_id,
+            fence,
+            AgentNodeEvent::Reject,
+            Some(completion_receipt),
+            Some(summary),
+            Some(source_envelope_id),
+            Some(idempotency_key),
+            output_port,
+            resolved_at,
+        )
+    }
+
     fn new(
         receipt: AuthorizedGraphResolutionReceipt,
         delivery_id: DeliveryId,
@@ -325,7 +443,10 @@ impl AgentNodeEventResolution {
             return Err(AgentNodeEventResolutionError::BlankGraphRunId);
         }
         if let Some(completion_receipt) = &completion_receipt {
-            if completion_receipt.graph_run_id().as_str() != graph_run_id {
+            if completion_receipt.receipt() != &receipt
+                || completion_receipt.graph_run_id().as_str() != graph_run_id
+                || completion_receipt.delivery_id() != &delivery_id
+            {
                 return Err(AgentNodeEventResolutionError::CompletionReceiptIdentityMismatch);
             }
             if completion_receipt.fence() != &fence {
@@ -342,6 +463,15 @@ impl AgentNodeEventResolution {
                 .ok_or(AgentNodeEventResolutionError::InvalidSummary)
             })
             .transpose()?;
+        if let Some(completion_receipt) = &completion_receipt
+            && artifact_idempotency_key
+                .as_deref()
+                .is_some_and(|idempotency_key| {
+                    idempotency_key != completion_receipt.idempotency_key()
+                })
+        {
+            return Err(AgentNodeEventResolutionError::CompletionReceiptIdentityMismatch);
+        }
         if artifact_source_envelope_id
             .as_deref()
             .is_some_and(|value| value.trim().is_empty())

@@ -1,13 +1,16 @@
-import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { ChatInput } from '@/pages/Chat/ChatInput';
 import { AgentSkillConfigPanel } from '@/pages/Chat/components/AgentSkillConfigPanel';
-import { ChatSidePanel } from '@/pages/Chat/components/ChatSidePanel';
+import { useAgentSkillConfig } from '@/pages/Chat/useAgentSkillConfig';
 import { hostApiFetch } from '@/lib/host-api';
 import { useChatStore } from '@/stores/chat';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useSkillsStore } from '@/stores/skills';
+import { useAgentSkillConfigStore, __resetAgentSkillConfigStoreInternalCachesForTest } from '@/stores/agent-skill-config';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import i18n from '@/i18n';
@@ -30,7 +33,6 @@ interface AgentSkillConfigOption {
   skillKey: string;
   displayName: string;
   description: string;
-  installed: boolean;
   selectable: boolean;
   unavailableReason?: 'globalSkillDisabled' | 'blockedByRuntimeAllowlist' | 'missingRequirements';
   missingRequirements?: AgentSkillMissingRequirements;
@@ -88,14 +90,13 @@ const skillRuntimeFixtures = vi.hoisted(() => {
     inheritedDefaultSkillKeys: ['web-search', 'feishu-doc', 'clawflow'],
     effectiveSkillKeys: ['web-search', 'feishu-doc'],
     options: [
-      { skillKey: 'web-search', displayName: 'Web Search', description: 'web', installed: true, selectable: true },
-      { skillKey: 'feishu-doc', displayName: 'Feishu Doc', description: 'doc', installed: true, selectable: true },
-      { skillKey: 'clawflow', displayName: 'Clawflow', description: 'flow', installed: true, selectable: true },
+      { skillKey: 'web-search', displayName: 'Web Search', description: 'web', selectable: true },
+      { skillKey: 'feishu-doc', displayName: 'Feishu Doc', description: 'doc', selectable: true },
+      { skillKey: 'clawflow', displayName: 'Clawflow', description: 'flow', selectable: true },
       {
         skillKey: 'disabled-skill',
         displayName: 'Disabled Skill',
         description: 'disabled',
-        installed: true,
         selectable: false,
         unavailableReason: 'blockedByRuntimeAllowlist',
       },
@@ -159,6 +160,13 @@ const skillRuntimeFixtures = vi.hoisted(() => {
 const { testSessionKey, testSessionIdentity, testAgentScope } = skillRuntimeFixtures;
 const testRecordKey = buildSessionRecordKey(testSessionIdentity);
 const hostApiFetchMock = vi.mocked(hostApiFetch);
+const readySendGate = {
+  canSend: true as const,
+  kind: 'session' as const,
+  sessionKey: testSessionKey,
+  endpointSessionId: undefined,
+  sessionIdentity: testSessionIdentity,
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: skillRuntimeFixtures.hostApiFetch,
@@ -180,16 +188,6 @@ interface CapabilityExecutePayload {
   input?: Partial<SetAgentSkillConfigCommand>;
 }
 
-function mapSkillConfigViewToPanelOptions(view: AgentSkillConfigView) {
-  return view.options.map((option) => ({
-    id: option.skillKey,
-    name: option.displayName,
-    description: option.description,
-    selectable: option.selectable,
-    unavailableReason: option.unavailableReason,
-  }));
-}
-
 function readCapabilityExecutePayloads(operationId: string): CapabilityExecutePayload[] {
   return hostApiFetchMock.mock.calls.flatMap(([url, options]) => {
     if (url !== '/api/capabilities/execute') {
@@ -201,77 +199,22 @@ function readCapabilityExecutePayloads(operationId: string): CapabilityExecutePa
   });
 }
 
-function renderSkillSidePanelHarness() {
+function renderSkillConfigPanelHarness() {
   const Harness = () => {
-    const [view, setView] = useState(skillRuntimeFixtures.getAgentSkillConfigView());
-    const [loading, setLoading] = useState(false);
-    const handleToggleSkill = async (skillId: string, checked: boolean) => {
-      const baseSkillKeys = view.selectionMode === 'inheritsDefaultSkills'
-        ? view.effectiveSkillKeys
-        : view.explicitSkillKeys;
-      const nextExplicitSkillKeys = checked
-        ? (baseSkillKeys.includes(skillId) ? baseSkillKeys : [...baseSkillKeys, skillId])
-        : baseSkillKeys.filter((id) => id !== skillId);
-      setLoading(true);
-      const result = await hostApiFetch('/api/capabilities/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          id: 'subagent.skills',
-          operationId: 'subagentSkills.set',
-          target: {
-            kind: 'subagent',
-            agentId: 'test',
-            subagentId: 'test',
-          },
-          input: {
-            agentId: 'test',
-            revision: view.revision,
-            selection: {
-              selectionType: 'setExplicitSkillAllowlist',
-              skillKeys: nextExplicitSkillKeys,
-            },
-          },
-        }),
-      }) as SetAgentSkillConfigResult;
-      if (result.resultType === 'updated') {
-        setView(result.view);
-      }
-      setLoading(false);
-    };
+    const {
+      selectedSkillIds,
+      availableSkillOptions,
+      skillsLoading,
+      toggleSkill,
+    } = useAgentSkillConfig({ currentAgentId: 'test' });
 
     return (
-      <ChatSidePanel
-        mode="docked"
-        width={320}
-        activeTab="skills"
-        artifactWorkbenchFullscreen={false}
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        onToggleArtifactWorkbenchFullscreen={vi.fn()}
-        unfinishedTaskCount={0}
-        taskInboxTasks={[]}
-        taskInboxLoading={false}
-        taskInboxError={null}
-        onRefreshTaskInbox={vi.fn().mockResolvedValue(undefined)}
-        onClearTaskInboxError={vi.fn()}
-        derivedPlanStatus={null}
-        skillConfigLabel="Skill Configuration"
-        skillConfigTitle="Skill Configuration · Test Agent"
-        skillOptions={mapSkillConfigViewToPanelOptions(view)}
-        skillsLoading={loading}
-        selectedSkillIds={view.effectiveSkillKeys}
-        onToggleSkill={handleToggleSkill}
-        artifactGroups={[]}
-        artifactFocusedFile={null}
-        artifactActiveSection="changes"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot={null}
-        onArtifactFocusFile={vi.fn()}
-        onOpenGeneratedArtifactFile={vi.fn()}
-        onOpenArtifactGroup={vi.fn()}
-        onArtifactSectionChange={vi.fn()}
-        onArtifactViewModeChange={vi.fn()}
-        onArtifactRevealInFileManager={vi.fn()}
+      <AgentSkillConfigPanel
+        title="Skill Configuration · Test Agent"
+        skillOptions={availableSkillOptions}
+        skillsLoading={skillsLoading}
+        selectedSkillIds={selectedSkillIds}
+        onToggleSkill={toggleSkill}
       />
     );
   };
@@ -289,6 +232,51 @@ describe('chat agent skill configuration', () => {
     updateAgent.mockClear();
     hostApiFetchMock.mockClear();
     skillRuntimeFixtures.resetAgentSkillConfigView();
+    __resetAgentSkillConfigStoreInternalCachesForTest();
+    useAgentSkillConfigStore.setState({
+      viewByAgentId: {
+        test: skillRuntimeFixtures.getAgentSkillConfigView(),
+      },
+      loadingByAgentId: {},
+      errorByAgentId: {},
+    });
+    useSkillsStore.setState({
+      skills: [
+        {
+          id: 'web-search',
+          slug: 'web-search',
+          name: 'Web Search',
+          description: 'web',
+          icon: '🌐',
+          enabled: true,
+          eligible: true,
+          source: 'bundled',
+        },
+        {
+          id: 'feishu-doc',
+          slug: 'feishu-doc',
+          name: 'Feishu Doc',
+          description: 'doc',
+          icon: '📄',
+          enabled: true,
+          eligible: true,
+          source: 'bundled',
+        },
+        {
+          id: 'clawflow',
+          slug: 'clawflow',
+          name: 'Clawflow',
+          description: 'flow',
+          icon: '🧩',
+          enabled: true,
+          eligible: true,
+          source: 'bundled',
+        },
+      ],
+      snapshotReady: true,
+      initialLoading: false,
+      fetchSkills: vi.fn().mockResolvedValue(undefined),
+    } as never);
 
     useRuntimeHostStore.setState({
       runtimeHost: { lifecycle: 'running' },
@@ -391,17 +379,16 @@ describe('chat agent skill configuration', () => {
     } as never);
   });
 
-  it('opens the shared side panel on the skills tab and updates current agent allowlist through capability execution', async () => {
-    renderSkillSidePanelHarness();
+  it('updates current agent allowlist through capability execution from the skill config panel', async () => {
+    renderSkillConfigPanelHarness();
 
-    expect(screen.getByRole('tab', { name: 'Skill Configuration' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText('Skill Configuration · Test Agent')).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Web Search' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Feishu Doc' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Clawflow' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Disabled Skill' })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Web Search' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Clawflow' }));
 
     await waitFor(() => {
       expect(readCapabilityExecutePayloads('subagentSkills.set')).toContainEqual(expect.objectContaining({
@@ -409,13 +396,13 @@ describe('chat agent skill configuration', () => {
         operationId: 'subagentSkills.set',
         target: expect.objectContaining({
           kind: 'subagent',
+          subagentId: 'test',
         }),
         input: expect.objectContaining({
           agentId: 'test',
           revision: 'rev-1',
           selection: {
-            selectionType: 'setExplicitSkillAllowlist',
-            skillKeys: ['feishu-doc'],
+            selectionType: 'inheritDefaultSkills',
           },
         }),
       }));
@@ -424,7 +411,7 @@ describe('chat agent skill configuration', () => {
   });
 
   it('does not toggle a non-selectable capability option', () => {
-    renderSkillSidePanelHarness();
+    renderSkillConfigPanelHarness();
 
     const disabledSkillSwitch = screen.getByRole('switch', { name: 'Disabled Skill' });
     expect(disabledSkillSwitch).toBeDisabled();
@@ -433,19 +420,112 @@ describe('chat agent skill configuration', () => {
     expect(readCapabilityExecutePayloads('subagentSkills.set')).toHaveLength(0);
   });
 
-  it('slash 只展示当前 agent effectiveSkillKeys 中的技能', () => {
-    skillRuntimeFixtures.resetAgentSkillConfigView({
-      effectiveSkillKeys: ['feishu-doc'],
-      explicitSkillKeys: ['feishu-doc'],
+  it('opens skill management from the composer button and toggles skills in the dialog', async () => {
+    const onToggleSkill = vi.fn();
+    render(
+      <MemoryRouter>
+        <ChatInput
+          onSend={vi.fn()}
+          sendGate={readySendGate}
+          sessionIdentity={testSessionIdentity}
+          skillManager={{
+            label: 'Skill Configuration',
+            title: 'Skill Configuration · Test Agent',
+            options: [
+              { id: 'web-search', name: 'Web Search', description: 'web', selectable: true },
+              { id: 'clawflow', name: 'Clawflow', description: 'flow', selectable: true },
+            ],
+            loading: false,
+            selectedSkillIds: ['web-search'],
+            skillPreview: null,
+            onToggleSkill,
+            onPreviewSkill: vi.fn(),
+            onClearSkillPreview: vi.fn(),
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    const managerButton = screen.getByTestId('chat-skill-manager-button');
+    expect(managerButton).toHaveAttribute('aria-haspopup', 'dialog');
+    fireEvent.click(managerButton);
+
+    expect(screen.getByRole('dialog', { name: 'Skill Configuration' })).toBeInTheDocument();
+    expect(screen.getByText('Skill Configuration · Test Agent')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: 'Clawflow' }));
+    expect(onToggleSkill).toHaveBeenCalledWith('clawflow', true);
+  });
+
+  it('opens selected skill preview inside the composer skill manager dialog', async () => {
+    const onPreviewSkill = vi.fn();
+    render(
+      <MemoryRouter>
+        <ChatInput
+          onSend={vi.fn()}
+          sendGate={readySendGate}
+          sessionIdentity={testSessionIdentity}
+          skillManager={{
+            label: 'Skill Configuration',
+            title: 'Skill Configuration · Test Agent',
+            options: [],
+            loading: false,
+            selectedSkillIds: [],
+            skillPreview: {
+              skillId: 'clawflow',
+              skillName: 'Clawflow',
+              markdown: '# Clawflow\n\nPreview body',
+              loading: false,
+              error: null,
+              filePath: '/skills/clawflow/SKILL.md',
+            },
+            onToggleSkill: vi.fn(),
+            onPreviewSkill,
+            onClearSkillPreview: vi.fn(),
+          }}
+          allowedSkillIds={['clawflow']}
+        />
+      </MemoryRouter>,
+    );
+
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: '/' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.click(screen.getByTestId('chat-selected-skill-preview'));
+
+    expect(onPreviewSkill).toHaveBeenCalledWith(expect.objectContaining({ id: 'clawflow', name: 'Clawflow' }));
+    expect(screen.getByRole('dialog', { name: 'Skill Configuration' })).toBeInTheDocument();
+    const previewPanel = screen.getByTestId('chat-skill-preview-panel');
+    expect(previewPanel).toBeInTheDocument();
+    expect(within(previewPanel).getAllByText('Clawflow').length).toBeGreaterThan(0);
+    expect(within(previewPanel).getByText('Preview body')).toBeInTheDocument();
+  });
+
+  it('sends only skills allowed by the current agent allowlist', async () => {
+    const onSend = vi.fn().mockResolvedValue({ accepted: true });
+    render(
+      <MemoryRouter>
+        <ChatInput
+          onSend={onSend}
+          sendGate={readySendGate}
+          sessionIdentity={testSessionIdentity}
+          allowedSkillIds={['feishu-doc']}
+        />
+      </MemoryRouter>,
+    );
+
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: '/' } });
+    expect(await screen.findByRole('option', { name: /Feishu Doc/ })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Web Search/ })).toBeNull();
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    expect(screen.getByText('Feishu Doc')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: 'use this skill' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('[已选择技能: Feishu Doc]\nuse this skill', undefined);
     });
-
-    const view = skillRuntimeFixtures.getAgentSkillConfigView();
-    const slashSkillNames = view.options
-      .filter((option) => view.effectiveSkillKeys.includes(option.skillKey))
-      .map((option) => option.displayName);
-
-    expect(slashSkillNames).toEqual(['Feishu Doc']);
-    expect(slashSkillNames).not.toContain('Web Search');
   });
 
   it('renders the inline skill list as immediate switches without save actions', () => {

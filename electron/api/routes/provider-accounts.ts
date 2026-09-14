@@ -8,12 +8,8 @@ import type {
   ProviderAccountsTransport,
 } from '../../main/runtime-host-delivery/transport/providers/accounts';
 import { isProviderAccountIdentifier } from '../../main/runtime-host-delivery/transport/providers/accounts';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { sendJson } from '../route-utils';
 
-const INVALID = {
-  success: false,
-  error: 'Provider account request is invalid',
-} as const;
 const UNAVAILABLE = {
   success: false,
   error: 'Provider accounts are unavailable',
@@ -46,23 +42,6 @@ export async function handleProviderAccountsRoutes(
   if (url.pathname === '/api/provider-accounts' && req.method === 'GET') {
     try {
       const response = await transport.execute(LIST_REQUEST);
-      sendJson(res, response.status, response.body);
-    } catch {
-      sendJson(res, 503, UNAVAILABLE);
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/provider-accounts' && req.method === 'POST') {
-    let body: unknown;
-    try {
-      body = await parseJsonBody(req);
-    } catch {
-      sendJson(res, 400, INVALID);
-      return true;
-    }
-    try {
-      const response = await transport.execute(body);
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNAVAILABLE);

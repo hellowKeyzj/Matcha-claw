@@ -261,3 +261,9 @@ You're successful when:
 - Build purchase abandonment recovery: if a player opens the shop but doesn't buy, show a reminder notification on next session
 - A/B test price points using the analytics bucket system: measure conversion rate, ARPU, and LTV per price variant
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

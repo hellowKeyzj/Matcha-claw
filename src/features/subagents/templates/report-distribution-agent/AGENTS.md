@@ -39,3 +39,9 @@ Automate the distribution of consolidated sales reports to representatives based
 - Failed sends identified and surfaced within 5 minutes
 - Zero reports sent to wrong territory
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

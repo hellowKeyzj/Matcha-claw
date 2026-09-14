@@ -5,6 +5,7 @@ import {
   fetchHistoryWindow,
 } from '@/stores/chat/history-fetch-helpers';
 import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
+import { decodeSessionView } from '@/types/session/snapshot';
 import {
   assistantItem,
   completeFact,
@@ -81,10 +82,19 @@ describe('chat history fetch pipeline helpers', () => {
         inputText: '{"file_path":"src/main.rs"}',
         summary: null,
         output: [{ type: 'text', text: 'ok' }],
+        details: { diff: '-old\n+new' },
         isError: false,
       })]),
     });
 
+    expect(decodeSessionView(view)).toMatchObject({
+      tools: { complete: [{ details: { diff: '-old\n+new' } }] },
+    });
+    expect(decodeSessionView(sessionView(sessionKey, {
+      tools: completeFact([toolView('tool-call-null-details')]),
+    }))).toMatchObject({
+      tools: { complete: [{ details: null }] },
+    });
     expect(projectSessionViewItems(view)).toMatchObject([{
       kind: 'assistant-turn',
       tools: [{
@@ -94,6 +104,7 @@ describe('chat history fetch pipeline helpers', () => {
         input: { file_path: 'src/main.rs' },
         inputText: '{"file_path":"src/main.rs"}',
         output: [{ type: 'text', text: 'ok' }],
+        details: { diff: '-old\n+new' },
         result: {
           kind: 'json',
           bodyText: '[\n  {\n    "type": "text",\n    "text": "ok"\n  }\n]',
@@ -105,6 +116,7 @@ describe('chat history fetch pipeline helpers', () => {
         tool: {
           toolCallId: 'tool-call-1',
           inputText: '{"file_path":"src/main.rs"}',
+          details: { diff: '-old\n+new' },
           result: { kind: 'json' },
         },
       }],

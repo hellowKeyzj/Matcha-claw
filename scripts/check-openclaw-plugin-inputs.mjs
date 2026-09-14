@@ -2,6 +2,10 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  findOpenClawPluginSdkImportIssues,
+  formatOpenClawPluginSdkImportIssue,
+} from './lib/openclaw-plugin-sdk-import-policy.mjs';
 
 const ROOT = process.cwd();
 
@@ -10,30 +14,35 @@ const REQUIRED_LOCAL_PLUGINS = [
     pluginId: 'task-manager',
     sourceDir: 'packages/openclaw-task-manager-plugin',
     expectedExtensions: ['./dist/index.js'],
+    sourceDirs: ['./src'],
     sourceEntries: ['./src/index.ts'],
   },
   {
     pluginId: 'security-core',
     sourceDir: 'packages/openclaw-security-plugin',
     expectedExtensions: ['./dist/index.js'],
+    sourceDirs: ['./src'],
     sourceEntries: ['./src/index.ts'],
   },
   {
     pluginId: 'browser-relay',
     sourceDir: 'packages/openclaw-browser-relay-plugin',
     expectedExtensions: ['./dist/index.js'],
+    sourceDirs: ['./src'],
     sourceEntries: ['./src/index.ts'],
   },
   {
     pluginId: 'memory-lancedb-pro',
     sourceDir: 'packages/memory-lancedb-pro',
     expectedExtensions: ['./dist/index.js'],
+    sourceDirs: ['./src'],
     sourceEntries: ['./index.ts', './cli.ts', './src/embedder.ts'],
   },
   {
     pluginId: 'matchaclaw-media',
     sourceDir: 'packages/openclaw-matchaclaw-media-plugin',
     expectedExtensions: ['./dist/index.js'],
+    sourceDirs: ['./src'],
     sourceEntries: ['./src/index.ts'],
   },
 ];
@@ -140,12 +149,29 @@ async function validatePluginSource(plugin) {
   }
 
   const sourceEntries = Array.isArray(plugin.sourceEntries) ? plugin.sourceEntries : [];
+  const sdkImportScanFiles = [];
   for (const sourceEntry of sourceEntries) {
     const sourceEntryPath = path.resolve(sourceDir, sourceEntry);
     if (!(await pathExists(sourceEntryPath))) {
       issues.push(`插件源码入口不存在: ${plugin.sourceDir} -> ${sourceEntry}`);
+      continue;
+    }
+    sdkImportScanFiles.push(sourceEntryPath);
+  }
+
+  const sdkImportScanDirs = [];
+  for (const sourceSubdir of plugin.sourceDirs ?? []) {
+    const sourceSubdirPath = path.resolve(sourceDir, sourceSubdir);
+    if (await pathExists(sourceSubdirPath)) {
+      sdkImportScanDirs.push(sourceSubdirPath);
     }
   }
+
+  const sdkImportIssues = await findOpenClawPluginSdkImportIssues({
+    files: sdkImportScanFiles,
+    dirs: sdkImportScanDirs,
+  });
+  issues.push(...sdkImportIssues.map((issue) => formatOpenClawPluginSdkImportIssue(issue, ROOT)));
 
   const runtimeDependencyNames = Object.keys(
     isRecord(packageJson?.dependencies) ? packageJson.dependencies : {},

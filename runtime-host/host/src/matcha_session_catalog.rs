@@ -1,4 +1,4 @@
-use matcha_agent::session::history::{HistoryCatalog, local::LocalHistoryCatalog};
+use matcha_agent::session::history::local::LocalHistoryCatalog;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Session {
@@ -10,17 +10,6 @@ pub(crate) struct Session {
 pub(crate) enum Outcome {
     Listed(Vec<Session>),
     Unavailable,
-}
-
-pub(crate) fn project(catalog: HistoryCatalog) -> Vec<Session> {
-    catalog
-        .sessions()
-        .iter()
-        .map(|session| Session {
-            endpoint_session_id: session.session_id().as_str().to_owned(),
-            updated_at: None,
-        })
-        .collect()
 }
 
 pub(crate) fn project_local(catalog: LocalHistoryCatalog) -> Vec<Session> {

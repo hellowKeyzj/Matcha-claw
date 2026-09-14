@@ -14,7 +14,6 @@ fn main() -> ExitCode {
 
     match runtime_host::run_team_run_mcp(
         &config.state_dir,
-        &config.authorization_verification_key,
         BufReader::new(io::stdin().lock()),
         io::stdout().lock(),
     ) {
@@ -25,7 +24,6 @@ fn main() -> ExitCode {
 
 struct ArtifactConfig {
     state_dir: PathBuf,
-    authorization_verification_key: String,
 }
 
 impl ArtifactConfig {
@@ -33,17 +31,10 @@ impl ArtifactConfig {
         let mut args = std::env::args_os();
         let _program = args.next();
         let mut state_dir = None;
-        let mut authorization_verification_key = None;
         while let Some(flag) = args.next() {
             match flag.to_str() {
                 Some("--state-dir") if state_dir.is_none() => {
                     state_dir = args.next().map(PathBuf::from)
-                }
-                Some("--authorization-verification-key")
-                    if authorization_verification_key.is_none() =>
-                {
-                    authorization_verification_key =
-                        args.next().and_then(|value| value.into_string().ok());
                 }
                 _ => return Err(()),
             }
@@ -52,13 +43,6 @@ impl ArtifactConfig {
         if !state_dir.is_absolute() || state_dir.as_os_str().is_empty() {
             return Err(());
         }
-        let authorization_verification_key = authorization_verification_key.ok_or(())?;
-        if authorization_verification_key.trim().is_empty() {
-            return Err(());
-        }
-        Ok(Self {
-            state_dir,
-            authorization_verification_key,
-        })
+        Ok(Self { state_dir })
     }
 }

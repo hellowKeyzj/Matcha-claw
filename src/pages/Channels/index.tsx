@@ -2,14 +2,12 @@
  * Channels Page
  * Manage messaging channel connections with configuration UI
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Radio,
   RefreshCw,
   Trash2,
-  Power,
-  PowerOff,
   QrCode,
   Loader2,
   X,
@@ -21,27 +19,37 @@ import {
   CheckCircle,
   ShieldCheck,
   UserCheck,
+  Settings,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
+import { ChannelIcon } from '@/components/channels/ChannelIcon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSubagentsStore } from '@/stores/subagents';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
 import {
+  channelErrorCode,
+  logChannelTrace,
   hostChannelsActivate,
+  hostChannelsConfigure,
   hostChannelsApprovePairingRequest,
+  hostChannelsCancelAuthorization,
   hostChannelsCancelSession,
   hostChannelsLoginWait,
   hostChannelsListPairingRequests,
   hostChannelsReadConfig,
+  hostChannelsStartAuthorization,
   hostChannelsValidateCredentials,
+  hostChannelsWaitAuthorization,
   type ChannelPairingRequest,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
@@ -50,7 +58,6 @@ import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { invokeIpc } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import {
-  CHANNEL_ICONS,
   CHANNEL_NAMES,
   CHANNEL_META,
   getPrimaryChannels,
@@ -58,6 +65,7 @@ import {
   type Channel,
   type ChannelMeta,
   type ChannelConfigField,
+  type ChannelSetupMode,
 } from '@/types/channel';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
@@ -66,9 +74,36 @@ const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
 const CHANNELS_STATUS_POLL_MS = 10_000;
 const WEIXIN_ADVANCED_FIELD_KEYS = new Set(['baseUrl', 'cdnBaseUrl', 'logUploadUrl', 'routeTag']);
 const QR_GENERATE_TIMEOUT_MS = 12_000;
+const CHANNEL_CONFIG_LOADING_DELAY_MS = 180;
+
+type ChannelDialogTarget =
+  | { kind: 'catalog' }
+  | { kind: 'new'; type: ChannelType }
+  | { kind: 'configured'; channel: Channel };
+
+type ChannelAuthPrompt = Readonly<{
+  qrDataUrl?: string;
+  authorizationUrl?: string;
+  sessionKey?: string;
+}>;
+
+type DialogSetupMode = ChannelSetupMode;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function channelConnectionLabelKey(connectionType: ChannelMeta['connectionType']): string {
+  switch (connectionType) {
+    case 'qr':
+      return 'dialog.qrCode';
+    case 'oauth':
+      return 'dialog.authorization';
+    case 'webhook':
+      return 'dialog.webhook';
+    case 'token':
+      return 'dialog.token';
+  }
 }
 
 export function Channels() {
@@ -86,9 +121,8 @@ export function Channels() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
 
-  const [showAddDialog, setShowAddDialog] = useState(false);
-  const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
-  const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType } | null>(null);
+  const [dialogTarget, setDialogTarget] = useState<ChannelDialogTarget | null>(null);
+  const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType; traceId: string; startedAt: number } | null>(null);
   const [pairingChannel, setPairingChannel] = useState<Channel | null>(null);
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
@@ -147,9 +181,8 @@ export function Channels() {
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
-  const displayedChannelTypeSet = new Set<ChannelType>(displayedChannelTypes);
   const safeChannels = Array.isArray(channels) ? channels : [];
-  const configuredChannels: Channel[] = safeChannels.filter((channel) => displayedChannelTypeSet.has(channel.type));
+  const configuredChannels: Channel[] = safeChannels;
 
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
@@ -172,16 +205,36 @@ export function Channels() {
   }, [configuredChannels.length, fetchChannels, gatewayOperational]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-muted-foreground">
-            {t('subtitle')}
-          </p>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="space-y-3">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-[-0.03em]">{t('title')}</h1>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+              {t('subtitle')}
+            </p>
+          </div>
+          {!showInitialLoading && (
+            <div className="flex flex-wrap gap-2">
+              <span className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card px-3 text-xs text-muted-foreground">
+                <Radio className="h-3.5 w-3.5" />
+                <strong className="text-foreground">{configuredChannels.length}</strong>
+                {t('stats.total')}
+              </span>
+              <span className="inline-flex h-8 items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 text-xs text-emerald-700 dark:text-emerald-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                <strong>{connectedCount}</strong>
+                {t('stats.connected')}
+              </span>
+              <span className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-secondary/70 px-3 text-xs text-muted-foreground">
+                <strong className="text-foreground">{configuredChannels.length - connectedCount}</strong>
+                {t('stats.disconnected')}
+              </span>
+            </div>
+          )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex shrink-0 gap-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -192,57 +245,12 @@ export function Channels() {
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
-          <Button onClick={() => setShowAddDialog(true)}>
+          <Button onClick={() => setDialogTarget({ kind: 'catalog' })}>
             <Plus className="h-4 w-4 mr-2" />
             {t('addChannel')}
           </Button>
         </div>
       </div>
-
-      {/* Stats */}
-      {!showInitialLoading && (
-        <div className="grid grid-cols-3 gap-4">
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="rounded-full bg-primary/10 p-3">
-                  <Radio className="h-6 w-6 text-primary" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold">{configuredChannels.length}</p>
-                  <p className="text-sm text-muted-foreground">{t('stats.total')}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="rounded-full bg-green-100 p-3 dark:bg-green-900">
-                  <Power className="h-6 w-6 text-green-600" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold">{connectedCount}</p>
-                  <p className="text-sm text-muted-foreground">{t('stats.connected')}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="rounded-full bg-slate-100 p-3 dark:bg-slate-800">
-                  <PowerOff className="h-6 w-6 text-slate-600" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold">{configuredChannels.length - connectedCount}</p>
-                  <p className="text-sm text-muted-foreground">{t('stats.disconnected')}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
 
       {/* Gateway Warning */}
       {!gatewayOperational && (
@@ -289,90 +297,95 @@ export function Channels() {
         <>
           {/* Configured Channels */}
           {configuredChannels.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>{t('configured')}</CardTitle>
-                <CardDescription>{t('configuredDesc')}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {configuredChannels.map((channel) => (
-                    <ChannelCard
-                      key={channel.id}
-                      channel={channel}
-                      isMutating={Boolean(mutatingByChannelId[channel.id])}
-                      onManagePairing={channel.type === 'feishu' ? () => setPairingChannel(channel) : undefined}
-                      onDelete={() => setChannelToDelete({ id: channel.id, type: channel.type })}
-                    />
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
+            <section className="space-y-3">
+              <div>
+                <h2 className="text-base font-semibold tracking-[-0.02em]">{t('configured')}</h2>
+                <p className="text-sm text-muted-foreground">{t('configuredDesc')}</p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {configuredChannels.map((channel) => (
+                  <ChannelCard
+                    key={channel.id}
+                    channel={channel}
+                    isMutating={Boolean(mutatingByChannelId[channel.id])}
+                    onConfigure={() => setDialogTarget({ kind: 'configured', channel })}
+                    onManagePairing={channel.type === 'feishu' ? () => setPairingChannel(channel) : undefined}
+                    onDelete={() => {
+                      const traceId = crypto.randomUUID();
+                      logChannelTrace('delete.click', traceId);
+                      setChannelToDelete({ id: channel.id, type: channel.type, traceId, startedAt: Date.now() });
+                    }}
+                  />
+                ))}
+              </div>
+            </section>
           )}
 
           {/* Available Channels */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>{t('available')}</CardTitle>
-                  <CardDescription>
-                    {t('availableDesc')}
-                  </CardDescription>
-                </div>
+          <section className="space-y-3 rounded-[1.5rem] border border-border/90 bg-card p-5">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold tracking-[-0.02em]">{t('available')}</h2>
+                <p className="text-sm text-muted-foreground">{t('availableDesc')}</p>
               </div>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-                {displayedChannelTypes.map((type) => {
-                  const meta = CHANNEL_META[type];
-                  const isConfigured = configuredChannels.some((channel) => channel.type === type);
-                  return (
-                    <button
-                      key={type}
-                      className={`p-4 rounded-lg border hover:bg-accent transition-colors text-left relative ${isConfigured ? 'border-green-500/50 bg-green-500/5' : ''}`}
-                      onClick={() => {
-                        setSelectedChannelType(type);
-                        setShowAddDialog(true);
-                      }}
-                    >
-                      <span className="text-3xl">{meta.icon}</span>
-                      <p className="font-medium mt-2">{meta.name}</p>
-                      <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                        {t(meta.description)}
-                      </p>
-                      {isConfigured && (
-                        <Badge className="absolute top-2 right-2 text-xs bg-green-600 hover:bg-green-600">
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+              {displayedChannelTypes.map((type) => {
+                const meta = CHANNEL_META[type];
+                const isConfigured = configuredChannels.some((channel) => channel.type === type);
+                const connectionLabel = t(channelConnectionLabelKey(meta.connectionType));
+                return (
+                  <button
+                    key={type}
+                    className={cn(
+                      'group relative flex min-h-[148px] flex-col rounded-[1.1rem] border p-4 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20',
+                      isConfigured
+                        ? 'border-emerald-500/45 bg-emerald-500/10'
+                        : 'border-border/90 bg-background/35 hover:bg-secondary/60'
+                    )}
+                    onClick={() => setDialogTarget({ kind: 'new', type })}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="grid h-11 w-11 place-items-center rounded-[0.9rem] bg-secondary shadow-sm">
+                        <ChannelIcon id={meta.iconId} className="h-7 w-7" />
+                      </span>
+                      {isConfigured ? (
+                        <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
                           {t('configuredBadge')}
                         </Badge>
-                      )}
-                      {!isConfigured && meta.isPlugin && (
-                        <Badge variant="secondary" className="absolute top-2 right-2 text-xs">
-                          {t('pluginBadge')}
+                      ) : (
+                        <Badge variant="secondary">
+                          {connectionLabel}
                         </Badge>
                       )}
-                    </button>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
+                    </div>
+                    <div className="mt-4 min-w-0 flex-1 space-y-1">
+                      <p className="truncate text-base font-semibold tracking-[-0.02em]">{meta.name}</p>
+                      <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {t(meta.description)}
+                      </p>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{meta.isPlugin ? t('pluginBadge') : connectionLabel}</span>
+                      <span className="transition-transform group-hover:translate-x-0.5">→</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
         </>
       )}
 
       {/* Add Channel Dialog */}
-      {showAddDialog && (
+      {dialogTarget && (
         <AddChannelDialog
-          selectedType={selectedChannelType}
-          onSelectType={setSelectedChannelType}
-          onClose={() => {
-            setShowAddDialog(false);
-            setSelectedChannelType(null);
-          }}
+          target={dialogTarget}
+          onTargetChange={setDialogTarget}
+          onClose={() => setDialogTarget(null)}
           onChannelAdded={() => {
             void fetchChannels();
-            setShowAddDialog(false);
-            setSelectedChannelType(null);
+            setDialogTarget(null);
           }}
         />
       )}
@@ -386,12 +399,19 @@ export function Channels() {
         variant="destructive"
         onConfirm={async () => {
           if (channelToDelete) {
-            await deleteChannel(channelToDelete.id);
-            await fetchChannels({ silent: true });
+            logChannelTrace('delete.submit', channelToDelete.traceId);
+            const deleted = await deleteChannel(channelToDelete.id, { traceId: channelToDelete.traceId });
+            if (deleted) {
+              await fetchChannels({ silent: true });
+            }
+            logChannelTrace('delete.final', channelToDelete.traceId, { outcome: deleted ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - channelToDelete.startedAt });
             setChannelToDelete(null);
           }
         }}
-        onCancel={() => setChannelToDelete(null)}
+        onCancel={() => {
+          if (channelToDelete) logChannelTrace('delete.final', channelToDelete.traceId, { outcome: 'cancelled', durationMs: Date.now() - channelToDelete.startedAt });
+          setChannelToDelete(null);
+        }}
       />
 
       {pairingChannel && (
@@ -409,26 +429,27 @@ export function Channels() {
 interface ChannelCardProps {
   channel: Channel;
   isMutating?: boolean;
+  onConfigure: () => void;
   onManagePairing?: () => void;
   onDelete: () => void;
 }
 
-function ChannelCard({ channel, isMutating = false, onManagePairing, onDelete }: ChannelCardProps) {
+function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing, onDelete }: ChannelCardProps) {
   const { t } = useTranslation('channels');
   const status = channel.status as Status;
   const statusLabel = t(`status.${status}`, { defaultValue: status });
 
   return (
-    <Card className="h-full">
-      <CardContent className="flex h-full min-h-[136px] flex-col justify-between p-4">
+    <Card className="h-full bg-card/80">
+      <CardContent className="flex h-full min-h-[118px] flex-col gap-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="text-2xl">
-              {CHANNEL_ICONS[channel.type]}
+            <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] bg-secondary shadow-sm">
+              <ChannelIcon id={CHANNEL_META[channel.type].iconId} className="h-6 w-6" />
             </span>
             <div className="min-w-0">
-              <CardTitle className="truncate text-base">{channel.name}</CardTitle>
-              <CardDescription className="truncate text-xs">
+              <CardTitle className="truncate text-base tracking-[-0.02em]">{channel.name}</CardTitle>
+              <CardDescription className="truncate text-xs leading-5">
                 {CHANNEL_NAMES[channel.type]}
               </CardDescription>
             </div>
@@ -436,35 +457,45 @@ function ChannelCard({ channel, isMutating = false, onManagePairing, onDelete }:
           <StatusBadge status={status} label={statusLabel} className="shrink-0 max-w-none" />
         </div>
 
-        <div className="min-h-5">
-          {channel.error ? (
-            <p className="line-clamp-2 text-xs text-destructive">{channel.error}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">{CHANNEL_NAMES[channel.type]}</p>
-          )}
-        </div>
+        {channel.error && (
+          <p className="line-clamp-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">{channel.error}</p>
+        )}
 
-        <div className="flex items-center justify-end gap-1">
-          {onManagePairing && (
+        <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/70 pt-3">
+          <p className="truncate text-xs text-muted-foreground">
+            {channel.accountId && channel.accountId !== 'default' ? channel.accountId : CHANNEL_NAMES[channel.type]}
+          </p>
+          <div className="flex shrink-0 items-center gap-1">
             <Button
               variant="ghost"
               size="sm"
-              onClick={onManagePairing}
+              onClick={onConfigure}
               disabled={isMutating}
-              aria-label={t('pairing.manage')}
+              aria-label={t('dialog.configureTitle', { name: channel.name })}
             >
-              <UserCheck className="h-4 w-4" />
+              <Settings className="h-4 w-4" />
             </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-destructive hover:text-destructive"
-            onClick={onDelete}
-            disabled={isMutating}
-          >
-            {isMutating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-          </Button>
+            {onManagePairing && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onManagePairing}
+                disabled={isMutating}
+                aria-label={t('pairing.manage')}
+              >
+                <UserCheck className="h-4 w-4" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={onDelete}
+              disabled={isMutating}
+            >
+              {isMutating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </Button>
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -614,25 +645,32 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
 // ==================== Add Channel Dialog ====================
 
 interface AddChannelDialogProps {
-  selectedType: ChannelType | null;
-  onSelectType: (type: ChannelType | null) => void;
+  target: ChannelDialogTarget;
+  onTargetChange: (target: ChannelDialogTarget | null) => void;
   onClose: () => void;
   onChannelAdded: () => void;
 }
 
-function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded }: AddChannelDialogProps) {
+function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: AddChannelDialogProps) {
   const { t } = useTranslation('channels');
+  const gatewayStatus = useGatewayStore((state) => state.status);
+  const agents = useSubagentsStore((state) => state.agentsResource.data);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
+  const [selectedAgentId, setSelectedAgentId] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
-  const [qrCode, setQrCode] = useState<string | null>(null);
+  const [authPrompt, setAuthPrompt] = useState<ChannelAuthPrompt | null>(null);
   const [qrImageFailed, setQrImageFailed] = useState(false);
+  const [setupMode, setSetupMode] = useState<DialogSetupMode>('guided');
   const [validating, setValidating] = useState(false);
-  const [loadingConfig, setLoadingConfig] = useState(false);
+  const [loadedConfigKey, setLoadedConfigKey] = useState<string | null>(null);
   const [isExistingConfig, setIsExistingConfig] = useState(false);
   const qrGenerateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qrAccountIdRef = useRef<string | null>(null);
+  const authSessionKeyRef = useRef<string | null>(null);
+  const qrTraceIdRef = useRef<string | undefined>(undefined);
   const qrWaitAbortControllerRef = useRef<AbortController | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
   const onChannelAddedRef = useRef(onChannelAdded);
@@ -643,11 +681,48 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   } | null>(null);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
+  const selectedType = target.kind === 'new'
+    ? target.type
+    : target.kind === 'configured'
+      ? target.channel.type
+      : null;
+  const configuredChannel = target.kind === 'configured' ? target.channel : null;
   const meta: ChannelMeta | null = selectedType ? CHANNEL_META[selectedType] : null;
+  const isConfiguredChannelEdit = target.kind === 'configured';
+  const configuredAccountId = configuredChannel?.accountId?.trim() || undefined;
+  const requiredFieldsFilled = meta?.configFields
+    .filter((field) => field.required)
+    .every((field) => configValues[field.key]?.trim()) ?? false;
+  const configKey = selectedType ? `${selectedType}:${configuredAccountId ?? ''}` : null;
+  const configReady = target.kind === 'catalog' || (configKey !== null && loadedConfigKey === configKey);
+  const showConfigLoading = useDelayedFlag(!configReady, CHANNEL_CONFIG_LOADING_DELAY_MS);
+  const isExistingTarget = target.kind === 'configured' || isExistingConfig;
+  const guidedSetupFlow = meta?.setupFlows.find((flow) => flow.mode === 'guided')?.flow;
+  const supportsGuidedSetup = Boolean(guidedSetupFlow);
+  const supportsCredentialSetup = Boolean(meta?.setupFlows.some((flow) => flow.mode === 'credential'));
+  const showSetupModeSwitch = !isConfiguredChannelEdit && supportsGuidedSetup && supportsCredentialSetup;
+  const effectiveSetupMode: DialogSetupMode = showSetupModeSwitch ? setupMode : supportsGuidedSetup && !isConfiguredChannelEdit ? 'guided' : 'credential';
+  const shouldStartAuthorization = guidedSetupFlow?.kind === 'authorization' && target.kind !== 'configured' && effectiveSetupMode === 'guided';
+  const shouldStartQrLogin = guidedSetupFlow?.kind === 'qr-login' && target.kind !== 'configured' && effectiveSetupMode === 'guided';
+  const shouldValidateToken = effectiveSetupMode === 'credential' && meta?.connectionType === 'token' && requiredFieldsFilled;
+  const agentOptions = useMemo(() => {
+    if (agents.some((agent) => agent.id === 'main')) return agents;
+    return [{ id: 'main', name: t('dialog.mainAgent'), isDefault: agents.length === 0 }, ...agents];
+  }, [agents, t]);
 
   useEffect(() => {
     onChannelAddedRef.current = onChannelAdded;
   }, [onChannelAdded]);
+
+  useEffect(() => {
+    void loadAgents({ silent: true }).catch(() => undefined);
+  }, [loadAgents]);
+
+  useEffect(() => {
+    setSelectedAgentId((current) => (
+      !current || agentOptions.some((agent) => agent.id === current) ? current : ''
+    ));
+  }, [agentOptions]);
 
   const clearQrGenerateTimeout = useCallback(() => {
     if (qrGenerateTimeoutRef.current) {
@@ -656,6 +731,43 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     }
   }, []);
 
+  const stopActiveLoginSession = useCallback(async () => {
+    clearQrGenerateTimeout();
+    qrWaitAbortControllerRef.current?.abort();
+    qrWaitAbortControllerRef.current = null;
+
+    const activeAccountId = qrAccountIdRef.current;
+    const activeSessionKey = authSessionKeyRef.current;
+    const traceId = qrTraceIdRef.current;
+    qrAccountIdRef.current = null;
+    authSessionKeyRef.current = null;
+
+    if (!selectedType || (!activeAccountId && !activeSessionKey)) return;
+
+    const startedAt = Date.now();
+    logChannelTrace('login.cancel.start', traceId);
+    if (shouldStartAuthorization && activeSessionKey) {
+      try {
+        const authChannelType = selectedType as Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>;
+        await hostChannelsCancelAuthorization(authChannelType, activeSessionKey, { traceId });
+        logChannelTrace('login.cancel.end', traceId, { outcome: 'cancelled', durationMs: Date.now() - startedAt });
+      } catch (error) {
+        logChannelTrace('login.cancel.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+      }
+      return;
+    }
+
+    if (shouldStartQrLogin && activeAccountId) {
+      try {
+        const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
+        await hostChannelsCancelSession(qrChannelType, activeAccountId, { traceId });
+        logChannelTrace('login.cancel.end', traceId, { outcome: 'cancelled', durationMs: Date.now() - startedAt });
+      } catch (error) {
+        logChannelTrace('login.cancel.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+      }
+    }
+  }, [clearQrGenerateTimeout, selectedType, shouldStartAuthorization, shouldStartQrLogin]);
+
   // Load existing config when a channel type is selected
   useEffect(() => {
     if (!selectedType) {
@@ -663,67 +775,70 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       qrWaitAbortControllerRef.current?.abort();
       qrWaitAbortControllerRef.current = null;
       qrAccountIdRef.current = null;
+      authSessionKeyRef.current = null;
       setConnecting(false);
       setConfigValues({});
       setChannelName('');
+      setSelectedAgentId('');
       setIsExistingConfig(false);
-      setQrCode(null);
+      setAuthPrompt(null);
       setQrImageFailed(false);
+      setSetupMode('guided');
       setShowAdvancedSettings(false);
+      setLoadedConfigKey(null);
       return;
     }
     setShowAdvancedSettings(false);
+    setSetupMode('guided');
+    setChannelName(configuredAccountId ?? '');
+    setConfigValues({});
+    setIsExistingConfig(isConfiguredChannelEdit);
+    setAuthPrompt(null);
+    setQrImageFailed(false);
+    setValidationResult(null);
+    setLoadedConfigKey(null);
 
     let cancelled = false;
-    setLoadingConfig(true);
+    const nextConfigKey = `${selectedType}:${configuredAccountId ?? ''}`;
+    const traceId = crypto.randomUUID();
+    const startedAt = Date.now();
+    logChannelTrace('config.read.start', traceId);
 
     (async () => {
       try {
-        const result = await hostChannelsReadConfig(selectedType);
+        const result = await hostChannelsReadConfig(selectedType, configuredAccountId, { traceId });
 
         if (cancelled) return;
 
-        if (result.success && result.values && Object.keys(result.values).length > 0) {
-          setConfigValues(result.values);
+        const hasValues = Boolean(result.success && result.values && Object.keys(result.values).length > 0);
+        logChannelTrace('config.read.end', traceId, { outcome: hasValues ? 'loaded' : 'empty', durationMs: Date.now() - startedAt });
+        if (hasValues) {
+          setConfigValues(result.values!);
           setIsExistingConfig(true);
-        } else {
-          setConfigValues({});
-          setIsExistingConfig(false);
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setConfigValues({});
-          setIsExistingConfig(false);
+          logChannelTrace('config.read.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
         }
       } finally {
-        if (!cancelled) setLoadingConfig(false);
+        if (!cancelled) setLoadedConfigKey(nextConfigKey);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [selectedType, clearQrGenerateTimeout]);
+  }, [selectedType, configuredAccountId, isConfiguredChannelEdit, clearQrGenerateTimeout]);
 
   // Focus first input when form is ready (avoids Windows focus loss after native dialogs)
   useEffect(() => {
-    if (selectedType && !loadingConfig && firstInputRef.current) {
+    if (selectedType && configReady && firstInputRef.current) {
       firstInputRef.current.focus();
     }
-  }, [selectedType, loadingConfig]);
+  }, [selectedType, configReady]);
 
   useEffect(() => {
-    if (!selectedType || CHANNEL_META[selectedType].connectionType !== 'qr') return undefined;
-    return () => {
-      clearQrGenerateTimeout();
-      const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-      qrWaitAbortControllerRef.current?.abort();
-      qrWaitAbortControllerRef.current = null;
-      const activeAccountId = qrAccountIdRef.current;
-      qrAccountIdRef.current = null;
-      if (activeAccountId) {
-        void hostChannelsCancelSession(qrChannelType, activeAccountId).catch(() => { });
-      }
-    };
-  }, [selectedType, clearQrGenerateTimeout]);
+    if (!selectedType || (!shouldStartQrLogin && !shouldStartAuthorization)) return undefined;
+    return () => { void stopActiveLoginSession(); };
+  }, [selectedType, shouldStartQrLogin, shouldStartAuthorization, stopActiveLoginSession]);
 
   const handleValidate = async () => {
     if (!selectedType) return;
@@ -762,33 +877,55 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const handleConnect = async () => {
     if (!selectedType || !meta) return;
 
+    const traceId = crypto.randomUUID();
+    const startedAt = Date.now();
+    let outcome = 'unconfirmed';
+    let activePhase: 'login.start' | 'validation' | 'config' | null = null;
+    let phaseStartedAt = startedAt;
+    logChannelTrace('create.click', traceId);
+    const accountId = (configuredAccountId ?? channelName.trim()) || 'default';
+    logChannelTrace('create.submit.start', traceId, { accountPresent: Boolean(accountId), gatewayOperational: isGatewayOperational(gatewayStatus) });
     setConnecting(true);
     setValidationResult(null);
+    if (shouldStartQrLogin || shouldStartAuthorization) {
+      await stopActiveLoginSession();
+    }
+    const explicitAgentId = selectedAgentId || undefined;
 
     try {
       // For QR-based channels, request QR code
-      if (meta.connectionType === 'qr') {
+      if (shouldStartQrLogin) {
         clearQrGenerateTimeout();
         qrGenerateTimeoutRef.current = setTimeout(() => {
+          logChannelTrace('login.qr.timeout', traceId, { errorCode: 'TIMEOUT', durationMs: Date.now() - startedAt });
           setConnecting(false);
           toast.error(t('toast.qrGenerateTimeout'));
         }, QR_GENERATE_TIMEOUT_MS);
-        const accountId = channelName.trim() || 'default';
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
         qrAccountIdRef.current = accountId;
-        const startResult = await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues });
+        qrTraceIdRef.current = traceId;
+        const loginStartedAt = Date.now();
+        activePhase = 'login.start';
+        phaseStartedAt = loginStartedAt;
+        logChannelTrace('login.start.start', traceId);
+        const startResult = await hostChannelsActivate({ channelType: qrChannelType, accountId, agentId: explicitAgentId, config: configValues }, { traceId });
+        logChannelTrace('login.start.end', traceId, { outcome: startResult.success ? 'accepted' : 'unconfirmed', durationMs: Date.now() - loginStartedAt });
+        activePhase = null;
         const progress = startResult.progress;
         if (!progress || (progress.outcome !== 'progress' && progress.outcome !== 'connected')) {
           throw new Error(startResult.error || 'Channel activation outcome is unknown');
         }
         if (progress.qrDataUrl) {
           setQrImageFailed(false);
-          setQrCode(progress.qrDataUrl);
+          setAuthPrompt((current) => ({ ...current, qrDataUrl: progress.qrDataUrl, sessionKey: progress.sessionKey }));
           clearQrGenerateTimeout();
         }
         if (progress.outcome === 'connected') {
           clearQrGenerateTimeout();
+          qrAccountIdRef.current = null;
           setConnecting(false);
+          outcome = 'confirmed';
+          logChannelTrace('login.confirmed', traceId);
           onChannelAddedRef.current();
           return;
         }
@@ -798,18 +935,23 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         let sessionKey = progress.sessionKey;
         while (!waitController.signal.aborted) {
           let waitResult;
+          const waitStartedAt = Date.now();
+          logChannelTrace('login.wait.start', traceId);
           try {
             waitResult = await hostChannelsLoginWait(qrChannelType, accountId, {
+              traceId,
               timeoutMs: 300_000,
               sessionKey,
               currentQrDataUrl,
               signal: waitController.signal,
             });
+            logChannelTrace('login.wait.end', traceId, { outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt });
           } catch (error) {
-            if (waitController.signal.aborted) return;
+            logChannelTrace('login.wait.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt });
+            if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
             throw error;
           }
-          if (waitController.signal.aborted) return;
+          if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
           if (waitResult.sessionKey) {
             sessionKey = waitResult.sessionKey;
           }
@@ -817,11 +959,15 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
             clearQrGenerateTimeout();
             currentQrDataUrl = waitResult.qrDataUrl;
             setQrImageFailed(false);
-            setQrCode(waitResult.qrDataUrl);
+            setAuthPrompt((current) => ({ ...current, qrDataUrl: waitResult.qrDataUrl, sessionKey }));
           }
           if (waitResult.outcome === 'connected') {
             clearQrGenerateTimeout();
+            qrAccountIdRef.current = null;
+            qrWaitAbortControllerRef.current = null;
             setConnecting(false);
+            outcome = 'confirmed';
+            logChannelTrace('login.confirmed', traceId);
             onChannelAddedRef.current();
             return;
           }
@@ -834,11 +980,115 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         return;
       }
 
-      // Step 1: Validate credentials against the actual service API
-      if (meta.connectionType === 'token') {
-        const validationResponse = await hostChannelsValidateCredentials(selectedType, configValues);
+      if (shouldStartAuthorization) {
+        clearQrGenerateTimeout();
+        const authorizationChannelType = selectedType as Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>;
+        const waitController = new AbortController();
+        qrWaitAbortControllerRef.current = waitController;
+        qrAccountIdRef.current = accountId;
+        qrTraceIdRef.current = traceId;
+        const loginStartedAt = Date.now();
+        activePhase = 'login.start';
+        phaseStartedAt = loginStartedAt;
+        logChannelTrace('login.start.start', traceId);
+        const startResult = await hostChannelsStartAuthorization({
+          channelType: authorizationChannelType,
+          accountId,
+          ...(explicitAgentId ? { agentId: explicitAgentId } : {}),
+          config: configValues,
+        }, { traceId });
+        logChannelTrace('login.start.end', traceId, { outcome: startResult.outcome, durationMs: Date.now() - loginStartedAt });
+        activePhase = null;
+        if (startResult.sessionKey) authSessionKeyRef.current = startResult.sessionKey;
+        if (startResult.qrDataUrl || startResult.authorizationUrl || startResult.sessionKey) {
+          setQrImageFailed(false);
+          setAuthPrompt({
+            qrDataUrl: startResult.qrDataUrl,
+            authorizationUrl: startResult.authorizationUrl,
+            sessionKey: startResult.sessionKey,
+          });
+        }
+        if (startResult.outcome === 'connected') {
+          qrAccountIdRef.current = null;
+          authSessionKeyRef.current = null;
+          qrWaitAbortControllerRef.current = null;
+          setConnecting(false);
+          outcome = 'confirmed';
+          logChannelTrace('login.confirmed', traceId);
+          onChannelAddedRef.current();
+          return;
+        }
+        if (startResult.outcome !== 'progress' || !startResult.sessionKey) {
+          throw new Error(startResult.outcome === 'target_rejected'
+            ? 'Channel authorization was rejected'
+            : 'Channel authorization outcome is unknown');
+        }
+        let sessionKey = startResult.sessionKey;
+        while (!waitController.signal.aborted) {
+          let waitResult;
+          const waitStartedAt = Date.now();
+          logChannelTrace('login.wait.start', traceId);
+          try {
+            waitResult = await hostChannelsWaitAuthorization(authorizationChannelType, sessionKey, {
+              traceId,
+              timeoutMs: 300_000,
+              signal: waitController.signal,
+            });
+            logChannelTrace('login.wait.end', traceId, { outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt });
+          } catch (error) {
+            logChannelTrace('login.wait.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt });
+            if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+            throw error;
+          }
+          if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+          if (waitResult.sessionKey) {
+            sessionKey = waitResult.sessionKey;
+            authSessionKeyRef.current = waitResult.sessionKey;
+          }
+          if (waitResult.qrDataUrl || waitResult.authorizationUrl) {
+            setQrImageFailed(false);
+            setAuthPrompt((current) => ({
+              ...current,
+              qrDataUrl: waitResult.qrDataUrl ?? current?.qrDataUrl,
+              authorizationUrl: waitResult.authorizationUrl ?? current?.authorizationUrl,
+              sessionKey,
+            }));
+          }
+          if (waitResult.outcome === 'connected') {
+            qrAccountIdRef.current = null;
+            authSessionKeyRef.current = null;
+            qrWaitAbortControllerRef.current = null;
+            setConnecting(false);
+            outcome = 'confirmed';
+            logChannelTrace('login.confirmed', traceId);
+            onChannelAddedRef.current();
+            return;
+          }
+          if (waitResult.outcome === 'cancelled') {
+            outcome = 'cancelled';
+            return;
+          }
+          if (waitResult.outcome !== 'progress') {
+            throw new Error(waitResult.outcome === 'target_rejected'
+              ? 'Channel authorization was rejected'
+              : 'Channel authorization outcome is unknown');
+          }
+        }
+        return;
+      }
 
+      // Step 1: Validate credentials against the actual service API
+      if (shouldValidateToken) {
+        const validationStartedAt = Date.now();
+        activePhase = 'validation';
+        phaseStartedAt = validationStartedAt;
+        logChannelTrace('validation.start', traceId);
+        const validationResponse = await hostChannelsValidateCredentials(selectedType, configValues, { traceId });
+        logChannelTrace('validation.end', traceId, { outcome: validationResponse.valid ? 'valid' : 'invalid', durationMs: Date.now() - validationStartedAt });
+
+        activePhase = null;
         if (!validationResponse.valid) {
+          outcome = 'validation_rejected';
           setValidationResult({
             valid: false,
             errors: validationResponse.errors || ['Validation failed'],
@@ -873,7 +1123,13 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
       // Step 2: Activate channel configuration
       const config: Record<string, unknown> = { ...configValues };
-      const saveResult = await hostChannelsActivate({ channelType: selectedType, config });
+      const configStartedAt = Date.now();
+      activePhase = 'config';
+      phaseStartedAt = configStartedAt;
+      logChannelTrace('config.start', traceId);
+      const saveResult = await hostChannelsConfigure({ channelType: selectedType, accountId, agentId: explicitAgentId, config }, { traceId });
+      logChannelTrace('config.end', traceId, { outcome: saveResult.success ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - configStartedAt });
+      activePhase = null;
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
       }
@@ -881,6 +1137,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         toast.warning(saveResult.warning);
       }
 
+      outcome = 'confirmed';
       toast.success(t('toast.channelSaved', { name: meta.name }));
 
       // Brief delay so user can see the success state before dialog closes
@@ -888,15 +1145,26 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       onChannelAdded();
     } catch (error) {
       clearQrGenerateTimeout();
-      toast.error(t('toast.configFailed', { error }));
+      outcome = 'error';
+      if (activePhase) logChannelTrace(`${activePhase}.end`, traceId, { outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - phaseStartedAt });
+      logChannelTrace('create.error', traceId, { errorCode: channelErrorCode(error) });
+      toast.error(t('toast.configFailed', { error: channelErrorCode(error) }));
       setConnecting(false);
+    } finally {
+      logChannelTrace('create.submit.end', traceId, { outcome, durationMs: Date.now() - startedAt });
+      logChannelTrace('create.final', traceId, { outcome, durationMs: Date.now() - startedAt });
     }
+  };
+
+  const handleRefreshCode = () => {
+    setQrImageFailed(false);
+    void handleConnect();
   };
 
   const openDocs = () => {
     if (meta?.docsPath) {
       void invokeIpc('shell:openResourcePath', meta.docsPath).catch((error) => {
-        console.error('Failed to open docs:', error);
+        console.error(`[startup-trace] ${JSON.stringify({ source: 'channel-renderer', phase: 'docs.error', errorCode: channelErrorCode(error) })}`);
         toast.error(t('toast.openDocsFailed', { error }));
       });
     }
@@ -905,6 +1173,8 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
   const isFormValid = () => {
     if (!meta) return false;
+    if (isConfiguredChannelEdit && selectedAgentId) return true;
+    if (shouldStartAuthorization) return true;
 
     // Check all required fields are filled
     return meta.configFields
@@ -921,14 +1191,14 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   };
 
   const isWeixinChannel = selectedType === 'openclaw-weixin';
-  const regularFields = meta?.configFields.filter((field) => !WEIXIN_ADVANCED_FIELD_KEYS.has(field.key)) ?? [];
+  const regularFields = shouldStartAuthorization ? [] : meta?.configFields.filter((field) => !WEIXIN_ADVANCED_FIELD_KEYS.has(field.key)) ?? [];
   const advancedFields = isWeixinChannel
     ? meta?.configFields.filter((field) => WEIXIN_ADVANCED_FIELD_KEYS.has(field.key)) ?? []
     : [];
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
@@ -936,88 +1206,140 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       }}
     >
       <Card
-        className="w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-[1.35rem] shadow-[0_24px_80px_rgba(0,0,0,0.35)]"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <CardHeader className="flex flex-row items-start justify-between">
-          <div>
-            <CardTitle>
-              {selectedType
-                ? isExistingConfig
-                  ? t('dialog.updateTitle', { name: CHANNEL_NAMES[selectedType] })
-                  : t('dialog.configureTitle', { name: CHANNEL_NAMES[selectedType] })
-                : t('dialog.addTitle')}
-            </CardTitle>
-            <CardDescription>
-              {selectedType && isExistingConfig
-                ? t('dialog.existingDesc')
-                : meta ? t(meta.description) : t('dialog.selectDesc')}
-            </CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-border/70 p-5">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[0.95rem] bg-secondary shadow-sm">
+              {meta ? <ChannelIcon id={meta.iconId} className="h-7 w-7" /> : <Plus className="h-5 w-5" />}
+            </span>
+            <div className="min-w-0">
+              <CardTitle className="text-lg">
+                {selectedType
+                  ? isExistingTarget
+                    ? t('dialog.updateTitle', { name: CHANNEL_NAMES[selectedType] })
+                    : t('dialog.configureTitle', { name: CHANNEL_NAMES[selectedType] })
+                  : t('dialog.addTitle')}
+              </CardTitle>
+              <CardDescription className="mt-1 line-clamp-2 leading-5">
+                {selectedType && isExistingTarget
+                  ? t('dialog.existingDesc')
+                  : meta ? t(meta.description) : t('dialog.selectDesc')}
+              </CardDescription>
+            </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button variant="ghost" size="icon" className="-mr-2 -mt-2 shrink-0" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {!selectedType ? (
+        <CardContent className="space-y-4 p-5">
+          {target.kind === 'catalog' ? (
             // Channel type selection
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {getPrimaryChannels().map((type) => {
                 const channelMeta = CHANNEL_META[type];
                 return (
                   <button
                     key={type}
-                    onClick={() => onSelectType(type)}
-                    className="p-4 rounded-lg border hover:bg-accent transition-colors text-left"
+                    onClick={() => onTargetChange({ kind: 'new', type })}
+                    className="group rounded-[1rem] border border-border/90 bg-background/35 p-4 text-left transition-[background-color,border-color,box-shadow] duration-150 hover:border-foreground/20 hover:bg-secondary/60 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
                   >
-                    <span className="text-3xl">{channelMeta.icon}</span>
-                    <p className="font-medium mt-2">{channelMeta.name}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {channelMeta.connectionType === 'qr' ? t('dialog.qrCode') : t('dialog.token')}
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] bg-secondary shadow-sm">
+                        <ChannelIcon id={channelMeta.iconId} className="h-6 w-6" />
+                      </span>
+                      <Badge variant="secondary">
+                        {t(channelConnectionLabelKey(channelMeta.connectionType))}
+                      </Badge>
+                    </div>
+                    <p className="mt-3 font-semibold tracking-[-0.02em]">{channelMeta.name}</p>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                      {t(channelMeta.description)}
                     </p>
                   </button>
                 );
               })}
             </div>
-          ) : qrCode ? (
-            // QR Code display
-            <div className="text-center space-y-4">
-              <div className="bg-white p-4 rounded-lg inline-block shadow-sm border">
-                {!qrImageFailed ? (
-                  <img
-                    src={qrCode}
-                    alt={t('dialog.qrImageAlt', { name: meta?.name || 'QR Code' })}
-                    className="w-64 h-64 object-contain"
-                    onError={() => setQrImageFailed(true)}
-                  />
-                ) : (
-                  <div className="w-64 h-64 bg-gray-100 flex items-center justify-center">
-                    <QrCode className="h-32 w-32 text-gray-400" />
-                  </div>
-                )}
-              </div>
-              <p className="text-sm text-muted-foreground">
-                {t('dialog.scanQR', { name: meta?.name })}
+          ) : authPrompt ? (
+            // QR/link authorization display
+            <div className="rounded-[1.15rem] border border-border/90 bg-secondary/45 p-5 text-center">
+              <p className="text-sm font-medium text-foreground">
+                {authPrompt.qrDataUrl ? t('dialog.scanQR', { name: meta?.name }) : t('dialog.openAuthorization', { name: meta?.name })}
               </p>
-              <div className="flex justify-center gap-2">
-                <Button variant="outline" onClick={() => {
-                  setQrCode(null);
-                  setQrImageFailed(false);
-                  handleConnect(); // Retry
-                }}>
+              {authPrompt.qrDataUrl ? (
+                <div className="mt-4 flex justify-center">
+                  <div className="rounded-[1rem] border bg-white p-3 shadow-sm">
+                    {!qrImageFailed ? (
+                      <img
+                        src={authPrompt.qrDataUrl}
+                        alt={t('dialog.qrImageAlt', { name: meta?.name || 'QR Code' })}
+                        className="h-56 w-56 object-contain"
+                        onError={() => setQrImageFailed(true)}
+                      />
+                    ) : (
+                      <div className="flex h-56 w-56 items-center justify-center bg-gray-100">
+                        <QrCode className="h-28 w-28 text-gray-400" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              <p className="mt-4 text-xs text-muted-foreground">{t('dialog.waitingForScan')}</p>
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                {authPrompt.authorizationUrl ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => invokeIpc('shell:openExternal', authPrompt.authorizationUrl)}
+                  >
+                    {t('dialog.openAuthorizationLink')}
+                  </Button>
+                ) : null}
+                <Button variant="outline" onClick={handleRefreshCode}>
                   {t('dialog.refreshCode')}
                 </Button>
               </div>
             </div>
-          ) : loadingConfig ? (
+          ) : !configReady ? (
             // Loading saved config
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              <span className="ml-2 text-sm text-muted-foreground">{t('dialog.loadingConfig')}</span>
+            <div className="flex min-h-24 items-center justify-center py-8">
+              {showConfigLoading ? (
+                <>
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                  <span className="ml-2 text-sm text-muted-foreground">{t('dialog.loadingConfig')}</span>
+                </>
+              ) : null}
             </div>
           ) : (
             // Connection form
             <div className="space-y-4">
+              {showSetupModeSwitch && (
+                <div className="grid grid-cols-2 gap-2 rounded-[0.95rem] bg-secondary/60 p-1">
+                  <button
+                    type="button"
+                    className={cn(
+                      'rounded-[0.75rem] px-3 py-2 text-sm font-medium transition-colors',
+                      effectiveSetupMode === 'guided' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    onClick={() => setSetupMode('guided')}
+                    disabled={connecting}
+                  >
+                    {t('dialog.setupModeGuided')}
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      'rounded-[0.75rem] px-3 py-2 text-sm font-medium transition-colors',
+                      effectiveSetupMode === 'credential' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    onClick={() => setSetupMode('credential')}
+                    disabled={connecting}
+                  >
+                    {t('dialog.setupModeCredential')}
+                  </button>
+                </div>
+              )}
+
               {/* Existing config hint */}
               {isExistingConfig && (
                 <div className="bg-blue-500/10 text-blue-600 dark:text-blue-400 p-3 rounded-lg text-sm flex items-center gap-2">
@@ -1056,7 +1378,24 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
                   placeholder={t('dialog.channelNamePlaceholder', { name: meta?.name })}
                   value={channelName}
                   onChange={(e) => setChannelName(e.target.value)}
+                  disabled={isConfiguredChannelEdit}
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="channel-agent">{t('dialog.agent')}</Label>
+                <Select
+                  id="channel-agent"
+                  value={selectedAgentId}
+                  onChange={(event) => setSelectedAgentId(event.target.value)}
+                >
+                  <option value="">{t('dialog.agentDefault')}</option>
+                  {agentOptions.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name && agent.name !== agent.id ? `${agent.name} (${agent.id})` : agent.id}
+                    </option>
+                  ))}
+                </Select>
               </div>
 
               {/* Configuration fields */}
@@ -1149,7 +1488,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
               <Separator />
 
               <div className="flex justify-between">
-                <Button variant="outline" onClick={() => onSelectType(null)}>
+                <Button variant="outline" onClick={isConfiguredChannelEdit ? onClose : () => onTargetChange({ kind: 'catalog' })}>
                   {t('dialog.back')}
                 </Button>
                 <div className="flex gap-2">
@@ -1180,9 +1519,11 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
                     {connecting ? (
                       <>
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        {meta?.connectionType === 'qr' ? t('dialog.generatingQR') : t('dialog.validatingAndSaving')}
+                        {shouldStartAuthorization ? t('dialog.startingAuthorization') : shouldStartQrLogin ? t('dialog.generatingQR') : t('dialog.validatingAndSaving')}
                       </>
-                    ) : meta?.connectionType === 'qr' ? (
+                    ) : shouldStartAuthorization ? (
+                      t('dialog.startAuthorization')
+                    ) : shouldStartQrLogin ? (
                       t('dialog.generateQRCode')
                     ) : (
                       <>

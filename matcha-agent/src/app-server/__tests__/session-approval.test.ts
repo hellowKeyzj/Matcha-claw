@@ -95,6 +95,24 @@ describe('SessionRegistry', () => {
     })
   })
 
+  test('rejects non-native session ids before creating records', async () => {
+    const registry = new SessionRegistry({
+      createSessionId: () => 'matcha-agent:matcha:session-1',
+      now: fixedClock(),
+      resolveWorkspaceRoot: async cwd => `${cwd}/real`,
+    })
+
+    await expect(registry.create({ cwd: 'workspace' })).resolves.toEqual({
+      resultType: 'invalidSessionId',
+      sessionId: 'matcha-agent:matcha:session-1',
+      message: 'sessionId must be a portable native session id',
+    })
+    await expect(
+      registry.create({ cwd: 'workspace', sessionId: '../session-1' }),
+    ).resolves.toMatchObject({ resultType: 'invalidSessionId' })
+    expect(registry.list()).toEqual([])
+  })
+
   test.each([
     ['git metadata directory', ['workspace', '.git']],
     ['claude config directory', ['workspace', '.claude']],

@@ -42,9 +42,29 @@ describe('strict SessionView and SessionDelta contract fixtures', () => {
       items: completeFact([assistantItem('item-1', 'done', { runId: 'run-1' })]),
       window: completeFact(windowView(1)),
     });
+    const noticeDelta = sessionDelta(sessionKey, {
+      epoch: 2,
+      seq: 8,
+      cursor: 8,
+      routeKey: 'renderer-route:fixture',
+      runId: 'run-1',
+      changes: [{
+        kind: 'runtimeNoticeUpdated',
+        notice: {
+          runId: 'run-1',
+          kind: 'guardian_warning',
+          command: 'cargo test',
+          riskLevel: 'medium',
+          rationale: null,
+          message: null,
+        },
+      }],
+    });
 
     expect(isSessionView(view)).toBe(true);
     expect(decodeSessionView(view)).toEqual(view);
+    expect(isSessionDelta(noticeDelta)).toBe(true);
+    expect(decodeSessionDelta(noticeDelta)).toEqual(noticeDelta);
   });
 
   it.each(['unavailable', 'unknown'] as const)('preserves typed %s SessionView facts', (status) => {

@@ -241,10 +241,10 @@ pub(crate) enum Command {
     OpenClawToolPermissionGet {},
     #[serde(rename = "openclaw.tool-permission.set")]
     OpenClawToolPermissionSet { input: CommandInput },
-    #[serde(rename = "openclaw.toolchain.status")]
-    OpenClawToolchainStatus {},
-    #[serde(rename = "openclaw.toolchain.install-uv")]
-    OpenClawToolchainInstallUv {},
+    #[serde(rename = "host.toolchain.status")]
+    HostToolchainStatus {},
+    #[serde(rename = "host.toolchain.prepare")]
+    HostToolchainPrepare {},
     #[serde(rename = "openclaw.subagent-templates.list")]
     OpenClawSubagentTemplateCatalog {},
     #[serde(rename = "openclaw.subagent-templates.get")]
@@ -267,8 +267,10 @@ pub(crate) enum Command {
     OpenClawControlUiUrl {},
     #[serde(rename = "openclaw.cron.manual-trigger")]
     OpenClawManualCronTrigger { input: CommandInput },
-    #[serde(rename = "openclaw.chat.history")]
-    OpenClawChatHistory { input: CommandInput },
+    #[serde(rename = "openclaw.browser.request")]
+    OpenClawBrowserRequest { input: CommandInput },
+    #[serde(rename = "openclaw.mcp-app.request")]
+    OpenClawMcpAppRequest { input: CommandInput },
     #[serde(rename = "openclaw.chat.send")]
     OpenClawChatSend { input: CommandInput },
     #[serde(rename = "openclaw.chat.abort")]

@@ -37,6 +37,35 @@ const freshUser = {
   updatedAt: '2026-01-02T00:00:00.000Z',
 };
 
+const publicSettings = {
+  registrationEnabled: true,
+  emailVerifyEnabled: false,
+  forceEmailOnThirdPartySignup: false,
+  registrationEmailSuffixWhitelist: [],
+  promoCodeEnabled: false,
+  passwordResetEnabled: true,
+  invitationCodeEnabled: false,
+  turnstileEnabled: false,
+  turnstileSiteKey: '',
+  siteName: 'Matcha',
+  siteLogo: '',
+  siteSubtitle: '',
+  contactInfo: '',
+  docUrl: '',
+  homeContent: '',
+  compactHomeEnabled: false,
+  paymentEnabled: false,
+  linuxdoOauthEnabled: false,
+  wechatOauthEnabled: false,
+  oidcOauthEnabled: false,
+  oidcOauthProviderName: '',
+  githubOauthEnabled: false,
+  googleOauthEnabled: false,
+  serviceQuotaEnabled: false,
+  affiliateEnabled: false,
+  version: 'test',
+} as const;
+
 const localSession = {
   accessToken: 'session-access-token',
   refreshToken: 'session-refresh-token',
@@ -56,7 +85,7 @@ describe('cloud account service', () => {
 
   it('returns a valid local authenticated session before background profile refresh settles', async () => {
     let resolveProfile!: (value: typeof freshUser) => void;
-    const fetchProfileMock = vi.fn(() => new Promise<typeof freshUser>((resolve) => { resolveProfile = resolve; }));
+    const fetchProfileMock = vi.fn((): Promise<typeof freshUser> => new Promise((resolve) => { resolveProfile = resolve; }));
     const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
     const service = createCloudAccountService({ fetchProfile: fetchProfileMock } as never);
 
@@ -74,5 +103,52 @@ describe('cloud account service', () => {
     resolveProfile(freshUser);
     await vi.waitFor(() => expect(hoisted.writeCloudAccountSessionMock).toHaveBeenCalledTimes(1));
     expect(hoisted.writeCloudAccountSessionMock).toHaveBeenCalledWith({ ...localSession, user: freshUser });
+    await expect(service.getSession()).resolves.toEqual({
+      state: 'authenticated',
+      user: freshUser,
+      expiresAt: localSession.expiresAt,
+      tokenType: 'Bearer',
+    });
+    expect(fetchProfileMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('prewarms public settings and session once for later calls', async () => {
+    let resolvePublicSettings!: (value: typeof publicSettings) => void;
+    let resolveProfile!: (value: typeof freshUser) => void;
+    const fetchPublicSettingsMock = vi.fn((): Promise<typeof publicSettings> => new Promise((resolve) => { resolvePublicSettings = resolve; }));
+    const fetchProfileMock = vi.fn((): Promise<typeof freshUser> => new Promise((resolve) => { resolveProfile = resolve; }));
+    const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
+    const service = createCloudAccountService({
+      fetchPublicSettings: fetchPublicSettingsMock,
+      fetchProfile: fetchProfileMock,
+    } as never);
+
+    service.prewarm();
+    const settingsPromise = service.getPublicSettings();
+    const sessionPromise = service.getSession();
+
+    expect(fetchPublicSettingsMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetchProfileMock).toHaveBeenCalledTimes(1));
+
+    resolvePublicSettings(publicSettings);
+    await expect(settingsPromise).resolves.toBe(publicSettings);
+    await expect(service.getPublicSettings()).resolves.toBe(publicSettings);
+    expect(fetchPublicSettingsMock).toHaveBeenCalledTimes(1);
+
+    await expect(sessionPromise).resolves.toEqual({
+      state: 'authenticated',
+      user: localUser,
+      expiresAt: localSession.expiresAt,
+      tokenType: 'Bearer',
+    });
+    resolveProfile(freshUser);
+    await vi.waitFor(() => expect(hoisted.writeCloudAccountSessionMock).toHaveBeenCalledWith({ ...localSession, user: freshUser }));
+    await expect(service.getSession()).resolves.toEqual({
+      state: 'authenticated',
+      user: freshUser,
+      expiresAt: localSession.expiresAt,
+      tokenType: 'Bearer',
+    });
+    expect(fetchProfileMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,7 +8,7 @@
   "gatewayNotRunning": "Шлюз не запущен",
   "recentTokenHistory": {
     "title": "Недавнее использование токенов",
-    "description": "Недавние ответы ассистента и результаты инструментов с данными о модели/провайдере.",
+    "description": "Недавние сессии с данными об использовании токенов.",
     "loading": "Загрузка истории использования токенов...",
     "refreshFailed": "Failed to refresh token usage history. Showing cached data.",
     "empty": "История использования токенов пуста",
@@ -31,6 +31,11 @@
     "output": "Вывод {{value}}",
     "cacheRead": "Чтение кэша {{value}}",
     "cacheWrite": "Запись кэша {{value}}",
-    "cost": "Стоимость ${{amount}}"
+    "cost": "Стоимость ${{amount}}",
+    "showDetails": "Показать детали сессии",
+    "hideDetails": "Скрыть детали сессии",
+    "detailsLoading": "Загрузка деталей сессии...",
+    "detailsEmpty": "Для этой сессии нет данных по токенам",
+    "detailsError": "Не удалось загрузить детали сессии"
   }
 }

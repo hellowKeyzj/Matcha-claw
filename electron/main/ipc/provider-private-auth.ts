@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type ServerResponse } from 'node:http';
+import { existsSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { platform } from 'node:process';
 import { dirname, join } from 'node:path';
+import { platform } from 'node:process';
+import { DatabaseSync } from 'node:sqlite';
 import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 
 import type { ProviderAccountsTransport } from '../runtime-host-delivery/transport/providers/accounts';
@@ -13,7 +15,11 @@ import {
   type ProviderMutationCommitUnknownResponse,
   type ProviderMutationReceipt,
 } from '../runtime-host-delivery/transport/providers/mutation-receipt';
+import { probeAnthropicCliAuth } from './provider-private-auth/anthropic-cli-probe';
 import { loginOpenAICodexOAuth } from '../../services/providers/oauth/openai-codex-oauth';
+import { loginOpenAIDeviceOAuth } from '../../services/providers/oauth/openai-device-oauth';
+import { loginGitHubCopilotDeviceOAuth } from '../../services/providers/oauth/github-copilot-device-oauth';
+import { loginOpenRouterOAuth } from '../../services/providers/oauth/openrouter-oauth';
 import {
   loginMiniMaxPortalOAuth,
   loginQwenPortalOAuth,
@@ -25,7 +31,14 @@ const MAX_ID_BYTES = 128;
 const MAX_PRIVATE_REQUEST_BYTES = 1024;
 const MAX_AUTH_PROFILES_BYTES = 1024 * 1024;
 const MAX_PROVIDER_KEY_BYTES = 256;
-const AUTH_PROFILES_FILE = 'auth-profiles.json';
+const OPENCLAW_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+const OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS = [50, 100, 200] as const;
+const OPENCLAW_STATE_DB_FILE = 'openclaw.sqlite';
+const OPENCLAW_STATE_DB_DIR = 'state';
+const AUTH_SHARED_STORE_STATE_KEY = 'auth.sharedStore';
+const AUTH_PROFILES_STORE_STATE_KEY = 'authProfiles.store';
+const AUTH_PROFILES_STATE_STATE_KEY = 'authProfiles.state';
+const AUTH_SHARED_STORE_STATE_VALUE = { location: 'state-db' } as const;
 const OAUTH_ERROR_MESSAGE = 'Provider OAuth authentication failed';
 const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
@@ -47,26 +60,33 @@ class ProviderPrivateResolverError extends Error {
   }
 }
 
-type Provider = 'openai' | 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
-type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local';
+type Provider = 'openai' | 'openrouter' | 'github-copilot' | 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
+type AuthMode = 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local' | 'token' | 'cliReuse';
+type CredentialAuthMode = Exclude<AuthMode, 'local' | 'cliReuse'>;
 type AccountKind = 'chat' | 'media';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
 type MediaProtocol = 'google' | 'openAi' | 'openRouter';
 type PrivateStore = Record<string, string>;
 type SecretRef = Readonly<{ source: 'env' | 'file' | 'exec'; provider: string; id: string }>;
-type SecretInput = string | SecretRef;
 type AuthProfile = Record<string, unknown>;
 type AuthProfileOrder = Record<string, string[]>;
 type AuthProfileLastGood = Record<string, string>;
 type MutableAuthProfileStore = {
   version: 1;
   profiles: Record<string, AuthProfile>;
-  order?: AuthProfileOrder;
-  lastGood?: AuthProfileLastGood;
-  [key: string]: unknown;
 };
 type AuthProfileStore = Readonly<MutableAuthProfileStore>;
-type AccountIntent = Readonly<{
+type MutableAuthProfileState = {
+  version: 1;
+  order?: AuthProfileOrder;
+  lastGood?: AuthProfileLastGood;
+};
+type AuthProfileState = Readonly<MutableAuthProfileState>;
+type MutableAuthProfileProjection = {
+  store: MutableAuthProfileStore;
+  state: MutableAuthProfileState;
+};
+export type ProviderAccountIntent = Readonly<{
   id: string;
   provider: string;
   label: string;
@@ -78,7 +98,8 @@ type AccountIntent = Readonly<{
   authMode: AuthMode;
   revision: number;
 }>;
-type Flow = Readonly<{ flowId: string; account: AccountIntent; provider: Provider }>;
+type AccountIntent = ProviderAccountIntent;
+type Flow = Readonly<{ flowId: string; account: AccountIntent; provider: Provider; controller: AbortController }>;
 
 const activeFlows = new Map<string, Flow>();
 const manualCodes = new Map<string, { resolve: (value: string) => void; reject: () => void }>();
@@ -98,17 +119,19 @@ export async function migrateLegacyProviderPrivateAuth(legacyProviderStoreFilePa
   if (!filePath || !safeStorage.isEncryptionAvailable()) return;
   const legacy = await readLegacyProviderStore(filePath);
   if (!legacy) return;
-  for (const [accountId, key] of Object.entries(legacy.apiKeys)) {
-    const account = legacy.accounts[accountId];
-    const provider = isRecord(account) && isProviderName(account.vendorId) ? account.vendorId : undefined;
-    if (!isId(accountId) || !provider || account.authMode !== 'api_key' || !isSecret(key)) continue;
+  for (const [accountId, account] of Object.entries(legacy.accounts)) {
+    const provider = storedAccountProvider(account);
+    const authMode = storedAccountAuthMode(account);
+    if (!isId(accountId) || !provider || !authMode || authMode === 'local' || authMode === 'cliReuse') continue;
     const reference = credentialReference(accountId);
-    if (await credentialSnapshot(reference)) continue;
+    const existing = await credentialSnapshot(reference);
+    const key = legacy.apiKeys[accountId];
+    if (!existing && (authMode !== 'apiKey' || !isSecret(key))) continue;
     try {
-      await storeSecret(accountId, { kind: 'apiKey', provider, key });
-      await applyPrivateProfile(reference, openClawProviderKey(provider, accountId, 'apiKey'), provider, 'apiKey', openClawStateDir);
+      if (!existing) await storeSecret(accountId, { kind: 'apiKey', provider, key });
+      await applyPrivateProfile(reference, openClawProviderKey(provider, accountId, authMode), provider, authMode, openClawStateDir);
     } catch {
-      await removeCredentialReference(reference).catch(() => undefined);
+      if (!existing) await removeCredentialReference(reference).catch(() => undefined);
     }
   }
 }
@@ -132,56 +155,32 @@ export function registerProviderPrivateAuthHandlers(
   transport: ProviderAccountsTransport,
 ): void {
   ipcMain.handle('providers:storeAccount', async (_, input: unknown) => {
-    const value = input as { account?: unknown; apiKey?: unknown };
-    const account = parseAccount(value.account);
-    if (!account || (account.authMode !== 'local' && value.apiKey !== undefined && !isSecret(value.apiKey))) {
+    const value = input as { account?: unknown; apiKey?: unknown; token?: unknown };
+    providerPrivateAuthTrace('ipc.store.received', {
+      hasAccount: Boolean(value?.account),
+      privateAuthInputPresent: (typeof value?.apiKey === 'string' && value.apiKey.trim().length > 0)
+        || (typeof value?.token === 'string' && value.token.trim().length > 0),
+    });
+    const account = parseAccount(value?.account);
+    if (!account) {
+      providerPrivateAuthTrace('ipc.store.rejected', { detail: 'invalid-account' });
       throw new Error('Provider account request is invalid');
     }
-    const reference = credentialReference(account.id);
-    const previous = account.authMode === 'local' ? undefined : await credentialSnapshot(reference);
-    if (account.authMode !== 'local') {
-      await storeCredential(account.provider, account.id, value.apiKey);
-    }
-    let replacement: PublicReplaceResult;
-    try {
-      replacement = await replace(transport, account);
-    } catch (error) {
-      if (error instanceof ProviderMutationReceiptUnavailableError) {
-        if (account.authMode !== 'local') await restoreCredential(reference, previous);
-        return { status: 'unavailable' as const };
-      }
-      throw error;
-    }
-    if ((replacement.outcome === 'rejected' || replacement.outcome === 'unavailable') && account.authMode !== 'local') {
-      await restoreCredential(reference, previous);
-    }
-    return {
-      status: replacement.outcome,
-      ...(replacement.receipt ? { receipt: replacement.receipt } : {}),
-    };
+    providerPrivateAuthTrace('ipc.store.decoded', accountTrace(account));
+    return await storeProviderPrivateAccount(transport, account, value.apiKey, value.token);
   });
 
   ipcMain.handle('providers:deleteAccount', async (_, input: unknown) => {
     const value = input as { accountId?: unknown; revision?: unknown };
+    providerPrivateAuthTrace('ipc.delete.received', {
+      accountId: idShape(typeof value?.accountId === 'string' ? value.accountId : undefined),
+      revision: typeof value?.revision === 'number' ? value.revision : undefined,
+    });
     if (!isId(value.accountId) || !isRevision(value.revision)) {
+      providerPrivateAuthTrace('ipc.delete.rejected', { detail: 'invalid-request' });
       throw new Error('Provider account request is invalid');
     }
-    try {
-      const response = await transport.execute(accountRequest('providerAccounts.delete', {
-        kind: 'delete', accountId: value.accountId, revision: value.revision,
-      }));
-      const outcome = mutationOutcomeForResponse(response, 'deleted');
-      const receipt = mutationReceiptForResponse(response);
-      return {
-        status: outcome,
-        ...(receipt ? { receipt } : {}),
-      };
-    } catch (error) {
-      if (error instanceof ProviderMutationReceiptUnavailableError) {
-        return { status: 'unavailable' as const };
-      }
-      throw error;
-    }
+    return await deleteProviderPrivateAccount(transport, value.accountId, value.revision);
   });
 
   ipcMain.handle('providers:startOAuth', async (_, input: unknown) => {
@@ -189,6 +188,7 @@ export function registerProviderPrivateAuthHandlers(
     if (!flow || !safeStorage.isEncryptionAvailable()) {
       throw new Error('Provider OAuth request is invalid');
     }
+    if (activeFlows.has(flow.flowId)) throw new Error('Provider OAuth flow is already active');
     activeFlows.set(flow.flowId, flow);
     publish(getMainWindow, { flowId: flow.flowId, status: 'started' });
     void runOAuth(flow, getMainWindow, transport);
@@ -199,7 +199,9 @@ export function registerProviderPrivateAuthHandlers(
     const value = input as { flowId?: unknown; code?: unknown };
     if (!isId(value.flowId) || !isSecret(value.code)) throw new Error('Provider OAuth request is invalid');
     const flow = activeFlows.get(value.flowId);
-    if (!flow || flow.provider !== 'openai') throw new Error('Provider OAuth flow is unavailable');
+    if (!flow || flow.provider !== 'openai' || flow.account.authMode !== 'oauthBrowser') {
+      throw new Error('Provider OAuth flow is unavailable');
+    }
     resolveManualCode(flow.flowId, value.code);
     return { flowId: flow.flowId, status: 'submitted' as const };
   });
@@ -207,6 +209,7 @@ export function registerProviderPrivateAuthHandlers(
   ipcMain.handle('providers:cancelOAuth', async (_, input: unknown) => {
     const flowId = (input as { flowId?: unknown })?.flowId;
     if (!isId(flowId)) throw new Error('Provider OAuth request is invalid');
+    activeFlows.get(flowId)?.controller.abort();
     activeFlows.delete(flowId);
     rejectManualCode(flowId);
     publish(getMainWindow, { flowId, status: 'cancelled' });
@@ -266,7 +269,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
         const provider = isProfileProviderName(body.provider) ? body.provider : undefined;
         const credentialProvider = isProviderName(body.credentialProvider) ? body.credentialProvider : undefined;
         const authMode = isAuthMode(body.authMode) ? body.authMode : undefined;
-        if (!provider || !credentialProvider || !authMode || authMode === 'local') {
+        if (!provider || !credentialProvider || !authMode || authMode === 'local' || authMode === 'cliReuse') {
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
@@ -306,18 +309,16 @@ async function runOAuth(
 ): Promise<void> {
   let flowClaimed = false;
   try {
-    const secret = flow.provider === 'openai'
-      ? await openAiSecret(flow, getMainWindow)
-      : await deviceSecret(flow, getMainWindow);
-    if (!activeFlows.delete(flow.flowId)) return;
+    const secret = await loginFlow(flow, getMainWindow);
+    if (flow.controller.signal.aborted || activeFlows.get(flow.flowId) !== flow) return;
+    activeFlows.delete(flow.flowId);
     flowClaimed = true;
-    const reference = credentialReference(flow.account.id);
-    const previous = await credentialSnapshot(reference);
-    await storeSecret(flow.account.id, secret);
-    const replacement = await replace(transport, flow.account);
-    if (replacement.outcome === 'rejected') {
-      await restoreCredential(reference, previous);
-    }
+    const account = {
+      ...flow.account,
+      authMode: secret.kind === 'apiKey' ? 'apiKey' as const
+        : secret.kind === 'token' ? 'token' as const : flow.account.authMode,
+    };
+    const replacement = await commitPrivateAccount(transport, account, secret);
     publish(getMainWindow, { flowId: flow.flowId, status: oauthOutcome(replacement.outcome) });
     if (replacement.outcome === 'stored') {
       publishLegacy(getMainWindow, 'oauth:success', {
@@ -331,16 +332,46 @@ async function runOAuth(
       });
     }
   } catch {
-    if (flowClaimed || activeFlows.delete(flow.flowId)) {
+    if (flowClaimed || activeFlows.get(flow.flowId) === flow) {
+      if (activeFlows.get(flow.flowId) === flow) activeFlows.delete(flow.flowId);
       publish(getMainWindow, { flowId: flow.flowId, status: 'unknown' });
       publishLegacy(getMainWindow, 'oauth:error', { message: OAUTH_ERROR_MESSAGE });
     }
   } finally {
-    rejectManualCode(flow.flowId);
+    if (!activeFlows.has(flow.flowId)) rejectManualCode(flow.flowId);
   }
 }
 
-async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<unknown> {
+type PrivateCredential = ReturnType<typeof parsePrivateCredential>;
+
+async function loginFlow(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<PrivateCredential> {
+  const signal = flow.controller.signal;
+  const openUrl = async (url: string) => {
+    signal.throwIfAborted();
+    await shell.openExternal(url);
+  };
+  const onVerification = (info: { verificationUri: string; userCode: string; expiresIn: number }) => {
+    if (signal.aborted) return;
+    publish(getMainWindow, { flowId: flow.flowId, status: 'device_code', ...info });
+    publishLegacy(getMainWindow, 'oauth:code', { provider: flow.provider, ...info });
+  };
+  if (flow.provider === 'openrouter') {
+    const { key } = await loginOpenRouterOAuth({ openUrl, signal });
+    return { kind: 'apiKey', provider: flow.provider, key };
+  }
+  if (flow.provider === 'github-copilot') {
+    const { token } = await loginGitHubCopilotDeviceOAuth({ openUrl, onVerification, signal });
+    return { kind: 'token', provider: flow.provider, token };
+  }
+  if (flow.provider === 'openai') {
+    if (flow.account.authMode === 'oauthBrowser') return await openAiSecret(flow, getMainWindow);
+    const token = await loginOpenAIDeviceOAuth({ openUrl, onVerification, signal });
+    return { kind: 'oauth', ...token };
+  }
+  return await deviceSecret(flow, getMainWindow);
+}
+
+async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<PrivateCredential> {
   const token = await loginOpenAICodexOAuth({
     openUrl: async (url) => { await shell.openExternal(url); },
     onManualCodeRequired: ({ authorizationUrl, reason }) => {
@@ -359,7 +390,7 @@ async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
   return { kind: 'oauth', access: token.access, refresh: token.refresh, expires: token.expires, accountId: token.accountId };
 }
 
-async function deviceSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<unknown> {
+async function deviceSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<PrivateCredential> {
   const note = async (message: string) => {
     const verificationUri = message.match(/Open\s+(https?:\/\/\S+?)\s+to/i)?.[1];
     const userCode = verificationUri ? new URL(verificationUri).searchParams.get('user_code') : undefined;
@@ -393,8 +424,188 @@ type PublicReplaceResult = Readonly<{
   accountId?: string;
   receipt?: ProviderMutationReceipt;
 }>;
+type PublicDeleteResult = Readonly<{
+  outcome: PublicDeleteOutcome;
+  receipt?: ProviderMutationReceipt;
+}>;
+
+export type ProviderPrivateAccountMutationResult = Readonly<{
+  status: PublicMutationOutcome | PublicDeleteOutcome;
+  receipt?: ProviderMutationReceipt;
+}>;
 
 type ProviderMutationTransportResponse = Awaited<ReturnType<ProviderAccountsTransport['execute']>>;
+
+function providerPrivateAuthTrace(phase: string, payload: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({
+    prefix: '[startup-trace]',
+    source: 'provider-private-auth',
+    phase,
+    at: Date.now(),
+    ...payload,
+  }));
+}
+
+function idShape(value: string | null | undefined): { present: boolean; length: number } {
+  return value ? { present: true, length: value.length } : { present: false, length: 0 };
+}
+
+function accountTrace(account: AccountIntent): Record<string, unknown> {
+  return {
+    accountId: idShape(account.id),
+    provider: account.provider,
+    authMode: account.authMode,
+    kind: account.kind,
+    enabled: account.enabled,
+    revision: account.revision,
+    endpoint: idShape(account.endpoint),
+    protocol: account.protocol,
+    mediaProtocol: account.mediaProtocol,
+  };
+}
+
+function receiptTrace(receipt: ProviderMutationReceipt | undefined): Record<string, unknown> {
+  if (!receipt) return { receipt: false };
+  return {
+    receipt: true,
+    desired: receipt.desired.status,
+    persisted: receipt.persisted.status,
+    nativeChanged: receipt.native.changed,
+    nativeApplied: receipt.native.applied.status,
+    nativeObserved: receipt.native.observed.status,
+    nativeDiagnostic: receipt.native.diagnostic
+      ? {
+          phase: receipt.native.diagnostic.phase,
+          reason: receipt.native.diagnostic.reason,
+          method: receipt.native.diagnostic.method,
+          expectedPath: receipt.native.diagnostic.expectedPath,
+          detail: idShape(receipt.native.diagnostic.detail),
+        }
+      : undefined,
+    commit: receipt.commit,
+  };
+}
+
+export async function storeProviderPrivateAccount(
+  transport: ProviderAccountsTransport,
+  account: ProviderAccountIntent,
+  apiKey?: unknown,
+  token?: unknown,
+): Promise<ProviderPrivateAccountMutationResult> {
+  providerPrivateAuthTrace('store.request', {
+    ...accountTrace(account),
+    privateAuthInputPresent: (typeof apiKey === 'string' && apiKey.trim().length > 0)
+      || (typeof token === 'string' && token.trim().length > 0),
+  });
+  if (!parseAccount(account)
+    || apiKey !== undefined && (account.authMode !== 'apiKey' || !isSecret(apiKey))
+    || token !== undefined && (account.authMode !== 'token' || !isSecret(token))) {
+    providerPrivateAuthTrace('store.rejected', { detail: 'invalid-request', accountId: idShape(account.id) });
+    throw new Error('Provider account request is invalid');
+  }
+  if (account.authMode === 'cliReuse' && account.enabled) {
+    const status = await probeAnthropicCliAuth();
+    if (status !== 'available') {
+      throw new Error(status === 'missing'
+        ? 'Claude CLI is not authenticated. Run claude auth login, then retry.'
+        : 'Claude CLI authentication could not be verified. Run claude auth status, then retry.');
+    }
+  }
+  const secret: PrivateCredential | undefined = apiKey !== undefined
+    ? { kind: 'apiKey', provider: account.provider, key: apiKey as string }
+    : token !== undefined
+      ? { kind: 'token', provider: account.provider, token: normalizeProviderToken(account.provider, token as string) }
+      : undefined;
+  const replacement = await commitPrivateAccount(transport, account, secret);
+  providerPrivateAuthTrace('store.response', {
+    ...accountTrace(account),
+    outcome: replacement.outcome,
+    ...receiptTrace(replacement.receipt),
+  });
+  return {
+    status: replacement.outcome,
+    ...(replacement.receipt ? { receipt: replacement.receipt } : {}),
+  };
+}
+
+async function commitPrivateAccount(
+  transport: ProviderAccountsTransport,
+  account: AccountIntent,
+  secret?: PrivateCredential,
+): Promise<PublicReplaceResult> {
+  const hasCredential = account.authMode !== 'local' && account.authMode !== 'cliReuse';
+  const reference = credentialReference(account.id);
+  const previous = hasCredential ? await credentialSnapshot(reference) : undefined;
+  providerPrivateAuthTrace('store.private-before', {
+    ...accountTrace(account),
+    privateAuthRequired: hasCredential,
+    previousPrivateAuthPresent: Boolean(previous),
+    incomingPrivateAuthPresent: Boolean(secret),
+  });
+  if (hasCredential) {
+    if (secret) await storeSecret(account.id, secret);
+    else if (!previous) throw new Error('A provider credential is required');
+  }
+  providerPrivateAuthTrace('store.private-after', {
+    ...accountTrace(account),
+    privateAuthStored: hasCredential,
+  });
+  let replacement: PublicReplaceResult;
+  try {
+    replacement = await replace(transport, account);
+  } catch (error) {
+    if (!(error instanceof ProviderMutationReceiptUnavailableError)) throw error;
+    providerPrivateAuthTrace('store.transport-unavailable', accountTrace(account));
+    replacement = { outcome: 'unavailable' };
+  }
+  if (hasCredential && replacement.outcome === 'rejected') {
+    await restoreCredential(reference, previous);
+    providerPrivateAuthTrace('store.private-rollback', accountTrace(account));
+  }
+  return replacement;
+}
+
+function normalizeProviderToken(provider: string, token: string): string {
+  if (provider !== 'anthropic') return token;
+  const normalized = token.replace(/\s+/g, '');
+  if (!normalized.startsWith('sk-ant-oat01-') || normalized.length < 80) {
+    throw new Error('Paste the full Anthropic setup-token starting with sk-ant-oat01-.');
+  }
+  return normalized;
+}
+
+export async function deleteProviderPrivateAccount(
+  transport: ProviderAccountsTransport,
+  accountId: string,
+  revision: number,
+): Promise<ProviderPrivateAccountMutationResult> {
+  providerPrivateAuthTrace('delete.request', { accountId: idShape(accountId), revision });
+  try {
+    const deletion = await removeAccount(transport, accountId, revision);
+    providerPrivateAuthTrace('delete.response', {
+      accountId: idShape(accountId),
+      revision,
+      outcome: deletion.outcome,
+      ...receiptTrace(deletion.receipt),
+    });
+    return {
+      status: deletion.outcome,
+      ...(deletion.receipt ? { receipt: deletion.receipt } : {}),
+    };
+  } catch (error) {
+    if (error instanceof ProviderMutationReceiptUnavailableError) {
+      providerPrivateAuthTrace('delete.transport-unavailable', { accountId: idShape(accountId), revision });
+      return { status: 'unavailable' };
+    }
+    providerPrivateAuthTrace('delete.failed', {
+      accountId: idShape(accountId),
+      revision,
+      errorName: error instanceof Error ? error.name : typeof error,
+      message: idShape(error instanceof Error ? error.message : String(error)),
+    });
+    throw error;
+  }
+}
 
 async function replace(
   transport: ProviderAccountsTransport,
@@ -404,20 +615,41 @@ async function replace(
     kind: 'replace',
     account,
   }));
-  const outcome = mutationOutcomeForResponse(response, 'stored');
+  const outcome = replaceOutcomeForResponse(response);
   const receipt = mutationReceiptForResponse(response);
+  const accountId = accountIdFromResponse(response.body);
   return {
     outcome,
-    ...(outcome === 'stored' && hasAccountId(response.body) ? { accountId: response.body.account.id } : {}),
+    ...(outcome === 'stored' && accountId ? { accountId } : {}),
     ...(receipt ? { receipt } : {}),
   };
 }
 
-function mutationOutcomeForResponse(
-  response: ProviderMutationTransportResponse,
-  success: 'stored' | 'deleted',
-): PublicMutationOutcome | PublicDeleteOutcome {
-  if (response.status === 200 && isCommittedMutation(response.body, success)) return success;
+async function removeAccount(
+  transport: ProviderAccountsTransport,
+  accountId: string,
+  revision: number,
+): Promise<PublicDeleteResult> {
+  const response = await transport.execute(accountRequest('providerAccounts.delete', {
+    kind: 'delete', accountId, revision,
+  }));
+  const outcome = deleteOutcomeForResponse(response);
+  const receipt = mutationReceiptForResponse(response);
+  return {
+    outcome,
+    ...(receipt ? { receipt } : {}),
+  };
+}
+
+function replaceOutcomeForResponse(response: ProviderMutationTransportResponse): PublicMutationOutcome {
+  if (response.status === 200 && isCommittedMutation(response.body, 'stored')) return 'stored';
+  if (response.status === 422) return 'rejected';
+  if (response.status === 409 && isUnknownMutation(response.body)) return 'unknown';
+  return 'unavailable';
+}
+
+function deleteOutcomeForResponse(response: ProviderMutationTransportResponse): PublicDeleteOutcome {
+  if (response.status === 200 && isCommittedMutation(response.body, 'deleted')) return 'deleted';
   if (response.status === 422) return 'rejected';
   if (response.status === 409 && isUnknownMutation(response.body)) return 'unknown';
   return 'unavailable';
@@ -488,16 +720,13 @@ function oauthErrorMessage(outcome: Exclude<PublicMutationOutcome, 'stored'>): s
   }
 }
 
-function hasAccountId(
+function accountIdFromResponse(
   value: Awaited<ReturnType<ProviderAccountsTransport['execute']>>['body'],
-): value is Readonly<{ account: Readonly<{ id: string }> }> {
-  return value !== null
-    && typeof value === 'object'
-    && 'account' in value
-    && value.account !== null
-    && typeof value.account === 'object'
-    && 'id' in value.account
-    && isId(value.account.id);
+): string | undefined {
+  if (value === null || typeof value !== 'object' || !('account' in value)) return undefined;
+  const account = value.account;
+  if (account === null || typeof account !== 'object' || !('id' in account) || !isId(account.id)) return undefined;
+  return account.id;
 }
 
 function accountRequest(operationId: 'providerAccounts.replace' | 'providerAccounts.delete', input: unknown): unknown {
@@ -540,14 +769,6 @@ function rejectManualCode(flowId: string): void {
   pending?.reject();
 }
 
-async function storeCredential(provider: string, accountId: string, apiKey: unknown): Promise<string> {
-  const reference = credentialReference(accountId);
-  const existing = (await readStore())[reference];
-  if (apiKey === undefined && existing) return reference;
-  if (!isSecret(apiKey)) throw new Error('A provider API key is required');
-  return await storeSecret(accountId, { kind: 'apiKey', provider, key: apiKey });
-}
-
 async function credentialSnapshot(reference: string): Promise<string | undefined> {
   return (await readStore())[reference];
 }
@@ -584,12 +805,20 @@ async function readLegacyProviderStore(path: string): Promise<{
     const raw = await readFile(path, 'utf8');
     if (Buffer.byteLength(raw) > MAX_AUTH_PROFILES_BYTES) return null;
     const value: unknown = JSON.parse(raw);
-    if (!isRecord(value) || value.schemaVersion !== 2) return null;
-    return {
-      accounts: Object.fromEntries(
+    if (!isRecord(value)) return null;
+    const accounts = Array.isArray(value.accounts)
+      ? Object.fromEntries(
+        value.accounts
+          .filter(isRecord)
+          .filter((account): account is Record<string, unknown> & { id: string } => isId(account.id))
+          .map((account) => [account.id, account]),
+      )
+      : Object.fromEntries(
         Object.entries(isRecord(value.accounts) ? value.accounts : {})
           .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])),
-      ),
+      );
+    return {
+      accounts,
       apiKeys: Object.fromEntries(
         Object.entries(isRecord(value.apiKeys) ? value.apiKeys : {})
           .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
@@ -598,6 +827,22 @@ async function readLegacyProviderStore(path: string): Promise<{
   } catch {
     return null;
   }
+}
+
+function storedAccountProvider(account: Record<string, unknown>): string | undefined {
+  const provider = typeof account.provider === 'string'
+    ? account.provider.replace(/^provider:/, '')
+    : account.vendorId;
+  return isProviderName(provider) ? provider : undefined;
+}
+
+function storedAccountAuthMode(account: Record<string, unknown>): Exclude<AuthMode, 'local'> | 'local' | undefined {
+  const mode = account.authMode ?? account.auth_mode;
+  if (mode === 'apiKey' || mode === 'api_key') return 'apiKey';
+  if (mode === 'oauthBrowser' || mode === 'oauth_browser') return 'oauthBrowser';
+  if (mode === 'oauthDevice' || mode === 'oauth_device') return 'oauthDevice';
+  if (mode === 'local') return 'local';
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -609,6 +854,7 @@ async function resolvePrivateCredential(reference: string): Promise<string | und
   if (!encrypted) return undefined;
   const credential = parsePrivateCredential(safeStorage.decryptString(Buffer.from(encrypted, 'base64')));
   if (credential.kind === 'apiKey') return credential.key;
+  if (credential.kind === 'token') return credential.token;
   return credential.access;
 }
 
@@ -616,9 +862,15 @@ async function applyPrivateProfile(
   reference: string,
   profileProvider: string,
   credentialProvider: string,
-  authMode: Exclude<AuthMode, 'local'>,
+  authMode: CredentialAuthMode,
   openClawStateDir: string,
 ): Promise<void> {
+  providerPrivateAuthTrace('store.private-profile-before', {
+    provider: profileProvider,
+    sourceProvider: credentialProvider,
+    authMode,
+    reference: idShape(reference),
+  });
   const encrypted = await readPrivateCredential(reference);
   const credential = decryptPrivateCredential(encrypted);
   const profileId = privateProfileId(profileProvider);
@@ -627,22 +879,34 @@ async function applyPrivateProfile(
     ? credential.kind === 'apiKey' && credential.provider === credentialProvider
       ? { type: 'api_key', provider: profileProvider, key: credential.key }
       : undefined
-    : credential.kind === 'oauth'
-      ? oauthProfile(profileProvider, credential)
-      : undefined;
+    : authMode === 'token'
+      ? credential.kind === 'token' && credential.provider === credentialProvider
+        ? { type: 'token', provider: profileProvider, token: credential.token }
+        : undefined
+      : credential.kind === 'oauth'
+        ? oauthProfile(profileProvider, credential)
+        : undefined;
   if (!profile) {
     throw new ProviderPrivateResolverError(
       credential.kind === 'apiKey' ? 'credential-provider-mismatch' : 'credential-invalid',
     );
   }
 
-  await updateAuthProfileStore(openClawStateDir, (store) => {
+  await updateAuthProfileProjection(openClawStateDir, ({ store, state }) => {
     store.profiles[profileId] = profile;
     if (legacyProfileId !== profileId) {
       delete store.profiles[legacyProfileId];
-      removeProfileReferences(store, legacyProfileId);
+      removeProfileReferences(state, legacyProfileId);
     }
-    markProfileCurrent(store, profileProvider, profileId);
+    markProfileCurrent(state, profileProvider, profileId);
+  });
+  providerPrivateAuthTrace('store.private-profile-after', {
+    provider: profileProvider,
+    sourceProvider: credentialProvider,
+    authMode,
+    reference: idShape(reference),
+    profileId: idShape(profileId),
+    legacyProfileId: idShape(legacyProfileId),
   });
 }
 
@@ -657,13 +921,25 @@ function oauthProfile(
 async function removePrivateProfile(reference: string, profileProvider: string, openClawStateDir: string): Promise<void> {
   const profileId = privateProfileId(profileProvider);
   const legacyProfileId = legacyPrivateProfileId(reference);
-  await updateAuthProfileStore(openClawStateDir, (store) => {
+  providerPrivateAuthTrace('delete.private-profile-before', {
+    provider: profileProvider,
+    reference: idShape(reference),
+    profileId: idShape(profileId),
+    legacyProfileId: idShape(legacyProfileId),
+  });
+  await updateAuthProfileProjection(openClawStateDir, ({ store, state }) => {
     delete store.profiles[profileId];
-    removeProfileReferences(store, profileId);
+    removeProfileReferences(state, profileId);
     if (legacyProfileId !== profileId) {
       delete store.profiles[legacyProfileId];
-      removeProfileReferences(store, legacyProfileId);
+      removeProfileReferences(state, legacyProfileId);
     }
+  });
+  providerPrivateAuthTrace('delete.private-profile-after', {
+    provider: profileProvider,
+    reference: idShape(reference),
+    profileId: idShape(profileId),
+    legacyProfileId: idShape(legacyProfileId),
   });
 }
 
@@ -688,6 +964,7 @@ function decryptPrivateCredential(encrypted: string): ReturnType<typeof parsePri
 function openClawProviderKey(provider: string, providerId: string, authMode?: AuthMode): string {
   if (provider === 'openai' && authMode === 'oauthBrowser') return 'openai';
   if (provider === 'minimax-portal-cn') return 'minimax-portal';
+  if (provider === 'zai-global') return 'zai';
   if (provider === 'custom' || provider === 'ollama') return multiInstanceProviderKey(provider, providerId);
   return provider;
 }
@@ -712,36 +989,37 @@ function legacyPrivateProfileId(reference: string): string {
   return reference.slice('credential:v1:'.length);
 }
 
-function markProfileCurrent(store: MutableAuthProfileStore, provider: string, profileId: string): void {
-  store.order ??= {};
-  store.order[provider] ??= [];
-  if (!store.order[provider].includes(profileId)) {
-    store.order[provider].push(profileId);
+function markProfileCurrent(state: MutableAuthProfileState, provider: string, profileId: string): void {
+  state.order ??= {};
+  state.order[provider] ??= [];
+  if (!state.order[provider].includes(profileId)) {
+    state.order[provider].push(profileId);
   }
-  store.lastGood ??= {};
-  store.lastGood[provider] = profileId;
+  state.lastGood ??= {};
+  state.lastGood[provider] = profileId;
 }
 
-function removeProfileReferences(store: MutableAuthProfileStore, profileId: string): void {
-  if (store.order) {
-    for (const [provider, profileIds] of Object.entries(store.order)) {
+function removeProfileReferences(state: MutableAuthProfileState, profileId: string): void {
+  if (state.order) {
+    for (const [provider, profileIds] of Object.entries(state.order)) {
       const next = profileIds.filter((id) => id !== profileId);
       if (next.length > 0) {
-        store.order[provider] = next;
+        state.order[provider] = next;
       } else {
-        delete store.order[provider];
+        delete state.order[provider];
       }
     }
   }
-  if (store.lastGood) {
-    for (const [provider, currentProfileId] of Object.entries(store.lastGood)) {
-      if (currentProfileId === profileId) delete store.lastGood[provider];
+  if (state.lastGood) {
+    for (const [provider, currentProfileId] of Object.entries(state.lastGood)) {
+      if (currentProfileId === profileId) delete state.lastGood[provider];
     }
   }
 }
 
 function parsePrivateCredential(value: string):
   | Readonly<{ kind: 'apiKey'; provider: string; key: string }>
+  | Readonly<{ kind: 'token'; provider: string; token: string }>
   | Readonly<{
     kind: 'oauth';
     access: string;
@@ -763,6 +1041,9 @@ function parsePrivateCredential(value: string):
   const candidate = credential as Record<string, unknown>;
   if (candidate.kind === 'apiKey' && isProviderName(candidate.provider) && isSecret(candidate.key)) {
     return { kind: 'apiKey', provider: candidate.provider, key: candidate.key };
+  }
+  if (candidate.kind === 'token' && isProviderName(candidate.provider) && isSecret(candidate.token)) {
+    return { kind: 'token', provider: candidate.provider, token: candidate.token };
   }
   if (candidate.kind === 'oauth'
     && isSecret(candidate.access)
@@ -791,26 +1072,210 @@ function optionalCredentialText(record: Record<string, unknown>, key: string): R
   return typeof value === 'string' ? { [key]: value } : {};
 }
 
-function authProfilesPath(openClawStateDir: string): string {
-  return join(openClawStateDir, 'agents', 'main', 'agent', AUTH_PROFILES_FILE);
+function openClawStateDbPath(openClawStateDir: string): string {
+  return join(openClawStateDir, OPENCLAW_STATE_DB_DIR, OPENCLAW_STATE_DB_FILE);
 }
 
-async function readAuthProfileStore(openClawStateDir: string): Promise<MutableAuthProfileStore> {
+async function updateAuthProfileProjection(
+  openClawStateDir: string,
+  mutate: (projection: MutableAuthProfileProjection) => void,
+): Promise<boolean> {
+  const previous = authProfileWrite;
+  let release!: () => void;
+  authProfileWrite = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
   try {
-    const raw = await readFile(authProfilesPath(openClawStateDir), 'utf8');
-    if (Buffer.byteLength(raw) > MAX_AUTH_PROFILES_BYTES) throw new Error();
-    const value: unknown = JSON.parse(raw);
-    if (!isAuthProfileStore(value)) throw new Error();
-    return {
-      ...value,
-      version: 1,
-      profiles: { ...value.profiles },
-      order: value.order ? cloneAuthProfileOrder(value.order) : undefined,
-      lastGood: value.lastGood ? { ...value.lastGood } : undefined,
-    };
+    return await writeAuthProfileProjection(openClawStateDir, mutate);
+  } finally {
+    release();
+  }
+}
+
+async function writeAuthProfileProjection(
+  openClawStateDir: string,
+  mutate: (projection: MutableAuthProfileProjection) => void,
+): Promise<boolean> {
+  try {
+    const path = openClawStateDbPath(openClawStateDir);
+    if (authProfileProjectionAlreadyMatches(path, mutate)) return false;
+    await mkdir(dirname(path), { recursive: true });
+    return await retryAuthProfileSqliteBusy(async () => {
+      const database = new DatabaseSync(path);
+      try {
+        database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS}`);
+        database.exec('BEGIN IMMEDIATE');
+        try {
+          ensureAuthProfileStateTable(database);
+          const projection = readAuthProfileProjection(database);
+          const before = authProfileProjectionSnapshot(projection);
+          mutate(projection);
+          const after = authProfileProjectionSnapshot(projection);
+          if (after === before && sharedAuthStoreIsCurrent(database)) {
+            database.exec('COMMIT');
+            return false;
+          }
+          writeAuthProfileCells(database, projection);
+          database.exec('COMMIT');
+          return true;
+        } catch (error) {
+          rollbackAuthProfileProjection(database);
+          throw error;
+        }
+      } finally {
+        database.close();
+      }
+    });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, profiles: {} };
+    if (error instanceof ProviderPrivateResolverError) throw error;
+    throw new ProviderPrivateResolverError('auth-profile-write-failed', error);
+  }
+}
+
+async function retryAuthProfileSqliteBusy<T>(operation: () => T | Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      if (attempt >= OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS.length) {
+        throw new ProviderPrivateResolverError('auth-profile-write-failed', error);
+      }
+      await delay(OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+function authProfileProjectionAlreadyMatches(
+  path: string,
+  mutate: (projection: MutableAuthProfileProjection) => void,
+): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    const database = new DatabaseSync(path, { readOnly: true });
+    try {
+      database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS}`);
+      if (!hasAuthProfileStateTable(database)) return false;
+      if (!sharedAuthStoreIsCurrent(database)) return false;
+      const projection = readAuthProfileProjection(database);
+      const before = authProfileProjectionSnapshot(projection);
+      mutate(projection);
+      return authProfileProjectionSnapshot(projection) === before;
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    if (isSqliteBusy(error)) return false;
+    throw error;
+  }
+}
+
+function ensureAuthProfileStateTable(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS config_machine_state (
+      state_key TEXT NOT NULL PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    ) STRICT;
+  `);
+}
+
+function hasAuthProfileStateTable(database: DatabaseSync): boolean {
+  return database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state' LIMIT 1")
+    .get() !== undefined;
+}
+
+function readAuthProfileProjection(database: DatabaseSync): MutableAuthProfileProjection {
+  return {
+    store: readAuthProfileStoreCell(database),
+    state: readAuthProfileStateCell(database),
+  };
+}
+
+function readAuthProfileStoreCell(database: DatabaseSync): MutableAuthProfileStore {
+  const value = readAuthProfileCell(database, AUTH_PROFILES_STORE_STATE_KEY);
+  if (value === undefined) return { version: 1, profiles: {} };
+  if (!isAuthProfileStore(value)) throw new ProviderPrivateResolverError('auth-profile-read-invalid');
+  return {
+    version: 1,
+    profiles: { ...value.profiles },
+  };
+}
+
+function readAuthProfileStateCell(database: DatabaseSync): MutableAuthProfileState {
+  const value = readAuthProfileCell(database, AUTH_PROFILES_STATE_STATE_KEY);
+  if (value === undefined) return { version: 1 };
+  if (!isAuthProfileState(value)) throw new ProviderPrivateResolverError('auth-profile-read-invalid');
+  return {
+    version: 1,
+    order: value.order ? cloneAuthProfileOrder(value.order) : undefined,
+    lastGood: value.lastGood ? { ...value.lastGood } : undefined,
+  };
+}
+
+function readAuthProfileCell(database: DatabaseSync, stateKey: string): unknown | undefined {
+  const row = database
+    .prepare('SELECT value_json FROM config_machine_state WHERE state_key = ?')
+    .get(stateKey) as { value_json?: unknown } | undefined;
+  if (typeof row?.value_json !== 'string') return undefined;
+  if (Buffer.byteLength(row.value_json) > MAX_AUTH_PROFILES_BYTES) {
+    throw new ProviderPrivateResolverError('auth-profile-read-invalid');
+  }
+  try {
+    return JSON.parse(row.value_json) as unknown;
+  } catch (error) {
     throw new ProviderPrivateResolverError('auth-profile-read-invalid', error);
+  }
+}
+
+function writeAuthProfileCells(database: DatabaseSync, projection: MutableAuthProfileProjection): void {
+  writeAuthProfileCell(database, AUTH_SHARED_STORE_STATE_KEY, AUTH_SHARED_STORE_STATE_VALUE);
+  writeAuthProfileCell(database, AUTH_PROFILES_STORE_STATE_KEY, projection.store);
+  writeAuthProfileCell(database, AUTH_PROFILES_STATE_STATE_KEY, normalizeAuthProfileState(projection.state));
+}
+
+function sharedAuthStoreIsCurrent(database: DatabaseSync): boolean {
+  const row = database
+    .prepare('SELECT value_json FROM config_machine_state WHERE state_key = ?')
+    .get(AUTH_SHARED_STORE_STATE_KEY) as { value_json?: unknown } | undefined;
+  return row?.value_json === JSON.stringify(AUTH_SHARED_STORE_STATE_VALUE);
+}
+
+function authProfileProjectionSnapshot(projection: MutableAuthProfileProjection): string {
+  return JSON.stringify({
+    store: projection.store,
+    state: normalizeAuthProfileState(projection.state),
+  });
+}
+
+function writeAuthProfileCell(database: DatabaseSync, stateKey: string, value: unknown): void {
+  const valueJson = JSON.stringify(value);
+  if (valueJson === undefined || Buffer.byteLength(valueJson) > MAX_AUTH_PROFILES_BYTES) {
+    throw new ProviderPrivateResolverError('auth-profile-write-failed');
+  }
+  database
+    .prepare(`
+      INSERT INTO config_machine_state (state_key, value_json, updated_at_ms)
+      VALUES (?, ?, ?)
+      ON CONFLICT(state_key) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_at_ms = excluded.updated_at_ms
+    `)
+    .run(stateKey, valueJson, Date.now());
+}
+
+function normalizeAuthProfileState(state: MutableAuthProfileState): AuthProfileState {
+  const next: MutableAuthProfileState = { version: 1 };
+  if (state.order && Object.keys(state.order).length > 0) next.order = state.order;
+  if (state.lastGood && Object.keys(state.lastGood).length > 0) next.lastGood = state.lastGood;
+  return next;
+}
+
+function rollbackAuthProfileProjection(database: DatabaseSync): void {
+  try {
+    if (database.isTransaction) database.exec('ROLLBACK');
+  } catch {
+    // Ignore rollback failure; the original write/read error is the useful boundary.
   }
 }
 
@@ -818,32 +1283,12 @@ function cloneAuthProfileOrder(order: AuthProfileOrder): AuthProfileOrder {
   return Object.fromEntries(Object.entries(order).map(([provider, profileIds]) => [provider, [...profileIds]]));
 }
 
-async function updateAuthProfileStore(
-  openClawStateDir: string,
-  mutate: (store: MutableAuthProfileStore) => void,
-): Promise<void> {
-  const previous = authProfileWrite;
-  let release!: () => void;
-  authProfileWrite = new Promise<void>((resolve) => { release = resolve; });
-  await previous;
-  try {
-    const store = await readAuthProfileStore(openClawStateDir);
-    mutate(store);
-    await writeAuthProfileStore(openClawStateDir, store);
-  } finally {
-    release();
-  }
+function isSqliteBusy(error: unknown): boolean {
+  return isRecord(error) && (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED');
 }
 
-async function writeAuthProfileStore(openClawStateDir: string, store: AuthProfileStore): Promise<void> {
-  const path = authProfilesPath(openClawStateDir);
-  const serialized = JSON.stringify(store);
-  if (Buffer.byteLength(serialized) > MAX_AUTH_PROFILES_BYTES) {
-    throw new ProviderPrivateResolverError('auth-profile-write-failed');
-  }
-  await replacePrivateFile(path, serialized).catch((error) => {
-    throw new ProviderPrivateResolverError('auth-profile-write-failed', error);
-  });
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isAuthProfileStore(value: unknown): value is AuthProfileStore {
@@ -852,9 +1297,15 @@ function isAuthProfileStore(value: unknown): value is AuthProfileStore {
   if (store.version !== 1 || !store.profiles || typeof store.profiles !== 'object' || Array.isArray(store.profiles)) {
     return false;
   }
-  if (store.order !== undefined && !isAuthProfileOrder(store.order)) return false;
-  if (store.lastGood !== undefined && !isAuthProfileLastGood(store.lastGood)) return false;
   return Object.entries(store.profiles).every(([id, profile]) => isId(id) && isAuthProfile(profile));
+}
+
+function isAuthProfileState(value: unknown): value is AuthProfileState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return state.version === 1
+    && (state.order === undefined || isAuthProfileOrder(state.order))
+    && (state.lastGood === undefined || isAuthProfileLastGood(state.lastGood));
 }
 
 function isAuthProfileOrder(value: unknown): value is AuthProfileOrder {
@@ -902,10 +1353,6 @@ function isAuthProfile(value: unknown): value is AuthProfile {
     || ['clientId', 'enterpriseUrl', 'projectId', 'accountId', 'chatgptPlanType', 'idToken'].includes(key) && typeof profileValue === 'string');
 }
 
-function isSecretInput(value: unknown): value is SecretInput {
-  return isSecret(value) || isSecretRef(value);
-}
-
 function isSecretRef(value: unknown): value is SecretRef {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const ref = value as Record<string, unknown>;
@@ -945,9 +1392,13 @@ function parseFlow(input: unknown): Flow | null {
   const account = parseAccount(value?.account);
   return isId(value?.flowId) && account && isProvider(value.provider)
     && account.provider === value.provider
-    && ((value.provider === 'openai' && account.authMode === 'oauthBrowser')
-      || (value.provider !== 'openai' && account.authMode === 'oauthDevice'))
-    ? { flowId: value.flowId, account, provider: value.provider }
+    && account.kind === 'chat'
+    && (value.provider === 'openrouter'
+      ? account.authMode === 'oauthBrowser'
+      : value.provider === 'openai'
+        ? account.authMode === 'oauthBrowser' || account.authMode === 'oauthDevice'
+        : account.authMode === 'oauthDevice')
+    ? { flowId: value.flowId, account, provider: value.provider, controller: new AbortController() }
     : null;
 }
 
@@ -962,6 +1413,8 @@ function parseAccount(value: unknown): AccountIntent | null {
     || !optionalAccountText(account.endpoint, 2048)
     || !isAccountProtocols(kind, account.protocol, account.mediaProtocol)
     || !isAuthMode(account.authMode)
+    || account.authMode === 'cliReuse' && (account.provider !== 'anthropic' || kind !== 'chat')
+    || account.authMode === 'token' && (kind !== 'chat' || !['anthropic', 'github-copilot'].includes(account.provider))
     || !isRevision(account.revision)) {
     return null;
   }
@@ -1015,7 +1468,8 @@ function credentialReference(accountId: string): string {
 }
 
 function isProvider(value: unknown): value is Provider {
-  return value === 'openai' || value === 'minimax-portal' || value === 'minimax-portal-cn' || value === 'qwen-portal';
+  return value === 'openai' || value === 'openrouter' || value === 'github-copilot'
+    || value === 'minimax-portal' || value === 'minimax-portal-cn' || value === 'qwen-portal';
 }
 
 function isProfileProviderName(value: unknown): value is string {
@@ -1027,7 +1481,8 @@ function isProviderName(value: unknown): value is string {
 }
 
 function isAuthMode(value: unknown): value is AuthMode {
-  return value === 'apiKey' || value === 'oauthBrowser' || value === 'oauthDevice' || value === 'local';
+  return value === 'apiKey' || value === 'oauthBrowser' || value === 'oauthDevice'
+    || value === 'local' || value === 'token' || value === 'cliReuse';
 }
 
 function isRevision(value: unknown): value is number {

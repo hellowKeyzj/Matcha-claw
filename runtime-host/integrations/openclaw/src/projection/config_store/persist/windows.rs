@@ -26,27 +26,6 @@ use super::PersistError;
 const FILE_SDDL: &str = "D:P(A;;FA;;;OW)";
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
-pub(super) fn create_if_missing(
-    state_dir: &StateDirHandle,
-    contents: &[u8],
-) -> Result<bool, PersistError> {
-    let security = SecurityDescriptor::new(FILE_SDDL)?;
-    let name = relative_name("openclaw.json")?;
-    let raw = create_file(state_dir, &name, &security)?;
-    if raw.is_null() {
-        return Ok(false);
-    }
-    // SAFETY: NtCreateFile returned a new owned file handle.
-    let mut file = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
-    if let Err(error) = write_all(&file, contents) {
-        return cleanup_after_failure(&mut file, error).map(|()| true);
-    }
-    if unsafe { FS::FlushFileBuffers(file.as_raw_handle() as F::HANDLE) } == 0 {
-        return cleanup_after_failure(&mut file, PersistError::TemporarySyncFailed).map(|()| true);
-    }
-    Ok(true)
-}
-
 pub(super) fn replace(state_dir: &StateDirHandle, contents: &[u8]) -> Result<(), PersistError> {
     let mut temporary = create_temporary_file(state_dir)?;
     if let Err(error) = write_all(&temporary, contents) {

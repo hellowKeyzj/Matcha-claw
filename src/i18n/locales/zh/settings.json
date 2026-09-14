@@ -35,7 +35,9 @@
       "apiKey": "API 密钥",
       "oauthDevice": "OAuth 设备登录",
       "oauthBrowser": "OAuth 浏览器登录",
-      "local": "本地"
+      "local": "本地",
+      "token": "Token / setup-token",
+      "cliReuse": "复用 CLI 登录"
     },
     "sections": {
       "credentials": "凭证配置"
@@ -64,6 +66,7 @@
       "replaceApiKey": "替换 API Key",
       "replaceApiKeyHelp": "如果想保留当前已保存的 API key，这里留空即可。",
       "baseUrl": "基础 URL",
+      "codePlanMode": "Code Plan 端点",
       "protocol": "协议",
       "chatProvider": "聊天提供商",
       "mediaProvider": "媒体提供商",
@@ -74,7 +77,13 @@
       "save": "保存",
       "customDoc": "查看文档",
       "validate": "验证",
-      "failed": "失败"
+      "failed": "失败",
+      "authMode": "认证方式",
+      "variant": "服务 / 套餐",
+      "endpointPreset": "端点地区",
+      "cliReuseHelp": "请先登录 Claude Code。保存前会验证本机 CLI 凭据，无需粘贴令牌。",
+      "replaceToken": "替换令牌",
+      "tokenHelp": "运行 claude setup-token，将生成的令牌粘贴到这里。令牌仅保存在本机。"
     },
     "protocols": {
       "openai": "OpenAI 兼容",
@@ -97,7 +106,8 @@
       "updated": "提供商已更新",
       "failedUpdate": "更新提供商失败",
       "invalidKey": "无效的 API 密钥",
-      "minimaxConflict": "不能同时添加 MiniMax 国际站和国内站的服务商。"
+      "minimaxConflict": "不能同时添加 MiniMax 国际站和国内站的服务商。",
+      "zaiConflict": "不能同时添加 Z.AI 国内站和国际站的服务商。"
     },
     "oauth": {
       "loginMode": "OAuth 登录",
@@ -117,13 +127,33 @@
       "step1": "复制下方的授权码。",
       "step2": "在浏览器中打开登录页面。",
       "step3": "粘贴授权码以批准访问。",
-      "requestingCode": "正在获取安全登录码..."
+      "requestingCode": "正在获取安全登录码...",
+      "completeLogin": "完成登录",
+      "manualHelp": "打开授权页面并登录，然后在下方粘贴回调链接或授权码。",
+      "callbackPlaceholder": "粘贴回调链接或授权码",
+      "submitCode": "提交授权码"
     },
     "projectionErrors": {
       "diagnostic": "OpenClaw 配置同步失败：{{reason}}",
       "readbackMismatch": "OpenClaw 配置写入后读回内容不一致。",
       "readbackUnavailable": "OpenClaw 配置写入后无法读回验证。",
       "outcomeUnknown": "OpenClaw 配置同步结果未知。",
+      "providerAccountConfigurationInvalid": "OpenClaw provider 账号配置无效，请检查提供商、端点和协议后重试。",
+      "providerCascadeUnavailable": "Provider 配置状态不可用，请刷新后重试。",
+      "providerCredentialUnavailable": "当前 provider 凭据不可用，请重新填写并保存。",
+      "providerKeyDuplicate": "OpenClaw provider 标识冲突，请删除重复账号或改用自定义配置。",
+      "providerModelCapabilityInvalid": "模型能力配置无效，请检查模型类型后保存。",
+      "providerModelIdentifierInvalid": "模型 ID 无效，请检查后保存。",
+      "providerModelPersistenceFailed": "无法写入 OpenClaw 模型配置，请检查文件权限后重试。",
+      "providerModelTokenLimitInvalid": "模型 Token 参数无效，请确保最大输出 Token 不大于上下文窗口。",
+      "providerOwnerResponseUnavailable": "Provider 配置写入没有返回结果，请刷新后重试。",
+      "providerOwnerUnavailable": "Provider 配置服务不可用，请重启应用后重试。",
+      "providerRoutingAccountUnavailable": "模型分配引用的 provider 账号不可用，请重新选择模型。",
+      "providerRoutingCredentialUnavailable": "模型分配引用的 provider 凭据不可用，请重新填写 API Key 后保存。",
+      "providerRoutingInvalid": "模型分配规则无效，请检查后保存。",
+      "providerRoutingModelCapabilityUnavailable": "模型分配引用的模型不支持该能力，请重新选择。",
+      "providerRoutingModelUnavailable": "模型分配引用的模型不存在，请重新选择。",
+      "providerRoutingPersistenceFailed": "无法写入 OpenClaw 模型分配配置，请检查文件权限后重试。",
       "privateResolver": {
         "credentialMissing": "当前账号没有可用的 API Key，请重新填写并保存。",
         "credentialDecryptFailed": "本机保存的 API Key 无法解密，请重新填写并保存。",
@@ -135,44 +165,6 @@
         "invalidRequest": "内部认证同步请求无效，请重试。",
         "unknown": "OpenClaw 认证同步失败，请重新填写 API Key 后保存。"
       }
-    }
-  },
-  "license": {
-    "title": "授权",
-    "description": "激活并管理本机授权",
-    "gateStatus": "门禁状态",
-    "gateState": {
-      "checking": "检查中",
-      "granted": "已授权",
-      "blocked": "未授权"
-    },
-    "renewAlert": {
-      "near_expiry_renew_failed": "临近过期续期失败，请尽快重新校验"
-    },
-    "inputLabel": "授权码",
-    "placeholder": "输入授权码（例如 MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
-    "showKey": "显示授权码",
-    "hideKey": "隐藏授权码",
-    "validate": "校验授权",
-    "revalidate": "重新校验",
-    "clear": "清除",
-    "messages": {
-      "valid": "授权校验成功",
-      "cache_grace_valid": "使用离线缓存宽限校验成功",
-      "empty": "请输入授权码",
-      "format_invalid": "授权码格式不正确",
-      "service_unconfigured": "授权服务未配置",
-      "network_error": "无法连接授权服务，请检查网络后重试",
-      "server_rejected": "授权服务拒绝了该授权码",
-      "expired": "授权已过期",
-      "device_mismatch": "授权设备与当前机器不匹配",
-      "not_allowed": "授权码不在允许名单中",
-      "checksum_invalid": "授权码校验位无效",
-      "unknown": "授权校验失败"
-    },
-    "toast": {
-      "cleared": "本地授权已清除",
-      "clearFailed": "清除本地授权失败: {{error}}"
     }
   },
   "diagnostics": {
@@ -439,9 +431,9 @@
     "refresh": "刷新",
     "empty": "暂无模型",
     "codePlan": {
-      "title": "Ark Code Plan",
-      "description": "将 ark-code-latest 添加到 ark 模型清单。Ark API Key 和 coding Base URL 仍在 provider 卡片中配置。",
-      "add": "添加 ark-code-latest",
+      "title": "Code Plan",
+      "description": "将 Code Plan 模型添加到当前 provider 模型清单。API Key 和 Code Plan Base URL 仍在 provider 卡片中配置。",
+      "add": "添加 {{model}}",
       "added": "已添加"
     },
     "create": {
@@ -450,8 +442,25 @@
       "add": "创建"
     },
     "actions": {
+      "discover": "获取模型",
       "add": "添加模型",
-      "save": "保存"
+      "save": "保存更改",
+      "reset": "撤销"
+    },
+    "pending": {
+      "summary_one": "有 {{count}} 处未保存修改",
+      "summary_other": "有 {{count}} 处未保存修改"
+    },
+    "discovery": {
+      "title": "可导入模型",
+      "loading": "正在获取模型...",
+      "empty": "未发现可用模型",
+      "error": "获取模型失败：{{error}}。请确认该账户可访问模型列表后重试。",
+      "rejected": "获取模型失败：后端拒绝了模型列表请求。请确认该账户的 API Key、权限、分组和余额状态可用后重试。",
+      "importSelected": "导入所选",
+      "duplicate": "已在清单中",
+      "count_one": "· {{count}} 个模型",
+      "count_other": "· {{count}} 个模型"
     },
     "group": {
       "subtitle_one": "当前 1 个模型",
@@ -469,6 +478,7 @@
       "resolutionLabel": "清晰度",
       "qualityLabel": "画质",
       "defaultOption": "默认",
+      "advanced": "高级字段",
       "remove": "删除"
     },
     "qualities": {

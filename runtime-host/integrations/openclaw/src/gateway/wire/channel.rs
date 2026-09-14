@@ -3,6 +3,10 @@ use std::fmt;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
+use crate::gateway::config_patch::{
+    encode_request as encode_config_patch_request, request_parts_are_valid,
+};
+
 use super::{GatewayResponse, RpcRequest, WireError, rpc_request, valid_string};
 
 pub(crate) const CHANNELS_STATUS_METHOD: &str = "channels.status";
@@ -137,17 +141,12 @@ pub(crate) fn decode_channel_runtime_confirmation(
                 crate::operations::channel_login::ChannelRuntimeAction::Stop => "stopped",
                 crate::operations::channel_login::ChannelRuntimeAction::Logout => unreachable!(),
             };
-            if payload.len() != 3
-                || payload.get(expected_field).and_then(Value::as_bool) != Some(true)
-            {
+            if payload.get(expected_field).and_then(Value::as_bool) != Some(true) {
                 return Err(WireError::InvalidChannelRuntime);
             }
         }
         crate::operations::channel_login::ChannelRuntimeAction::Logout => {
             if payload.get("cleared").and_then(Value::as_bool) != Some(true) {
-                return Err(WireError::InvalidChannelRuntime);
-            }
-            if payload.len() < 3 {
                 return Err(WireError::InvalidChannelRuntime);
             }
         }
@@ -211,13 +210,17 @@ fn optional_valid_qr(
     payload: &Map<String, Value>,
     field: &str,
 ) -> Result<Option<String>, WireError> {
-    let value = optional_valid_string(payload, field)?;
-    if value.as_deref().is_some_and(|value| {
-        !value.starts_with(QR_DATA_URL_PREFIX) || value.len() > MAX_QR_DATA_URL_LENGTH
-    }) {
-        return Err(WireError::InvalidLoginProgress);
+    let Some(value) = optional_valid_string(payload, field)? else {
+        return Ok(None);
+    };
+    if value.starts_with(QR_DATA_URL_PREFIX) {
+        return if value.len() <= MAX_QR_DATA_URL_LENGTH {
+            Ok(Some(value))
+        } else {
+            Err(WireError::InvalidLoginProgress)
+        };
     }
-    Ok(value)
+    Err(WireError::InvalidLoginProgress)
 }
 
 pub(crate) fn config_schema_lookup_request(
@@ -417,6 +420,7 @@ pub(crate) struct ChannelConfigPatchRequest {
     request_id: String,
     raw: Zeroizing<Vec<u8>>,
     base_hash: Zeroizing<Vec<u8>>,
+    replace_paths: Vec<String>,
 }
 
 impl ChannelConfigPatchRequest {
@@ -425,28 +429,29 @@ impl ChannelConfigPatchRequest {
     }
 
     pub(crate) fn encode(&self) -> Result<String, WireError> {
-        let raw = std::str::from_utf8(&self.raw).map_err(|_| WireError::EncodeRequest)?;
-        let base_hash =
-            std::str::from_utf8(&self.base_hash).map_err(|_| WireError::EncodeRequest)?;
-        serde_json::to_string(&serde_json::json!({
-            "type": "req",
-            "id": self.request_id,
-            "method": CONFIG_PATCH_METHOD,
-            "params": { "raw": raw, "baseHash": base_hash }
-        }))
+        encode_config_patch_request(
+            &self.request_id,
+            std::str::from_utf8(&self.raw).map_err(|_| WireError::EncodeRequest)?,
+            Some(std::str::from_utf8(&self.base_hash).map_err(|_| WireError::EncodeRequest)?),
+            &self.replace_paths,
+        )
         .map_err(|_| WireError::EncodeRequest)
     }
 }
 
 impl fmt::Debug for ChannelConfigPatchRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ChannelConfigPatchRequest([REDACTED])")
+        formatter
+            .debug_struct("ChannelConfigPatchRequest")
+            .field("replace_paths", &self.replace_paths.len())
+            .finish()
     }
 }
 
 pub(crate) struct ChannelConfigSnapshot {
+    pub(crate) source_document: Zeroizing<Vec<u8>>,
     pub(crate) document: Zeroizing<Vec<u8>>,
-    pub(crate) base_hash: Zeroizing<Vec<u8>>,
+    pub(crate) base_hash: Option<Zeroizing<Vec<u8>>>,
 }
 
 pub(crate) fn decode_config_snapshot(
@@ -459,27 +464,65 @@ pub(crate) fn decode_config_snapshot(
         } => payload,
         _ => return Err(WireError::InvalidChannelConfigPatch),
     };
-    let raw = payload
-        .get("raw")
-        .and_then(Value::as_str)
-        .filter(|value| valid_string(value))
-        .ok_or(WireError::InvalidChannelConfigPatch)?;
-    let hash = payload
-        .get("hash")
-        .and_then(Value::as_str)
-        .filter(|value| valid_string(value))
-        .ok_or(WireError::InvalidChannelConfigPatch)?;
-    let document =
-        serde_json::from_str::<Value>(raw).map_err(|_| WireError::InvalidChannelConfigPatch)?;
-    if !document.is_object() {
-        return Err(WireError::InvalidChannelConfigPatch);
-    }
+    let hash = match payload.get("hash") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if valid_string(value) => Some(value.as_bytes().to_vec()),
+        _ => return Err(WireError::InvalidChannelConfigPatch),
+    };
+    let raw = match payload.get("raw") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if valid_string(value) => Some(value),
+        _ => return Err(WireError::InvalidChannelConfigPatch),
+    };
+    let fallback = || {
+        let document =
+            serde_json::from_str::<Value>(raw.ok_or(WireError::InvalidChannelConfigPatch)?)
+                .map_err(|_| WireError::InvalidChannelConfigPatch)?;
+        if document.is_object() {
+            Ok(document)
+        } else {
+            Err(WireError::InvalidChannelConfigPatch)
+        }
+    };
+    let source_document = match payload.get("sourceConfig") {
+        Some(document) if document.is_object() => document.clone(),
+        Some(_) => return Err(WireError::InvalidChannelConfigPatch),
+        None => fallback()?,
+    };
+    let document = match payload.get("config") {
+        Some(document) if document.is_object() => document.clone(),
+        Some(_) => return Err(WireError::InvalidChannelConfigPatch),
+        None => fallback()?,
+    };
     Ok(ChannelConfigSnapshot {
+        source_document: Zeroizing::new(
+            serde_json::to_vec(&source_document)
+                .map_err(|_| WireError::InvalidChannelConfigPatch)?,
+        ),
         document: Zeroizing::new(
             serde_json::to_vec(&document).map_err(|_| WireError::InvalidChannelConfigPatch)?,
         ),
-        base_hash: Zeroizing::new(hash.as_bytes().to_vec()),
+        base_hash: hash.map(Zeroizing::new),
     })
+}
+
+pub(crate) fn decode_config_document(
+    response: GatewayResponse,
+) -> Result<Zeroizing<Vec<u8>>, WireError> {
+    let payload = match response {
+        GatewayResponse::Success {
+            payload: Some(Value::Object(payload)),
+            ..
+        } => payload,
+        _ => return Err(WireError::InvalidChannelConfigPatch),
+    };
+    let document = payload
+        .get("config")
+        .filter(|value| value.is_object())
+        .ok_or(WireError::InvalidChannelConfigPatch)?;
+    Ok(Zeroizing::new(
+        serde_json::to_vec(document).map_err(|_| WireError::InvalidChannelConfigPatch)?,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,21 +544,22 @@ pub(crate) fn decode_channel_account_readback(
         } => payload,
         _ => return Err(WireError::InvalidChannelConfigPatch),
     };
-    if payload.get("partial").and_then(Value::as_bool) == Some(true)
-        || payload.get("warnings").is_some()
-    {
-        return Err(WireError::InvalidChannelConfigPatch);
-    }
+    let partial = read_status_partial(&payload)?;
+    validate_status_warnings(&payload)?;
     let channels = payload
         .get("channelAccounts")
         .and_then(Value::as_object)
         .ok_or(WireError::InvalidChannelConfigPatch)?;
     let Some(accounts) = channels.get(channel) else {
-        return Ok(ChannelAccountReadback {
-            present: false,
-            configured: false,
-            running: false,
-        });
+        return if partial {
+            Err(WireError::InvalidChannelConfigPatch)
+        } else {
+            Ok(ChannelAccountReadback {
+                present: false,
+                configured: false,
+                running: false,
+            })
+        };
     };
     let accounts = accounts
         .as_array()
@@ -557,18 +601,41 @@ pub(crate) fn decode_channel_account_readback(
     }))
 }
 
+fn read_status_partial(payload: &Map<String, Value>) -> Result<bool, WireError> {
+    match payload.get("partial") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(partial)) => Ok(*partial),
+        Some(_) => Err(WireError::InvalidChannelConfigPatch),
+    }
+}
+
+fn validate_status_warnings(payload: &Map<String, Value>) -> Result<(), WireError> {
+    match payload.get("warnings") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(warnings)) if warnings.iter().all(Value::is_string) => Ok(()),
+        Some(_) => Err(WireError::InvalidChannelConfigPatch),
+    }
+}
+
 pub(crate) fn config_patch_request(
     request_id: String,
     raw: Zeroizing<Vec<u8>>,
     base_hash: Zeroizing<Vec<u8>>,
+    replace_paths: Vec<String>,
 ) -> Result<ChannelConfigPatchRequest, WireError> {
-    if !valid_string(&request_id) || raw.is_empty() || base_hash.is_empty() {
+    if !request_parts_are_valid(
+        &request_id,
+        raw.as_slice(),
+        Some(base_hash.as_slice()),
+        &replace_paths,
+    ) {
         return Err(WireError::InvalidChannelConfigPatch);
     }
     Ok(ChannelConfigPatchRequest {
         request_id,
         raw,
         base_hash,
+        replace_paths,
     })
 }
 
@@ -597,10 +664,11 @@ pub(crate) fn decode_channel_catalog(
         .get("channelMeta")
         .and_then(Value::as_array)
         .ok_or(WireError::InvalidChannelCatalog)?;
-    let channels = payload
-        .get("channels")
-        .and_then(Value::as_object)
-        .ok_or(WireError::InvalidChannelCatalog)?;
+    let channels = match payload.get("channels") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(channels)) => Some(channels),
+        Some(_) => return Err(WireError::InvalidChannelCatalog),
+    };
 
     let mut seen = std::collections::BTreeSet::new();
     metas
@@ -618,14 +686,14 @@ pub(crate) fn decode_channel_catalog(
             if !seen.insert(id.clone()) {
                 return Err(WireError::InvalidChannelCatalog);
             }
-            let summary = channels
-                .get(&id)
-                .and_then(Value::as_object)
-                .ok_or(WireError::InvalidChannelCatalog)?;
-            let configured = summary
-                .get("configured")
-                .and_then(Value::as_bool)
-                .ok_or(WireError::InvalidChannelCatalog)?;
+            let configured = match channels.and_then(|channels| channels.get(&id)) {
+                None | Some(Value::Null) => false,
+                Some(Value::Object(summary)) => match summary.get("configured") {
+                    None | Some(Value::Null) => false,
+                    Some(value) => value.as_bool().ok_or(WireError::InvalidChannelCatalog)?,
+                },
+                Some(_) => return Err(WireError::InvalidChannelCatalog),
+            };
             Ok(ChannelMeta {
                 id,
                 label,
@@ -640,20 +708,87 @@ pub(crate) fn decode_channel_catalog(
 pub(crate) fn decode_config_base_hash(
     response: GatewayResponse,
 ) -> Result<Zeroizing<Vec<u8>>, WireError> {
-    Ok(decode_config_snapshot(response)?.base_hash)
+    decode_config_snapshot(response)?
+        .base_hash
+        .ok_or(WireError::InvalidChannelConfigPatch)
 }
 
-pub(crate) fn decode_config_patch(response: GatewayResponse) -> Result<(), WireError> {
+pub(crate) fn is_config_conflict(error: &super::GatewayError) -> bool {
+    // OpenClaw reports config conflicts as INVALID_REQUEST, not a dedicated conflict code.
+    error.code == "INVALID_REQUEST"
+        && error.message == "config changed since last load; re-run config.get and retry"
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigPatchOutcome {
+    Written,
+    Noop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChannelConfigPatchOutcome {
+    Written,
+    Noop,
+    RestartRequired,
+}
+
+pub(crate) fn is_config_restart_required(error: &super::GatewayError) -> bool {
+    error.code == "UNAVAILABLE"
+        && (error.message.contains("restart-pending")
+            || error.message.contains("applied-restart-required"))
+}
+
+pub(crate) fn decode_config_patch(
+    response: GatewayResponse,
+) -> Result<ConfigPatchOutcome, WireError> {
+    match decode_channel_config_patch(response)? {
+        ChannelConfigPatchOutcome::Written | ChannelConfigPatchOutcome::RestartRequired => {
+            Ok(ConfigPatchOutcome::Written)
+        }
+        ChannelConfigPatchOutcome::Noop => Ok(ConfigPatchOutcome::Noop),
+    }
+}
+
+pub(crate) fn decode_channel_config_patch(
+    response: GatewayResponse,
+) -> Result<ChannelConfigPatchOutcome, WireError> {
     match response {
-        GatewayResponse::Success { payload: None, .. } => Ok(()),
+        GatewayResponse::Success { payload: None, .. } => Ok(ChannelConfigPatchOutcome::Written),
         GatewayResponse::Success {
             payload: Some(Value::Object(payload)),
             ..
-        } if payload.get("ok").and_then(Value::as_bool) == Some(true) => Ok(()),
+        } if payload.get("ok").and_then(Value::as_bool) == Some(true) => {
+            if payload.get("noop").and_then(Value::as_bool) == Some(true) {
+                Ok(ChannelConfigPatchOutcome::Noop)
+            } else if config_patch_requires_restart(&payload) {
+                Ok(ChannelConfigPatchOutcome::RestartRequired)
+            } else {
+                Ok(ChannelConfigPatchOutcome::Written)
+            }
+        }
+        GatewayResponse::Failure { error, .. } if is_config_restart_required(&error) => {
+            Ok(ChannelConfigPatchOutcome::RestartRequired)
+        }
         GatewayResponse::Failure { .. } | GatewayResponse::Success { .. } => {
             Err(WireError::InvalidChannelConfigPatch)
         }
     }
+}
+
+fn config_patch_requires_restart(payload: &Map<String, Value>) -> bool {
+    payload.get("stats").is_some_and(stats_requires_restart)
+        || payload
+            .get("sentinel")
+            .and_then(|sentinel| sentinel.get("payload"))
+            .and_then(|payload| payload.get("stats"))
+            .is_some_and(stats_requires_restart)
+}
+
+fn stats_requires_restart(stats: &Value) -> bool {
+    stats
+        .get("requiresRestart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn required_string(payload: &Map<String, Value>, field: &str) -> Result<String, WireError> {
@@ -670,6 +805,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::gateway::config_patch::MAX_REPLACE_PATHS;
 
     fn response(payload: Value) -> GatewayResponse {
         GatewayResponse::Success {
@@ -681,6 +817,9 @@ mod tests {
     #[test]
     fn catalog_uses_summary_configured_and_projects_meta() {
         let catalog = decode_channel_catalog(response(json!({
+            "partial": false,
+            "warnings": [],
+            "eventLoop": {"running": true},
             "channelMeta": [{"id":"telegram","label":"Telegram","detailLabel":"Bot API","systemImage":"paperplane"}],
             "channels": {"telegram": {"configured": true, "token":"not-projected"}},
             "channelAccounts": {"telegram": [{"secret":"not-projected"}]}
@@ -692,12 +831,56 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejects_missing_configured_summary() {
-        assert!(
-            decode_channel_catalog(response(json!({
+    fn catalog_defaults_unreported_configured_to_false() {
+        let catalog = decode_channel_catalog(response(json!({
+            "partial": true,
+            "warnings": ["native warning not projected"],
+            "eventLoop": {"running": false},
+            "channelMeta": [{"id":"telegram","label":"Telegram","detailLabel":"Bot API"}]
+        })))
+        .unwrap();
+        assert_eq!(catalog[0].id, "telegram");
+        assert!(!catalog[0].configured);
+        assert!(!format!("{catalog:?}").contains("native warning"));
+    }
+
+    #[test]
+    fn readback_accepts_82_status_extras_for_reported_target_account() {
+        let readback = decode_channel_account_readback(
+            response(json!({
+                "partial": true,
+                "warnings": ["native warning"],
+                "eventLoop": {"degraded": true},
                 "channelMeta": [{"id":"telegram","label":"Telegram","detailLabel":"Bot API"}],
-                "channels": {"telegram": {}}
-            })))
+                "channels": {"telegram": {"configured": false}},
+                "channelAccounts": {"telegram": [{"accountId": "primary", "configured": false, "running": true}]}
+            })),
+            "telegram",
+            "primary",
+        )
+        .unwrap();
+        assert_eq!(
+            readback,
+            ChannelAccountReadback {
+                present: true,
+                configured: false,
+                running: true,
+            }
+        );
+    }
+
+    #[test]
+    fn readback_rejects_unreported_target_during_partial_status() {
+        assert!(
+            decode_channel_account_readback(
+                response(json!({
+                    "partial": true,
+                    "warnings": ["native warning"],
+                    "channelAccounts": {"other": [{"accountId": "primary"}]}
+                })),
+                "telegram",
+                "primary",
+            )
             .is_err()
         );
     }
@@ -707,18 +890,21 @@ mod tests {
         let fields = decode_channel_form(
             response(json!({
                 "path": "channels.telegram",
+                "reloadKind": "restart",
+                "hint": {"label": "Telegram"},
+                "hintPath": "channels.telegram",
                 "schema": {
                     "properties": {
-                        "token": {"type": "string", "writeOnly": true},
-                        "mode": {"type": "string", "enum": ["poll", "webhook"]},
+                        "token": {"type": "string", "writeOnly": true, "reloadKind": "restart"},
+                        "mode": {"type": "string", "enum": ["poll", "webhook"], "hintPath": "channels.telegram.mode"},
                         "enabled": {"type": "boolean"},
                         "readback": {"type": "string", "readOnly": true}
                     },
                     "required": ["token", "mode"]
                 },
                 "children": [
-                    {"key": "token", "hasChildren": false, "hint": {"label": "Token"}},
-                    {"key": "mode", "hasChildren": false},
+                    {"key": "token", "hasChildren": false, "hint": {"label": "Token", "hintPath": "channels.telegram.token"}, "reloadKind": "restart"},
+                    {"key": "mode", "hasChildren": false, "hintPath": "channels.telegram.mode"},
                     {"key": "enabled", "hasChildren": false},
                     {"key": "readback", "hasChildren": false}
                 ]
@@ -755,6 +941,75 @@ mod tests {
     }
 
     #[test]
+    fn config_document_uses_public_config_without_requiring_raw_or_hash() {
+        let document = decode_config_document(response(json!({
+            "path": "openclaw.json",
+            "exists": true,
+            "raw": null,
+            "valid": false,
+            "config": {"channels": {"telegram": {"accounts": {"primary": {}}}}},
+            "issues": [{"path": "meta", "message": "invalid"}]
+        })))
+        .unwrap();
+        let document: Value = serde_json::from_slice(&document).unwrap();
+        assert_eq!(
+            document["channels"]["telegram"]["accounts"]["primary"],
+            json!({})
+        );
+    }
+
+    #[test]
+    fn config_snapshot_uses_config_object_and_optional_hash() {
+        let snapshot = decode_config_snapshot(response(json!({
+            "path": "openclaw.json",
+            "exists": true,
+            "raw": null,
+            "valid": true,
+            "sourceConfig": {"channels": {"telegram": {"accounts": {"source": {}}}}},
+            "config": {"channels": {"telegram": {}}}
+        })))
+        .unwrap();
+        let source: Value = serde_json::from_slice(&snapshot.source_document).unwrap();
+        let document: Value = serde_json::from_slice(&snapshot.document).unwrap();
+        assert_eq!(
+            source,
+            json!({"channels": {"telegram": {"accounts": {"source": {}}}}})
+        );
+        assert_eq!(document, json!({"channels": {"telegram": {}}}));
+        assert!(snapshot.base_hash.is_none());
+
+        let snapshot = decode_config_snapshot(response(json!({
+            "raw": "{}",
+            "hash": "hash-1",
+            "sourceConfig": {},
+            "config": {"channels": {"telegram": {}}}
+        })))
+        .unwrap();
+        let source: Value = serde_json::from_slice(&snapshot.source_document).unwrap();
+        let document: Value = serde_json::from_slice(&snapshot.document).unwrap();
+        assert_eq!(source, json!({}));
+        assert_eq!(document, json!({"channels": {"telegram": {}}}));
+        assert_eq!(
+            snapshot.base_hash.as_ref().map(|hash| hash.as_slice()),
+            Some(&b"hash-1"[..])
+        );
+    }
+
+    #[test]
+    fn config_snapshot_accepts_legacy_raw_when_config_is_absent() {
+        let snapshot =
+            decode_config_snapshot(response(json!({"raw": "{}", "hash": "hash-1"}))).unwrap();
+        let document: Value = serde_json::from_slice(&snapshot.document).unwrap();
+        assert_eq!(document, json!({}));
+        assert_eq!(
+            snapshot.base_hash.as_ref().map(|hash| hash.as_slice()),
+            Some(&b"hash-1"[..])
+        );
+
+        assert!(decode_config_snapshot(response(json!({"raw": null, "hash": "hash-1"}))).is_err());
+    }
+
+    #[test]
     fn patch_request_has_native_shape_without_debug_secrets() {
         let request = config_patch_request(
             "patch-1".into(),
@@ -762,28 +1017,155 @@ mod tests {
                 br#"{"channels":{"telegram":{"accounts":{"a":{"token":"canary"}}}}}"#.to_vec(),
             ),
             Zeroizing::new(b"hash-canary".to_vec()),
+            Vec::new(),
         )
         .unwrap();
-        assert!(!format!("{request:?}").contains("canary"));
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("patch-1"));
+        assert!(!debug.contains("canary"));
+        assert!(!debug.contains("hash-canary"));
+        assert!(!debug.contains("replace-path-canary"));
+        assert!(debug.contains("replace_paths: 0"));
         let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
         assert_eq!(encoded["method"], CONFIG_PATCH_METHOD);
+        assert!(encoded["params"].get("replacePaths").is_none());
         let raw: Value = serde_json::from_str(encoded["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(
             raw["channels"]["telegram"]["accounts"]["a"]["token"],
             "canary"
         );
+
+        let request = config_patch_request(
+            "patch-2".into(),
+            Zeroizing::new(br#"{"channels":{"telegram":{"accounts":{"a":{}}}}}"#.to_vec()),
+            Zeroizing::new(b"hash-2".to_vec()),
+            vec![
+                "channels.telegram.accounts.a".into(),
+                "channels.slack".into(),
+            ],
+        )
+        .unwrap();
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("patch-2"));
+        assert!(!debug.contains("channels.telegram"));
+        assert!(!debug.contains("channels.slack"));
+        assert!(!debug.contains("hash-2"));
+        assert!(debug.contains("replace_paths: 2"));
+        let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        assert_eq!(
+            encoded["params"],
+            json!({
+                "raw": "{\"channels\":{\"telegram\":{\"accounts\":{\"a\":{}}}}}",
+                "baseHash": "hash-2",
+                "replacePaths": ["channels.telegram.accounts.a", "channels.slack"]
+            })
+        );
+
+        assert!(
+            config_patch_request(
+                "patch-3".into(),
+                Zeroizing::new(b"{}".to_vec()),
+                Zeroizing::new(b"hash-3".to_vec()),
+                vec![String::new()],
+            )
+            .is_err()
+        );
+        assert!(
+            config_patch_request(
+                "patch-4".into(),
+                Zeroizing::new(b"{}".to_vec()),
+                Zeroizing::new(b"hash-4".to_vec()),
+                vec!["path".into(); MAX_REPLACE_PATHS + 1],
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn patch_confirmation_is_strict() {
-        assert!(
+        for (code, message, conflict) in [
+            (
+                "INVALID_REQUEST",
+                "config changed since last load; re-run config.get and retry",
+                true,
+            ),
+            (
+                "INVALID_REQUEST",
+                "config base hash required; re-run config.get and retry",
+                false,
+            ),
+            (
+                "INVALID_REQUEST",
+                "config base hash unavailable; re-run config.get and retry",
+                false,
+            ),
+            (
+                "INVALID_REQUEST",
+                "config path changed since last load",
+                false,
+            ),
+            (
+                "INVALID_REQUEST",
+                "active config environment changed while preparing write; re-run config.get and retry",
+                false,
+            ),
+            ("INVALID_REQUEST", "invalid config", false),
+            (
+                "UNAVAILABLE",
+                "config changed since last load; re-run config.get and retry",
+                false,
+            ),
+        ] {
+            let frame = json!({
+                "type": "res", "id": "cas", "ok": false,
+                "error": {"code": code, "message": message}
+            });
+            let GatewayResponse::Failure { error, .. } =
+                super::super::decode_response(&frame.to_string(), "cas")
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected native failure");
+            };
+            assert_eq!(is_config_conflict(&error), conflict);
+        }
+        assert_eq!(
             decode_config_patch(GatewayResponse::Success {
                 request_id: "id".into(),
                 payload: None,
-            })
-            .is_ok()
+            }),
+            Ok(ConfigPatchOutcome::Written)
         );
-        assert!(decode_config_patch(response(json!({"ok": true, "noop": true}))).is_ok());
+        assert_eq!(
+            decode_config_patch(response(json!({"ok": true, "noop": true}))),
+            Ok(ConfigPatchOutcome::Noop)
+        );
+        for payload in [
+            json!({"ok": true, "stats": {"requiresRestart": true}}),
+            json!({"ok": true, "sentinel": {"payload": {"stats": {"requiresRestart": true}}}}),
+        ] {
+            assert_eq!(
+                decode_channel_config_patch(response(payload)),
+                Ok(ChannelConfigPatchOutcome::RestartRequired)
+            );
+        }
+        assert_eq!(
+            decode_config_patch(response(json!({"ok": true}))),
+            Ok(ConfigPatchOutcome::Written)
+        );
+        for message in ["restart-pending", "applied-restart-required"] {
+            let frame = json!({
+                "type": "res", "id": "restart", "ok": false,
+                "error": {"code": "UNAVAILABLE", "message": message}
+            });
+            let response = super::super::decode_response(&frame.to_string(), "restart")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                decode_channel_config_patch(response),
+                Ok(ChannelConfigPatchOutcome::RestartRequired)
+            );
+        }
         assert!(decode_config_patch(response(json!({"ok": false}))).is_err());
         assert!(decode_config_patch(response(json!(true))).is_err());
     }
@@ -807,11 +1189,11 @@ mod tests {
         for (action, payload) in [
             (
                 crate::operations::channel_login::ChannelRuntimeAction::Start,
-                json!({"channel":"whatsapp","accountId":"primary","started":true}),
+                json!({"channel":"whatsapp","accountId":"primary","started":true,"nativeExtra":"ignored"}),
             ),
             (
                 crate::operations::channel_login::ChannelRuntimeAction::Stop,
-                json!({"channel":"whatsapp","accountId":"primary","stopped":true}),
+                json!({"channel":"whatsapp","accountId":"primary","stopped":true,"nativeExtra":"ignored"}),
             ),
             (
                 crate::operations::channel_login::ChannelRuntimeAction::Logout,
@@ -833,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn login_wait_request_uses_only_shared_schema_fields() {
+    fn web_login_requests_preserve_channel_and_session_key() {
         let start = web_login_start_request(
             "start-1".into(),
             "openclaw-weixin",
@@ -844,7 +1226,16 @@ mod tests {
         )
         .unwrap();
         let start: Value = serde_json::from_str(&start.encode().unwrap()).unwrap();
-        assert_eq!(start["params"]["channel"], "openclaw-weixin");
+        assert_eq!(
+            start["params"],
+            json!({
+                "channel": "openclaw-weixin",
+                "force": true,
+                "timeoutMs": 5_000,
+                "verbose": false,
+                "accountId": "primary"
+            })
+        );
 
         let wait = web_login_wait_request(
             "wait-1".into(),
@@ -869,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn login_progress_projects_only_bounded_qr_and_never_message() {
+    fn login_progress_projects_only_bounded_data_url_and_never_message() {
         let progress = decode_login_progress(
             response(json!({
                 "message": "private native message",
@@ -889,6 +1280,52 @@ mod tests {
             progress.qr_data_url.as_deref(),
             Some("data:image/png;base64,qr-canary")
         );
+        assert!(!format!("{progress:?}").contains("private native message"));
+
+        let connected = decode_login_progress(
+            response(json!({
+                "message": "connected native message",
+                "sessionKey": "native-random-weixin-value",
+                "connected": true,
+                "accountId": "primary",
+                "token": "private-token"
+            })),
+            Some("wechat-main"),
+        )
+        .unwrap();
+        assert_eq!(
+            connected.status,
+            crate::operations::channel_login::LoginProgressStatus::Connected
+        );
+        assert_eq!(connected.account_id.as_deref(), Some("primary"));
+        assert!(connected.qr_data_url.is_none());
+        assert!(!format!("{connected:?}").contains("connected native message"));
+        assert!(!format!("{connected:?}").contains("private-token"));
+
+        for payload in [
+            json!({"alreadyConnected": true, "token": "private-token"}),
+            json!({"status": "binded_redirect", "token": "private-token"}),
+        ] {
+            let progress = decode_login_progress(response(payload), Some("wechat-main")).unwrap();
+            assert_eq!(
+                progress.status,
+                crate::operations::channel_login::LoginProgressStatus::Unknown
+            );
+            assert!(progress.qr_data_url.is_none());
+            assert!(!format!("{progress:?}").contains("private-token"));
+        }
+
+        assert!(
+            decode_login_progress(
+                response(json!({
+                    "message": "private native message",
+                    "connected": false,
+                    "qrDataUrl": "https://weixin.qq.com/x/weixin-login-canary"
+                })),
+                Some("primary"),
+            )
+            .is_err()
+        );
         assert!(
             decode_login_progress(
                 response(json!({
@@ -900,6 +1337,13 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!format!("{progress:?}").contains("private native message"));
+        assert!(decode_login_progress(
+            response(json!({
+                "connected": false,
+                "qrDataUrl": format!("{QR_DATA_URL_PREFIX}{}", "x".repeat(MAX_QR_DATA_URL_LENGTH))
+            })),
+            Some("primary"),
+        )
+        .is_err());
     }
 }

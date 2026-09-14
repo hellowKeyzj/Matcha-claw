@@ -199,18 +199,28 @@ interface FinalizeStoreSendFailureParams {
   error: string;
 }
 
+function isDirectoryAttachment(attachment: ChatSendAttachment): boolean {
+  return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
+}
+
+function materializableAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
+  const materializable = attachments?.filter((attachment) => !isDirectoryAttachment(attachment));
+  return materializable && materializable.length > 0 ? materializable : undefined;
+}
+
 function attachmentReselectionRequired(attachments: ChatSendAttachment[] | undefined): true | undefined {
-  return attachments && attachments.length > 0 ? true : undefined;
+  return materializableAttachments(attachments) ? true : undefined;
 }
 
 function cachedAttachmentReceiptFiles(attachments: ChatSendAttachment[]) {
   return attachments
-    .filter((attachment) => !attachment.mimeType.startsWith('image/'))
+    .filter((attachment) => !attachment.mimeType.startsWith('image/') || attachment.sourcePath)
     .map((attachment) => ({
       fileName: attachment.fileName,
       mimeType: attachment.mimeType,
       fileSize: attachment.fileSize,
       preview: null,
+      ...(attachment.sourcePath ? { filePath: attachment.sourcePath, source: 'user-upload' as const } : {}),
     }));
 }
 
@@ -276,6 +286,7 @@ function appendOptimisticSendItems(params: {
           runPhase: 'submitted',
           pendingTurnKey: assistantItemKey,
           pendingTurnLaneKey: 'main',
+          imageGeneration: undefined,
           lastUserMessageAt: createdAt,
           lastError: null,
           lastIssue: null,
@@ -345,6 +356,7 @@ function confirmOptimisticSendItems(params: {
           activeTurnItemKey: null,
           pendingTurnKey: runAssistantKey,
           pendingTurnLaneKey: 'main',
+          imageGeneration: undefined,
           lastUserMessageAt,
           lastError: null,
           lastIssue: null,
@@ -371,6 +383,7 @@ function clearOptimisticRuntimeState(
     activeTurnItemKey: ownsActiveTurn ? null : runtime.activeTurnItemKey,
     pendingTurnKey: ownsPendingTurn ? null : runtime.pendingTurnKey,
     pendingTurnLaneKey: ownsPendingTurn ? null : runtime.pendingTurnLaneKey,
+    imageGeneration: undefined,
     updatedAt: Date.now(),
   };
 }
@@ -442,7 +455,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } = params;
   const trimmed = text.trim();
   const traceId = createSessionTraceId('send-boundary');
-  const attachmentCount = attachments?.length ?? 0;
+  const attachmentsToMaterialize = materializableAttachments(attachments);
+  const attachmentCount = attachmentsToMaterialize?.length ?? 0;
   const stateBeforeSend = get();
   const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(stateBeforeSend), {
     text,
@@ -509,8 +523,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
   beginMutating();
   try {
-    if (attachments && attachments.length > 0) {
-      cacheSendAttachments(attachments);
+    if (attachmentsToMaterialize) {
+      cacheSendAttachments(attachmentsToMaterialize);
     }
 
     const sendResult = await sendChatTransport({
@@ -518,7 +532,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       sessionIdentity,
       message: trimmed,
       idempotencyKey: clientMessageId,
-      attachments,
+      attachments: attachmentsToMaterialize,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
       traceId,
     });

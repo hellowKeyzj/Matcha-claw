@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    composition::{HostAdmission, OpenClawInstance, RequestAdmissionClosed},
+    composition::{HostAdmission, OpenClawInstance},
     runtime_driver::RuntimeDriver as _,
 };
 
@@ -93,24 +93,6 @@ impl PlatformRuntimeHandle {
             ));
         }
         Ok(self.open_claw.set_tool_permission_mode(mode))
-    }
-
-    pub(crate) async fn toolchain_status(
-        &self,
-    ) -> Result<Result<openclaw::toolchain::ToolchainStatus, RequestAdmissionClosed>, ()> {
-        match self.admission.admit_request() {
-            Ok(()) => Ok(Ok(self.open_claw.toolchain_status().await)),
-            Err(closed) => Ok(Err(closed)),
-        }
-    }
-
-    pub(crate) async fn install_uv(
-        &self,
-    ) -> Result<Result<openclaw::toolchain::UvInstallOutcome, RequestAdmissionClosed>, ()> {
-        match self.admission.admit_request() {
-            Ok(()) => Ok(Ok(self.open_claw.install_toolchain_uv().await)),
-            Err(closed) => Ok(Err(closed)),
-        }
     }
 
     pub(crate) async fn subagent_template_catalog(

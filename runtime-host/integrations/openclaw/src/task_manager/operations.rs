@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize};
 
 use crate::gateway::{
     client::{GatewayClient, GatewayClientError},
@@ -16,8 +16,6 @@ const TASK_LIST_METHOD: &str = "TaskList";
 const TASK_GET_METHOD: &str = "TaskGet";
 const TODO_WRITE_METHOD: &str = "TodoWrite";
 const TODO_GET_METHOD: &str = "TodoGet";
-const TASK_OUTPUT_METHOD: &str = "TaskOutput";
-const TASK_STOP_METHOD: &str = "TaskStop";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Fixed typed adapter for the task-manager plugin methods over the shared
@@ -147,31 +145,6 @@ impl TaskManagerOperation {
             decode_todo_snapshot,
         )
         .await
-    }
-
-    pub async fn output(&self, task_id: String) -> Result<TaskOutput, TaskReadFailure> {
-        let request =
-            TaskIdRequest::new(&self.scope, task_id).map_err(|_| TaskReadFailure::Rejected)?;
-        self.read(TASK_OUTPUT_METHOD, request, decode_task_output)
-            .await
-    }
-
-    pub async fn stop(&self, task_id: String) -> TaskMutationOutcome<TaskStopResult> {
-        let request = match TaskIdRequest::new(&self.scope, task_id) {
-            Ok(request) => request,
-            Err(_) => return TaskMutationOutcome::Rejected,
-        };
-        match self.mutate(TASK_STOP_METHOD, request).await {
-            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
-                TaskMutationOutcome::Rejected
-            }
-            MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => {
-                TaskMutationOutcome::OutcomeUnknown
-            }
-            MutationDelivery::Response(response) => decode_task_stop(response)
-                .map(TaskMutationOutcome::Applied)
-                .unwrap_or(TaskMutationOutcome::OutcomeUnknown),
-        }
     }
 
     async fn read<P: Serialize, T>(
@@ -571,43 +544,6 @@ impl TodoSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TaskOutput {
-    Available,
-    NotFound,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TaskOutputKind {
-    Available,
-    NotFound,
-}
-
-impl TaskOutput {
-    pub fn kind(&self) -> TaskOutputKind {
-        match self {
-            Self::Available => TaskOutputKind::Available,
-            Self::NotFound => TaskOutputKind::NotFound,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskStopResult {
-    found: bool,
-    cancelled: bool,
-}
-
-impl TaskStopResult {
-    pub fn found(&self) -> bool {
-        self.found
-    }
-
-    pub fn cancelled(&self) -> bool {
-        self.cancelled
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskReadFailure {
     Unavailable,
@@ -775,24 +711,6 @@ impl<'a> TodoGetRequest<'a> {
             session_key: &scope.session_key,
             workspace_dir: &scope.workspace_dir,
         }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskIdRequest<'a> {
-    session_key: &'a str,
-    workspace_dir: &'a str,
-    task_id: String,
-}
-
-impl<'a> TaskIdRequest<'a> {
-    fn new(scope: &'a TaskScope, task_id: String) -> Result<Self, TaskInputError> {
-        Ok(Self {
-            session_key: &scope.session_key,
-            workspace_dir: &scope.workspace_dir,
-            task_id: non_empty(task_id)?,
-        })
     }
 }
 
@@ -1052,50 +970,6 @@ fn decode_todo_snapshot(response: GatewayResponse) -> Result<TodoSnapshot, Proto
     })
 }
 
-fn decode_task_output(response: GatewayResponse) -> Result<TaskOutput, ProtocolError> {
-    let payload = payload(response)?;
-    let wire: TaskOutputResponse =
-        serde_json::from_value(payload).map_err(|_| ProtocolError::Invalid)?;
-    match wire {
-        TaskOutputResponse::Available(TaskOutputAvailableResponse {
-            success: true,
-            task_id,
-            task,
-            message,
-        }) if valid_string(&task_id) && message.as_deref().is_none_or(valid_string) => {
-            let _ = task;
-            Ok(TaskOutput::Available)
-        }
-        TaskOutputResponse::NotFound(TaskOutputNotFoundResponse {
-            success: false,
-            task_id,
-            status,
-            message,
-        }) if valid_string(&task_id) && status == "not_found" && valid_string(&message) => {
-            Ok(TaskOutput::NotFound)
-        }
-        _ => Err(ProtocolError::Invalid),
-    }
-}
-
-fn decode_task_stop(response: GatewayResponse) -> Result<TaskStopResult, ProtocolError> {
-    let payload = payload(response)?;
-    let wire: TaskStopResponse =
-        serde_json::from_value(payload).map_err(|_| ProtocolError::Invalid)?;
-    if !valid_string(&wire.task_id)
-        || wire.success != wire.cancelled
-        || (wire.cancelled && !wire.found)
-        || !optional_string(&wire.message)
-    {
-        return Err(ProtocolError::Invalid);
-    }
-    let _ = wire.task;
-    Ok(TaskStopResult {
-        found: wire.found,
-        cancelled: wire.cancelled,
-    })
-}
-
 fn payload(response: GatewayResponse) -> Result<serde_json::Value, ProtocolError> {
     match response {
         GatewayResponse::Success {
@@ -1200,42 +1074,6 @@ struct TaskUpdateDeletedResponse {
 struct TodoResponse {
     todos: Vec<TodoWire>,
     updated_at: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum TaskOutputResponse {
-    Available(TaskOutputAvailableResponse),
-    NotFound(TaskOutputNotFoundResponse),
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct TaskOutputAvailableResponse {
-    success: bool,
-    task_id: String,
-    task: IgnoredAny,
-    message: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct TaskOutputNotFoundResponse {
-    success: bool,
-    task_id: String,
-    status: String,
-    message: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct TaskStopResponse {
-    success: bool,
-    task_id: String,
-    found: bool,
-    cancelled: bool,
-    message: Option<String>,
-    task: Option<IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -1665,28 +1503,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn written_mutation_is_unknown_after_connection_close_without_retrying() {
-        let (client, mut peer) = connected_gateway().await;
-        {
-            let operation = TaskManagerOperation::new(Arc::clone(&client), scope());
-            let stop = operation.stop("run-1".into());
-            tokio::pin!(stop);
-
-            let _ = futures_util::poll!(&mut stop);
-            let request = read_json(&mut peer.socket).await;
-            assert_plugin_request(&request, TASK_STOP_METHOD);
-            peer.socket.close(None).await.unwrap();
-
-            assert!(matches!(
-                timeout(TEST_TIMEOUT, &mut stop).await.unwrap(),
-                TaskMutationOutcome::OutcomeUnknown
-            ));
-        }
-        peer.server.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn all_remaining_plugin_operations_use_gateway_control_exchange() {
+    async fn planning_operations_use_gateway_control_exchange() {
         let (client, mut peer) = connected_gateway().await;
         {
             let operation = TaskManagerOperation::new(Arc::clone(&client), scope());
@@ -1745,31 +1562,6 @@ mod tests {
             )
             .await;
             assert!(timeout(TEST_TIMEOUT, &mut todo_get).await.unwrap().is_ok());
-
-            let output = operation.output("run-1".into());
-            tokio::pin!(output);
-            let _ = futures_util::poll!(&mut output);
-            let request = read_json(&mut peer.socket).await;
-            assert_plugin_request(&request, TASK_OUTPUT_METHOD);
-            send_json(&mut peer.socket, plugin_response(&request, json!({"success":false,"taskId":"run-1","status":"not_found","message":"not found"}))).await;
-            assert_eq!(
-                timeout(TEST_TIMEOUT, &mut output).await.unwrap().unwrap(),
-                TaskOutput::NotFound
-            );
-
-            let stop = operation.stop("run-1".into());
-            tokio::pin!(stop);
-            let _ = futures_util::poll!(&mut stop);
-            let request = read_json(&mut peer.socket).await;
-            assert_plugin_request(&request, TASK_STOP_METHOD);
-            send_json(&mut peer.socket, plugin_response(&request, json!({"success":false,"taskId":"run-1","found":false,"cancelled":false,"message":"not found"}))).await;
-            assert!(matches!(
-                timeout(TEST_TIMEOUT, &mut stop).await.unwrap(),
-                TaskMutationOutcome::Applied(TaskStopResult {
-                    found: false,
-                    cancelled: false
-                })
-            ));
         }
         client.close_control_connection().await;
         peer.server.await.unwrap();
@@ -1858,6 +1650,7 @@ mod tests {
                     "config.get",
                     "config.patch",
                     "config.apply",
+                    "plugins.refresh",
                     "agents.list",
                     "skills.status",
                     wire::SYSTEM_PRESENCE_METHOD,
@@ -1873,9 +1666,7 @@ mod tests {
                     "TaskList",
                     "TaskGet",
                     "TodoWrite",
-                    "TodoGet",
-                    "TaskOutput",
-                    "TaskStop"
+                    "TodoGet"
                 ], "events": ["tick", "chat", "session.message", "session.operation", "session.tool", "sessions.changed"]},
                 "snapshot": {
                     "presence": [],
@@ -1909,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn request_dtos_cover_the_eight_fixed_plugin_methods() {
+    fn request_dtos_cover_the_six_planning_plugin_methods() {
         let scope = scope();
         let cases = [
             (
@@ -1970,14 +1761,6 @@ mod tests {
                 TODO_GET_METHOD,
                 serde_json::to_value(TodoGetRequest::new(&scope)).unwrap(),
             ),
-            (
-                TASK_OUTPUT_METHOD,
-                serde_json::to_value(TaskIdRequest::new(&scope, "run-1".into()).unwrap()).unwrap(),
-            ),
-            (
-                TASK_STOP_METHOD,
-                serde_json::to_value(TaskIdRequest::new(&scope, "run-1".into()).unwrap()).unwrap(),
-            ),
         ];
         for (method, params) in cases {
             assert!(params.is_object(), "{method}");
@@ -2025,14 +1808,6 @@ mod tests {
         let response_scope = json!({"type":"team","key":"team:team-canary","label":"Team · team-canary","teamKey":"team-canary"});
         assert!(decode_task_update(&requested_scope, "task-1", success(json!({"scope": response_scope, "taskId":"task-1", "deleted":true, "todos":[todo()]}))).is_ok());
         assert!(decode_todo_snapshot(success(json!({"todos":[todo()], "updatedAt":2}))).is_ok());
-        assert_eq!(
-            decode_task_output(success(
-                json!({"success":false,"taskId":"run-1","status":"not_found","message":"not found"})
-            ))
-            .unwrap(),
-            TaskOutput::NotFound
-        );
-        assert_eq!(decode_task_stop(success(json!({"success":false,"taskId":"run-1","found":false,"cancelled":false,"message":"not found"}))).unwrap(), TaskStopResult { found:false, cancelled:false });
     }
 
     #[test]
@@ -2168,36 +1943,6 @@ mod tests {
         assert_eq!(todo_snapshot.todos().len(), 1);
         assert_eq!(todo_snapshot.updated_at(), 2);
 
-        let stop = decode_task_stop(success(json!({
-            "success": true,
-            "taskId": "task-1",
-            "found": true,
-            "cancelled": true
-        })))
-        .unwrap();
-        assert!(stop.found());
-        assert!(stop.cancelled());
-        assert_eq!(
-            decode_task_output(success(json!({
-                "success": true,
-                "taskId": "task-1",
-                "task": {"private": "raw-task-canary"}
-            })))
-            .unwrap()
-            .kind(),
-            TaskOutputKind::Available
-        );
-        assert_eq!(
-            decode_task_output(success(json!({
-                "success": false,
-                "taskId": "task-1",
-                "status": "not_found",
-                "message": "not found"
-            })))
-            .unwrap()
-            .kind(),
-            TaskOutputKind::NotFound
-        );
         assert!(!format!("{snapshot:?}").contains("metadata-canary"));
     }
 
@@ -2247,13 +1992,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ProtocolError::Invalid);
-        assert!(!format!("{error:?}").contains("canary"));
-
-        let error = decode_task_output(success(
-            json!({"success":true,"taskId":"run-1","task":{"private":"canary"}}),
-        ))
-        .unwrap();
-        assert_eq!(error, TaskOutput::Available);
         assert!(!format!("{error:?}").contains("canary"));
     }
 

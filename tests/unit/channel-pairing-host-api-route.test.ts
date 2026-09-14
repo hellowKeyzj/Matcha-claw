@@ -33,13 +33,13 @@ describe('channel pairing Host API route', () => {
     const result = response();
 
     await expect(handleChannelPairingRoutes(
-      request({ channel: 'feishu' }) as never,
+      request({ channel: 'feishu', accountId: 'default' }) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/channels/pairing'),
       { list, approve: vi.fn() },
     )).resolves.toBe(true);
 
-    expect(list).toHaveBeenCalledWith('feishu');
+    expect(list).toHaveBeenCalledWith('feishu', 'default');
     expect(result.state).toEqual({
       statusCode: 200,
       body: { requests: [{ id: 'request-1', status: 'pending' }] },
@@ -56,11 +56,11 @@ describe('channel pairing Host API route', () => {
     await expect(handleChannelPairingRoutes(
       request(undefined, 'GET') as never,
       result.raw as never,
-      new URL('http://127.0.0.1/api/channels/pairing/feishu'),
+      new URL('http://127.0.0.1/api/channels/pairing/feishu?accountId=default'),
       { list, approve: vi.fn() },
     )).resolves.toBe(true);
 
-    expect(list).toHaveBeenCalledWith('feishu');
+    expect(list).toHaveBeenCalledWith('feishu', 'default');
     expect(result.state).toEqual({
       statusCode: 200,
       body: { requests: [{ id: 'request-1', status: 'pending' }] },

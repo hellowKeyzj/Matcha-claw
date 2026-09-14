@@ -164,11 +164,12 @@ export function TeamsPage() {
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const selectedAgentIds = new Set(manualMembers.map((member) => member.agentId));
   const manualSearchText = manualSearchQuery.trim().toLocaleLowerCase();
+  const teamAssignableAgents = agents.filter((agent) => agent.kind !== 'system');
   const visibleAgents = manualSearchText
-    ? agents.filter((agent) => [agent.id, agent.name, agent.identity?.name, agent.workspace, ...(agent.skills ?? [])]
+    ? teamAssignableAgents.filter((agent) => [agent.id, agent.name, agent.identity?.name, agent.workspace, ...(agent.skills ?? [])]
       .filter((value): value is string => typeof value === 'string' && value.length > 0)
       .some((value) => value.toLocaleLowerCase().includes(manualSearchText)))
-    : agents;
+    : teamAssignableAgents;
   const selectedManualMembers = manualMembers.map((member) => ({
     member,
     agent: agents.find((agent) => agent.id === member.agentId) ?? null,

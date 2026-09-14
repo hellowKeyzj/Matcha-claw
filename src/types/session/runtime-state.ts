@@ -28,6 +28,23 @@ export type SessionRunPhase =
 
 export type SessionRuntimeActivity = 'compacting';
 
+export interface SessionRuntimeErrorDetail {
+  failoverReason: string | null;
+  providerRuntimeFailureKind: string | null;
+  providerErrorType: string | null;
+  providerErrorMessagePreview: string | null;
+  httpStatus: number | null;
+}
+
+export interface SessionRuntimeNotice {
+  runId: string;
+  kind: 'guardian_reviewing' | 'guardian_approved' | 'guardian_denied' | 'guardian_warning' | 'guardian_strict_review_required';
+  command: string | null;
+  riskLevel: string | null;
+  rationale: string | null;
+  message: string | null;
+}
+
 export interface SessionRuntimeStateSnapshot {
   activeRunId: string | null;
   runPhase: SessionRunPhase;
@@ -35,6 +52,8 @@ export interface SessionRuntimeStateSnapshot {
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
   runtimeActivity: SessionRuntimeActivity | null;
+  errorDetail: SessionRuntimeErrorDetail | null;
+  runtimeNotice?: SessionRuntimeNotice | null;
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;

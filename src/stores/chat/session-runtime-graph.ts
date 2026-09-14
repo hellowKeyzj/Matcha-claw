@@ -188,9 +188,14 @@ function resolveEndpointDefaultAgentId(endpoint: RuntimeEndpointAccumulator): st
   return endpoint.target?.defaultSessionPromptScope.agentId ?? null;
 }
 
+function isInteractiveSession(session: ChatSessionRuntimeSessionNode): boolean {
+  return session.kind !== 'automation';
+}
+
 function resolvePreferredSessionKey(sessions: ChatSessionRuntimeSessionNode[]): string | null {
-  return sessions.find((session) => session.preferred)?.sessionRecordKey
-    ?? sessions[0]?.sessionRecordKey
+  const interactiveSessions = sessions.filter(isInteractiveSession);
+  return interactiveSessions.find((session) => session.preferred)?.sessionRecordKey
+    ?? interactiveSessions[0]?.sessionRecordKey
     ?? null;
 }
 
@@ -250,7 +255,11 @@ export function findPreferredSessionForAgent(
 ): ChatSessionRuntimeSessionNode | null {
   const endpointNode = graph.endpoints.find((candidate) => sameRuntimeEndpointScope(candidate.endpoint, endpoint));
   const agentNode = endpointNode?.agents.find((candidate) => candidate.agentId === agentId);
-  return agentNode?.sessions.find((session) => session.preferred) ?? agentNode?.sessions[0] ?? null;
+  if (!agentNode) {
+    return null;
+  }
+  const interactiveSessions = agentNode.sessions.filter(isInteractiveSession);
+  return interactiveSessions.find((session) => session.preferred) ?? interactiveSessions[0] ?? null;
 }
 
 export function resolveCurrentConversationRuntimeState(input: {

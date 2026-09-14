@@ -29,6 +29,7 @@ pub fn list_request(request_id: String, offset: u64) -> Result<RpcRequest, WireE
         CRON_LIST_METHOD,
         Some(serde_json::json!({
             "includeDisabled": true,
+            "includeDeliveryPreviews": false,
             "limit": CRON_LIST_PAGE_LIMIT,
             "offset": offset,
         })),
@@ -235,6 +236,17 @@ impl CronJobCreate {
             return Err(WireError::InvalidCronAddRequest);
         }
         self.agent_id = Some(agent_id);
+        Ok(self)
+    }
+
+    pub fn with_model(mut self, model: Option<String>) -> Result<Self, WireError> {
+        if !valid_optional_string(&model) {
+            return Err(WireError::InvalidCronAddRequest);
+        }
+        let CronPayload::AgentTurn { model: current, .. } = &mut self.payload else {
+            return Err(WireError::InvalidCronAddRequest);
+        };
+        *current = model;
         Ok(self)
     }
 
@@ -501,8 +513,13 @@ impl Serialize for CronWakeMode {
 }
 
 pub(crate) enum CronPayload {
-    SystemEvent { text: String },
-    AgentTurn { message: String },
+    SystemEvent {
+        text: String,
+    },
+    AgentTurn {
+        message: String,
+        model: Option<String>,
+    },
 }
 
 impl CronPayload {
@@ -516,14 +533,19 @@ impl CronPayload {
     fn agent_turn(message: impl Into<String>) -> Result<Self, WireError> {
         let message = message.into();
         valid_string(&message)
-            .then_some(Self::AgentTurn { message })
+            .then_some(Self::AgentTurn {
+                message,
+                model: None,
+            })
             .ok_or(WireError::InvalidCronAddRequest)
     }
 
     fn is_valid(&self) -> bool {
         match self {
             Self::SystemEvent { text } => valid_string(text),
-            Self::AgentTurn { message } => valid_string(message),
+            Self::AgentTurn { message, model } => {
+                valid_string(message) && valid_optional_string(model)
+            }
         }
     }
 }
@@ -546,15 +568,18 @@ impl Serialize for CronPayload {
                 }
                 .serialize(serializer)
             }
-            Self::AgentTurn { message } => {
+            Self::AgentTurn { message, model } => {
                 #[derive(Serialize)]
                 struct AgentTurn<'a> {
                     kind: &'static str,
                     message: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    model: &'a Option<String>,
                 }
                 AgentTurn {
                     kind: "agentTurn",
                     message,
+                    model,
                 }
                 .serialize(serializer)
             }
@@ -659,6 +684,7 @@ pub struct CronJobUpdate {
     name: Option<String>,
     agent_id: Option<String>,
     message: Option<String>,
+    model: Option<Option<String>>,
     schedule: Option<CronSchedule>,
     delivery: Option<CronDelivery>,
     enabled: Option<bool>,
@@ -669,10 +695,11 @@ impl CronJobUpdate {
         name: Option<String>,
         agent_id: Option<String>,
         message: Option<String>,
+        model: Option<Option<String>>,
         schedule: Option<CronSchedule>,
         enabled: Option<bool>,
     ) -> Result<Self, WireError> {
-        Self::build(name, agent_id, message, schedule, None, enabled)
+        Self::build(name, agent_id, message, model, schedule, None, enabled)
     }
 
     pub fn with_no_delivery(mut self) -> Result<Self, WireError> {
@@ -702,6 +729,7 @@ impl CronJobUpdate {
         name: Option<String>,
         agent_id: Option<String>,
         message: Option<String>,
+        model: Option<Option<String>>,
         schedule: Option<CronSchedule>,
         delivery: Option<CronDelivery>,
         enabled: Option<bool>,
@@ -710,6 +738,7 @@ impl CronJobUpdate {
             name,
             agent_id,
             message,
+            model,
             schedule,
             delivery,
             enabled,
@@ -729,6 +758,10 @@ impl CronJobUpdate {
                 .as_ref()
                 .is_some_and(|value| !valid_string(value))
             || self
+                .model
+                .as_ref()
+                .is_some_and(|value| !valid_optional_string(value))
+            || self
                 .schedule
                 .as_ref()
                 .is_some_and(|value| !value.is_valid())
@@ -739,6 +772,7 @@ impl CronJobUpdate {
             || (self.name.is_none()
                 && self.agent_id.is_none()
                 && self.message.is_none()
+                && self.model.is_none()
                 && self.schedule.is_none()
                 && self.delivery.is_none()
                 && self.enabled.is_none())
@@ -766,11 +800,13 @@ impl CronJobPatch {
                         .message
                         .as_ref()
                         .is_none_or(|value| valid_string(value))
+                    && update.model.as_ref().is_none_or(valid_optional_string)
                     && update.schedule.as_ref().is_none_or(CronSchedule::is_valid)
                     && update.delivery.as_ref().is_none_or(CronDelivery::is_valid)
                     && (update.name.is_some()
                         || update.agent_id.is_some()
                         || update.message.is_some()
+                        || update.model.is_some()
                         || update.schedule.is_some()
                         || update.delivery.is_some()
                         || update.enabled.is_some())
@@ -811,15 +847,21 @@ impl Serialize for CronJobPatch {
                 #[derive(Serialize)]
                 struct UpdatePayload<'a> {
                     kind: &'static str,
-                    message: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    message: &'a Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    model: &'a Option<Option<String>>,
                 }
                 Update {
                     name: &update.name,
                     agent_id: &update.agent_id,
-                    payload: update.message.as_deref().map(|message| UpdatePayload {
-                        kind: "agentTurn",
-                        message,
-                    }),
+                    payload: (update.message.is_some() || update.model.is_some()).then_some(
+                        UpdatePayload {
+                            kind: "agentTurn",
+                            message: &update.message,
+                            model: &update.model,
+                        },
+                    ),
                     schedule: &update.schedule,
                     delivery: &update.delivery,
                     enabled: &update.enabled,
@@ -880,6 +922,7 @@ pub struct CronJob {
     pub name: String,
     pub agent_id: Option<String>,
     pub message: Option<String>,
+    pub model: Option<String>,
     pub schedule: CronScheduleView,
     pub delivery: CronDeliveryView,
     pub enabled: bool,
@@ -904,6 +947,7 @@ impl fmt::Debug for CronJob {
             .field("name", &"[REDACTED]")
             .field("agent_id", &self.agent_id.as_ref().map(|_| "[REDACTED]"))
             .field("message", &self.message.as_ref().map(|_| "[REDACTED]"))
+            .field("model", &self.model.as_ref().map(|_| "[REDACTED]"))
             .field("schedule", &self.schedule)
             .field("delivery", &self.delivery)
             .field("enabled", &self.enabled)
@@ -1000,20 +1044,37 @@ pub struct CronJobs {
 }
 
 pub struct CronRunReceipt {
-    pub enqueued: bool,
-    pub run_id: Option<String>,
-    pub(crate) disposition: Option<CronRunDisposition>,
+    outcome: CronRunReceiptOutcome,
+}
+
+impl CronRunReceipt {
+    pub(crate) fn into_outcome(self) -> CronRunReceiptOutcome {
+        self.outcome
+    }
 }
 
 impl fmt::Debug for CronRunReceipt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CronRunReceipt")
-            .field("enqueued", &self.enqueued)
-            .field("run_id", &self.run_id.as_ref().map(|_| "[REDACTED]"))
-            .field("disposition", &self.disposition)
-            .finish()
+        let mut debug = formatter.debug_struct("CronRunReceipt");
+        match &self.outcome {
+            CronRunReceiptOutcome::Enqueued { .. } => debug
+                .field("outcome", &"enqueued")
+                .field("run_id", &Some("[REDACTED]")),
+            CronRunReceiptOutcome::Ran => debug.field("outcome", &"ran"),
+            CronRunReceiptOutcome::Skipped(disposition) => debug
+                .field("outcome", &"skipped")
+                .field("disposition", disposition),
+            CronRunReceiptOutcome::OutcomeUnknown => debug.field("outcome", &"outcome-unknown"),
+        }
+        .finish()
     }
+}
+
+pub(crate) enum CronRunReceiptOutcome {
+    Enqueued { run_id: String },
+    Ran,
+    Skipped(CronRunDisposition),
+    OutcomeUnknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1021,6 +1082,8 @@ pub(crate) enum CronRunDisposition {
     AlreadyRunning,
     NotDue,
     InvalidSpec,
+    Disabled,
+    Stopped,
 }
 
 pub struct CronRunLog {
@@ -1116,6 +1179,8 @@ pub fn decode_list(response: GatewayResponse) -> Result<CronJobs, WireError> {
         has_more,
         next_offset,
         delivery_previews: _,
+        snapshot_revision: _,
+        config_revision: _,
     } = payload;
     Ok(CronJobs {
         jobs: jobs
@@ -1133,24 +1198,27 @@ pub fn decode_list(response: GatewayResponse) -> Result<CronJobs, WireError> {
 
 pub fn decode_add(response: GatewayResponse) -> Result<CronJob, WireError> {
     let payload = success_payload(response, WireError::InvalidCronAdd)?;
-    let payload: CronJobWire =
-        serde_json::from_value(payload).map_err(|_| WireError::InvalidCronAdd)?;
-    (payload.is_valid()
-        && payload
-            .delivery
-            .as_ref()
-            .is_none_or(CronDeliveryWire::is_ui_projection))
-    .then_some(payload.into_public())
-    .ok_or(WireError::InvalidCronAdd)
+    let payload = decode_job_mutation_payload(payload, WireError::InvalidCronAdd)?;
+    (payload.is_valid() && payload.is_ui_crud_projection())
+        .then(|| payload.into_public())
+        .ok_or(WireError::InvalidCronAdd)
 }
 
 pub fn decode_update(response: GatewayResponse) -> Result<CronJob, WireError> {
     let payload = success_payload(response, WireError::InvalidCronUpdate)?;
-    let payload: CronJobWire =
-        serde_json::from_value(payload).map_err(|_| WireError::InvalidCronUpdate)?;
+    let payload = decode_job_mutation_payload(payload, WireError::InvalidCronUpdate)?;
     (payload.is_valid() && payload.is_ui_crud_projection())
-        .then_some(payload.into_public())
+        .then(|| payload.into_public())
         .ok_or(WireError::InvalidCronUpdate)
+}
+
+fn decode_job_mutation_payload(payload: Value, error: WireError) -> Result<CronJobWire, WireError> {
+    if payload.get("job").is_some() {
+        let wrapper: CronJobMutationWrapperWire =
+            serde_json::from_value(payload).map_err(|_| error)?;
+        return wrapper.into_job().ok_or(error);
+    }
+    serde_json::from_value(payload).map_err(|_| error)
 }
 
 pub fn decode_remove(response: GatewayResponse) -> Result<CronRemoved, WireError> {
@@ -1206,7 +1274,7 @@ pub fn decode_runs_page(response: GatewayResponse) -> Result<CronRunHistoryPage,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct CronListWire {
     jobs: Vec<CronJobWire>,
     total: u64,
@@ -1214,7 +1282,12 @@ struct CronListWire {
     limit: u64,
     has_more: bool,
     next_offset: Option<u64>,
-    delivery_previews: Value,
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
+    delivery_previews: Option<Value>,
+    #[serde(default)]
+    snapshot_revision: Option<String>,
+    #[serde(default)]
+    config_revision: Option<String>,
 }
 
 impl CronListWire {
@@ -1236,15 +1309,61 @@ impl CronListWire {
             } else {
                 self.next_offset.is_none() && expected_next_offset == self.total
             }
-            && self.delivery_previews.is_object()
+            && self.delivery_previews.as_ref().is_none_or(Value::is_object)
+            && valid_optional_string(&self.snapshot_revision)
+            && valid_optional_string(&self.config_revision)
             && self.jobs.iter().all(CronJobWire::is_valid)
     }
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CronJobMutationWrapperWire {
+    job: CronJobWire,
+    #[serde(default)]
+    created: Option<bool>,
+    #[serde(default)]
+    updated: Option<bool>,
+    #[serde(default)]
+    delivery_preview: Option<CronDeliveryPreviewWire>,
+}
+
+impl CronJobMutationWrapperWire {
+    fn into_job(self) -> Option<CronJobWire> {
+        let _ = (self.created, self.updated);
+        self.delivery_preview
+            .as_ref()
+            .is_none_or(CronDeliveryPreviewWire::is_valid)
+            .then_some(self.job)
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronDeliveryPreviewWire {
+    label: String,
+    detail: String,
+}
+
+impl CronDeliveryPreviewWire {
+    fn is_valid(&self) -> bool {
+        let _ = (&self.label, &self.detail);
+        true
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CronJobWire {
     id: String,
+    #[serde(default)]
+    declaration_key: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    owner: Option<CronOwnerWire>,
+    #[serde(default)]
+    scheduled_tool_policy: Option<CronScheduledToolPolicyWire>,
     #[serde(default)]
     agent_id: Option<String>,
     #[serde(default)]
@@ -1257,7 +1376,13 @@ struct CronJobWire {
     delete_after_run: Option<bool>,
     created_at_ms: u64,
     updated_at_ms: u64,
+    #[serde(default)]
+    config_revision: Option<String>,
     schedule: CronScheduleWire,
+    #[serde(default)]
+    pacing: Option<CronPacingWire>,
+    #[serde(default)]
+    trigger: Option<CronTriggerWire>,
     session_target: String,
     wake_mode: CronWakeModeWire,
     payload: CronPayloadWire,
@@ -1266,6 +1391,30 @@ struct CronJobWire {
     #[serde(default)]
     failure_alert: CronFailureAlertWire,
     state: CronJobStateWire,
+    #[serde(default)]
+    next_run_at_ms: Option<u64>,
+    #[serde(default)]
+    last_run_at_ms: Option<u64>,
+    #[serde(default)]
+    last_run_status: Option<CronRunStatusWire>,
+    #[serde(default)]
+    last_run_error: Option<String>,
+    #[serde(default)]
+    last_delivered: Option<bool>,
+    #[serde(default)]
+    last_delivery_status: Option<String>,
+    #[serde(default)]
+    last_delivery_error: Option<String>,
+    #[serde(default)]
+    delivery_suppression_reason: Option<String>,
+    #[serde(default)]
+    last_failure_notification_delivered: Option<bool>,
+    #[serde(default)]
+    last_failure_notification_delivery_status: Option<String>,
+    #[serde(default)]
+    last_failure_notification_delivery_error: Option<String>,
+    #[serde(default)]
+    delivery_preview: Option<CronDeliveryPreviewWire>,
 }
 
 impl CronJobWire {
@@ -1281,15 +1430,37 @@ impl CronJobWire {
             &self.wake_mode,
             &self.delivery,
             &self.failure_alert,
+            self.next_run_at_ms,
+            self.last_run_at_ms,
+            &self.last_run_status,
+            &self.last_run_error,
+            self.last_delivered,
+            &self.last_delivery_status,
+            &self.last_delivery_error,
+            &self.delivery_suppression_reason,
+            self.last_failure_notification_delivered,
+            &self.last_failure_notification_delivery_status,
+            &self.last_failure_notification_delivery_error,
+            &self.delivery_preview,
         );
         valid_safe_integer(self.created_at_ms)
             && valid_safe_integer(self.updated_at_ms)
             && valid_string(&self.id)
             && valid_string(&self.name)
+            && valid_optional_string(&self.declaration_key)
+            && valid_optional_string(&self.display_name)
+            && self.owner.as_ref().is_none_or(CronOwnerWire::is_valid)
+            && self
+                .scheduled_tool_policy
+                .as_ref()
+                .is_none_or(CronScheduledToolPolicyWire::is_valid)
             && valid_optional_string(&self.agent_id)
             && valid_optional_string(&self.session_key)
             && valid_optional_string(&self.description)
+            && valid_optional_string(&self.config_revision)
             && self.schedule.is_valid()
+            && self.pacing.as_ref().is_none_or(CronPacingWire::is_valid)
+            && self.trigger.as_ref().is_none_or(CronTriggerWire::is_valid)
             && cron_session_target(&self.session_target).is_some()
             && self.wake_mode.is_valid()
             && self.payload.is_valid()
@@ -1299,13 +1470,27 @@ impl CronJobWire {
                 .is_none_or(CronDeliveryWire::is_valid)
             && self.failure_alert.is_valid()
             && self.state.is_valid()
+            && valid_optional_safe_integer(self.next_run_at_ms)
+            && valid_optional_safe_integer(self.last_run_at_ms)
+            && valid_optional_string(&self.last_run_error)
+            && valid_optional_cron_delivery_status(&self.last_delivery_status)
+            && valid_optional_string(&self.last_delivery_error)
+            && valid_optional_string(&self.delivery_suppression_reason)
+            && valid_optional_cron_delivery_status(&self.last_failure_notification_delivery_status)
+            && valid_optional_string(&self.last_failure_notification_delivery_error)
+            && self
+                .delivery_preview
+                .as_ref()
+                .is_none_or(CronDeliveryPreviewWire::is_valid)
     }
 
     fn is_ui_crud_projection(&self) -> bool {
         matches!(
             cron_session_target(&self.session_target),
             Some(CronSessionTargetWire::Isolated)
-        ) && matches!(self.payload, CronPayloadWire::AgentTurn { .. })
+        ) && self.agent_id.as_deref().is_some_and(valid_string)
+            && self.payload.agent_turn_message().is_some_and(valid_string)
+            && self.schedule.is_ui_projection()
             && self
                 .delivery
                 .as_ref()
@@ -1318,6 +1503,10 @@ impl CronJobWire {
             .expect("validated cron session target must project");
         let payload_kind = self.payload.kind();
         let message = self.payload.agent_turn_message().map(ToOwned::to_owned);
+        let model = match self.payload {
+            CronPayloadWire::AgentTurn { model, .. } => model,
+            _ => None,
+        };
         let delivery = self
             .delivery
             .and_then(CronDeliveryWire::into_view)
@@ -1327,6 +1516,7 @@ impl CronJobWire {
             name: self.name,
             agent_id: self.agent_id,
             message,
+            model,
             schedule: self.schedule.into_view(),
             delivery,
             enabled: self.enabled,
@@ -1359,6 +1549,25 @@ enum CronScheduleWire {
         tz: Option<String>,
         stagger_ms: Option<u64>,
     },
+    #[serde(rename = "on-exit")]
+    OnExit {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    Stream {
+        command: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        r#match: Option<String>,
+        #[serde(default)]
+        batch_ms: Option<u64>,
+        #[serde(default)]
+        max_batch_bytes: Option<u64>,
+    },
 }
 
 impl CronScheduleWire {
@@ -1382,7 +1591,33 @@ impl CronScheduleWire {
                     && valid_optional_string(tz)
                     && valid_optional_safe_integer(*stagger_ms)
             }
+            Self::OnExit { command, cwd } => valid_string(command) && valid_optional_string(cwd),
+            Self::Stream {
+                command,
+                cwd,
+                mode,
+                r#match,
+                batch_ms,
+                max_batch_bytes,
+            } => {
+                !command.is_empty()
+                    && command.iter().all(|value| valid_string(value))
+                    && valid_optional_string(cwd)
+                    && mode
+                        .as_deref()
+                        .is_none_or(|mode| matches!(mode, "line" | "match"))
+                    && valid_optional_string(r#match)
+                    && valid_optional_safe_integer(*batch_ms)
+                    && valid_optional_safe_integer(*max_batch_bytes)
+            }
         }
+    }
+
+    fn is_ui_projection(&self) -> bool {
+        matches!(
+            self,
+            Self::At { .. } | Self::Every { .. } | Self::Cron { .. }
+        )
     }
 
     fn into_view(self) -> CronScheduleView {
@@ -1396,6 +1631,9 @@ impl CronScheduleWire {
                 anchor_ms,
             },
             Self::Cron { expr, tz, .. } => CronScheduleView::Cron { expr, tz },
+            Self::OnExit { .. } | Self::Stream { .. } => {
+                panic!("validated UI cron schedule must project")
+            }
         }
     }
 }
@@ -1423,6 +1661,10 @@ impl CronWakeModeWire {
 enum CronPayloadWire {
     SystemEvent {
         text: String,
+        #[serde(default)]
+        tools_allow: Option<Vec<String>>,
+        #[serde(default)]
+        tools_allow_is_default: Option<bool>,
     },
     AgentTurn {
         message: String,
@@ -1442,20 +1684,61 @@ enum CronPayloadWire {
         light_context: Option<bool>,
         #[serde(default)]
         tools_allow: Option<Vec<String>>,
+        #[serde(default)]
+        tools_allow_is_default: Option<bool>,
     },
+    Command {
+        argv: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: Option<Value>,
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        timeout_seconds: Option<f64>,
+        #[serde(default)]
+        no_output_timeout_seconds: Option<f64>,
+        #[serde(default)]
+        output_max_bytes: Option<u64>,
+        #[serde(default)]
+        tools_allow: Option<Vec<String>>,
+        #[serde(default)]
+        tools_allow_is_default: Option<bool>,
+    },
+    Script {
+        script: String,
+        #[serde(default)]
+        timeout_seconds: Option<f64>,
+        #[serde(default)]
+        tool_budget: Option<u64>,
+        #[serde(default)]
+        tools_allow: Option<Vec<String>>,
+        #[serde(default)]
+        tools_allow_is_default: Option<bool>,
+    },
+    Heartbeat,
+    SkillCollectionReview,
 }
 
 impl CronPayloadWire {
     fn agent_turn_message(&self) -> Option<&str> {
         match self {
             Self::AgentTurn { message, .. } => Some(message),
-            Self::SystemEvent { .. } => None,
+            _ => None,
         }
     }
 
     fn is_valid(&self) -> bool {
         match self {
-            Self::SystemEvent { text } => valid_string(text),
+            Self::SystemEvent {
+                text,
+                tools_allow,
+                tools_allow_is_default,
+            } => {
+                let _ = tools_allow_is_default;
+                valid_string(text) && valid_optional_string_vec(tools_allow)
+            }
             Self::AgentTurn {
                 message,
                 model,
@@ -1466,11 +1749,13 @@ impl CronPayloadWire {
                 external_content_source,
                 light_context,
                 tools_allow,
+                tools_allow_is_default,
             } => {
                 let _ = (
                     allow_unsafe_external_content,
                     external_content_source,
                     light_context,
+                    tools_allow_is_default,
                 );
                 valid_string(message)
                     && valid_optional_string(model)
@@ -1478,16 +1763,51 @@ impl CronPayloadWire {
                     && external_content_source
                         .as_deref()
                         .is_none_or(|source| matches!(source, "gmail" | "webhook"))
+                    && valid_optional_nonnegative_number(*timeout_seconds)
+                    && valid_optional_string_vec(fallbacks)
+                    && valid_optional_string_vec(tools_allow)
+            }
+            Self::Command {
+                argv,
+                cwd,
+                env,
+                input,
+                timeout_seconds,
+                no_output_timeout_seconds,
+                output_max_bytes,
+                tools_allow,
+                tools_allow_is_default,
+            } => {
+                let _ = (env, tools_allow_is_default);
+                !argv.is_empty()
+                    && argv.iter().all(|value| valid_string(value))
+                    && valid_optional_string(cwd)
+                    && valid_optional_string(input)
+                    && valid_optional_nonnegative_number(*timeout_seconds)
+                    && valid_optional_nonnegative_number(*no_output_timeout_seconds)
+                    && output_max_bytes
+                        .as_ref()
+                        .is_none_or(|value| *value > 0 && valid_safe_integer(*value))
+                    && valid_optional_string_vec(tools_allow)
+            }
+            Self::Script {
+                script,
+                timeout_seconds,
+                tool_budget,
+                tools_allow,
+                tools_allow_is_default,
+            } => {
+                let _ = tools_allow_is_default;
+                valid_string(script)
                     && timeout_seconds
                         .as_ref()
-                        .is_none_or(|value| value.is_finite() && *value >= 0.0)
-                    && fallbacks
+                        .is_none_or(|value| value.is_finite() && *value >= 1.0)
+                    && tool_budget
                         .as_ref()
-                        .is_none_or(|values| values.iter().all(|value| valid_string(value)))
-                    && tools_allow
-                        .as_ref()
-                        .is_none_or(|values| values.iter().all(|value| valid_string(value)))
+                        .is_none_or(|value| *value > 0 && valid_safe_integer(*value))
+                    && valid_optional_string_vec(tools_allow)
             }
+            Self::Heartbeat | Self::SkillCollectionReview => true,
         }
     }
 
@@ -1495,7 +1815,85 @@ impl CronPayloadWire {
         match self {
             Self::SystemEvent { .. } => CronPayloadKind::SystemEvent,
             Self::AgentTurn { .. } => CronPayloadKind::AgentTurn,
+            Self::Command { .. }
+            | Self::Script { .. }
+            | Self::Heartbeat
+            | Self::SkillCollectionReview => CronPayloadKind::SystemEvent,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronOwnerWire {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    session_key: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+impl CronOwnerWire {
+    fn is_valid(&self) -> bool {
+        valid_optional_string(&self.agent_id)
+            && valid_optional_string(&self.session_key)
+            && valid_optional_string(&self.account_id)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronScheduledToolPolicyWire {
+    version: u64,
+    mode: String,
+    #[serde(default)]
+    owner_session_key: Option<String>,
+    #[serde(default)]
+    owner_account_id: Option<String>,
+}
+
+impl CronScheduledToolPolicyWire {
+    fn is_valid(&self) -> bool {
+        self.version == 1
+            && matches!(self.mode.as_str(), "trusted" | "account")
+            && valid_optional_string(&self.owner_session_key)
+            && valid_optional_string(&self.owner_account_id)
+            && (self.mode != "account"
+                || (self.owner_session_key.as_deref().is_some_and(valid_string)
+                    && self.owner_account_id.as_deref().is_some_and(valid_string)))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CronPacingWire {
+    #[serde(default)]
+    min: Option<String>,
+    #[serde(default)]
+    max: Option<String>,
+}
+
+impl CronPacingWire {
+    fn is_valid(&self) -> bool {
+        (self.min.is_some() || self.max.is_some())
+            && valid_optional_string(&self.min)
+            && valid_optional_string(&self.max)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CronTriggerWire {
+    script: String,
+    #[serde(default)]
+    once: Option<bool>,
+}
+
+impl CronTriggerWire {
+    fn is_valid(&self) -> bool {
+        let _ = self.once;
+        valid_string(&self.script)
     }
 }
 
@@ -1514,6 +1912,8 @@ struct CronDeliveryWire {
     #[serde(default)]
     failure_destination: Option<CronFailureDestinationWire>,
     #[serde(default)]
+    completion_destination: Option<CronCompletionDestinationWire>,
+    #[serde(default)]
     to: Option<String>,
 }
 
@@ -1529,6 +1929,10 @@ impl CronDeliveryWire {
                 .failure_destination
                 .as_ref()
                 .is_none_or(CronFailureDestinationWire::is_valid)
+            && self
+                .completion_destination
+                .as_ref()
+                .is_none_or(CronCompletionDestinationWire::is_valid)
     }
 
     fn is_ui_projection(&self) -> bool {
@@ -1576,6 +1980,19 @@ impl CronFailureDestinationWire {
                 .mode
                 .as_deref()
                 .is_none_or(|mode| matches!(mode, "announce" | "webhook"))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronCompletionDestinationWire {
+    mode: String,
+    to: String,
+}
+
+impl CronCompletionDestinationWire {
+    fn is_valid(&self) -> bool {
+        self.mode == "webhook" && valid_string(&self.to)
     }
 }
 
@@ -1634,6 +2051,8 @@ struct CronJobStateWire {
     #[serde(default)]
     next_run_at_ms: Option<u64>,
     #[serde(default)]
+    schedule_activated_at_ms: Option<u64>,
+    #[serde(default)]
     running_at_ms: Option<u64>,
     #[serde(default)]
     last_run_at_ms: Option<u64>,
@@ -1654,6 +2073,8 @@ struct CronJobStateWire {
     #[serde(default)]
     consecutive_errors: Option<u64>,
     #[serde(default)]
+    auto_disabled: Option<CronAutoDisabledWire>,
+    #[serde(default)]
     consecutive_skipped: Option<u64>,
     #[serde(default)]
     last_delivered: Option<bool>,
@@ -1661,6 +2082,8 @@ struct CronJobStateWire {
     last_delivery_status: Option<String>,
     #[serde(default)]
     last_delivery_error: Option<String>,
+    #[serde(default)]
+    delivery_suppression_reason: Option<String>,
     #[serde(default)]
     last_failure_notification_delivered: Option<bool>,
     #[serde(default)]
@@ -1670,6 +2093,32 @@ struct CronJobStateWire {
     #[serde(default)]
     last_failure_alert_at_ms: Option<u64>,
     #[serde(default)]
+    last_trigger_eval_at_ms: Option<u64>,
+    #[serde(default)]
+    trigger_eval_count: Option<u64>,
+    #[serde(default)]
+    last_trigger_fire_at_ms: Option<u64>,
+    #[serde(default)]
+    trigger_state: Option<Value>,
+    #[serde(default)]
+    stream_status: Option<String>,
+    #[serde(default)]
+    stream_error: Option<String>,
+    #[serde(default)]
+    stream_consecutive_failures: Option<u64>,
+    #[serde(default)]
+    stream_restart_exhausted: Option<bool>,
+    #[serde(default)]
+    stream_source_identity: Option<String>,
+    #[serde(default)]
+    stream_dropped_batches: Option<u64>,
+    #[serde(default)]
+    stream_coalesced_batches: Option<u64>,
+    #[serde(default)]
+    stream_last_started_at_ms: Option<u64>,
+    #[serde(default)]
+    stream_last_exit_at_ms: Option<u64>,
+    #[serde(default)]
     schedule_error_count: Option<u64>,
 }
 
@@ -1677,6 +2126,7 @@ impl CronJobStateWire {
     fn is_valid(&self) -> bool {
         let _ = (
             self.next_run_at_ms,
+            self.schedule_activated_at_ms,
             &self.last_status,
             &self.last_error,
             &self.last_diagnostics,
@@ -1688,19 +2138,62 @@ impl CronJobStateWire {
             self.last_delivered,
             &self.last_delivery_status,
             &self.last_delivery_error,
+            &self.delivery_suppression_reason,
             self.last_failure_notification_delivered,
             &self.last_failure_notification_delivery_status,
             &self.last_failure_notification_delivery_error,
             self.last_failure_alert_at_ms,
+            self.last_trigger_eval_at_ms,
+            self.trigger_eval_count,
+            self.last_trigger_fire_at_ms,
+            &self.trigger_state,
+            &self.stream_status,
+            &self.stream_error,
+            self.stream_consecutive_failures,
+            self.stream_restart_exhausted,
+            &self.stream_source_identity,
+            self.stream_dropped_batches,
+            self.stream_coalesced_batches,
+            self.stream_last_started_at_ms,
+            self.stream_last_exit_at_ms,
             self.schedule_error_count,
         );
         valid_optional_safe_integer(self.next_run_at_ms)
+            && valid_optional_safe_integer(self.schedule_activated_at_ms)
             && valid_optional_safe_integer(self.running_at_ms)
             && valid_optional_safe_integer(self.last_run_at_ms)
             && valid_optional_safe_integer(self.last_duration_ms)
             && valid_optional_safe_integer(self.consecutive_errors)
+            && self
+                .auto_disabled
+                .as_ref()
+                .is_none_or(CronAutoDisabledWire::is_valid)
             && valid_optional_safe_integer(self.consecutive_skipped)
+            && valid_optional_string(&self.last_error)
+            && valid_optional_string(&self.last_diagnostic_summary)
+            && valid_optional_string(&self.last_error_reason)
+            && valid_optional_cron_delivery_status(&self.last_delivery_status)
+            && valid_optional_string(&self.last_delivery_error)
+            && valid_optional_string(&self.delivery_suppression_reason)
+            && valid_optional_cron_delivery_status(&self.last_failure_notification_delivery_status)
+            && valid_optional_string(&self.last_failure_notification_delivery_error)
             && valid_optional_safe_integer(self.last_failure_alert_at_ms)
+            && valid_optional_safe_integer(self.last_trigger_eval_at_ms)
+            && valid_optional_safe_integer(self.trigger_eval_count)
+            && valid_optional_safe_integer(self.last_trigger_fire_at_ms)
+            && self.stream_status.as_deref().is_none_or(|status| {
+                matches!(
+                    status,
+                    "starting" | "running" | "restarting" | "stopped" | "disabled" | "error"
+                )
+            })
+            && valid_optional_string(&self.stream_error)
+            && valid_optional_string(&self.stream_source_identity)
+            && valid_optional_safe_integer(self.stream_consecutive_failures)
+            && valid_optional_safe_integer(self.stream_dropped_batches)
+            && valid_optional_safe_integer(self.stream_coalesced_batches)
+            && valid_optional_safe_integer(self.stream_last_started_at_ms)
+            && valid_optional_safe_integer(self.stream_last_exit_at_ms)
             && valid_optional_safe_integer(self.schedule_error_count)
     }
 
@@ -1716,6 +2209,25 @@ impl CronJobStateWire {
             last_error: self.last_error,
             last_duration_ms: self.last_duration_ms,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronAutoDisabledWire {
+    reason: String,
+    at_ms: u64,
+    consecutive_errors: u64,
+}
+
+impl CronAutoDisabledWire {
+    fn is_valid(&self) -> bool {
+        matches!(
+            self.reason.as_str(),
+            "consecutive-failures" | "schedule-errors"
+        ) && valid_safe_integer(self.at_ms)
+            && self.consecutive_errors > 0
+            && valid_safe_integer(self.consecutive_errors)
     }
 }
 
@@ -1758,6 +2270,8 @@ struct CronEventWire {
     #[serde(default)]
     status: Option<CronRunStatusWire>,
     #[serde(default)]
+    completion_status: Option<String>,
+    #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     summary: Option<String>,
@@ -1770,6 +2284,8 @@ struct CronEventWire {
     #[serde(default)]
     delivery_error: Option<String>,
     #[serde(default)]
+    delivery_suppression_reason: Option<String>,
+    #[serde(default)]
     failure_notification_delivery: Option<Value>,
     #[serde(default)]
     delivery: Option<Value>,
@@ -1781,6 +2297,8 @@ struct CronEventWire {
     run_id: Option<String>,
     #[serde(default)]
     next_run_at_ms: Option<u64>,
+    #[serde(default)]
+    trigger_fired: Option<bool>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -1796,10 +2314,15 @@ impl CronEventWire {
             && valid_optional_string(&self.run_id)
             && valid_optional_string(&self.session_id)
             && valid_optional_string(&self.session_key)
+            && self
+                .completion_status
+                .as_deref()
+                .is_none_or(|status| matches!(status, "succeeded" | "failed" | "unknown"))
             && valid_optional_string(&self.error)
             && valid_optional_string(&self.summary)
-            && valid_optional_string(&self.delivery_status)
+            && valid_optional_cron_delivery_status(&self.delivery_status)
             && valid_optional_string(&self.delivery_error)
+            && valid_optional_string(&self.delivery_suppression_reason)
             && valid_optional_string(&self.model)
             && valid_optional_string(&self.provider)
             && valid_optional_safe_integer(self.run_at_ms)
@@ -1809,48 +2332,50 @@ impl CronEventWire {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum CronRunWire {
-    Enqueued(CronRunEnqueuedWire),
-    Disposition(CronRunDispositionWire),
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct CronRunEnqueuedWire {
+#[serde(rename_all = "camelCase")]
+struct CronRunWire {
     ok: bool,
-    enqueued: bool,
-    run_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CronRunDispositionWire {
-    ok: bool,
-    ran: bool,
-    reason: String,
+    #[serde(default)]
+    enqueued: Option<bool>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    ran: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    process_instance_id: Option<String>,
 }
 
 impl CronRunWire {
     fn into_public(self) -> Option<CronRunReceipt> {
-        match self {
-            Self::Enqueued(CronRunEnqueuedWire {
-                ok: true,
-                enqueued: true,
-                run_id,
-            }) if valid_string(&run_id) => Some(CronRunReceipt {
-                enqueued: true,
-                run_id: Some(run_id),
-                disposition: None,
+        let Self {
+            ok,
+            enqueued,
+            run_id,
+            ran,
+            reason,
+            process_instance_id,
+        } = self;
+        if !valid_optional_string(&process_instance_id) {
+            return None;
+        }
+        match (ok, enqueued, run_id, ran, reason) {
+            (true, Some(true), Some(run_id), None, None) if valid_string(&run_id) => {
+                Some(CronRunReceipt {
+                    outcome: CronRunReceiptOutcome::Enqueued { run_id },
+                })
+            }
+            (true, None, None, Some(true), None) => Some(CronRunReceipt {
+                outcome: CronRunReceiptOutcome::Ran,
             }),
-            Self::Disposition(CronRunDispositionWire {
-                ok: true,
-                ran: false,
-                reason,
-            }) => cron_run_disposition(&reason).map(|disposition| CronRunReceipt {
-                enqueued: false,
-                run_id: None,
-                disposition: Some(disposition),
+            (true, None, None, Some(false), Some(reason)) => {
+                cron_run_disposition(&reason).map(|disposition| CronRunReceipt {
+                    outcome: CronRunReceiptOutcome::Skipped(disposition),
+                })
+            }
+            (false, None, None, None, None) => Some(CronRunReceipt {
+                outcome: CronRunReceiptOutcome::OutcomeUnknown,
             }),
             _ => None,
         }
@@ -1858,7 +2383,7 @@ impl CronRunWire {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct CronRunsWire {
     entries: Vec<CronRunLogEntryWire>,
     total: u64,
@@ -1866,6 +2391,10 @@ struct CronRunsWire {
     limit: u64,
     has_more: bool,
     next_offset: Option<u64>,
+    #[serde(default)]
+    snapshot_revision: Option<String>,
+    #[serde(default)]
+    config_revision: Option<String>,
 }
 
 impl CronRunsWire {
@@ -1886,23 +2415,31 @@ impl CronRunsWire {
             } else {
                 self.next_offset.is_none() && expected_next_offset == self.total
             }
+            && valid_optional_string(&self.snapshot_revision)
+            && valid_optional_string(&self.config_revision)
             && self.entries.iter().all(CronRunLogEntryWire::is_valid)
     }
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct CronRunLogEntryWire {
     ts: u64,
     job_id: String,
     action: String,
     status: Option<CronRunStatusWire>,
+    #[serde(default)]
+    completion_status: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    error_reason: Option<String>,
     summary: Option<String>,
     diagnostics: Option<Value>,
     delivered: Option<bool>,
     delivery_status: Option<String>,
     delivery_error: Option<String>,
+    #[serde(default)]
+    delivery_suppression_reason: Option<String>,
     failure_notification_delivery: Option<Value>,
     session_id: Option<String>,
     session_key: Option<String>,
@@ -1911,6 +2448,8 @@ struct CronRunLogEntryWire {
     delivery: Option<Value>,
     duration_ms: Option<u64>,
     next_run_at_ms: Option<u64>,
+    #[serde(default)]
+    trigger_fired: Option<bool>,
     model: Option<String>,
     provider: Option<String>,
     usage: Option<Value>,
@@ -1934,6 +2473,7 @@ impl CronRunLogEntryWire {
             self.run_at_ms,
             self.duration_ms,
             self.next_run_at_ms,
+            self.trigger_fired,
             &self.model,
             &self.provider,
             &self.usage,
@@ -1945,9 +2485,22 @@ impl CronRunLogEntryWire {
             && valid_optional_safe_integer(self.next_run_at_ms)
             && valid_string(&self.job_id)
             && self.action == "finished"
+            && self
+                .completion_status
+                .as_deref()
+                .is_none_or(|status| matches!(status, "succeeded" | "failed" | "unknown"))
+            && valid_optional_string(&self.error)
+            && valid_optional_string(&self.error_reason)
+            && valid_optional_string(&self.summary)
+            && valid_optional_cron_delivery_status(&self.delivery_status)
+            && valid_optional_string(&self.delivery_error)
+            && valid_optional_string(&self.delivery_suppression_reason)
             && valid_optional_string(&self.session_id)
             && valid_optional_string(&self.session_key)
             && valid_optional_string(&self.run_id)
+            && valid_optional_string(&self.model)
+            && valid_optional_string(&self.provider)
+            && valid_optional_string(&self.job_name)
     }
 
     fn into_history(self) -> CronRunHistoryEntry {
@@ -1973,6 +2526,28 @@ const fn valid_optional_safe_integer(value: Option<u64>) -> bool {
     }
 }
 
+fn valid_optional_nonnegative_number(value: Option<f64>) -> bool {
+    value.is_none_or(|value| value.is_finite() && value >= 0.0)
+}
+
+fn valid_optional_string_vec(values: &Option<Vec<String>>) -> bool {
+    values
+        .as_ref()
+        .is_none_or(|values| values.iter().all(|value| valid_string(value)))
+}
+
+fn deserialize_optional_object<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom("expected object"))
+    }
+}
+
 fn cron_session_target(value: &str) -> Option<CronSessionTargetWire> {
     match value {
         "main" => Some(CronSessionTargetWire::Main),
@@ -1990,8 +2565,21 @@ fn cron_run_disposition(value: &str) -> Option<CronRunDisposition> {
         "already-running" => Some(CronRunDisposition::AlreadyRunning),
         "not-due" => Some(CronRunDisposition::NotDue),
         "invalid-spec" => Some(CronRunDisposition::InvalidSpec),
+        "disabled" => Some(CronRunDisposition::Disabled),
+        "stopped" => Some(CronRunDisposition::Stopped),
         _ => None,
     }
+}
+
+fn valid_cron_delivery_status(value: &str) -> bool {
+    matches!(
+        value,
+        "delivered" | "not-delivered" | "unknown" | "not-requested"
+    )
+}
+
+fn valid_optional_cron_delivery_status(value: &Option<String>) -> bool {
+    value.as_deref().is_none_or(valid_cron_delivery_status)
 }
 
 fn valid_job_log_id(value: &str) -> bool {
@@ -2044,7 +2632,7 @@ mod tests {
             "cron-job-1",
             "isolated",
             "next-heartbeat",
-            json!({"kind": "systemEvent", "text": "system-event"}),
+            json!({"kind": "agentTurn", "message": "agent-turn"}),
             None,
         );
         job["schedule"]["anchorMs"] = json!(1);
@@ -2160,6 +2748,7 @@ mod tests {
                 Some("new-name".into()),
                 Some("other-agent".into()),
                 Some("new-message".into()),
+                None,
                 Some(CronSchedule::cron("30 8 * * *".into()).unwrap()),
                 Some(true),
             )
@@ -2183,13 +2772,42 @@ mod tests {
             serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap(),
             json!({
                 "type": "req", "id": "cron-list-1", "method": "cron.list",
-                "params": { "includeDisabled": true, "limit": 200, "offset": 200 }
+                "params": {
+                    "includeDisabled": true,
+                    "includeDeliveryPreviews": false,
+                    "limit": 200,
+                    "offset": 200
+                }
             })
         );
     }
 
     #[test]
     fn cron_job_decoder_projects_closed_ui_fields() {
+        let mut wrapper_job = cron_job(
+            "cron-job-wrapper",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "wrapped"}),
+            None,
+        );
+        wrapper_job["agentId"] = json!("main");
+        wrapper_job["configRevision"] = json!("config-1");
+        assert_eq!(
+            decode_add(response(
+                "cron-add-wrapper",
+                json!({
+                    "created": true,
+                    "job": wrapper_job,
+                    "deliveryPreview": {"label": "None", "detail": "No delivery"}
+                })
+            ))
+            .unwrap()
+            .message
+            .as_deref(),
+            Some("wrapped")
+        );
+
         let mut job = cron_job(
             "cron-job-1",
             "isolated",
@@ -2244,8 +2862,36 @@ mod tests {
             json!({"kind": "agentTurn", "message": "at"}),
             None,
         );
+        at_job["agentId"] = json!("main");
         at_job["schedule"] = json!({"kind": "at", "at": "2026-08-08T12:00:00Z"});
         assert!(decode_add(response("cron-at", at_job)).is_ok());
+
+        let mut on_exit = cron_job(
+            "cron-on-exit",
+            "isolated",
+            "now",
+            json!({"kind": "agentTurn", "message": "on-exit"}),
+            None,
+        );
+        on_exit["agentId"] = json!("main");
+        on_exit["schedule"] = json!({"kind": "on-exit", "command": "git status"});
+        assert!(matches!(
+            decode_add(response("cron-on-exit", on_exit)),
+            Err(WireError::InvalidCronAdd)
+        ));
+
+        let mut stream = cron_job(
+            "cron-stream",
+            "isolated",
+            "now",
+            json!({"kind": "agentTurn", "message": "stream"}),
+            None,
+        );
+        stream["schedule"] = json!({"kind": "stream", "command": ["node", "watch.js"]});
+        assert!(matches!(
+            decode_add(response("cron-stream", stream)),
+            Err(WireError::InvalidCronAdd)
+        ));
 
         let mut webhook_job = cron_job(
             "cron-webhook",
@@ -2263,13 +2909,25 @@ mod tests {
 
     #[test]
     fn cron_job_decoder_projects_missing_delivery_as_none_and_rejects_non_ui_delivery() {
-        let without_delivery = cron_job(
+        let mut add_job_preview = cron_job(
+            "cron-job-preview",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "scheduled message"}),
+            Some(json!({"mode": "none"})),
+        );
+        add_job_preview["agentId"] = json!("main");
+        add_job_preview["deliveryPreview"] = json!({"label": "None", "detail": "No delivery"});
+        assert!(decode_add(response("cron-add-preview", add_job_preview)).is_ok());
+
+        let mut without_delivery = cron_job(
             "cron-job-1",
             "isolated",
             "next-heartbeat",
             json!({"kind": "agentTurn", "message": "scheduled message"}),
             None,
         );
+        without_delivery["agentId"] = json!("main");
         assert_eq!(
             decode_add(response("cron-add-1", without_delivery))
                 .unwrap()
@@ -2291,29 +2949,58 @@ mod tests {
     }
 
     #[test]
-    fn cron_list_projects_only_isolated_agent_turn_jobs() {
-        let isolated_agent_turn = cron_job(
+    fn cron_list_projects_only_ui_crud_subset_and_accepts_page_revisions() {
+        let mut isolated_agent_turn = cron_job(
             "cron-job-1",
             "isolated",
             "next-heartbeat",
             json!({"kind": "agentTurn", "message": "scheduled message"}),
             None,
         );
-        let main_system_event = cron_job(
+        isolated_agent_turn["agentId"] = json!("main");
+        let mut main_system_event = cron_job(
             "cron-job-2",
             "main",
             "next-heartbeat",
             json!({"kind": "systemEvent", "text": "system event"}),
             None,
         );
+        main_system_event["agentId"] = json!("main");
+        let mut on_exit = cron_job(
+            "cron-job-3",
+            "isolated",
+            "now",
+            json!({"kind": "agentTurn", "message": "on-exit"}),
+            None,
+        );
+        on_exit["agentId"] = json!("main");
+        on_exit["schedule"] = json!({"kind": "on-exit", "command": "git status"});
+        let mut stream = cron_job(
+            "cron-job-4",
+            "isolated",
+            "now",
+            json!({"kind": "agentTurn", "message": "stream"}),
+            None,
+        );
+        stream["agentId"] = json!("main");
+        stream["schedule"] = json!({"kind": "stream", "command": ["node", "watch.js"]});
+        let command_without_agent_id = cron_job(
+            "cron-job-5",
+            "isolated",
+            "now",
+            json!({"kind": "command", "argv": ["node", "task.js"]}),
+            None,
+        );
         let payload = json!({
-            "jobs": [isolated_agent_turn, main_system_event],
-            "total": 2,
+            "jobs": [isolated_agent_turn, main_system_event, on_exit, stream, command_without_agent_id],
+            "total": 5,
             "offset": 0,
             "limit": 50,
             "hasMore": false,
             "nextOffset": null,
             "deliveryPreviews": {},
+            "snapshotRevision": "snapshot-1",
+            "configRevision": "config-1",
         });
 
         let jobs = decode_list(response("cron-list-1", payload)).unwrap();
@@ -2324,21 +3011,308 @@ mod tests {
     }
 
     #[test]
-    fn cron_job_decoder_accepts_only_schema_defined_failure_alert_forms() {
-        let disabled = cron_job(
+    fn cron_list_accepts_missing_delivery_previews_and_rejects_non_object_when_present() {
+        let job = cron_job(
             "cron-job-1",
             "isolated",
             "next-heartbeat",
-            json!({"kind": "systemEvent", "text": "system-event"}),
+            json!({"kind": "agentTurn", "message": "scheduled message"}),
             None,
         );
+        let payload_without_delivery_previews = json!({
+            "jobs": [job.clone()],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "hasMore": false,
+            "nextOffset": null,
+        });
+        assert!(decode_list(response("cron-list-1", payload_without_delivery_previews)).is_ok());
+
+        for delivery_previews in [json!(null), json!([]), json!("bad")] {
+            let payload = json!({
+                "jobs": [job.clone()],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "hasMore": false,
+                "nextOffset": null,
+                "deliveryPreviews": delivery_previews,
+            });
+            assert!(matches!(
+                decode_list(response("cron-list-1", payload)),
+                Err(WireError::InvalidCronList)
+            ));
+        }
+    }
+
+    #[test]
+    fn cron_decoders_accept_openclaw_8_2_additive_response_fields_without_projecting_them() {
+        let mut job = cron_job(
+            "cron-job-8-2",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "scheduled message"}),
+            Some(json!({"mode": "none"})),
+        );
+        job["agentId"] = json!("main");
+        job["declarationKey"] = json!("declaration-1");
+        job["displayName"] = json!("Display name");
+        job["owner"] = json!({
+            "agentId": "main",
+            "sessionKey": "agent:main:session",
+            "accountId": "account-1"
+        });
+        job["scheduledToolPolicy"] = json!({
+            "version": 1,
+            "mode": "account",
+            "ownerSessionKey": "agent:main:session",
+            "ownerAccountId": "account-1"
+        });
+        job["pacing"] = json!({"min": "1m"});
+        job["trigger"] = json!({"script": "return true", "once": true});
+        job["configRevision"] = json!("config-1");
+        job["state"] = json!({
+            "nextRunAtMs": 10,
+            "lastRunAtMs": 9,
+            "lastRunStatus": "ok",
+            "lastDiagnostics": {"summary": "redacted", "entries": []},
+            "scheduleErrorCount": 0,
+            "streamDroppedBatches": 0
+        });
+        job["createdActor"] = json!({"type": "human", "source": "profile", "id": "profile-1"});
+        job["runtimeAuthority"] = json!({"version": 1, "runtimeId": "codex"});
+        job["runtimeAuthorityRecoveryRequired"] = json!(true);
+        job["skillLibrarySelections"] = json!([{ "id": "private-skill" }]);
+        job["toolsAllowProvenance"] = json!({"version": 1, "source": "final-executable-surface"});
+        job["toolsAllowExecTarget"] = json!({"runtimeId": "codex"});
+        job["toolsAllowExecTargetRequirement"] = json!({"runtimeId": "codex"});
+        job["nativeOnlyFuture"] = json!({"ignored": true});
+
+        let jobs = decode_list(response(
+            "cron-list-8-2",
+            json!({
+                "jobs": [job.clone()],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "hasMore": false,
+                "nextOffset": null,
+                "deliveryPreviews": {},
+                "snapshotRevision": "snapshot-1",
+                "configRevision": "config-1",
+                "serverClockMs": 1,
+                "filtersApplied": {"includeDisabled": true}
+            }),
+        ))
+        .unwrap();
+        assert_eq!(jobs.jobs.len(), 1);
+        assert_eq!(jobs.jobs[0].id, "cron-job-8-2");
+        assert_eq!(jobs.jobs[0].message.as_deref(), Some("scheduled message"));
+        assert_eq!(jobs.jobs[0].state.next_run_at_ms, Some(10));
+        assert_eq!(jobs.jobs[0].state.last_run_status, Some(CronRunStatus::Ok));
+
+        let updated = decode_update(response(
+            "cron-update-8-2",
+            json!({
+                "updated": true,
+                "job": job,
+                "deliveryPreview": {"label": "not requested", "detail": "not requested"},
+                "mutationRevision": "mutation-1",
+                "serverClockMs": 1
+            }),
+        ))
+        .unwrap();
+        assert_eq!(updated.id, "cron-job-8-2");
+        assert_eq!(updated.message.as_deref(), Some("scheduled message"));
+    }
+
+    #[test]
+    fn cron_runs_accept_openclaw_8_2_additive_response_fields_without_projecting_them() {
+        let page = decode_runs_page(response(
+            "runs-8-2",
+            json!({
+                "entries": [{
+                    "ts": 1,
+                    "jobId": "cron-job-1",
+                    "action": "finished",
+                    "status": "error",
+                    "completionStatus": "failed",
+                    "error": "redacted",
+                    "errorReason": "timeout",
+                    "summary": "summary",
+                    "diagnostics": {"summary": "diagnostic", "entries": []},
+                    "delivered": false,
+                    "deliveryStatus": "not-delivered",
+                    "deliveryError": "no route",
+                    "deliverySuppressionReason": "silent",
+                    "failureNotificationDelivery": {"status": "not-requested", "future": true},
+                    "delivery": {"resolved": {"ok": false, "error": "no route"}},
+                    "sessionId": "session-1",
+                    "sessionKey": "agent:main:session",
+                    "runId": "manual:cron-job-1:1:1",
+                    "runAtMs": 1,
+                    "durationMs": 2,
+                    "nextRunAtMs": 3,
+                    "triggerFired": true,
+                    "model": "model-1",
+                    "provider": "provider-1",
+                    "usage": {"input_tokens": 1, "future": 2},
+                    "jobName": "cron-name",
+                    "taskId": "task-1",
+                    "storeKey": "private-store",
+                    "scriptStateChanged": true,
+                    "scriptState": {"private": true}
+                }],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "hasMore": false,
+                "nextOffset": null,
+                "snapshotRevision": "snapshot-1",
+                "configRevision": "config-1",
+                "storeKey": "private-store",
+                "retention": {"ignored": true}
+            }),
+        ))
+        .unwrap();
+
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].job_id, "cron-job-1");
+        assert_eq!(
+            page.entries[0].run_id.as_deref(),
+            Some("manual:cron-job-1:1:1")
+        );
+        assert_eq!(page.entries[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(page.entries[0].status(), Some(CronRunStatus::Error));
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[test]
+    fn additive_response_fields_do_not_weaken_core_cron_validation() {
+        let mut job = cron_job(
+            "cron-job-1",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "scheduled message"}),
+            None,
+        );
+        job["nativeOnlyFuture"] = json!({"ignored": true});
+        replace_with_unsafe_integer(&mut job, "/createdAtMs");
+        assert!(matches!(
+            decode_list(response(
+                "cron-list-invalid-core",
+                json!({
+                    "jobs": [job],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "hasMore": false,
+                    "nextOffset": null,
+                    "futurePageField": true
+                }),
+            )),
+            Err(WireError::InvalidCronList)
+        ));
+
+        assert!(matches!(
+            decode_update(response(
+                "cron-update-invalid-core",
+                json!({
+                    "updated": true,
+                    "job": {
+                        "id": "cron-job-1",
+                        "name": "cron-name",
+                        "enabled": true,
+                        "createdAtMs": 1,
+                        "updatedAtMs": 1,
+                        "schedule": {"kind": "every", "everyMs": 0},
+                        "sessionTarget": "isolated",
+                        "wakeMode": "next-heartbeat",
+                        "payload": {"kind": "agentTurn", "message": "scheduled message"},
+                        "failureAlert": false,
+                        "state": {},
+                        "nativeOnlyFuture": true
+                    },
+                    "futureWrapperField": true
+                }),
+            )),
+            Err(WireError::InvalidCronUpdate)
+        ));
+
+        assert!(matches!(
+            decode_runs(response(
+                "runs-invalid-core",
+                json!({
+                    "entries": [{
+                        "ts": 1,
+                        "jobId": "cron-job-1",
+                        "action": "started",
+                        "futureEntryField": true
+                    }],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "hasMore": false,
+                    "nextOffset": null,
+                    "futurePageField": true
+                }),
+            )),
+            Err(WireError::InvalidCronRuns)
+        ));
+
+        let mut job = cron_job(
+            "cron-job-1",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "scheduled message"}),
+            None,
+        );
+        job["lastDeliveryStatus"] = json!("sent");
+        assert!(matches!(
+            decode_update(response("cron-update-invalid-delivery-status", job)),
+            Err(WireError::InvalidCronUpdate)
+        ));
+
+        assert!(matches!(
+            decode_runs(response(
+                "runs-invalid-delivery-status",
+                json!({
+                    "entries": [{
+                        "ts": 1,
+                        "jobId": "cron-job-1",
+                        "action": "finished",
+                        "deliveryStatus": "sent"
+                    }],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "hasMore": false,
+                    "nextOffset": null,
+                    "futurePageField": true
+                }),
+            )),
+            Err(WireError::InvalidCronRuns)
+        ));
+    }
+
+    #[test]
+    fn cron_job_decoder_accepts_only_schema_defined_failure_alert_forms() {
+        let mut disabled = cron_job(
+            "cron-job-1",
+            "isolated",
+            "next-heartbeat",
+            json!({"kind": "agentTurn", "message": "agent-turn"}),
+            None,
+        );
+        disabled["agentId"] = json!("main");
         assert!(decode_add(response("cron-add-1", disabled)).is_ok());
 
         let mut invalid = cron_job(
             "cron-job-1",
             "isolated",
             "next-heartbeat",
-            json!({"kind": "systemEvent", "text": "system-event"}),
+            json!({"kind": "agentTurn", "message": "agent-turn"}),
             None,
         );
         invalid["failureAlert"] = json!(true);
@@ -2353,31 +3327,88 @@ mod tests {
         assert!(matches!(
             decode_run(response(
                 "run-1",
-                json!({"ok": true, "enqueued": true, "runId": "manual:cron-job-1:1:1"})
-            )),
-            Ok(CronRunReceipt {
-                enqueued: true,
-                run_id: Some(_),
-                disposition: None
-            })
+                json!({
+                    "ok": true,
+                    "enqueued": true,
+                    "runId": "manual:cron-job-1:1:1",
+                    "processInstanceId": "gateway-process-1"
+                })
+            ))
+            .map(CronRunReceipt::into_outcome),
+            Ok(CronRunReceiptOutcome::Enqueued { .. })
         ));
         assert!(matches!(
             decode_run(response(
                 "run-1",
-                json!({"ok": true, "ran": false, "reason": "already-running"})
-            )),
-            Ok(CronRunReceipt {
-                enqueued: false,
-                run_id: None,
-                disposition: Some(CronRunDisposition::AlreadyRunning)
-            })
+                json!({
+                    "ok": true,
+                    "enqueued": true,
+                    "runId": "manual:cron-job-1:1:1",
+                    "future": true
+                })
+            ))
+            .map(CronRunReceipt::into_outcome),
+            Ok(CronRunReceiptOutcome::Enqueued { .. })
         ));
+        assert!(matches!(
+            decode_run(response(
+                "run-1",
+                json!({"ok": true, "ran": true, "processInstanceId": "gateway-process-1"})
+            ))
+            .map(CronRunReceipt::into_outcome),
+            Ok(CronRunReceiptOutcome::Ran)
+        ));
+        assert!(matches!(
+            decode_run(response(
+                "run-1",
+                json!({"ok": false, "processInstanceId": "gateway-process-1"})
+            ))
+            .map(CronRunReceipt::into_outcome),
+            Ok(CronRunReceiptOutcome::OutcomeUnknown)
+        ));
+        for (reason, disposition) in [
+            ("already-running", CronRunDisposition::AlreadyRunning),
+            ("not-due", CronRunDisposition::NotDue),
+            ("invalid-spec", CronRunDisposition::InvalidSpec),
+            ("disabled", CronRunDisposition::Disabled),
+            ("stopped", CronRunDisposition::Stopped),
+        ] {
+            assert!(matches!(
+                decode_run(response(
+                    "run-1",
+                    json!({
+                        "ok": true,
+                        "ran": false,
+                        "reason": reason,
+                        "processInstanceId": "gateway-process-1"
+                    })
+                ))
+                .map(CronRunReceipt::into_outcome),
+                Ok(CronRunReceiptOutcome::Skipped(value)) if value == disposition
+            ));
+        }
         assert!(matches!(
             decode_runs(response(
                 "runs-1",
                 json!({
-                    "entries": [{"ts": 1, "jobId": "cron-job-1", "action": "finished", "status": "ok", "runId": "manual:cron-job-1:1:1"}],
-                    "total": 1, "offset": 0, "limit": 50, "hasMore": false, "nextOffset": null
+                    "entries": [{
+                        "ts": 1,
+                        "jobId": "cron-job-1",
+                        "action": "finished",
+                        "status": "ok",
+                        "runId": "manual:cron-job-1:1:1",
+                        "completionStatus": "succeeded",
+                        "errorReason": "timeout",
+                        "deliverySuppressionReason": "no-target",
+                        "triggerFired": true
+                    }],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "hasMore": false,
+                    "nextOffset": null,
+                    "snapshotRevision": "snapshot-1",
+                    "configRevision": "config-1"
                 })
             )),
             Ok(CronRunLog { entries }) if entries.len() == 1 && entries[0].status == Some(CronRunStatus::Ok)
@@ -2476,10 +3507,22 @@ mod tests {
             ))
             .is_err()
         );
+        for payload in [
+            json!({"ok": true, "enqueued": false, "runId": "manual:cron-job-1:1:1"}),
+            json!({"ok": true, "ran": false, "reason": "unknown", "processInstanceId": "gateway-process-1"}),
+            json!({"ok": true, "ran": true, "reason": "not-due", "processInstanceId": "gateway-process-1"}),
+            json!({"ok": false, "runId": "manual:cron-job-1:1:1"}),
+            json!({"ok": false, "reason": "stopped"}),
+        ] {
+            assert!(matches!(
+                decode_run(response("run-1", payload)),
+                Err(WireError::InvalidCronRun)
+            ));
+        }
         assert!(decode_runs(response(
             "runs-1",
             json!({"entries": [], "total": 0, "offset": 0, "limit": 50, "hasMore": false, "nextOffset": null, "future": true})
         ))
-        .is_err());
+        .is_ok());
     }
 }

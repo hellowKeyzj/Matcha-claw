@@ -21,6 +21,7 @@ pub(crate) struct Bootstrap {
     app_version: String,
     app_log_dir: PathBuf,
     runtime_host_state_dir: PathBuf,
+    runtime_host_mcp_executable: PathBuf,
     parent_callback_base_url: String,
     parent_callback_dispatch_token: String,
     provider_credential_resolver:
@@ -42,7 +43,6 @@ pub(crate) struct Bootstrap {
     channel_control_transport_port: u16,
     channel_pairing_transport_port: u16,
     session_model_selection_transport_port: u16,
-    openclaw_history_transport_port: u16,
     matcha_history_transport_port: u16,
     usage_transport_port: u16,
     diagnostics_transport_port: u16,
@@ -93,7 +93,6 @@ pub(crate) struct BootstrapParts {
     pub(crate) channel_control_transport_port: u16,
     pub(crate) channel_pairing_transport_port: u16,
     pub(crate) session_model_selection_transport_port: u16,
-    pub(crate) openclaw_history_transport_port: u16,
     pub(crate) matcha_history_transport_port: u16,
     pub(crate) usage_transport_port: u16,
     pub(crate) diagnostics_transport_port: u16,
@@ -155,7 +154,6 @@ impl Bootstrap {
         let channel_control_transport_port = self.channel_control_transport_port;
         let channel_pairing_transport_port = self.channel_pairing_transport_port;
         let session_model_selection_transport_port = self.session_model_selection_transport_port;
-        let openclaw_history_transport_port = self.openclaw_history_transport_port;
         let matcha_history_transport_port = self.matcha_history_transport_port;
         let usage_transport_port = self.usage_transport_port;
         let diagnostics_transport_port = self.diagnostics_transport_port;
@@ -175,6 +173,8 @@ impl Bootstrap {
         let team_role_chat_transport_port = self.team_role_chat_transport_port;
         let team_graph_transport_port = self.team_graph_transport_port;
         let provider_models_transport_port = self.provider_models_transport_port;
+        let sealed_runtime_token = runtime_secret()?;
+        let sealed_endpoint = format!("http://127.0.0.1:{provider_models_transport_port}");
         let provider_accounts_transport_port = self.provider_accounts_transport_port;
         let team_skill_transport_port = self.team_skill_transport_port;
         let team_trigger_transport_port = self.team_trigger_transport_port;
@@ -199,6 +199,8 @@ impl Bootstrap {
                 },
                 matcha_secret,
                 open_claw: OpenClawInput {
+                    team_run_mcp_executable: self.runtime_host_mcp_executable,
+                    team_run_mcp_state_dir: runtime_host_state_dir.clone(),
                     electron_image: self.open_claw.electron_image,
                     working_directory: self.open_claw.working_directory,
                     openclaw_dir: self.open_claw.openclaw_dir,
@@ -208,6 +210,8 @@ impl Bootstrap {
                     entry: self.open_claw.entry,
                     state_dir,
                     port: self.open_claw.port,
+                    sealed_endpoint: Some(sealed_endpoint),
+                    sealed_token: Some(sealed_runtime_token),
                     client_metadata: metadata,
                     report_diagnostic: Arc::new(|_| {}),
                     #[cfg(unix)]
@@ -237,7 +241,6 @@ impl Bootstrap {
             channel_control_transport_port,
             channel_pairing_transport_port,
             session_model_selection_transport_port,
-            openclaw_history_transport_port,
             matcha_history_transport_port,
             usage_transport_port,
             diagnostics_transport_port,
@@ -279,6 +282,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
 
     let app_version = non_empty(wire.app_version)?;
     let runtime_host_state_dir = absolute(wire.runtime_host_state_dir)?;
+    let runtime_host_mcp_executable = absolute(wire.runtime_host_mcp_executable)?;
     let parent_callback_base_url = non_empty(wire.parent_callback_base_url)?;
     let parent_callback_dispatch_token = non_empty(wire.parent_callback_dispatch_token)?;
     let delivery_verification_key = non_empty(wire.delivery_verification_key)?;
@@ -306,7 +310,6 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
     let channel_control_transport_port = port(wire.channel_control_transport_port)?;
     let channel_pairing_transport_port = port(wire.channel_pairing_transport_port)?;
     let session_model_selection_transport_port = port(wire.session_model_selection_transport_port)?;
-    let openclaw_history_transport_port = port(wire.openclaw_history_transport_port)?;
     let matcha_history_transport_port = port(wire.matcha_history_transport_port)?;
     let usage_transport_port = port(wire.usage_transport_port)?;
     let diagnostics_transport_port = port(wire.diagnostics_transport_port)?;
@@ -369,7 +372,6 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
             channel_control_transport_port,
             channel_pairing_transport_port,
             session_model_selection_transport_port,
-            openclaw_history_transport_port,
             matcha_history_transport_port,
             usage_transport_port,
             diagnostics_transport_port,
@@ -403,7 +405,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
         .len()
-            != 42
+            != 41
     {
         return Err(BootstrapError);
     }
@@ -412,6 +414,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         app_version,
         app_log_dir: absolute(wire.app_log_dir)?,
         runtime_host_state_dir,
+        runtime_host_mcp_executable,
         parent_callback_base_url,
         parent_callback_dispatch_token,
         provider_credential_resolver,
@@ -432,7 +435,6 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         channel_control_transport_port,
         channel_pairing_transport_port,
         session_model_selection_transport_port,
-        openclaw_history_transport_port,
         matcha_history_transport_port,
         usage_transport_port,
         diagnostics_transport_port,
@@ -494,6 +496,7 @@ struct Wire {
     app_version: String,
     app_log_dir: String,
     runtime_host_state_dir: String,
+    runtime_host_mcp_executable: String,
     parent_callback_base_url: String,
     parent_callback_dispatch_token: String,
     #[serde(default)]
@@ -513,7 +516,6 @@ struct Wire {
     channel_control_transport_port: u16,
     channel_pairing_transport_port: u16,
     session_model_selection_transport_port: u16,
-    openclaw_history_transport_port: u16,
     matcha_history_transport_port: u16,
     usage_transport_port: u16,
     diagnostics_transport_port: u16,

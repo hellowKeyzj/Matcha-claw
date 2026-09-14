@@ -47,6 +47,8 @@ pub mod team {
 }
 
 pub mod run {
+    #[path = "activity/mod.rs"]
+    pub mod activity;
     #[path = "approval/mod.rs"]
     pub mod approval;
     #[path = "approval_projection.rs"]
@@ -92,6 +94,16 @@ pub mod run {
     #[path = "trigger/mod.rs"]
     pub mod trigger;
 
+    pub use activity::{
+        Activity, ActivityClaim, ActivityClaimOutcome, ActivityClaimSnapshot, ActivityDispatch,
+        ActivityDispatchOutcome, ActivityDispatchSnapshot, ActivityFailure, ActivityId,
+        ActivityIdError, ActivityKind, ActivityLedger, ActivityLedgerSnapshot, ActivityPhase,
+        ActivityPhaseSnapshot, ActivityRegistrationOutcome, ActivityRequest, ActivityRequestError,
+        ActivitySettlement, ActivitySettlementOutcome, ActivitySnapshot, ActivityTarget,
+        ActivityTargetError, ActivityTransitionError, RestoreActivityError,
+        RestoreActivityLedgerError, claim_activity, dispatch_activity,
+        recover_interrupted_activity, settle_activity,
+    };
     pub use approval::{
         Approval, ApprovalDecision, ApprovalEffect, ApprovalOrigin, ApprovalRequest,
         ApprovalResolution, ApprovalResolutionError, ApprovalStatus, ApprovalSubject,
@@ -121,10 +133,10 @@ pub mod run {
     };
     pub use control::{
         AgentNodeEvent, AgentNodeEventResolution, AgentNodeEventResolutionError, ControlAuthority,
-        ControlNodeResolution, ControlNodeResolutionError, ControlNodeResolutionOutcome,
-        HumanDecision, ScriptReviewRule, TeamNodeEvent, TeamNodeEventKind, TeamNodeEventOutcome,
-        TeamNodeEventProducer, TeamNodeEventProducerError, TeamNodeNonTerminalEvent,
-        TeamNodeTerminalEvent,
+        ControlExecutionStep, ControlNodeResolution, ControlNodeResolutionError,
+        ControlNodeResolutionOutcome, HumanDecision, ScriptReviewRule, TeamNodeEvent,
+        TeamNodeEventKind, TeamNodeEventOutcome, TeamNodeEventProducer, TeamNodeEventProducerError,
+        TeamNodeNonTerminalEvent, TeamNodeTerminalEvent,
     };
     pub use decision::{
         TeamDecision, TeamDecisionCommand, TeamDecisionCommandError, TeamDecisionLedger,
@@ -267,14 +279,20 @@ pub use run::lifecycle::{
     TombstoneOutcome,
 };
 pub use run::{
-    AgentNodeEvent, AgentNodeEventResolution, AgentNodeEventResolutionError, Approval,
-    ApprovalDecision, ApprovalEffect, ApprovalOrigin, ApprovalRequest, ApprovalResolution,
-    ApprovalResolutionError, ApprovalStatus, ApprovalSubject, ArmedCronTrigger, ArmedTriggerFacts,
-    ArmedWebhookTrigger, Attempt, AttemptId, AttemptIdentity, AttemptOutcome, AttemptPhase,
-    AttemptProjection, AttemptReason, AttemptReceipt, AttemptRecoveryItem, AttemptStatus,
-    AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionError,
-    AuthorizedGraphResolutionOutcome, AuthorizedGraphResolutionReceipt, CancellationRecoveryAction,
-    CommandPayload, CommandReceipt, CommandRejection, ContextEdge, ContextNode, ControlAuthority,
+    Activity, ActivityClaim, ActivityClaimOutcome, ActivityClaimSnapshot, ActivityDispatch,
+    ActivityDispatchOutcome, ActivityDispatchSnapshot, ActivityFailure, ActivityId,
+    ActivityIdError, ActivityKind, ActivityLedger, ActivityLedgerSnapshot, ActivityPhase,
+    ActivityPhaseSnapshot, ActivityRegistrationOutcome, ActivityRequest, ActivityRequestError,
+    ActivitySettlement, ActivitySettlementOutcome, ActivitySnapshot, ActivityTarget,
+    ActivityTargetError, ActivityTransitionError, AgentNodeEvent, AgentNodeEventResolution,
+    AgentNodeEventResolutionError, Approval, ApprovalDecision, ApprovalEffect, ApprovalOrigin,
+    ApprovalRequest, ApprovalResolution, ApprovalResolutionError, ApprovalStatus, ApprovalSubject,
+    ArmedCronTrigger, ArmedTriggerFacts, ArmedWebhookTrigger, Attempt, AttemptId, AttemptIdentity,
+    AttemptOutcome, AttemptPhase, AttemptProjection, AttemptReason, AttemptReceipt,
+    AttemptRecoveryItem, AttemptStatus, AuthorizedGraphOutcome, AuthorizedGraphResolution,
+    AuthorizedGraphResolutionError, AuthorizedGraphResolutionOutcome,
+    AuthorizedGraphResolutionReceipt, CancellationRecoveryAction, CommandPayload, CommandReceipt,
+    CommandRejection, ContextEdge, ContextNode, ControlAuthority, ControlExecutionStep,
     ControlNodeResolution, ControlNodeResolutionError, ControlNodeResolutionOutcome,
     CronScheduleError, CronTriggerScheduleError, DefinitionError, Delivery, DeliveryClaim,
     DeliveryClaimSnapshot, DeliveryDispatch, DeliveryFailure, DeliveryId, DeliveryIdError,
@@ -295,25 +313,26 @@ pub use run::{
     NodeId, NodeKind, NodeProjection, OrganizationRecoveryApply, OrganizationRecoveryPlan,
     ReadyQueueItem, RecordCommandError, RecordOutcome, RecoveryAction, RecoveryFault,
     RecoveryQueryError, ReduceError, RegisterDeliveryError, RegisterOutcome, ResolveApprovalError,
-    RestoreDeliveryError, RestoreError, RestoreEvidenceLedgerError, RestoreLedgerError,
-    RestoreTriggerLedgerError, ReviewAssignment, ReviewRecoveryStatus, ReviewRecoverySummary,
-    RoleChatAdmission, RoleChatAdmissionError, RoleChatAdmissionOutcome, RoleChatRejection,
-    RoleSessionDeletionConfirmation, RunCommand, RunRecoveryStatus, ScriptReviewRule,
-    SettleOutcome, StartOutcome, StartTrigger, TeamDecision, TeamDecisionCommand,
-    TeamDecisionCommandError, TeamDecisionLedger, TeamDecisionLedgerRestoreError,
-    TeamDecisionLedgerSnapshot, TeamDecisionReceipt, TeamDecisionRecordError, TeamDecisionSnapshot,
-    TeamDecisionType, TeamGraphContext, TeamGraphContextQuery, TeamGraphContextQueryError,
-    TeamGraphContextResult, TeamGraphContextView, TeamNodeEvent, TeamNodeEventKind,
-    TeamNodeEventOutcome, TeamNodeEventProducer, TeamNodeEventProducerError,
-    TeamNodeNonTerminalEvent, TeamNodeTerminalEvent, TeamPublicAttempt, TeamPublicAttemptStatus,
-    TeamPublicEdge, TeamPublicEdgeAction, TeamPublicEdgeStatus, TeamPublicGraph,
-    TeamPublicGraphStatus, TeamPublicNode, TeamPublicNodeKind, TeamPublicProjection,
-    TeamPublicQueryOutcome, TeamRoleSessionProjection, TeamRoleSessionQueryOutcome,
-    TeamRoleSessionStatus, TeamRunDiagnosticsApprovalSummary, TeamRunDiagnosticsBudgets,
-    TeamRunDiagnosticsConfidence, TeamRunDiagnosticsDeliveryFailureSummary,
-    TeamRunDiagnosticsDeliverySummary, TeamRunDiagnosticsFailureSummary,
-    TeamRunDiagnosticsGraphStatus, TeamRunDiagnosticsLifecycleStatus, TeamRunDiagnosticsLimits,
-    TeamRunDiagnosticsProjection, TeamRunDiagnosticsQueryOutcome, TeamRunDiagnosticsRetrySummary,
+    RestoreActivityError, RestoreActivityLedgerError, RestoreDeliveryError, RestoreError,
+    RestoreEvidenceLedgerError, RestoreLedgerError, RestoreTriggerLedgerError, ReviewAssignment,
+    ReviewRecoveryStatus, ReviewRecoverySummary, RoleChatAdmission, RoleChatAdmissionError,
+    RoleChatAdmissionOutcome, RoleChatRejection, RoleSessionDeletionConfirmation, RunCommand,
+    RunRecoveryStatus, ScriptReviewRule, SettleOutcome, StartOutcome, StartTrigger, TeamDecision,
+    TeamDecisionCommand, TeamDecisionCommandError, TeamDecisionLedger,
+    TeamDecisionLedgerRestoreError, TeamDecisionLedgerSnapshot, TeamDecisionReceipt,
+    TeamDecisionRecordError, TeamDecisionSnapshot, TeamDecisionType, TeamGraphContext,
+    TeamGraphContextQuery, TeamGraphContextQueryError, TeamGraphContextResult,
+    TeamGraphContextView, TeamNodeEvent, TeamNodeEventKind, TeamNodeEventOutcome,
+    TeamNodeEventProducer, TeamNodeEventProducerError, TeamNodeNonTerminalEvent,
+    TeamNodeTerminalEvent, TeamPublicAttempt, TeamPublicAttemptStatus, TeamPublicEdge,
+    TeamPublicEdgeAction, TeamPublicEdgeStatus, TeamPublicGraph, TeamPublicGraphStatus,
+    TeamPublicNode, TeamPublicNodeKind, TeamPublicProjection, TeamPublicQueryOutcome,
+    TeamRoleSessionProjection, TeamRoleSessionQueryOutcome, TeamRoleSessionStatus,
+    TeamRunDiagnosticsApprovalSummary, TeamRunDiagnosticsBudgets, TeamRunDiagnosticsConfidence,
+    TeamRunDiagnosticsDeliveryFailureSummary, TeamRunDiagnosticsDeliverySummary,
+    TeamRunDiagnosticsFailureSummary, TeamRunDiagnosticsGraphStatus,
+    TeamRunDiagnosticsLifecycleStatus, TeamRunDiagnosticsLimits, TeamRunDiagnosticsProjection,
+    TeamRunDiagnosticsQueryOutcome, TeamRunDiagnosticsRetrySummary,
     TeamRunDiagnosticsStaleExecution, TeamRunDiagnosticsStatus,
     TeamRunDiagnosticsUnavailableReason, TeamRunDiagnosticsUnavailableSection, TeamRunProjection,
     TeamRunPurgeRequest, TeamRunQuery, TeamRunQueryOutcome, TeamRunRecoveryPlan,
@@ -323,12 +342,14 @@ pub use run::{
     TriggerLedger, TriggerRegistration, TriggerSource, WaitOutcome, WebhookTriggerResolution,
     WebhookTriggerResolutionError, WorkAssignment, WorkGroup, WorkflowGroup, WorkflowJoinPolicy,
     WorkflowPlan, WorkflowTask, abort_pending_approvals, apply_graph_patch,
-    apply_organization_recovery, begin_delivery, dispatch_delivery, export_yaml, import_for_run,
-    import_yaml, next_cron_slot_after, plan_due_cron_trigger, plan_organization_recovery,
-    plan_terminal_observations, project, query_team_graph_context, query_team_public_projection,
-    query_team_role_sessions, query_team_run, query_team_run_diagnostics, query_team_run_recovery,
-    recover_interrupted_delivery, recovery_oracle, reduce, register_delivery, resolve_approval,
-    resolve_webhook_trigger, restore_oracle, settle_delivery,
+    apply_organization_recovery, begin_delivery, claim_activity, dispatch_activity,
+    dispatch_delivery, export_yaml, import_for_run, import_yaml, next_cron_slot_after,
+    plan_due_cron_trigger, plan_organization_recovery, plan_terminal_observations, project,
+    query_team_graph_context, query_team_public_projection, query_team_role_sessions,
+    query_team_run, query_team_run_diagnostics, query_team_run_recovery,
+    recover_interrupted_activity, recover_interrupted_delivery, recovery_oracle, reduce,
+    register_delivery, resolve_approval, resolve_webhook_trigger, restore_oracle, settle_activity,
+    settle_delivery,
 };
 pub use store::{
     GraphRunFacts, MatchaTerminalReceiptTarget, OrganizationFacts, OrganizationFactsError,

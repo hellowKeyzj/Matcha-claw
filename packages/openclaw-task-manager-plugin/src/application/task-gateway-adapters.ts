@@ -1,7 +1,7 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
-import { executeTaskOutput, executeTaskStop } from './background-task-tools.js'
+import { readTaskOutputGatewayPayload, readTaskStopGatewayPayload } from './background-task-tools.js'
 import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
 import { asTaskDetailPayload } from './task-payloads.js'
 import { getStore, getTodoStore, resolveTaskScope, resolveTodoScopeKey } from './task-store-context.js'
@@ -13,17 +13,8 @@ type GatewayOptions = {
   respond: (success: boolean, data?: unknown, error?: { code: string; message: string }) => void
 }
 
-function logTaskPipeline(api: OpenClawPluginApi, event: string, payload: Record<string, unknown>): void {
-  api.logger?.debug?.(`[task-pipeline] plugin.${event} ${JSON.stringify(payload)}`)
-}
-
-function readPluginStorageRoot(api: OpenClawPluginApi): string | null {
-  const config = api.pluginConfig
-  if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    return null
-  }
-  const storageRoot = (config as Record<string, unknown>).storageRoot
-  return typeof storageRoot === 'string' && storageRoot.trim() ? storageRoot.trim() : null
+function logTaskPipeline(api: OpenClawPluginApi, event: string, count: number): void {
+  api.logger?.debug?.(`[task-pipeline] plugin.${event} count=${count}`)
 }
 
 async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unknown>): Promise<void> {
@@ -66,14 +57,7 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
       const scope = resolveTaskScope({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const store = getStore({ api, workspaceDir: options.params.workspaceDir })
       const tasks = await store.list(scope.key)
-      logTaskPipeline(api, 'gateway.TaskList', {
-        scopeKey: scope.key,
-        scopeType: scope.type,
-        paramSessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : null,
-        workspaceDir: typeof options.params.workspaceDir === 'string' ? options.params.workspaceDir : null,
-        storageRoot: readPluginStorageRoot(api),
-        tasksCount: tasks.length,
-      })
+      logTaskPipeline(api, 'gateway.TaskList', tasks.length)
       const todos = await loadStoredTodos(api, options.params.workspaceDir, resolveTodoScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined }))
       return { scope, tasks: tasks.map(asTaskDetailPayload), todos }
     })
@@ -118,13 +102,7 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
       const scopeKey = resolveTodoScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const input = parseTodoWriteInput(options.params)
       const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, input.newTodos)
-      logTaskPipeline(api, 'gateway.TodoWrite', {
-        scopeKey,
-        paramSessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : null,
-        workspaceDir: typeof options.params.workspaceDir === 'string' ? options.params.workspaceDir : null,
-        storageRoot: readPluginStorageRoot(api),
-        todosCount: result.todos.length,
-      })
+      logTaskPipeline(api, 'gateway.TodoWrite', result.todos.length)
       return { todos: result.todos, updatedAt: result.updatedAt }
     })
   })
@@ -139,15 +117,13 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
 
   api.registerGatewayMethod('TaskOutput', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const result = await executeTaskOutput(api, gatewayToolContext(options.params), options.params)
-      return result.rawResponse
+      return await readTaskOutputGatewayPayload(api, gatewayToolContext(options.params), options.params)
     })
   })
 
   api.registerGatewayMethod('TaskStop', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const result = await executeTaskStop(api, gatewayToolContext(options.params), options.params)
-      return result.rawResponse
+      return await readTaskStopGatewayPayload(api, gatewayToolContext(options.params), options.params)
     })
   })
 

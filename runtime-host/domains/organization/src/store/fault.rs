@@ -1,8 +1,9 @@
 use std::{fmt, io};
 
 use crate::{
-    AgentNodeEventResolutionError, AuthorizedGraphResolutionError, ControlNodeResolutionError,
-    DeliveryReceiptError, DeliveryRequestError, TerminalObservationError, TriggerFireError,
+    ActivityTransitionError, AgentNodeEventResolutionError, AuthorizedGraphResolutionError,
+    ControlNodeResolutionError, DeliveryReceiptError, DeliveryRequestError,
+    TerminalObservationError, TriggerFireError,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +23,7 @@ pub enum StoreFault {
     InvalidFacts,
     RuntimeReceipt(crate::OrganizationFactsError),
     Evidence(crate::OrganizationFactsError),
+    ActivityTransition(ActivityTransitionError),
     DeliveryRequest(DeliveryRequestError),
     DeliveryReceipt(Box<DeliveryReceiptError>),
     TriggerFire(TriggerFireError),
@@ -73,6 +75,8 @@ impl fmt::Display for StoreFault {
             Self::Evidence(_) => {
                 formatter.write_str("organization evidence violates TeamRun durable invariants")
             }
+            Self::ActivityTransition(_) => formatter
+                .write_str("organization activity transition violates durable claim invariants"),
             Self::DeliveryRequest(_) => {
                 formatter.write_str("organization delivery request violates durable invariants")
             }

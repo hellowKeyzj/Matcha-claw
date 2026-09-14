@@ -4,17 +4,21 @@ use platform::exchange::InvocationOutcome;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::gateway::{
-    client::{GatewayClient, GatewayClientError},
-    delivery::MutationDelivery,
-    wire::{self, GatewayResponse},
+use crate::{
+    agents::{AgentsReadFailure, OpenClawAgents},
+    gateway::{
+        client::{GatewayClient, GatewayClientError},
+        delivery::MutationDelivery,
+        wire::{self, GatewayResponse},
+    },
 };
 
 use super::protocol::{
     self, ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
     ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
     SessionDeleteResult, SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
-    SessionModelPatchResult, SessionsListParams, SessionsListResult,
+    SessionModelPatchResult, SessionPermissionMode, SessionPermissionPatchParams,
+    SessionPermissionProjection, SessionsListParams, SessionsListResult,
 };
 
 static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -72,6 +76,23 @@ impl SessionOperation {
         payload(&request_id, response)
     }
 
+    pub(crate) async fn subscribe_session_messages(
+        &self,
+        session_key: &protocol::SessionKey,
+    ) -> Result<(), OperationError> {
+        let request_id = next_request_id("sessions-messages-subscribe");
+        let request = wire::sessions_messages_subscribe_request(
+            request_id.clone(),
+            session_key.as_str().to_owned(),
+        )?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(OperationError::from)?;
+        wire::decode_sessions_messages_subscribe(response).map_err(OperationError::from)
+    }
+
     pub(crate) async fn send_chat(
         &self,
         params: ChatSendParams,
@@ -126,6 +147,43 @@ impl SessionOperation {
             .await)
     }
 
+    pub(crate) async fn get_session_permission(
+        &self,
+        session_key: protocol::SessionKey,
+    ) -> Result<SessionPermissionProjection, OperationError> {
+        self.session_permission_projection(session_key).await
+    }
+
+    pub(crate) async fn set_session_permission(
+        &self,
+        params: SessionPermissionPatchParams,
+    ) -> Result<InvocationOutcome<SessionPermissionProjection, OperationError>, OperationError>
+    {
+        let expected_key = params.key().clone();
+        let request_id = next_request_id("sessions-patch-permission");
+        let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
+        match self
+            .mutate(request, |response| {
+                protocol::decode_session_permission_patch_result(
+                    &request_id,
+                    response,
+                    &expected_key,
+                )
+            })
+            .await
+        {
+            InvocationOutcome::Succeeded(_) => self
+                .session_permission_projection(expected_key)
+                .await
+                .map(InvocationOutcome::Succeeded),
+            InvocationOutcome::TargetRejected(error) => {
+                Ok(InvocationOutcome::TargetRejected(error))
+            }
+            InvocationOutcome::Cancelled => Ok(InvocationOutcome::Cancelled),
+            InvocationOutcome::Unknown => Ok(InvocationOutcome::Unknown),
+        }
+    }
+
     pub(crate) async fn create_session(
         &self,
         params: SessionCreateParams,
@@ -152,6 +210,54 @@ impl SessionOperation {
                 protocol::decode_session_delete_result(&request_id, response, &expected_key)
             })
             .await)
+    }
+
+    async fn session_permission_projection(
+        &self,
+        session_key: protocol::SessionKey,
+    ) -> Result<SessionPermissionProjection, OperationError> {
+        let params = SessionsListParams::default()
+            .try_with_limit(100)?
+            .try_with_search(session_key.as_str())?;
+        let result = self.list_sessions(params).await?;
+        let Some(summary) = result
+            .sessions
+            .into_iter()
+            .find(|summary| summary.key == session_key)
+        else {
+            return Ok(SessionPermissionProjection::unsupported(
+                "OpenClaw session was not found",
+            ));
+        };
+        let default_mode = match summary.agent_id.as_ref() {
+            Some(agent_id) => self.default_permission_mode(agent_id.as_str()).await?,
+            None => None,
+        };
+        Ok(SessionPermissionProjection::supported(
+            summary.permission_mode,
+            default_mode,
+            summary.permission_mode_pending.unwrap_or(false),
+            true,
+        ))
+    }
+
+    async fn default_permission_mode(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<SessionPermissionMode>, OperationError> {
+        let agents = OpenClawAgents::new(Arc::clone(&self.gateway))
+            .list()
+            .await
+            .map_err(OperationError::from)?;
+        let Some(agent) = agents.agents.iter().find(|agent| agent.id == agent_id) else {
+            return Ok(None);
+        };
+        agent
+            .default_permission_mode
+            .as_deref()
+            .map(|mode| serde_json::from_value(Value::String(mode.to_owned())))
+            .transpose()
+            .map_err(|_| OperationError::Protocol)
     }
 
     async fn mutate<T>(
@@ -248,6 +354,22 @@ impl From<GatewayClientError> for OperationError {
     }
 }
 
+impl From<protocol::ValidationError> for OperationError {
+    fn from(_: protocol::ValidationError) -> Self {
+        Self::Protocol
+    }
+}
+
+impl From<AgentsReadFailure> for OperationError {
+    fn from(value: AgentsReadFailure) -> Self {
+        match value {
+            AgentsReadFailure::Unavailable => Self::Transport,
+            AgentsReadFailure::Protocol => Self::Protocol,
+            AgentsReadFailure::Rejected => Self::Rejected,
+        }
+    }
+}
+
 impl From<protocol::ProtocolError> for OperationError {
     fn from(value: protocol::ProtocolError) -> Self {
         match value {
@@ -312,7 +434,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_operation_reuses_control_gateway_for_every_method_without_subscribe() {
+    async fn session_operation_reuses_control_gateway_for_every_method() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let identity = TestTlsIdentity::generate();
         let client = Arc::new(test_client(&listener, identity.fingerprint()));
@@ -334,6 +456,15 @@ mod tests {
                 protocol::CHAT_HISTORY_METHOD,
                 json!({
                     "messages": [{"role": "user", "content": "hello"}]
+                }),
+            )
+            .await;
+            serve_session_success(
+                &mut socket,
+                wire::SESSIONS_MESSAGES_SUBSCRIBE_METHOD,
+                json!({
+                    "subscribed": true,
+                    "key": "agent:main:session-1"
                 }),
             )
             .await;
@@ -379,6 +510,37 @@ mod tests {
                 }),
             )
             .await;
+            serve_permission_projection(&mut socket, Some("guarded"), true).await;
+            serve_session_request_success(
+                &mut socket,
+                protocol::SESSIONS_PATCH_METHOD,
+                json!({
+                    "key": "agent:main:session-1",
+                    "permissionMode": "full"
+                }),
+                json!({
+                    "ok": true,
+                    "key": "agent:main:session-1",
+                    "entry": {"permissionMode": "full"}
+                }),
+            )
+            .await;
+            serve_permission_projection(&mut socket, Some("full"), false).await;
+            serve_session_request_success(
+                &mut socket,
+                protocol::SESSIONS_PATCH_METHOD,
+                json!({
+                    "key": "agent:main:session-1",
+                    "permissionMode": null
+                }),
+                json!({
+                    "ok": true,
+                    "key": "agent:main:session-1",
+                    "entry": {}
+                }),
+            )
+            .await;
+            serve_permission_projection(&mut socket, None, false).await;
             serve_session_success(
                 &mut socket,
                 protocol::SESSIONS_CREATE_METHOD,
@@ -420,6 +582,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history.messages.len(), 1);
+        operation
+            .subscribe_session_messages(&session_key)
+            .await
+            .unwrap();
         assert!(matches!(
             operation
                 .send_chat(
@@ -447,10 +613,54 @@ mod tests {
         assert!(matches!(
             operation
                 .patch_session_label(
-                    protocol::SessionLabelPatchParams::try_new(session_key, "Review").unwrap()
+                    protocol::SessionLabelPatchParams::try_new(session_key.clone(), "Review")
+                        .unwrap()
                 )
                 .await,
             Ok(InvocationOutcome::Succeeded(_))
+        ));
+        let permission = operation
+            .get_session_permission(session_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            permission.mode,
+            Some(protocol::SessionPermissionMode::Guarded)
+        );
+        assert_eq!(
+            permission.default_mode,
+            Some(protocol::SessionPermissionMode::Workspace)
+        );
+        assert!(permission.pending);
+        assert!(matches!(
+            operation
+                .set_session_permission(protocol::SessionPermissionPatchParams::new(
+                    session_key.clone(),
+                    Some(protocol::SessionPermissionMode::Full),
+                ))
+                .await,
+            Ok(InvocationOutcome::Succeeded(
+                protocol::SessionPermissionProjection {
+                    mode: Some(protocol::SessionPermissionMode::Full),
+                    pending: false,
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            operation
+                .set_session_permission(protocol::SessionPermissionPatchParams::new(
+                    session_key,
+                    None
+                ))
+                .await,
+            Ok(InvocationOutcome::Succeeded(
+                protocol::SessionPermissionProjection {
+                    mode: None,
+                    pending: false,
+                    ..
+                }
+            ))
         ));
         assert!(matches!(
             operation.create_session(create).await,
@@ -589,6 +799,7 @@ mod tests {
                             "config.get",
                             "config.patch",
                             "config.apply",
+                            "plugins.refresh",
                             "agents.list",
                             "skills.status",
                             wire::SYSTEM_PRESENCE_METHOD,
@@ -633,6 +844,71 @@ mod tests {
                 "id": request["id"],
                 "ok": true,
                 "payload": payload
+            }),
+        )
+        .await;
+    }
+
+    async fn serve_session_request_success(
+        socket: &mut TestSocket,
+        method: &str,
+        expected_params: Value,
+        payload: Value,
+    ) {
+        let request = read_session_request(socket, method).await;
+        assert_eq!(request["params"], expected_params);
+        send_json(
+            socket,
+            json!({
+                "type": "res",
+                "id": request["id"],
+                "ok": true,
+                "payload": payload
+            }),
+        )
+        .await;
+    }
+
+    async fn serve_permission_projection(
+        socket: &mut TestSocket,
+        permission_mode: Option<&str>,
+        pending: bool,
+    ) {
+        let mut session = json!({
+            "key": "agent:main:session-1",
+            "kind": "direct",
+            "agentId": "main",
+            "permissionModePending": pending
+        });
+        if let Some(mode) = permission_mode {
+            session["permissionMode"] = json!(mode);
+        }
+        serve_session_request_success(
+            socket,
+            protocol::SESSIONS_LIST_METHOD,
+            json!({
+                "limit": 100,
+                "search": "agent:main:session-1"
+            }),
+            json!({
+                "ts": 42,
+                "count": 1,
+                "sessions": [session]
+            }),
+        )
+        .await;
+        serve_session_success(
+            socket,
+            "agents.list",
+            json!({
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "global",
+                "agents": [{
+                    "id": "main",
+                    "kind": "system",
+                    "defaultPermissionMode": "workspace"
+                }]
             }),
         )
         .await;

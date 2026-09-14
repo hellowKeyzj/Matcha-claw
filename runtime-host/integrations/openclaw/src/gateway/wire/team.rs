@@ -4,22 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use crate::gateway::config_patch::{
+    encode_request as encode_config_patch_request, request_parts_are_valid,
+};
+
 use super::{
     GatewayResponse, RpcRequest, WireError, rpc_request, success_payload, valid_optional_string,
     valid_string, valid_strings,
 };
-
-pub(crate) fn agents_list_request(request_id: String) -> Result<RpcRequest, WireError> {
-    if !valid_string(&request_id) {
-        return Err(WireError::InvalidAgentsListRequest);
-    }
-    rpc_request(
-        request_id,
-        "agents.list",
-        Some(Value::Object(Default::default())),
-    )
-    .map_err(|_| WireError::InvalidAgentsListRequest)
-}
 
 #[derive(Serialize)]
 struct AgentsCreateParams {
@@ -233,6 +225,7 @@ pub(crate) struct ConfigPatchRequest {
     request_id: String,
     raw: ConfigDocument,
     base_hash: Option<ConfigBaseHash>,
+    replace_paths: Vec<String>,
 }
 
 impl ConfigPatchRequest {
@@ -241,33 +234,15 @@ impl ConfigPatchRequest {
     }
 
     pub(crate) fn encode(&self) -> Result<String, WireError> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params<'a> {
-            raw: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            base_hash: Option<&'a str>,
-        }
-        #[derive(Serialize)]
-        struct Frame<'a> {
-            r#type: &'static str,
-            id: &'a str,
-            method: &'static str,
-            params: Params<'a>,
-        }
-
-        let raw = self.raw.as_str()?;
-        let base_hash = self
-            .base_hash
-            .as_ref()
-            .map(ConfigBaseHash::as_str)
-            .transpose()?;
-        serde_json::to_string(&Frame {
-            r#type: "req",
-            id: &self.request_id,
-            method: "config.patch",
-            params: Params { raw, base_hash },
-        })
+        encode_config_patch_request(
+            &self.request_id,
+            self.raw.as_str()?,
+            self.base_hash
+                .as_ref()
+                .map(ConfigBaseHash::as_str)
+                .transpose()?,
+            &self.replace_paths,
+        )
         .map_err(|_| WireError::EncodeRequest)
     }
 }
@@ -279,6 +254,7 @@ impl fmt::Debug for ConfigPatchRequest {
             .field("request_id", &"[REDACTED]")
             .field("raw", &"[REDACTED]")
             .field("base_hash", &self.base_hash.as_ref().map(|_| "[REDACTED]"))
+            .field("replace_paths", &self.replace_paths.len())
             .finish()
     }
 }
@@ -287,17 +263,21 @@ pub(crate) fn config_patch_request(
     request_id: String,
     raw: ConfigDocument,
     base_hash: Option<ConfigBaseHash>,
+    replace_paths: Vec<String>,
 ) -> Result<ConfigPatchRequest, WireError> {
-    if !valid_string(&request_id)
-        || raw.is_empty()
-        || base_hash.as_ref().is_some_and(ConfigBaseHash::is_empty)
-    {
+    if !request_parts_are_valid(
+        &request_id,
+        &raw.0,
+        base_hash.as_ref().map(|hash| hash.0.as_slice()),
+        &replace_paths,
+    ) {
         return Err(WireError::InvalidConfigPatchRequest);
     }
     Ok(ConfigPatchRequest {
         request_id,
         raw,
         base_hash,
+        replace_paths,
     })
 }
 
@@ -373,15 +353,6 @@ pub(crate) fn config_apply_request(
     })
 }
 
-pub(crate) struct GatewayAgent {
-    pub(crate) agent_id: String,
-    pub(crate) workspace: Option<String>,
-}
-
-pub(crate) struct GatewayAgents {
-    pub(crate) agents: Vec<GatewayAgent>,
-}
-
 pub(crate) struct AgentCreated {
     pub(crate) agent_id: String,
     pub(crate) name: String,
@@ -399,6 +370,7 @@ pub(crate) struct AgentDeleted {
 pub(crate) struct ConfigSnapshot {
     raw: Option<ConfigDocument>,
     base_hash: Option<ConfigBaseHash>,
+    source_config: Value,
     config: Value,
 }
 
@@ -407,8 +379,18 @@ impl ConfigSnapshot {
         (self.raw, self.base_hash)
     }
 
+    pub(crate) fn into_source_config_parts(self) -> (Value, Option<ConfigBaseHash>) {
+        (self.source_config, self.base_hash)
+    }
+
     pub(crate) fn into_config_parts(self) -> (Value, Option<ConfigBaseHash>) {
         (self.config, self.base_hash)
+    }
+
+    pub(crate) fn into_source_and_runtime_config_parts(
+        self,
+    ) -> (Value, Value, Option<ConfigBaseHash>) {
+        (self.source_config, self.config, self.base_hash)
     }
 
     pub(crate) fn patch_agents(
@@ -434,16 +416,22 @@ impl ConfigSnapshot {
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .ok_or(WireError::InvalidConfigSetRequest)?;
+        let mut entry_patches = Vec::with_capacity(patches.len());
         let mut restore_facts = Vec::with_capacity(patches.len());
         for patch in patches {
-            restore_facts.push(patch.apply(list)?);
+            let (entry_patch, restore_fact) = patch.apply(list)?;
+            entry_patches.push(entry_patch);
+            restore_facts.push(restore_fact);
         }
-        let raw =
-            serde_json::to_string(&document).map_err(|_| WireError::InvalidConfigSetRequest)?;
+        let raw = serde_json::to_string(&serde_json::json!({
+            "agents": {"list": entry_patches}
+        }))
+        .map_err(|_| WireError::InvalidConfigSetRequest)?;
         Ok(ConfigPatch {
             raw: ConfigDocument::new(raw)?,
             base_hash,
             restore_facts: ConfigRestoreFacts(restore_facts),
+            replace_paths: Vec::new(),
         })
     }
 
@@ -505,11 +493,15 @@ impl ConfigSnapshot {
         for index in removals {
             list.remove(index);
         }
-        let raw =
-            serde_json::to_string(&document).map_err(|_| WireError::InvalidConfigSetRequest)?;
+        let restored_list = list.clone();
+        let raw = serde_json::to_string(&serde_json::json!({
+            "agents": {"list": restored_list}
+        }))
+        .map_err(|_| WireError::InvalidConfigSetRequest)?;
         let raw = ConfigDocument::new(raw)?;
         let request_id = format!("team-config-restore-{}", next_restore_request_id());
-        let request = config_set_request(request_id, raw, Some(base_hash))?;
+        let request =
+            config_patch_request(request_id, raw, Some(base_hash), vec!["agents.list".into()])?;
         Ok(ConfigRestorePreparation::Ready { request, fenced })
     }
 }
@@ -529,7 +521,7 @@ impl ConfigAgentPatch {
         }
     }
 
-    fn apply(self, list: &mut Vec<Value>) -> Result<ConfigRestoreFact, WireError> {
+    fn apply(self, list: &mut Vec<Value>) -> Result<(Value, ConfigRestoreFact), WireError> {
         if !valid_string(&self.agent_id)
             || !valid_string(&self.name)
             || !valid_string(&self.workspace)
@@ -559,20 +551,30 @@ impl ConfigAgentPatch {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let name = self.name;
+        let workspace = self.workspace;
         entry.insert("id".into(), Value::String(agent_id.clone()));
-        entry.insert("name".into(), Value::String(self.name));
-        entry.insert("workspace".into(), Value::String(self.workspace));
+        entry.insert("name".into(), Value::String(name.clone()));
+        entry.insert("workspace".into(), Value::String(workspace.clone()));
         let expected_entry = Value::Object(entry);
+        let entry_patch = serde_json::json!({
+            "id": agent_id.clone(),
+            "name": name,
+            "workspace": workspace
+        });
         match matching.as_slice() {
             [] => list.push(expected_entry.clone()),
             [index] => list[*index] = expected_entry.clone(),
             _ => unreachable!("duplicate config agent IDs were rejected"),
         }
-        Ok(ConfigRestoreFact {
-            agent_id,
-            expected_entry,
-            prior_entry,
-        })
+        Ok((
+            entry_patch,
+            ConfigRestoreFact {
+                agent_id,
+                expected_entry,
+                prior_entry,
+            },
+        ))
     }
 }
 
@@ -594,11 +596,24 @@ pub(crate) struct ConfigPatch {
     raw: ConfigDocument,
     base_hash: Option<ConfigBaseHash>,
     restore_facts: ConfigRestoreFacts,
+    replace_paths: Vec<String>,
 }
 
 impl ConfigPatch {
-    pub(crate) fn into_parts(self) -> (ConfigDocument, Option<ConfigBaseHash>, ConfigRestoreFacts) {
-        (self.raw, self.base_hash, self.restore_facts)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ConfigDocument,
+        Option<ConfigBaseHash>,
+        ConfigRestoreFacts,
+        Vec<String>,
+    ) {
+        (
+            self.raw,
+            self.base_hash,
+            self.restore_facts,
+            self.replace_paths,
+        )
     }
 }
 
@@ -612,29 +627,10 @@ struct ConfigRestoreFact {
 
 pub(crate) enum ConfigRestorePreparation {
     Ready {
-        request: ConfigSetRequest,
+        request: ConfigPatchRequest,
         fenced: bool,
     },
     Fenced,
-}
-
-pub(crate) fn decode_agents_list(response: GatewayResponse) -> Result<GatewayAgents, WireError> {
-    let payload = success_payload(response, WireError::InvalidAgentsList)?;
-    let payload: AgentsListWire =
-        serde_json::from_value(payload).map_err(|_| WireError::InvalidAgentsList)?;
-    if !payload.is_valid() {
-        return Err(WireError::InvalidAgentsList);
-    }
-    Ok(GatewayAgents {
-        agents: payload
-            .agents
-            .into_iter()
-            .map(|agent| GatewayAgent {
-                agent_id: agent.id,
-                workspace: agent.workspace,
-            })
-            .collect(),
-    })
 }
 
 pub(crate) fn decode_agents_create(response: GatewayResponse) -> Result<AgentCreated, WireError> {
@@ -682,6 +678,7 @@ pub(crate) fn decode_config_get(response: GatewayResponse) -> Result<ConfigSnaps
             .into_option()
             .map(|raw| ConfigDocument(raw.into_bytes())),
         base_hash: payload.hash.map(ConfigBaseHash::from_response),
+        source_config: payload.source_config,
         config: payload.config,
     })
 }
@@ -718,112 +715,6 @@ pub(crate) fn decode_config_apply(
         return Err(WireError::InvalidConfigApply);
     }
     Ok(ConfigApplyApplied)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AgentsListWire {
-    default_id: String,
-    main_key: String,
-    scope: String,
-    agents: Vec<AgentSummaryWire>,
-}
-
-impl AgentsListWire {
-    fn is_valid(&self) -> bool {
-        valid_string(&self.default_id)
-            && valid_string(&self.main_key)
-            && matches!(self.scope.as_str(), "per-sender" | "global")
-            && self.agents.iter().all(AgentSummaryWire::is_valid)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AgentSummaryWire {
-    id: String,
-    name: Option<String>,
-    identity: Option<AgentIdentityWire>,
-    workspace: Option<String>,
-    model: Option<AgentModelWire>,
-    agent_runtime: Option<AgentRuntimeWire>,
-}
-
-impl AgentSummaryWire {
-    fn is_valid(&self) -> bool {
-        valid_string(&self.id)
-            && valid_optional_string(&self.name)
-            && valid_optional_string(&self.workspace)
-            && self
-                .identity
-                .as_ref()
-                .is_none_or(AgentIdentityWire::is_valid)
-            && self.model.as_ref().is_none_or(AgentModelWire::is_valid)
-            && self
-                .agent_runtime
-                .as_ref()
-                .is_none_or(AgentRuntimeWire::is_valid)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentIdentityWire {
-    name: Option<String>,
-    theme: Option<String>,
-    emoji: Option<String>,
-    avatar: Option<String>,
-    #[serde(rename = "avatarUrl")]
-    avatar_url: Option<String>,
-}
-
-impl AgentIdentityWire {
-    fn is_valid(&self) -> bool {
-        valid_optional_string(&self.name)
-            && valid_optional_string(&self.theme)
-            && valid_optional_string(&self.emoji)
-            && valid_optional_string(&self.avatar)
-            && valid_optional_string(&self.avatar_url)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentModelWire {
-    primary: Option<String>,
-    fallbacks: Option<Vec<String>>,
-}
-
-impl AgentModelWire {
-    fn is_valid(&self) -> bool {
-        valid_optional_string(&self.primary)
-            && self
-                .fallbacks
-                .as_ref()
-                .is_none_or(|fallbacks| valid_strings(fallbacks))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AgentRuntimeWire {
-    id: String,
-    fallback: Option<String>,
-    source: String,
-}
-
-impl AgentRuntimeWire {
-    fn is_valid(&self) -> bool {
-        valid_string(&self.id)
-            && self
-                .fallback
-                .as_deref()
-                .is_none_or(|fallback| matches!(fallback, "pi" | "none"))
-            && matches!(
-                self.source.as_str(),
-                "env" | "agent" | "defaults" | "model" | "provider" | "implicit"
-            )
-    }
 }
 
 #[derive(Deserialize)]
@@ -866,6 +757,7 @@ struct ConfigSnapshotWire {
     exists: bool,
     raw: NullableString,
     valid: bool,
+    source_config: Value,
     config: Value,
     hash: Option<String>,
     #[serde(default)]
@@ -881,6 +773,7 @@ impl ConfigSnapshotWire {
         let _ = self.valid;
         valid_string(&self.path)
             && self.raw.is_valid()
+            && self.source_config.is_object()
             && self.config.is_object()
             && valid_optional_string(&self.hash)
             && self.issues.iter().all(ConfigIssueWire::is_valid)
@@ -1050,12 +943,6 @@ mod tests {
 
     #[test]
     fn requests_match_gateway_golden_frames() {
-        let list = agents_list_request("agents-list-1".into()).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&list.encode().unwrap()).unwrap(),
-            json!({"type": "req", "id": "agents-list-1", "method": "agents.list", "params": {}})
-        );
-
         let create = agents_create_request(
             "agents-create-1".into(),
             "team-agent-1".into(),
@@ -1155,6 +1042,7 @@ mod tests {
             "config-patch-1".into(),
             ConfigDocument::new("{\"models\":{}}".into()).unwrap(),
             base_hash,
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(
@@ -1162,6 +1050,24 @@ mod tests {
             json!({
                 "type": "req", "id": "config-patch-1", "method": "config.patch",
                 "params": {"raw": "{\"models\":{}}", "baseHash": "base-hash-canary"}
+            })
+        );
+
+        let patch_with_replace_paths = config_patch_request(
+            "config-patch-2".into(),
+            ConfigDocument::new("{\"agents\":{\"list\":[]}}".into()).unwrap(),
+            None,
+            vec!["agents.list".into(), "mcp.servers".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&patch_with_replace_paths.encode().unwrap()).unwrap(),
+            json!({
+                "type": "req", "id": "config-patch-2", "method": "config.patch",
+                "params": {
+                    "raw": "{\"agents\":{\"list\":[]}}",
+                    "replacePaths": ["agents.list", "mcp.servers"]
+                }
             })
         );
 
@@ -1185,10 +1091,6 @@ mod tests {
 
     #[test]
     fn requests_reject_invalid_required_values() {
-        assert_eq!(
-            agents_list_request(String::new()).unwrap_err(),
-            WireError::InvalidAgentsListRequest
-        );
         assert_eq!(
             agents_create_request("id".into(), String::new(), "workspace".into()).unwrap_err(),
             WireError::InvalidAgentsCreateRequest
@@ -1227,6 +1129,17 @@ mod tests {
                 String::new(),
                 ConfigDocument::new("raw".into()).unwrap(),
                 None,
+                Vec::new(),
+            )
+            .unwrap_err(),
+            WireError::InvalidConfigPatchRequest
+        );
+        assert_eq!(
+            config_patch_request(
+                "id".into(),
+                ConfigDocument::new("raw".into()).unwrap(),
+                None,
+                vec![String::new()],
             )
             .unwrap_err(),
             WireError::InvalidConfigPatchRequest
@@ -1251,6 +1164,7 @@ mod tests {
                 "exists": false,
                 "raw": null,
                 "valid": true,
+                "sourceConfig": {},
                 "config": {},
                 "hash": "base-hash-canary",
                 "issues": [],
@@ -1266,11 +1180,98 @@ mod tests {
             "config-patch-null".into(),
             ConfigDocument::new("{\"models\":{}}".into()).unwrap(),
             base_hash,
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&patch.encode().unwrap()).unwrap()["params"]["baseHash"],
             json!("base-hash-canary")
+        );
+    }
+
+    #[test]
+    fn materialize_agents_patch_keeps_raw_local_to_managed_fields() {
+        let initial = json!({
+            "agents": {
+                "list": [{
+                    "id": "managed-first",
+                    "name": "old-first",
+                    "workspace": "old-workspace",
+                    "model": {"primary": "provider/model-canary"},
+                    "tools": ["tool-canary"]
+                }]
+            },
+            "models": {"leak": "must-not-appear"}
+        });
+        let snapshot = decode_config_get(response(
+            "config-get-1",
+            config_snapshot_with_raw(initial.to_string(), "patch-base-hash"),
+        ))
+        .unwrap();
+        let patch = snapshot
+            .patch_agents(vec![ConfigAgentPatch::new(
+                "managed-first".into(),
+                "new-first".into(),
+                "workspace-first".into(),
+            )])
+            .unwrap();
+        let (raw, _, facts, replace_paths) = patch.into_parts();
+        assert!(replace_paths.is_empty());
+        assert_eq!(
+            serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap(),
+            json!({
+                "agents": {
+                    "list": [{
+                        "id": "managed-first",
+                        "name": "new-first",
+                        "workspace": "workspace-first"
+                    }]
+                }
+            })
+        );
+
+        let restored_snapshot = decode_config_get(response(
+            "config-get-2",
+            config_snapshot_with_raw(
+                json!({
+                    "agents": {
+                        "list": [{
+                            "id": "managed-first",
+                            "name": "new-first",
+                            "workspace": "workspace-first",
+                            "model": {"primary": "provider/model-canary"},
+                            "tools": ["tool-canary"]
+                        }]
+                    },
+                    "models": {"keep": "outside-restore-patch"}
+                })
+                .to_string(),
+                "restore-base-hash",
+            ),
+        ))
+        .unwrap();
+        let ConfigRestorePreparation::Ready { request, fenced } =
+            restored_snapshot.prepare_restore(facts).unwrap()
+        else {
+            panic!("matching entry with preserved fields must prepare a restore");
+        };
+        assert!(!fenced);
+        let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        assert_eq!(encoded["method"], "config.patch");
+        assert_eq!(encoded["params"]["replacePaths"], json!(["agents.list"]));
+        assert_eq!(
+            serde_json::from_str::<Value>(encoded["params"]["raw"].as_str().unwrap()).unwrap(),
+            json!({
+                "agents": {
+                    "list": [{
+                        "id": "managed-first",
+                        "name": "old-first",
+                        "workspace": "old-workspace",
+                        "model": {"primary": "provider/model-canary"},
+                        "tools": ["tool-canary"]
+                    }]
+                }
+            })
         );
     }
 
@@ -1300,7 +1301,28 @@ mod tests {
                 ),
             ])
             .unwrap();
-        let (_, _, facts) = patch.into_parts();
+        let (raw, base_hash, facts, replace_paths) = patch.into_parts();
+        assert_eq!(base_hash.unwrap().as_str().unwrap(), "patch-base-hash");
+        assert!(replace_paths.is_empty());
+        assert_eq!(
+            serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap(),
+            json!({
+                "agents": {
+                    "list": [
+                        {
+                            "id": "managed-first",
+                            "name": "new-first",
+                            "workspace": "workspace-first"
+                        },
+                        {
+                            "id": "managed-second",
+                            "name": "new-second",
+                            "workspace": "workspace-second"
+                        }
+                    ]
+                }
+            })
+        );
 
         let reordered = json!({
             "agents": {
@@ -1331,41 +1353,19 @@ mod tests {
         };
         assert!(!fenced);
         let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        assert_eq!(encoded["method"], "config.patch");
         assert_eq!(encoded["params"]["baseHash"], "restore-base-hash");
+        assert_eq!(encoded["params"]["replacePaths"], json!(["agents.list"]));
         let restored: Value =
             serde_json::from_str(encoded["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(
-            restored["agents"]["list"],
-            json!([{"id": "unrelated", "value": "keep"}])
+            restored,
+            json!({"agents": {"list": [{"id": "unrelated", "value": "keep"}]}})
         );
     }
 
     #[test]
     fn decoders_project_only_the_required_private_values() {
-        let agents = decode_agents_list(response(
-            "agents-list-1",
-            json!({
-                "defaultId": "agent-1",
-                "mainKey": "main",
-                "scope": "per-sender",
-                "agents": [{
-                    "id": "agent-1",
-                    "name": "team-agent-1",
-                    "workspace": "workspace-path-canary",
-                    "identity": {"name": "identity-1"},
-                    "model": {"primary": "provider/model-1", "fallbacks": ["provider/model-2"]},
-                    "agentRuntime": {"id": "provider/model-1", "fallback": "pi", "source": "agent"}
-                }]
-            }),
-        ))
-        .unwrap();
-        assert_eq!(agents.agents.len(), 1);
-        assert_eq!(agents.agents[0].agent_id, "agent-1");
-        assert_eq!(
-            agents.agents[0].workspace.as_deref(),
-            Some("workspace-path-canary")
-        );
-
         let created = decode_agents_create(response(
             "agents-create-1",
             json!({
@@ -1407,13 +1407,6 @@ mod tests {
     #[test]
     fn decoders_fail_closed_on_schema_drift_or_gateway_failures() {
         assert!(matches!(
-            decode_agents_list(response(
-                "agents-list-1",
-                json!({"defaultId": "agent-1", "mainKey": "main", "scope": "global", "agents": [], "future": true}),
-            )),
-            Err(WireError::InvalidAgentsList)
-        ));
-        assert!(matches!(
             decode_agents_create(response(
                 "agents-create-1",
                 json!({"ok": true, "agentId": "agent-1", "name": "name", "workspace": "workspace", "future": true}),
@@ -1430,7 +1423,7 @@ mod tests {
         assert!(matches!(
             decode_agents_delete(response(
                 "agents-delete-1",
-                json!({"ok": true, "agentId": "agent-1", "removedBindings": 0, "future": true}),
+                json!({"ok": true, "agentId": "agent-1", "removedBindings": "0"}),
             )),
             Err(WireError::InvalidAgentsDelete)
         ));
@@ -1524,6 +1517,27 @@ mod tests {
             &["request-id-canary", "config-raw-canary", "base-hash-canary"],
         );
 
+        let (_, base_hash) = decode_config_get(response("config-get-2", config_snapshot()))
+            .unwrap()
+            .into_parts();
+        let request = config_patch_request(
+            "request-id-canary".into(),
+            ConfigDocument::new("config-raw-canary".into()).unwrap(),
+            base_hash,
+            vec!["replace-path-canary".into()],
+        )
+        .unwrap();
+        assert_debug_redacts(
+            &request,
+            &[
+                "request-id-canary",
+                "config-raw-canary",
+                "base-hash-canary",
+                "replace-path-canary",
+            ],
+        );
+        assert!(format!("{request:?}").contains("replace_paths: 1"));
+
         assert_not_clone::<ConfigDocument, _>();
         assert_not_debug::<ConfigDocument, _>();
         assert_not_display::<ConfigDocument, _>();
@@ -1542,8 +1556,6 @@ mod tests {
         assert_not_serialize::<ConfigRestoreFacts, _>();
         assert_not_debug::<ConfigRestorePreparation, _>();
         assert_not_debug::<ConfigSnapshot, _>();
-        assert_not_debug::<GatewayAgent, _>();
-        assert_not_debug::<GatewayAgents, _>();
         assert_not_debug::<AgentCreated, _>();
         assert_not_debug::<AgentUpdated, _>();
         assert_not_debug::<AgentDeleted, _>();

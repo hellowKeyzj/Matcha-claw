@@ -128,8 +128,7 @@ fn decode_confirmation(
     else {
         return Err(());
     };
-    (payload.len() == 3
-        && payload.get("channel").and_then(Value::as_str) == Some(expected_channel.as_str())
+    (payload.get("channel").and_then(Value::as_str) == Some(expected_channel.as_str())
         && payload.get("accountId").and_then(Value::as_str) == Some(expected_account.as_str())
         && payload
             .get(action.confirmation_field())
@@ -176,7 +175,12 @@ mod tests {
     fn confirmation_requires_the_requested_state_and_exact_identity() {
         assert!(
             decode_confirmation(
-                response(json!({ "channel": "whatsapp", "accountId": "default", "started": true })),
+                response(json!({
+                    "channel": "whatsapp",
+                    "accountId": "default",
+                    "started": true,
+                    "nativeExtra": "ignored"
+                })),
                 ChannelControlAction::Start,
                 &channel(),
                 &account(),

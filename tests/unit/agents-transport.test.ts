@@ -33,7 +33,10 @@ describe('Electron Main agents transport', () => {
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => created });
     const transport = createAgentsTransport({ verificationKey: 'public', signDecision }, 34_225, fetcher);
 
-    await expect(transport.execute(createRequest)).resolves.toEqual({ status: 200, body: created });
+    await expect(transport.execute({
+      ...createRequest,
+      input: { ...createRequest.input, workspaceInitialization: 'emptyWorkspace' },
+    })).resolves.toEqual({ status: 200, body: created });
     expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: '/api/subagents/agents',
       scope: 'subagents:manage',
@@ -43,13 +46,87 @@ describe('Electron Main agents transport', () => {
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
-      body: JSON.stringify(createRequest),
+      body: JSON.stringify({
+        ...createRequest,
+        input: { ...createRequest.input, workspaceInitialization: 'emptyWorkspace' },
+      }),
     }));
+  });
+
+  it('accepts the final public agents list projection only', async () => {
+    const listRequest = {
+      id: 'subagent.management',
+      operationId: 'subagents.list',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'agent', agentId: 'main' },
+      input: { kind: 'list', endpoint },
+    } as const;
+    const body = {
+      success: true,
+      defaultId: 'main',
+      selectionRequired: false,
+      agents: [
+        { id: 'main', name: 'Main', workspace: null, model: null, kind: 'system', sealed: false },
+        { id: 'writer', name: 'Writer', workspace: 'E:/workspace/writer', model: null, kind: 'agent', sealed: true },
+      ],
+    };
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.execute(listRequest)).resolves.toEqual({ status: 200, body });
+  });
+
+  it.each([
+    {
+      success: true,
+      defaultId: 'main',
+      selectionRequired: false,
+      agents: [{ mainKey: 'writer', scope: 'user', identity: { id: 'writer', name: 'Writer' }, agentRuntime: { kind: 'openclaw' } }],
+    },
+    {
+      success: true,
+      defaultId: 'main',
+      selectionRequired: false,
+      agents: [{ id: 'writer', name: 'Writer', workspace: null, model: null, kind: 'agent' }],
+    },
+  ])('rejects non-public agents list bodies', async (body) => {
+    const listRequest = {
+      id: 'subagent.management',
+      operationId: 'subagents.list',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'agent', agentId: 'main' },
+      input: { kind: 'list', endpoint },
+    } as const;
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.execute(listRequest)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
   });
 
   it.each([
     { ...createRequest, operationId: 'subagents.files.get' },
-    { ...createRequest, input: { ...createRequest.input, workspaceInitialization: 'emptyWorkspace' } },
+    {
+      ...createRequest,
+      operationId: 'subagents.package.export',
+      input: { kind: 'packageExport', endpoint, agentId: 'writer' },
+    },
+    {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg', workspace: 'C:/private' },
+    },
+    { ...createRequest, input: { ...createRequest.input, workspaceInitialization: 'bad' } },
     { ...createRequest, input: { ...createRequest.input, endpoint: { ...endpoint, runtimeInstanceId: 'remote' } } },
     { ...createRequest, privateToken: 'must-not-pass' },
   ])('fails closed before signing malformed requests', async (invalid) => {
@@ -83,6 +160,107 @@ describe('Electron Main agents transport', () => {
       target: { kind: 'subagent' as const, subagentId: 'writer' },
       input: { kind: 'filesGet' as const, endpoint, agentId: 'writer', name: 'AGENTS.md' },
     };
+
+    await expect(transport.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+  });
+
+  it('exports only the sealed package public receipt', async () => {
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.export',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { kind: 'packageExport', endpoint, agentId: 'writer' },
+    } as const;
+    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      fetcher,
+    );
+
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(request),
+    }));
+  });
+
+  it.each([
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, content: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, path: 'C:/private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, files: [] } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, source: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, token: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, key: 'private' } },
+  ])('rejects sealed package export receipts with private fields', async (body) => {
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.export',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { kind: 'packageExport', endpoint, agentId: 'writer' },
+    } as const;
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+  });
+
+  it('installs only the public sealed package DTO and receipt', async () => {
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg' },
+    } as const;
+    const body = { success: true, package: { agentId: 'writer' } };
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      fetcher,
+    );
+
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(request),
+    }));
+  });
+
+  it.each([
+    { success: true, package: { agentId: 'writer', workspace: 'C:/private' } },
+    { success: true, package: { agentId: 'writer', packagePath: 'C:/sealed/writer.matcha-agentpkg' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg' } },
+    { success: true, package: { agentId: 'writer', files: [] } },
+    { success: true, package: { agentId: 'writer', content: 'private' } },
+    { success: true, package: { agentId: 'writer', path: 'C:/private' } },
+    { success: true, package: { agentId: 'writer', token: 'private' } },
+  ])('rejects sealed package install receipts with private fields', async (body) => {
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg' },
+    } as const;
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
 
     await expect(transport.execute(request)).resolves.toEqual({
       status: 503,
@@ -296,6 +474,50 @@ describe('Electron Main agents transport', () => {
     });
   });
 
+  it('accepts skill configuration options without installed and rejects installed residue', async () => {
+    const request = {
+      id: 'subagent.skills',
+      operationId: 'subagentSkills.get',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { agentId: 'writer' },
+    } as const;
+    const skillOption = {
+      skillKey: 'research',
+      displayName: 'Research',
+      description: 'Search and summarize',
+      selectable: true,
+      unavailableReason: null,
+      missingRequirements: null,
+    };
+    const view = {
+      agentId: 'writer', support: { supportType: 'supported' }, selectionMode: 'inheritsDefaultSkills',
+      explicitSkillKeys: [], inheritedDefaultSkillKeys: ['research'], effectiveSkillKeys: ['research'], options: [skillOption], revision: 'revision-1', updatedAt: null,
+    };
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => view }),
+    );
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body: view });
+
+    const leaking = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        json: async () => ({
+          ...view,
+          options: [{ ...skillOption, installed: true }],
+        }),
+      }),
+    );
+    await expect(leaking.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+  });
+
   it('delivers only bare typed tool configuration views and rejects catalog leaks', async () => {
     const request = {
       id: 'subagent.tools',
@@ -304,9 +526,14 @@ describe('Electron Main agents transport', () => {
       target: { kind: 'subagent', subagentId: 'writer' },
       input: { agentId: 'writer' },
     } as const;
+    const toolOption = {
+      toolKey: 'read', displayName: 'Read', optionType: 'tool', description: null,
+      source: 'core', pluginId: null, optional: true, risk: 'low', tags: ['file'], defaultProfiles: ['default'],
+      groupKey: null, groupDisplayName: null,
+    };
     const view = {
       agentId: 'writer', support: { supportType: 'supported' }, selectionMode: 'inheritsDefaultTools', toolPolicy: null,
-      toolProfiles: [], toolGroups: [], toolOptions: [], revision: 'revision-1', updatedAt: null,
+      toolProfiles: [], toolGroups: [], toolOptions: [toolOption], revision: 'revision-1', updatedAt: null,
     };
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
@@ -321,6 +548,22 @@ describe('Electron Main agents transport', () => {
       vi.fn().mockResolvedValue({ status: 200, json: async () => ({ ...view, raw: 'private-config' }) }),
     );
     await expect(leaking.execute(request)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+
+    const rawToolOption = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        json: async () => ({
+          ...view,
+          toolOptions: [{ ...toolOption, rawInputSchema: { token: 'private' } }],
+        }),
+      }),
+    );
+    await expect(rawToolOption.execute(request)).resolves.toEqual({
       status: 503,
       body: { success: false, error: 'Subagent management is unavailable' },
     });

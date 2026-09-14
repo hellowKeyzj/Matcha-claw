@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Cable, CheckCircle2, CircleAlert, Clock3, Loader2, RefreshCw, XCircle } from 'lucide-react';
+import type { SessionRunPhase } from '@/types/session/runtime-state';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useSessionConnectorStatusStore, type SessionConnectorStatus, type SessionConnectorStatusResultType } from '@/stores/session-connector-status';
@@ -12,17 +14,24 @@ import {
 interface ChatSessionConnectorStatusProps {
   readonly sessionIdentity: SessionIdentity | null;
   readonly disabled?: boolean;
+  readonly activeRunId?: string | null;
+  readonly runPhase?: SessionRunPhase | null;
 }
 
 const EMPTY_SESSION_CONNECTOR_STATUSES: SessionConnectorStatus[] = [];
+const CONNECTOR_STATUS_REFRESH_PHASES = new Set<SessionRunPhase>(['submitted', 'streaming', 'done', 'error', 'aborted']);
+const CONNECTOR_STATUS_REFRESH_TERMINAL_PHASES = new Set<SessionRunPhase>(['done', 'error', 'aborted']);
 
 export function ChatSessionConnectorStatus({
   sessionIdentity,
   disabled = false,
+  activeRunId = null,
+  runPhase = null,
 }: ChatSessionConnectorStatusProps) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const autoRefreshKeyRef = useRef<string>('');
   const sessionIdentityKey = useMemo(
     () => (sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : ''),
     [sessionIdentity],
@@ -37,6 +46,7 @@ export function ChatSessionConnectorStatus({
     sessionIdentityKey ? state.errorBySessionKey[sessionIdentityKey] ?? null : null
   ));
   const refreshSessionStatus = useSessionConnectorStatusStore((state) => state.refreshSessionStatus);
+  const setSessionMcpServerEnabled = useSessionConnectorStatusStore((state) => state.setSessionMcpServerEnabled);
 
   const refresh = useCallback(() => {
     if (!sessionIdentity) {
@@ -50,7 +60,22 @@ export function ChatSessionConnectorStatus({
       return;
     }
     void refreshSessionStatus(sessionIdentity).catch(() => undefined);
-  }, [refreshSessionStatus, sessionIdentityKey]);
+  }, [refreshSessionStatus, sessionIdentity, sessionIdentityKey]);
+
+  useEffect(() => {
+    if (!sessionIdentity || !runPhase || !CONNECTOR_STATUS_REFRESH_PHASES.has(runPhase)) {
+      return;
+    }
+    if (!activeRunId && !CONNECTOR_STATUS_REFRESH_TERMINAL_PHASES.has(runPhase)) {
+      return;
+    }
+    const refreshKey = `${sessionIdentityKey}:${activeRunId ?? 'terminal'}:${runPhase}`;
+    if (autoRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+    autoRefreshKeyRef.current = refreshKey;
+    void refreshSessionStatus(sessionIdentity).catch(() => undefined);
+  }, [activeRunId, refreshSessionStatus, runPhase, sessionIdentity, sessionIdentityKey]);
 
   useEffect(() => {
     if (!open) {
@@ -150,7 +175,14 @@ export function ChatSessionConnectorStatus({
             ) : null}
             {statuses.length > 0 ? (
               <div className="space-y-1.5">
-                {statuses.map((status) => <ConnectorStatusRow key={`${status.adapterId}:${status.connectorId}`} status={status} />)}
+                {statuses.map((status) => (
+                  <ConnectorStatusRow
+                    key={`${status.adapterId}:${status.connectorId}`}
+                    status={status}
+                    sessionIdentity={sessionIdentity}
+                    onSetEnabled={setSessionMcpServerEnabled}
+                  />
+                ))}
               </div>
             ) : null}
           </div>
@@ -174,9 +206,27 @@ export function ChatSessionConnectorStatus({
   );
 }
 
-function ConnectorStatusRow({ status }: { readonly status: SessionConnectorStatus }) {
+function ConnectorStatusRow({
+  status,
+  sessionIdentity,
+  onSetEnabled,
+}: {
+  readonly status: SessionConnectorStatus;
+  readonly sessionIdentity: SessionIdentity | null;
+  readonly onSetEnabled: (sessionIdentity: SessionIdentity, serverId: string, enabled: boolean) => Promise<void>;
+}) {
   const meta = statusMeta(status.resultType);
   const toolCount = status.details?.toolCount;
+  const serverId = status.details?.serverId;
+  const enabledNextRun = status.details?.enabledNextRun;
+  const nextEnabled = sessionIdentity && serverId && status.details?.enabledConfigurable === true && status.resultType !== 'unsupported'
+    ? enabledNextRun === false
+    : null;
+  const pendingText = enabledNextRun === false
+    ? '已禁用'
+    : enabledNextRun === true && status.resultType === 'disabled'
+      ? '已启用'
+      : null;
   return (
     <div className="flex items-center gap-2.5 rounded-xl px-2.5 py-2 transition-colors hover:bg-muted/55">
       <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full', meta.iconClass)}>
@@ -187,8 +237,25 @@ function ConnectorStatusRow({ status }: { readonly status: SessionConnectorStatu
           <span className="truncate text-sm font-medium">{status.displayName || status.connectorId}</span>
           <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium', meta.badgeClass)}>{meta.label}</span>
         </div>
-        <div className="mt-0.5 truncate text-xs text-muted-foreground">
-          {toolCount !== undefined ? `${toolCount} 个工具` : status.reason ?? status.adapterId}
+        <div className="mt-0.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span className="min-w-0 truncate">
+            {pendingText ?? (toolCount !== undefined ? `${toolCount} 个工具` : status.reason ?? status.adapterId)}
+          </span>
+          {nextEnabled !== null ? (
+            <button
+              type="button"
+              className="shrink-0 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={(event) => {
+                event.stopPropagation();
+                if (!sessionIdentity || !serverId) return;
+                void onSetEnabled(sessionIdentity, serverId, nextEnabled)
+                  .then(() => toast.success(nextEnabled ? '已启用' : '已禁用'))
+                  .catch((error) => toast.error(error instanceof Error ? error.message : '更新会话 MCP 状态失败'));
+              }}
+            >
+              {nextEnabled ? '启用' : '禁用'}
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

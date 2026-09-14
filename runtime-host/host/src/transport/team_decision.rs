@@ -33,8 +33,8 @@ pub(crate) enum Delivery {
 impl Delivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
-            Self::Recorded | Self::Replayed | Self::OutcomeUnknown => 200,
-            Self::Rejected => 409,
+            Self::Recorded | Self::Replayed => 200,
+            Self::OutcomeUnknown | Self::Rejected => 409,
         }
     }
 
@@ -42,7 +42,9 @@ impl Delivery {
         match self {
             Self::Recorded => json!({ "success": true, "outcome": "recorded" }),
             Self::Replayed => json!({ "success": true, "outcome": "replayed" }),
-            Self::OutcomeUnknown => json!({ "success": true, "outcome": "outcome-unknown" }),
+            Self::OutcomeUnknown => {
+                json!({ "success": false, "outcome": "outcome-unknown", "error": "Team human decision outcome is unknown" })
+            }
             Self::Rejected => {
                 json!({ "success": false, "error": "Team human decision was rejected" })
             }

@@ -21,6 +21,7 @@ const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 const PROJECTS_DIR: &str = "projects";
 const JSONL_EXTENSION: &str = "jsonl";
 const LIST_LIMIT: usize = 200;
+const MAX_SANITIZED_LENGTH: usize = 200;
 const TRANSCRIPT_MAX_LINES: usize = 10_000;
 const MAX_TEXT_PREVIEW_BYTES: usize = 64 * 1024;
 const DEFAULT_CONTENT_CHUNK_BYTES: usize = 64 * 1024;
@@ -28,7 +29,15 @@ const IMAGE_MEDIA_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "im
 
 #[derive(Clone)]
 pub struct LocalHistoryReader {
-    projects_dir: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    project_dir_prefix: Option<String>,
+    scope: LocalHistoryScope,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LocalHistoryScope {
+    Projects,
+    Project,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -73,14 +82,39 @@ enum EntryType {
 impl LocalHistoryReader {
     pub fn from_environment() -> Self {
         Self {
-            projects_dir: claude_config_home_from_environment().map(|home| home.join(PROJECTS_DIR)),
+            project_dir: claude_config_home_from_environment().map(|home| home.join(PROJECTS_DIR)),
+            project_dir_prefix: None,
+            scope: LocalHistoryScope::Projects,
+        }
+    }
+
+    pub fn for_workspace(cwd: impl Into<PathBuf>) -> Self {
+        let (project_dir, project_dir_prefix) = workspace_project_dir(cwd.into());
+        Self {
+            project_dir,
+            project_dir_prefix,
+            scope: LocalHistoryScope::Project,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn from_projects_dir(projects_dir: PathBuf) -> Self {
+    pub(crate) fn from_project_dir(project_dir: PathBuf) -> Self {
         Self {
-            projects_dir: Some(projects_dir),
+            project_dir: Some(project_dir),
+            project_dir_prefix: None,
+            scope: LocalHistoryScope::Projects,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_workspace_project_dir(
+        project_dir: PathBuf,
+        project_dir_prefix: Option<String>,
+    ) -> Self {
+        Self {
+            project_dir: Some(project_dir),
+            project_dir_prefix,
+            scope: LocalHistoryScope::Project,
         }
     }
 
@@ -129,7 +163,14 @@ impl LocalHistoryReader {
     }
 
     fn list_blocking(&self) -> io::Result<LocalHistoryCatalog> {
-        let mut sessions = self.session_files()?;
+        let mut sessions = self
+            .session_files()?
+            .into_values()
+            .map(|file| LocalHistorySession {
+                session_id: file.session_id,
+                updated_at: file.updated_at,
+            })
+            .collect::<Vec<_>>();
         sessions.sort_by(|left, right| {
             right
                 .updated_at
@@ -137,15 +178,7 @@ impl LocalHistoryReader {
                 .then_with(|| left.session_id.as_str().cmp(right.session_id.as_str()))
         });
         sessions.truncate(LIST_LIMIT);
-        Ok(LocalHistoryCatalog {
-            sessions: sessions
-                .into_iter()
-                .map(|file| LocalHistorySession {
-                    session_id: file.session_id,
-                    updated_at: file.updated_at,
-                })
-                .collect(),
-        })
+        Ok(LocalHistoryCatalog { sessions })
     }
 
     fn load_blocking(
@@ -213,35 +246,43 @@ impl LocalHistoryReader {
     }
 
     fn session_file(&self, session_id: &SessionId) -> io::Result<Option<SessionFile>> {
-        let mut found = self
-            .session_files()?
-            .into_iter()
-            .filter(|file| file.session_id == *session_id)
-            .collect::<Vec<_>>();
-        found.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        Ok(found.into_iter().next())
+        Ok(self.session_files()?.remove(session_id.as_str()))
     }
 
-    fn session_files(&self) -> io::Result<Vec<SessionFile>> {
-        let Some(projects_dir) = &self.projects_dir else {
+    fn session_files(&self) -> io::Result<HashMap<String, SessionFile>> {
+        let Some(project_dir) = &self.project_dir else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "claude config home is unavailable",
             ));
         };
         let mut by_session = HashMap::<String, SessionFile>::new();
-        for entry in fs::read_dir(projects_dir)? {
-            let Ok(entry) = entry else { continue };
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                collect_project_session_files(&entry.path(), &mut by_session);
-            } else if file_type.is_file() {
-                collect_session_file(&entry.path(), &mut by_session);
+        if let Some(prefix) = &self.project_dir_prefix
+            && !project_dir.is_dir()
+            && let Some(resolved) = find_project_dir_with_prefix(project_dir, prefix)
+        {
+            collect_project_session_files(&resolved, &mut by_session);
+            return Ok(by_session);
+        }
+        match self.scope {
+            LocalHistoryScope::Projects => {
+                for entry in fs::read_dir(project_dir)? {
+                    let Ok(entry) = entry else { continue };
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if file_type.is_dir() {
+                        collect_project_session_files(&entry.path(), &mut by_session);
+                    } else if file_type.is_file() {
+                        collect_session_file(&entry.path(), &mut by_session);
+                    }
+                }
+            }
+            LocalHistoryScope::Project => {
+                collect_project_session_files(project_dir, &mut by_session);
             }
         }
-        Ok(by_session.into_values().collect())
+        Ok(by_session)
     }
 }
 
@@ -271,7 +312,8 @@ impl fmt::Debug for LocalHistoryReader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalHistoryReader")
-            .field("has_projects_dir", &self.projects_dir.is_some())
+            .field("has_project_dir", &self.project_dir.is_some())
+            .field("has_project_dir_prefix", &self.project_dir_prefix.is_some())
             .finish()
     }
 }
@@ -293,6 +335,107 @@ impl fmt::Debug for LocalHistorySession {
             .field("updated_at", &self.updated_at)
             .finish()
     }
+}
+
+fn workspace_project_dir(cwd: PathBuf) -> (Option<PathBuf>, Option<String>) {
+    let Some(home) = claude_config_home_from_environment() else {
+        return (None, None);
+    };
+    workspace_project_dir_at(home, &cwd)
+}
+
+fn workspace_project_dir_at(home: PathBuf, cwd: &Path) -> (Option<PathBuf>, Option<String>) {
+    let Some(workspace) = workspace_path_string(cwd) else {
+        return (None, None);
+    };
+    let sanitized = sanitize_path(&workspace);
+    let project_dir = home.join(PROJECTS_DIR).join(&sanitized);
+    let prefix = (sanitized.len() > MAX_SANITIZED_LENGTH)
+        .then(|| sanitized[..MAX_SANITIZED_LENGTH].to_owned());
+    (Some(project_dir), prefix)
+}
+
+fn workspace_path_string(cwd: &Path) -> Option<String> {
+    let path = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    portable_path_string(&path)
+}
+
+#[cfg(windows)]
+fn portable_path_string(path: &Path) -> Option<String> {
+    let value = path.to_str()?;
+    if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{value}"));
+    }
+    Some(value.strip_prefix(r"\\?\").unwrap_or(value).to_owned())
+}
+
+#[cfg(not(windows))]
+fn portable_path_string(path: &Path) -> Option<String> {
+    path.to_str().map(str::to_owned)
+}
+
+fn sanitize_path(value: &str) -> String {
+    let sanitized = value
+        .encode_utf16()
+        .map(|unit| match unit {
+            0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a => {
+                char::from_u32(u32::from(unit)).expect("ASCII alphanumeric is valid char")
+            }
+            _ => '-',
+        })
+        .collect::<String>();
+    if sanitized.len() <= MAX_SANITIZED_LENGTH {
+        return sanitized;
+    }
+    format!(
+        "{}-{}",
+        &sanitized[..MAX_SANITIZED_LENGTH],
+        base36_abs(djb2_hash(value))
+    )
+}
+
+fn djb2_hash(value: &str) -> i32 {
+    value.encode_utf16().fold(0i32, |hash, unit| {
+        hash.wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(unit))
+    })
+}
+
+fn base36_abs(value: i32) -> String {
+    let mut value = value.unsigned_abs();
+    if value == 0 {
+        return "0".to_owned();
+    }
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = value % 36;
+        digits.push(match digit {
+            0..=9 => (b'0' + digit as u8) as char,
+            _ => (b'a' + (digit - 10) as u8) as char,
+        });
+        value /= 36;
+    }
+    digits.iter().rev().collect()
+}
+
+fn find_project_dir_with_prefix(project_dir: &Path, prefix: &str) -> Option<PathBuf> {
+    let projects_dir = project_dir.parent()?;
+    let entries = fs::read_dir(projects_dir).ok()?;
+    let prefix = format!("{prefix}-");
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(&prefix) {
+            return Some(entry.path());
+        }
+    }
+    None
 }
 
 fn collect_project_session_files(project_dir: &Path, sessions: &mut HashMap<String, SessionFile>) {
@@ -1016,33 +1159,72 @@ mod tests {
     use crate::session::hydration::{HydratedMessageRole, HydrationWindowMode};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lists_non_empty_transcript_files_without_exposing_paths() {
-        let root = test_projects_dir("list");
-        let project = root.join("project-a");
-        fs::create_dir_all(&project).unwrap();
+    async fn lists_only_the_workspace_project_dir() {
+        let home = test_project_dir("workspace-list-home");
+        let workspace = test_project_dir("workspace-list-cwd");
+        let (Some(project_dir), _) = workspace_project_dir_at(home.clone(), &workspace) else {
+            panic!("workspace project dir should resolve");
+        };
+        let other_project = home.join(PROJECTS_DIR).join("other-workspace");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
         fs::write(
-            project.join("session-a.jsonl"),
-            transcript(&[user("u1", None, "hello")]),
+            project_dir.join("session-a.jsonl"),
+            transcript(&[user("u1", None, "a")]),
         )
         .unwrap();
-        fs::write(project.join("empty.jsonl"), "").unwrap();
+        fs::write(
+            other_project.join("session-b.jsonl"),
+            transcript(&[user("u1", None, "b")]),
+        )
+        .unwrap();
 
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_workspace_project_dir(project_dir, None);
         let HistoryResult::Complete(catalog) = reader.list().await else {
             panic!("list should complete");
         };
 
         assert_eq!(catalog.sessions().len(), 1);
         assert_eq!(catalog.sessions()[0].session_id().as_str(), "session-a");
-        assert!(catalog.sessions()[0].updated_at().is_some());
-        let debug = format!("{catalog:?}");
-        assert!(!debug.contains("session-a"));
-        assert!(!debug.contains("project-a"));
+    }
+
+    #[test]
+    fn sanitize_path_matches_matcha_agent_short_paths() {
+        assert_eq!(sanitize_path("E:/code/Matcha-claw"), "E--code-Matcha-claw");
+        assert_eq!(sanitize_path(r"C:\Users\Mr.Key\项目"), "C--Users-Mr-Key---");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lists_long_workspace_prefix_match_when_hash_suffix_differs() {
+        let home = test_project_dir("workspace-list-long-home");
+        let exact = home
+            .join(PROJECTS_DIR)
+            .join(format!("{}-rust", "a".repeat(MAX_SANITIZED_LENGTH)));
+        let actual = home
+            .join(PROJECTS_DIR)
+            .join(format!("{}-native", "a".repeat(MAX_SANITIZED_LENGTH)));
+        fs::create_dir_all(&actual).unwrap();
+        fs::write(
+            actual.join("session-a.jsonl"),
+            transcript(&[user("u1", None, "a")]),
+        )
+        .unwrap();
+
+        let reader = LocalHistoryReader::from_workspace_project_dir(
+            exact,
+            Some("a".repeat(MAX_SANITIZED_LENGTH)),
+        );
+        let HistoryResult::Complete(catalog) = reader.list().await else {
+            panic!("list should complete");
+        };
+
+        assert_eq!(catalog.sessions().len(), 1);
+        assert_eq!(catalog.sessions()[0].session_id().as_str(), "session-a");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn loads_latest_non_sidechain_chain_as_hydration_replay_lines() {
-        let root = test_projects_dir("load-chain");
+        let root = test_project_dir("load-chain");
         let project = root.join("project-a");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -1057,7 +1239,7 @@ mod tests {
         )
         .unwrap();
 
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_project_dir(root);
         let HistoryResult::Complete(snapshot) = reader
             .load(
                 SessionId::try_new("session-a").unwrap(),
@@ -1077,7 +1259,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn bridges_legacy_progress_entries_before_chain_walk() {
-        let root = test_projects_dir("progress");
+        let root = test_project_dir("progress");
         let project = root.join("project-a");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -1090,7 +1272,7 @@ mod tests {
         )
         .unwrap();
 
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_project_dir(root);
         let HistoryResult::Complete(snapshot) = reader
             .load(
                 SessionId::try_new("session-a").unwrap(),
@@ -1107,7 +1289,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn recovers_parallel_tool_result_siblings_without_tool_input_values() {
-        let root = test_projects_dir("parallel-tools");
+        let root = test_project_dir("parallel-tools");
         let project = root.join("project-a");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -1123,7 +1305,7 @@ mod tests {
         )
         .unwrap();
 
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_project_dir(root);
         let HistoryResult::Complete(snapshot) = reader
             .load(
                 SessionId::try_new("session-a").unwrap(),
@@ -1146,7 +1328,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn large_text_hydrates_preview_and_loads_utf8_chunks() {
-        let root = test_projects_dir("large-text");
+        let root = test_project_dir("large-text");
         let project = root.join("project-a");
         fs::create_dir_all(&project).unwrap();
         let text = format!("{}好", "a".repeat(MAX_TEXT_PREVIEW_BYTES));
@@ -1156,7 +1338,7 @@ mod tests {
         )
         .unwrap();
 
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_project_dir(root);
         let HistoryResult::Complete(snapshot) = reader
             .load(
                 SessionId::try_new("session-a").unwrap(),
@@ -1195,9 +1377,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn missing_session_is_not_found() {
-        let root = test_projects_dir("missing");
+        let root = test_project_dir("missing");
         fs::create_dir_all(root.join("project-a")).unwrap();
-        let reader = LocalHistoryReader::from_projects_dir(root);
+        let reader = LocalHistoryReader::from_project_dir(root);
 
         assert!(matches!(
             reader
@@ -1210,7 +1392,7 @@ mod tests {
         ));
     }
 
-    fn test_projects_dir(name: &str) -> PathBuf {
+    fn test_project_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "matcha-local-history-{name}-{}",

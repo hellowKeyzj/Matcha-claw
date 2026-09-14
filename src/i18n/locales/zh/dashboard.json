@@ -8,7 +8,7 @@
     "gatewayNotRunning": "网关未运行",
     "recentTokenHistory": {
         "title": "最近 Token 消耗",
-        "description": "展示最近带有 token 用量记录的助手回复。",
+        "description": "展示最近带有 token 用量记录的 session。",
         "loading": "正在加载 token 消耗历史...",
         "refreshFailed": "刷新 token 消耗历史失败，当前展示缓存数据。",
         "empty": "还没有 token 消耗历史",
@@ -31,6 +31,11 @@
         "output": "输出 {{value}}",
         "cacheRead": "缓存读取 {{value}}",
         "cacheWrite": "缓存写入 {{value}}",
-        "cost": "费用 ${{amount}}"
+        "cost": "费用 ${{amount}}",
+        "showDetails": "展开 session 明细",
+        "hideDetails": "收起 session 明细",
+        "detailsLoading": "正在加载 session 明细...",
+        "detailsEmpty": "这个 session 没有 token 明细",
+        "detailsError": "加载 session 明细失败"
     }
 }

@@ -53,7 +53,6 @@ export const RUNTIME_OWNED_INVOKE_CHANNELS = [
   'fleet:writeCredential',
   'settings:splitProxyIntent',
   'providers:storeAccount',
-  'providers:validateApiKey',
   'providers:deleteAccount',
   'providers:startOAuth',
   'providers:submitOAuthCode',

@@ -1,6 +1,6 @@
 import { invokeIpc } from '@/lib/api-client';
 import { trackUiEvent } from './telemetry';
-import { normalizeAppError } from './error-model';
+import { mapBackendErrorCode, normalizeAppError } from './error-model';
 import {
   decodeHostApiProxyEnvelope,
   type HostApiProxyEnvelope,
@@ -32,6 +32,7 @@ import {
   type SessionContentLoadResult,
   type SessionListResult,
   type SessionView,
+  type SessionWireIdentity,
 } from '../types/session/snapshot';
 
 const DEFAULT_HOST_API_PORT = 13210;
@@ -42,6 +43,9 @@ const SESSION_MANAGEMENT_CAPABILITY_ID = 'session.management';
 const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
 const SESSION_APPROVAL_CAPABILITY_ID = 'session.approval';
 const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
+const OPENCLAW_BROWSER_CAPABILITY_ID = 'openclaw.browser';
+const OPENCLAW_MCP_APP_CAPABILITY_ID = 'openclaw.mcpApp';
+const OPENCLAW_LOCAL_ENDPOINT = { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } as const;
 const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
 const capabilityScopeCache = new Map<string, { scope: RuntimeScope; expiresAt: number }>();
 const capabilityScopeInflight = new Map<string, Promise<RuntimeScope>>();
@@ -102,11 +106,13 @@ export interface FileThumbnailResult {
 }
 
 export interface StagedFilePayload {
-  stagedAttachmentId: string;
+  stagedAttachmentId?: string;
+  entryKind?: 'file' | 'directory';
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  sourcePath?: string;
 }
 
 export interface WorkspaceFileContext {
@@ -142,11 +148,22 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
-export type OpenClawToolPermissionMode = 'default' | 'fullAccess';
+export type SessionPermissionMode = 'read-only' | 'guarded' | 'workspace' | 'full';
+export type SessionPermissionSelection = SessionPermissionMode | null;
 
-export interface OpenClawToolPermissionModePayload {
-  mode: OpenClawToolPermissionMode;
-}
+export type HostSessionPermissionResult = Readonly<{
+  supported: boolean;
+  mode: SessionPermissionSelection;
+  defaultMode?: SessionPermissionMode;
+  pending: boolean;
+  canSelectFull: boolean;
+  options: readonly SessionPermissionMode[];
+  reason?: string;
+}>;
+
+export type HostSessionPermissionSetResult = HostSessionPermissionResult & Readonly<{
+  changed?: boolean;
+}>;
 
 export type HostSessionCatalogItem = SessionCatalogItem;
 
@@ -315,8 +332,8 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
       method,
       source: 'ipc-proxy',
       durationMs: Date.now() - startedAt,
-      message: normalized.message,
-      code: normalized.code,
+      message: path.startsWith('/api/channels/') ? 'Channel request failed' : normalized.message,
+      code: path.startsWith('/api/channels/') ? mapBackendErrorCode(normalized.code) : normalized.code,
     });
     throw normalized;
   } finally {
@@ -390,30 +407,16 @@ export async function hostOpenClawGetCliCommand(): Promise<OpenClawCliCommandPay
   return hostApiFetch('/api/openclaw/cli-command');
 }
 
-export async function hostOpenClawGetToolPermissionMode(): Promise<OpenClawToolPermissionModePayload> {
-  return hostApiFetch('/api/openclaw/tool-permission-mode');
-}
-
-export async function hostOpenClawSetToolPermissionMode(
-  mode: OpenClawToolPermissionMode,
-): Promise<OpenClawToolPermissionModePayload> {
-  return hostApiFetch('/api/openclaw/tool-permission-mode', {
-    method: 'PUT',
-    body: JSON.stringify({ mode }),
-  });
-}
-
 export async function hostUvCheck(): Promise<boolean> {
-  return hostApiFetch('/api/toolchain/uv/check');
+  const result = await hostApiFetch<{ installed: boolean }>('/api/toolchain/uv/check');
+  return result.installed;
 }
 
-export async function hostUvInstallAll(endpoint: RuntimeEndpointRef): Promise<void> {
-  await hostCapabilityExecute(buildCapabilityExecutePayload({
-    id: 'platform.runtime',
-    operationId: 'toolchain.installUv',
-    scope: runtimeInstanceScope(endpoint),
-    target: { kind: 'platform-runtime' },
-  }), { timeoutMs: 120000 });
+export async function hostToolchainPrepare(): Promise<void> {
+  await hostApiFetch('/api/toolchain/uv/prepare', {
+    method: 'POST',
+    timeoutMs: 120000,
+  });
 }
 
 type WorkspaceFileRequest = {
@@ -499,6 +502,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasAllowedKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => allowed.has(key));
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
@@ -807,15 +820,18 @@ export async function hostWorkspaceMediaThumbnail(
 
 function isWorkspaceMediaAttachment(value: unknown): value is StagedFilePayload {
   return isRecord(value)
-    && hasExactKeys(value, ['stagedAttachmentId', 'fileName', 'mimeType', 'fileSize', 'preview'])
-    && typeof value.stagedAttachmentId === 'string'
-    && value.stagedAttachmentId.length > 0
+    && hasAllowedKeys(value, ['fileName', 'mimeType', 'fileSize', 'preview'], ['stagedAttachmentId', 'entryKind', 'sourcePath'])
+    && (value.stagedAttachmentId === undefined || (typeof value.stagedAttachmentId === 'string' && value.stagedAttachmentId.length > 0))
+    && (value.entryKind === undefined || value.entryKind === 'file' || value.entryKind === 'directory')
+    && (value.entryKind !== 'directory' || (value.mimeType === 'application/x-directory' && value.fileSize === 0 && value.preview === null))
+    && (value.entryKind === 'directory' || typeof value.stagedAttachmentId === 'string')
     && typeof value.fileName === 'string'
     && value.fileName.length > 0
     && typeof value.mimeType === 'string'
     && value.mimeType.length > 0
     && isSafeNonNegativeInteger(value.fileSize)
-    && (value.preview === null || typeof value.preview === 'string');
+    && (value.preview === null || typeof value.preview === 'string')
+    && (value.sourcePath === undefined || (typeof value.sourcePath === 'string' && value.sourcePath.trim().length > 0));
 }
 
 function isMediaThumbnailResult(value: unknown): value is FileThumbnailResult {
@@ -1029,6 +1045,40 @@ async function hostCapabilityExecute<TResult = unknown>(
   });
 }
 
+export async function hostOpenClawBrowserRequest<TResult = unknown>(
+  input: {
+    method: string;
+    path: string;
+    query?: Record<string, unknown>;
+    body?: unknown;
+    timeoutMs?: number;
+    target?: 'host' | 'node';
+    node?: string;
+  },
+  options?: SessionCapabilityOptions,
+): Promise<TResult> {
+  return hostCapabilityExecute<TResult>({
+    id: OPENCLAW_BROWSER_CAPABILITY_ID,
+    operationId: 'browser.request',
+    scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
+    target: null,
+    input,
+  }, options);
+}
+
+export async function hostOpenClawMcpAppRequest<TResult = unknown>(
+  input: { operationId: `mcp.app.${string}`; sessionKey: string; viewId: string; standalone?: boolean },
+  options?: SessionCapabilityOptions,
+): Promise<TResult> {
+  const { operationId, ...requestInput } = input;
+  return hostCapabilityExecute<TResult>({
+    id: OPENCLAW_MCP_APP_CAPABILITY_ID,
+    operationId,
+    scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
+    target: null,
+    input: requestInput,
+  }, options);
+}
 
 function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }>(
   payload: T,
@@ -1036,6 +1086,71 @@ function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }
   return {
     ...payload,
     sessionKey: payload.sessionIdentity.sessionKey,
+  };
+}
+
+function sessionWireIdentityScope(identity: SessionWireIdentity): RuntimeScope {
+  return { kind: 'session', identity } as unknown as RuntimeScope;
+}
+
+function isSessionPermissionMode(value: unknown): value is SessionPermissionMode {
+  return value === 'read-only' || value === 'guarded' || value === 'workspace' || value === 'full';
+}
+
+function isSessionPermissionSelection(value: unknown): value is SessionPermissionSelection {
+  return value === null || isSessionPermissionMode(value);
+}
+
+function decodeHostSessionPermissionResult(
+  value: unknown,
+  optionalKeys: readonly string[] = [],
+): HostSessionPermissionResult {
+  if (!isRecord(value)
+    || !hasAllowedKeys(value, ['supported', 'mode', 'pending', 'canSelectFull', 'options'], ['defaultMode', 'reason', ...optionalKeys])
+    || typeof value.supported !== 'boolean'
+    || !isSessionPermissionSelection(value.mode)
+    || typeof value.pending !== 'boolean'
+    || typeof value.canSelectFull !== 'boolean'
+    || !Array.isArray(value.options)
+    || !value.options.every(isSessionPermissionMode)
+    || (value.reason !== undefined && typeof value.reason !== 'string')) {
+    throw new Error('Invalid session permission result');
+  }
+  if (!value.supported) {
+    if (value.mode !== null || value.pending || value.canSelectFull || value.options.length !== 0) {
+      throw new Error('Invalid session permission result');
+    }
+    return {
+      supported: false,
+      mode: null,
+      pending: false,
+      canSelectFull: false,
+      options: [],
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
+    };
+  }
+  if (value.defaultMode !== undefined && !isSessionPermissionMode(value.defaultMode)) {
+    throw new Error('Invalid session permission result');
+  }
+  return {
+    supported: true,
+    mode: value.mode,
+    ...(value.defaultMode === undefined ? {} : { defaultMode: value.defaultMode }),
+    pending: value.pending,
+    canSelectFull: value.canSelectFull,
+    options: value.options,
+    ...(value.reason === undefined ? {} : { reason: value.reason }),
+  };
+}
+
+function decodeHostSessionPermissionSetResult(value: unknown): HostSessionPermissionSetResult {
+  const result = decodeHostSessionPermissionResult(value, ['changed']);
+  if (isRecord(value) && Object.hasOwn(value, 'changed') && typeof value.changed !== 'boolean') {
+    throw new Error('Invalid session permission result');
+  }
+  return {
+    ...result,
+    ...(isRecord(value) && typeof value.changed === 'boolean' ? { changed: value.changed } : {}),
   };
 }
 
@@ -1054,6 +1169,41 @@ export async function hostSessionWindowFetch(
     operationId: 'sessions.window',
     payload: bindSessionIdentityInput(payload),
   });
+}
+
+export async function hostSessionPermissionGet(
+  payload: { identity: SessionWireIdentity },
+  options?: SessionCapabilityOptions,
+): Promise<HostSessionPermissionResult> {
+  const result = await sessionCapabilityExecute<unknown>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.permission.get',
+    scope: sessionWireIdentityScope(payload.identity),
+    target: { kind: 'session', identity: payload.identity },
+    payload: {
+      sessionKey: payload.identity.sessionKey,
+      sessionIdentity: payload.identity,
+    },
+  }, options);
+  return decodeHostSessionPermissionResult(result);
+}
+
+export async function hostSessionPermissionSet(
+  payload: { identity: SessionWireIdentity; selection: SessionPermissionSelection },
+  options?: SessionCapabilityOptions,
+): Promise<HostSessionPermissionSetResult> {
+  const result = await sessionCapabilityExecute<unknown>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.permission.set',
+    scope: sessionWireIdentityScope(payload.identity),
+    target: { kind: 'session', identity: payload.identity },
+    payload: {
+      sessionKey: payload.identity.sessionKey,
+      sessionIdentity: payload.identity,
+      permissionMode: payload.selection,
+    },
+  }, options);
+  return decodeHostSessionPermissionSetResult(result);
 }
 
 export async function hostSessionContentLoad(

@@ -12,6 +12,12 @@ import { useTaskCenterStore } from '@/stores/task-center-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 
+const endpoint = {
+  kind: 'native-runtime' as const,
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
+
 vi.mock('@/features/teams/feature-flag', () => ({
   TEAMS_FEATURE_ENABLED: true,
 }));
@@ -53,11 +59,7 @@ function createSessionRecord(input?: {
       ...base.meta,
       agentId: recordKey.split(':')[1] ?? null,
       sessionIdentity: {
-        endpoint: {
-          kind: 'native-runtime' as const,
-          runtimeAdapterId: 'openclaw',
-          runtimeInstanceId: 'local',
-        },
+        endpoint,
         agentId: recordKey.split(':')[1] ?? 'main',
         sessionKey: recordKey,
       },
@@ -87,7 +89,6 @@ function createSessionRecord(input?: {
 
 function setupSidebarState() {
   useSettingsStore.setState({
-    setupComplete: true,
     language: 'en',
     devModeUnlocked: false,
     init: vi.fn().mockResolvedValue(undefined),
@@ -317,9 +318,16 @@ describe('sidebar chat nav', () => {
       pendingApprovalsBySession: {
         'agent:analytics:main': [
           {
-            approvalId: 'approval-chat-1',
+            id: 'approval-chat-1',
             sessionKey: 'agent:analytics:main',
-            optionIds: ['option-1'],
+            sessionIdentity: {
+              endpoint,
+              agentId: 'analytics',
+              sessionKey: 'agent:analytics:main',
+            },
+            title: 'approval-chat-1',
+            allowedDecisions: ['allow-once'],
+            createdAtMs: 1,
           },
         ],
       },
@@ -351,9 +359,16 @@ describe('sidebar chat nav', () => {
       pendingApprovalsBySession: {
         'agent:main:main': [
           {
-            approvalId: 'approval-chat-1',
+            id: 'approval-chat-1',
             sessionKey: 'agent:main:main',
-            optionIds: ['option-1'],
+            sessionIdentity: {
+              endpoint,
+              agentId: 'main',
+              sessionKey: 'agent:main:main',
+            },
+            title: 'approval-chat-1',
+            allowedDecisions: ['allow-once'],
+            createdAtMs: 1,
           },
         ],
       },

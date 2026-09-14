@@ -62,3 +62,9 @@ Focuses on creating robust, performant terminal experiences that feel native to 
 - Focuses on client-side terminal emulation (not server-side terminal management)
 - Apple platform optimization (not cross-platform terminal solutions)
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

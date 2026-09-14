@@ -7,7 +7,10 @@ import {
 } from '../../desktop-contract/runtime-address';
 import {
   RuntimeHostControlError,
+  type RuntimeHostControlCommand,
   type RuntimeHostControlOutcome,
+  type RuntimeHostJsonObject,
+  type RuntimeHostJsonValue,
 } from '../../main/runtime-host-delivery/control';
 import {
   decodeSkillsStatus,
@@ -22,10 +25,7 @@ import {
 } from '../../main/runtime-host-delivery/transport/sessions/trace';
 import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
 import { parseJsonBody, sendJson } from '../route-utils';
-import type {
-  TaskManagerTransport,
-  TaskManagerTransportResponse,
-} from '../../main/runtime-host-delivery/transport/task-manager';
+import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
 
 const CAPABILITY_NOT_AVAILABLE = {
   success: false,
@@ -67,10 +67,6 @@ const TASK_MANAGER_UNAVAILABLE = {
   success: false,
   error: 'Task manager is unavailable',
 } as const;
-const TASK_MANAGER_REJECTED = {
-  success: false,
-  error: 'Task manager request was rejected',
-} as const;
 const TEAM_RUNTIME_REQUEST_INVALID = {
   success: false,
   error: 'Team runtime request is invalid',
@@ -79,28 +75,25 @@ const TEAM_RUNTIME_UNAVAILABLE = {
   success: false,
   error: 'Team runtime operation is unavailable',
 } as const;
-const TOOLCHAIN_REQUEST_INVALID = {
+const OPENCLAW_BROWSER_REQUEST_INVALID = {
   success: false,
-  error: 'Toolchain request is invalid',
+  error: 'OpenClaw browser request is invalid',
 } as const;
-const TOOLCHAIN_UNAVAILABLE = {
+const OPENCLAW_BROWSER_UNAVAILABLE = {
   success: false,
-  error: 'Toolchain is unavailable',
+  error: 'OpenClaw browser request is unavailable',
 } as const;
-
-const LEGACY_TASK_METHODS = [
-  'TaskList',
-  'TaskGet',
-  'TaskCreate',
-  'TaskUpdate',
-  'TodoGet',
-  'TodoWrite',
-] as const;
-type LegacyTaskMethod = typeof LEGACY_TASK_METHODS[number];
-
+const OPENCLAW_MCP_APP_REQUEST_INVALID = {
+  success: false,
+  error: 'OpenClaw MCP app request is invalid',
+} as const;
+const OPENCLAW_MCP_APP_UNAVAILABLE = {
+  success: false,
+  error: 'OpenClaw MCP app request is unavailable',
+} as const;
 type CapabilityRouteContext = SessionCapabilityRouteDeps & Pick<
   HostApiContext,
-  'licenseService' | 'providerRoutingTransport' | 'taskManagerTransport' | 'runtimeHost' | 'workspaceMediaTransport' | 'agentsTransport'
+  'providerRoutingTransport' | 'taskManagerTransport' | 'runtimeHost' | 'workspaceMediaTransport' | 'agentsTransport'
 >;
 
 type TaskOperation =
@@ -109,9 +102,7 @@ type TaskOperation =
   | 'tasks.create'
   | 'tasks.update'
   | 'todos.get'
-  | 'todos.write'
-  | 'tasks.output'
-  | 'tasks.stop';
+  | 'todos.write';
 
 const taskDispatch: Readonly<Record<TaskOperation, keyof TaskManagerTransport>> = {
   'tasks.list': 'list',
@@ -120,8 +111,6 @@ const taskDispatch: Readonly<Record<TaskOperation, keyof TaskManagerTransport>> 
   'tasks.update': 'update',
   'todos.get': 'getTodos',
   'todos.write': 'writeTodos',
-  'tasks.output': 'output',
-  'tasks.stop': 'stop',
 };
 
 export async function handleCapabilityRoutes(
@@ -132,9 +121,9 @@ export async function handleCapabilityRoutes(
 ): Promise<boolean> {
   if (url.pathname === '/api/capabilities/list' && req.method === 'GET') {
     try {
-      const directory = projectCapabilityDirectory(decodeCapabilityDirectory(
+      const directory = decodeCapabilityDirectory(
         await deps.runtimeHost.command({ name: 'host.capabilities.list' }),
-      ));
+      );
       sendJson(res, directory ? 200 : 503, directory ?? CAPABILITY_DIRECTORY_UNAVAILABLE);
     } catch {
       sendJson(res, 503, CAPABILITY_DIRECTORY_UNAVAILABLE);
@@ -154,21 +143,10 @@ export async function handleCapabilityRoutes(
       sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
       return true;
     }
-    if (body.id === LICENSE_RUNTIME_DESCRIPTOR.id) {
-      const capability = sameRuntimeScope(LICENSE_RUNTIME_DESCRIPTOR.scope, body.scope)
-        ? LICENSE_RUNTIME_DESCRIPTOR
-        : null;
-      sendJson(
-        res,
-        capability ? 200 : 404,
-        capability ? { capability } : CAPABILITY_NOT_AVAILABLE,
-      );
-      return true;
-    }
     try {
       const outcome = await deps.runtimeHost.command({
         name: 'host.capabilities.describe',
-        input: { id: body.id, scope: body.scope },
+        input: { id: body.id, scope: body.scope as RuntimeHostJsonObject },
       });
       if (isInvalidCapabilityRejection(outcome)) {
         sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
@@ -265,6 +243,18 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
+  if (body.id === 'openclaw.browser') {
+    const response = await executeOpenClawBrowserCapability(body, deps);
+    sendJson(res, response.status, response.body);
+    return true;
+  }
+
+  if (body.id === 'openclaw.mcpApp') {
+    const response = await executeOpenClawMcpAppCapability(body, deps);
+    sendJson(res, response.status, response.body);
+    return true;
+  }
+
   if (body.id === 'team.runtime') {
     const traceId = readTraceHeader(req.headers);
     logSessionTrace('electron.team.runtime.request', traceId, summarizeTeamRuntimeRequest(body));
@@ -277,7 +267,7 @@ export async function handleCapabilityRoutes(
       logSessionTrace('electron.team.runtime.control.request', traceId, summarizeTeamRuntimeRequest(body));
       const outcome = await deps.runtimeHost.command({
         name: 'team.runtime.execute',
-        input: traceId ? { ...body, traceId } : body,
+        input: buildTeamRuntimeControlInput(body, traceId ?? undefined),
       });
       logSessionTrace('electron.team.runtime.control.response', traceId, summarizeTeamRuntimeOutcome(outcome));
       const response = projectTeamRuntimeOutcome(outcome);
@@ -305,12 +295,6 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
-  if (body.id === 'platform.runtime') {
-    const response = await executeToolchainCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
-  }
-
   if (body.id === 'provider.routing') {
     if (!isProviderRoutingRequest(body)) {
       sendJson(res, 400, PROVIDER_ROUTING_INVALID);
@@ -333,15 +317,10 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
-  if (body.id === 'tool.invoke') {
-    const response = await executeLegacyTaskCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
-  }
 
-  if (body.id === 'task.management' || body.id === 'task.control') {
+  if (body.id === 'task.management') {
     const operation = isTaskOperation(body.operationId) ? body.operationId : undefined;
-    if (!operation || !isTaskRequest(body, operation)) {
+    if (!operation || !isTaskCapabilityRequest(body, operation)) {
       sendJson(res, 400, TASK_MANAGER_INVALID);
       return true;
     }
@@ -358,18 +337,9 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
-  if (body.id === 'license.runtime') {
-    const response = await executeLicenseCapability(body, deps.licenseService);
-    sendJson(res, response.status, response.body);
-    return true;
-  }
-
   sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
   return true;
 }
-
-type TaskManagementOperation = Exclude<TaskOperation, 'tasks.output' | 'tasks.stop'>;
-type TaskIdentity = Record<string, unknown>;
 
 type SkillCapabilityOperation =
   | 'skills.refreshStatus'
@@ -458,6 +428,20 @@ function summarizeTeamRuntimeRequest(body: Record<string, unknown>): Record<stri
   };
 }
 
+function buildTeamRuntimeControlInput(
+  body: Record<string, unknown>,
+  traceId: string | undefined,
+): Extract<RuntimeHostControlCommand, { readonly name: 'team.runtime.execute' }>['input'] {
+  return {
+    id: body.id as string,
+    operationId: body.operationId as string,
+    scope: body.scope as RuntimeHostJsonObject,
+    target: body.target as RuntimeHostJsonValue,
+    input: body.input as RuntimeHostJsonObject,
+    ...(traceId ? { traceId } : {}),
+  };
+}
+
 function summarizeTeamRuntimeOutcome(outcome: RuntimeHostControlOutcome): Record<string, unknown> {
   if (outcome.kind === 'succeeded') return { outcome: 'succeeded', contract: summarizeTeamRuntimeResult(outcome.result) };
   if (outcome.kind === 'unknown') return { outcome: 'unknown', contract: summarizeTeamRuntimeResult(outcome.result) };
@@ -486,6 +470,76 @@ function readString(record: Record<string, unknown> | null, key: string): string
   return typeof value === 'string' ? value : null;
 }
 
+function capabilityControlInput(
+  body: Record<string, unknown>,
+  operationId: string,
+): RuntimeHostJsonObject {
+  return {
+    id: body.id as RuntimeHostJsonValue,
+    operationId,
+    scope: body.scope as RuntimeHostJsonValue,
+    target: body.target as RuntimeHostJsonValue,
+    input: body.input as RuntimeHostJsonValue,
+  };
+}
+
+async function executeOpenClawBrowserCapability(
+  body: Record<string, unknown>,
+  deps: CapabilityRouteContext,
+): Promise<{ status: number; body: unknown }> {
+  if (!isOpenClawBrowserRequest(body)) {
+    return { status: 400, body: OPENCLAW_BROWSER_REQUEST_INVALID };
+  }
+  try {
+    const outcome = await deps.runtimeHost.command({
+      name: 'openclaw.browser.request',
+      input: body.input as Extract<RuntimeHostControlCommand, { readonly name: 'openclaw.browser.request' }>['input'],
+    });
+    return projectOpenClawGatewayOutcome(outcome, OPENCLAW_BROWSER_REQUEST_INVALID, OPENCLAW_BROWSER_UNAVAILABLE);
+  } catch {
+    return { status: 503, body: OPENCLAW_BROWSER_UNAVAILABLE };
+  }
+}
+
+async function executeOpenClawMcpAppCapability(
+  body: Record<string, unknown>,
+  deps: CapabilityRouteContext,
+): Promise<{ status: number; body: unknown }> {
+  if (!isOpenClawMcpAppRequest(body)) {
+    return { status: 400, body: OPENCLAW_MCP_APP_REQUEST_INVALID };
+  }
+  try {
+    const input = body.input as Extract<RuntimeHostControlCommand, { readonly name: 'openclaw.mcp-app.request' }>['input'];
+    const outcome = await deps.runtimeHost.command({
+      name: 'openclaw.mcp-app.request',
+      input: {
+        operationId: body.operationId as string,
+        sessionKey: input.sessionKey,
+        viewId: input.viewId,
+        ...(input.standalone === undefined ? {} : { standalone: input.standalone }),
+      },
+    });
+    return projectOpenClawGatewayOutcome(outcome, OPENCLAW_MCP_APP_REQUEST_INVALID, OPENCLAW_MCP_APP_UNAVAILABLE);
+  } catch {
+    return { status: 503, body: OPENCLAW_MCP_APP_UNAVAILABLE };
+  }
+}
+
+function projectOpenClawGatewayOutcome(
+  outcome: RuntimeHostControlOutcome,
+  invalidBody: unknown,
+  unavailableBody: unknown,
+): { status: number; body: unknown } {
+  if (outcome.kind === 'succeeded') return { status: 200, body: outcome.result };
+  if (outcome.kind === 'rejected' && outcome.error.code === 'INVALID_INPUT') {
+    return { status: 400, body: invalidBody };
+  }
+  if (outcome.kind === 'rejected' && outcome.error.code === 'CAPACITY_EXHAUSTED') {
+    return { status: 409, body: unavailableBody };
+  }
+  return { status: 503, body: unavailableBody };
+}
+
 async function executeSkillManagementCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
@@ -497,13 +551,7 @@ async function executeSkillManagementCapability(
   try {
     const outcome = await deps.runtimeHost.command({
       name: 'openclaw.skills.execute',
-      input: {
-        id: body.id,
-        operationId: operation,
-        scope: body.scope,
-        target: body.target,
-        input: body.input,
-      },
+      input: capabilityControlInput(body, operation),
     });
     return projectSkillCapabilityOutcome(outcome, operation);
   } catch {
@@ -521,13 +569,7 @@ async function executePluginRuntimeCapability(
   try {
     const outcome = await deps.runtimeHost.command({
       name: 'openclaw.plugins.execute',
-      input: {
-        id: body.id,
-        operationId: body.operationId,
-        scope: body.scope,
-        target: body.target,
-        input: body.input,
-      },
+      input: capabilityControlInput(body, body.operationId as string),
     });
     if (outcome.kind === 'succeeded' && isRecord(outcome.result)
       && hasExactKeys(outcome.result, ['success', 'outcome'])
@@ -575,13 +617,18 @@ function projectSkillCapabilityOutcome(
       ? { status: 200, body: { ok: true } }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
-  if (operation === 'clawhub.openReadme' || operation === 'clawhub.openPath') {
+  if (operation === 'clawhub.openReadme') {
     return isRecord(outcome.result)
       && hasExactKeys(outcome.result, ['success', 'content', 'filePath'])
       && outcome.result.success === true
       && typeof outcome.result.content === 'string'
-      && typeof outcome.result.filePath === 'string'
+      && isAbsolutePath(outcome.result.filePath)
       ? { status: 200, body: outcome.result }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  if (operation === 'clawhub.openPath') {
+    return isRecord(outcome.result) && outcome.result.success === true
+      ? { status: 200, body: { success: true } }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
   return isRecord(outcome.result) && outcome.result.success === true
@@ -612,15 +659,28 @@ function isSkillCapabilityRequest(body: Record<string, unknown>, operation: Skil
 
 function targetMatchesSkillOperation(target: Record<string, unknown>, input: Record<string, unknown>, operation: SkillCapabilityOperation): boolean {
   if (operation === 'skills.refreshStatus') return hasExactKeys(target, ['kind']) && target.kind === 'none' && hasExactKeys(input, []);
-  if (operation === 'skills.exportBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillKeys']) && isStringArray(input.skillKeys);
+  if (operation === 'skills.exportBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillKeys']) && isOpenClawSkillKeyArray(input.skillKeys);
   if (operation === 'skills.importBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillBundles']) && Array.isArray(input.skillBundles);
-  if (operation === 'skills.updateBatchState') return hasExactKeys(target, ['kind']) && target.kind === 'skill' && hasExactKeys(input, ['skillKeys', 'enabled']) && isStringArray(input.skillKeys) && typeof input.enabled === 'boolean';
-  if (!hasExactKeys(target, ['kind', 'skillId', 'slug']) || target.kind !== 'skill' || typeof target.skillId !== 'string' || typeof target.slug !== 'string') return false;
-  if (operation === 'skills.updateConfig') return hasExactKeys(input, ['skillKey', 'apiKey', 'env']) && input.skillKey === target.skillId && typeof input.apiKey === 'string' && isStringRecord(input.env);
-  if (operation === 'skills.updateState') return hasExactKeys(input, ['skillKey', 'enabled']) && input.skillKey === target.skillId && typeof input.enabled === 'boolean';
-  return input.skillKey === target.skillId
+  if (operation === 'skills.updateBatchState') return hasExactKeys(target, ['kind']) && target.kind === 'skill' && hasExactKeys(input, ['skillKeys', 'enabled']) && isOpenClawSkillKeyArray(input.skillKeys) && typeof input.enabled === 'boolean';
+  const skillId = skillTargetId(target);
+  if (skillId === null) return false;
+  if (operation === 'skills.updateConfig') return hasExactKeys(input, ['skillKey', 'apiKey', 'env']) && input.skillKey === skillId && typeof input.apiKey === 'string' && isStringRecord(input.env);
+  if (operation === 'skills.updateState') return hasExactKeys(input, ['skillKey', 'enabled']) && input.skillKey === skillId && typeof input.enabled === 'boolean';
+  return input.skillKey === skillId
     && (input.slug === undefined || input.slug === target.slug)
+    && (input.baseDir === undefined || isAbsolutePath(input.baseDir))
+    && (input.filePath === undefined || isAbsolutePath(input.filePath))
     && hasOnlyKeys(input, ['skillKey', 'slug', 'baseDir', 'filePath']);
+}
+
+function skillTargetId(target: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(target, ['kind', 'skillId', 'slug'])
+    || target.kind !== 'skill'
+    || !isOpenClawSkillKey(target.skillId)
+    || (target.slug !== undefined && !isOpenClawSkillKey(target.slug))) {
+    return null;
+  }
+  return target.skillId;
 }
 
 function isPluginCapabilityRequest(body: Record<string, unknown>): boolean {
@@ -640,6 +700,65 @@ function isPluginCapabilityRequest(body: Record<string, unknown>): boolean {
     && body.input.pluginIds[0] === body.target.pluginId;
 }
 
+function isOpenClawBrowserRequest(value: Record<string, unknown>): boolean {
+  return hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    && value.id === 'openclaw.browser'
+    && value.operationId === 'browser.request'
+    && isNativeRuntimeScope(value.scope)
+    && value.target === null
+    && isOpenClawBrowserInput(value.input);
+}
+
+function isOpenClawBrowserInput(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['method', 'path', 'query', 'body', 'timeoutMs', 'target', 'node'])
+    && Object.hasOwn(value, 'method')
+    && Object.hasOwn(value, 'path')
+    && isNonEmptyText(value.method)
+    && isNonEmptyText(value.path)
+    && (value.query === undefined || (isRecord(value.query) && isRuntimeJsonValue(value.query)))
+    && (value.body === undefined || isRuntimeJsonValue(value.body))
+    && (value.timeoutMs === undefined || isSafePositiveInteger(value.timeoutMs))
+    && (value.target === undefined || value.target === 'host' || value.target === 'node')
+    && (value.node === undefined || (value.target === 'node' && isNonEmptyText(value.node)));
+}
+
+function isOpenClawMcpAppRequest(value: Record<string, unknown>): boolean {
+  return hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    && value.id === 'openclaw.mcpApp'
+    && isMcpAppOperationId(value.operationId)
+    && isNativeRuntimeScope(value.scope)
+    && value.target === null
+    && isOpenClawMcpAppInput(value.input);
+}
+
+function isOpenClawMcpAppInput(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['sessionKey', 'viewId', 'standalone'])
+    && Object.hasOwn(value, 'sessionKey')
+    && Object.hasOwn(value, 'viewId')
+    && isNonEmptyText(value.sessionKey)
+    && isNonEmptyText(value.viewId)
+    && (value.standalone === undefined || typeof value.standalone === 'boolean');
+}
+
+function isMcpAppOperationId(value: unknown): value is string {
+  return isNonEmptyText(value) && value.startsWith('mcp.app.');
+}
+
+function isRuntimeJsonValue(value: unknown, seen = new Set<object>()): value is RuntimeHostJsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+
+  seen.add(value);
+  if (Array.isArray(value)) return value.every((entry) => isRuntimeJsonValue(entry, seen));
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    return false;
+  }
+  return Object.values(value).every((entry) => isRuntimeJsonValue(entry, seen));
+}
+
 function isNativeRuntimeScope(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'endpoint'])
@@ -651,328 +770,30 @@ function isNativeRuntimeScope(value: unknown): boolean {
     && value.endpoint.runtimeInstanceId === 'local';
 }
 
-async function executeToolchainCapability(
-  body: Record<string, unknown>,
-  deps: CapabilityRouteContext,
-): Promise<{ status: number; body: unknown }> {
-  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input']) || !isNativeRuntimeScope(body.scope)) {
-    return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
-  }
-  if (body.id !== 'platform.runtime' || body.operationId !== 'toolchain.installUv') {
-    return { status: 404, body: CAPABILITY_NOT_AVAILABLE };
-  }
-  if (!isRecord(body.target) || !hasExactKeys(body.target, ['kind']) || body.target.kind !== 'platform-runtime'
-    || !isRecord(body.input) || !hasExactKeys(body.input, [])) {
-    return { status: 400, body: TOOLCHAIN_REQUEST_INVALID };
-  }
-  try {
-    const outcome = await deps.runtimeHost.command({ name: 'openclaw.toolchain.install-uv' }, { timeoutMs: 120000 });
-    return projectToolchainInstallOutcome(outcome);
-  } catch {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-}
-
-function projectToolchainInstallOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
-  if (!isRecord(outcome) || !hasExactKeys(outcome, ['kind', 'result']) || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result) || !hasExactKeys(outcome.result, ['result'])
-    || !isRecord(outcome.result.result) || !hasExactKeys(outcome.result.result, ['outcome'])) {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-  switch (outcome.result.result.outcome) {
-    case 'installed':
-      return { status: 200, body: { success: true } };
-    case 'rejected':
-      return { status: 500, body: { success: false, error: 'Toolchain installation was rejected' } };
-    case 'unknown':
-      return { status: 503, body: { success: false, error: 'Toolchain installation outcome is unknown' } };
-    default:
-      return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-}
-
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyText(entry));
+  return Array.isArray(value) && value.every((entry) => isNonEmptyText(entry));
+}
+
+function isOpenClawSkillKey(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 4_096 && !value.includes('\0');
+}
+
+function isOpenClawSkillKeyArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isOpenClawSkillKey);
+}
+
+function isAbsolutePath(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 4_096
+    && !value.includes('\0')
+    && (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/'));
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
 }
 
-
-async function executeLegacyTaskCapability(
-  body: Record<string, unknown>,
-  deps: CapabilityRouteContext,
-): Promise<{ status: number; body: unknown }> {
-  if (body.operationId !== 'tools.invoke') {
-    return typeof body.operationId === 'string' && body.operationId.length > 0
-      ? { status: 400, body: { success: false, error: `Capability operation not supported: ${body.operationId}` } }
-      : { status: 400, body: { success: false, error: 'Capability operationId is required' } };
-  }
-  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-
-  const scope = body.scope;
-  if (!isRecord(scope)
-    || !hasExactKeys(scope, ['kind', 'identity'])
-    || scope.kind !== 'session'
-    || !isTaskIdentity(scope.identity)) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  const identity = scope.identity;
-
-  const target = body.target;
-  if (!isRecord(target)
-    || !hasExactKeys(target, ['kind', 'toolName', 'identity'])
-    || target.kind !== 'tool') {
-    return { status: 400, body: { success: false, error: 'Capability target kind must be tool' } };
-  }
-  const input = body.input;
-  if (!isRecord(input)) {
-    return { status: 400, body: { success: false, error: 'Capability input method is required' } };
-  }
-  const method = input.method;
-  if (typeof method !== 'string' || method.trim().length === 0) {
-    return { status: 400, body: { success: false, error: 'Capability input method is required' } };
-  }
-  if (target.toolName !== method) {
-    return { status: 400, body: { success: false, error: 'Capability target toolName must match input method' } };
-  }
-  if (!isTaskIdentity(target.identity) || !sameTaskIdentity(target.identity, identity)) {
-    return { status: 400, body: { success: false, error: 'Capability target identity must match request scope' } };
-  }
-  if (!isTaskIdentity(input.sessionIdentity) || !sameTaskIdentity(target.identity, input.sessionIdentity)) {
-    return { status: 400, body: { success: false, error: 'Capability target identity must match input sessionIdentity' } };
-  }
-  if (!hasExactKeys(input, ['sessionIdentity', 'method', 'params'])) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  if (!isLegacyTaskMethod(method)) {
-    return { status: 400, body: { success: false, error: `Task tool method not supported: ${method}` } };
-  }
-  if (!isRecord(input.params)) {
-    return { status: 400, body: { success: false, error: 'sessionKey is required' } };
-  }
-
-  const params = input.params;
-  const allowedParams: Record<LegacyTaskMethod, readonly string[]> = {
-    TaskList: ['sessionKey', 'teamKey'],
-    TaskGet: ['sessionKey', 'teamKey', 'taskId'],
-    TaskCreate: ['sessionKey', 'teamKey', 'subject', 'description', 'activeForm', 'metadata', 'owner'],
-    TaskUpdate: ['sessionKey', 'teamKey', 'taskId', 'status', 'subject', 'description', 'activeForm', 'metadata', 'owner', 'addBlockedBy', 'addBlocks'],
-    TodoGet: ['sessionKey'],
-    TodoWrite: ['sessionKey', 'oldTodos', 'newTodos'],
-  };
-  if (!hasOnlyKeys(params, allowedParams[method])) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  if (!isNonEmptyText(params.sessionKey)) {
-    return { status: 400, body: { success: false, error: 'sessionKey is required' } };
-  }
-  if (params.sessionKey !== identity.sessionKey) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  if ((method === 'TaskCreate' || method === 'TaskUpdate')
-    && Object.hasOwn(params, 'metadata')
-    && !isRecord(params.metadata)) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  if (['TaskList', 'TaskGet', 'TaskCreate', 'TaskUpdate'].includes(method)
-    && params.teamKey !== undefined
-    && !isNonEmptyText(params.teamKey)) {
-    return { status: 400, body: TASK_MANAGER_INVALID };
-  }
-  if ((method === 'TaskGet' || method === 'TaskUpdate') && !isNonEmptyText(params.taskId)) {
-    return { status: 400, body: { success: false, error: 'taskId is required' } };
-  }
-  if (method === 'TaskCreate' && !isNonEmptyText(params.subject)) {
-    return { status: 400, body: { success: false, error: 'subject is required' } };
-  }
-  if (method === 'TodoWrite') {
-    if (!Array.isArray(params.oldTodos)) {
-      return { status: 400, body: { success: false, error: 'oldTodos is required' } };
-    }
-    if (!Array.isArray(params.newTodos)) {
-      return { status: 400, body: { success: false, error: 'newTodos is required' } };
-    }
-  }
-
-  let operation: TaskManagementOperation;
-  let response: TaskManagerTransportResponse;
-  switch (method) {
-    case 'TaskList': {
-      operation = 'tasks.list';
-      const request = buildTaskManagementRequest(operation, identity, {
-        sessionIdentity: identity,
-        ...(params.teamKey === undefined ? {} : { teamKey: params.teamKey }),
-      });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.list(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-    case 'TaskGet': {
-      operation = 'tasks.get';
-      const request = buildTaskManagementRequest(operation, identity, {
-        sessionIdentity: identity,
-        ...(params.teamKey === undefined ? {} : { teamKey: params.teamKey }),
-        taskId: params.taskId,
-      });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.get(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-    case 'TaskCreate': {
-      operation = 'tasks.create';
-      const request = buildTaskManagementRequest(operation, identity, {
-        sessionIdentity: identity,
-        ...(params.teamKey === undefined ? {} : { teamKey: params.teamKey }),
-        subject: params.subject,
-        description: params.description,
-        ...(params.activeForm === undefined ? {} : { activeForm: params.activeForm }),
-        ...(Object.hasOwn(params, 'metadata') ? { metadata: params.metadata } : {}),
-        ...(params.owner === undefined ? {} : { owner: params.owner }),
-      });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.create(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-    case 'TaskUpdate': {
-      operation = 'tasks.update';
-      const request = buildTaskManagementRequest(operation, identity, {
-        sessionIdentity: identity,
-        ...(params.teamKey === undefined ? {} : { teamKey: params.teamKey }),
-        taskId: params.taskId,
-        ...(params.status === undefined ? {} : { status: params.status }),
-        ...(params.subject === undefined ? {} : { subject: params.subject }),
-        ...(params.description === undefined ? {} : { description: params.description }),
-        ...(params.activeForm === undefined ? {} : { activeForm: params.activeForm }),
-        ...(Object.hasOwn(params, 'metadata') ? { metadata: params.metadata } : {}),
-        ...(params.owner === undefined ? {} : { owner: params.owner }),
-        ...(params.addBlockedBy === undefined ? {} : { addBlockedBy: params.addBlockedBy }),
-        ...(params.addBlocks === undefined ? {} : { addBlocks: params.addBlocks }),
-      });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.update(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-    case 'TodoGet': {
-      operation = 'todos.get';
-      const request = buildTaskManagementRequest(operation, identity, { sessionIdentity: identity });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.getTodos(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-    case 'TodoWrite': {
-      operation = 'todos.write';
-      const request = buildTaskManagementRequest(operation, identity, {
-        sessionIdentity: identity,
-        oldTodos: params.oldTodos,
-        newTodos: params.newTodos,
-      });
-      if (!isTaskRequest(request, operation)) return { status: 400, body: TASK_MANAGER_INVALID };
-      try {
-        response = await deps.taskManagerTransport.writeTodos(request);
-      } catch {
-        return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-      }
-      break;
-    }
-  }
-
-  return projectLegacyTaskResponse(method, operation, params, response);
-}
-
-function buildTaskManagementRequest(
-  operation: TaskManagementOperation,
-  identity: TaskIdentity,
-  input: Record<string, unknown>,
-): Record<string, unknown> {
-  return {
-    id: 'task.management',
-    operationId: operation,
-    scope: { kind: 'session', identity },
-    target: { kind: 'task-manager', identity },
-    input,
-  };
-}
-
-function projectLegacyTaskResponse(
-  method: LegacyTaskMethod,
-  operation: TaskManagementOperation,
-  params: Record<string, unknown>,
-  response: TaskManagerTransportResponse,
-): { status: number; body: unknown } {
-  if (!isTaskManagerResponse(response.body, operation)) {
-    return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-  }
-  const body = response.body;
-  if (isRecord(body) && hasExactKeys(body, ['success', 'error'])) {
-    return body.error === TASK_MANAGER_REJECTED.error
-      ? { status: 409, body: TASK_MANAGER_REJECTED }
-      : { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-  }
-  if (response.status !== 200) {
-    return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-  }
-  if (isRecord(body) && body.outcome === 'rejected') {
-    return { status: 409, body: TASK_MANAGER_REJECTED };
-  }
-  if (isRecord(body) && body.outcome === 'unknown') {
-    return { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-  }
-
-  switch (method) {
-    case 'TaskList':
-      return { status: 200, body: { tasks: (body as Record<string, unknown>).tasks, todos: (body as Record<string, unknown>).todos } };
-    case 'TaskGet':
-      return { status: 200, body: { task: (body as Record<string, unknown>).task } };
-    case 'TaskCreate': {
-      const snapshot = (body as Record<string, unknown>).snapshot as Record<string, unknown>;
-      return { status: 200, body: { task: (body as Record<string, unknown>).task, todos: snapshot.todos } };
-    }
-    case 'TaskUpdate': {
-      const snapshot = (body as Record<string, unknown>).snapshot as Record<string, unknown>;
-      if (params.status === 'deleted') {
-        return { status: 200, body: { taskId: params.taskId, deleted: true, todos: snapshot.todos } };
-      }
-      const task = snapshot.tasks instanceof Array
-        ? snapshot.tasks.find((candidate) => isRecord(candidate) && candidate.id === params.taskId)
-        : undefined;
-      return task
-        ? { status: 200, body: { task } }
-        : { status: 503, body: TASK_MANAGER_UNAVAILABLE };
-    }
-    case 'TodoGet': {
-      const todoSnapshot = body as Record<string, unknown>;
-      return { status: 200, body: { todos: todoSnapshot.todos, updatedAt: todoSnapshot.updatedAt } };
-    }
-    case 'TodoWrite': {
-      const todoSnapshot = (body as Record<string, unknown>).snapshot as Record<string, unknown>;
-      return { status: 200, body: { todos: todoSnapshot.todos, updatedAt: todoSnapshot.updatedAt } };
-    }
-  }
-}
 
 function decodeCronTriggerJobId(value: unknown): string | null {
   if (!isRecord(value)
@@ -1004,8 +825,8 @@ function decodeCronTriggerJobId(value: unknown): string | null {
 function decodeCronTriggerResult(
   outcome: RuntimeHostControlOutcome,
 ): { success: true; result: {
-  outcome: 'accepted' | 'skipped' | 'outcome-unknown';
-  reason?: 'already-running' | 'not-due' | 'invalid-spec';
+  outcome: 'accepted' | 'skipped';
+  reason?: 'already-running' | 'not-due' | 'invalid-spec' | 'disabled' | 'stopped';
 } } | null {
   if (!isRecord(outcome)
     || !hasExactKeys(outcome, ['kind', 'result'])
@@ -1016,8 +837,7 @@ function decodeCronTriggerResult(
     || !hasOnlyKeys(outcome.result.result, ['outcome', 'reason'])
     || !Object.hasOwn(outcome.result.result, 'outcome')
     || (outcome.result.result.outcome !== 'accepted'
-      && outcome.result.result.outcome !== 'skipped'
-      && outcome.result.result.outcome !== 'outcome-unknown')
+      && outcome.result.result.outcome !== 'skipped')
     || (outcome.result.result.reason !== undefined
       && !isCronTriggerSkipReason(outcome.result.result.reason))) {
     return null;
@@ -1034,35 +854,17 @@ function decodeCronTriggerResult(
   };
 }
 
-function isCronTriggerSkipReason(value: unknown): value is 'already-running' | 'not-due' | 'invalid-spec' {
-  return value === 'already-running' || value === 'not-due' || value === 'invalid-spec';
+function isCronTriggerSkipReason(value: unknown): value is 'already-running' | 'not-due' | 'invalid-spec' | 'disabled' | 'stopped' {
+  return value === 'already-running' || value === 'not-due' || value === 'invalid-spec' || value === 'disabled' || value === 'stopped';
 }
 
 type CapabilityDirectory = Readonly<{
   capabilities: CapabilityDescriptor[];
 }>;
 
-const LICENSE_RUNTIME_DESCRIPTOR: CapabilityDescriptor = {
-  id: 'license.runtime',
-  kind: 'license-runtime',
-  scopeKind: 'app',
-  scope: { kind: 'app' },
-  targetKinds: ['license'],
-  supportLevel: 'native',
-  availability: 'available',
-  operations: [
-    { id: 'license.validate', title: 'Validate license', targetKind: 'license', targetRequired: true },
-    { id: 'license.revalidate', title: 'Revalidate stored license', targetKind: 'license', targetRequired: true },
-    { id: 'license.clear', title: 'Clear stored license', targetKind: 'license', targetRequired: true },
-  ],
-  policyScope: 'license.runtime',
-  ownerModuleId: 'license',
-  routeOwnerId: 'license',
-};
-
 function isCapabilityDescribeRequest(
   value: unknown,
-): value is { id: string; scope: RuntimeScope } {
+): value is { id: string; scope: RuntimeScope & RuntimeHostJsonObject } {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'scope'])
     && isCapabilityText(value.id)
@@ -1087,16 +889,6 @@ function decodeCapabilityDirectory(outcome: RuntimeHostControlOutcome): Capabili
     capabilities.push(capability);
   }
   return { capabilities };
-}
-
-function projectCapabilityDirectory(directory: CapabilityDirectory | null): CapabilityDirectory | null {
-  if (!directory) return null;
-  return {
-    capabilities: [
-      ...directory.capabilities.filter(({ id }) => id !== LICENSE_RUNTIME_DESCRIPTOR.id),
-      LICENSE_RUNTIME_DESCRIPTOR,
-    ],
-  };
 }
 
 function decodeCapabilityDescribe(
@@ -1163,6 +955,7 @@ function decodeCapabilityDescriptor(value: unknown): CapabilityDescriptor | null
     'routeOwnerId',
   ] as const;
   if (!isRecord(value)
+    || !isRecord(value.scope)
     || !hasOnlyKeys(value, allowed)
     || !required.every((key) => Object.hasOwn(value, key))
     || !isCapabilityText(value.id)
@@ -1187,7 +980,7 @@ function decodeCapabilityDescriptor(value: unknown): CapabilityDescriptor | null
     || !optionalCapabilityTextArray(value.targetAgentIds)) {
     return null;
   }
-  return value as CapabilityDescriptor;
+  return value as unknown as CapabilityDescriptor;
 }
 
 function isCapabilityOperation(value: unknown): boolean {
@@ -1246,103 +1039,6 @@ function optionalCapabilityTextArray(value: unknown): value is string[] | undefi
   return value === undefined || Array.isArray(value) && value.every(isCapabilityText);
 }
 
-function isLegacyTaskMethod(value: unknown): value is LegacyTaskMethod {
-  return typeof value === 'string' && LEGACY_TASK_METHODS.includes(value as LegacyTaskMethod);
-}
-
-async function executeLicenseCapability(
-  body: Record<string, unknown>,
-  service: HostApiContext['licenseService'],
-): Promise<{ status: number; body: unknown }> {
-  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    || body.id !== 'license.runtime'
-    || !isAppScope(body.scope)
-    || !isLicenseTarget(body.target)
-    || !isRecord(body.input)) {
-    return { status: 404, body: CAPABILITY_NOT_AVAILABLE };
-  }
-
-  if (body.operationId === 'license.validate') {
-    if (!hasExactKeys(body.input, ['key']) || typeof body.input.key !== 'string' || body.input.key.length === 0) {
-      return { status: 400, body: CAPABILITY_REQUEST_FAILED };
-    }
-    try {
-      const result = await service.validate(body.input.key);
-      const publicResult = projectLicenseValidationResult(result);
-      return publicResult
-        ? { status: 200, body: publicResult }
-        : { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    } catch {
-      return { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    }
-  }
-
-  if (body.operationId === 'license.revalidate') {
-    if (!hasExactKeys(body.input, [])) return { status: 400, body: CAPABILITY_REQUEST_FAILED };
-    try {
-      const result = await service.revalidate();
-      const publicResult = projectLicenseValidationResult(result);
-      return publicResult
-        ? { status: 200, body: publicResult }
-        : { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    } catch {
-      return { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    }
-  }
-
-  if (body.operationId === 'license.clear') {
-    if (!hasExactKeys(body.input, [])) return { status: 400, body: CAPABILITY_REQUEST_FAILED };
-    try {
-      const result = await service.clear();
-      return result && isRecord(result) && hasExactKeys(result, ['success']) && result.success === true
-        ? { status: 200, body: { success: true } }
-        : { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    } catch {
-      return { status: 503, body: { success: false, error: 'License service is unavailable' } };
-    }
-  }
-
-  return { status: 404, body: CAPABILITY_NOT_AVAILABLE };
-}
-
-function projectLicenseValidationResult(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)
-    || !hasOnlyKeys(value, ['valid', 'code', 'masked', 'last4', 'mode', 'source', 'expiresAt', 'refreshAfterSec', 'offlineGraceUntilMs'])
-    || typeof value.valid !== 'boolean'
-    || !isLicenseValidationCode(value.code)
-    || (value.mode !== undefined && !isLicenseValidationMode(value.mode))
-    || (value.masked !== undefined && value.masked !== null && typeof value.masked !== 'string')
-    || (value.last4 !== undefined && value.last4 !== null && typeof value.last4 !== 'string')
-    || (value.source !== undefined && value.source !== 'server' && value.source !== 'cache' && value.source !== 'local')
-    || (value.expiresAt !== undefined && value.expiresAt !== null && typeof value.expiresAt !== 'string')
-    || (value.refreshAfterSec !== undefined && !isNonNegativeSafeInteger(value.refreshAfterSec))
-    || (value.offlineGraceUntilMs !== undefined && !isNonNegativeSafeInteger(value.offlineGraceUntilMs))) {
-    return null;
-  }
-  return {
-    valid: value.valid,
-    code: value.code,
-    ...(value.masked === undefined ? {} : { masked: value.masked }),
-    ...(value.last4 === undefined ? {} : { last4: value.last4 }),
-    ...(value.mode === undefined ? {} : { mode: value.mode }),
-    ...(value.source === undefined ? {} : { source: value.source }),
-    ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }),
-    ...(value.refreshAfterSec === undefined ? {} : { refreshAfterSec: value.refreshAfterSec }),
-    ...(value.offlineGraceUntilMs === undefined ? {} : { offlineGraceUntilMs: value.offlineGraceUntilMs }),
-  };
-}
-
-function isLicenseValidationCode(value: unknown): boolean {
-  return value === 'valid' || value === 'empty' || value === 'format_invalid'
-    || value === 'service_unconfigured' || value === 'network_error' || value === 'server_rejected'
-    || value === 'cache_grace_valid' || value === 'expired' || value === 'device_mismatch'
-    || value === 'not_allowed' || value === 'checksum_invalid';
-}
-
-function isLicenseValidationMode(value: unknown): boolean {
-  return value === 'online' || value === 'cache' || value === 'allowlist'
-    || value === 'checksum' || value === 'none';
-}
 
 function isProviderRoutingRequest(value: Record<string, unknown>): boolean {
   if (value.id !== 'provider.routing'
@@ -1441,25 +1137,22 @@ function isTaskOperation(value: unknown): value is TaskOperation {
   return typeof value === 'string' && Object.hasOwn(taskDispatch, value);
 }
 
-function isTaskRequest(value: Record<string, unknown>, operation: TaskOperation): boolean {
-  const management = operation !== 'tasks.output' && operation !== 'tasks.stop';
-  if (value.id !== (management ? 'task.management' : 'task.control')
-    || value.operationId !== operation
-    || !isRecord(value.scope)
-    || !hasExactKeys(value.scope, ['kind', 'identity'])
-    || value.scope.kind !== 'session'
-    || !isTaskIdentity(value.scope.identity)
-    || !isRecord(value.target)
-    || !hasExactKeys(value.target, ['kind', 'identity'])
-    || value.target.kind !== (management ? 'task-manager' : 'task')
-    || !isTaskIdentity(value.target.identity)
-    || !sameTaskIdentity(value.scope.identity, value.target.identity)
-    || !isRecord(value.input)
-    || !isTaskInput(value.input, operation)
-    || !isTaskIdentity(value.input.sessionIdentity)) {
-    return false;
-  }
-  return sameTaskIdentity(value.scope.identity, value.input.sessionIdentity);
+function isTaskCapabilityRequest(value: Record<string, unknown>, operation: TaskOperation): boolean {
+  return value.id === 'task.management'
+    && value.operationId === operation
+    && isRecord(value.scope)
+    && hasExactKeys(value.scope, ['kind', 'identity'])
+    && value.scope.kind === 'session'
+    && isTaskIdentity(value.scope.identity)
+    && isRecord(value.target)
+    && hasExactKeys(value.target, ['kind', 'identity'])
+    && value.target.kind === 'task-manager'
+    && isTaskIdentity(value.target.identity)
+    && sameTaskIdentity(value.scope.identity, value.target.identity)
+    && isRecord(value.input)
+    && isTaskInput(value.input, operation)
+    && isTaskIdentity(value.input.sessionIdentity)
+    && sameTaskIdentity(value.scope.identity, value.input.sessionIdentity);
 }
 
 function isTaskInput(value: Record<string, unknown>, operation: TaskOperation): boolean {
@@ -1470,13 +1163,10 @@ function isTaskInput(value: Record<string, unknown>, operation: TaskOperation): 
     'tasks.update': ['sessionIdentity', 'teamKey', 'taskId', 'status', 'subject', 'description', 'activeForm', 'metadata', 'owner', 'addBlockedBy', 'addBlocks'],
     'todos.get': ['sessionIdentity'],
     'todos.write': ['sessionIdentity', 'oldTodos', 'newTodos'],
-    'tasks.output': ['sessionIdentity', 'taskId'],
-    'tasks.stop': ['sessionIdentity', 'taskId'],
   };
   if (!Object.keys(value).every((key) => allowed[operation].includes(key))) return false;
   if (value.teamKey !== undefined && !isNonEmptyText(value.teamKey)) return false;
-  if (['tasks.get', 'tasks.update', 'tasks.output', 'tasks.stop'].includes(operation)
-    && !isNonEmptyText(value.taskId)) return false;
+  if ((operation === 'tasks.get' || operation === 'tasks.update') && !isNonEmptyText(value.taskId)) return false;
   if (operation === 'tasks.create' && (!isNonEmptyText(value.subject) || !isNonEmptyText(value.description))) return false;
   if (value.activeForm !== undefined && !isNonEmptyText(value.activeForm)) return false;
   if (Object.hasOwn(value, 'metadata') && !isRecord(value.metadata)) return false;
@@ -1523,15 +1213,6 @@ function isTaskManagerResponse(value: unknown, operation: TaskOperation): boolea
   if (operation === 'tasks.list') return isTaskSnapshot(value);
   if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && isTask(value.task);
   if (operation === 'todos.get') return isTodoSnapshot(value);
-  if (operation === 'tasks.output') {
-    return hasExactKeys(value, ['output']) && (value.output === 'available' || value.output === 'not_found');
-  }
-  if (operation === 'tasks.stop') {
-    return (hasExactKeys(value, ['found', 'cancelled'])
-      && typeof value.found === 'boolean'
-      && typeof value.cancelled === 'boolean')
-      || isClosedTaskMutation(value);
-  }
   if (operation === 'todos.write') {
     return (hasExactKeys(value, ['outcome', 'snapshot'])
       && value.outcome === 'applied'
@@ -1600,17 +1281,6 @@ function isTodo(value: unknown): boolean {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isAppScope(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'app';
-}
-
-function isLicenseTarget(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'subject'])
-    && value.kind === 'license'
-    && value.subject === 'key';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

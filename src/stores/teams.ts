@@ -189,6 +189,7 @@ interface TeamsState {
   ) => Promise<void>;
   submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
   resolveTeamRoleChatTargetBySession: (probe: TeamRoleSessionProbe) => TeamRoleChatTarget | null;
+  resolveTeamLeaderChatTargetBySession: (probe: TeamRoleSessionProbe) => TeamRoleChatTarget | null;
   isTeamRoleSession: (probe: TeamRoleSessionProbe) => boolean;
   submitTeamRoleMessageFromChat: (teamId: string, roleId: string, message: string, runId?: string) => Promise<void>;
 }
@@ -340,6 +341,21 @@ export function resolveTeamRoleChatTargetFromProbe(index: TeamRoleChatTargetInde
     }
   }
   return null;
+}
+
+export function resolveTeamLeaderChatTargetFromProbe(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): TeamRoleChatTarget | null {
+  const target = resolveTeamRoleChatTargetFromProbe(index, probe);
+  if (!target) {
+    return null;
+  }
+  if (target.roleId === 'leader') {
+    return target;
+  }
+  return Array.from(index.byIdentityKey.values()).find((candidate) => (
+    candidate.teamId === target.teamId
+    && candidate.runId === target.runId
+    && candidate.roleId === 'leader'
+  )) ?? null;
 }
 
 export function isTeamRoleSessionLocalKey(index: TeamRoleChatTargetIndex, value: string | null | undefined): boolean {
@@ -1512,6 +1528,9 @@ export const useTeamsStore = create<TeamsState>()(
       },
       resolveTeamRoleChatTargetBySession: (probe) => (
         resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(get()), probe)
+      ),
+      resolveTeamLeaderChatTargetBySession: (probe) => (
+        resolveTeamLeaderChatTargetFromProbe(selectTeamRoleChatTargetIndex(get()), probe)
       ),
       isTeamRoleSession: (probe) => isKnownTeamRoleSession(selectTeamRoleChatTargetIndex(get()), probe),
       submitTeamRoleMessageFromChat: async (teamId, roleId, message, requestedRunId) => {

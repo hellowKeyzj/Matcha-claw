@@ -5,14 +5,14 @@ const UNAVAILABLE = { success: false, error: 'Task manager is unavailable' } as 
 
 type Operation =
   | 'tasks.list' | 'tasks.get' | 'tasks.create' | 'tasks.update'
-  | 'todos.get' | 'todos.write' | 'tasks.output' | 'tasks.stop';
+  | 'todos.get' | 'todos.write';
 type Endpoint = Readonly<{ kind: 'native-runtime'; runtimeAdapterId: 'openclaw'; runtimeInstanceId: 'local' }>;
 type Identity = Readonly<{ endpoint: Endpoint; agentId: string; sessionKey: string }>;
 type TaskRequest = Readonly<{
-  id: 'task.management' | 'task.control';
+  id: 'task.management';
   operationId: Operation;
   scope: Readonly<{ kind: 'session'; identity: Identity }>;
-  target: Readonly<{ kind: 'task-manager' | 'task'; identity: Identity }>;
+  target: Readonly<{ kind: 'task-manager'; identity: Identity }>;
   input: Record<string, unknown>;
 }>;
 
@@ -25,8 +25,6 @@ export interface TaskManagerTransport {
   update(request: unknown): Promise<TaskManagerTransportResponse>;
   getTodos(request: unknown): Promise<TaskManagerTransportResponse>;
   writeTodos(request: unknown): Promise<TaskManagerTransportResponse>;
-  output(request: unknown): Promise<TaskManagerTransportResponse>;
-  stop(request: unknown): Promise<TaskManagerTransportResponse>;
 }
 
 const details: Record<Operation, Readonly<{ path: string; scope: string; capability: TaskRequest['id']; subject: string }>> = {
@@ -36,8 +34,6 @@ const details: Record<Operation, Readonly<{ path: string; scope: string; capabil
   'tasks.update': { path: '/api/tasks/update', scope: 'tasks:write', capability: 'task.management', subject: 'tasks-update' },
   'todos.get': { path: '/api/tasks/todos/get', scope: 'tasks:read', capability: 'task.management', subject: 'todos-get' },
   'todos.write': { path: '/api/tasks/todos/write', scope: 'tasks:write', capability: 'task.management', subject: 'todos-write' },
-  'tasks.output': { path: '/api/tasks/output', scope: 'tasks:control', capability: 'task.control', subject: 'tasks-output' },
-  'tasks.stop': { path: '/api/tasks/stop', scope: 'tasks:control', capability: 'task.control', subject: 'tasks-stop' },
 };
 
 export function createTaskManagerTransport(
@@ -74,16 +70,14 @@ export function createTaskManagerTransport(
     list: (request) => send('tasks.list', request), get: (request) => send('tasks.get', request),
     create: (request) => send('tasks.create', request), update: (request) => send('tasks.update', request),
     getTodos: (request) => send('todos.get', request), writeTodos: (request) => send('todos.write', request),
-    output: (request) => send('tasks.output', request), stop: (request) => send('tasks.stop', request),
   };
 }
 
 function isRequest(value: unknown, operation: Operation): value is TaskRequest {
   if (!isRecord(value) || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
-    || value.operationId !== operation || !isScope(value.scope) || !isTarget(value.target, operation)
+    || value.operationId !== operation || !isScope(value.scope) || !isTarget(value.target)
     || !isInput(value.input, operation)) return false;
-  const management = operation !== 'tasks.output' && operation !== 'tasks.stop';
-  return value.id === (management ? 'task.management' : 'task.control')
+  return value.id === 'task.management'
     && sameIdentity(value.scope.identity, value.target.identity)
     && sameIdentity(value.scope.identity, value.input.sessionIdentity as Identity);
 }
@@ -91,9 +85,9 @@ function isRequest(value: unknown, operation: Operation): value is TaskRequest {
 function isScope(value: unknown): value is { kind: 'session'; identity: Identity } {
   return isRecord(value) && hasExactKeys(value, ['kind', 'identity']) && value.kind === 'session' && isIdentity(value.identity);
 }
-function isTarget(value: unknown, operation: Operation): value is { kind: 'task-manager' | 'task'; identity: Identity } {
+function isTarget(value: unknown): value is { kind: 'task-manager'; identity: Identity } {
   return isRecord(value) && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === (operation === 'tasks.output' || operation === 'tasks.stop' ? 'task' : 'task-manager')
+    && value.kind === 'task-manager'
     && isIdentity(value.identity);
 }
 function isInput(value: unknown, operation: Operation): value is Record<string, unknown> & { sessionIdentity: Identity } {
@@ -103,11 +97,10 @@ function isInput(value: unknown, operation: Operation): value is Record<string, 
     'tasks.create': ['sessionIdentity', 'teamKey', 'subject', 'description', 'activeForm', 'owner', 'metadata'],
     'tasks.update': ['sessionIdentity', 'teamKey', 'taskId', 'status', 'subject', 'description', 'activeForm', 'owner', 'addBlockedBy', 'addBlocks', 'metadata'],
     'todos.get': ['sessionIdentity'], 'todos.write': ['sessionIdentity', 'oldTodos', 'newTodos'],
-    'tasks.output': ['sessionIdentity', 'taskId'], 'tasks.stop': ['sessionIdentity', 'taskId'],
   };
   if (!Object.keys(value).every((key) => allowed[operation].includes(key))) return false;
   if (value.teamKey !== undefined && !isString(value.teamKey)) return false;
-  if (['tasks.get', 'tasks.update', 'tasks.output', 'tasks.stop'].includes(operation) && !isString(value.taskId)) return false;
+  if ((operation === 'tasks.get' || operation === 'tasks.update') && !isString(value.taskId)) return false;
   if (operation === 'tasks.create' && (!isString(value.subject) || !isString(value.description))) return false;
   if (value.activeForm !== undefined && !isString(value.activeForm) || value.owner !== undefined && !isString(value.owner)) return false;
   if (value.status !== undefined && !['pending', 'in_progress', 'completed', 'deleted'].includes(value.status as string)) return false;
@@ -126,9 +119,6 @@ function isSuccess(value: unknown, operation: Operation): boolean {
   if (operation === 'tasks.list') return isSnapshot(value);
   if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && isTask(value.task);
   if (operation === 'todos.get') return isTodoSnapshot(value);
-  if (operation === 'tasks.output') return hasExactKeys(value, ['output']) && (value.output === 'available' || value.output === 'not_found');
-  if (operation === 'tasks.stop') return (hasExactKeys(value, ['found', 'cancelled']) && typeof value.found === 'boolean' && typeof value.cancelled === 'boolean')
-    || isClosedMutation(value);
   if (operation === 'todos.write') return (hasExactKeys(value, ['outcome', 'snapshot']) && value.outcome === 'applied' && isTodoSnapshot(value.snapshot))
     || isClosedMutation(value);
   if (operation === 'tasks.create') {

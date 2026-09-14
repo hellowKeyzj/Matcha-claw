@@ -185,3 +185,9 @@ You're successful when:
 - Develop shader parameter validation tools that catch out-of-range values before they reach QA
 - Maintain a team-shared script library versioned in the same repo as game assets
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

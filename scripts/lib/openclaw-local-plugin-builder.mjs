@@ -2,6 +2,7 @@ import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import ts from 'typescript'
+import { safeRm } from './safe-delete.mjs'
 
 const BUILD_TARGETS = [
   {
@@ -230,7 +231,7 @@ async function refreshManagedPluginMirror({ rootDir, target }) {
   const packageDir = path.join(rootDir, target.packageDir)
   const outputDir = path.join(rootDir, 'build', 'openclaw-plugins', target.pluginId)
 
-  await fs.rm(outputDir, { recursive: true, force: true })
+  await safeRm(outputDir, { root: path.join(rootDir, 'build', 'openclaw-plugins') })
   await fs.mkdir(outputDir, { recursive: true })
   await copyRuntimeFiles(packageDir, outputDir, target.runtimeFiles)
 
@@ -295,7 +296,7 @@ export async function buildLocalPluginArtifacts({
   compileFiles,
   preserveDirStructure = false,
 }) {
-  await fs.rm(distDir, { recursive: true, force: true })
+  await safeRm(distDir, { root: packageDir })
   await fs.mkdir(distDir, { recursive: true })
 
   const sourceFiles = await collectCompileTargets(packageDir, {

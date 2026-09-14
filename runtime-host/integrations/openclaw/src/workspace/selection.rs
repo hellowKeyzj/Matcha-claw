@@ -104,22 +104,44 @@ fn defaults_workspace(config: &Value) -> Option<PathBuf> {
 }
 
 fn configured_agents(config: &Value) -> Vec<ConfiguredAgentWorkspace> {
-    config
-        .get("agents")
-        .and_then(|agents| agents.get("list"))
+    let Some(agents) = config.get("agents").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    if let Some(entries) = agents.get("entries").and_then(Value::as_object) {
+        return entries
+            .iter()
+            .filter_map(|(id, agent)| {
+                let id = agent_id(id)?;
+                let agent = agent.as_object()?;
+                let workspace = workspace_value(agent.get("workspace"))?;
+                Some(ConfiguredAgentWorkspace {
+                    id: id.to_owned(),
+                    workspace,
+                    is_default: agent_is_default(agent),
+                })
+            })
+            .collect();
+    }
+    agents
+        .get("list")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|agent| {
+            let agent = agent.as_object()?;
             let id = agent.get("id").and_then(Value::as_str).and_then(agent_id)?;
             let workspace = workspace_value(agent.get("workspace"))?;
             Some(ConfiguredAgentWorkspace {
                 id: id.to_owned(),
                 workspace,
-                is_default: agent.get("isDefault") == Some(&Value::Bool(true)),
+                is_default: agent_is_default(agent),
             })
         })
         .collect()
+}
+
+fn agent_is_default(agent: &serde_json::Map<String, Value>) -> bool {
+    agent.get("default").or_else(|| agent.get("isDefault")) == Some(&Value::Bool(true))
 }
 
 fn workspace_value(value: Option<&Value>) -> Option<PathBuf> {

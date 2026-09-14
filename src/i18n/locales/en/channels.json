@@ -54,17 +54,25 @@
         "addTitle": "Add Channel",
         "existingDesc": "Update your existing configuration",
         "selectDesc": "Select a channel type to configure",
-        "qrCode": "QRCode",
-        "token": "Token",
+        "qrCode": "QR code",
+        "token": "Credential",
+        "authorization": "Authorization",
+        "webhook": "Webhook",
         "scanQR": "Scan this QR code with {{name}}",
+        "openAuthorization": "Open the {{name}} authorization link",
+        "openAuthorizationLink": "Open authorization link",
         "qrImageAlt": "{{name}} login QR code",
-        "refreshCode": "Refresh Code",
+        "waitingForScan": "Waiting for scan or authorization...",
+        "refreshCode": "Refresh QR code",
         "loadingConfig": "Loading configuration...",
         "existingHint": "You have an existing configuration for this channel",
         "howToConnect": "How to connect",
         "viewDocs": "View Documentation",
         "channelName": "Channel Name",
         "channelNamePlaceholder": "My {{name}}",
+        "agent": "Agent",
+        "agentDefault": "Default (main) / keep existing",
+        "mainAgent": "Main agent",
         "enableChannel": "Enable Channel",
         "enableChannelDesc": "When off, config is saved but the channel stays disabled",
         "credentialsVerified": "Credentials Verified",
@@ -74,9 +82,13 @@
         "validating": "Validating...",
         "validateConfig": "Validate Configuration",
         "generatingQR": "Generating QR...",
+        "startingAuthorization": "Starting authorization...",
         "validatingAndSaving": "Validating & Saving...",
         "advancedSettings": "Advanced settings (optional)",
+        "setupModeGuided": "Scan / authorize",
+        "setupModeCredential": "Use configuration",
         "generateQRCode": "Generate QR Code",
+        "startAuthorization": "Start authorization",
         "updateAndReconnect": "Update & Reconnect",
         "saveAndConnect": "Save & Connect",
         "envVar": "Environment Variable: {{var}}"
@@ -233,21 +245,21 @@
             ]
         },
         "wecom": {
-            "description": "Connect WeCom Bot via plugin",
+            "description": "Connect WeCom Bot via the official plugin using Bot ID and Bot Secret.",
             "fields": {
                 "botId": {
                     "label": "Bot ID",
-                    "placeholder": "ww_xxxxxx"
+                    "placeholder": "Enter your WeCom Bot ID"
                 },
                 "secret": {
-                    "label": "App Secret",
-                    "placeholder": "Your WeCom Bot secret"
+                    "label": "Bot Secret",
+                    "placeholder": "Enter your WeCom Bot Secret"
                 }
             },
             "instructions": [
-                "Create an application in WeCom Admin Console to get configuration info",
-                "Ensure receive message server config is enabled",
-                "Enter your Bot ID (or Corp ID) and Secret to establish connection"
+                "Create or open a WeCom Bot in the WeCom Admin Console and copy its Bot ID and Bot Secret.",
+                "This form uses the default WebSocket Bot mode. No QR code, OAuth, or callback URL is required here.",
+                "Save the credentials; the gateway will complete non-interactive authorization and start the channel."
             ]
         },
         "imessage": {

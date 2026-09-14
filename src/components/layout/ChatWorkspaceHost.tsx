@@ -2,18 +2,10 @@ import { AgentSessionsPane } from './AgentSessionsPane';
 import { Chat } from '@/pages/Chat';
 
 interface ChatWorkspaceHostProps {
-  agentSessionsWidth: number;
-  agentSessionsCollapsed: boolean;
-  agentSessionsCollapsedWidth: number;
-  onToggleAgentSessionsCollapse: () => void;
   takeoverMode: 'none' | 'artifact-workbench';
 }
 
 export function ChatWorkspaceHost({
-  agentSessionsWidth,
-  agentSessionsCollapsed,
-  agentSessionsCollapsedWidth,
-  onToggleAgentSessionsCollapse,
   takeoverMode,
 }: ChatWorkspaceHostProps) {
   const artifactWorkbenchFullscreen = takeoverMode === 'artifact-workbench';
@@ -22,16 +14,14 @@ export function ChatWorkspaceHost({
     <div
       data-testid="chat-workspace-host"
       data-takeover-mode={takeoverMode}
-      className="flex h-full min-w-0 overflow-hidden bg-card"
+      className="relative flex h-full min-w-0 overflow-hidden bg-card"
     >
       {!artifactWorkbenchFullscreen ? (
-        <AgentSessionsPane
-          expandedWidth={agentSessionsWidth}
-          collapsed={agentSessionsCollapsed}
-          collapsedWidth={agentSessionsCollapsedWidth}
-          onToggleCollapse={onToggleAgentSessionsCollapse}
-          showRightDivider
-        />
+        <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-0 overflow-visible">
+          <div className="pointer-events-auto h-full">
+            <AgentSessionsPane />
+          </div>
+        </div>
       ) : null}
       <div className="min-w-0 flex-1 overflow-hidden bg-card">
         <Chat />

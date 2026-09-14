@@ -60,10 +60,14 @@ function stripLeadingBootstrapPendingBlock(text: string): string {
   return text.slice(offset);
 }
 
+function isOpenClawGatewayRestartRecoveryPrompt(text: string): boolean {
+  return /^\s*\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\./i.test(text.trim());
+}
+
 function stripLeadingInternalPromptArtifacts(text: string): string {
   let output = text;
   while (true) {
-    const next = stripLeadingBootstrapPendingBlock(output)
+    const next = (isOpenClawGatewayRestartRecoveryPrompt(output) ? '' : stripLeadingBootstrapPendingBlock(output))
       .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
       .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '');
     if (next === output) {
@@ -79,6 +83,10 @@ function stripLeadingConversationEnvelopeArtifacts(text: string): string {
   while (true) {
     const next = output
       .replace(/^\s*System:\s*\[[^\]\r\n]+\]\s+[^\r\n]*\[msg:[^\]\r\n]+\]\s*(?:\r?\n|$)/i, '')
+      .replace(
+        /^\s*Sender:\s*⟦openclaw:ctx⟧\s*(?:```[a-z]*\n[\s\S]*?```\s*|\{[\s\S]*?\}\s*)/i,
+        '',
+      )
       .replace(
         /^\s*(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):\s*(?:```[a-z]*\n[\s\S]*?```\s*|\{[\s\S]*?\}\s*)/i,
         '',
@@ -169,7 +177,9 @@ export function isImageGenerationStatusNarration(text: string): boolean {
 }
 
 export function isOpenClawRuntimeEventPrompt(text: string): boolean {
-  return text.trim().split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?$/i.test(line.trim()));
+  const value = text.trim();
+  return value.split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?$/i.test(line.trim()))
+    || isOpenClawGatewayRestartRecoveryPrompt(value);
 }
 
 export function isInternalDeliveryPlanningText(text: string): boolean {
@@ -220,7 +230,7 @@ function stripInternalAssistantArtifactLines(text: string): string {
     .replace(assistantMediaArtifactRegex, '')
     .replace(assistantOpenClawMediaArtifactRegex, '$1')
     .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{2,}/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 

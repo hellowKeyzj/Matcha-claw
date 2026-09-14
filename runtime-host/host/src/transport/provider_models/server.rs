@@ -1,7 +1,7 @@
 use std::{
     io,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clawhub::ClawHubRegistryClient;
@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use crate::{
-    facade::{PluginsHandle, SkillsHandle},
+    facade::{AgentsHandle, PluginsHandle, SkillsHandle},
     transport::authorization::CapabilityDecisionVerifier,
 };
 
@@ -24,9 +24,9 @@ use crate::transport::{
     clawhub_search::{self, Delivery as ClawHubSearchDelivery},
     clawhub_skill::{self, Delivery as ClawHubSkillDelivery},
     provider_routing::{self, ProviderRoutingDelivery},
-    skill_bundle, skills,
+    sealed_resource, skill_bundle, skills,
 };
-use crate::transport::{external_connectors, plugins};
+use crate::transport::{external_connectors, openclaw_mcp_servers, plugins};
 
 const ENDPOINT: &str = "/api/provider-models";
 const SELECTABLE_ENDPOINT: &str = "/api/provider-models/selectable";
@@ -35,7 +35,8 @@ const AUTHORIZATION_SUBJECT: &str = "provider-models";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
+const RESPONSE_WRITE_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -44,6 +45,7 @@ pub(crate) struct Server {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::provider::ProviderHandle,
     skills: SkillsHandle,
+    agents: AgentsHandle,
     clawhub_registry: ClawHubRegistryClient,
     plugins: PluginsHandle,
     connector_handle: crate::connectors::ConnectorHandle,
@@ -55,6 +57,7 @@ impl Server {
         verifier: CapabilityDecisionVerifier,
         owner: crate::provider::ProviderHandle,
         skills: SkillsHandle,
+        agents: AgentsHandle,
         clawhub_registry: ClawHubRegistryClient,
         plugins: PluginsHandle,
         connector_handle: crate::connectors::ConnectorHandle,
@@ -64,6 +67,7 @@ impl Server {
             verifier: Arc::new(Mutex::new(verifier)),
             owner,
             skills,
+            agents,
             clawhub_registry,
             plugins,
             connector_handle,
@@ -76,6 +80,7 @@ impl Server {
             let verifier = Arc::clone(&self.verifier);
             let owner = self.owner.clone();
             let skills = self.skills.clone();
+            let agents = self.agents.clone();
             let clawhub_registry = self.clawhub_registry.clone();
             let plugins = self.plugins.clone();
             let connector_handle = self.connector_handle.clone();
@@ -85,6 +90,7 @@ impl Server {
                     verifier,
                     owner,
                     skills,
+                    agents,
                     clawhub_registry,
                     plugins,
                     connector_handle,
@@ -108,35 +114,81 @@ async fn serve(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::provider::ProviderHandle,
     skills: SkillsHandle,
+    agents: AgentsHandle,
     clawhub_registry: ClawHubRegistryClient,
     plugins: PluginsHandle,
     connector_handle: crate::connectors::ConnectorHandle,
 ) -> io::Result<()> {
-    let response = match timeout(REQUEST_DEADLINE, async {
-        let request = read_request(&mut stream).await?;
-        Ok::<_, io::Error>(match request {
-            Ok(request) => {
-                handle(
-                    request,
-                    verifier,
-                    owner,
-                    skills,
-                    clawhub_registry,
-                    plugins,
-                    connector_handle,
-                )
-                .await
-            }
-            Err(response) => response,
-        })
-    })
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => Response::bad_request(),
+    let started = Instant::now();
+    let response = match timeout(REQUEST_READ_DEADLINE, read_request(&mut stream)).await {
+        Ok(Ok(Ok(request))) => {
+            eprintln!(
+                "[provider-models-transport] phase=request-read outcome=received elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            let handling_started = Instant::now();
+            let response = handle(
+                request,
+                verifier,
+                owner,
+                skills,
+                agents,
+                clawhub_registry,
+                plugins,
+                connector_handle,
+            )
+            .await;
+            eprintln!(
+                "[provider-models-transport] phase=request-handle outcome=completed status={} elapsed_ms={}",
+                response.status,
+                handling_started.elapsed().as_millis()
+            );
+            response
+        }
+        Ok(Ok(Err(response))) => {
+            eprintln!(
+                "[provider-models-transport] phase=request-read outcome=invalid elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            response
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "[provider-models-transport] phase=request-read outcome=io-error elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            return Err(error);
+        }
+        Err(_) => {
+            eprintln!(
+                "[provider-models-transport] phase=request-read outcome=timeout elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            Response::fixed(408, "Request reception timed out")
+        }
     };
-    write_response(&mut stream, response).await
+    let write_started = Instant::now();
+    let result = timeout(
+        RESPONSE_WRITE_DEADLINE,
+        write_response(&mut stream, response),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Response write timed out",
+        ))
+    });
+    eprintln!(
+        "[provider-models-transport] phase=response-write outcome={} elapsed_ms={}",
+        match &result {
+            Ok(()) => "written",
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => "timeout",
+            Err(_) => "io-error",
+        },
+        write_started.elapsed().as_millis()
+    );
+    result
 }
 
 async fn handle(
@@ -144,6 +196,7 @@ async fn handle(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::provider::ProviderHandle,
     skills: SkillsHandle,
+    agents: AgentsHandle,
     clawhub_registry: ClawHubRegistryClient,
     plugins: PluginsHandle,
     connector_handle: crate::connectors::ConnectorHandle,
@@ -216,8 +269,27 @@ async fn handle(
         skill_bundle::IMPORT_ENDPOINT if request.method == "POST" => {
             handle_skill_bundle_import(request, verifier, skills).await
         }
+        sealed_resource::STATUS_ENDPOINT if request.method == "GET" => {
+            handle_sealed_resource(request, verifier, skills, agents).await
+        }
+        path if request.method == "GET"
+            && (path.starts_with(sealed_resource::READ_ENDPOINT_PREFIX)
+                || path.starts_with(sealed_resource::AGENT_READ_ENDPOINT_PREFIX)) =>
+        {
+            handle_sealed_resource(request, verifier, skills, agents).await
+        }
+        sealed_resource::EXPORT_ENDPOINT
+        | sealed_resource::INSTALL_ENDPOINT
+        | sealed_resource::UNINSTALL_ENDPOINT
+            if request.method == "POST" =>
+        {
+            handle_sealed_resource(request, verifier, skills, agents).await
+        }
         external_connectors::ENDPOINT if request.method == "POST" => {
             handle_external_connectors(request, verifier, connector_handle).await
+        }
+        openclaw_mcp_servers::ENDPOINT if request.method == "POST" => {
+            handle_openclaw_mcp_servers(request, verifier, connector_handle).await
         }
         _ => Response::not_found(&request.path),
     }
@@ -351,6 +423,20 @@ async fn handle_provider_models(
             .selectable_provider_models(capability)
             .await
             .map(ProviderModelsDelivery::Selectable),
+        ProviderModelsCommand::Discover(account_id) => {
+            let started = Instant::now();
+            eprintln!("[provider-models-transport] phase=discover-owner outcome=dispatched");
+            let delivery = owner
+                .discover_provider_models(account_id)
+                .await
+                .map(ProviderModelsDelivery::Discover);
+            eprintln!(
+                "[provider-models-transport] phase=discover-owner outcome=completed status={} elapsed_ms={}",
+                delivery.as_ref().map_or(503, ProviderModelsDelivery::status_code),
+                started.elapsed().as_millis()
+            );
+            delivery
+        }
         ProviderModelsCommand::Replace { account_id, models } => owner
             .replace_provider_models(account_id, models)
             .await
@@ -508,26 +594,23 @@ async fn handle_external_connectors(
                 }
             })
             .unwrap_or(external_connectors::Delivery::Unavailable),
-        external_connectors::Command::SessionStatus(identity) => {
-            let native_openclaw = is_native_openclaw_session(&identity);
-            connector_handle
-                .session_status(identity)
-                .await
-                .map(|outcome| match outcome {
-                    crate::external_connectors::SessionStatusOutcome::Available(statuses) => {
-                        let statuses = public_session_statuses(statuses);
-                        if statuses.is_empty() && native_openclaw {
-                            external_connectors::Delivery::Unavailable
-                        } else {
-                            external_connectors::Delivery::SessionStatus(statuses)
-                        }
-                    }
-                    crate::external_connectors::SessionStatusOutcome::Unavailable => {
-                        external_connectors::Delivery::Unavailable
-                    }
-                })
-                .unwrap_or(external_connectors::Delivery::Unavailable)
-        }
+        external_connectors::Command::SessionStatus(identity) => connector_handle
+            .session_status(identity)
+            .await
+            .map(|outcome| match outcome {
+                crate::external_connectors::SessionStatusOutcome::Available(statuses) => {
+                    external_connectors::Delivery::SessionStatus(public_session_statuses(statuses))
+                }
+                crate::external_connectors::SessionStatusOutcome::Unavailable => {
+                    external_connectors::Delivery::Unavailable
+                }
+            })
+            .unwrap_or(external_connectors::Delivery::Unavailable),
+        external_connectors::Command::SessionMcpServerEnabled(target) => connector_handle
+            .set_session_mcp_server_enabled(target)
+            .await
+            .map(external_connectors::Delivery::SessionMcpServerEnabled)
+            .unwrap_or(external_connectors::Delivery::Unavailable),
         external_connectors::Command::Probe(id) => connector_handle
             .probe(id.clone())
             .await
@@ -594,14 +677,48 @@ fn is_system_runtime_connector(connector: &environment::Connector) -> bool {
         })
 }
 
-fn is_native_openclaw_session(identity: &crate::external_connectors::SessionIdentity) -> bool {
-    matches!(
-        &identity.endpoint,
-        crate::external_connectors::SessionEndpoint::Native {
-            runtime_adapter_id,
-            runtime_instance_id,
-        } if runtime_adapter_id == "openclaw" && runtime_instance_id == "local"
-    )
+async fn handle_openclaw_mcp_servers(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    connector_handle: crate::connectors::ConnectorHandle,
+) -> Response {
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        return Response::openclaw_mcp_servers_unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => return Response::openclaw_mcp_servers_bad_request(),
+    };
+    let command = {
+        let mut verifier = verifier.lock().await;
+        match openclaw_mcp_servers::Request::decode(
+            value,
+            authorization,
+            &mut verifier,
+            now_millis(),
+        ) {
+            Ok(request) => request.into_command(),
+            Err(openclaw_mcp_servers::RequestError::Invalid) => {
+                return Response::openclaw_mcp_servers_bad_request();
+            }
+            Err(openclaw_mcp_servers::RequestError::Unauthorized) => {
+                return Response::openclaw_mcp_servers_unauthorized();
+            }
+        }
+    };
+    let delivery = match command {
+        openclaw_mcp_servers::Command::List => connector_handle
+            .openclaw_mcp_servers()
+            .await
+            .map(openclaw_mcp_servers::Delivery::List)
+            .unwrap_or(openclaw_mcp_servers::Delivery::Unavailable),
+    };
+    Response::from_openclaw_mcp_servers_delivery(delivery)
 }
 
 async fn handle_provider_routing(
@@ -742,6 +859,33 @@ async fn handle_skill_bundle_import(
     }
 }
 
+async fn handle_sealed_resource(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    skills: SkillsHandle,
+    agents: AgentsHandle,
+) -> Response {
+    match sealed_resource::handle(
+        &request.path,
+        &request.method,
+        &request.headers,
+        &request.body,
+        verifier,
+        skills,
+        agents,
+        now_millis(),
+    )
+    .await
+    {
+        Ok((status, body)) => Response { status, body },
+        Err(sealed_resource::RequestError::Invalid) => Response::sealed_resource_rejected(),
+        Err(sealed_resource::RequestError::Unauthorized) => {
+            Response::sealed_resource_unauthorized()
+        }
+        Err(sealed_resource::RequestError::Unavailable) => Response::sealed_resource_unavailable(),
+    }
+}
+
 struct Request {
     method: String,
     path: String,
@@ -787,8 +931,22 @@ impl Response {
             skill_bundle::EXPORT_ENDPOINT | skill_bundle::IMPORT_ENDPOINT => {
                 Self::fixed(404, "Subagent skill bundle route is not available")
             }
+            sealed_resource::STATUS_ENDPOINT
+            | sealed_resource::EXPORT_ENDPOINT
+            | sealed_resource::INSTALL_ENDPOINT
+            | sealed_resource::UNINSTALL_ENDPOINT => {
+                Self::fixed(404, "Sealed skills route is not available")
+            }
+            path if path.starts_with(sealed_resource::READ_ENDPOINT_PREFIX)
+                || path.starts_with(sealed_resource::AGENT_READ_ENDPOINT_PREFIX) =>
+            {
+                Self::fixed(404, "Sealed resource route is not available")
+            }
             external_connectors::ENDPOINT => {
                 Self::fixed(404, "External connector route is not available")
+            }
+            openclaw_mcp_servers::ENDPOINT => {
+                Self::fixed(404, "OpenClaw MCP servers route is not available")
             }
             _ => Self::fixed(404, "Provider model route is not available"),
         }
@@ -817,6 +975,21 @@ impl Response {
     }
 
     fn from_external_connectors_delivery(delivery: external_connectors::Delivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+
+    fn openclaw_mcp_servers_bad_request() -> Self {
+        Self::fixed(400, "OpenClaw MCP servers request is invalid")
+    }
+
+    fn openclaw_mcp_servers_unauthorized() -> Self {
+        Self::fixed(401, "OpenClaw MCP servers authorization is invalid")
+    }
+
+    fn from_openclaw_mcp_servers_delivery(delivery: openclaw_mcp_servers::Delivery) -> Self {
         Self {
             status: delivery.status_code(),
             body: delivery.body(),
@@ -900,6 +1073,24 @@ impl Response {
 
     fn skill_bundle_delivery(body: Value) -> Self {
         Self { status: 200, body }
+    }
+
+    fn sealed_resource_rejected() -> Self {
+        Self {
+            status: 400,
+            body: serde_json::json!({ "outcome": "rejected" }),
+        }
+    }
+
+    fn sealed_resource_unauthorized() -> Self {
+        Self::fixed(401, "Sealed resource authorization is invalid")
+    }
+
+    fn sealed_resource_unavailable() -> Self {
+        Self {
+            status: 503,
+            body: serde_json::json!({ "outcome": "unknown" }),
+        }
     }
 }
 
@@ -1002,14 +1193,17 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Result<Request, Resp
 
 fn is_get_path(path: &str) -> bool {
     let path = path.split_once('?').map_or(path, |(path, _)| path);
-    matches!(
-        path,
-        ENDPOINT
-            | SELECTABLE_ENDPOINT
-            | plugins::CATALOG_ENDPOINT
-            | plugins::RUNTIME_ENDPOINT
-            | skills::ENDPOINT
-    )
+    path.starts_with(sealed_resource::READ_ENDPOINT_PREFIX)
+        || path.starts_with(sealed_resource::AGENT_READ_ENDPOINT_PREFIX)
+        || matches!(
+            path,
+            ENDPOINT
+                | SELECTABLE_ENDPOINT
+                | plugins::CATALOG_ENDPOINT
+                | plugins::RUNTIME_ENDPOINT
+                | skills::ENDPOINT
+                | sealed_resource::STATUS_ENDPOINT
+        )
 }
 
 async fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
@@ -1019,6 +1213,7 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        408 => "Request Timeout",
         409 => "Conflict",
         422 => "Unprocessable Content",
         503 => "Service Unavailable",
@@ -1145,6 +1340,7 @@ mod tests {
                 verifier,
                 handles.provider,
                 handles.skills,
+                handles.agents,
                 handles.clawhub_registry,
                 handles.plugins,
                 handles.connector,
@@ -1197,6 +1393,7 @@ mod tests {
                 verifier,
                 handles.provider,
                 handles.skills,
+                handles.agents,
                 handles.clawhub_registry,
                 handles.plugins,
                 handles.connector,
@@ -1531,10 +1728,20 @@ mod tests {
                 .to_string(),
             ))
             .await;
-        assert_eq!(native["status"], 503);
+        assert_eq!(native["status"], 200);
         assert_eq!(
             native["body"],
-            json!({ "success": false, "error": "External connectors are unavailable" })
+            json!({
+                "statuses": [{
+                    "connectorId": "matcha-teamrun",
+                    "displayName": "Matcha TeamRun MCP",
+                    "adapterId": "openclaw",
+                    "targetKind": "session",
+                    "resultType": "unknown",
+                    "reason": "OpenClaw MCP status is unavailable for this session",
+                    "details": { "serverId": "matcha-teamrun", "enabledNextRun": true, "enabledConfigurable": false },
+                }]
+            })
         );
         assert!(!native.to_string().contains("session-native"));
 
@@ -1565,6 +1772,43 @@ mod tests {
         assert_eq!(protocol["status"], 200);
         assert_eq!(protocol["body"], json!({ "statuses": [] }));
         assert!(!protocol.to_string().contains("session-protocol"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn loopback_openclaw_mcp_servers_lists_preset_catalog() {
+        let server = RunningServer::start().await;
+        let endpoint = openclaw_mcp_servers::ENDPOINT;
+
+        let list = server
+            .request(&http_request(
+                "POST",
+                endpoint,
+                Some(&openclaw_mcp_servers_decision("openClawMcpServers.list")),
+                &openclaw_mcp_servers_request("openClawMcpServers.list", json!({ "kind": "list" }))
+                    .to_string(),
+            ))
+            .await;
+        assert_eq!(list["status"], 200);
+        assert_eq!(
+            list["body"],
+            json!({
+                "servers": [{
+                    "serverId": "matcha-teamrun",
+                    "displayName": "Matcha TeamRun MCP",
+                    "kind": "mcp-stdio",
+                    "source": "preset",
+                    "enabled": true,
+                    "managed": true,
+                    "editable": false,
+                    "removable": false,
+                }]
+            })
+        );
+        assert!(!list.to_string().contains("runtime-host-mcp"));
+        assert!(!list.to_string().contains("runtime-host"));
+        assert!(!list.to_string().contains("test-openclaw-secret"));
 
         server.stop().await;
     }
@@ -1807,6 +2051,25 @@ mod tests {
         )
     }
 
+    fn openclaw_mcp_servers_request(operation_id: &str, input: Value) -> Value {
+        json!({
+            "id": "openclaw.mcpServers",
+            "operationId": operation_id,
+            "scope": { "kind": "openclaw-mcp-servers" },
+            "target": { "kind": "openclaw-mcp-servers" },
+            "input": input,
+        })
+    }
+
+    fn openclaw_mcp_servers_decision(operation_id: &str) -> String {
+        signed_decision(
+            openclaw_mcp_servers::ENDPOINT,
+            "openclaw:mcp-servers",
+            operation_id,
+            "openclaw-mcp-servers",
+        )
+    }
+
     async fn write_response_over_loopback(response: Response) -> Value {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1978,6 +2241,8 @@ mod tests {
             },
             matcha_secret: Secret::new("test-matcha-secret".into()).expect("matcha secret"),
             open_claw: OpenClawInput {
+                team_run_mcp_executable: absolute_path("runtime-host-mcp"),
+                team_run_mcp_state_dir: absolute_path("runtime-host"),
                 electron_image: absolute_path("MatchaClaw"),
                 working_directory: absolute_path("runtime"),
                 openclaw_dir: root.openclaw.openclaw_dir().to_owned(),
@@ -1991,6 +2256,8 @@ mod tests {
                 entry: root.openclaw.openclaw_dir().join("openclaw.mjs"),
                 state_dir,
                 port: 18_789,
+                sealed_endpoint: None,
+                sealed_token: None,
                 client_metadata: GatewayClientMetadata::try_new(
                     "test".into(),
                     std::env::consts::OS.into(),

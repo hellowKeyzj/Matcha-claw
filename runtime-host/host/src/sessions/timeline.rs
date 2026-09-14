@@ -1,7 +1,8 @@
 use crate::sessions::state::{
     ApprovalPhase, ApprovalView, ItemStatus, MAX_CONTENT_REF_BYTES, MissingFact, OmissionReason,
-    RunPhase, RuntimeView, SessionCompleteness, SessionContent, SessionFact, SessionIdentity,
-    SessionItem, SessionProvider, SessionView, SessionWindow, ToolPhase, ToolView,
+    RunPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeView, SessionCompleteness,
+    SessionContent, SessionFact, SessionIdentity, SessionItem, SessionProvider, SessionView,
+    SessionWindow, ToolPhase, ToolView,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -10,7 +11,6 @@ const MAX_ID_BYTES: usize = 256;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_WINDOW_LIMIT: usize = 200;
 const DEFAULT_WINDOW_LIMIT: usize = 80;
-const SOURCE_REPLY_SUFFIX: &str = "-source-reply";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Provider {
@@ -166,6 +166,14 @@ impl ContentCommand {
         self.endpoint_session_id.as_deref()
     }
 
+    pub(crate) fn with_endpoint_session_id(mut self, endpoint_session_id: String) -> Option<Self> {
+        if !valid_optional_bounded_text(Some(&endpoint_session_id), MAX_ENDPOINT_SESSION_ID_BYTES) {
+            return None;
+        }
+        self.endpoint_session_id = Some(endpoint_session_id);
+        Some(self)
+    }
+
     pub(crate) fn content_ref(&self) -> &str {
         &self.content_ref
     }
@@ -259,6 +267,14 @@ impl Command {
         self.endpoint_session_id.as_deref()
     }
 
+    pub(crate) fn with_endpoint_session_id(mut self, endpoint_session_id: String) -> Option<Self> {
+        if !valid_optional_bounded_text(Some(&endpoint_session_id), MAX_ENDPOINT_SESSION_ID_BYTES) {
+            return None;
+        }
+        self.endpoint_session_id = Some(endpoint_session_id);
+        Some(self)
+    }
+
     pub(crate) const fn include_canonical(&self) -> bool {
         self.include_canonical
     }
@@ -292,8 +308,6 @@ pub(crate) enum UnavailableReason {
     MatchaProjectionInvalid,
     OpenClawBindingInvalid,
     OpenClawSessionKeyInvalid,
-    OpenClawHistoryParamsInvalid,
-    OpenClawWindowRequestInvalid,
     OpenClawReadSessionConnection,
     OpenClawReadRequestIdExhausted,
     OpenClawReadRequestDeadline,
@@ -325,8 +339,6 @@ impl UnavailableReason {
             Self::MatchaProjectionInvalid => "matcha.projection_invalid",
             Self::OpenClawBindingInvalid => "openclaw.binding_invalid",
             Self::OpenClawSessionKeyInvalid => "openclaw.session_key_invalid",
-            Self::OpenClawHistoryParamsInvalid => "openclaw.history_params_invalid",
-            Self::OpenClawWindowRequestInvalid => "openclaw.window_request_invalid",
             Self::OpenClawReadSessionConnection => "openclaw.read.session_connection",
             Self::OpenClawReadRequestIdExhausted => "openclaw.read.request_id_exhausted",
             Self::OpenClawReadRequestDeadline => "openclaw.read.request_deadline",
@@ -580,8 +592,7 @@ pub(crate) async fn load_matcha_content(
     session: &matcha_agent::peer::MatchaPeerSessionHandle,
     command: ContentCommand,
 ) -> ContentOutcome {
-    let Some(session_id) =
-        matcha_native_session_id_for_parts(command.session_key(), command.endpoint_session_id())
+    let Some(session_id) = matcha_native_session_id_for_binding(command.endpoint_session_id())
     else {
         return ContentOutcome::unavailable(UnavailableReason::MatchaMissingNativeSessionId);
     };
@@ -621,6 +632,58 @@ pub(crate) fn load_openclaw_content(_command: ContentCommand) -> ContentOutcome 
     ContentOutcome::unavailable(UnavailableReason::RuntimeUnsupported)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenClawReplayRequest {
+    session_key: openclaw::session::protocol::SessionKey,
+    window: WindowRequest,
+}
+
+impl OpenClawReplayRequest {
+    pub(crate) fn new(
+        session_key: openclaw::session::protocol::SessionKey,
+        window: WindowRequest,
+    ) -> Self {
+        Self {
+            session_key,
+            window,
+        }
+    }
+
+    pub(crate) fn session_key(&self) -> &openclaw::session::protocol::SessionKey {
+        &self.session_key
+    }
+
+    pub(crate) const fn window(&self) -> WindowRequest {
+        self.window
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenClawReplayWindow {
+    replay: openclaw::port::CanonicalSessionReplay,
+    window: SessionWindow,
+}
+
+impl OpenClawReplayWindow {
+    pub(crate) fn new(
+        replay: openclaw::port::CanonicalSessionReplay,
+        window: SessionWindow,
+    ) -> Option<Self> {
+        (window.window_start_offset <= window.window_end_offset
+            && window.window_end_offset <= window.total_item_count
+            && window.window_end_offset - window.window_start_offset <= MAX_WINDOW_LIMIT as u64)
+            .then_some(Self { replay, window })
+    }
+
+    pub(crate) const fn replay(&self) -> &openclaw::port::CanonicalSessionReplay {
+        &self.replay
+    }
+
+    pub(crate) const fn window(&self) -> SessionWindow {
+        self.window
+    }
+}
+
 pub(crate) async fn load_openclaw(
     ops: &dyn crate::runtime_driver::SessionOps,
     command: Command,
@@ -633,27 +696,10 @@ pub(crate) async fn load_openclaw(
         Ok(key) => key,
         Err(_) => return Outcome::unavailable(UnavailableReason::OpenClawSessionKeyInvalid),
     };
-    let params = match openclaw::session::protocol::ChatHistoryParams::new(key)
-        .try_with_limit(command.window.limit() as u64)
-    {
-        Ok(params) => params,
-        Err(_) => return Outcome::unavailable(UnavailableReason::OpenClawHistoryParamsInvalid),
-    };
-    let request = match openclaw::session_window::PageRequest::new(
-        match command.window.direction() {
-            Direction::Latest => openclaw::session_window::Direction::Latest,
-            Direction::Older => openclaw::session_window::Direction::Older,
-            Direction::Newer => openclaw::session_window::Direction::Newer,
-        },
-        command.window.limit(),
-        command.offset(),
-    ) {
-        Some(request) => request,
-        None => return Outcome::unavailable(UnavailableReason::OpenClawWindowRequestInvalid),
-    };
-    let window = match ops.history_window(params, request).await {
+    let request = OpenClawReplayRequest::new(key, command.window);
+    let window = match ops.load_openclaw_session_replay(request).await {
         Ok(window)
-            if openclaw_window_identity_matches(&window, &command.session_key, &history_key) =>
+            if openclaw_replay_identity_matches(&window, &command.session_key, &history_key) =>
         {
             window
         }
@@ -676,7 +722,7 @@ pub(crate) async fn load_openclaw(
     else {
         return Outcome::unavailable(UnavailableReason::OpenClawIdentityInvalid);
     };
-    project_openclaw_view(&identity, &window, epoch)
+    project_openclaw_replay_view(&identity, &window, epoch)
         .map(Outcome::Incomplete)
         .unwrap_or_else(|| Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid))
 }
@@ -832,6 +878,8 @@ fn project_matcha_view(
         phase,
         active_run_id,
         issue: None,
+        runtime_activity: None,
+        error_detail: None,
     };
     let mut missing = vec![
         MissingFact::Artifacts,
@@ -902,40 +950,69 @@ fn openclaw_history_key(command: &Command) -> Option<String> {
 }
 
 fn matcha_native_session_id(command: &Command) -> Option<matcha_agent::session::model::SessionId> {
-    matcha_native_session_id_for_parts(command.session_key(), command.endpoint_session_id())
+    matcha_native_session_id_for_binding(command.endpoint_session_id())
 }
 
-fn matcha_native_session_id_for_parts(
-    session_key: &str,
+fn matcha_native_session_id_for_binding(
     endpoint_session_id: Option<&str>,
 ) -> Option<matcha_agent::session::model::SessionId> {
-    let session_id = match endpoint_session_id {
-        Some(session_id) => session_id,
-        None if session_key.starts_with("matcha-agent:") => return None,
-        None => session_key,
-    };
-    matcha_agent::session::model::SessionId::try_new(session_id.to_owned()).ok()
+    matcha_agent::session::model::SessionId::try_new(endpoint_session_id?.to_owned()).ok()
 }
 
-fn openclaw_window_identity_matches(
-    window: &openclaw::session_window::SessionWindow,
+fn openclaw_replay_identity_matches(
+    window: &OpenClawReplayWindow,
     session_key: &str,
     history_key: &str,
 ) -> bool {
-    session_key == history_key
-        && window
-            .session_key()
-            .is_none_or(|actual| actual == history_key)
+    session_key == history_key && window.replay().session_key().as_str() == history_key
 }
 
-fn project_openclaw_view(
+fn project_openclaw_replay_view(
     identity: &SessionIdentity,
-    window: &openclaw::session_window::SessionWindow,
+    window: &OpenClawReplayWindow,
     epoch: u64,
 ) -> Option<SessionView> {
     let endpoint_session_id = parse_openclaw_session_key(&identity.session_key)
         .map(|(_, endpoint_session_id)| endpoint_session_id.to_owned())?;
-    let range = window.range();
+    let projection = OpenClawReplayProjection::from_replay(window.replay())?;
+    let partial = projection.partial;
+    let gaps = vec![MissingFact::BoundedHistory];
+    let items = if partial {
+        SessionFact::Incomplete {
+            facts: projection.items,
+            gaps: gaps.clone(),
+        }
+    } else {
+        SessionFact::Complete(projection.items)
+    };
+    let tools = if partial {
+        SessionFact::Incomplete {
+            facts: projection.tools,
+            gaps: gaps.clone(),
+        }
+    } else {
+        SessionFact::Complete(projection.tools)
+    };
+    let approvals = if partial {
+        SessionFact::Incomplete {
+            facts: projection.approvals,
+            gaps,
+        }
+    } else {
+        SessionFact::Complete(projection.approvals)
+    };
+    let mut missing = vec![
+        MissingFact::Catalog,
+        MissingFact::Usage,
+        MissingFact::Artifacts,
+        MissingFact::ContextTokens,
+        MissingFact::Tasks,
+        MissingFact::ReplayCursor,
+        MissingFact::PartialRuntime,
+    ];
+    if partial {
+        missing.push(MissingFact::BoundedHistory);
+    }
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id: Some(endpoint_session_id),
@@ -943,42 +1020,1051 @@ fn project_openclaw_view(
         epoch,
         seq: 0,
         cursor: 0,
-        items: SessionFact::Complete(openclaw_items(window)),
-        tools: SessionFact::Complete(openclaw_tools(window)),
-        approvals: SessionFact::Incomplete {
-            facts: Vec::new(),
-            gaps: vec![MissingFact::EventOnly],
-        },
+        items,
+        tools,
+        approvals,
         runtime: SessionFact::Incomplete {
-            facts: RuntimeView {
+            facts: projection.runtime,
+            gaps: vec![MissingFact::PartialRuntime],
+        },
+        window: SessionFact::Complete(window.window()),
+        completeness: SessionCompleteness::Incomplete { missing },
+    };
+    view.validate().ok().map(|_| view)
+}
+
+const OPENCLAW_REPLAY_RECOVERY_ITEM_ID: &str = "openclaw:replay-recovery";
+const OPENCLAW_REPLAY_RECOVERY_TEXT: &str = "部分历史内容无法加载，已省略。";
+
+struct OpenClawReplayProjection {
+    items: Vec<SessionItem>,
+    tools: Vec<ToolView>,
+    approvals: Vec<ApprovalView>,
+    runtime: RuntimeView,
+    partial: bool,
+}
+
+impl OpenClawReplayProjection {
+    fn from_replay(replay: &openclaw::port::CanonicalSessionReplay) -> Option<Self> {
+        let mut projection = Self {
+            items: Vec::new(),
+            tools: Vec::new(),
+            approvals: Vec::new(),
+            runtime: RuntimeView {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             },
-            gaps: vec![MissingFact::PartialRuntime],
-        },
-        window: SessionFact::Complete(SessionWindow {
-            total_item_count: window.total_item_count() as u64,
-            window_start_offset: range.start() as u64,
-            window_end_offset: range.end() as u64,
-            has_more: range.start() > 0,
-            has_newer: range.end() < window.total_item_count(),
-            is_at_latest: range.end() == window.total_item_count(),
+            partial: false,
+        };
+        for result in replay.ingress_results() {
+            let openclaw::port::CanonicalIngressResult::Produced(delta) = result else {
+                continue;
+            };
+            for change in delta.changes() {
+                projection.apply_change(change)?;
+            }
+        }
+        Some(projection)
+    }
+
+    fn apply_change(
+        &mut self,
+        change: &openclaw::session::projection::CanonicalSessionChange,
+    ) -> Option<()> {
+        match change {
+            openclaw::session::projection::CanonicalSessionChange::AssistantTurnChunk {
+                run_id,
+                message_id,
+                kind,
+                text,
+                replace,
+                status,
+            } => self.apply_assistant_turn_chunk(
+                run_id.as_str(),
+                message_id.as_ref().map(|id| id.as_str()),
+                *kind,
+                text,
+                *replace,
+                *status,
+            ),
+            openclaw::session::projection::CanonicalSessionChange::AssistantTurnSnapshot {
+                snapshot,
+            } => self.apply_assistant_turn_snapshot(snapshot),
+            openclaw::session::projection::CanonicalSessionChange::ToolActivity {
+                run_id,
+                tool_id,
+                tool_name,
+                phase,
+                input,
+                input_text,
+                summary,
+                output,
+                details,
+                is_error,
+            } => self.apply_tool_activity(OpenClawReplayToolActivity {
+                run_id: run_id.as_str(),
+                tool_id: tool_id.as_str(),
+                tool_name: tool_name.as_deref(),
+                phase: *phase,
+                input,
+                input_text: input_text.as_deref(),
+                summary: summary.as_deref(),
+                output,
+                details,
+                is_error: *is_error,
+            }),
+            openclaw::session::projection::CanonicalSessionChange::RuntimeActivity {
+                run_id,
+                activity,
+            } => self.apply_runtime_activity(run_id.as_str(), Some(*activity)),
+            openclaw::session::projection::CanonicalSessionChange::RuntimeActivityCleared {
+                run_id,
+                retrying_cleanup,
+                ..
+            } => {
+                if *retrying_cleanup {
+                    Some(())
+                } else {
+                    self.apply_runtime_activity(run_id.as_str(), None)
+                }
+            }
+            openclaw::session::projection::CanonicalSessionChange::RuntimeFallback {
+                detail,
+                ..
+            } => self.apply_runtime_fallback(detail),
+            openclaw::session::projection::CanonicalSessionChange::RuntimeFallbackCleared {
+                ..
+            } => self.apply_runtime_fallback_cleared(),
+            openclaw::session::projection::CanonicalSessionChange::GuardianNotice { .. } => {
+                Some(())
+            }
+            openclaw::session::projection::CanonicalSessionChange::ApprovalRequested {
+                run_id,
+                approval_id,
+                option_ids,
+            } => self.upsert_approval(
+                approval_id.as_str(),
+                Some(run_id.as_str()),
+                ApprovalPhase::Requested,
+                option_ids.iter().map(|id| id.as_str()).collect(),
+            ),
+            openclaw::session::projection::CanonicalSessionChange::ApprovalResolved {
+                run_id,
+                approval_id,
+                option_ids,
+            } => self.upsert_approval(
+                approval_id.as_str(),
+                Some(run_id.as_str()),
+                ApprovalPhase::Resolved,
+                option_ids.iter().map(|id| id.as_str()).collect(),
+            ),
+            openclaw::session::projection::CanonicalSessionChange::Terminal {
+                run_id,
+                outcome,
+                error_kind,
+                error_message,
+                stop_reason,
+                error_detail,
+                ..
+            } => self.apply_terminal(
+                run_id.as_str(),
+                *outcome,
+                error_detail,
+                error_message,
+                error_kind,
+                stop_reason,
+            ),
+            openclaw::session::projection::CanonicalSessionChange::RecoveryRequired { .. } => {
+                self.apply_recovery()
+            }
+            openclaw::session::projection::CanonicalSessionChange::TranscriptMessage {
+                message,
+            } => self.apply_transcript_message(message),
+        }
+    }
+
+    fn apply_recovery(&mut self) -> Option<()> {
+        self.partial = true;
+        if self
+            .items
+            .iter()
+            .any(|item| item.item_id() == OPENCLAW_REPLAY_RECOVERY_ITEM_ID)
+        {
+            return Some(());
+        }
+        if self.items.len() >= MAX_WINDOW_LIMIT {
+            return Some(());
+        }
+        self.items.push(SessionItem::System {
+            item_id: OPENCLAW_REPLAY_RECOVERY_ITEM_ID.to_owned(),
+            text: OPENCLAW_REPLAY_RECOVERY_TEXT.to_owned(),
+            status: ItemStatus::Final,
+        });
+        Some(())
+    }
+
+    fn apply_transcript_message(
+        &mut self,
+        message: &openclaw::session_window::Message,
+    ) -> Option<()> {
+        for content in message.content() {
+            self.apply_transcript_tool_content(message, content)?;
+        }
+        if let Some(item) = transcript_session_item(message, self.items.len()) {
+            upsert_replay_item(&mut self.items, item)?;
+        }
+        Some(())
+    }
+
+    fn apply_transcript_tool_content(
+        &mut self,
+        message: &openclaw::session_window::Message,
+        content: &openclaw::session_window::MessageContent,
+    ) -> Option<()> {
+        match content {
+            openclaw::session_window::MessageContent::ToolUse {
+                name,
+                tool_call_id: Some(tool_call_id),
+                input,
+                input_text,
+            } => upsert_replay_tool(
+                &mut self.tools,
+                transcript_tool_view(
+                    tool_call_id,
+                    message.run_id(),
+                    Some(name.as_str()),
+                    ToolPhase::Started,
+                    input.as_ref(),
+                    input_text.as_deref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )?,
+            ),
+            openclaw::session_window::MessageContent::ToolResult {
+                tool_name,
+                tool_call_id: Some(tool_call_id),
+                summary,
+                output,
+                details,
+                is_error,
+            } => upsert_replay_tool(
+                &mut self.tools,
+                transcript_tool_view(
+                    tool_call_id,
+                    message.run_id(),
+                    tool_name.as_deref(),
+                    match is_error {
+                        Some(true) => ToolPhase::Failed,
+                        _ => ToolPhase::Completed,
+                    },
+                    None,
+                    None,
+                    summary.as_deref(),
+                    output.as_ref(),
+                    details.as_ref(),
+                    *is_error,
+                )?,
+            ),
+            openclaw::session_window::MessageContent::MessageToolDelivery { text, media } => {
+                if let Some(tool_call_id) = transcript_message_tool_call_id(message) {
+                    upsert_replay_tool(
+                        &mut self.tools,
+                        transcript_tool_view(
+                            tool_call_id,
+                            message.run_id(),
+                            None,
+                            ToolPhase::Completed,
+                            None,
+                            None,
+                            text.as_deref(),
+                            transcript_delivery_output(text.as_deref(), media).as_ref(),
+                            None,
+                            None,
+                        )?,
+                    );
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn apply_assistant_turn_chunk(
+        &mut self,
+        run_id: &str,
+        message_id: Option<&str>,
+        kind: openclaw::session::projection::AssistantTurnChunkKind,
+        text: &str,
+        replace: bool,
+        status: openclaw::session::projection::AssistantTurnStatus,
+    ) -> Option<()> {
+        let mut item = self.assistant_turn_mut(run_id, message_id)?;
+        item.push_chunk(kind, text, replace)?;
+        *item.status = openclaw_assistant_turn_item_status(status);
+        self.observe_assistant_turn_status(run_id, status);
+        Some(())
+    }
+
+    fn apply_assistant_turn_snapshot(
+        &mut self,
+        snapshot: &openclaw::session::projection::AssistantTurnSnapshot,
+    ) -> Option<()> {
+        let mut item = self.assistant_turn_mut(
+            snapshot.run_id.as_str(),
+            snapshot.message_id.as_ref().map(|id| id.as_str()),
+        )?;
+        item.set_ordered_snapshot(&snapshot.segments, &snapshot.text)?;
+        *item.status = openclaw_assistant_turn_item_status(snapshot.status);
+        self.observe_assistant_turn_status(snapshot.run_id.as_str(), snapshot.status);
+        Some(())
+    }
+
+    fn observe_assistant_turn_status(
+        &mut self,
+        run_id: &str,
+        status: openclaw::session::projection::AssistantTurnStatus,
+    ) {
+        self.runtime.phase = openclaw_assistant_turn_run_phase(status);
+        self.runtime.active_run_id = match status {
+            openclaw::session::projection::AssistantTurnStatus::Final
+            | openclaw::session::projection::AssistantTurnStatus::Aborted
+            | openclaw::session::projection::AssistantTurnStatus::Error => None,
+            openclaw::session::projection::AssistantTurnStatus::Streaming
+            | openclaw::session::projection::AssistantTurnStatus::WaitingForTool => {
+                Some(run_id.to_owned())
+            }
+        };
+    }
+
+    fn apply_tool_activity(&mut self, activity: OpenClawReplayToolActivity<'_>) -> Option<()> {
+        let phase = openclaw_replay_tool_phase(activity.phase);
+        let tool = ToolView {
+            tool_call_id: activity.tool_id.to_owned(),
+            run_id: Some(activity.run_id.to_owned()),
+            name: activity.tool_name.map(str::to_owned),
+            phase,
+            input: activity.input.clone(),
+            input_text: activity.input_text.map(str::to_owned),
+            summary: activity.summary.map(str::to_owned),
+            output: activity.output.clone(),
+            details: activity.details.clone(),
+            is_error: activity.is_error,
+        };
+        upsert_replay_tool(&mut self.tools, tool);
+        let mut item = self.assistant_turn_mut(activity.run_id, None)?;
+        item.upsert_tool(activity.tool_id, activity.tool_name)?;
+        *item.status = match phase {
+            ToolPhase::Completed | ToolPhase::Failed => ItemStatus::Streaming,
+            ToolPhase::Started | ToolPhase::Updated => ItemStatus::WaitingForTool,
+        };
+        self.runtime.phase = RunPhase::Started;
+        self.runtime.active_run_id = Some(activity.run_id.to_owned());
+        Some(())
+    }
+
+    fn upsert_approval(
+        &mut self,
+        approval_id: &str,
+        run_id: Option<&str>,
+        phase: ApprovalPhase,
+        option_ids: Vec<&str>,
+    ) -> Option<()> {
+        if let Some(approval) = self
+            .approvals
+            .iter_mut()
+            .find(|approval| approval.approval_id == approval_id)
+        {
+            approval.run_id = run_id.map(str::to_owned);
+            approval.phase = phase;
+            approval.option_ids = option_ids.into_iter().map(str::to_owned).collect();
+        } else {
+            self.approvals.push(ApprovalView {
+                approval_id: approval_id.to_owned(),
+                run_id: run_id.map(str::to_owned),
+                phase,
+                option_ids: option_ids.into_iter().map(str::to_owned).collect(),
+            });
+        }
+        if phase == ApprovalPhase::Requested {
+            self.runtime.phase = RunPhase::WaitingForApproval;
+            self.runtime.active_run_id = run_id.map(str::to_owned);
+        }
+        Some(())
+    }
+
+    fn apply_runtime_activity(
+        &mut self,
+        run_id: &str,
+        activity: Option<openclaw::session::projection::CanonicalRuntimeActivity>,
+    ) -> Option<()> {
+        self.runtime.phase = RunPhase::Started;
+        self.runtime.active_run_id = Some(run_id.to_owned());
+        self.runtime.runtime_activity = activity.map(|activity| match activity {
+            openclaw::session::projection::CanonicalRuntimeActivity::Compacting => {
+                RuntimeActivity::Compacting
+            }
+        });
+        self.runtime.error_detail = None;
+        Some(())
+    }
+
+    fn apply_runtime_fallback(
+        &mut self,
+        detail: &openclaw::session::protocol::RuntimeFallbackDetail,
+    ) -> Option<()> {
+        self.runtime.error_detail = Some(RuntimeErrorDetail {
+            failover_reason: detail.failover_reason.clone(),
+            provider_runtime_failure_kind: detail.provider_runtime_failure_kind.clone(),
+            provider_error_type: detail.provider_error_type.clone(),
+            provider_error_message_preview: detail.provider_error_message_preview.clone(),
+            http_status: detail.http_status,
+        });
+        Some(())
+    }
+
+    fn apply_runtime_fallback_cleared(&mut self) -> Option<()> {
+        self.runtime.error_detail = None;
+        Some(())
+    }
+
+    fn apply_terminal(
+        &mut self,
+        run_id: &str,
+        outcome: openclaw::port::TerminalOutcome,
+        error_detail: &Option<serde_json::Value>,
+        error_message: &Option<String>,
+        error_kind: &Option<openclaw::session::protocol::SessionErrorKind>,
+        stop_reason: &Option<String>,
+    ) -> Option<()> {
+        let status = openclaw_terminal_item_status(outcome);
+        if let Some(item) = self.assistant_turn_by_run_mut(run_id) {
+            *item.status = status;
+        }
+        let phase = openclaw_terminal_run_phase(outcome);
+        self.runtime.phase = phase;
+        self.runtime.active_run_id = None;
+        self.runtime.runtime_activity = None;
+        self.runtime.error_detail = matches!(outcome, openclaw::port::TerminalOutcome::Error)
+            .then(|| {
+                super::openclaw::terminal_runtime_error_detail(
+                    error_detail,
+                    error_message,
+                    error_kind,
+                    stop_reason,
+                )
+            })
+            .flatten();
+        Some(())
+    }
+
+    fn assistant_turn_mut(
+        &mut self,
+        run_id: &str,
+        message_id: Option<&str>,
+    ) -> Option<OpenClawReplayAssistantTurn<'_>> {
+        if let Some(index) = self.assistant_turn_index(run_id, message_id) {
+            let item = &mut self.items[index];
+            let SessionItem::AssistantTurn {
+                status,
+                segments,
+                text,
+                message_id: existing_message_id,
+                ..
+            } = item
+            else {
+                return None;
+            };
+            if existing_message_id.is_none() {
+                *existing_message_id = message_id.map(str::to_owned);
+            }
+            return Some(OpenClawReplayAssistantTurn {
+                status,
+                segments,
+                text,
+            });
+        }
+        if self.items.len() >= MAX_WINDOW_LIMIT {
+            return None;
+        }
+        self.items.push(SessionItem::AssistantTurn {
+            item_id: message_id.unwrap_or(run_id).to_owned(),
+            run_id: Some(run_id.to_owned()),
+            message_id: message_id.map(str::to_owned),
+            status: ItemStatus::Streaming,
+            segments: Vec::new(),
+            text: String::new(),
+        });
+        self.assistant_turn_mut(run_id, message_id)
+    }
+
+    fn assistant_turn_by_run_mut(
+        &mut self,
+        run_id: &str,
+    ) -> Option<OpenClawReplayAssistantTurn<'_>> {
+        let index = self.items.iter().position(|item| {
+            matches!(item, SessionItem::AssistantTurn { run_id: Some(existing), .. } if existing == run_id)
+        })?;
+        let item = &mut self.items[index];
+        let SessionItem::AssistantTurn {
+            status,
+            segments,
+            text,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        Some(OpenClawReplayAssistantTurn {
+            status,
+            segments,
+            text,
+        })
+    }
+
+    fn assistant_turn_index(&self, run_id: &str, message_id: Option<&str>) -> Option<usize> {
+        message_id
+            .and_then(|message_id| {
+                self.items.iter().position(|item| {
+                    matches!(item, SessionItem::AssistantTurn { message_id: Some(existing), .. } if existing == message_id)
+                })
+            })
+            .or_else(|| {
+                self.items.iter().position(|item| {
+                    matches!(item, SessionItem::AssistantTurn { run_id: Some(existing), .. } if existing == run_id)
+                })
+            })
+    }
+}
+
+struct OpenClawReplayToolActivity<'a> {
+    run_id: &'a str,
+    tool_id: &'a str,
+    tool_name: Option<&'a str>,
+    phase: openclaw::session::protocol::ToolActivityPhase,
+    input: &'a Option<serde_json::Value>,
+    input_text: Option<&'a str>,
+    summary: Option<&'a str>,
+    output: &'a Option<serde_json::Value>,
+    details: &'a Option<serde_json::Value>,
+    is_error: Option<bool>,
+}
+
+struct OpenClawReplayAssistantTurn<'a> {
+    status: &'a mut ItemStatus,
+    segments: &'a mut Vec<SessionContent>,
+    text: &'a mut String,
+}
+
+impl OpenClawReplayAssistantTurn<'_> {
+    fn push_chunk(
+        &mut self,
+        kind: openclaw::session::projection::AssistantTurnChunkKind,
+        text: &str,
+        replace: bool,
+    ) -> Option<()> {
+        match kind {
+            openclaw::session::projection::AssistantTurnChunkKind::Text => {
+                if replace {
+                    self.text.clear();
+                    remove_replay_text_segments(self.segments);
+                }
+                self.text.push_str(text);
+                push_or_append_replay_segment(
+                    self.segments,
+                    SessionContent::Text {
+                        text: text.to_owned(),
+                    },
+                )
+            }
+            openclaw::session::projection::AssistantTurnChunkKind::Thinking => {
+                if replace {
+                    remove_replay_thinking_segments(self.segments);
+                }
+                push_or_append_replay_segment(
+                    self.segments,
+                    SessionContent::Thinking {
+                        text: text.to_owned(),
+                    },
+                )
+            }
+        }
+    }
+
+    fn set_ordered_snapshot(
+        &mut self,
+        segments: &[openclaw::session::projection::AssistantTurnSegment],
+        text: &str,
+    ) -> Option<()> {
+        self.segments.clear();
+        for segment in segments {
+            if let Some(segment) = openclaw_assistant_turn_segment(segment) {
+                push_transcript_segment(self.segments, segment)?;
+            }
+        }
+        *self.text = text.to_owned();
+        Some(())
+    }
+
+    fn upsert_tool(&mut self, tool_id: &str, tool_name: Option<&str>) -> Option<()> {
+        let name = tool_name.unwrap_or("unknown").to_owned();
+        if let Some(segment) = self.segments.iter_mut().find(|segment| {
+            matches!(segment, SessionContent::ToolUse { tool_call_id, .. } if tool_call_id == tool_id)
+        }) {
+            *segment = SessionContent::ToolUse {
+                name,
+                tool_call_id: tool_id.to_owned(),
+            };
+            return Some(());
+        }
+        if self.segments.len() >= 64 {
+            return None;
+        }
+        self.segments.push(SessionContent::ToolUse {
+            name,
+            tool_call_id: tool_id.to_owned(),
+        });
+        Some(())
+    }
+}
+
+fn transcript_session_item(
+    message: &openclaw::session_window::Message,
+    fallback_index: usize,
+) -> Option<SessionItem> {
+    let item_id = transcript_item_id(message, fallback_index);
+    let message_id = message.message_id().map(str::to_owned);
+    let text = message.text().to_owned();
+    match message.role() {
+        openclaw::session_window::MessageRole::User => Some(SessionItem::UserMessage {
+            item_id,
+            message_id,
+            text,
+            content: transcript_content(message, TranscriptContentMode::User)?,
+            status: ItemStatus::Final,
         }),
-        completeness: SessionCompleteness::Incomplete {
-            missing: vec![
-                MissingFact::Catalog,
-                MissingFact::Usage,
-                MissingFact::Artifacts,
-                MissingFact::ContextTokens,
-                MissingFact::Tasks,
-                MissingFact::ReplayCursor,
-                MissingFact::PartialRuntime,
-                MissingFact::EventOnly,
-            ],
-        },
+        openclaw::session_window::MessageRole::Assistant => Some(SessionItem::AssistantTurn {
+            item_id,
+            run_id: message.run_id().map(str::to_owned),
+            message_id,
+            status: ItemStatus::Final,
+            segments: transcript_content(message, TranscriptContentMode::Assistant)?,
+            text,
+        }),
+        openclaw::session_window::MessageRole::System => Some(SessionItem::System {
+            item_id,
+            text,
+            status: ItemStatus::Final,
+        }),
+        openclaw::session_window::MessageRole::ToolResult => None,
+    }
+}
+
+fn transcript_item_id(
+    message: &openclaw::session_window::Message,
+    fallback_index: usize,
+) -> String {
+    message
+        .message_id()
+        .or_else(|| message.origin())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("source:{fallback_index}"))
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptContentMode {
+    User,
+    Assistant,
+}
+
+fn transcript_content(
+    message: &openclaw::session_window::Message,
+    mode: TranscriptContentMode,
+) -> Option<Vec<SessionContent>> {
+    let mut segments = Vec::new();
+    for block in message.content() {
+        let segment = match block {
+            openclaw::session_window::MessageContent::Text { text } => {
+                Some(SessionContent::Text { text: text.clone() })
+            }
+            openclaw::session_window::MessageContent::Thinking { text } => {
+                Some(SessionContent::Thinking { text: text.clone() })
+            }
+            openclaw::session_window::MessageContent::ToolUse {
+                name,
+                tool_call_id: Some(tool_call_id),
+                ..
+            } => Some(SessionContent::ToolUse {
+                name: name.clone(),
+                tool_call_id: tool_call_id.clone(),
+            }),
+            openclaw::session_window::MessageContent::ToolUse { .. } => {
+                Some(SessionContent::Omitted {
+                    reason: OmissionReason::Unknown,
+                })
+            }
+            openclaw::session_window::MessageContent::ToolResult {
+                tool_call_id: Some(tool_call_id),
+                summary,
+                is_error,
+                ..
+            } => transcript_tool_result_segment(mode, tool_call_id, summary.as_deref(), *is_error),
+            openclaw::session_window::MessageContent::ToolResult { .. } => {
+                Some(SessionContent::Omitted {
+                    reason: OmissionReason::Unknown,
+                })
+            }
+            openclaw::session_window::MessageContent::MessageToolDelivery { text, media } => {
+                append_transcript_delivery(message, mode, text.as_deref(), media, &mut segments)?;
+                None
+            }
+            openclaw::session_window::MessageContent::Media {
+                media_type,
+                reference: Some(reference),
+                bytes: None,
+            } => Some(SessionContent::Media {
+                media_type: media_type.clone(),
+                reference: reference.clone(),
+            }),
+            openclaw::session_window::MessageContent::Media { .. } => {
+                Some(SessionContent::Omitted {
+                    reason: OmissionReason::UnsafeMedia,
+                })
+            }
+            openclaw::session_window::MessageContent::Omitted { kind } => {
+                Some(SessionContent::Omitted {
+                    reason: transcript_omission_reason(*kind),
+                })
+            }
+        };
+        if let Some(segment) = segment {
+            push_transcript_segment(&mut segments, segment)?;
+        }
+    }
+    Some(segments)
+}
+
+fn transcript_tool_result_segment(
+    mode: TranscriptContentMode,
+    tool_call_id: &str,
+    summary: Option<&str>,
+    is_error: Option<bool>,
+) -> Option<SessionContent> {
+    match mode {
+        TranscriptContentMode::Assistant => None,
+        TranscriptContentMode::User => Some(SessionContent::ToolResult {
+            tool_call_id: tool_call_id.to_owned(),
+            summary: summary.map(str::to_owned),
+            is_error: is_error.unwrap_or(false),
+        }),
+    }
+}
+
+fn append_transcript_delivery(
+    message: &openclaw::session_window::Message,
+    mode: TranscriptContentMode,
+    text: Option<&str>,
+    media: &[openclaw::session_window::MessageToolDeliveryMedia],
+    segments: &mut Vec<SessionContent>,
+) -> Option<()> {
+    let is_tool_delivery = transcript_message_tool_call_id(message).is_some();
+    if let Some(text) = text
+        && (matches!(mode, TranscriptContentMode::User) || !is_tool_delivery)
+    {
+        push_transcript_segment(
+            segments,
+            SessionContent::Text {
+                text: text.to_owned(),
+            },
+        )?;
+    }
+    if matches!(mode, TranscriptContentMode::Assistant) && is_tool_delivery {
+        return Some(());
+    }
+    for media in media {
+        push_transcript_segment(
+            segments,
+            SessionContent::Media {
+                media_type: media.media_type().map(str::to_owned),
+                reference: media.reference().to_owned(),
+            },
+        )?;
+    }
+    Some(())
+}
+
+fn push_transcript_segment(
+    segments: &mut Vec<SessionContent>,
+    segment: SessionContent,
+) -> Option<()> {
+    if segments.len() >= 64 {
+        return None;
+    }
+    segments.push(segment);
+    Some(())
+}
+
+fn push_or_append_replay_segment(
+    segments: &mut Vec<SessionContent>,
+    segment: SessionContent,
+) -> Option<()> {
+    match (segments.last_mut(), segment) {
+        (Some(SessionContent::Text { text: current }), SessionContent::Text { text }) => {
+            current.push_str(&text);
+            Some(())
+        }
+        (Some(SessionContent::Thinking { text: current }), SessionContent::Thinking { text }) => {
+            current.push_str(&text);
+            Some(())
+        }
+        (_, segment) => push_transcript_segment(segments, segment),
+    }
+}
+
+fn remove_replay_text_segments(segments: &mut Vec<SessionContent>) {
+    segments.retain(|segment| !matches!(segment, SessionContent::Text { .. }));
+}
+
+fn remove_replay_thinking_segments(segments: &mut Vec<SessionContent>) {
+    segments.retain(|segment| !matches!(segment, SessionContent::Thinking { .. }));
+}
+
+fn transcript_message_tool_call_id(message: &openclaw::session_window::Message) -> Option<&str> {
+    message.tool_call_id().or_else(|| {
+        message.content().iter().find_map(|content| match content {
+            openclaw::session_window::MessageContent::ToolResult {
+                tool_call_id: Some(tool_call_id),
+                ..
+            } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+    })
+}
+
+fn transcript_delivery_output(
+    text: Option<&str>,
+    media: &[openclaw::session_window::MessageToolDeliveryMedia],
+) -> Option<serde_json::Value> {
+    if media.is_empty() {
+        return text.map(|text| serde_json::Value::String(text.to_owned()));
+    }
+    let media = media
+        .iter()
+        .map(|media| {
+            let mut item = serde_json::Map::new();
+            if let Some(media_type) = media.media_type() {
+                item.insert(
+                    "mediaType".to_owned(),
+                    serde_json::Value::String(media_type.to_owned()),
+                );
+            }
+            item.insert(
+                "reference".to_owned(),
+                serde_json::Value::String(media.reference().to_owned()),
+            );
+            serde_json::Value::Object(item)
+        })
+        .collect::<Vec<_>>();
+    let mut output = serde_json::Map::new();
+    if let Some(text) = text {
+        output.insert(
+            "text".to_owned(),
+            serde_json::Value::String(text.to_owned()),
+        );
+    }
+    output.insert("media".to_owned(), serde_json::Value::Array(media));
+    Some(serde_json::Value::Object(output))
+}
+
+fn transcript_omission_reason(
+    kind: openclaw::session_window::OmittedContentKind,
+) -> OmissionReason {
+    match kind {
+        openclaw::session_window::OmittedContentKind::Thinking => OmissionReason::Thinking,
+        openclaw::session_window::OmittedContentKind::Unknown => OmissionReason::Unknown,
+        openclaw::session_window::OmittedContentKind::UnsafeMedia => OmissionReason::UnsafeMedia,
+    }
+}
+
+fn transcript_tool_view(
+    tool_call_id: &str,
+    run_id: Option<&str>,
+    name: Option<&str>,
+    phase: ToolPhase,
+    input: Option<&serde_json::Value>,
+    input_text: Option<&str>,
+    summary: Option<&str>,
+    output: Option<&serde_json::Value>,
+    details: Option<&serde_json::Value>,
+    is_error: Option<bool>,
+) -> Option<ToolView> {
+    Some(ToolView {
+        tool_call_id: tool_call_id.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        name: name.map(str::to_owned),
+        phase,
+        input: input.cloned(),
+        input_text: input_text.map(str::to_owned),
+        summary: summary.map(str::to_owned),
+        output: output.cloned(),
+        details: details.cloned(),
+        is_error,
+    })
+}
+
+fn upsert_replay_item(items: &mut Vec<SessionItem>, item: SessionItem) -> Option<()> {
+    if let Some(index) = items
+        .iter()
+        .position(|existing| existing.item_id() == item.item_id())
+    {
+        items[index] = item;
+        return Some(());
+    }
+    if let Some(index) = transcript_assistant_turn_index(items, &item) {
+        if matches!(
+            items[index],
+            SessionItem::AssistantTurn {
+                message_id: None,
+                ..
+            }
+        ) {
+            items.remove(index);
+            items.push(item);
+        } else {
+            items[index] = item;
+        }
+        return Some(());
+    }
+    if items.len() >= MAX_WINDOW_LIMIT {
+        return None;
+    }
+    items.push(item);
+    Some(())
+}
+
+fn transcript_assistant_turn_index(items: &[SessionItem], item: &SessionItem) -> Option<usize> {
+    let SessionItem::AssistantTurn {
+        run_id: Some(run_id),
+        ..
+    } = item
+    else {
+        return None;
     };
-    view.validate().ok().map(|_| view)
+    items.iter().position(|existing| {
+        matches!(existing, SessionItem::AssistantTurn { run_id: Some(existing), .. } if existing == run_id)
+    })
+}
+
+fn openclaw_assistant_turn_segment(
+    segment: &openclaw::session::projection::AssistantTurnSegment,
+) -> Option<SessionContent> {
+    match segment {
+        openclaw::session::projection::AssistantTurnSegment::Text { text } => {
+            Some(SessionContent::Text { text: text.clone() })
+        }
+        openclaw::session::projection::AssistantTurnSegment::Thinking { text } => {
+            Some(SessionContent::Thinking { text: text.clone() })
+        }
+        openclaw::session::projection::AssistantTurnSegment::ToolUse { tool_id, tool_name } => {
+            Some(SessionContent::ToolUse {
+                name: tool_name.as_deref().unwrap_or("unknown").to_owned(),
+                tool_call_id: tool_id.as_str().to_owned(),
+            })
+        }
+        openclaw::session::projection::AssistantTurnSegment::ToolResult { .. } => None,
+    }
+}
+
+fn upsert_replay_tool(tools: &mut Vec<ToolView>, tool: ToolView) {
+    if let Some(existing) = tools
+        .iter_mut()
+        .find(|existing| existing.tool_call_id == tool.tool_call_id)
+    {
+        if tool.name.is_some() {
+            existing.name = tool.name.clone();
+        }
+        existing.phase = tool.phase;
+        if tool.input.is_some() {
+            existing.input = tool.input;
+        }
+        if tool.input_text.is_some() {
+            existing.input_text = tool.input_text;
+        }
+        if tool.summary.is_some() {
+            existing.summary = tool.summary;
+        }
+        if tool.output.is_some() {
+            existing.output = tool.output;
+        }
+        if tool.details.is_some() {
+            existing.details = tool.details;
+        }
+        if tool.is_error.is_some() {
+            existing.is_error = tool.is_error;
+        }
+        if existing.run_id.is_none() {
+            existing.run_id = tool.run_id;
+        }
+        return;
+    }
+    tools.push(tool);
+}
+
+const fn openclaw_assistant_turn_run_phase(
+    status: openclaw::session::projection::AssistantTurnStatus,
+) -> RunPhase {
+    match status {
+        openclaw::session::projection::AssistantTurnStatus::Streaming => RunPhase::Started,
+        openclaw::session::projection::AssistantTurnStatus::WaitingForTool => RunPhase::Started,
+        openclaw::session::projection::AssistantTurnStatus::Final => RunPhase::Completed,
+        openclaw::session::projection::AssistantTurnStatus::Aborted => RunPhase::Interrupted,
+        openclaw::session::projection::AssistantTurnStatus::Error => RunPhase::Failed,
+    }
+}
+
+const fn openclaw_assistant_turn_item_status(
+    status: openclaw::session::projection::AssistantTurnStatus,
+) -> ItemStatus {
+    match status {
+        openclaw::session::projection::AssistantTurnStatus::Streaming => ItemStatus::Streaming,
+        openclaw::session::projection::AssistantTurnStatus::WaitingForTool => {
+            ItemStatus::WaitingForTool
+        }
+        openclaw::session::projection::AssistantTurnStatus::Final => ItemStatus::Final,
+        openclaw::session::projection::AssistantTurnStatus::Aborted => ItemStatus::Aborted,
+        openclaw::session::projection::AssistantTurnStatus::Error => ItemStatus::Error,
+    }
+}
+
+const fn openclaw_replay_tool_phase(
+    phase: openclaw::session::protocol::ToolActivityPhase,
+) -> ToolPhase {
+    match phase {
+        openclaw::session::protocol::ToolActivityPhase::Started => ToolPhase::Started,
+        openclaw::session::protocol::ToolActivityPhase::Updated => ToolPhase::Updated,
+        openclaw::session::protocol::ToolActivityPhase::Completed => ToolPhase::Completed,
+        openclaw::session::protocol::ToolActivityPhase::Failed => ToolPhase::Failed,
+    }
+}
+
+const fn openclaw_terminal_run_phase(outcome: openclaw::port::TerminalOutcome) -> RunPhase {
+    match outcome {
+        openclaw::port::TerminalOutcome::Completed => RunPhase::Completed,
+        openclaw::port::TerminalOutcome::Aborted => RunPhase::Interrupted,
+        openclaw::port::TerminalOutcome::Error => RunPhase::Failed,
+    }
+}
+
+const fn openclaw_terminal_item_status(outcome: openclaw::port::TerminalOutcome) -> ItemStatus {
+    match outcome {
+        openclaw::port::TerminalOutcome::Completed => ItemStatus::Final,
+        openclaw::port::TerminalOutcome::Aborted => ItemStatus::Aborted,
+        openclaw::port::TerminalOutcome::Error => ItemStatus::Error,
+    }
 }
 
 fn project_matcha_hydration_view(
@@ -1006,6 +2092,8 @@ fn project_matcha_hydration_view(
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                runtime_activity: None,
+                error_detail: None,
             },
             gaps: vec![MissingFact::PartialRuntime],
         },
@@ -1177,6 +2265,7 @@ fn upsert_matcha_tool_use(
         input_text: tool.input_text().map(str::to_owned),
         summary: None,
         output: None,
+        details: None,
         is_error: None,
     });
 }
@@ -1210,6 +2299,7 @@ fn upsert_matcha_tool_result(
         input_text: None,
         summary: result.body().map(str::to_owned),
         output: None,
+        details: None,
         is_error: result.is_error(),
     });
 }
@@ -1240,315 +2330,6 @@ fn matcha_approvals(
         .collect()
 }
 
-fn openclaw_items(window: &openclaw::session_window::SessionWindow) -> Vec<SessionItem> {
-    window
-        .messages()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, message)| {
-            let item_id = message
-                .message_id()
-                .or(message.origin())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("source:{index}"));
-            if message.role() == openclaw::session_window::MessageRole::ToolResult {
-                return openclaw_message_delivery_item(message, &item_id, index);
-            }
-            let text = message.text().to_owned();
-            let content = openclaw_content(message);
-            if !has_openclaw_renderable_content(&text, &content) {
-                return None;
-            }
-            match message.role() {
-                openclaw::session_window::MessageRole::User => Some(SessionItem::UserMessage {
-                    item_id,
-                    message_id: message.message_id().map(str::to_owned),
-                    text,
-                    content,
-                    status: ItemStatus::Final,
-                }),
-                openclaw::session_window::MessageRole::Assistant => {
-                    Some(SessionItem::AssistantTurn {
-                        item_id,
-                        run_id: message.run_id().map(str::to_owned),
-                        message_id: message.message_id().map(str::to_owned),
-                        status: ItemStatus::Final,
-                        segments: content,
-                        text,
-                    })
-                }
-                openclaw::session_window::MessageRole::System
-                | openclaw::session_window::MessageRole::ToolResult => None,
-            }
-        })
-        .collect()
-}
-
-fn openclaw_message_delivery_item(
-    message: &openclaw::session_window::Message,
-    source_item_id: &str,
-    index: usize,
-) -> Option<SessionItem> {
-    let segments = openclaw_message_delivery_content(message)?;
-    let text = openclaw_content_text(&segments);
-    let item_id = if valid_bounded_text(source_item_id, MAX_ID_BYTES - SOURCE_REPLY_SUFFIX.len()) {
-        format!("{source_item_id}{SOURCE_REPLY_SUFFIX}")
-    } else {
-        format!("source:{index}{SOURCE_REPLY_SUFFIX}")
-    };
-    Some(SessionItem::AssistantTurn {
-        item_id,
-        run_id: message.run_id().map(str::to_owned),
-        message_id: message
-            .message_id()
-            .filter(|message_id| {
-                valid_bounded_text(message_id, MAX_ID_BYTES - SOURCE_REPLY_SUFFIX.len())
-            })
-            .map(|message_id| format!("{message_id}{SOURCE_REPLY_SUFFIX}")),
-        status: ItemStatus::Final,
-        segments,
-        text,
-    })
-}
-
-fn openclaw_message_delivery_content(
-    message: &openclaw::session_window::Message,
-) -> Option<Vec<SessionContent>> {
-    message.content().iter().find_map(|block| {
-        let openclaw::session_window::MessageContent::MessageToolDelivery { text, media } = block
-        else {
-            return None;
-        };
-        let mut content = Vec::with_capacity(media.len() + usize::from(text.is_some()));
-        if let Some(text) = text {
-            content.push(SessionContent::Text { text: text.clone() });
-        }
-        content.extend(media.iter().map(|media| SessionContent::Media {
-            media_type: media.media_type().map(str::to_owned),
-            reference: media.reference().to_owned(),
-        }));
-        (!content.is_empty()).then_some(content)
-    })
-}
-
-fn openclaw_content_text(content: &[SessionContent]) -> String {
-    content
-        .iter()
-        .filter_map(|content| match content {
-            SessionContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn has_openclaw_renderable_content(text: &str, content: &[SessionContent]) -> bool {
-    !text.trim().is_empty()
-        || content.iter().any(|content| match content {
-            SessionContent::Text { text }
-            | SessionContent::Thinking { text }
-            | SessionContent::LargeText { text, .. } => !text.trim().is_empty(),
-            SessionContent::ToolUse { .. }
-            | SessionContent::ToolResult { .. }
-            | SessionContent::Media { .. } => true,
-            SessionContent::Omitted { .. } => false,
-        })
-}
-
-fn openclaw_content(message: &openclaw::session_window::Message) -> Vec<SessionContent> {
-    message
-        .content()
-        .iter()
-        .filter_map(|block| match block {
-            openclaw::session_window::MessageContent::Text { text } => {
-                Some(SessionContent::Text { text: text.clone() })
-            }
-            openclaw::session_window::MessageContent::ToolUse {
-                name,
-                tool_call_id: Some(tool_call_id),
-                ..
-            } => Some(SessionContent::ToolUse {
-                name: name.clone(),
-                tool_call_id: tool_call_id.clone(),
-            }),
-            openclaw::session_window::MessageContent::ToolUse {
-                tool_call_id: None, ..
-            } => Some(SessionContent::Omitted {
-                reason: OmissionReason::Unknown,
-            }),
-            openclaw::session_window::MessageContent::ToolResult {
-                tool_call_id: Some(tool_call_id),
-                summary,
-                is_error,
-                ..
-            } => Some(SessionContent::ToolResult {
-                tool_call_id: tool_call_id.clone(),
-                summary: summary.clone(),
-                is_error: is_error.unwrap_or(false),
-            }),
-            openclaw::session_window::MessageContent::ToolResult {
-                tool_call_id: None, ..
-            } => Some(SessionContent::Omitted {
-                reason: OmissionReason::Unknown,
-            }),
-            openclaw::session_window::MessageContent::MessageToolDelivery { .. } => None,
-            openclaw::session_window::MessageContent::Media {
-                media_type,
-                reference: Some(reference),
-                ..
-            } => Some(SessionContent::Media {
-                media_type: media_type.clone(),
-                reference: reference.clone(),
-            }),
-            openclaw::session_window::MessageContent::Media { .. } => {
-                Some(SessionContent::Omitted {
-                    reason: OmissionReason::UnsafeMedia,
-                })
-            }
-            openclaw::session_window::MessageContent::Omitted { kind } => {
-                Some(SessionContent::Omitted {
-                    reason: match kind {
-                        openclaw::session_window::OmittedContentKind::Thinking => {
-                            OmissionReason::Thinking
-                        }
-                        openclaw::session_window::OmittedContentKind::UnsafeMedia => {
-                            OmissionReason::UnsafeMedia
-                        }
-                        openclaw::session_window::OmittedContentKind::Unknown => {
-                            OmissionReason::Unknown
-                        }
-                    },
-                })
-            }
-        })
-        .collect()
-}
-
-fn openclaw_tools(window: &openclaw::session_window::SessionWindow) -> Vec<ToolView> {
-    let mut tools = Vec::new();
-    for message in window.messages() {
-        for block in message.content() {
-            match block {
-                openclaw::session_window::MessageContent::ToolUse {
-                    name,
-                    tool_call_id: Some(tool_call_id),
-                    input,
-                    input_text,
-                    ..
-                } => upsert_openclaw_tool_use(
-                    &mut tools,
-                    tool_call_id,
-                    name,
-                    input.clone(),
-                    input_text.clone(),
-                ),
-                openclaw::session_window::MessageContent::ToolResult {
-                    tool_name,
-                    tool_call_id: Some(tool_call_id),
-                    summary,
-                    output,
-                    is_error,
-                    ..
-                } => upsert_openclaw_tool_result(
-                    &mut tools,
-                    tool_call_id,
-                    tool_name.as_deref(),
-                    summary.clone(),
-                    output.clone(),
-                    *is_error,
-                ),
-                _ => {}
-            }
-        }
-    }
-    tools
-}
-
-fn upsert_openclaw_tool_use(
-    tools: &mut Vec<ToolView>,
-    tool_call_id: &str,
-    name: &str,
-    input: Option<serde_json::Value>,
-    input_text: Option<String>,
-) {
-    if let Some(tool) = tools
-        .iter_mut()
-        .find(|tool| tool.tool_call_id == tool_call_id)
-    {
-        if tool.name.is_none() {
-            tool.name = Some(name.to_owned());
-        }
-        if input.is_some() {
-            tool.input = input;
-        }
-        if input_text.is_some() {
-            tool.input_text = input_text;
-        }
-        return;
-    }
-
-    tools.push(ToolView {
-        tool_call_id: tool_call_id.to_owned(),
-        run_id: None,
-        name: Some(name.to_owned()),
-        phase: ToolPhase::Started,
-        input,
-        input_text,
-        summary: None,
-        output: None,
-        is_error: None,
-    });
-}
-
-fn upsert_openclaw_tool_result(
-    tools: &mut Vec<ToolView>,
-    tool_call_id: &str,
-    name: Option<&str>,
-    summary: Option<String>,
-    output: Option<serde_json::Value>,
-    is_error: Option<bool>,
-) {
-    let phase = openclaw_tool_result_phase(is_error);
-    if let Some(tool) = tools
-        .iter_mut()
-        .find(|tool| tool.tool_call_id == tool_call_id)
-    {
-        if tool.name.is_none() {
-            tool.name = name.map(str::to_owned);
-        }
-        tool.phase = phase;
-        if summary.is_some() {
-            tool.summary = summary;
-        }
-        if output.is_some() {
-            tool.output = output;
-        }
-        if is_error.is_some() {
-            tool.is_error = is_error;
-        }
-        return;
-    }
-
-    tools.push(ToolView {
-        tool_call_id: tool_call_id.to_owned(),
-        run_id: None,
-        name: name.map(str::to_owned),
-        phase,
-        input: None,
-        input_text: None,
-        summary,
-        output,
-        is_error,
-    });
-}
-
-const fn openclaw_tool_result_phase(is_error: Option<bool>) -> ToolPhase {
-    if matches!(is_error, Some(true)) {
-        ToolPhase::Failed
-    } else {
-        ToolPhase::Completed
-    }
-}
-
 fn valid_bounded_text(value: &str, max_bytes: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_bytes
@@ -1563,8 +2344,303 @@ fn valid_optional_bounded_text(value: Option<&str>, max_bytes: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::sync::Mutex;
 
     use super::*;
+    use crate::{
+        RuntimeSessionError,
+        runtime_driver::{RuntimeDriverIdentity, SessionFuture, SessionOps},
+        sessions::{
+            abort::{SessionAbortCommand, SessionAbortOutcome},
+            create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome},
+            model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
+            send::{SessionSendCommand, SessionSendOutcome},
+        },
+    };
+
+    #[derive(Default)]
+    struct CapturingSessionOps {
+        captured: Mutex<Option<serde_json::Value>>,
+    }
+
+    impl SessionOps for CapturingSessionOps {
+        fn admission(&self) -> SessionAdmission {
+            SessionAdmission::agent_scoped(
+                RuntimeDriverIdentity::open_claw().endpoint(),
+                SessionProvider::OpenClaw,
+                "agent",
+            )
+        }
+
+        fn abort_session<'a>(
+            &'a self,
+            _command: SessionAbortCommand,
+        ) -> SessionFuture<'a, SessionAbortOutcome> {
+            Box::pin(async { SessionAbortOutcome::Unavailable })
+        }
+
+        fn create_session<'a>(
+            &'a self,
+            _command: SessionCreateCommand,
+            _epoch: u64,
+        ) -> SessionFuture<'a, SessionCreateOutcome> {
+            Box::pin(async { SessionCreateOutcome::Unavailable })
+        }
+
+        fn load_openclaw_session_replay<'a>(
+            &'a self,
+            request: OpenClawReplayRequest,
+        ) -> SessionFuture<
+            'a,
+            Result<OpenClawReplayWindow, RuntimeSessionError<openclaw::port::OpenClawSessionError>>,
+        > {
+            let captured = serde_json::json!({
+                "sessionKey": request.session_key().as_str(),
+                "direction": request.window().direction().as_str(),
+                "limit": request.window().limit(),
+                "offset": request.window().offset(),
+            });
+            *self.captured.lock().expect("captured lock") = Some(captured);
+            Box::pin(async {
+                OpenClawReplayWindow::new(
+                    replay_from_events([terminal_snapshot(1)]),
+                    SessionWindow {
+                        total_item_count: 12,
+                        window_start_offset: 3,
+                        window_end_offset: 5,
+                        has_more: true,
+                        has_newer: true,
+                        is_at_latest: false,
+                    },
+                )
+                .ok_or(RuntimeSessionError::Client(
+                    openclaw::port::OpenClawSessionError::Protocol(None),
+                ))
+            })
+        }
+
+        fn send_session<'a>(
+            &'a self,
+            _command: SessionSendCommand,
+        ) -> SessionFuture<'a, SessionSendOutcome> {
+            Box::pin(async { SessionSendOutcome::Unavailable })
+        }
+
+        fn select_session_model<'a>(
+            &'a self,
+            _command: ResolvedSessionModelSelection,
+        ) -> SessionFuture<'a, SessionModelSelectionOutcome> {
+            Box::pin(async { SessionModelSelectionOutcome::Unavailable })
+        }
+    }
+
+    fn session_key() -> openclaw::session::protocol::SessionKey {
+        openclaw::session::protocol::SessionKey::try_new("agent:main:session-1").unwrap()
+    }
+
+    fn decode_event(
+        name: &str,
+        payload: serde_json::Value,
+        sequence: u64,
+    ) -> openclaw::session::protocol::SessionEventEnvelope {
+        openclaw::session::protocol::decode_session_event(openclaw::gateway::wire::GatewayEvent {
+            name: name.to_owned(),
+            payload: Some(payload),
+            sequence: Some(sequence),
+            state_version: None,
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn terminal_snapshot(sequence: u64) -> openclaw::session::protocol::SessionEventEnvelope {
+        decode_event(
+            "chat",
+            json!({
+                "sessionKey": "agent:main:session-1",
+                "runId": "run-1",
+                "seq": sequence,
+                "state": "final",
+                "message": {
+                    "id": "message-1",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "plan"},
+                        {"type": "text", "text": "answer"}
+                    ]
+                }
+            }),
+            sequence,
+        )
+    }
+
+    fn tool_event(sequence: u64, phase: &str) -> openclaw::session::protocol::SessionEventEnvelope {
+        tool_event_with_id(sequence, phase, "tool-1")
+    }
+
+    fn tool_event_with_id(
+        sequence: u64,
+        phase: &str,
+        tool_call_id: &str,
+    ) -> openclaw::session::protocol::SessionEventEnvelope {
+        decode_event(
+            "session.tool",
+            json!({
+                "sessionKey": "agent:main:session-1",
+                "runId": "run-1",
+                "phase": phase,
+                "toolCallId": tool_call_id,
+                "toolName": "read",
+                "args": {"path": "Cargo.toml"},
+                "summary": "file list",
+                "result": {"files": ["Cargo.toml"]},
+                "isError": false
+            }),
+            sequence,
+        )
+    }
+
+    fn approval_event(
+        sequence: u64,
+        name: &str,
+    ) -> openclaw::session::protocol::SessionEventEnvelope {
+        decode_event(
+            name,
+            json!({
+                "id": "approval-1",
+                "request": {
+                    "sessionKey": "agent:main:session-1",
+                    "runId": "run-1",
+                    "allowedDecisions": ["allow-once", "deny"]
+                }
+            }),
+            sequence,
+        )
+    }
+
+    fn replay_from_events(
+        events: impl IntoIterator<Item = openclaw::session::protocol::SessionEventEnvelope>,
+    ) -> openclaw::port::CanonicalSessionReplay {
+        openclaw::session::materialize_session_replay(session_key(), events, Some(1), None).unwrap()
+    }
+
+    fn partial_replay() -> openclaw::port::CanonicalSessionReplay {
+        openclaw::session::materialize_session_replay_rows(
+            session_key(),
+            [openclaw::session::SessionReplaySourceRow::Recovery { source_sequence: 2 }],
+            Some(1),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn transcript_message(
+        role: openclaw::session_window::MessageRole,
+        _text: &str,
+        content: Vec<openclaw::session_window::MessageContent>,
+    ) -> openclaw::session_window::Message {
+        let window = openclaw::session_window::decode_window(
+            json!({
+                "messages": [{
+                    "role": transcript_role(role),
+                    "id": "message-1",
+                    "runId": "run-1",
+                    "seq": 1,
+                    "content": content.into_iter().map(transcript_content_value).collect::<Vec<_>>()
+                }]
+            }),
+            openclaw::session_window::PageRequest::latest(),
+        )
+        .unwrap();
+        window.messages()[0].clone()
+    }
+
+    fn transcript_role(role: openclaw::session_window::MessageRole) -> &'static str {
+        match role {
+            openclaw::session_window::MessageRole::User => "user",
+            openclaw::session_window::MessageRole::Assistant => "assistant",
+            openclaw::session_window::MessageRole::System => "system",
+            openclaw::session_window::MessageRole::ToolResult => "toolResult",
+        }
+    }
+
+    fn transcript_content_value(
+        content: openclaw::session_window::MessageContent,
+    ) -> serde_json::Value {
+        match content {
+            openclaw::session_window::MessageContent::Text { text } => {
+                json!({"type": "text", "text": text})
+            }
+            openclaw::session_window::MessageContent::Thinking { text } => {
+                json!({"type": "thinking", "thinking": text})
+            }
+            openclaw::session_window::MessageContent::ToolUse {
+                name,
+                tool_call_id,
+                input,
+                input_text,
+            } => json!({
+                "type": "tool_use",
+                "name": name,
+                "tool_call_id": tool_call_id,
+                "input": input,
+                "input_text": input_text,
+            }),
+            openclaw::session_window::MessageContent::ToolResult {
+                tool_name,
+                tool_call_id,
+                summary,
+                output,
+                details,
+                is_error,
+            } => json!({
+                "type": "tool_result",
+                "toolName": tool_name,
+                "tool_call_id": tool_call_id,
+                "summary": summary,
+                "output": output,
+                "details": details,
+                "is_error": is_error,
+            }),
+            openclaw::session_window::MessageContent::Media {
+                media_type,
+                reference,
+                bytes: None,
+            } => json!({"type": "media", "mediaType": media_type, "reference": reference}),
+            _ => json!({"type": "unknown"}),
+        }
+    }
+
+    fn transcript_replay(
+        rows: impl IntoIterator<Item = openclaw::session::SessionReplaySourceRow>,
+    ) -> openclaw::port::CanonicalSessionReplay {
+        openclaw::session::materialize_session_replay_rows(session_key(), rows, Some(1), None)
+            .unwrap()
+    }
+
+    fn default_window(replay: openclaw::port::CanonicalSessionReplay) -> OpenClawReplayWindow {
+        OpenClawReplayWindow::new(
+            replay,
+            SessionWindow {
+                total_item_count: 1,
+                window_start_offset: 0,
+                window_end_offset: 1,
+                has_more: false,
+                has_newer: false,
+                is_at_latest: true,
+            },
+        )
+        .unwrap()
+    }
+
+    fn openclaw_identity() -> SessionIdentity {
+        SessionIdentity::new(
+            "agent:main:session-1".to_owned(),
+            SessionProvider::OpenClaw,
+            Some("main".to_owned()),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn rejects_endpoint_session_id_that_cannot_be_bound() {
@@ -1601,7 +2677,7 @@ mod tests {
     }
 
     #[test]
-    fn matcha_native_session_id_prefers_endpoint_binding() {
+    fn matcha_native_session_id_uses_endpoint_binding() {
         let command = Command::new(
             Provider::Matcha,
             "matcha-agent:matcha:native-session-1".to_owned(),
@@ -1619,18 +2695,20 @@ mod tests {
     }
 
     #[test]
-    fn matcha_native_session_id_rejects_projected_key_without_endpoint_binding() {
-        let command = Command::new(
-            Provider::Matcha,
-            "matcha-agent:matcha:session-1".to_owned(),
-            Some("matcha".to_owned()),
-            WindowRequest::latest(),
-            None,
-            true,
-        )
-        .unwrap();
+    fn matcha_native_session_id_rejects_missing_endpoint_binding() {
+        for session_key in ["session-1", "matcha-agent:matcha:session-1"] {
+            let command = Command::new(
+                Provider::Matcha,
+                session_key.to_owned(),
+                Some("matcha".to_owned()),
+                WindowRequest::latest(),
+                None,
+                true,
+            )
+            .unwrap();
 
-        assert!(matcha_native_session_id(&command).is_none());
+            assert!(matcha_native_session_id(&command).is_none());
+        }
     }
 
     #[test]
@@ -1702,60 +2780,512 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_projection_surfaces_internal_message_tool_delivery() {
-        let window = openclaw::session_window::decode_window(
-            json!({
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "id": "assistant-1",
-                        "runId": "run-1",
-                        "content": [{
-                            "type": "toolUse",
-                            "name": "message",
-                            "toolUseId": "call-message"
-                        }]
-                    },
-                    {
-                        "role": "toolResult",
-                        "messageId": "message-tool",
-                        "toolCallId": "call-message",
-                        "toolName": "message",
-                        "content": "sent",
-                        "isError": false,
-                        "details": {
-                            "status": "ok",
-                            "sourceReplySink": "internal-ui",
-                            "sourceReply": {
-                                "text": "Generated image",
-                                "mediaUrls": ["/api/chat/media/outgoing/session-1/image.png"]
-                            }
-                        }
-                    }
-                ],
-                "sessionKey": "agent:main:main"
-            }),
-            openclaw::session_window::PageRequest::latest(),
-        )
-        .unwrap();
+    fn openclaw_replay_projection_uses_window_metadata() {
         let identity = SessionIdentity::new(
-            "agent:main:main".to_owned(),
+            "agent:main:session-1".to_owned(),
             SessionProvider::OpenClaw,
             Some("main".to_owned()),
         )
         .unwrap();
+        let window = OpenClawReplayWindow::new(
+            replay_from_events([terminal_snapshot(1)]),
+            SessionWindow {
+                total_item_count: 240,
+                window_start_offset: 80,
+                window_end_offset: 160,
+                has_more: true,
+                has_newer: true,
+                is_at_latest: false,
+            },
+        )
+        .unwrap();
 
-        let view = project_openclaw_view(&identity, &window, 1).unwrap();
+        let view = project_openclaw_replay_view(&identity, &window, 1).unwrap();
+        let SessionFact::Complete(projected) = view.window else {
+            panic!("window projected");
+        };
+        assert_eq!(view.seq, 0);
+        assert_eq!(view.cursor, 0);
+        assert_eq!(projected.total_item_count, 240);
+        assert_eq!(projected.window_start_offset, 80);
+        assert_eq!(projected.window_end_offset, 160);
+        assert!(projected.has_more);
+        assert!(projected.has_newer);
+        assert!(!projected.is_at_latest);
+    }
+
+    #[tokio::test]
+    async fn openclaw_older_window_passes_request_to_replay_loader_and_keeps_window_metadata() {
+        let ops = CapturingSessionOps::default();
+        let command = Command::new(
+            Provider::OpenClaw,
+            "agent:main:session-1".to_owned(),
+            Some("main".to_owned()),
+            WindowRequest::new(Direction::Older, 2, Some(3)).unwrap(),
+            Some("session-1".to_owned()),
+            true,
+        )
+        .unwrap();
+
+        let outcome = load_openclaw(&ops, command, 1).await;
+        let captured = ops
+            .captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("replay request captured");
+        assert_eq!(captured["sessionKey"], "agent:main:session-1");
+        assert_eq!(captured["direction"], "older");
+        assert_eq!(captured["limit"], 2);
+        assert_eq!(captured["offset"], 3);
+        assert!(matches!(
+            outcome,
+            Outcome::Incomplete(SessionView {
+                window: SessionFact::Complete(SessionWindow {
+                    total_item_count: 12,
+                    window_start_offset: 3,
+                    window_end_offset: 5,
+                    has_more: true,
+                    has_newer: true,
+                    is_at_latest: false,
+                }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_marks_partial_rows_without_failing_view() {
+        let identity = SessionIdentity::new(
+            "agent:main:session-1".to_owned(),
+            SessionProvider::OpenClaw,
+            Some("main".to_owned()),
+        )
+        .unwrap();
+        let window = OpenClawReplayWindow::new(
+            partial_replay(),
+            SessionWindow {
+                total_item_count: 3,
+                window_start_offset: 0,
+                window_end_offset: 3,
+                has_more: false,
+                has_newer: false,
+                is_at_latest: true,
+            },
+        )
+        .unwrap();
+
+        let view = project_openclaw_replay_view(&identity, &window, 7).unwrap();
+        assert!(matches!(
+            view.items,
+            SessionFact::Incomplete { facts, gaps }
+                if gaps == vec![MissingFact::BoundedHistory]
+                    && matches!(
+                        facts.as_slice(),
+                        [SessionItem::System { text, status: ItemStatus::Final, .. }]
+                            if text == OPENCLAW_REPLAY_RECOVERY_TEXT
+                    )
+        ));
+        assert!(matches!(
+            view.completeness,
+            SessionCompleteness::Incomplete { missing }
+                if missing.contains(&MissingFact::BoundedHistory)
+        ));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_keeps_text_tool_text_order() {
+        let identity = SessionIdentity::new(
+            "agent:main:session-1".to_owned(),
+            SessionProvider::OpenClaw,
+            Some("main".to_owned()),
+        )
+        .unwrap();
+        let window = OpenClawReplayWindow::new(
+            replay_from_events([
+                decode_event(
+                    "chat",
+                    json!({
+                        "sessionKey": "agent:main:session-1",
+                        "runId": "run-1",
+                        "seq": 1,
+                        "state": "delta",
+                        "message": {
+                            "id": "message-1",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "before"}]
+                        }
+                    }),
+                    1,
+                ),
+                tool_event_with_id(2, "start", "tool-1"),
+                decode_event(
+                    "chat",
+                    json!({
+                        "sessionKey": "agent:main:session-1",
+                        "runId": "run-1",
+                        "seq": 3,
+                        "state": "delta",
+                        "message": {
+                            "id": "message-1",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "before after"}]
+                        }
+                    }),
+                    3,
+                ),
+            ]),
+            SessionWindow {
+                total_item_count: 3,
+                window_start_offset: 0,
+                window_end_offset: 3,
+                has_more: false,
+                has_newer: false,
+                is_at_latest: true,
+            },
+        )
+        .unwrap();
+
+        let view = project_openclaw_replay_view(&identity, &window, 7).unwrap();
         let SessionFact::Complete(items) = view.items else {
             panic!("items projected");
         };
-        assert_eq!(items.len(), 2);
         assert!(matches!(
-            &items[1],
-            SessionItem::AssistantTurn { status: ItemStatus::Final, text, segments, .. }
-                if text == "Generated image"
-                    && segments.iter().any(|segment| matches!(segment, SessionContent::Text { text } if text == "Generated image"))
-                    && segments.iter().any(|segment| matches!(segment, SessionContent::Media { media_type: Some(media_type), reference } if media_type == "image/png" && reference == "/api/chat/media/outgoing/session-1/image.png"))
+            items.as_slice(),
+            [SessionItem::AssistantTurn { text, segments, .. }]
+                if text == "before after"
+                    && matches!(
+                        segments.as_slice(),
+                        [
+                            SessionContent::Text { text: before },
+                            SessionContent::ToolUse { tool_call_id, .. },
+                            SessionContent::Text { text: after },
+                        ] if before == "before" && tool_call_id == "tool-1" && after == " after"
+                    )
+        ));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_merges_native_and_transcript_tool() {
+        let window = default_window(transcript_replay([
+            openclaw::session::SessionReplaySourceRow::Event(tool_event(1, "start")),
+            openclaw::session::SessionReplaySourceRow::TranscriptMessage(transcript_message(
+                openclaw::session_window::MessageRole::Assistant,
+                "before after",
+                vec![
+                    openclaw::session_window::MessageContent::Text {
+                        text: "before ".to_owned(),
+                    },
+                    openclaw::session_window::MessageContent::ToolUse {
+                        name: "read".to_owned(),
+                        tool_call_id: Some("tool-1".to_owned()),
+                        input: Some(json!({"path": "Cargo.toml"})),
+                        input_text: Some("Cargo.toml".to_owned()),
+                    },
+                    openclaw::session_window::MessageContent::Text {
+                        text: " after".to_owned(),
+                    },
+                ],
+            )),
+        ]));
+
+        let view = project_openclaw_replay_view(&openclaw_identity(), &window, 7).unwrap();
+        let SessionFact::Complete(items) = view.items else {
+            panic!("items projected");
+        };
+        let SessionFact::Complete(tools) = view.tools else {
+            panic!("tools projected");
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "tool-1");
+        assert_eq!(tools[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(tools[0].name.as_deref(), Some("read"));
+        assert_eq!(tools[0].input, Some(json!({"path": "Cargo.toml"})));
+        assert_eq!(tools[0].input_text.as_deref(), Some("Cargo.toml"));
+        assert!(items.iter().any(|item| matches!(
+            item,
+            SessionItem::AssistantTurn { segments, text, .. }
+                if text == "before \n after"
+                    && matches!(
+                        segments.as_slice(),
+                        [
+                            SessionContent::Text { text: before },
+                            SessionContent::ToolUse { tool_call_id, .. },
+                            SessionContent::Text { text: after },
+                        ] if before == "before " && tool_call_id == "tool-1" && after == " after"
+                    )
+        )));
+    }
+
+    #[test]
+    fn openclaw_replay_tool_activity_projects_details() {
+        let input = None;
+        let output = None;
+        let details = Some(json!({"lineCount":1}));
+        let mut projection = OpenClawReplayProjection {
+            items: Vec::new(),
+            tools: Vec::new(),
+            approvals: Vec::new(),
+            runtime: RuntimeView {
+                phase: RunPhase::Completed,
+                active_run_id: None,
+                issue: None,
+                runtime_activity: None,
+                error_detail: None,
+            },
+            partial: false,
+        };
+
+        projection
+            .apply_tool_activity(OpenClawReplayToolActivity {
+                run_id: "run-1",
+                tool_id: "tool-1",
+                tool_name: Some("read"),
+                phase: openclaw::session::protocol::ToolActivityPhase::Completed,
+                input: &input,
+                input_text: None,
+                summary: Some("done"),
+                output: &output,
+                details: &details,
+                is_error: Some(false),
+            })
+            .unwrap();
+
+        assert_eq!(projection.tools.len(), 1);
+        assert_eq!(projection.tools[0].details, details);
+    }
+
+    #[test]
+    fn openclaw_replay_tool_merge_keeps_existing_details_when_sparse_update_has_none() {
+        let mut tools = vec![ToolView {
+            tool_call_id: "tool-1".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            name: Some("read".to_owned()),
+            phase: ToolPhase::Updated,
+            input: None,
+            input_text: None,
+            summary: None,
+            output: None,
+            details: Some(json!({"rows":1})),
+            is_error: None,
+        }];
+
+        upsert_replay_tool(
+            &mut tools,
+            ToolView {
+                tool_call_id: "tool-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                name: None,
+                phase: ToolPhase::Completed,
+                input: None,
+                input_text: None,
+                summary: Some("done".to_owned()),
+                output: Some(json!({"ok": true})),
+                details: None,
+                is_error: Some(false),
+            },
+        );
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].phase, ToolPhase::Completed);
+        assert_eq!(tools[0].details, Some(json!({"rows":1})));
+        assert_eq!(tools[0].summary.as_deref(), Some("done"));
+
+        upsert_replay_tool(
+            &mut tools,
+            ToolView {
+                tool_call_id: "tool-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                name: None,
+                phase: ToolPhase::Completed,
+                input: None,
+                input_text: None,
+                summary: None,
+                output: None,
+                details: Some(json!({"rows":2})),
+                is_error: None,
+            },
+        );
+
+        assert_eq!(tools[0].details, Some(json!({"rows":2})));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_keeps_tool_result_out_of_assistant_text() {
+        let window = default_window(transcript_replay([
+            openclaw::session::SessionReplaySourceRow::TranscriptMessage(transcript_message(
+                openclaw::session_window::MessageRole::Assistant,
+                "answer",
+                vec![
+                    openclaw::session_window::MessageContent::Text {
+                        text: "answer".to_owned(),
+                    },
+                    openclaw::session_window::MessageContent::ToolResult {
+                        tool_name: Some("read".to_owned()),
+                        tool_call_id: Some("tool-1".to_owned()),
+                        summary: Some("file list".to_owned()),
+                        output: Some(json!({"files": ["Cargo.toml"]})),
+                        details: None,
+                        is_error: Some(false),
+                    },
+                ],
+            )),
+        ]));
+
+        let view = project_openclaw_replay_view(&openclaw_identity(), &window, 7).unwrap();
+        let SessionFact::Complete(items) = view.items else {
+            panic!("items projected");
+        };
+        let SessionFact::Complete(tools) = view.tools else {
+            panic!("tools projected");
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "tool-1");
+        assert_eq!(tools[0].name.as_deref(), Some("read"));
+        assert_eq!(tools[0].phase, ToolPhase::Completed);
+        assert_eq!(tools[0].summary.as_deref(), Some("file list"));
+        assert_eq!(tools[0].output, Some(json!({"files": ["Cargo.toml"]})));
+        assert!(matches!(
+            items.as_slice(),
+            [SessionItem::AssistantTurn { segments, text, .. }]
+                if text == "answer"
+                    && matches!(segments.as_slice(), [SessionContent::Text { text }] if text == "answer")
+        ));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_binds_tool_result_message_to_tool_card() {
+        let window = default_window(transcript_replay([
+            openclaw::session::SessionReplaySourceRow::TranscriptMessage(transcript_message(
+                openclaw::session_window::MessageRole::Assistant,
+                "answer",
+                vec![
+                    openclaw::session_window::MessageContent::Text {
+                        text: "answer".to_owned(),
+                    },
+                    openclaw::session_window::MessageContent::ToolUse {
+                        name: "message".to_owned(),
+                        tool_call_id: Some("tool-1".to_owned()),
+                        input: Some(json!({"text": "hi"})),
+                        input_text: Some("hi".to_owned()),
+                    },
+                ],
+            )),
+            openclaw::session::SessionReplaySourceRow::TranscriptMessage(transcript_message(
+                openclaw::session_window::MessageRole::ToolResult,
+                "delivered text",
+                vec![openclaw::session_window::MessageContent::ToolResult {
+                    tool_name: Some("message".to_owned()),
+                    tool_call_id: Some("tool-1".to_owned()),
+                    summary: Some("sent".to_owned()),
+                    output: Some(json!({"ok": true})),
+                    details: Some(json!({"changed": true})),
+                    is_error: Some(false),
+                }],
+            )),
+        ]));
+
+        let view = project_openclaw_replay_view(&openclaw_identity(), &window, 7).unwrap();
+        let SessionFact::Complete(items) = view.items else {
+            panic!("items projected");
+        };
+        let SessionFact::Complete(tools) = view.tools else {
+            panic!("tools projected");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "tool-1");
+        assert_eq!(tools[0].name.as_deref(), Some("message"));
+        assert_eq!(tools[0].input, Some(json!({"text": "hi"})));
+        assert_eq!(tools[0].input_text.as_deref(), Some("hi"));
+        assert_eq!(tools[0].summary.as_deref(), Some("sent"));
+        assert_eq!(tools[0].output, Some(json!({"ok": true})));
+        assert!(matches!(
+            items.as_slice(),
+            [SessionItem::AssistantTurn { segments, text, .. }]
+                if text == "answer"
+                    && matches!(segments.as_slice(), [SessionContent::Text { .. }, SessionContent::ToolUse { tool_call_id, .. }] if tool_call_id == "tool-1")
+        ));
+    }
+
+    #[test]
+    fn openclaw_replay_projection_materializes_text_thinking_tool_approval_and_final() {
+        let identity = SessionIdentity::new(
+            "agent:main:session-1".to_owned(),
+            SessionProvider::OpenClaw,
+            Some("main".to_owned()),
+        )
+        .unwrap();
+        let window = OpenClawReplayWindow::new(
+            replay_from_events([
+                tool_event(1, "start"),
+                tool_event(2, "result"),
+                approval_event(3, "exec.approval.requested"),
+                approval_event(4, "exec.approval.resolved"),
+                terminal_snapshot(5),
+            ]),
+            SessionWindow {
+                total_item_count: 5,
+                window_start_offset: 0,
+                window_end_offset: 5,
+                has_more: false,
+                has_newer: false,
+                is_at_latest: true,
+            },
+        )
+        .unwrap();
+
+        let view = project_openclaw_replay_view(&identity, &window, 7).unwrap();
+        let SessionFact::Complete(items) = view.items else {
+            panic!("items projected");
+        };
+        assert_eq!(view.seq, 0);
+        assert_eq!(view.cursor, 0);
+        assert!(matches!(
+            items.as_slice(),
+            [SessionItem::AssistantTurn {
+                status: ItemStatus::Final,
+                run_id: Some(run_id),
+                message_id: Some(message_id),
+                text,
+                segments,
+                ..
+            }] if run_id == "run-1"
+                && message_id == "message-1"
+                && text == "answer"
+                && segments.iter().any(|segment| matches!(segment, SessionContent::Text { text } if text == "answer"))
+                && segments.iter().any(|segment| matches!(segment, SessionContent::Thinking { text } if text == "plan"))
+                && segments.iter().any(|segment| matches!(segment, SessionContent::ToolUse { name, tool_call_id } if name == "read" && tool_call_id == "tool-1"))
+        ));
+        let SessionFact::Complete(tools) = view.tools else {
+            panic!("tools projected");
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "tool-1");
+        assert_eq!(tools[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(tools[0].name.as_deref(), Some("read"));
+        assert_eq!(tools[0].phase, ToolPhase::Completed);
+        assert_eq!(tools[0].input, Some(json!({"path": "Cargo.toml"})));
+        assert_eq!(
+            tools[0].input_text.as_deref(),
+            Some("{\n  \"path\": \"Cargo.toml\"\n}")
+        );
+        assert_eq!(tools[0].summary.as_deref(), Some("file list"));
+        assert_eq!(tools[0].output, Some(json!({"files": ["Cargo.toml"]})));
+        assert_eq!(tools[0].is_error, Some(false));
+        let SessionFact::Complete(approvals) = view.approvals else {
+            panic!("approvals projected");
+        };
+        assert!(matches!(
+            approvals.as_slice(),
+            [ApprovalView {
+                approval_id,
+                run_id: Some(run_id),
+                phase: ApprovalPhase::Resolved,
+                option_ids,
+            }] if approval_id == "approval-1"
+                && run_id == "run-1"
+                && option_ids == &vec!["allow-once".to_owned(), "deny".to_owned()]
         ));
         assert!(matches!(
             view.runtime,
@@ -1768,60 +3298,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn openclaw_projection_links_role_level_tool_results_to_assistant_turns() {
-        let window = openclaw::session_window::decode_window(
-            json!({
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "id": "assistant-1",
-                        "content": [{
-                            "type": "toolUse",
-                            "name": "read",
-                            "toolUseId": "call-1",
-                            "input": { "path": "Cargo.toml" },
-                            "inputText": "Cargo.toml"
-                        }]
-                    },
-                    {
-                        "role": "toolResult",
-                        "toolCallId": "call-1",
-                        "toolName": "read",
-                        "content": "file list",
-                        "output": { "files": ["Cargo.toml"] },
-                        "isError": true
-                    }
-                ],
-                "sessionKey": "agent:main:main"
-            }),
-            openclaw::session_window::PageRequest::latest(),
-        )
-        .unwrap();
-
-        let items = openclaw_items(&window);
-        assert_eq!(items.len(), 1);
-        assert!(matches!(
-            &items[0],
-            SessionItem::AssistantTurn { segments, .. }
-                if segments.iter().any(|segment| matches!(
-                    segment,
-                    SessionContent::ToolUse { name, tool_call_id }
-                        if name == "read" && tool_call_id == "call-1"
-                ))
-        ));
-
-        let tools = openclaw_tools(&window);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].tool_call_id, "call-1");
-        assert_eq!(tools[0].name.as_deref(), Some("read"));
-        assert_eq!(tools[0].phase, ToolPhase::Failed);
-        assert_eq!(tools[0].input, Some(json!({ "path": "Cargo.toml" })));
-        assert_eq!(tools[0].input_text.as_deref(), Some("Cargo.toml"));
-        assert_eq!(tools[0].summary.as_deref(), Some("file list"));
-        assert_eq!(tools[0].output, Some(json!({ "files": ["Cargo.toml"] })));
-        assert_eq!(tools[0].is_error, Some(true));
     }
 }

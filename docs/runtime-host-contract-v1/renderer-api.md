@@ -71,23 +71,39 @@ POST /api/capabilities/execute
 | capability ID | Renderer operation / 用途 | 关键 wrapper / evidence |
 | --- | --- | --- |
 | `workspace.file` | `files.readText`、`writeText`、`stagePaths`、`stageBuffer`、`thumbnail`、`readBinary`、`stat`、`listDir` | [host-api.ts](../../src/lib/host-api.ts#L424-L512) |
-| `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L983) |
+| `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state`、`sessions.permission.get/set` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L1168) |
 | `session.prompt` | `sessions.create`、`load`、`abort`、`prompt`、`sendWithMedia` | [host-api.ts](../../src/lib/host-api.ts#L840-L855)、[host-api.ts](../../src/lib/host-api.ts#L924-L1065) |
 | `session.approval` | `approvals.list`、`approvals.resolve` | [host-api.ts](../../src/lib/host-api.ts#L1000-L1025) |
 | `session.modelSelection` | `sessions.patchModel` | [host-api.ts](../../src/lib/host-api.ts#L1027-L1041) |
-| `platform.runtime` | `toolchain.installUv`；`hostUvInstallAll` 直接使用 target=`platform-runtime`；Electron public adapter 调 Rust private `openclaw.toolchain.install-uv` 并等待真实结果；accepted-only async operation 统一由具体 owner/facade typed operation query/event 恢复 | [host-api.ts](../../src/lib/host-api.ts#L402-L409)、[Setup/index.tsx](../../src/pages/Setup/index.tsx#L846-L860)、[capabilities.ts](../../electron/api/routes/capabilities.ts#L616-L654) |
-| `provider.routing` | provider routing capability projection；provider accounts/models 仍有 direct Host API reads/writes | [capability-routing.ts](../../src/lib/capability-routing.ts)、[provider-accounts.ts](../../src/lib/provider-accounts.ts)、[provider-models.ts](../../src/lib/provider-models.ts) |
+| `provider.routing` | provider routing capability projection；provider accounts/models 仍有 direct Host API reads/writes/discovery | [capability-routing.ts](../../src/lib/capability-routing.ts)、[provider-accounts.ts](../../src/lib/provider-accounts.ts)、[provider-models.ts](../../src/lib/provider-models.ts)、[provider-model-catalog.ts](../../src/lib/provider-model-catalog.ts) |
 | `integration.channel` | channel integration operations | [channel-runtime.ts](../../src/lib/channel-runtime.ts) |
 | `skill.management` | skill operations / import / gateway sync | [skills.ts](../../src/stores/skills.ts)、[Skills/index.tsx](../../src/pages/Skills/index.tsx) |
 | `plugin.runtime` | plugin runtime operations | [plugins-store.ts](../../src/stores/plugins-store.ts)、[plugin-manager-client.ts](../../src/services/openclaw/plugin-manager-client.ts) |
 | `scheduler.cron` | cron create/update/delete/toggle/trigger | [cron.ts](../../src/stores/cron.ts) |
 | `settings.runtime` | 已从 Renderer capability envelope 退休；Settings 使用扁平 intent `GET /api/settings` + `POST /api/settings/desired`，由 Electron Main 适配到 Rust desired transport | [settings-runtime.ts](../../src/lib/settings-runtime.ts)、[settings-desired.ts](../../electron/api/routes/settings-desired.ts) |
 | `security.runtime` | security operations | [security-runtime.ts](../../src/lib/security-runtime.ts) |
-| `license.runtime` | license operations | [license-runtime.ts](../../src/lib/license-runtime.ts) |
 | `subagent.management` / `subagent.skills` / `subagent.tools` | agent and subagent configuration | [subagents.ts](../../src/stores/subagents.ts)、[agent-skill-config.ts](../../src/stores/agent-skill-config.ts)、[agent-tool-config.ts](../../src/stores/agent-tool-config.ts) |
 | `team.runtime` | team package/run/graph/trigger/role chat/approval/cancel/delete operations；Rust control path已解码为 Organization owner command；TeamRun scheduler/watch/reconciliation 由 Organization coordinator 承接；unsupported legacy projection返回 unavailable/unknown/rejected，不伪造成功 | [team-runtime-client.ts](../../src/services/openclaw/team-runtime-client.ts)、[dispatch.rs](../../runtime-host/host/src/control/dispatch.rs)、[command.rs](../../runtime-host/host/src/organization/command.rs)、[coordinator.rs](../../runtime-host/host/src/organization/coordinator.rs) |
 
+Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：discovery response 仍只允许 `modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；`source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId` 等 reference/private 字段不得暴露。
+
 `OPEN`: 这不是对每个 operation input/output 的替代类型定义；对应 Renderer wrapper 和 runtime capability descriptor 是字段级权威。后续 Rust cutover 应以 operation family 为单元采集实际 request/response fixture。
+
+### Provider account 认证契约
+
+`ProviderAccountAuthMode` 新增 `Token`、`CliReuse`，wire 分别为 `token`、`cliReuse`；其余值仍为 `apiKey`、`oauthBrowser`、`oauthDevice`、`local`。登录交互方式不等于返回的凭据类型：
+
+| 入口 | 私密凭据 / 保存的 account `authMode` | OpenClaw native projection |
+| --- | --- | --- |
+| OpenRouter 浏览器登录 | ApiKey / `apiKey` | `api_key` profile |
+| GitHub Copilot 设备登录 | Token / `token` | `token` profile |
+| OpenAI 浏览器 / 设备登录 | OAuth / `oauthBrowser` 或 `oauthDevice` | `oauth` profile |
+| Anthropic setup-token | Token / `token` | native `token` profile，不冒充 API key 或 OAuth |
+| Anthropic CLI 复用 | 无复制凭据 / `cliReuse` | native `anthropic` provider，`agentRuntime: { "id": "claude-cli" }` |
+
+`providers:storeAccount` 的 `apiKey` / `token` 仅交给 Main 私密入口；Host account 与 public response 不携带 secret。`cliReuse` 仅用于 Anthropic chat account，既不复制 CLI secret，也不保存 credential reference；`token` 用于 Anthropic / GitHub Copilot chat account。品牌和套餐只表达为现有 account 的 provider / endpoint，不新增 plan owner。
+
+Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`；Host 按 native provider 筛选模型，Zen/Go 的逐模型协议由 native catalog 独占。此处记录契约，不宣称真实登录或 live 模型发现已验证。私密存储链见 [layered-architecture.md](../architecture/layered-architecture.md#63-integration-独占-peer-specific-private-semantics)。来源：[provider_account.rs](../../runtime-host/domains/environment/src/provider_account.rs)、[provider_accounts.rs](../../runtime-host/host/src/transport/provider_accounts.rs)、[provider-private-auth.ts](../../electron/main/ipc/provider-private-auth.ts)、[provider_models/mod.rs](../../runtime-host/integrations/openclaw/src/projection/provider_models/mod.rs)。
 
 ## 4. session prompt 的关键兼容语义
 
@@ -118,9 +134,10 @@ Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempote
 
 | Method | Path | 现有 Renderer wrapper / consumer | child / main status |
 | --- | --- | --- | --- |
-| `GET` | `/api/openclaw/{status,ready,dir,config-dir,subagent-templates,workspace-dir,task-workspace-dirs,skills-dir,cli-command,tool-permission-mode}` | [host-api.ts](../../src/lib/host-api.ts#L358-L409) | child business route |
-| `PUT` | `/api/openclaw/tool-permission-mode` | [host-api.ts](../../src/lib/host-api.ts#L402-L409) | child business route |
-| `GET` | `/api/toolchain/uv/check` | [host-api.ts](../../src/lib/host-api.ts#L411-L422) | child business route |
+| `GET` | `/api/openclaw/{status,ready,dir,config-dir,subagent-templates,workspace-dir,task-workspace-dirs,skills-dir,cli-command,tool-permission-mode}` | [host-api.ts](../../src/lib/host-api.ts#L358-L409)；`tool-permission-mode` 现无 Renderer wrapper | child business route |
+| `PUT` | `/api/openclaw/tool-permission-mode` | 现无 Renderer wrapper；保留为旧 public route contract | child business route |
+| `GET` | `/api/toolchain/uv/check` | [host-api.ts](../../src/lib/host-api.ts#L406-L409) | Electron calls Rust `host.toolchain.status` and returns only `{ installed }` |
+| `POST` | `/api/toolchain/uv/prepare` | [host-api.ts](../../src/lib/host-api.ts#L411-L416) | Electron calls Rust `host.toolchain.prepare` and returns only public outcome |
 | `GET` | `/api/runtime-{adapters,connectors,endpoints}/...` | [host-api.ts](../../src/lib/host-api.ts#L558-L608) | child topology projection |
 | `POST` | `/api/runtime-connectors/{connect,disconnect}` | [host-api.ts](../../src/lib/host-api.ts#L578-L598) | `LEGACY-REJECTED` by child; Renderer wrapper exists, so replacement must preserve observed rejection unless API migration is separately approved. |
 | `POST` | `/api/gateway/stop` | [gateway.ts](../../src/stores/gateway.ts#L355) | Electron main-owned, not child |

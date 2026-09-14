@@ -8,6 +8,8 @@ use std::{
 };
 
 use super::*;
+#[cfg(windows)]
+use serde_json::json;
 
 const SECRET_CANARY: &str = "synthetic-openclaw-launch-secret-canary";
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -97,10 +99,11 @@ async fn launch_attempt_uses_only_the_legacy_gateway_contract() {
     drop(attempt);
 
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-    assert_eq!(
-        fs::read(root.path().join(CANONICAL_CONFIG_FILE)).unwrap(),
-        br#"{"channels":{}}"#
-    );
+    let config = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(root.path().join(CANONICAL_CONFIG_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["channels"], json!({}));
 }
 
 #[test]
@@ -116,6 +119,39 @@ fn configured_channels_omit_skip_from_the_exact_public_environment() {
     let prepared = launch.prepare_attempt().unwrap();
 
     assert_exact_spec(prepared.spec(), &root, false);
+}
+
+#[test]
+fn sealed_runtime_host_environment_is_injected_when_supplied() {
+    let root = TestRoot::new();
+    fs::write(
+        root.path().join(CANONICAL_CONFIG_FILE),
+        br#"{"channels":{"feishu":{"appId":"app-id"}}}"#,
+    )
+    .unwrap();
+    let mut launch = input(&root)
+        .try_into_launch_factory_with_sealed_runtime_host(Some(SealedRuntimeHost {
+            endpoint: "http://127.0.0.1:34135/sealed".into(),
+            token: "sealed-token-canary".into(),
+        }))
+        .unwrap();
+
+    let prepared = launch.prepare_attempt().unwrap();
+    let environment = prepared.spec().public_environment();
+
+    assert!(environment.contains(&(
+        MATCHA_SEALED_ENDPOINT.into(),
+        "http://127.0.0.1:34135/sealed".into()
+    )));
+    assert!(environment.contains(&(MATCHA_SEALED_TOKEN.into(), "sealed-token-canary".into())));
+    assert!(environment.contains(&(MATCHA_SEALED_RUNTIME.into(), "openclaw".into())));
+    assert!(
+        !prepared
+            .spec()
+            .arguments()
+            .iter()
+            .any(|value| value == "sealed-token-canary")
+    );
 }
 
 #[cfg(unix)]
@@ -141,7 +177,41 @@ fn missing_canonical_config_is_initialized_with_state_dir_and_without_overlay_en
 
     let prepared = launch.prepare_attempt().unwrap();
 
-    assert_eq!(fs::read(&canonical).unwrap(), b"{}\n");
+    let config =
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&canonical).unwrap()).unwrap();
+    assert_eq!(
+        config["agents"]["defaults"],
+        json!({
+            "systemAgent": { "agentId": "main" },
+            "sessionStore": { "agentId": "main" },
+            "bootstrapMaxChars": 32_000,
+            "bootstrapTotalMaxChars": 100_000,
+            "skipBootstrap": true,
+            "compaction": {
+                "mode": "safeguard",
+                "midTurnPrecheck": { "enabled": true }
+            },
+            "heartbeat": { "target": "none", "every": "0m" }
+        })
+    );
+    assert_eq!(
+        config["tools"],
+        json!({
+            "profile": "full",
+            "sessions": { "visibility": "all" },
+            "deny": [
+                "skill_workshop",
+                "gateway",
+                "nodes",
+                "progress_card",
+                "suggest_task",
+                "dismiss_task",
+                "create_goal",
+                "get_goal",
+                "update_goal"
+            ]
+        })
+    );
     assert!(
         prepared
             .spec()
@@ -158,15 +228,49 @@ fn missing_canonical_config_is_initialized_with_state_dir_and_without_overlay_en
 }
 
 #[test]
-fn canonical_initialization_preserves_existing_configuration_bytes() {
+fn canonical_initialization_preserves_existing_configuration() {
     let root = TestRoot::new();
     let canonical = root.path().join(CANONICAL_CONFIG_FILE);
-    let contents = br#"{"channels":{"feishu":{"appId":"app-id"}}}"#;
-    fs::write(&canonical, contents).unwrap();
+    fs::write(&canonical, br#"{"channels":{"feishu":{"appId":"app-id"}}}"#).unwrap();
 
     input(&root).try_into_launch_factory().unwrap();
 
-    assert_eq!(fs::read(canonical).unwrap(), contents);
+    let config =
+        serde_json::from_slice::<serde_json::Value>(&fs::read(canonical).unwrap()).unwrap();
+    assert_eq!(config["channels"]["feishu"]["appId"], "app-id");
+    assert_eq!(
+        config["agents"]["defaults"],
+        json!({
+            "systemAgent": { "agentId": "main" },
+            "sessionStore": { "agentId": "main" },
+            "bootstrapMaxChars": 32_000,
+            "bootstrapTotalMaxChars": 100_000,
+            "skipBootstrap": true,
+            "compaction": {
+                "mode": "safeguard",
+                "midTurnPrecheck": { "enabled": true }
+            },
+            "heartbeat": { "target": "none", "every": "0m" }
+        })
+    );
+    assert_eq!(
+        config["tools"],
+        json!({
+            "profile": "full",
+            "sessions": { "visibility": "all" },
+            "deny": [
+                "skill_workshop",
+                "gateway",
+                "nodes",
+                "progress_card",
+                "suggest_task",
+                "dismiss_task",
+                "create_goal",
+                "get_goal",
+                "update_goal"
+            ]
+        })
+    );
 }
 
 #[test]
@@ -280,6 +384,30 @@ fn zero_port_fails_closed_without_creating_material() {
 }
 
 #[test]
+fn empty_sealed_runtime_host_material_fails_closed_without_creating_material() {
+    for sealed_runtime_host in [
+        SealedRuntimeHost {
+            endpoint: String::new(),
+            token: "sealed-token-canary".into(),
+        },
+        SealedRuntimeHost {
+            endpoint: "http://127.0.0.1:34135/sealed".into(),
+            token: String::new(),
+        },
+    ] {
+        let root = TestRoot::new();
+
+        assert!(matches!(
+            input(&root)
+                .try_into_launch_factory_with_sealed_runtime_host(Some(sealed_runtime_host)),
+            Err(LaunchError::InvalidInput)
+        ));
+        assert!(root.path().is_dir());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn launch_environment_strips_legacy_systemd_and_non_legacy_material() {
     let environment = sanitize_inherited_environment([
         ("OPENCLAW_SYSTEMD_UNIT".into(), "openclaw.service".into()),
@@ -291,6 +419,13 @@ fn launch_environment_strips_legacy_systemd_and_non_legacy_material() {
         ("OPENCLAW_STATE_DIR".into(), "non-legacy-state".into()),
         ("OPENCLAW_CONFIG_DIR".into(), "non-legacy-config-dir".into()),
         ("MATCHACLAW_OPENCLAW_TLS_CERT_FD".into(), "11".into()),
+        (OPENCLAW_EXEC_SHELL_SNAPSHOT.into(), "1".into()),
+        (
+            MATCHA_SEALED_ENDPOINT.into(),
+            "stale-sealed-endpoint".into(),
+        ),
+        (MATCHA_SEALED_TOKEN.into(), "stale-sealed-token".into()),
+        (MATCHA_SEALED_RUNTIME.into(), "stale-sealed-runtime".into()),
         ("SAFE_ENV".into(), "kept".into()),
     ]);
 
@@ -359,6 +494,7 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
     expected_environment.extend([
         (OPENCLAW_GATEWAY_PORT.into(), "18789".into()),
         (OPENCLAW_GATEWAY_TOKEN.into(), SECRET_CANARY.into()),
+        (OPENCLAW_EXEC_SHELL_SNAPSHOT.into(), "0".into()),
         (OPENCLAW_STATE_DIR.into(), root.path().into()),
         (OPENCLAW_CONFIG_DIR.into(), root.path().into()),
         (MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT.into(), "18789".into()),
@@ -392,6 +528,11 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
     for forbidden in NON_LEGACY_LAUNCH_ENV_KEYS
         .into_iter()
         .filter(|forbidden| *forbidden != OPENCLAW_STATE_DIR && *forbidden != OPENCLAW_CONFIG_DIR)
+        .chain([
+            MATCHA_SEALED_ENDPOINT,
+            MATCHA_SEALED_TOKEN,
+            MATCHA_SEALED_RUNTIME,
+        ])
     {
         assert!(!spec.arguments().iter().any(|value| value == forbidden));
         assert!(

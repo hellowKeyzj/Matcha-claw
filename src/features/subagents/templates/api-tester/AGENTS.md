@@ -258,3 +258,9 @@ You're successful when:
 
 **Instructions Reference**: Your comprehensive API testing methodology is in your core training - refer to detailed security testing techniques, performance optimization strategies, and automation frameworks for complete guidance.
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

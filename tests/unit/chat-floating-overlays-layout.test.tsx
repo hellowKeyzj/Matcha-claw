@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { ChatApprovalDock, ChatErrorBanner } from '@/pages/Chat/components/ChatRuntimeDock';
+import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from '@/pages/Chat/components/ChatRuntimeDock';
 import { ChatImageLightbox } from '@/pages/Chat/components/ChatImageLightbox';
 import type { ApprovalItem } from '@/stores/chat';
 
@@ -15,6 +15,8 @@ vi.mock('react-i18next', () => ({
         'approval.allowOnce': 'Allow once',
         'approval.allowAlways': 'Always allow',
         'approval.deny': 'Deny',
+        'runtimeStatus.providerFallback': 'Provider fallback applied',
+        'runtimeStatus.guardian.warning': 'Guardian warning',
       }[key] ?? key;
     },
   }),
@@ -79,6 +81,51 @@ describe('chat floating overlays layout', () => {
     expect(root?.className).toContain('rounded-[22px]');
     expect(root?.className).toContain('bg-background/92');
     expect(root?.className).toContain('backdrop-blur-xl');
+  });
+
+  it('runtime status dock shows compaction state', () => {
+    render(<ChatRuntimeStatusDock compacting errorDetail={null} />);
+
+    expect(screen.getByTestId('chat-runtime-status-dock')).toBeInTheDocument();
+    expect(screen.getByText('pending.compacting')).toBeInTheDocument();
+  });
+
+  it('runtime status dock shows safe fallback fields with provider preview text', () => {
+    render(
+      <ChatRuntimeStatusDock
+        compacting={false}
+        errorDetail={{
+          failoverReason: 'rate_limit',
+          providerRuntimeFailureKind: null,
+          providerErrorType: 'overloaded',
+          providerErrorMessagePreview: 'raw upstream text',
+          httpStatus: 429,
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Provider fallback applied')).toBeInTheDocument();
+    expect(screen.getByText('rate_limit · overloaded · raw upstream text · HTTP 429')).toBeInTheDocument();
+  });
+
+  it('runtime status dock shows guardian notices', () => {
+    render(
+      <ChatRuntimeStatusDock
+        compacting={false}
+        errorDetail={null}
+        runtimeNotice={{
+          runId: 'run-1',
+          kind: 'guardian_warning',
+          command: null,
+          riskLevel: 'medium',
+          rationale: 'review required',
+          message: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Guardian warning')).toBeInTheDocument();
+    expect(screen.getByText('medium')).toBeInTheDocument();
   });
 
   it('image lightbox uses a soft backdrop and pill controls instead of hard utility chrome', () => {

@@ -252,6 +252,17 @@ impl SessionModelSelectionCommand {
         })
     }
 
+    pub(crate) fn with_endpoint_session_id(
+        mut self,
+        session_id: String,
+    ) -> Result<Self, InvalidCommand> {
+        if !valid_endpoint_session_id(&session_id) {
+            return Err(InvalidCommand);
+        }
+        self.endpoint_session_id = Some(session_id);
+        Ok(self)
+    }
+
     pub(crate) fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
         self.trace_id = trace_id;
         self

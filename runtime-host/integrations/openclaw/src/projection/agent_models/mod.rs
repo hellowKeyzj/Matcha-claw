@@ -73,9 +73,10 @@ impl Model {
         if context_window == Some(0) || max_tokens == Some(0) {
             return Err(ModelProjectionError::InvalidTokenLimit);
         }
-        if let (Some(context_window), Some(max_tokens)) = (context_window, max_tokens)
-            && max_tokens > context_window
-        {
+        if matches!(
+            (context_window, max_tokens),
+            (Some(context_window), Some(max_tokens)) if max_tokens > context_window
+        ) {
             return Err(ModelProjectionError::InvalidTokenLimit);
         }
         Ok(Self {

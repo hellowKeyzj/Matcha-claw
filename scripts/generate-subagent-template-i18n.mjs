@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const TEMPLATE_REQUIRED_FILES = ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'];
+const TEMPLATE_REQUIRED_FILES = ['AGENTS.md', 'SOUL.md', 'USER.md', 'MEMORY.md'];
 
 function looksLikeEmojiToken(token) {
   return /[\p{Extended_Pictographic}\uFE0F]/u.test(token);
@@ -19,8 +19,8 @@ function getFirstBodyLine(content) {
   return '';
 }
 
-function parseIdentityMetadata(identityContent, fallbackName) {
-  const lines = identityContent.split(/\r?\n/);
+function parseTemplateMetadata(metadataContent, fallbackName) {
+  const lines = metadataContent.split(/\r?\n/);
   let name = fallbackName;
   let emoji;
   let summary;
@@ -208,16 +208,16 @@ function resolveTemplateBaseData(templateRoot) {
     if (files.length === 0) {
       continue;
     }
-    const identityPath = join(templateDir, 'IDENTITY.md');
+    const metadataPath = join(templateDir, 'MEMORY.md');
     const agentsPath = join(templateDir, 'AGENTS.md');
-    const identityContent = existsSync(identityPath) ? readFileSync(identityPath, 'utf8') : '';
+    const metadataContent = existsSync(metadataPath) ? readFileSync(metadataPath, 'utf8') : '';
     const agentsContent = existsSync(agentsPath) ? readFileSync(agentsPath, 'utf8') : '';
     const fallbackName = toDisplayNameFromSlug(id) || id;
-    const identity = parseIdentityMetadata(identityContent, fallbackName);
-    const summary = (identity.summary ?? getFirstBodyLine(agentsContent) ?? '').trim();
+    const metadata = parseTemplateMetadata(metadataContent, fallbackName);
+    const summary = (metadata.summary ?? getFirstBodyLine(agentsContent) ?? '').trim();
     result.push({
       id,
-      name: (identity.name || fallbackName).trim(),
+      name: (metadata.name || fallbackName).trim(),
       summary,
     });
   }

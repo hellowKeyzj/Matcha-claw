@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{
     sessions::send::{Attachment, NativeEndpoint, SessionSendCommand, SessionSendOutcome},
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::{authorization::CapabilityDecisionVerifier, session_key::is_cron_session_key},
 };
 
 pub(crate) mod server;
@@ -13,6 +13,7 @@ const OPERATION_ID: &str = "sessions.send";
 const AUTHORIZATION_ENDPOINT: &str = "/api/sessions/send";
 const AUTHORIZATION_SCOPE: &str = "sessions:write";
 const AUTHORIZATION_SUBJECT: &str = "session-send";
+const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestError {
@@ -98,6 +99,19 @@ fn valid_route_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'-' | b'_'))
 }
 
+fn valid_endpoint_session_id(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= MAX_ENDPOINT_SESSION_ID_BYTES
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    })
+}
+
+fn is_openclaw_cron_session_key(endpoint: &Endpoint, session_key: &str) -> bool {
+    endpoint.parse() == Some(NativeEndpoint::OpenClawLocal) && is_cron_session_key(session_key)
+}
+
 impl SessionSendRequest {
     pub(crate) fn decode(
         value: Value,
@@ -131,7 +145,9 @@ impl SessionSendRequest {
             && self.target.kind == "session"
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.parse().is_some()
+            && !is_openclaw_cron_session_key(&self.scope.endpoint, &self.scope.session_key)
             && self.scope.session_key == self.input.session_key
+            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref())
             && valid_route_key(&self.scope.route_key))
         .then_some(())
         .ok_or(RequestError::Invalid)
@@ -155,7 +171,7 @@ impl SessionSendRequest {
         SessionSendCommand::try_new(
             endpoint,
             self.input.session_key,
-            self.input.endpoint_session_id,
+            None,
             self.scope.route_key,
             self.input.message,
             self.input.run_id,
@@ -274,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_endpoint_session_binding_without_using_it_as_native_identity() {
+    fn ignores_public_endpoint_session_binding_on_active_send() {
         let mut value = request("openclaw");
         value["input"]["endpointSessionId"] = json!("endpoint-session-1");
 
@@ -282,12 +298,28 @@ mod tests {
             .unwrap()
             .into_command(None)
             .unwrap();
-        assert_eq!(
-            command.endpoint_session_id.as_deref(),
-            Some("endpoint-session-1")
-        );
+        assert_eq!(command.endpoint_session_id, None);
         assert_eq!(command.session_key, "agent:main:demo");
         assert_eq!(command.run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn rejects_openclaw_cron_session_prompt_requests() {
+        for session_key in [
+            "agent:main:cron:heartbeat-main",
+            "agent:main:cron:heartbeat-main:run:run-1",
+            "cron:heartbeat-main",
+        ] {
+            let mut value = request("openclaw");
+            value["scope"]["sessionKey"] = json!(session_key);
+            value["input"]["sessionKey"] = json!(session_key);
+
+            assert_eq!(
+                SessionSendRequest::decode_semantics(value)
+                    .and_then(|request| SessionSendRequest::into_command(request, None)),
+                Err(RequestError::Invalid)
+            );
+        }
     }
 
     #[test]

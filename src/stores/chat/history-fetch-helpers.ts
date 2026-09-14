@@ -215,7 +215,7 @@ export function richTimelineItems(
         });
       } else if (content.kind === 'thinking') {
         segments.push({ kind: 'thinking', key: `${key}:thinking:${thinkingIndex++}`, text: content.text });
-      } else if (content.kind === 'media') {
+      } else if (content.kind === 'media' || content.kind === 'omitted') {
         const media = richMedia(content);
         if (media.images.length || media.attachedFiles.length) {
           segments.push({ kind: 'media', key: `${key}:media:${mediaIndex++}`, ...media });

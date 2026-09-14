@@ -1,9 +1,12 @@
-import { useDeferredValue, useMemo, useRef } from 'react';
+import { useDeferredValue, useMemo } from 'react';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ResourceStateMeta } from '@/lib/resource-state';
 import type { ChatSession } from '@/stores/chat';
 import { findAgentScope } from '@/stores/chat/session-identity';
-import { parseSessionCreatedAtMs } from '@/stores/chat/session-helpers';
+import {
+  normalizeAutomaticSessionTitle,
+  parseSessionCreatedAtMs,
+} from '@/stores/chat/session-helpers';
 import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
 import type {
   ChatCurrentConversation,
@@ -11,6 +14,13 @@ import type {
   ChatSessionRuntimeEndpointTarget,
 } from '@/stores/chat/types';
 import type { AgentScope } from '../../../electron/desktop-contract/runtime-address';
+import {
+  buildAgentSessionSwitchboardModel,
+  isAgentSessionSwitchboardAutomationSession,
+  type AgentSessionSwitchboardAgentSessionSourceInput,
+  type AgentSessionSwitchboardModel,
+  type AgentSessionSwitchboardTeamInput,
+} from './agent-session-switchboard-model';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 
@@ -73,6 +83,10 @@ function buildRuntimeEndpointAgentIds(
   return Array.from(agentIds);
 }
 
+function createRuntimeAgentSessionCountKey(runtimeScopeKey: string, agentId: string): string {
+  return JSON.stringify([runtimeScopeKey, agentId]);
+}
+
 function buildRuntimeEndpointAgentSummaries(
   endpoint: ChatSessionRuntimeEndpointNode,
   agents: SidebarAgentSummary[],
@@ -111,7 +125,7 @@ function buildRuntimeEndpointAgentSummaries(
 }
 
 function filterSessionEntriesByRuntimeEndpoint(
-  sessionEntries: AgentSessionsPaneSessionEntry[],
+  sessionEntries: readonly AgentSessionsPaneSessionEntry[],
   endpoint: ChatSessionRuntimeEndpointNode | null,
 ): AgentSessionsPaneSessionEntry[] {
   if (!endpoint) {
@@ -186,6 +200,7 @@ export interface AgentSessionsPaneViewModel {
   agentNodes: AgentSessionNode[];
   sessionBuckets: SessionBucketNode[];
   sessionViewModelByKey: Map<string, SessionViewModel>;
+  switchboard: AgentSessionSwitchboardModel;
   agentListState: 'loading' | 'error' | 'ready';
   agentErrorMessage: string | null;
   sessionListState: 'loading' | 'error' | 'ready';
@@ -224,8 +239,9 @@ export function readSessionSuffix(session: Pick<ChatSession, 'key' | 'sessionIde
   return suffix || sessionKey;
 }
 
-function normalizeSessionTitle(text: string): string {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
+function normalizeSessionTitle(text: string, automatic: boolean): string {
+  const title = automatic ? normalizeAutomaticSessionTitle(text) : text.trim();
+  const cleaned = title ? title.replace(/\s+/g, ' ').trim() : '';
   if (!cleaned) {
     return '';
   }
@@ -260,87 +276,23 @@ function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEnt
   return left.entry.session.key.localeCompare(right.entry.session.key);
 }
 
-function removeSortedSessionKey(sortedKeys: string[], key: string): void {
-  const index = sortedKeys.indexOf(key);
-  if (index >= 0) {
-    sortedKeys.splice(index, 1);
-  }
-}
-
-function insertSortedSessionKey(
-  sortedKeys: string[],
-  key: string,
-  entriesByKey: Map<string, SessionSortEntry>,
-): void {
-  const nextEntry = entriesByKey.get(key);
-  if (!nextEntry) {
-    return;
-  }
-  let low = 0;
-  let high = sortedKeys.length;
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    const midEntry = entriesByKey.get(sortedKeys[mid]);
-    if (!midEntry) {
-      low = mid + 1;
-      continue;
-    }
-    const compare = compareSessionSortEntries(nextEntry, midEntry);
-    if (compare < 0) {
-      high = mid;
-    } else {
-      low = mid + 1;
-    }
-  }
-  sortedKeys.splice(low, 0, key);
-}
-
-function buildIncrementalSessionActivityIndex(input: {
-  previous: SessionActivityIndex;
-  sessionEntries: AgentSessionsPaneSessionEntry[];
-}): SessionActivityIndex {
-  const entriesByKey = new Map(input.previous.entriesByKey);
-  const sortedKeys = [...input.previous.sortedKeys];
-  const seen = new Set<string>();
-
-  for (const entry of input.sessionEntries) {
+function buildSessionActivityIndex(sessionEntries: AgentSessionsPaneSessionEntry[]): SessionActivityIndex {
+  const entriesByKey = new Map<string, SessionSortEntry>();
+  const sortedEntries = sessionEntries.map((entry) => {
     const session = entry.session;
-    const key = session.key;
-    seen.add(key);
-    const agentId = session.agentId;
-    const activityMs = resolveSessionActivityMs(entry);
-    const previousEntry = entriesByKey.get(key);
-    if (!previousEntry) {
-      entriesByKey.set(key, { entry, agentId, activityMs });
-      insertSortedSessionKey(sortedKeys, key, entriesByKey);
-      continue;
-    }
-    const sortChanged = previousEntry.agentId !== agentId || previousEntry.activityMs !== activityMs;
-    if (sortChanged) {
-      removeSortedSessionKey(sortedKeys, key);
-      entriesByKey.set(key, { entry, agentId, activityMs });
-      insertSortedSessionKey(sortedKeys, key, entriesByKey);
-      continue;
-    }
-    if (previousEntry.entry !== entry) {
-      entriesByKey.set(key, {
-        ...previousEntry,
-        entry,
-      });
-    }
-  }
-
-  for (const key of Array.from(entriesByKey.keys())) {
-    if (seen.has(key)) {
-      continue;
-    }
-    entriesByKey.delete(key);
-    removeSortedSessionKey(sortedKeys, key);
-  }
+    const sortEntry = {
+      entry,
+      agentId: session.agentId,
+      activityMs: resolveSessionActivityMs(entry),
+    };
+    entriesByKey.set(session.key, sortEntry);
+    return sortEntry;
+  });
+  sortedEntries.sort(compareSessionSortEntries);
 
   return {
     entriesByKey,
-    sortedKeys,
+    sortedKeys: sortedEntries.map((entry) => entry.entry.session.key),
   };
 }
 
@@ -442,11 +394,14 @@ interface UseAgentSessionsPaneViewModelInput {
   subagentManagementAgents: SidebarAgentSummary[];
   subagentManagementAgentsResource: ResourceStateMeta;
   sessionEntries: AgentSessionsPaneSessionEntry[];
+  switchboardSessionEntries?: readonly AgentSessionsPaneSessionEntry[];
   sessionsLoading: boolean;
   sessionsLoadedOnce: boolean;
   sessionsError: string | null;
   currentConversation: ChatCurrentConversation | null;
   selectedRuntimeEndpoint: ChatSessionRuntimeEndpointNode | null;
+  runtimeEndpoints?: readonly ChatSessionRuntimeEndpointNode[];
+  teams?: readonly AgentSessionSwitchboardTeamInput[];
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
 }
@@ -454,30 +409,57 @@ interface UseAgentSessionsPaneViewModelInput {
 export function useAgentSessionsPaneViewModel(
   input: UseAgentSessionsPaneViewModelInput,
 ): AgentSessionsPaneViewModel {
+  const {
+    subagentManagementAgents,
+    subagentManagementAgentsResource,
+    sessionEntries,
+    switchboardSessionEntries,
+    sessionsLoadedOnce,
+    sessionsError,
+    currentConversation,
+    selectedRuntimeEndpoint,
+    runtimeEndpoints,
+    teams,
+    locale,
+    t,
+  } = input;
+
+  const switchboardRuntimeEndpoints = useMemo(
+    () => runtimeEndpoints ?? (selectedRuntimeEndpoint ? [selectedRuntimeEndpoint] : []),
+    [runtimeEndpoints, selectedRuntimeEndpoint],
+  );
   const runtimeAgentSummaries = useMemo(
-    () => input.selectedRuntimeEndpoint
-      ? buildRuntimeEndpointAgentSummaries(input.selectedRuntimeEndpoint, input.subagentManagementAgents)
+    () => selectedRuntimeEndpoint
+      ? buildRuntimeEndpointAgentSummaries(selectedRuntimeEndpoint, subagentManagementAgents)
       : [],
-    [input.subagentManagementAgents, input.selectedRuntimeEndpoint],
+    [subagentManagementAgents, selectedRuntimeEndpoint],
+  );
+  const switchboardRuntimeAgentSummariesByScopeKey = useMemo(() => {
+    return new Map(switchboardRuntimeEndpoints.map((endpoint) => [
+      endpoint.runtimeScopeKey,
+      buildRuntimeEndpointAgentSummaries(endpoint, subagentManagementAgents),
+    ] as const));
+  }, [subagentManagementAgents, switchboardRuntimeEndpoints]);
+  const visibleSessionEntries = useMemo(
+    () => sessionEntries.filter((entry) => !isAgentSessionSwitchboardAutomationSession(entry.session)),
+    [sessionEntries],
   );
   const runtimeSessionEntries = useMemo(
-    () => filterSessionEntriesByRuntimeEndpoint(input.sessionEntries, input.selectedRuntimeEndpoint),
-    [input.sessionEntries, input.selectedRuntimeEndpoint],
+    () => filterSessionEntriesByRuntimeEndpoint(visibleSessionEntries, selectedRuntimeEndpoint),
+    [visibleSessionEntries, selectedRuntimeEndpoint],
   );
   const deferredSessionEntries = useDeferredValue(runtimeSessionEntries);
-  const sessionActivityIndexRef = useRef<SessionActivityIndex>({
-    entriesByKey: new Map<string, SessionSortEntry>(),
-    sortedKeys: [],
-  });
+  const sessionAggregation = useMemo<SessionAggregation>(() => buildSessionAggregation(
+    buildSessionActivityIndex(deferredSessionEntries),
+  ), [deferredSessionEntries]);
 
-  const sessionAggregation = useMemo<SessionAggregation>(() => {
-    const nextIndex = buildIncrementalSessionActivityIndex({
-      previous: sessionActivityIndexRef.current,
-      sessionEntries: deferredSessionEntries,
-    });
-    sessionActivityIndexRef.current = nextIndex;
-    return buildSessionAggregation(nextIndex);
-  }, [deferredSessionEntries]);
+  const switchboardInputSessionEntries = switchboardSessionEntries ?? sessionEntries;
+  const switchboardSortedSessionEntries = useMemo(() => {
+    const nextIndex = buildSessionActivityIndex([...switchboardInputSessionEntries]);
+    return nextIndex.sortedKeys
+      .map((key) => nextIndex.entriesByKey.get(key)?.entry)
+      .filter((entry): entry is AgentSessionsPaneSessionEntry => entry != null);
+  }, [switchboardInputSessionEntries]);
 
   const agentNodes = useMemo<AgentSessionNode[]>(() => {
     const sessionsByAgent = sessionAggregation.sessionsByAgent;
@@ -507,12 +489,12 @@ export function useAgentSessionsPaneViewModel(
   }, [agentNodes]);
 
   const activeAgentId = useMemo(() => {
-    const conversation = input.currentConversation;
-    if (!conversation || conversation.runtimeScopeKey !== input.selectedRuntimeEndpoint?.runtimeScopeKey) {
+    const conversation = currentConversation;
+    if (!conversation || conversation.runtimeScopeKey !== selectedRuntimeEndpoint?.runtimeScopeKey) {
       return '';
     }
     return conversation.agentId;
-  }, [input.currentConversation, input.selectedRuntimeEndpoint]);
+  }, [currentConversation, selectedRuntimeEndpoint]);
 
   const globalSessionNodes = useMemo<SessionListNode[]>(() => {
     const nodes: SessionListNode[] = [];
@@ -553,15 +535,15 @@ export function useAgentSessionsPaneViewModel(
     return (entry: AgentSessionsPaneSessionEntry): string => {
       const title = entry.title?.trim();
       if (title) {
-        return normalizeSessionTitle(title);
+        return normalizeSessionTitle(title, entry.session.titleSource !== 'user');
       }
-      return inferUntitledSessionLabel(entry.session, input.t);
+      return inferUntitledSessionLabel(entry.session, t);
     };
-  }, [input.t]);
+  }, [t]);
 
   const sessionBuckets = useMemo(
-    () => buildSessionBuckets(globalSessionEntries, input.t),
-    [globalSessionEntries, input.t],
+    () => buildSessionBuckets(globalSessionEntries, t),
+    [globalSessionEntries, t],
   );
 
   const sessionViewModelByKey = useMemo(() => {
@@ -572,8 +554,8 @@ export function useAgentSessionsPaneViewModel(
       const sessionOwner = globalSessionOwnerByKey.get(session.key);
       const activityMs = resolveSessionActivityMs(entry);
       const sessionMeta = sessionOwner
-        ? `${sessionOwner.agentName} / ${formatSessionMeta(session, activityMs, input.locale)}`
-        : formatSessionMeta(session, activityMs, input.locale);
+        ? `${sessionOwner.agentName} / ${formatSessionMeta(session, activityMs, locale)}`
+        : formatSessionMeta(session, activityMs, locale);
       map.set(session.key, {
         title: sessionTitle,
         meta: sessionMeta,
@@ -581,24 +563,122 @@ export function useAgentSessionsPaneViewModel(
         agentName: sessionOwner?.agentName ?? session.agentId,
         avatarSeed: sessionOwner?.avatarSeed,
         avatarStyle: sessionOwner?.avatarStyle,
-        deleteLabel: input.t('sidebar.deleteSessionAria', { title: sessionTitle }),
-        renameLabel: input.t('sidebar.renameSessionAria', { title: sessionTitle }),
-        saveRenameLabel: input.t('sidebar.saveSessionRenameAria', { title: sessionTitle }),
-        cancelRenameLabel: input.t('sidebar.cancelSessionRenameAria', { title: sessionTitle }),
+        deleteLabel: t('sidebar.deleteSessionAria', { title: sessionTitle }),
+        renameLabel: t('sidebar.renameSessionAria', { title: sessionTitle }),
+        saveRenameLabel: t('sidebar.saveSessionRenameAria', { title: sessionTitle }),
+        cancelRenameLabel: t('sidebar.cancelSessionRenameAria', { title: sessionTitle }),
       });
     }
     return map;
-  }, [globalSessionEntries, globalSessionOwnerByKey, input.locale, input.t, resolveSessionTitle]);
+  }, [globalSessionEntries, globalSessionOwnerByKey, locale, t, resolveSessionTitle]);
 
-  const requiresSubagentManagementCatalog = input.selectedRuntimeEndpoint?.target?.agentCatalog.source === 'subagent-management';
+  const switchboardSessionSourceIndex = useMemo(() => {
+    const sessionCountByRuntimeAgent = new Map<string, number>();
+    const agentSourceByKey = new Map<string, AgentSessionSwitchboardAgentSessionSourceInput>();
+    const endpointsBySessionKey = new Map<string, ChatSessionRuntimeEndpointNode>();
+    const agentSummaryByRuntimeAgentKey = new Map<string, SidebarAgentSummary>();
+    for (const endpoint of switchboardRuntimeEndpoints) {
+      for (const agent of switchboardRuntimeAgentSummariesByScopeKey.get(endpoint.runtimeScopeKey) ?? []) {
+        agentSummaryByRuntimeAgentKey.set(createRuntimeAgentSessionCountKey(endpoint.runtimeScopeKey, agent.id), agent);
+      }
+      for (const agent of endpoint.agents) {
+        for (const session of agent.sessions) {
+          endpointsBySessionKey.set(session.sessionRecordKey, endpoint);
+        }
+      }
+    }
+    for (const entry of switchboardSortedSessionEntries) {
+      const endpoint = endpointsBySessionKey.get(entry.session.key);
+      if (!endpoint) {
+        continue;
+      }
+      const agentKey = createRuntimeAgentSessionCountKey(endpoint.runtimeScopeKey, entry.session.agentId);
+      const agentSummary = agentSummaryByRuntimeAgentKey.get(agentKey);
+      const agentName = agentSummary?.name?.trim() || entry.session.agentId;
+      const source: AgentSessionSwitchboardAgentSessionSourceInput = {
+        runtimeScopeKey: endpoint.runtimeScopeKey,
+        runtimeLabel: endpoint.displayName,
+        agentId: entry.session.agentId,
+        agentName,
+        avatarSeed: agentSummary?.avatarSeed,
+        avatarStyle: agentSummary?.avatarStyle,
+      };
+      agentSourceByKey.set(entry.session.key, source);
+      if (!isAgentSessionSwitchboardAutomationSession(entry.session)) {
+        sessionCountByRuntimeAgent.set(agentKey, (sessionCountByRuntimeAgent.get(agentKey) ?? 0) + 1);
+      }
+    }
+    return { agentSourceByKey, sessionCountByRuntimeAgent };
+  }, [switchboardRuntimeAgentSummariesByScopeKey, switchboardRuntimeEndpoints, switchboardSortedSessionEntries]);
+
+  const switchboardRuntimeResults = useMemo(() => {
+    return switchboardRuntimeEndpoints.map((endpoint) => ({
+      runtimeScopeKey: endpoint.runtimeScopeKey,
+      runtimeLabel: endpoint.displayName,
+      agents: (switchboardRuntimeAgentSummariesByScopeKey.get(endpoint.runtimeScopeKey) ?? []).map((agent) => ({
+        agentId: agent.id,
+        agentName: agent.name?.trim() || agent.id,
+        avatarSeed: agent.avatarSeed,
+        avatarStyle: agent.avatarStyle,
+        preferredSessionKey: agent.preferredSessionKey ?? null,
+        sessionCount: switchboardSessionSourceIndex.sessionCountByRuntimeAgent.get(createRuntimeAgentSessionCountKey(endpoint.runtimeScopeKey, agent.id)) ?? 0,
+      })),
+    }));
+  }, [switchboardRuntimeAgentSummariesByScopeKey, switchboardRuntimeEndpoints, switchboardSessionSourceIndex]);
+
+  const switchboardSessionViewModelByKey = useMemo(() => {
+    const map = new Map<string, SessionViewModel>();
+    for (const entry of switchboardSortedSessionEntries) {
+      const session = entry.session;
+      const sessionTitle = resolveSessionTitle(entry);
+      const agentSource = switchboardSessionSourceIndex.agentSourceByKey.get(session.key);
+      const activityMs = resolveSessionActivityMs(entry);
+      const sessionMeta = agentSource
+        ? `${agentSource.agentName} / ${formatSessionMeta(session, activityMs, locale)}`
+        : formatSessionMeta(session, activityMs, locale);
+      map.set(session.key, {
+        title: sessionTitle,
+        meta: sessionMeta,
+        agentId: agentSource?.agentId ?? session.agentId,
+        agentName: agentSource?.agentName ?? session.agentId,
+        avatarSeed: agentSource?.avatarSeed,
+        avatarStyle: agentSource?.avatarStyle,
+        deleteLabel: t('sidebar.deleteSessionAria', { title: sessionTitle }),
+        renameLabel: t('sidebar.renameSessionAria', { title: sessionTitle }),
+        saveRenameLabel: t('sidebar.saveSessionRenameAria', { title: sessionTitle }),
+        cancelRenameLabel: t('sidebar.cancelSessionRenameAria', { title: sessionTitle }),
+      });
+    }
+    return map;
+  }, [locale, t, resolveSessionTitle, switchboardSessionSourceIndex.agentSourceByKey, switchboardSortedSessionEntries]);
+
+  const switchboardSessionBuckets = useMemo(
+    () => buildSessionBuckets(switchboardSortedSessionEntries, t),
+    [t, switchboardSortedSessionEntries],
+  );
+
+  const switchboard = useMemo(() => buildAgentSessionSwitchboardModel({
+    currentConversation: currentConversation,
+    selectedRuntimeEndpoint: selectedRuntimeEndpoint,
+    runtimeResults: switchboardRuntimeResults,
+    teamResults: teams ?? [],
+    sessionResults: {
+      buckets: switchboardSessionBuckets,
+      viewModelByKey: switchboardSessionViewModelByKey,
+      agentSourceByKey: switchboardSessionSourceIndex.agentSourceByKey,
+    },
+  }), [currentConversation, selectedRuntimeEndpoint, teams, switchboardRuntimeResults, switchboardSessionBuckets, switchboardSessionSourceIndex.agentSourceByKey, switchboardSessionViewModelByKey]);
+
+  const requiresSubagentManagementCatalog = switchboardRuntimeEndpoints.some((endpoint) => endpoint.target?.agentCatalog.source === 'subagent-management');
   const agentListState = requiresSubagentManagementCatalog
-    && !input.subagentManagementAgentsResource.hasLoadedOnce
-    && (input.subagentManagementAgentsResource.status === 'idle' || input.subagentManagementAgentsResource.status === 'loading')
+    && !subagentManagementAgentsResource.hasLoadedOnce
+    && (subagentManagementAgentsResource.status === 'idle' || subagentManagementAgentsResource.status === 'loading')
     ? 'loading'
-    : (requiresSubagentManagementCatalog && !input.subagentManagementAgentsResource.hasLoadedOnce && input.subagentManagementAgentsResource.status === 'error' ? 'error' : 'ready');
+    : (requiresSubagentManagementCatalog && !subagentManagementAgentsResource.hasLoadedOnce && subagentManagementAgentsResource.status === 'error' ? 'error' : 'ready');
 
-  const sessionListState = !input.sessionsLoadedOnce && input.sessionEntries.length === 0
-    ? (input.sessionsError ? 'error' : 'loading')
+  const hasSwitchboardSessions = switchboardInputSessionEntries.length > 0;
+  const sessionListState = !sessionsLoadedOnce && !hasSwitchboardSessions
+    ? (sessionsError ? 'error' : 'loading')
     : 'ready';
 
   return {
@@ -606,9 +686,10 @@ export function useAgentSessionsPaneViewModel(
     agentNodes,
     sessionBuckets,
     sessionViewModelByKey,
+    switchboard,
     agentListState,
-    agentErrorMessage: requiresSubagentManagementCatalog ? input.subagentManagementAgentsResource.error : null,
+    agentErrorMessage: requiresSubagentManagementCatalog ? subagentManagementAgentsResource.error : null,
     sessionListState,
-    sessionErrorMessage: input.sessionEntries.length === 0 ? input.sessionsError : null,
+    sessionErrorMessage: hasSwitchboardSessions ? null : sessionsError,
   };
 }

@@ -267,3 +267,9 @@ You're successful when:
 - Build server-validated `UGameplayAbility` activation: clients predict locally, server confirms or rolls back
 - Profile GAS replication overhead: use `net.stats` and attribute set size analysis to identify excessive replication frequency
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

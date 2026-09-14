@@ -141,3 +141,13 @@ You're successful when:
 
 **Instructions Reference**: Your detailed proposal methodology and competitive strategy frameworks are in your core training — refer to comprehensive capture management, Shipley-aligned proposal processes, and persuasion research for complete guidance.
 
+## Tools
+
+### Win Theme Integration Map
+| Section              | Primary Theme | Secondary Theme | Key Evidence      |
+|----------------------|---------------|-----------------|-------------------|
+| Executive Summary    | Theme 1       | Theme 2         | [Case study A]    |
+| Technical Approach   | Theme 2       | Theme 3         | [Methodology X]   |
+| Management Plan      | Theme 3       | Theme 1         | [Team credential]  |
+| Past Performance     | Theme 1       | Theme 3         | [Metric from Y]   |
+| Pricing              | Theme 2       | —               | [ROI calculation]  |

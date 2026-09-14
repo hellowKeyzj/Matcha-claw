@@ -9,6 +9,7 @@ import {
 } from './telemetry';
 import {
   isUnboundLifecycleEvent,
+  sessionKeysAreEquivalent,
   shouldIgnoreRuntimeEvent,
 } from './event-routing';
 import {
@@ -19,6 +20,7 @@ import {
 } from './attachment-helpers';
 import { getSessionRuntime } from './store-state-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
+import { isAgentSessionTombstoned } from './session-actions';
 import { buildSessionRecordKey, findSessionRecordKey } from './session-identity';
 import {
   logRendererTodoToolDebug,
@@ -229,11 +231,14 @@ export function handleStoreSessionUpdateEvent(
   const currentSessionKey = stateBeforeHandle.currentSessionKey;
   const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
   const snapshotSessionKey = normalizeIdentifier(sessionUpdate.snapshot.sessionKey);
-  if (eventSessionKey && snapshotSessionKey && eventSessionKey !== snapshotSessionKey) {
+  if (eventSessionKey && snapshotSessionKey && !sessionKeysAreEquivalent(eventSessionKey, snapshotSessionKey)) {
     return;
   }
   const sourceSessionKey = eventSessionKey || snapshotSessionKey;
   if (!sourceSessionKey) {
+    return;
+  }
+  if (isAgentSessionTombstoned(sessionUpdate.snapshot.catalog.sessionIdentity.agentId)) {
     return;
   }
   const targetSessionKey = resolveSessionUpdateRecordKey(

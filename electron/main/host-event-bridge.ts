@@ -26,7 +26,6 @@ type HostEventName =
   | 'runtime-host:status'
   | 'runtime-host:error'
   | 'runtime-host:restart'
-  | 'license:gate-changed'
   | 'team:event'
   | 'matcha-agent:status'
   | 'openclaw:cli-installed'
@@ -186,14 +185,46 @@ function publishSessionDelta(
   }
 }
 
-function sessionDeltaTextLength(
-  changes: readonly { readonly kind: string; readonly text?: string }[],
+function sessionDeltaTextLength(changes: readonly unknown[]): number {
+  return changes.reduce((total, change) => {
+    if (!isRecord(change)) return total;
+    if (change.kind === 'messageDelta') return total + publicTextLength(change.text);
+    if (change.kind !== 'messageUpdated') return total;
+    return total + sessionItemTextLength(change.item);
+  }, 0);
+}
+
+function sessionItemTextLength(item: unknown): number {
+  if (!isRecord(item)) return 0;
+  if (item.kind === 'userMessage') return itemTextOrSegmentsLength(item, 'content');
+  if (item.kind === 'assistantTurn') return itemTextOrSegmentsLength(item, 'segments');
+  if (item.kind === 'system') return publicTextLength(item.text);
+  return 0;
+}
+
+function itemTextOrSegmentsLength(
+  item: Record<string, unknown>,
+  segmentsKey: 'content' | 'segments',
 ): number {
-  return changes.reduce((total, change) => (
-    change.kind === 'messageDelta' && typeof change.text === 'string'
-      ? total + change.text.length
-      : total
-  ), 0);
+  const segmentsLength = publicSegmentsTextLength(item[segmentsKey]);
+  return segmentsLength > 0 ? segmentsLength : publicTextLength(item.text);
+}
+
+function publicSegmentsTextLength(segments: unknown): number {
+  if (!Array.isArray(segments)) return 0;
+  return segments.reduce((total, segment) => {
+    if (!isRecord(segment)) return total;
+    if (segment.kind !== 'text' && segment.kind !== 'thinking' && segment.kind !== 'largeText') return total;
+    return total + publicTextLength(segment.text);
+  }, 0);
+}
+
+function publicTextLength(value: unknown): number {
+  return typeof value === 'string' ? value.length : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function sessionDeltaRunId(delta: ReturnType<typeof decodeSessionDelta>): string | undefined {

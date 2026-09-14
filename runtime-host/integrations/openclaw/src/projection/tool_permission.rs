@@ -11,6 +11,8 @@ use crate::{
     },
 };
 
+const SKILL_WORKSHOP_TOOL: &str = "skill_workshop";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
@@ -72,6 +74,7 @@ impl Mode {
         );
         changed |= exec.remove("security").is_some();
         changed |= exec.remove("ask").is_some();
+        changed |= normalize_deny(&mut tools);
         if !changed {
             return false;
         }
@@ -135,6 +138,28 @@ fn object(value: Option<&Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+fn normalize_deny(tools: &mut Map<String, Value>) -> bool {
+    let existing = tools.get("deny");
+    let mut deny: Vec<Value> = existing
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(|text| Value::String(text.into())))
+        .collect();
+    if !deny
+        .iter()
+        .any(|value| value.as_str() == Some(SKILL_WORKSHOP_TOOL))
+    {
+        deny.push(Value::String(SKILL_WORKSHOP_TOOL.into()));
+    }
+    let next = Value::Array(deny);
+    if existing == Some(&next) {
+        return false;
+    }
+    tools.insert("deny".into(), next);
+    true
 }
 
 fn replace(target: &mut Map<String, Value>, key: &str, value: Value) -> bool {
@@ -247,6 +272,7 @@ mod tests {
                 "profile": "coding",
                 "fs": { "workspaceOnly": true, "keepFs": true },
                 "exec": { "keepExec": true },
+                "deny": ["skill_workshop"],
                 "customToolConfig": true,
             })
         );
@@ -268,7 +294,8 @@ mod tests {
         let root = TestRoot::new();
         let state_dir = root.state_dir();
         let path = state_dir.as_path().join("openclaw.json");
-        let original = br#"{ "tools": { "fs": { "workspaceOnly": true } } }"#;
+        let original =
+            br#"{ "tools": { "deny": ["skill_workshop"], "fs": { "workspaceOnly": true } } }"#;
         fs::write(&path, original).unwrap();
 
         assert_eq!(Mode::Default.apply(state_dir).unwrap(), Effect::Unchanged);
@@ -285,6 +312,73 @@ mod tests {
             Effect::Written
         );
         assert_eq!(Mode::read(state_dir).unwrap(), Mode::Default);
+    }
+
+    #[test]
+    fn preserves_existing_string_denies_and_appends_skill_workshop() {
+        let root = TestRoot::new();
+        let state_dir = root.state_dir();
+        let store = OpenClawConfigStore::new(state_dir.clone());
+        store
+            .update(|document| {
+                document.insert(
+                    "tools".into(),
+                    json!({ "deny": ["terminal"], "fs": { "workspaceOnly": true } }),
+                );
+                OpenClawConfigMutation::changed()
+            })
+            .unwrap();
+
+        assert_eq!(Mode::Default.apply(state_dir).unwrap(), Effect::Written);
+        assert_eq!(
+            store.read().unwrap().as_value()["tools"]["deny"],
+            json!(["terminal", "skill_workshop"])
+        );
+    }
+
+    #[test]
+    fn filters_non_string_denies() {
+        let root = TestRoot::new();
+        let state_dir = root.state_dir();
+        let store = OpenClawConfigStore::new(state_dir.clone());
+        store
+            .update(|document| {
+                document.insert(
+                    "tools".into(),
+                    json!({ "deny": ["terminal", false, 1, null, { "tool": "shell" }] }),
+                );
+                OpenClawConfigMutation::changed()
+            })
+            .unwrap();
+
+        assert_eq!(Mode::Default.apply(state_dir).unwrap(), Effect::Written);
+        assert_eq!(
+            store.read().unwrap().as_value()["tools"]["deny"],
+            json!(["terminal", "skill_workshop"])
+        );
+    }
+
+    #[test]
+    fn full_access_still_denies_skill_workshop() {
+        let root = TestRoot::new();
+        let state_dir = root.state_dir();
+        let store = OpenClawConfigStore::new(state_dir.clone());
+        store
+            .update(|document| {
+                document.insert("tools".into(), json!({ "fs": { "workspaceOnly": true } }));
+                OpenClawConfigMutation::changed()
+            })
+            .unwrap();
+
+        assert_eq!(
+            Mode::FullAccess.apply(state_dir.clone()).unwrap(),
+            Effect::Written
+        );
+        assert_eq!(Mode::read(state_dir).unwrap(), Mode::FullAccess);
+        assert_eq!(
+            store.read().unwrap().as_value()["tools"]["deny"],
+            json!(["skill_workshop"])
+        );
     }
 
     #[test]

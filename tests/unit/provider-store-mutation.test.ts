@@ -125,24 +125,11 @@ describe('useProviderStore mutation states', () => {
       undefined,
     );
     expect(useProviderStore.getState().providerSnapshot.credentials[0]?.label).toBe('OpenAI primary');
-    expect(useProviderStore.getState().refreshing).toBe(true);
-
-    resolveSnapshot?.({
-      statuses: [{ id: 'openai-main', hasKey: true }],
-      credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI primary' }],
-      vendors: [{ id: 'openai', name: 'OpenAI' }],
-      revisions: { 'openai-main': 2 },
-    });
-
-    await act(async () => {
-      await sleep(0);
-    });
-
     expect(useProviderStore.getState().refreshing).toBe(false);
     expect(useProviderStore.getState().error).toBeNull();
   });
 
-  it('createAccount forces a post-mutation snapshot past an in-flight stale request', async () => {
+  it('createAccount 只使用 mutation 后的 owner readback', async () => {
     let resolveInitialSnapshot: ((value: unknown) => void) | null = null;
     const initialSnapshot = new Promise((resolve) => {
       resolveInitialSnapshot = resolve;

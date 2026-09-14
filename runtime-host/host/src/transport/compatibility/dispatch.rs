@@ -4,7 +4,7 @@ use crate::{
     capability_directory,
     composition::PeerHandle,
     control::{CommandInput, CommandOutcome},
-    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     owner,
     sessions::SessionHandle,
 };
@@ -15,6 +15,7 @@ pub(crate) async fn execute(
     owner: &owner::Handle,
     peer: &PeerHandle,
     platform_runtime: &PlatformRuntimeHandle,
+    toolchain: &ToolchainHandle,
     plugins: &PluginsHandle,
     skills: &SkillsHandle,
     _session: &SessionHandle,
@@ -31,6 +32,7 @@ pub(crate) async fn execute(
         owner,
         peer,
         platform_runtime,
+        toolchain,
         plugins,
         skills,
         &request.method,
@@ -54,6 +56,7 @@ async fn dispatch_route(
     owner: &owner::Handle,
     peer: &PeerHandle,
     platform_runtime: &PlatformRuntimeHandle,
+    toolchain: &ToolchainHandle,
     plugins: &PluginsHandle,
     skills: &SkillsHandle,
     method: &str,
@@ -64,9 +67,7 @@ async fn dispatch_route(
         ("GET", "/api/runtime-host/health") => dispatch_host_health(owner).await,
         ("GET", "/api/capabilities/list") => command_outcome(capability_directory::list()),
         ("POST", "/api/capabilities/describe") => dispatch_capability_describe(payload),
-        ("POST", "/api/capabilities/execute") => {
-            dispatch_capability(platform_runtime, payload).await
-        }
+        ("POST", "/api/capabilities/execute") => Ok(None),
         ("GET", "/api/openclaw/status") => dispatch_openclaw_status(peer).await,
         ("GET", "/api/openclaw/ready") => dispatch_openclaw_ready(peer).await,
         ("GET", "/api/openclaw/dir") => {
@@ -100,7 +101,7 @@ async fn dispatch_route(
         ("GET", path) if path.starts_with("/api/openclaw/subagent-templates/") => {
             dispatch_subagent_template(platform_runtime, path).await
         }
-        ("GET", "/api/toolchain/uv/check") => dispatch_toolchain_uv_check(platform_runtime).await,
+        ("GET", "/api/toolchain/uv/check") => dispatch_toolchain_uv_check(toolchain).await,
         ("GET", "/api/plugins/runtime") => dispatch_plugins_runtime(plugins).await,
         ("GET", "/api/plugins/catalog") => dispatch_plugins_catalog(plugins).await,
         ("GET", "/api/skills/status") => dispatch_skill_status(skills).await,
@@ -282,16 +283,16 @@ async fn dispatch_subagent_template(
 }
 
 async fn dispatch_toolchain_uv_check(
-    platform_runtime: &PlatformRuntimeHandle,
+    toolchain: &ToolchainHandle,
 ) -> Result<Option<Value>, DispatchResponse> {
-    let status = platform_runtime
-        .toolchain_status()
+    let status = toolchain
+        .status()
         .await
         .map_err(|_| DispatchResponse::internal_error())?
         .map_err(|_| DispatchResponse::internal_error())?;
     Ok(Some(json!(matches!(
         status.uv(),
-        openclaw::toolchain::ToolAvailability::Available
+        toolchain::ToolAvailability::Available
     ))))
 }
 
@@ -323,21 +324,9 @@ async fn dispatch_skill_status(skills: &SkillsHandle) -> Result<Option<Value>, D
         .await
         .map_err(|_| DispatchResponse::internal_error())?
     {
-        crate::skill_status::Outcome::Available(catalog) => Ok(Some(json!({
-            "skills": catalog.entries.iter().map(|entry| json!({
-                "key": entry.key,
-                "name": entry.name,
-                "description": entry.description,
-                "enabled": entry.enabled,
-                "selectable": entry.selectable,
-                "installed": entry.installed,
-                "eligible": entry.eligible,
-                "blockedByAllowlist": entry.blocked_by_allowlist,
-                "blockedByAgentFilter": entry.blocked_by_agent_filter,
-                "unavailableReason": entry.unavailable_reason.map(|reason| format!("{reason:?}").to_ascii_lowercase()),
-                "missingCategories": entry.missing_categories.iter().map(|category| format!("{category:?}").to_ascii_lowercase()).collect::<Vec<_>>()
-            })).collect::<Vec<_>>(),
-        }))),
+        crate::skill_status::Outcome::Available(catalog) => {
+            Ok(Some(crate::skill_status::project(&catalog)))
+        }
         crate::skill_status::Outcome::Unavailable => Err(DispatchResponse::internal_error()),
     }
 }
@@ -399,11 +388,6 @@ const LEGACY_FILE_ROUTES: &[&str] = &[
     "/api/files/thumbnail",
 ];
 
-const PLATFORM_RUNTIME_CAPABILITY_ID: &str = "platform.runtime";
-const TOOLCHAIN_INSTALL_UV_OPERATION_ID: &str = "toolchain.installUv";
-const PLUGIN_RUNTIME_CAPABILITY_ID: &str = "plugin.runtime";
-const SKILL_MANAGEMENT_CAPABILITY_ID: &str = "skill.management";
-
 fn route_without_query(route: &str) -> &str {
     route.split_once('?').map_or(route, |(path, _)| path)
 }
@@ -421,163 +405,5 @@ fn command_outcome(outcome: CommandOutcome) -> Result<Option<Value>, DispatchRes
             "Runtime Host command input is invalid.",
         )),
         CommandOutcome::TimedOut => Err(DispatchResponse::internal_error()),
-    }
-}
-
-async fn dispatch_capability(
-    platform_runtime: &PlatformRuntimeHandle,
-    payload: Option<Value>,
-) -> Result<Option<Value>, DispatchResponse> {
-    let Some(Value::Object(payload)) = payload else {
-        return Err(DispatchResponse::bad_request(
-            "Capability payload is invalid",
-        ));
-    };
-    match (
-        payload.get("id").and_then(Value::as_str),
-        payload.get("operationId").and_then(Value::as_str),
-    ) {
-        (Some(PLATFORM_RUNTIME_CAPABILITY_ID), Some(TOOLCHAIN_INSTALL_UV_OPERATION_ID)) => {
-            dispatch_toolchain_install(platform_runtime, &payload).await
-        }
-        _ => Ok(None),
-    }
-}
-
-async fn dispatch_toolchain_install(
-    platform_runtime: &PlatformRuntimeHandle,
-    payload: &serde_json::Map<String, Value>,
-) -> Result<Option<Value>, DispatchResponse> {
-    validate_toolchain_install_request(payload)?;
-
-    match platform_runtime.install_uv().await {
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Installed)) => {
-            Ok(Some(json!({ "success": true })))
-        }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Rejected)) => {
-            Err(DispatchResponse::internal_error())
-        }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unknown)) => {
-            Err(DispatchResponse::internal_error())
-        }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unavailable))
-        | Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unsupported))
-        | Ok(Err(_))
-        | Err(_) => Err(DispatchResponse::internal_error()),
-    }
-}
-
-fn validate_toolchain_install_request(
-    payload: &serde_json::Map<String, Value>,
-) -> Result<(), DispatchResponse> {
-    if !has_exact_keys(payload, &["id", "operationId", "scope", "target", "input"])
-        || payload.get("id").and_then(Value::as_str) != Some(PLATFORM_RUNTIME_CAPABILITY_ID)
-        || payload.get("operationId").and_then(Value::as_str)
-            != Some(TOOLCHAIN_INSTALL_UV_OPERATION_ID)
-        || !is_native_runtime_scope(payload.get("scope"))
-    {
-        return Err(DispatchResponse::bad_request(
-            "Capability payload is invalid",
-        ));
-    }
-
-    let valid_target = payload
-        .get("target")
-        .and_then(Value::as_object)
-        .is_some_and(|target| {
-            has_exact_keys(target, &["kind"])
-                && target.get("kind").and_then(Value::as_str) == Some("platform-runtime")
-        });
-    let valid_input = payload
-        .get("input")
-        .and_then(Value::as_object)
-        .is_some_and(|input| input.is_empty());
-    if !valid_target || !valid_input {
-        return Err(DispatchResponse::target_rejected());
-    }
-    Ok(())
-}
-
-fn has_exact_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) -> bool {
-    object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
-}
-
-fn is_native_runtime_scope(value: Option<&Value>) -> bool {
-    value
-        == Some(&serde_json::json!({
-            "kind": "runtime-instance",
-            "endpoint": {
-                "kind": "native-runtime",
-                "runtimeAdapterId": "openclaw",
-                "runtimeInstanceId": "local",
-            },
-        }))
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{PLATFORM_RUNTIME_CAPABILITY_ID, TOOLCHAIN_INSTALL_UV_OPERATION_ID};
-
-    fn toolchain_install_payload() -> serde_json::Value {
-        json!({
-            "id": PLATFORM_RUNTIME_CAPABILITY_ID,
-            "operationId": TOOLCHAIN_INSTALL_UV_OPERATION_ID,
-            "scope": {
-                "kind": "runtime-instance",
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": "openclaw",
-                    "runtimeInstanceId": "local",
-                },
-            },
-            "target": { "kind": "platform-runtime" },
-            "input": {},
-        })
-    }
-
-    #[test]
-    fn toolchain_install_request_accepts_the_private_capability_envelope() {
-        super::validate_toolchain_install_request(toolchain_install_payload().as_object().unwrap())
-            .expect("toolchain install envelope must be accepted");
-    }
-
-    #[test]
-    fn toolchain_install_request_rejects_invalid_envelopes_without_echoing_input() {
-        let secret = "private-toolchain-input";
-        let mut payload = toolchain_install_payload();
-        payload.as_object_mut().unwrap().remove("scope");
-        payload["input"] = json!({ "secret": secret });
-        let response = super::validate_toolchain_install_request(payload.as_object().unwrap())
-            .unwrap_err()
-            .into_json();
-        assert_eq!(response["status"], 400);
-        assert_eq!(response["error"]["code"], "BAD_REQUEST");
-        assert!(!response.to_string().contains(secret));
-    }
-
-    #[test]
-    fn toolchain_install_request_rejects_invalid_scope_without_echoing_it() {
-        let secret = "private-runtime-scope";
-        let mut payload = toolchain_install_payload();
-        payload["scope"] = json!({ "kind": "runtime-instance", "secret": secret });
-        let response = super::validate_toolchain_install_request(payload.as_object().unwrap())
-            .unwrap_err()
-            .into_json();
-        assert_eq!(response["status"], 400);
-        assert_eq!(response["error"]["code"], "BAD_REQUEST");
-        assert!(!response.to_string().contains(secret));
-    }
-
-    #[test]
-    fn toolchain_install_request_rejects_invalid_target_kind() {
-        let mut payload = toolchain_install_payload();
-        payload["target"]["kind"] = json!("session");
-        let response = super::validate_toolchain_install_request(payload.as_object().unwrap())
-            .unwrap_err()
-            .into_json();
-        assert_eq!(response["status"], 400);
-        assert_eq!(response["error"]["code"], "TARGET_REJECTED");
     }
 }

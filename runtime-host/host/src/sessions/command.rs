@@ -9,6 +9,7 @@ use super::{
     model_selection::{SessionModelSelectionCommand, SessionModelSelectionOutcome},
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
+    session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     state::{SessionDelta, SessionIdentity, SessionProvider, SessionSourceBinding, SessionState},
 };
 
@@ -121,6 +122,10 @@ pub(crate) enum SessionCommand {
         command: SessionModelSelectionCommand,
         reply: oneshot::Sender<SessionModelSelectionOutcome>,
     },
+    Permission {
+        command: SessionPermissionCommand,
+        reply: oneshot::Sender<SessionPermissionOutcome>,
+    },
 }
 
 impl SessionCommand {
@@ -169,6 +174,9 @@ impl SessionCommand {
             Self::ModelSelection { reply, .. } => {
                 let _ = reply.send(SessionModelSelectionOutcome::Unavailable);
             }
+            Self::Permission { reply, .. } => {
+                let _ = reply.send(SessionPermissionOutcome::Unavailable);
+            }
         }
     }
 
@@ -213,6 +221,10 @@ impl SessionCommand {
                     },
                 ..
             } => CommandRoute::Keyed(session_lane_key(endpoint.provider(), session_key)),
+            Self::Permission { command, .. } => CommandRoute::Keyed(session_lane_key(
+                command.endpoint.provider(),
+                command.session_key(),
+            )),
             Self::Create { command, .. } => {
                 CommandRoute::Keyed(session_lane_key(command.provider(), command.session_key()))
             }

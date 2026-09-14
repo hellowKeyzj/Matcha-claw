@@ -3,6 +3,7 @@ import type {
   ChatRunPhase,
   ChatSendGate,
   ChatSessionHistoryStatus,
+  ChatSessionMetaState,
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
@@ -23,6 +24,7 @@ export type CurrentChatSendGateSource =
     endpointSessionId: string | null;
     sessionIdentity: SessionIdentity | null;
     historyStatus: ChatSessionHistoryStatus | null;
+    sessionKind: ChatSessionMetaState['kind'];
     runPhase: ChatRunPhase | null;
     activeRunId: string | null;
     pendingTurnKey: string | null;
@@ -58,6 +60,7 @@ export function readCurrentChatSendGateSource(state: ChatStoreState): CurrentCha
     endpointSessionId: record?.meta.endpointSessionId ?? null,
     sessionIdentity: record?.meta.sessionIdentity ?? null,
     historyStatus: record?.meta.historyStatus ?? null,
+    sessionKind: record?.meta.kind ?? null,
     runPhase: record?.runtime.runPhase ?? null,
     activeRunId: record?.runtime.activeRunId ?? null,
     pendingTurnKey: record?.runtime.pendingTurnKey ?? null,
@@ -80,6 +83,7 @@ export function areCurrentChatSendGateSourcesEquivalent(
       && left.endpointSessionId === right.endpointSessionId
       && left.sessionIdentity === right.sessionIdentity
       && left.historyStatus === right.historyStatus
+      && left.sessionKind === right.sessionKind
       && left.runPhase === right.runPhase
       && left.activeRunId === right.activeRunId
       && left.pendingTurnKey === right.pendingTurnKey
@@ -116,6 +120,9 @@ export function deriveChatSendGate(source: CurrentChatSendGateSource): ChatSendG
   }
   if (source.runPhase === 'stopping') {
     return { canSend: false, reason: 'stopping', sessionKey: source.sessionKey };
+  }
+  if (source.sessionKind === 'automation') {
+    return { canSend: false, reason: 'automation-session', sessionKey: source.sessionKey };
   }
   if (
     (source.runPhase != null && isRunActive({ runPhase: source.runPhase }))

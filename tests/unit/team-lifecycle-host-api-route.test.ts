@@ -57,19 +57,18 @@ describe('Team lifecycle Host API route', () => {
   it('forwards only the fixed lifecycle actions', async () => {
     const list = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'list', runs: [] } });
     const create = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'create', runId: 'run-1', outcome: 'created' } });
-    const deleteTeam = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'deleteTeam', teamId: 'team-1', outcome: 'deleted' } });
+    const remove = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'delete', teamId: 'team-1', outcome: 'deleted' } });
     const resume = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'resume', runs: [] } });
     const cancel = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'cancel', runId: 'run-1', state: 'cancelling' } });
-    const tombstone = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'tombstone', runId: 'run-1', state: 'tombstoned' } });
-    const transport = { list, create, deleteTeam, resume, cancel, tombstone };
+    const transport = { list, create, delete: remove, resume, cancel };
 
     for (const [body, expected, requestValue] of [
       [{ action: 'list', teamId: 'team-1' }, list, { teamId: 'team-1' }],
       [{ action: 'create', ...createRequest }, create, createRequest],
-      [{ action: 'deleteTeam', teamId: 'team-1', idempotencyKey: 'delete-1' }, deleteTeam, { teamId: 'team-1', idempotencyKey: 'delete-1' }],
-      [{ action: 'resume', teamId: 'team-1' }, resume, { teamId: 'team-1' }],
+      [{ action: 'delete', teamId: 'team-1', idempotencyKey: 'delete-1' }, remove, { teamId: 'team-1', idempotencyKey: 'delete-1' }],
+      [{ action: 'resume', teamId: 'team-1', idempotencyKey: 'resume-1' }, resume, { teamId: 'team-1', idempotencyKey: 'resume-1' }],
       [{ action: 'cancel', runId: 'run-1', idempotencyKey: 'cancel-1' }, cancel, { runId: 'run-1', idempotencyKey: 'cancel-1' }],
-      [{ action: 'tombstone', runId: 'run-1', idempotencyKey: 'delete-1' }, tombstone, { runId: 'run-1', idempotencyKey: 'delete-1' }],
+      [{ action: 'delete', runId: 'run-1', idempotencyKey: 'delete-1' }, remove, { runId: 'run-1', idempotencyKey: 'delete-1' }],
     ] as const) {
       const result = response();
       await expect(handleTeamLifecycleRoutes(
@@ -83,15 +82,16 @@ describe('Team lifecycle Host API route', () => {
   });
 
   it('rejects extra, legacy, and malformed fields before transport invocation', async () => {
-    const transport = { list: vi.fn(), create: vi.fn(), deleteTeam: vi.fn(), resume: vi.fn(), cancel: vi.fn(), tombstone: vi.fn() };
+    const transport = { list: vi.fn(), create: vi.fn(), delete: vi.fn(), resume: vi.fn(), cancel: vi.fn() };
     for (const body of [
       { action: 'create', ...createRequest, packagePath: 'legacy' },
       { action: 'create', teamId: 'team-1', runId: 'run-1', idempotencyKey: 'create-1' },
-      { action: 'deleteTeam', teamId: 'team-1' },
+      { action: 'delete', teamId: 'team-1' },
+      { action: 'deleteTeam', teamId: 'team-1', idempotencyKey: 'delete-1' },
       { action: 'cancel', runId: 'run-1', idempotencyKey: 'cancel-1', reason: 'legacy' },
-      { action: 'tombstone', runId: 'run-1' },
+      { action: 'tombstone', runId: 'run-1', idempotencyKey: 'delete-1' },
       { action: 'list', teamId: 'team-1', sessions: [] },
-      { action: 'resume', teamId: 'team\n1' },
+      { action: 'resume', teamId: 'team\n1', idempotencyKey: 'resume-1' },
     ]) {
       const result = response();
       await handleTeamLifecycleRoutes(
@@ -107,10 +107,9 @@ describe('Team lifecycle Host API route', () => {
     }
     expect(transport.list).not.toHaveBeenCalled();
     expect(transport.create).not.toHaveBeenCalled();
-    expect(transport.deleteTeam).not.toHaveBeenCalled();
+    expect(transport.delete).not.toHaveBeenCalled();
     expect(transport.resume).not.toHaveBeenCalled();
     expect(transport.cancel).not.toHaveBeenCalled();
-    expect(transport.tombstone).not.toHaveBeenCalled();
   });
 
   it('does not claim unrelated routes', async () => {
@@ -118,7 +117,7 @@ describe('Team lifecycle Host API route', () => {
       request({ action: 'list', teamId: 'team-1' }) as never,
       response().raw as never,
       new URL('http://127.0.0.1/api/team/not-lifecycle'),
-      { list: vi.fn(), create: vi.fn(), deleteTeam: vi.fn(), resume: vi.fn(), cancel: vi.fn(), tombstone: vi.fn() },
+      { list: vi.fn(), create: vi.fn(), delete: vi.fn(), resume: vi.fn(), cancel: vi.fn() },
     )).resolves.toBe(false);
   });
 });

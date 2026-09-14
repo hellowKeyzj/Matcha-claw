@@ -7,12 +7,12 @@ import { useChatStore } from '@/stores/chat';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
+import { useAccountStore } from '@/stores/account';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 
 function enableMainAppRoutes() {
   useSettingsStore.setState({
-    setupComplete: true,
     language: 'en',
     devModeUnlocked: false,
     init: vi.fn().mockResolvedValue(undefined),
@@ -51,6 +51,31 @@ function enableMainAppRoutes() {
     runtimeHost: { lifecycle: 'running' },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
+  useAccountStore.setState({
+    status: 'signedIn',
+    user: {
+      id: 1,
+      username: 'matcha',
+      email: 'matcha@example.com',
+      role: 'user',
+      balance: 0,
+      concurrency: 1,
+      status: 'active',
+      allowedGroups: null,
+      balanceNotifyEnabled: false,
+      balanceNotifyThreshold: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+    subscription: null,
+    usage: null,
+    platformQuotas: null,
+    publicSettings: { registrationEnabled: true, emailVerifyEnabled: false },
+    errorMessage: null,
+    twoFactorChallengeId: null,
+    twoFactorEmail: null,
+    init: vi.fn().mockResolvedValue(undefined),
+  } as never);
   i18n.changeLanguage('en');
 }
 
@@ -84,9 +109,10 @@ describe('tasks navigation', () => {
     expect(await screen.findByRole('tab', { name: 'Long Tasks' })).toBeInTheDocument();
     expect(await screen.findByRole('tab', { name: 'Scheduled Tasks' })).toBeInTheDocument();
     expect(screen.getByText('Incomplete')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'All Time' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Last 7 Days' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Last 30 Days' })).toBeInTheDocument();
+    const timeRange = screen.getByRole('combobox', { name: 'Time Range' });
+    expect(timeRange).toHaveValue('all');
+    expect(screen.getByRole('option', { name: 'Time range: Last 7 Days' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Time range: Last 30 Days' })).toBeInTheDocument();
   });
 
   it('路由 /cron 会重定向到任务中心的定时任务页签', async () => {

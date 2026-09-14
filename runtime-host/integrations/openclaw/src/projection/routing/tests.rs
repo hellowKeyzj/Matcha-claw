@@ -14,7 +14,7 @@ use environment::{
 };
 use serde_json::json;
 
-use crate::lifecycle::state_dir::{AgentId, CanonicalStateDir, PrivateAuthProfiles};
+use crate::lifecycle::state_dir::CanonicalStateDir;
 
 use super::*;
 
@@ -48,6 +48,46 @@ impl TestRoot {
 
     fn store(&self) -> OpenClawConfigStore {
         OpenClawConfigStore::new(self.state_dir.clone())
+    }
+}
+
+fn write_state_db_auth_profiles(root: &TestRoot, profiles: serde_json::Value) {
+    let database_path = root
+        .state_dir
+        .as_path()
+        .join("state")
+        .join("openclaw.sqlite");
+    fs::create_dir_all(database_path.parent().expect("state-db parent"))
+        .expect("create state-db parent");
+    let connection = rusqlite::Connection::open(database_path).expect("open state-db");
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT",
+            [],
+        )
+        .expect("create config machine state table");
+    for (state_key, value) in [
+        ("auth.sharedStore", json!({ "location": "state-db" })),
+        (
+            "authProfiles.store",
+            json!({ "version": 1, "profiles": profiles }),
+        ),
+        ("authProfiles.state", json!({ "version": 1 })),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(state_key) DO UPDATE SET \
+                   value_json = excluded.value_json, \
+                   updated_at_ms = excluded.updated_at_ms",
+                (
+                    state_key,
+                    serde_json::to_string(&value).expect("serialize auth state value"),
+                    1_800_000_000_000_i64,
+                ),
+            )
+            .expect("write auth state value");
     }
 }
 
@@ -211,16 +251,18 @@ fn routing_credential_check_uses_projected_provider_key() {
     let catalog =
         ProviderModelCatalog::try_new(vec![provider_model(&account, "gpt-5.6")]).expect("catalog");
     let routing = desired_routing(&account, "gpt-5.6");
-    let agent = AgentId::try_new("main".into()).expect("agent");
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(
-                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai-codex","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
-            )
-            .expect("legacy provider profile"),
-        )
-        .expect("store legacy provider profile");
+    write_state_db_auth_profiles(
+        &root,
+        json!({
+            "openai-oauth": {
+                "type": "oauth",
+                "provider": "openai-codex",
+                "access": "access-token",
+                "refresh": "refresh-token",
+                "expires": 1900000000000_u64
+            }
+        }),
+    );
 
     assert_eq!(
         ProviderRoutingProjection::apply(
@@ -233,15 +275,18 @@ fn routing_credential_check_uses_projected_provider_key() {
         Err(ProviderRoutingProjectionError::CredentialUnavailable)
     );
 
-    root.state_dir
-        .replace_auth_profiles(
-            &agent,
-            &PrivateAuthProfiles::try_new(
-                br#"{"version":1,"profiles":{"openai-oauth":{"type":"oauth","provider":"openai","access":"access-token","refresh":"refresh-token","expires":1900000000000}}}"#.to_vec(),
-            )
-            .expect("canonical provider profile"),
-        )
-        .expect("store canonical provider profile");
+    write_state_db_auth_profiles(
+        &root,
+        json!({
+            "openai-oauth": {
+                "type": "oauth",
+                "provider": "openai",
+                "access": "access-token",
+                "refresh": "refresh-token",
+                "expires": 1900000000000_u64
+            }
+        }),
+    );
 
     let effect = ProviderRoutingProjection::apply(
         root.state_dir.clone(),
@@ -374,7 +419,9 @@ fn removes_absent_routes_media_fallback_and_tts_provider_without_erasing_sibling
     assert_eq!(
         document.get("agents"),
         Some(&json!({
-            "defaults": { "temperature": 0.3 },
+            "defaults": {
+                "temperature": 0.3
+            },
             "other": true
         }))
     );
@@ -397,6 +444,19 @@ fn reapplying_the_same_routing_is_a_no_op() {
 
     assert!(routing.apply(&root.store()).expect("initial apply").changed);
     assert!(!routing.apply(&root.store()).expect("repeat apply").changed);
+}
+
+#[test]
+fn repeated_single_slot_provider_key_is_rejected_for_routing() {
+    let first = provider_account("zai-main", "zai", ProviderAccountAuthMode::ApiKey);
+    let second = provider_account("zai-alt", "zai", ProviderAccountAuthMode::ApiKey);
+    let accounts = [first, second];
+    let accounts = accounts_by_id(&accounts).expect("accounts");
+
+    assert_eq!(
+        projection_keys(&accounts),
+        Err(ProviderRoutingProjectionError::AccountUnavailable)
+    );
 }
 
 #[test]

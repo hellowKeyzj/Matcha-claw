@@ -22,6 +22,7 @@ mod plugin;
 mod provider;
 mod runtime_directory;
 mod runtime_driver;
+pub mod sealed_resource;
 mod security;
 mod security_audit;
 mod security_delivery;

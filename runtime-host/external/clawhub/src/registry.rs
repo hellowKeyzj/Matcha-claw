@@ -223,7 +223,7 @@ fn map_search_results(payload: &Value) -> Vec<ScoredSearchResult> {
             let name = text(row.get("displayName"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| slug.clone());
-            let description = display_description(row);
+            let description = skill_manifest_description(row)?;
             let version = text(row.get("version"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "latest".to_owned());
@@ -255,20 +255,48 @@ fn map_search_results(payload: &Value) -> Vec<ScoredSearchResult> {
         .collect()
 }
 
-fn display_description(row: &serde_json::Map<String, Value>) -> String {
-    let summary = text(row.get("summary")).unwrap_or_default();
-    if !is_placeholder_description(&summary) {
-        return summary;
-    }
+fn skill_manifest_description(row: &serde_json::Map<String, Value>) -> Option<String> {
     row.get("metaContent")
         .and_then(Value::as_object)
-        .and_then(|meta| text(meta.get("DisplayDescription")))
-        .filter(|value| !is_placeholder_description(value))
-        .unwrap_or_default()
+        .and_then(|meta| text(meta.get("skillMd")))
+        .and_then(|markdown| frontmatter_description(&markdown))
 }
 
-fn is_placeholder_description(value: &str) -> bool {
-    matches!(value.trim(), "[object Object]" | "metadata:")
+fn frontmatter_description(markdown: &str) -> Option<String> {
+    let frontmatter = frontmatter(markdown)?;
+    let normalized = normalize_inline_block_scalars(frontmatter);
+    let parsed = serde_yaml::from_str::<Value>(&normalized).ok()?;
+    text(parsed.get("description"))
+}
+
+fn frontmatter(markdown: &str) -> Option<&str> {
+    let markdown = markdown.strip_prefix("---")?;
+    let end = markdown.find("\n---")?;
+    Some(&markdown[..end])
+}
+
+fn normalize_inline_block_scalars(frontmatter: &str) -> String {
+    let mut normalized = String::with_capacity(frontmatter.len() + 4);
+    for line in frontmatter.lines() {
+        if let Some((prefix, body)) = inline_block_scalar(line) {
+            normalized.push_str(prefix);
+            normalized.push('\n');
+            normalized.push_str("  ");
+            normalized.push_str(body);
+            normalized.push('\n');
+        } else {
+            normalized.push_str(line);
+            normalized.push('\n');
+        }
+    }
+    normalized
+}
+
+fn inline_block_scalar(line: &str) -> Option<(&str, &str)> {
+    let marker = line.find(": |-").or_else(|| line.find(": >-"))?;
+    let body_start = marker + 4;
+    let body = line.get(body_start..)?.trim();
+    (!body.is_empty()).then(|| (&line[..body_start], body))
 }
 
 fn optional_count(value: &Value) -> Option<u64> {
@@ -290,7 +318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_clawhub_registry_metadata_like_the_legacy_runtime() {
+    fn maps_clawhub_registry_metadata_from_skill_markdown() {
         let results = map_search_results(&json!({
             "results": [{
                 "slug": "windylamdatahive",
@@ -301,7 +329,8 @@ mod tests {
                 "stats": { "downloads": 12, "stars": "3" },
                 "metaContent": {
                     "owner": "windylam1986",
-                    "DisplayDescription": "当前该技能的功能说明存在异常"
+                    "DisplayDescription": "当前该技能的功能说明存在异常",
+                    "skillMd": "---\nname: windylam\ndescription: 当前该技能的功能说明存在异常\n---\n# windylam\n"
                 }
             }]
         }));
@@ -314,5 +343,82 @@ mod tests {
         assert_eq!(result.author(), Some("windylam1986"));
         assert_eq!(result.downloads(), Some(12));
         assert_eq!(result.stars(), Some(3));
+    }
+
+    #[test]
+    fn parses_standard_skill_markdown_block_description() {
+        let results = map_search_results(&json!({
+            "results": [{
+                "slug": "calendar-pro",
+                "displayName": "日历管理工具专业版",
+                "version": "1.0.0",
+                "metaContent": {
+                    "owner": "thcjp",
+                    "skillMd": "---\nname: calendar-pro\ndescription: |-\n  核心能力：日程管理。\n  支持会议、提醒和排期。\n---\n# 日历管理\n"
+                }
+            }]
+        }));
+
+        assert_eq!(
+            results[0].item.description(),
+            "核心能力：日程管理。\n支持会议、提醒和排期。"
+        );
+    }
+
+    #[test]
+    fn parses_standard_skill_markdown_folded_description() {
+        let results = map_search_results(&json!({
+            "results": [{
+                "slug": "calendar-pro",
+                "displayName": "日历管理工具专业版",
+                "version": "1.0.0",
+                "metaContent": {
+                    "owner": "thcjp",
+                    "skillMd": "---\nname: calendar-pro\ndescription: >-\n  核心能力：日程管理。\n  支持会议、提醒和排期。\n---\n# 日历管理\n"
+                }
+            }]
+        }));
+
+        assert_eq!(
+            results[0].item.description(),
+            "核心能力：日程管理。 支持会议、提醒和排期。"
+        );
+    }
+
+    #[test]
+    fn skips_marketplace_rows_without_skill_markdown_description() {
+        let results = map_search_results(&json!({
+            "results": [{
+                "slug": "windylamdatahive",
+                "displayName": "windylam",
+                "summary": "Indexed summary",
+                "version": "1.0.0",
+                "metaContent": { "DisplayDescription": "Indexed display description" }
+            }]
+        }));
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parses_skill_markdown_block_description_when_indexed_summary_is_a_block_marker() {
+        let results = map_search_results(&json!({
+            "results": [{
+                "slug": "dlazy-gen-tool-pro",
+                "displayName": "综合生成工具-专业版",
+                "summary": "|- 功能涵盖: dlazy, gen。",
+                "version": "1.0.0",
+                "metaContent": {
+                    "owner": "thcjp",
+                    "DisplayDescription": "可靠筛选各种AI绘画和日常内容处理的图像工具。",
+                    "skillMd": "---\r\nslug: dlazy-gen-tool-pro\r\nname: \"dlazy-gen-tool-pro\"\r\nsummary: \"全模态生成引擎，覆盖40+模型，支持图片/视频/音频生成与管道链接批量工作流。\"\r\ndescription: |- 功能涵盖: dlazy, gen。\r\n  综合生成工具专业版。\r\n  - 40+ 模型全覆盖。\r\n  - 高质量图片生成。\r\n---\r\n# 综合生成工具\r\n"
+                }
+            }]
+        }));
+
+        assert_eq!(
+            results[0].item.description(),
+            "功能涵盖: dlazy, gen。\n综合生成工具专业版。\n- 40+ 模型全覆盖。\n- 高质量图片生成。"
+        );
     }
 }

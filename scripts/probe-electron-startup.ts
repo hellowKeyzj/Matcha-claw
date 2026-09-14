@@ -1,6 +1,6 @@
 import { _electron as electron } from '@playwright/test';
 import { createServer } from 'node:net';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -30,7 +30,6 @@ async function main(): Promise<void> {
   const appDataDir = join(homeDir, 'AppData', 'Roaming');
   const localAppDataDir = join(homeDir, 'AppData', 'Local');
   await Promise.all([mkdir(userDataDir, { recursive: true }), mkdir(appDataDir, { recursive: true }), mkdir(localAppDataDir, { recursive: true })]);
-  await writeFile(join(userDataDir, 'settings.json'), JSON.stringify({ setupComplete: true }), 'utf8');
   const portKeys = [
     'MATCHACLAW_DIAGNOSTICS_TRANSPORT',
     'MATCHACLAW_WORKSPACE_TEXT_TRANSPORT',
@@ -40,7 +39,6 @@ async function main(): Promise<void> {
     'MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT',
     'MATCHACLAW_SESSION_SEND_TRANSPORT',
     'MATCHACLAW_SESSION_ABORT_TRANSPORT',
-    'MATCHACLAW_OPENCLAW_HISTORY_TRANSPORT',
     'MATCHACLAW_MATCHA_HISTORY_TRANSPORT',
     'MATCHACLAW_USAGE_TRANSPORT',
     'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT',

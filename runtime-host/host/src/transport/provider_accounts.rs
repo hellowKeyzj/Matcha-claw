@@ -89,6 +89,36 @@ impl AccountDraft {
     pub(crate) const fn revision(&self) -> u64 {
         self.revision
     }
+
+    pub(crate) fn trace_provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub(crate) fn trace_auth_mode(&self) -> &str {
+        &self.auth_mode
+    }
+
+    pub(crate) fn trace_kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub(crate) const fn trace_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn trace_endpoint_present(&self) -> bool {
+        self.endpoint
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+    }
+
+    pub(crate) fn trace_protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
+    }
+
+    pub(crate) fn trace_media_protocol(&self) -> Option<&str> {
+        self.media_protocol.as_deref()
+    }
 }
 
 pub(crate) enum ProviderAccountsCommand {
@@ -177,6 +207,23 @@ fn validate_draft(draft: &AccountDraft) -> Result<AccountDraft, RequestError> {
         .map_err(|_| RequestError::Invalid)?;
     ProviderAccountRevision::try_new(draft.revision).map_err(|_| RequestError::Invalid)?;
     let auth_mode = auth_mode(&draft.auth_mode)?;
+    let provider = provider_reference(&draft.provider)?;
+    match auth_mode {
+        ProviderAccountAuthMode::CliReuse
+            if provider != "provider:anthropic" || draft.kind != "chat" =>
+        {
+            return Err(RequestError::Invalid);
+        }
+        ProviderAccountAuthMode::Token
+            if !matches!(
+                provider.as_str(),
+                "provider:anthropic" | "provider:github-copilot"
+            ) || draft.kind != "chat" =>
+        {
+            return Err(RequestError::Invalid);
+        }
+        _ => {}
+    }
     let credential = credential_for_draft(draft)?;
     ProviderAccountConfiguration::try_new(ProviderAccountConfigurationInput {
         label: draft.label.clone(),
@@ -204,7 +251,7 @@ fn validate_draft(draft: &AccountDraft) -> Result<AccountDraft, RequestError> {
 }
 
 fn credential_for_draft(draft: &AccountDraft) -> Result<Option<CredentialReference>, RequestError> {
-    if draft.auth_mode == "local" {
+    if matches!(draft.auth_mode.as_str(), "local" | "cliReuse") {
         return Ok(None);
     }
     CredentialReference::try_new(format!("credential:v1:{}", draft.id))
@@ -644,6 +691,8 @@ fn media_protocol_name(value: ProviderMediaApiProtocol) -> &'static str {
 fn auth_mode(value: &str) -> Result<ProviderAccountAuthMode, RequestError> {
     match value {
         "apiKey" => Ok(ProviderAccountAuthMode::ApiKey),
+        "token" => Ok(ProviderAccountAuthMode::Token),
+        "cliReuse" => Ok(ProviderAccountAuthMode::CliReuse),
         "oauthBrowser" => Ok(ProviderAccountAuthMode::OAuthBrowser),
         "oauthDevice" => Ok(ProviderAccountAuthMode::OAuthDevice),
         "local" => Ok(ProviderAccountAuthMode::Local),
@@ -654,6 +703,8 @@ fn auth_mode(value: &str) -> Result<ProviderAccountAuthMode, RequestError> {
 fn auth_mode_name(value: ProviderAccountAuthMode) -> &'static str {
     match value {
         ProviderAccountAuthMode::ApiKey => "apiKey",
+        ProviderAccountAuthMode::Token => "token",
+        ProviderAccountAuthMode::CliReuse => "cliReuse",
         ProviderAccountAuthMode::OAuthBrowser => "oauthBrowser",
         ProviderAccountAuthMode::OAuthDevice => "oauthDevice",
         ProviderAccountAuthMode::Local => "local",

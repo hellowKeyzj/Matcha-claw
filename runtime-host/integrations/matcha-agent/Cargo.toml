@@ -13,6 +13,7 @@ base64.workspace = true
 chrono.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
 organization = { version = "0.1.0", path = "../../domains/organization" }
+toolchain = { version = "0.1.0", path = "../../external/toolchain" }
 futures-util.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
 serde.workspace = true

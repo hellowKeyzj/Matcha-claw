@@ -62,7 +62,6 @@ describe('skills store local import', () => {
       name: 'Calendar',
       description: 'Calendar integration',
       enabled: true,
-      installed: true,
     };
     useSkillsStore.getState().setSkills([existingSkill]);
 

@@ -35,7 +35,9 @@
       "apiKey": "API キー",
       "oauthDevice": "OAuth デバイス",
       "oauthBrowser": "OAuth ブラウザ",
-      "local": "ローカル"
+      "local": "ローカル",
+      "token": "Token / setup-token",
+      "cliReuse": "CLI ログインを再利用"
     },
     "sections": {
       "credentials": "認証情報設定"
@@ -64,6 +66,7 @@
       "replaceApiKey": "API キーを置き換える",
       "replaceApiKeyHelp": "現在保存されている API キーをそのまま使う場合は、この欄を空のままにしてください。",
       "baseUrl": "ベース URL",
+      "codePlanMode": "Code Plan エンドポイント",
       "protocol": "プロトコル",
       "chatProvider": "チャットプロバイダー",
       "mediaProvider": "メディアプロバイダー",
@@ -74,7 +77,13 @@
       "save": "保存",
       "customDoc": "ドキュメント",
       "validate": "検証",
-      "failed": "失敗"
+      "failed": "失敗",
+      "authMode": "認証方法",
+      "variant": "サービス / プラン",
+      "endpointPreset": "エンドポイント地域",
+      "cliReuseHelp": "先に Claude Code にログインしてください。保存前にローカルの CLI 認証情報を確認するため、トークンの貼り付けは不要です。",
+      "replaceToken": "トークンを置き換える",
+      "tokenHelp": "claude setup-token を実行し、生成されたトークンを貼り付けてください。トークンはローカルに保存されます。"
     },
     "protocols": {
       "openai": "OpenAI 互換",
@@ -97,7 +106,8 @@
       "updated": "プロバイダーが更新されました",
       "failedUpdate": "プロバイダーの更新に失敗しました",
       "invalidKey": "無効な API キー",
-      "minimaxConflict": "MiniMax (Global) と MiniMax (CN) は同時に追加できません。"
+      "minimaxConflict": "MiniMax (Global) と MiniMax (CN) は同時に追加できません。",
+      "zaiConflict": "Z.AI (CN) と Z.AI (Global) は同時に追加できません。"
     },
     "oauth": {
       "loginMode": "OAuthログイン",
@@ -116,13 +126,33 @@
       "step1": "以下の認証コードをコピーしてください。",
       "step2": "ブラウザでログインページを開いてください。",
       "step3": "コードを貼り付けてアクセスを承認してください。",
-      "requestingCode": "セキュアログインコードを取得中..."
+      "requestingCode": "セキュアログインコードを取得中...",
+      "completeLogin": "ログインを完了",
+      "manualHelp": "認証ページでログインし、コールバック URL またはコードを下に貼り付けてください。",
+      "callbackPlaceholder": "コールバック URL またはコード",
+      "submitCode": "コードを送信"
     },
     "projectionErrors": {
       "diagnostic": "OpenClaw 設定の同期に失敗しました: {{reason}}",
       "readbackMismatch": "OpenClaw 設定の読み戻し結果が保存内容と一致しません。",
       "readbackUnavailable": "OpenClaw 設定を書き込みましたが、確認のために読み戻せませんでした。",
       "outcomeUnknown": "OpenClaw 設定同期の結果が不明です。",
+      "providerAccountConfigurationInvalid": "OpenClaw プロバイダーアカウント設定が無効です。プロバイダー、エンドポイント、プロトコルを確認してください。",
+      "providerCascadeUnavailable": "プロバイダー設定の状態を利用できません。更新してから再試行してください。",
+      "providerCredentialUnavailable": "現在のプロバイダー認証情報を利用できません。再入力して保存してください。",
+      "providerKeyDuplicate": "OpenClaw プロバイダー識別子が衝突しています。重複アカウントを削除するかカスタム設定を使ってください。",
+      "providerModelCapabilityInvalid": "モデル能力設定が無効です。モデル種別を確認して保存してください。",
+      "providerModelIdentifierInvalid": "モデル ID が無効です。確認して保存してください。",
+      "providerModelPersistenceFailed": "OpenClaw モデル設定を書き込めません。ファイル権限を確認してください。",
+      "providerModelTokenLimitInvalid": "モデル Token 制限が無効です。最大出力 Token がコンテキストウィンドウを超えないようにしてください。",
+      "providerOwnerResponseUnavailable": "プロバイダー設定の書き込み結果が返りませんでした。更新して再試行してください。",
+      "providerOwnerUnavailable": "プロバイダー設定サービスを利用できません。アプリを再起動して再試行してください。",
+      "providerRoutingAccountUnavailable": "モデル割り当てが利用できないプロバイダーアカウントを参照しています。モデルを選び直してください。",
+      "providerRoutingCredentialUnavailable": "モデル割り当てが利用できないプロバイダー認証情報を参照しています。API キーを再入力して保存してください。",
+      "providerRoutingInvalid": "モデル割り当てルールが無効です。確認して保存してください。",
+      "providerRoutingModelCapabilityUnavailable": "モデル割り当て先のモデルはこの能力をサポートしていません。別のモデルを選択してください。",
+      "providerRoutingModelUnavailable": "モデル割り当てが存在しないモデルを参照しています。モデルを選び直してください。",
+      "providerRoutingPersistenceFailed": "OpenClaw モデル割り当て設定を書き込めません。ファイル権限を確認してください。",
       "privateResolver": {
         "credentialMissing": "このアカウントに保存された API キーがありません。再入力して保存してください。",
         "credentialDecryptFailed": "保存済み API キーをこの端末で復号できません。再入力して保存してください。",
@@ -134,44 +164,6 @@
         "invalidRequest": "内部認証同期リクエストが無効です。再試行してください。",
         "unknown": "OpenClaw の認証同期に失敗しました。API キーを再入力して保存してください。"
       }
-    }
-  },
-  "license": {
-    "title": "ライセンス",
-    "description": "ローカルライセンスを有効化・管理します",
-    "gateStatus": "ゲート状態",
-    "gateState": {
-      "checking": "確認中",
-      "granted": "許可",
-      "blocked": "ブロック"
-    },
-    "renewAlert": {
-      "near_expiry_renew_failed": "期限切れ間近の更新に失敗しました。再検証してください"
-    },
-    "inputLabel": "ライセンスキー",
-    "placeholder": "ライセンスキーを入力（例: MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
-    "showKey": "ライセンスキーを表示",
-    "hideKey": "ライセンスキーを隠す",
-    "validate": "ライセンス検証",
-    "revalidate": "再検証",
-    "clear": "クリア",
-    "messages": {
-      "valid": "ライセンス検証に成功しました",
-      "cache_grace_valid": "キャッシュ猶予でライセンスを検証しました",
-      "empty": "ライセンスキーを入力してください",
-      "format_invalid": "ライセンスキー形式が不正です",
-      "service_unconfigured": "ライセンスサービスが未設定です",
-      "network_error": "ライセンスサービスに接続できません。ネットワークを確認してください",
-      "server_rejected": "ライセンスサービスに拒否されました",
-      "expired": "ライセンスの有効期限が切れています",
-      "device_mismatch": "ライセンス端末情報が一致しません",
-      "not_allowed": "このライセンスキーは許可されていません",
-      "checksum_invalid": "ライセンスキーのチェックサムが不正です",
-      "unknown": "ライセンス検証に失敗しました"
-    },
-    "toast": {
-      "cleared": "ローカルライセンスをクリアしました",
-      "clearFailed": "ローカルライセンスのクリアに失敗しました: {{error}}"
     }
   },
   "diagnostics": {
@@ -438,9 +430,9 @@
     "refresh": "更新",
     "empty": "モデルなし",
     "codePlan": {
-      "title": "Ark Code Plan",
-      "description": "ark-code-latest を ark のモデルカタログに追加します。Ark API Key と coding Base URL は provider カードで設定します。",
-      "add": "ark-code-latest を追加",
+      "title": "Code Plan",
+      "description": "Code Plan モデルをこの provider のモデルカタログに追加します。API Key と Code Plan Base URL は provider カードで設定します。",
+      "add": "{{model}} を追加",
       "added": "追加済み"
     },
     "create": {
@@ -449,8 +441,25 @@
       "add": "作成"
     },
     "actions": {
+      "discover": "モデルを取得",
       "add": "モデルを追加",
-      "save": "保存"
+      "save": "変更を保存",
+      "reset": "取り消す"
+    },
+    "pending": {
+      "summary_one": "未保存の変更が {{count}} 件あります",
+      "summary_other": "未保存の変更が {{count}} 件あります"
+    },
+    "discovery": {
+      "title": "インポート可能なモデル",
+      "loading": "モデルを取得中...",
+      "empty": "利用可能なモデルは見つかりませんでした",
+      "error": "モデルの取得に失敗しました: {{error}}。このアカウントがモデル一覧にアクセスできることを確認してから再試行してください。",
+      "rejected": "モデルの取得に失敗しました: バックエンドがモデル一覧リクエストを拒否しました。このアカウントの API キー、権限、グループ、残高が利用可能であることを確認してから再試行してください。",
+      "importSelected": "選択項目をインポート",
+      "duplicate": "カタログに登録済み",
+      "count_one": "· {{count}} 件",
+      "count_other": "· {{count}} 件"
     },
     "group": {
       "subtitle_one": "1 件のモデル",
@@ -468,6 +477,7 @@
       "resolutionLabel": "解像度",
       "qualityLabel": "品質",
       "defaultOption": "デフォルト",
+      "advanced": "詳細項目",
       "remove": "削除"
     },
     "qualities": {

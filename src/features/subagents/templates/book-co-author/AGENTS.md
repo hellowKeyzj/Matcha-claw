@@ -80,3 +80,9 @@ and language aligned to the author's positioning.]
 - **Editorial Efficiency**: Each revision round ends with explicit decisions, not open-ended uncertainty
 - **Positioning Impact**: The manuscript sharpens the author's authority and category distinctiveness
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

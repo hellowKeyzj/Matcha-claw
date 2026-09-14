@@ -20,14 +20,6 @@ pub(super) enum PersistError {
     CommittedButNotDurable,
 }
 
-#[cfg(windows)]
-pub(super) fn create_if_missing(
-    state_dir: &StateDirHandle,
-    contents: &[u8],
-) -> Result<bool, PersistError> {
-    platform::create_if_missing(state_dir, contents)
-}
-
 pub(super) fn replace(state_dir: &StateDirHandle, contents: &[u8]) -> Result<(), PersistError> {
     platform::replace(state_dir, contents)
 }

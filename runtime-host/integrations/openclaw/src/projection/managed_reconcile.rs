@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 use super::text;
 use crate::lifecycle::state_dir::CanonicalStateDir;
 
+#[path = "plugin_peer_link.rs"]
+mod peer_link;
+pub(super) use peer_link::repair_channel_peer_link;
+
 const MANIFEST: &str = "openclaw.plugin.json";
 const PACKAGE: &str = "package.json";
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
@@ -18,25 +22,25 @@ const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
 
-const MANAGED_CAPABILITY_IDS: &[&str] = &[
-    "task-manager",
-    "security-core",
-    "browser-relay",
-    "memory-lancedb-pro",
-    "matchaclaw-media",
-];
-
-const MANAGED_CHANNEL_IDS: &[&str] = &[
+pub(super) const MANAGED_CHANNEL_IDS: &[&str] = &[
     "dingtalk",
     "openclaw-lark",
     "wecom",
     "openclaw-qqbot",
     "openclaw-weixin",
-    "discord",
-    "whatsapp",
 ];
 
+const RETIRED_MANAGED_TARGET_IDS: &[&str] = &["discord", "whatsapp", "opencode-go"];
+
 const MANAGED_SOURCES: &[(&str, &[&str])] = &[
+    ("qianfan", &["qianfan"]),
+    ("stepfun", &["stepfun"]),
+    ("tencent", &["tencent"]),
+    ("xiaomi", &["xiaomi"]),
+    ("qwen", &["qwen"]),
+    ("kimi", &["kimi"]),
+    ("volcengine", &["volcengine"]),
+    ("opencode", &["opencode"]),
     ("dingtalk", &["dingtalk"]),
     (
         "openclaw-lark",
@@ -45,8 +49,6 @@ const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("wecom", &["wecom", "wecom-openclaw-plugin"]),
     ("openclaw-qqbot", &["openclaw-qqbot", "qqbot"]),
     ("openclaw-weixin", &["openclaw-weixin"]),
-    ("discord", &["discord"]),
-    ("whatsapp", &["whatsapp"]),
     ("task-manager", &["task-manager"]),
     ("security-core", &["security-core"]),
     ("browser-relay", &["browser-relay"]),
@@ -66,12 +68,8 @@ pub(crate) fn reconcile_selected(
     managed_plugin_root: &Path,
     plugin_ids: &[String],
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
-    reconcile_selected_ids(
-        state_dir,
-        managed_plugin_root,
-        plugin_ids,
-        MANAGED_CAPABILITY_IDS,
-    )
+    let selected_ids = selected_managed_source_ids(plugin_ids);
+    reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids))
 }
 
 pub(crate) fn reconcile_selected_channels(
@@ -79,26 +77,36 @@ pub(crate) fn reconcile_selected_channels(
     managed_plugin_root: &Path,
     plugin_ids: &[String],
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
-    reconcile_selected_ids(
-        state_dir,
-        managed_plugin_root,
-        plugin_ids,
-        MANAGED_CHANNEL_IDS,
-    )
+    let selected_ids = selected_managed_ids(plugin_ids, MANAGED_CHANNEL_IDS);
+    let mut result = reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids))?;
+    result
+        .removed_ids
+        .extend(remove_unconfigured_managed_channel_targets(
+            state_dir,
+            &selected_ids,
+        )?);
+    result.sort_ids();
+    Ok(result)
 }
 
-fn reconcile_selected_ids(
-    state_dir: &CanonicalStateDir,
-    managed_plugin_root: &Path,
-    plugin_ids: &[String],
-    allowed_ids: &[&str],
-) -> Result<ManagedPluginReconcile, PluginReconcileError> {
-    let selected_ids = plugin_ids
+fn selected_managed_source_ids(plugin_ids: &[String]) -> BTreeSet<String> {
+    plugin_ids
+        .iter()
+        .filter(|id| {
+            MANAGED_SOURCES
+                .iter()
+                .any(|(managed_id, _)| id == managed_id)
+        })
+        .cloned()
+        .collect()
+}
+
+fn selected_managed_ids(plugin_ids: &[String], allowed_ids: &[&str]) -> BTreeSet<String> {
+    plugin_ids
         .iter()
         .filter(|id| allowed_ids.contains(&id.as_str()))
         .cloned()
-        .collect::<BTreeSet<_>>();
-    reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids))
+        .collect()
 }
 
 fn reconcile_bundles(
@@ -109,6 +117,9 @@ fn reconcile_bundles(
     let bundles = discover_managed_bundles(managed_plugin_root, selected_ids)?;
     let extensions = state_dir.as_path().join("extensions");
     ensure_directory(&extensions)?;
+    let extensions = extensions
+        .canonicalize()
+        .map_err(PluginReconcileError::io)?;
 
     let mut result = ManagedPluginReconcile::default();
     for bundle in &bundles {
@@ -138,8 +149,8 @@ fn reconcile_bundles(
 
     result.removed_ids = remove_stale_managed_builtin_targets(&extensions)?;
 
-    // A missing source is not an uninstall request. Cleanup is limited to
-    // obsolete builtin alias targets with a valid MatchaClaw managed marker.
+    // A missing source is not an uninstall request. Base cleanup only removes
+    // stale MatchaClaw-managed targets with a valid marker.
     result.sort_ids();
     Ok(result)
 }
@@ -147,9 +158,11 @@ fn reconcile_bundles(
 fn remove_stale_managed_builtin_targets(
     extensions: &Path,
 ) -> Result<Vec<String>, PluginReconcileError> {
-    let extensions = extensions
-        .canonicalize()
-        .map_err(PluginReconcileError::io)?;
+    let extensions = match extensions.canonicalize() {
+        Ok(extensions) => extensions,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
     let mut removed_ids = Vec::new();
     for entry in fs::read_dir(&extensions).map_err(PluginReconcileError::io)? {
         let entry = entry.map_err(PluginReconcileError::io)?;
@@ -157,38 +170,184 @@ fn remove_stale_managed_builtin_targets(
         let target_name = entry.file_name();
         let Some(target_id) = target_name
             .to_str()
-            .filter(|id| is_obsolete_managed_builtin_target(id))
+            .filter(|id| is_stale_managed_target(id))
         else {
             continue;
         };
-        let metadata = match fs::symlink_metadata(&target) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(PluginReconcileError::Io(error)),
-        };
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            continue;
+        if remove_marked_target(&extensions, &target, target_id)? {
+            removed_ids.push(target_id.to_owned());
         }
-        let Ok(canonical_target) = target.canonicalize() else {
-            continue;
-        };
-        if !canonical_target.starts_with(&extensions) {
-            continue;
-        }
-        let Some(_) = read_managed_marker(&target, target_id).map_err(PluginReconcileError::io)?
-        else {
-            continue;
-        };
-        fs::remove_dir_all(&target).map_err(PluginReconcileError::io)?;
-        removed_ids.push(target_id.to_owned());
     }
     Ok(removed_ids)
 }
 
-fn is_obsolete_managed_builtin_target(id: &str) -> bool {
-    MANAGED_SOURCES
-        .iter()
-        .any(|(canonical_id, aliases)| *canonical_id != id && aliases.contains(&id))
+fn remove_unconfigured_managed_channel_targets(
+    state_dir: &CanonicalStateDir,
+    configured_ids: &BTreeSet<String>,
+) -> Result<Vec<String>, PluginReconcileError> {
+    let extensions = state_dir.as_path().join("extensions");
+    let extensions = match extensions.canonicalize() {
+        Ok(extensions) => extensions,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    let mut removed_ids = Vec::new();
+    for &target_id in MANAGED_CHANNEL_IDS {
+        if configured_ids.contains(target_id) {
+            continue;
+        }
+        let target = extensions.join(target_id);
+        if remove_marked_target(&extensions, &target, target_id)? {
+            removed_ids.push(target_id.to_owned());
+        }
+    }
+    Ok(removed_ids)
+}
+
+pub(super) fn managed_target_exists(
+    extensions: &Path,
+    target_id: &str,
+) -> Result<bool, PluginReconcileError> {
+    let extensions = match extensions.canonicalize() {
+        Ok(extensions) => extensions,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    let target = extensions.join(target_id);
+    removable_marked_target(&extensions, &target, target_id)
+}
+
+pub(super) fn remove_managed_target(
+    extensions: &Path,
+    target_id: &str,
+) -> Result<bool, PluginReconcileError> {
+    let extensions = match extensions.canonicalize() {
+        Ok(extensions) => extensions,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    let target = extensions.join(target_id);
+    remove_marked_target(&extensions, &target, target_id)
+}
+
+fn remove_marked_target(
+    extensions: &Path,
+    target: &Path,
+    target_id: &str,
+) -> Result<bool, PluginReconcileError> {
+    if !removable_marked_target(extensions, target, target_id)? {
+        return Ok(false);
+    }
+    let deletion_root = target.canonicalize().map_err(PluginReconcileError::io)?;
+    safe_remove_tree(extensions, &deletion_root, target)?;
+    Ok(true)
+}
+
+fn removable_marked_target(
+    extensions: &Path,
+    target: &Path,
+    target_id: &str,
+) -> Result<bool, PluginReconcileError> {
+    if target.file_name().and_then(|name| name.to_str()) != Some(target_id) {
+        return Ok(false);
+    }
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Ok(false);
+    }
+    let Ok(canonical_target) = target.canonicalize() else {
+        return Ok(false);
+    };
+    if canonical_target == extensions || !canonical_target.starts_with(extensions) {
+        return Ok(false);
+    }
+    if canonical_target.file_name().and_then(|name| name.to_str()) != Some(target_id) {
+        return Ok(false);
+    }
+    let Some(_) = read_managed_marker(target, target_id).map_err(PluginReconcileError::io)? else {
+        return Ok(false);
+    };
+    Ok(true)
+}
+
+fn safe_remove_tree(
+    extensions: &Path,
+    deletion_root: &Path,
+    path: &Path,
+) -> Result<(), PluginReconcileError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        remove_link(path).map_err(PluginReconcileError::io)?;
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let canonical = path.canonicalize().map_err(PluginReconcileError::io)?;
+        if !canonical.starts_with(extensions) || !canonical.starts_with(deletion_root) {
+            return Err(PluginReconcileError::InvalidSource {
+                path: path.to_owned(),
+                reason: "path escape",
+            });
+        }
+        for entry in fs::read_dir(path).map_err(PluginReconcileError::io)? {
+            safe_remove_tree(
+                extensions,
+                deletion_root,
+                &entry.map_err(PluginReconcileError::io)?.path(),
+            )?;
+        }
+        fs::remove_dir(path).map_err(PluginReconcileError::io)?;
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(PluginReconcileError::io)
+}
+
+#[cfg(windows)]
+fn remove_link(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            fs::remove_dir(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+fn remove_link(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_: &fs::Metadata) -> bool {
+    false
+}
+
+fn is_stale_managed_target(id: &str) -> bool {
+    RETIRED_MANAGED_TARGET_IDS.contains(&id)
+        || MANAGED_SOURCES
+            .iter()
+            .any(|(canonical_id, aliases)| *canonical_id != id && aliases.contains(&id))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -490,7 +649,7 @@ fn target_state(path: &Path, id: &str) -> Result<TargetState, PluginReconcileErr
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(TargetState::Missing),
         Err(error) => return Err(PluginReconcileError::Io(error)),
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Ok(TargetState::Unmanaged);
     }
     let Some(marker) = read_managed_marker(path, id).map_err(PluginReconcileError::io)? else {
@@ -573,7 +732,8 @@ fn install_bundle(
             let _ = fs::rename(&backup, target);
             return Err(PluginReconcileError::Io(error));
         }
-        fs::remove_dir_all(backup).map_err(PluginReconcileError::io)?;
+        let backup_root = backup.canonicalize().map_err(PluginReconcileError::io)?;
+        safe_remove_tree(extensions, &backup_root, &backup)?;
     } else {
         fs::rename(&staging, target).map_err(PluginReconcileError::io)?;
     }
@@ -595,10 +755,7 @@ fn patch_staged_bundle(bundle: &ManagedBundle, staging: &Path) -> Result<(), Plu
     }
 
     let package = read_metadata_file(&staging.join(PACKAGE))?;
-    for key in ["main", "module"] {
-        let Some(entry) = text(package.get(key)) else {
-            continue;
-        };
+    for entry in plugin_runtime_entries(&package) {
         let entry_path = staging.join(&entry);
         let metadata = fs::symlink_metadata(&entry_path).map_err(PluginReconcileError::io)?;
         if !metadata.is_file()
@@ -621,6 +778,33 @@ fn patch_staged_bundle(bundle: &ManagedBundle, staging: &Path) -> Result<(), Plu
         }
     }
     Ok(())
+}
+
+fn plugin_runtime_entries(package: &Map<String, Value>) -> Vec<String> {
+    let openclaw_entries =
+        package
+            .get("openclaw")
+            .and_then(Value::as_object)
+            .and_then(|openclaw| {
+                string_array(openclaw.get("runtimeExtensions"))
+                    .or_else(|| string_array(openclaw.get("extensions")))
+            });
+    match openclaw_entries {
+        Some(entries) if !entries.is_empty() => entries,
+        _ => ["main", "module"]
+            .into_iter()
+            .filter_map(|key| text(package.get(key)))
+            .collect(),
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    value.and_then(Value::as_array).map(|entries| {
+        entries
+            .iter()
+            .filter_map(|entry| text(Some(entry)))
+            .collect()
+    })
 }
 
 fn replace_plugin_id(content: &str, source_id: &str, canonical_id: &str) -> String {
@@ -751,6 +935,7 @@ mod tests {
                 self.state_dir.clone(),
                 self.source.join("companion-skills"),
                 self.source.clone(),
+                self.path.clone(),
             )
         }
 
@@ -857,6 +1042,26 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_does_not_copy_when_marker_matches_source_signature() {
+        let root = TestRoot::new();
+        root.write_bundle("browser-relay", "1.0.0");
+        root.reconcile_selected(&["browser-relay"]);
+        fs::write(
+            root.target("browser-relay").join("dist/index.js"),
+            "target-only change",
+        )
+        .expect("target mutation");
+
+        let result = root.reconcile_selected(&["browser-relay"]);
+
+        assert_eq!(result.unchanged_ids, vec!["browser-relay"]);
+        assert_eq!(
+            fs::read_to_string(root.target("browser-relay").join("dist/index.js")).unwrap(),
+            "target-only change"
+        );
+    }
+
+    #[test]
     fn reconcile_updates_managed_target_by_version() {
         let root = TestRoot::new();
         root.write_bundle("browser-relay", "1.0.0");
@@ -933,18 +1138,100 @@ mod tests {
     }
 
     #[test]
+    fn selected_reconcile_does_not_install_bundled_openclaw_provider_extensions() {
+        let root = TestRoot::new();
+        root.write_bundle("opencode-go", "1.0.0");
+
+        let result = root.reconcile_selected(&["opencode-go"]);
+
+        assert!(result.installed_ids.is_empty());
+        assert!(!root.target("opencode-go").exists());
+    }
+
+    #[test]
+    fn reconcile_removes_marked_opencode_go_target() {
+        let root = TestRoot::new();
+        fs::create_dir_all(root.target("opencode-go")).expect("obsolete target");
+        fs::write(
+            root.target("opencode-go").join(MANAGED_MARKER),
+            "opencode-go\n1.0.0\nsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .expect("managed marker");
+
+        let result = root
+            .projection()
+            .reconcile_managed_plugins()
+            .expect("reconcile");
+
+        assert_eq!(result.removed_ids, vec!["opencode-go"]);
+        assert!(!root.target("opencode-go").exists());
+    }
+
+    #[test]
     fn selected_channel_reconcile_installs_only_configured_channel_plugins() {
         let root = TestRoot::new();
         root.write_bundle("dingtalk", "1.0.0");
-        root.write_bundle("discord", "1.0.0");
+        root.write_bundle("openclaw-weixin", "1.0.0");
         root.write_bundle("browser-relay", "1.0.0");
 
         let result = root.reconcile_selected_channels(&["dingtalk"]);
 
         assert_eq!(result.installed_ids, vec!["dingtalk"]);
         assert!(root.target("dingtalk").exists());
-        assert!(!root.target("discord").exists());
+        assert!(!root.target("openclaw-weixin").exists());
         assert!(!root.target("browser-relay").exists());
+    }
+
+    #[test]
+    fn selected_channel_reconcile_uses_openclaw_entry_for_lark_alias() {
+        let root = TestRoot::new();
+        let source = root.source.join("feishu-openclaw-plugin");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(MANIFEST),
+            serde_json::json!({"id": "openclaw-lark", "version": "1.0.0"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            source.join(PACKAGE),
+            serde_json::json!({
+                "name": "@larksuite/openclaw-lark",
+                "version": "1.0.0",
+                "main": "./dist/index.js",
+                "openclaw": {"extensions": ["./index.js"]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            source.join("index.js"),
+            "module.exports = { id: 'openclaw-lark' };",
+        )
+        .unwrap();
+
+        let result = root.reconcile_selected_channels(&["openclaw-lark"]);
+
+        assert_eq!(result.installed_ids, vec!["openclaw-lark"]);
+        assert!(root.target("openclaw-lark").join("index.js").is_file());
+        assert!(!root.target("openclaw-lark").join("dist/index.js").exists());
+    }
+
+    #[test]
+    fn selected_channel_reconcile_removes_only_matcha_owned_unconfigured_targets() {
+        let root = TestRoot::new();
+        root.write_bundle("dingtalk", "1.0.0");
+        root.write_bundle("openclaw-weixin", "1.0.0");
+        root.reconcile_selected_channels(&["dingtalk", "openclaw-weixin"]);
+        fs::create_dir_all(root.target("user-channel")).expect("unmanaged target");
+        fs::write(root.target("user-channel").join("package.json"), "{}").expect("package");
+
+        let result = root.reconcile_selected_channels(&["dingtalk"]);
+
+        assert_eq!(result.unchanged_ids, vec!["dingtalk"]);
+        assert_eq!(result.removed_ids, vec!["openclaw-weixin"]);
+        assert!(root.target("dingtalk").exists());
+        assert!(!root.target("openclaw-weixin").exists());
+        assert!(root.target("user-channel").exists());
     }
 
     #[test]
@@ -1017,6 +1304,25 @@ mod tests {
             fs::read_to_string(root.target("browser-relay").join("dist/index.js")).unwrap(),
             "export const changed = true;"
         );
+    }
+
+    #[test]
+    fn reconcile_rejects_unmarked_target_conflict() {
+        let root = TestRoot::new();
+        root.write_bundle("browser-relay", "1.0.0");
+        fs::create_dir_all(root.target("browser-relay")).expect("target");
+        fs::write(root.target("browser-relay").join("package.json"), "{}").expect("package");
+
+        let error = root
+            .projection()
+            .reconcile_managed_plugins()
+            .expect_err("reject unmarked target");
+
+        assert!(matches!(
+            error,
+            PluginReconcileError::TargetConflict { id } if id == "browser-relay"
+        ));
+        assert!(root.target("browser-relay").join("package.json").exists());
     }
 
     #[test]

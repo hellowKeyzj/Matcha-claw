@@ -337,6 +337,14 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn new_session_owners_use_new_projection_epochs() {
+        let runtime_dir = Arc::new(RuntimeDriverDirectory::new());
+        let (first, _) = session_owner(Arc::clone(&runtime_dir));
+        let (second, _) = session_owner(runtime_dir);
+        assert!(second.session_epoch_for_test() > first.session_epoch_for_test());
+    }
+
+    #[tokio::test]
     async fn handle_ingest_applies_openclaw_canonical() {
         // Arrange
         let runtime_dir = Arc::new(RuntimeDriverDirectory::new());

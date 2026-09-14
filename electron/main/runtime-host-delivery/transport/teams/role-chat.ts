@@ -16,6 +16,12 @@ const UNAVAILABLE = {
   error: 'Team role chat is unavailable',
 } as const;
 
+const UNKNOWN = {
+  success: false,
+  outcome: 'outcome-unknown',
+  error: 'Team role chat outcome is unknown',
+} as const;
+
 export type TeamRoleChatRequest = Readonly<{
   teamId: string;
   runId: string;
@@ -25,10 +31,11 @@ export type TeamRoleChatRequest = Readonly<{
 }>;
 
 export type TeamRoleChatTransportResponse = Readonly<{
-  status: 200 | 400 | 503;
+  status: 200 | 400 | 409 | 503;
   body:
-    | Readonly<{ success: true; outcome: 'accepted' | 'rejected' | 'outcome-unknown' }>
+    | Readonly<{ success: true; outcome: 'accepted' | 'rejected' }>
     | typeof INVALID
+    | typeof UNKNOWN
     | typeof UNAVAILABLE;
 }>;
 
@@ -64,6 +71,7 @@ export function createTeamRoleChatTransport(
         });
         const body: unknown = await response.json();
         if (response.status === 200 && isSuccess(body)) return { status: 200, body };
+        if (response.status === 409 && isUnknown(body)) return { status: 409, body };
       } catch {
         // Native transport details do not cross the Electron delivery boundary.
       }
@@ -84,14 +92,20 @@ function isRequest(value: unknown): value is TeamRoleChatRequest {
 
 function isSuccess(value: unknown): value is Readonly<{
   success: true;
-  outcome: 'accepted' | 'rejected' | 'outcome-unknown';
+  outcome: 'accepted' | 'rejected';
 }> {
   return isRecord(value)
     && hasExactKeys(value, ['success', 'outcome'])
     && value.success === true
-    && (value.outcome === 'accepted'
-      || value.outcome === 'rejected'
-      || value.outcome === 'outcome-unknown');
+    && (value.outcome === 'accepted' || value.outcome === 'rejected');
+}
+
+function isUnknown(value: unknown): value is typeof UNKNOWN {
+  return isRecord(value)
+    && hasExactKeys(value, ['success', 'outcome', 'error'])
+    && value.success === false
+    && value.outcome === UNKNOWN.outcome
+    && value.error === UNKNOWN.error;
 }
 
 function isOpaqueId(value: unknown): value is string {

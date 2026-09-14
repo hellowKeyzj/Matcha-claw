@@ -8,8 +8,6 @@ import {
   MessageSquare,
   Bot,
   Radio,
-  Puzzle,
-  Package,
   KeyRound,
   ListTodo,
   Users,
@@ -18,7 +16,6 @@ import {
   ChevronRight,
   Terminal,
   ExternalLink,
-  Cable,
   Network,
   CreditCard,
   Info,
@@ -39,8 +36,6 @@ import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useAccountStore } from '@/stores/account';
 import { useSubscriptionStore } from '@/stores/subscription';
-import { useSkillsStore } from '@/stores/skills';
-import { prewarmPluginsData } from '@/stores/plugins-store';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -57,8 +52,8 @@ import { hostApiFetch } from '@/lib/host-api';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
-import type { AccountSubscriptionProjection, AccountUsageProjection, CloudUser, PlatformQuotaProjection } from '@/lib/account';
-import type { PlatformQuota, SubscriptionProgress as SubscriptionProgressItem, SubscriptionSummary } from '@/lib/subscription';
+import type { AccountSubscriptionProjection, AccountUsageProjection, CloudUser } from '@/lib/account';
+import type { SubscriptionProgress as SubscriptionProgressItem, SubscriptionSummary } from '@/lib/subscription';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import type { TeamApprovalRecord } from '@/services/openclaw/team-runtime-client';
 import { useTranslation } from 'react-i18next';
@@ -71,6 +66,7 @@ interface NavItemProps {
   icon: React.ReactNode;
   label: string;
   collapsed?: boolean;
+  active?: boolean;
   onMouseEnter?: () => void;
   onFocus?: () => void;
   onNavigate?: (to: string) => void;
@@ -148,17 +144,29 @@ function buildSidebarQuotaViews(quotas: readonly SidebarQuotaInput[], t: (key: s
     .map((quota, index) => buildSidebarQuotaView(quota, index, t));
 }
 
+function buildSidebarBalanceViews(user: CloudUser | null, t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView[] {
+  if (!user) return [];
+  const frozenBalance = user.frozenBalance ?? 0;
+  return buildSidebarQuotaViews([
+    { id: 'balance:available', name: t('sidebar.account.quota.availableBalance'), used: user.balance, limit: null, unit: 'USD' },
+    { id: 'balance:frozen', name: t('sidebar.account.quota.frozenBalance'), used: frozenBalance, limit: null, unit: 'USD' },
+  ], t);
+}
+
+function isUsableSubscriptionStatus(status: string | undefined): boolean {
+  return status === 'active' || status === 'trialing';
+}
+
 function buildSidebarSubscriptionQuotaViews(input: {
   summary: SubscriptionSummary | null;
   progress: readonly SubscriptionProgressItem[] | null;
   t: (key: string, options?: Record<string, unknown>) => string;
 }): SidebarQuotaView[] {
-  const summarySubscription = input.summary?.subscriptions.find((subscription) => subscription.status === 'active')
-    ?? input.summary?.subscriptions[0]
+  const summarySubscription = input.summary?.subscriptions.find((subscription) => isUsableSubscriptionStatus(subscription.status))
     ?? null;
-  const progress = input.progress?.find((item) => item.subscriptionId === summarySubscription?.id)
-    ?? input.progress?.[0]
-    ?? null;
+  const progress = summarySubscription
+    ? input.progress?.find((item) => item.subscriptionId === summarySubscription.id) ?? null
+    : null;
 
   const quotas: SidebarQuotaInput[] = [];
   if (progress?.daily) {
@@ -180,18 +188,6 @@ function buildSidebarSubscriptionQuotaViews(input: {
   }
 
   return buildSidebarQuotaViews(quotas, input.t);
-}
-
-function buildSidebarPlatformQuotaViews(quotas: readonly PlatformQuota[], t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView[] {
-  return quotas
-    .slice(0, SIDEBAR_ACCOUNT_QUOTA_RENDER_LIMIT)
-    .map((quota, index) => buildSidebarQuotaView({
-      id: quota.platform,
-      name: t('sidebar.account.quota.platformMonthly', { platform: quota.platform }),
-      used: quota.monthly.usedUsd,
-      limit: quota.monthly.limitUsd,
-      unit: 'USD',
-    }, index, t));
 }
 
 function sidebarPlanBadgeVariant(status: string | undefined): SidebarPlanBadgeVariant {
@@ -273,8 +269,6 @@ interface SidebarAccountCardProps {
   usage: AccountUsageProjection | null;
   subscriptionSummary: SubscriptionSummary | null;
   subscriptionProgress: readonly SubscriptionProgressItem[] | null;
-  accountPlatformQuotas: readonly PlatformQuotaProjection[] | null;
-  subscriptionPlatformQuotas: readonly PlatformQuota[] | null;
   onLogin: () => void;
   onRegister: () => void;
   onOpenSubscription: () => void;
@@ -309,8 +303,6 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
   usage,
   subscriptionSummary,
   subscriptionProgress,
-  accountPlatformQuotas,
-  subscriptionPlatformQuotas,
   onLogin,
   onRegister,
   onOpenSubscription,
@@ -332,17 +324,15 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
     if (subscriptionQuotaViews.length > 0) {
       return subscriptionQuotaViews;
     }
-    if (subscriptionPlatformQuotas && subscriptionPlatformQuotas.length > 0) {
-      return buildSidebarPlatformQuotaViews(subscriptionPlatformQuotas, t);
-    }
-    if (accountPlatformQuotas && accountPlatformQuotas.length > 0) {
-      return buildSidebarQuotaViews(accountPlatformQuotas, t);
+    const balanceViews = buildSidebarBalanceViews(user, t);
+    if (balanceViews.length > 0) {
+      return balanceViews;
     }
     if (usage) {
       return buildSidebarQuotaViews([{ ...usage, id: 'account-usage', name: t('sidebar.account.quota.totalUsage') }], t);
     }
     return [];
-  }, [accountPlatformQuotas, subscriptionPlatformQuotas, subscriptionProgress, subscriptionSummary, t, usage]);
+  }, [subscriptionProgress, subscriptionSummary, t, usage, user]);
 
   const triggerClassName = collapsed
     ? 'flex h-10 w-10 items-center justify-center rounded-full border border-transparent bg-transparent transition-[background-color,border-color,box-shadow] hover:bg-secondary/70 data-[state=open]:border-border data-[state=open]:bg-card data-[state=open]:shadow-whisper'
@@ -394,12 +384,14 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
                   <span className="truncate">{quota.name}</span>
                   <span className="shrink-0">{quota.usageLabel}</span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
-                  <div
-                    className="h-full rounded-full bg-primary"
-                    style={{ width: quota.hasLimit ? `${quota.percent}%` : '100%' }}
-                  />
-                </div>
+                {quota.hasLimit ? (
+                  <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
+                    <div
+                      className="h-full rounded-full bg-primary"
+                      style={{ width: `${quota.percent}%` }}
+                    />
+                  </div>
+                ) : null}
               </div>
             ))
           ) : (
@@ -567,10 +559,11 @@ function buildApprovalBlockerCards(input: {
   return cards;
 }
 
-function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
+function NavItem({ to, icon, label, collapsed, active, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   return (
     <NavLink
       to={to}
+      aria-current={active ? 'page' : undefined}
       onMouseEnter={onMouseEnter}
       onFocus={onFocus}
       onClick={(event) => {
@@ -594,7 +587,7 @@ function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate
         cn(
           'flex items-center rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] transition-[background-color,color,box-shadow]',
           'hover:bg-secondary hover:text-foreground',
-          isActive
+          (active ?? isActive)
             ? 'bg-secondary text-foreground'
             : 'text-muted-foreground',
           collapsed ? 'justify-center gap-0 px-0' : 'gap-3',
@@ -797,17 +790,13 @@ export function Sidebar({
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
-  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-  const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const accountStatus = useAccountStore((state) => state.status);
   const accountUser = useAccountStore((state) => state.user);
   const accountSubscription = useAccountStore((state) => state.subscription);
   const accountUsage = useAccountStore((state) => state.usage);
-  const accountPlatformQuotas = useAccountStore((state) => state.platformQuotas);
   const logoutAccount = useAccountStore((state) => state.logout);
   const subscriptionSummary = useSubscriptionStore((state) => state.summary);
   const subscriptionProgress = useSubscriptionStore((state) => state.progress);
-  const subscriptionPlatformQuotas = useSubscriptionStore((state) => state.platformQuotas);
   const [subscriptionDialogOpen, setSubscriptionDialogOpen] = useState(false);
   const prefetchHandlesRef = useRef<Map<string, PrefetchScheduleHandle>>(new Map());
 
@@ -844,9 +833,6 @@ export function Sidebar({
       ? [{ to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') }]
       : []),
     { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
-    { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
-    { to: '/plugins', icon: <Package className="h-5 w-5" />, label: t('sidebar.plugins') },
-    { to: '/connectors', icon: <Cable className="h-5 w-5" />, label: t('sidebar.connectors') },
     { to: '/remote-fleet', icon: <Network className="h-5 w-5" />, label: t('sidebar.remoteFleet') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
@@ -862,11 +848,6 @@ export function Sidebar({
     }
 
     if (!gatewayOperational) {
-      return;
-    }
-
-    if (path === '/skills') {
-      void fetchSkills({ silent: true });
       return;
     }
 
@@ -890,12 +871,7 @@ export function Sidebar({
       });
       return;
     }
-
-    if (path === '/plugins') {
-      void prewarmPluginsData();
-    }
   }, [
-    fetchSkills,
     gatewayOperational,
     initTaskCenter,
     refreshTaskCenter,
@@ -949,17 +925,10 @@ export function Sidebar({
     if (location.pathname === to) {
       return;
     }
-    if (
-      to === '/skills'
-      && gatewayOperational
-      && !skillsSnapshotReady
-    ) {
-      void fetchSkills({ silent: true });
-    }
     startTransition(() => {
       navigate(to);
     });
-  }, [fetchSkills, gatewayOperational, location.pathname, navigate, skillsSnapshotReady]);
+  }, [location.pathname, navigate]);
 
   const openSubscriptionDialog = useCallback(() => {
     setSubscriptionDialogOpen(true);
@@ -1031,6 +1000,7 @@ export function Sidebar({
             key={item.to}
             {...item}
             collapsed={sidebarCollapsed}
+            active={item.to === '/subagents' && ['/subagents', '/skills', '/plugins', '/connectors'].includes(location.pathname) ? true : undefined}
             onMouseEnter={() => scheduleNavPrefetch(item.to)}
             onFocus={() => scheduleNavPrefetch(item.to)}
             onNavigate={navigateToPath}
@@ -1061,8 +1031,6 @@ export function Sidebar({
           usage={accountUsage}
           subscriptionSummary={subscriptionSummary}
           subscriptionProgress={subscriptionProgress}
-          accountPlatformQuotas={accountPlatformQuotas}
-          subscriptionPlatformQuotas={subscriptionPlatformQuotas}
           onLogin={navigateToLogin}
           onRegister={navigateToRegister}
           onOpenSubscription={openSubscriptionDialog}

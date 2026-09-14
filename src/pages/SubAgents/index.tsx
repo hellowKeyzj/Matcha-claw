@@ -1,23 +1,23 @@
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Upload } from 'lucide-react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Loader2, Plus, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { AgentPage, AgentPageSection, AgentResourceCard, AgentResourceGrid } from '@/components/common/AgentPage';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
-import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
   getSubagentTemplateById,
   getSubagentTemplateCatalog,
-  prefetchSubagentTemplateById,
 } from '@/services/openclaw/subagent-template-catalog';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentSkillConfigStore } from '@/stores/agent-skill-config';
 import { useAgentToolConfigStore } from '@/stores/agent-tool-config';
 import { useSubagentsStore } from '@/stores/subagents';
-import type { SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
+import type { SubagentCloudPackage, SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
 import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
@@ -25,14 +25,20 @@ import { SubagentCard } from './components/SubagentCard';
 import { SubagentDeleteDialog } from './components/SubagentDeleteDialog';
 import { SubagentFormDialog } from './components/SubagentFormDialog';
 import { SubagentTemplateLoadDialog } from './components/SubagentTemplateLoadDialog';
+import { SubagentTemplateLibrary } from './components/SubagentTemplateLibrary';
+import { SubagentResourceToolbar } from './components/SubagentResourceToolbar';
 
 type DialogMode = 'create' | 'edit';
 type SubagentEditorTab = 'basic' | 'persona' | 'skills' | 'tools';
-type TemplateListItem = SubagentTemplateCatalogResult['templates'][number];
+type AgentListState = 'starting' | 'loading' | 'ready';
 const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
-const INITIAL_TEMPLATE_CARD_BATCH = 9;
-const TEMPLATE_CARD_BATCH_SIZE = 18;
-const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
+const EMPTY_AGENTS: SubagentSummary[] = [];
+
+function packageLabel(packageInfo: SubagentCloudPackage): string {
+  return packageInfo.displayName?.trim()
+    || packageInfo.name?.trim()
+    || packageInfo.packageVersionId;
+}
 
 const AGENT_CONFIG_FILE_FILTERS = [
   { name: 'MatchaClaw Agent Config', extensions: ['matchaclaw-agent.json', 'json'] },
@@ -40,85 +46,27 @@ const AGENT_CONFIG_FILE_FILTERS = [
   { name: 'All Files', extensions: ['*'] },
 ];
 
-const TemplateCatalogCard = memo(function TemplateCatalogCard({
-  template,
-  localizedTemplateName,
-  localizedSummary,
-  loading,
-  disabled,
-  badgeLabel,
-  loadLabel,
-  loadingLabel,
-  onPrefetch,
-  onLoad,
-}: {
-  template: TemplateListItem;
-  localizedTemplateName: string;
-  localizedSummary: string;
-  loading: boolean;
-  disabled: boolean;
-  badgeLabel: string;
-  loadLabel: string;
-  loadingLabel: string;
-  onPrefetch: (templateId: string) => void;
-  onLoad: (templateId: string) => void;
-}) {
-  return (
-    <article
-      className="rounded-md border bg-background p-3"
-      onMouseEnter={() => onPrefetch(template.id)}
-      onFocus={() => onPrefetch(template.id)}
-    >
-      <div className="flex items-start gap-3">
-        <AgentAvatar
-          avatarSeed={buildTemplateAvatarSeed(template.id)}
-          agentId={template.id}
-          agentName={localizedTemplateName}
-          className="mt-0.5 h-8 w-8"
-          alt={`${localizedTemplateName} avatar`}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
-              {localizedTemplateName}
-            </h3>
-            <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium leading-none text-primary">
-              {badgeLabel}
-            </span>
-          </div>
-          <p className="truncate text-xs text-muted-foreground">{template.id}</p>
-          {localizedSummary && (
-            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-              {localizedSummary}
-            </p>
-          )}
-        </div>
-      </div>
-      <div className="mt-3">
-        <Button
-          size="sm"
-          variant="outline"
-          className="w-full"
-          disabled={loading || disabled}
-          onClick={() => {
-            onLoad(template.id);
-          }}
-          onMouseEnter={() => onPrefetch(template.id)}
-          onFocus={() => onPrefetch(template.id)}
-        >
-          {loading ? loadingLabel : loadLabel}
-        </Button>
-      </div>
-    </article>
-  );
-});
-
 export function SubAgents() {
   const { t } = useTranslation('subagents');
   const { t: tTemplate } = useTranslation('subagentTemplates');
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') === 'templates' ? 'templates' : 'agents';
+  const agentSearch = searchParams.get('search') ?? '';
+  const agentView = searchParams.get('view') === 'list' ? 'list' : 'grid';
+  const deferredAgentSearch = useDeferredValue(agentSearch.trim().toLocaleLowerCase());
+  const updateAgentQuery = (key: string, value: string, defaultValue = '') => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      if (value === defaultValue) next.delete(key);
+      else next.set(key, value);
+      return next;
+    }, { replace: key !== 'tab' });
+  };
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
-  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
+  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : EMPTY_AGENTS;
+  const cloudPackages = useSubagentsStore((state) => state.cloudPackages);
+  const loadCloudPackages = useSubagentsStore((state) => state.loadCloudPackages);
   const mutating = useSubagentsStore((state) => state.mutating);
   const error = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
@@ -145,6 +93,10 @@ export function SubAgents() {
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const deleteAgent = useSubagentsStore((state) => state.deleteAgent);
   const exportAgentConfig = useSubagentsStore((state) => state.exportAgentConfig);
+  const exportAgentPackage = useSubagentsStore((state) => state.exportAgentPackage);
+  const uploadAgentPackageToCloud = useSubagentsStore((state) => state.uploadAgentPackageToCloud);
+  const downloadAgentPackageFromCloud = useSubagentsStore((state) => state.downloadAgentPackageFromCloud);
+  const installAgentPackageFromCloud = useSubagentsStore((state) => state.installAgentPackageFromCloud);
   const importAgentConfig = useSubagentsStore((state) => state.importAgentConfig);
   const createAgentFromTemplate = useSubagentsStore((state) => state.createAgentFromTemplate);
   const generateDraftFromPrompt = useSubagentsStore((state) => state.generateDraftFromPrompt);
@@ -167,25 +119,21 @@ export function SubAgents() {
   const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [templateCatalog, setTemplateCatalog] = useState<SubagentTemplateCatalogResult>({ categories: [], templates: [] });
-  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesLoading, setTemplatesLoading] = useState(true);
   const [templateError, setTemplateError] = useState<string | null>(null);
-  const [templatesExpanded, setTemplatesExpanded] = useState(false);
-  const [selectedTemplateCategory, setSelectedTemplateCategory] = useState<string>('all');
   const [templateLoadingId, setTemplateLoadingId] = useState<string | null>(null);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
   const [templateDialogLoading, setTemplateDialogLoading] = useState(false);
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
+  const [cloudPackagesOpen, setCloudPackagesOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test' || agents.length > 0 || agentsResource.hasLoadedOnce,
   );
-  const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayOperational = isGatewayOperational(gatewayStatus);
   const templateLoadRequestIdRef = useRef(0);
-  const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
-  const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
   const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
@@ -203,15 +151,16 @@ export function SubAgents() {
   const editingToolConfigLoading = editingAgentId ? Boolean(toolConfigLoadingByAgentId[editingAgentId]) : false;
   const editingToolConfigError = editingAgentId ? (toolConfigErrorByAgentId[editingAgentId] ?? null) : null;
   const hasAvailableModels = availableModels.length > 0;
-  const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
   const gatewayPending = !gatewayInitialized || isGatewayRecovering(gatewayStatus);
-  const showSubagentGridSkeleton = !hasAgentCards && !agentsResource.hasLoadedOnce && (
-    agentsResource.status === 'loading'
-    || agentsResource.status === 'idle'
-    || !subagentsHeavyContentReady
-    || gatewayPending
-  );
+  const agentListState: AgentListState = gatewayPending && !agentsResource.hasLoadedOnce
+    ? 'starting'
+    : (!hasAgentCards && !agentsResource.hasLoadedOnce && (
+      agentsResource.status === 'loading'
+      || agentsResource.status === 'idle'
+      || !subagentsHeavyContentReady
+    ) ? 'loading' : 'ready');
+  const showNoModelGuide = agentListState !== 'starting' && !modelsLoading && !hasAvailableModels;
   const showRefreshingHint = useDelayedFlag(
     agentsResource.hasLoadedOnce && agentsResource.status === 'loading',
     180,
@@ -221,10 +170,9 @@ export function SubAgents() {
     if (!gatewayOperational) {
       return;
     }
-    void loadAvailableModels().catch(() => {
-      useSubagentsStore.setState({ availableModels: [], modelsLoading: false });
-    });
-  }, [gatewayOperational, loadAvailableModels]);
+    void loadAvailableModels();
+    void loadCloudPackages().catch(() => undefined);
+  }, [gatewayOperational, loadAvailableModels, loadCloudPackages]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -251,11 +199,17 @@ export function SubAgents() {
     if (!managedAgentId || dialogOpen || editingAgentId) {
       return;
     }
+    const managedAgent = agents.find((agent) => agent.id === managedAgentId);
+    if (managedAgent?.sealed) {
+      setManagedAgentId(null);
+      toast.error(t('sealed.editDisabled'));
+      return;
+    }
     setDialogMode('edit');
     setDialogInitialTab('persona');
     setEditingAgentId(managedAgentId);
     setDialogOpen(true);
-  }, [dialogOpen, editingAgentId, managedAgentId]);
+  }, [agents, dialogOpen, editingAgentId, managedAgentId, setManagedAgentId, t]);
 
   useEffect(() => {
     if (!editingAgentId || !dialogOpen || dialogMode !== 'edit') {
@@ -340,189 +294,13 @@ export function SubAgents() {
     };
   }, []);
 
-  const templateCategoryCountById = useMemo(() => {
-    if (!subagentsHeavyContentReady) {
-      return new Map<string, number>();
-    }
-    const counts = new Map<string, number>();
-    for (const template of templateCatalog.templates) {
-      const categoryId = template.categoryId?.trim();
-      if (!categoryId) {
-        continue;
-      }
-      counts.set(categoryId, (counts.get(categoryId) ?? 0) + 1);
-    }
-    return counts;
-  }, [subagentsHeavyContentReady, templateCatalog.templates]);
-
-  const templateCategories = useMemo(() => {
-    if (!subagentsHeavyContentReady) {
-      return [];
-    }
-    const usedCategoryIds = new Set(templateCategoryCountById.keys());
-    const categoriesFromCatalog = templateCatalog.categories
-      .filter((category) => usedCategoryIds.has(category.id))
-      .sort((a, b) => {
-        const aOrder = a.order ?? Number.MAX_SAFE_INTEGER;
-        const bOrder = b.order ?? Number.MAX_SAFE_INTEGER;
-        if (aOrder !== bOrder) {
-          return aOrder - bOrder;
-        }
-        return a.id.localeCompare(b.id);
-      });
-
-    const knownIds = new Set(categoriesFromCatalog.map((category) => category.id));
-    const fallbackCategories = [...usedCategoryIds]
-      .filter((id) => !knownIds.has(id))
-      .sort((a, b) => a.localeCompare(b))
-      .map((id) => ({ id }));
-    return [...categoriesFromCatalog, ...fallbackCategories];
-  }, [subagentsHeavyContentReady, templateCatalog.categories, templateCategoryCountById]);
-
-  const filteredTemplates = useMemo(() => {
-    if (!subagentsHeavyContentReady) {
-      return [];
-    }
-    if (selectedTemplateCategory === 'all') {
-      return templateCatalog.templates;
-    }
-    return templateCatalog.templates.filter((template) => template.categoryId === selectedTemplateCategory);
-  }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCatalog.templates]);
-  const deferredFilteredTemplates = useDeferredValue(filteredTemplates);
-  const visibleTemplates = useMemo(
-    () => deferredFilteredTemplates.slice(0, visibleTemplateCount),
-    [deferredFilteredTemplates, visibleTemplateCount],
-  );
-  const displayedTemplateCount = Math.min(visibleTemplateCount, deferredFilteredTemplates.length);
-
-  useEffect(() => {
-    if (!templatesExpanded) {
-      return;
-    }
-    setVisibleTemplateCount(INITIAL_TEMPLATE_CARD_BATCH);
-  }, [selectedTemplateCategory, templatesExpanded]);
-
-  const appendVisibleTemplates = useCallback(() => {
-    setVisibleTemplateCount((prev) => {
-      if (prev >= deferredFilteredTemplates.length) {
-        return prev;
-      }
-      return Math.min(prev + TEMPLATE_CARD_BATCH_SIZE, deferredFilteredTemplates.length);
-    });
-  }, [deferredFilteredTemplates.length]);
-
-  const handleTemplateCardScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
-      return;
-    }
-    const target = event.currentTarget;
-    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
-    if (remain <= TEMPLATE_CARD_SCROLL_THRESHOLD_PX) {
-      appendVisibleTemplates();
-    }
-  }, [appendVisibleTemplates, deferredFilteredTemplates.length, displayedTemplateCount]);
-
-  useEffect(() => {
-    if (!subagentsHeavyContentReady || selectedTemplateCategory === 'all') {
-      return;
-    }
-    const exists = templateCategories.some((category) => category.id === selectedTemplateCategory);
-    if (!exists) {
-      setSelectedTemplateCategory('all');
-    }
-  }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCategories]);
-
-  useEffect(() => {
-    if (!templatesExpanded || !subagentsHeavyContentReady) {
-      return;
-    }
-    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
-      return;
-    }
-    const container = templateCardScrollRef.current;
-    if (!container) {
-      return;
-    }
-    if (container.scrollHeight <= container.clientHeight + 8) {
-      appendVisibleTemplates();
-    }
-  }, [
-    appendVisibleTemplates,
-    deferredFilteredTemplates.length,
-    displayedTemplateCount,
-    subagentsHeavyContentReady,
-    templatesExpanded,
-    visibleTemplates.length,
-  ]);
-
-  const prefetchTemplateDetail = useCallback((templateId: string) => {
-    const normalizedId = templateId.trim();
-    if (!normalizedId) {
-      return;
-    }
-    if (prefetchedTemplateIdsRef.current.has(normalizedId)) {
-      return;
-    }
-    prefetchedTemplateIdsRef.current.add(normalizedId);
-    void prefetchSubagentTemplateById(normalizedId).catch(() => {
-      prefetchedTemplateIdsRef.current.delete(normalizedId);
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!subagentsHeavyContentReady || !templatesExpanded || templatesLoading || deferredFilteredTemplates.length === 0) {
-      return;
-    }
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const sleep = (ms: number) => new Promise<void>((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-
-    const runPrefetch = async () => {
-      for (const template of deferredFilteredTemplates.slice(0, 4)) {
-        if (cancelled) {
-          return;
-        }
-        prefetchTemplateDetail(template.id);
-        await sleep(80);
-      }
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(() => {
-        void runPrefetch();
-      }, { timeout: 500 });
-    } else {
-      timeoutId = window.setTimeout(() => {
-        void runPrefetch();
-      }, 120);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [deferredFilteredTemplates, prefetchTemplateDetail, subagentsHeavyContentReady, templatesExpanded, templatesLoading]);
-
-  const localizedTemplateTextMap = useMemo(() => {
-    const localized = new Map<string, { name: string; summary: string }>();
-    for (const template of deferredFilteredTemplates) {
-      localized.set(template.id, {
-        name: tTemplate(`templates.${template.id}.name`, { defaultValue: template.name }),
-        summary: tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' }) || '',
-      });
-    }
-    return localized;
-  }, [deferredFilteredTemplates, tTemplate]);
+  const filteredAgents = useMemo(() => {
+    if (!deferredAgentSearch) return agents;
+    return agents.filter((agent) => (
+      `${agent.id} ${agent.name ?? ''} ${agent.description ?? ''} ${agent.model ?? ''}`
+        .toLocaleLowerCase().includes(deferredAgentSearch)
+    ));
+  }, [agents, deferredAgentSearch]);
 
   const editingAgent: SubagentSummary | undefined = editingAgentId
     ? (agents.find((agent) => agent.id === editingAgentId) ?? (editingAgentId === managedAgentId ? { id: editingAgentId, name: editingAgentId } : undefined))
@@ -537,6 +315,11 @@ export function SubAgents() {
   };
 
   const openEditDialog = (agentId: string, initialTab: SubagentEditorTab = 'basic') => {
+    const agent = agents.find((entry) => entry.id === agentId);
+    if (agent?.sealed) {
+      toast.error(t('sealed.editDisabled'));
+      return;
+    }
     setDialogMode('edit');
     setDialogInitialTab(initialTab);
     setEditingAgentId(agentId);
@@ -592,6 +375,10 @@ export function SubAgents() {
   };
 
   const handleExportAgentConfig = useCallback(async (agent: SubagentSummary) => {
+    if (agent.sealed) {
+      toast.error(t('sealed.configExportDisabled'));
+      return;
+    }
     try {
       const packageData = await exportAgentConfig(agent.id);
       const fileNameBase = normalizeSubagentNameToSlug(packageData.agent.name) || agent.id;
@@ -608,6 +395,48 @@ export function SubAgents() {
       toast.error(t('transfer.exportFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
   }, [exportAgentConfig, t]);
+
+  const handleExportAgentPackage = useCallback(async (agent: SubagentSummary) => {
+    try {
+      const result = await exportAgentPackage(agent.id);
+      toast.success(t('transfer.exportPackageSuccess', { fileName: result.fileName }));
+    } catch (error) {
+      toast.error(t('transfer.exportPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [exportAgentPackage, t]);
+
+  const handleUploadAgentPackageToCloud = useCallback(async (agent: SubagentSummary) => {
+    try {
+      const result = await uploadAgentPackageToCloud(agent.id);
+      toast.success(t('transfer.uploadPackageSuccess', { fileName: result.fileName ?? agent.name ?? agent.id }));
+      void loadCloudPackages().catch(() => undefined);
+    } catch (error) {
+      toast.error(t('transfer.uploadPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [loadCloudPackages, t, uploadAgentPackageToCloud]);
+
+  const handleDownloadAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
+    try {
+      const result = await downloadAgentPackageFromCloud(packageInfo.packageVersionId);
+      toast.success(t('transfer.downloadPackageSuccess', { fileName: result.fileName }));
+    } catch (error) {
+      toast.error(t('transfer.downloadPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [downloadAgentPackageFromCloud, t]);
+
+  const handleInstallAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
+    try {
+      const result = await installAgentPackageFromCloud(packageInfo.packageVersionId);
+      if (result.warning) {
+        toast.warning(result.warning);
+      } else {
+        toast.success(t('transfer.installPackageSuccess', { agentId: result.agentId }));
+      }
+      void loadPersistedFilesForAgent(result.agentId);
+    } catch (error) {
+      toast.error(t('transfer.installPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [installAgentPackageFromCloud, loadPersistedFilesForAgent, t]);
 
   const handleImportAgentConfig = useCallback(async () => {
     try {
@@ -633,205 +462,151 @@ export function SubAgents() {
   }, [importAgentConfig, loadPersistedFilesForAgent, setManagedAgentId, t]);
 
   return (
-    <section className="space-y-4">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {(showRefreshingHint || mutating) && (
-            <span className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs text-muted-foreground">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-primary" />
-              {mutating ? t('status.mutating') : t('status.refreshing')}
-            </span>
-          )}
-          <Button variant="outline" className="gap-2" onClick={handleImportAgentConfig}>
-            <Upload className="h-4 w-4" />
-            {t('transfer.import')}
-          </Button>
-          <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>
-        </div>
-      </header>
+    <AgentPage>
+      <Tabs value={activeTab} onValueChange={(value) => updateAgentQuery('tab', value, 'agents')} className="space-y-6">
+        <AgentPageSection actions={
+          <>
+            {(showRefreshingHint || mutating) && (
+              <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="size-2 animate-pulse rounded-full bg-primary" />
+                {mutating ? t('status.mutating') : t('status.refreshing')}
+              </span>
+            )}
+            {agentListState !== 'starting' && (
+              <Button variant="outline" size="sm" className="gap-2 rounded-full" onClick={handleImportAgentConfig}>
+                <Upload className="size-4" aria-hidden="true" />
+                {t('transfer.import')}
+              </Button>
+            )}
+            {activeTab === 'agents' && agentListState !== 'starting' && (
+              <Button size="sm" className="gap-2 rounded-full" onClick={openCreateDialog}>
+                <Plus className="size-4" aria-hidden="true" />
+                {t('newSubagent')}
+              </Button>
+            )}
+          </>
+        }>
+          <TabsList variant="line" aria-label={t('title')}>
+            <TabsTrigger value="agents" className="gap-2">
+              {t('tabs.agents')}
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{agents.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="templates" className="gap-2">
+              {t('tabs.templates')}
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{templateCatalog.templates.length}</span>
+            </TabsTrigger>
+          </TabsList>
+        </AgentPageSection>
 
-      {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {error}
-        </p>
-      )}
-      {showNoModelGuide && (
-        <div className="rounded-md border border-amber-300/60 bg-amber-50/70 p-3 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
-          <p>{t('modelGuide.description')}</p>
-          <div className="mt-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => navigate('/providers')}
-            >
-              {t('modelGuide.action')}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      <section className="space-y-3 rounded-lg border bg-card/40 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold">{t('templates.title')}</h2>
-            <p className="text-xs text-muted-foreground">
-              {t('templates.subtitle', { count: templateCatalog.templates.length })}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              aria-expanded={templatesExpanded}
-              onClick={() => setTemplatesExpanded((prev) => !prev)}
-            >
-              <ChevronDown className={`mr-1 h-4 w-4 transition-transform ${templatesExpanded ? 'rotate-180' : ''}`} />
-              {templatesExpanded ? t('templates.collapse') : t('templates.expand')}
-            </Button>
-          </div>
-        </div>
-
-        {templatesExpanded && !subagentsHeavyContentReady && (
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div key={`subagents-template-filter-placeholder-${index}`} className="h-8 w-20 animate-pulse rounded-md bg-muted" />
-              ))}
-            </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {Array.from({ length: 3 }).map((_, index) => (
-                <div key={`subagents-template-card-placeholder-${index}`} className="rounded-md border bg-background p-3">
-                  <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
-                  <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
-                  <div className="mt-4 h-8 w-full animate-pulse rounded bg-muted" />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {templatesExpanded && subagentsHeavyContentReady && templatesLoading && (
-          <p className="text-sm text-muted-foreground">{t('templates.loading')}</p>
-        )}
-        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && templateError && (
-          <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-sm text-destructive">
-            {t('templates.error', { message: templateError })}
+        {error && (
+          <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+            {error}
           </p>
         )}
-        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && !templateError && templateCatalog.templates.length === 0 && (
-          <p className="text-sm text-muted-foreground">{t('templates.empty')}</p>
-        )}
-        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && !templateError && templateCatalog.templates.length > 0 && (
-          <>
-            <div className="flex flex-wrap items-center gap-2">
+        {showNoModelGuide && (
+          <div className="rounded-md border border-amber-300/60 bg-amber-50/70 p-3 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+            <p>{t('modelGuide.description')}</p>
+            <div className="mt-2">
               <Button
                 type="button"
                 size="sm"
-                variant={selectedTemplateCategory === 'all' ? 'default' : 'outline'}
-                onClick={() => setSelectedTemplateCategory('all')}
+                variant="outline"
+                onClick={() => navigate('/providers')}
               >
-                {t('templates.categories.all')} ({templateCatalog.templates.length})
+                {t('modelGuide.action')}
               </Button>
-              {templateCategories.map((category) => (
-                <Button
-                  key={category.id}
-                  type="button"
-                  size="sm"
-                  variant={selectedTemplateCategory === category.id ? 'default' : 'outline'}
-                  onClick={() => setSelectedTemplateCategory(category.id)}
-                >
-                  {t(`templates.categories.${category.id}`, { defaultValue: category.id })} (
-                  {templateCategoryCountById.get(category.id) ?? 0})
-                </Button>
-              ))}
             </div>
-            {deferredFilteredTemplates.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t('templates.empty')}</p>
-            ) : (
-              <div
-                ref={templateCardScrollRef}
-                className="max-h-[56vh] overflow-y-auto pr-1"
-                onScroll={handleTemplateCardScroll}
-              >
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {visibleTemplates.map((template) => {
-                    const localizedText = localizedTemplateTextMap.get(template.id);
-                    return (
-                      <TemplateCatalogCard
-                        key={template.id}
-                        template={template}
-                        localizedTemplateName={localizedText?.name ?? template.name}
-                        localizedSummary={localizedText?.summary ?? template.summary ?? ''}
-                        loading={templateLoadingId === template.id}
-                        disabled={modelsLoading || availableModels.length === 0}
-                        badgeLabel={t('templates.badge')}
-                        loadLabel={t('templates.load')}
-                        loadingLabel={t('templates.loadingButton')}
-                        onPrefetch={prefetchTemplateDetail}
-                        onLoad={handleLoadTemplateCard}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            {displayedTemplateCount < deferredFilteredTemplates.length && (
-              <div className="rounded-md border border-dashed px-3 py-2 text-center">
-                <p className="text-xs text-muted-foreground">
-                  {t('templates.pagination.showing', { shown: displayedTemplateCount, total: deferredFilteredTemplates.length })}
-                </p>
-              </div>
-            )}
-          </>
+          </div>
         )}
-      </section>
 
-      {showSubagentGridSkeleton ? (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
-          {Array.from({ length: 8 }).map((_, index) => (
-            <div key={`subagents-card-placeholder-${index}`} className="rounded-lg border bg-card p-4">
-              <div className="h-5 w-2/5 animate-pulse rounded bg-muted" />
-              <div className="mt-3 h-3 w-4/5 animate-pulse rounded bg-muted" />
-              <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
-              <div className="mt-4 h-8 w-full animate-pulse rounded bg-muted" />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
-          {agents.map((agent) => (
-            <SubagentCard
-              key={agent.id}
-              agent={agent}
-              modelLabel={resolveModelCatalogEntry(availableModels, agent.model)?.modelLabel ?? agent.model?.trim()}
-              editLocked={false}
-              deleteLocked={Boolean(agent.isDefault)}
-              exportLocked={false}
-              modelReady={Boolean(agent.model?.trim())}
-              onEdit={() => openEditDialog(agent.id)}
-              onDelete={() => {
-                setDeletingAgentId(agent.id);
-              }}
-              onExport={() => {
-                void handleExportAgentConfig(agent);
-              }}
-              onChat={() => {
-                const query = new URLSearchParams({ agent: agent.id }).toString();
-                navigate(`/?${query}`);
-              }}
+        <TabsContent value="templates" className="mt-0">
+          {activeTab === 'templates' && (
+            <SubagentTemplateLibrary
+              catalog={templateCatalog}
+              loading={templatesLoading || !subagentsHeavyContentReady}
+              error={templateError}
+              templateLoadingId={templateLoadingId}
+              modelsUnavailable={modelsLoading || !hasAvailableModels}
+              onLoad={handleLoadTemplateCard}
             />
-          ))}
-        </div>
-      )}
-
-      {!showSubagentGridSkeleton && agentsResource.hasLoadedOnce && agents.length === 0 && (
-        <p className="text-sm text-muted-foreground">{t('empty')}</p>
-      )}
+          )}
+        </TabsContent>
+        <TabsContent value="agents" className="mt-0 space-y-6">
+          {agentListState !== 'starting' && (
+            <SubagentResourceToolbar
+              search={agentSearch}
+              onSearchChange={(value) => updateAgentQuery('search', value)}
+              searchLabel={t('search.agents')}
+              countLabel={t('results.agents', { total: filteredAgents.length })}
+              view={agentView}
+              onViewChange={(value) => updateAgentQuery('view', value, 'grid')}
+            />
+          )}
+          {agentListState === 'starting' ? (
+            <div role="status" className="flex min-h-[360px] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border bg-card/60 p-8 text-center">
+              <div className="flex size-14 items-center justify-center rounded-2xl border border-border bg-muted/40 text-muted-foreground">
+                <Loader2 className="size-6 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-medium text-foreground">{t('startup.title')}</h3>
+                <p className="text-sm text-muted-foreground">{t('startup.description')}</p>
+              </div>
+            </div>
+          ) : agentListState === 'loading' ? (
+            <AgentResourceGrid data-testid="subagent-card-grid" aria-busy="true">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <AgentResourceCard key={index} className="gap-5">
+                  <div className="flex items-center gap-3">
+                    <div className="size-10 animate-pulse rounded-xl bg-muted" />
+                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
+                  </div>
+                  <div className="h-10 w-4/5 animate-pulse rounded bg-muted" />
+                  <div className="h-7 w-full animate-pulse rounded bg-muted" />
+                </AgentResourceCard>
+              ))}
+            </AgentResourceGrid>
+          ) : (
+            <AgentResourceGrid data-testid="subagent-card-grid" className={agentView === 'list' ? 'md:grid-cols-1 xl:grid-cols-1' : undefined}>
+              {filteredAgents.map((agent) => (
+                <SubagentCard
+                  key={agent.id}
+                  agent={agent}
+                  compact={agentView === 'list'}
+                  modelLabel={resolveModelCatalogEntry(availableModels, agent.model)?.modelLabel ?? agent.model?.trim()}
+                  editLocked={(agent.kind === 'system' && !agent.isDefault) || Boolean(agent.sealed)}
+                  deleteLocked={Boolean(agent.isDefault) || agent.kind === 'system'}
+                  exportLocked={agent.kind === 'system' || Boolean(agent.sealed)}
+                  packageExportLocked={agent.kind === 'system'}
+                  modelReady={(agent.kind !== 'system' || Boolean(agent.isDefault)) && Boolean(agent.model?.trim())}
+                  onEdit={() => openEditDialog(agent.id)}
+                  onDelete={() => {
+                    setDeletingAgentId(agent.id);
+                  }}
+                  onExport={() => {
+                    void handleExportAgentConfig(agent);
+                  }}
+                  onExportPackage={() => {
+                    void handleExportAgentPackage(agent);
+                  }}
+                  onUploadPackageToCloud={() => {
+                    void handleUploadAgentPackageToCloud(agent);
+                  }}
+                  onOpenCloudPackages={() => {
+                    setCloudPackagesOpen(true);
+                  }}
+                  onChat={() => {
+                    const query = new URLSearchParams({ agent: agent.id }).toString();
+                    navigate(`/?${query}`);
+                  }}
+                />
+              ))}
+            </AgentResourceGrid>
+          )}
+          {agentListState === 'ready' && agentsResource.hasLoadedOnce && filteredAgents.length === 0 && (
+            <p className="py-10 text-center text-sm text-muted-foreground">{t(agents.length ? 'search.empty' : 'empty')}</p>
+          )}
+        </TabsContent>
+      </Tabs>
       <SubagentDeleteDialog
         open={Boolean(deletingAgentId)}
         agentId={deletingAgentId}
@@ -990,6 +765,34 @@ export function SubAgents() {
         }}
       />
 
+      <Sheet open={cloudPackagesOpen} onOpenChange={setCloudPackagesOpen}>
+        <SheetContent aria-describedby={undefined} className="w-[28rem] sm:max-w-[28rem]">
+          <SheetHeader>
+            <SheetTitle>{t('cloudPackages.title')}</SheetTitle>
+          </SheetHeader>
+          <div className="mt-4 space-y-2">
+            {cloudPackages.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t('cloudPackages.empty')}</p>
+            ) : cloudPackages.map((packageInfo) => (
+              <div key={packageInfo.packageVersionId} className="rounded-lg border p-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{packageLabel(packageInfo)}</p>
+                  <p className="truncate text-xs text-muted-foreground">{packageInfo.version}</p>
+                </div>
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button size="sm" variant="outline" onClick={() => void handleDownloadAgentPackageFromCloud(packageInfo)}>
+                    {t('cloudPackages.download')}
+                  </Button>
+                  <Button size="sm" onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
+                    {t('cloudPackages.install')}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </SheetContent>
+      </Sheet>
+
       <SubagentTemplateLoadDialog
         open={templateDialogOpen}
         loading={templateDialogLoading}
@@ -1028,7 +831,7 @@ export function SubAgents() {
           setActiveTemplate(null);
         }}
       />
-    </section>
+    </AgentPage>
   );
 }
 

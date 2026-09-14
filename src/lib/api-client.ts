@@ -89,19 +89,23 @@ export async function invokeApi<T>(channel: string, ...args: unknown[]): Promise
     return value;
   } catch (err) {
     const durationMs = Date.now() - startedAt;
+    const request = args[0];
+    const isChannelRequest = channel === 'hostapi:fetch'
+      && request !== null && typeof request === 'object' && 'path' in request
+      && typeof request.path === 'string' && request.path.startsWith('/api/channels/');
     logApiAttempt({
       requestId,
       channel,
       durationMs,
       ok: false,
-      error: err,
+      error: isChannelRequest ? { category: 'channel_request_failed' } : err,
     });
     trackUiEvent('api.request_error', {
       requestId,
       channel,
       transport: 'ipc',
       durationMs,
-      message: err instanceof Error ? err.message : String(err),
+      message: isChannelRequest ? 'Channel request failed' : err instanceof Error ? err.message : String(err),
     });
     throw normalizeAppError(err, {
       requestId,

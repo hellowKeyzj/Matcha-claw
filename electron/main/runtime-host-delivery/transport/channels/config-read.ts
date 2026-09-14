@@ -1,8 +1,13 @@
 import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './catalog';
 
 const DECISION_TTL_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const ENDPOINT = '/api/channels/config/read';
+const UNAVAILABLE = {
+  success: false,
+  error: 'Channel configuration is unavailable',
+} as const;
 
 export type ChannelConfigReadRequest = Readonly<{
   channel: string;
@@ -14,7 +19,7 @@ export type ChannelConfigReadProjection = Readonly<{
 }>;
 
 export interface ChannelConfigReadTransport {
-  read(input: ChannelConfigReadRequest): Promise<ChannelConfigReadProjection | null>;
+  read(input: ChannelConfigReadRequest, traceId?: string): Promise<ChannelConfigReadProjection | null>;
 }
 
 export function createChannelConfigReadTransport(
@@ -24,9 +29,13 @@ export function createChannelConfigReadTransport(
 ): ChannelConfigReadTransport {
   const url = `http://127.0.0.1:${port}${ENDPOINT}`;
   return {
-    async read(input): Promise<ChannelConfigReadProjection | null> {
+    async read(input, traceId): Promise<ChannelConfigReadProjection | null> {
       if (!isRequest(input)) return null;
 
+      const finish = beginChannelTrace('transport.config_read', traceId);
+      let status = 503;
+      let body: unknown;
+      let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
       const controller = new AbortController();
       const requestTimeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       try {
@@ -43,6 +52,7 @@ export function createChannelConfigReadTransport(
               revision: '1',
             })}`,
             'Content-Type': 'application/json',
+            ...channelTraceHeaders(traceId),
           },
           body: JSON.stringify({
             channel: input.channel,
@@ -50,17 +60,22 @@ export function createChannelConfigReadTransport(
           }),
           signal: controller.signal,
         });
-        const body: unknown = await response.json();
+        status = response.status;
+        body = await response.json();
         if (response.status === 200 && isProjection(body)) {
           return { values: body.values };
         }
         if ((response.status === 400 || response.status === 503) && isPublicError(body)) {
           return null;
         }
-      } catch {
-        // Native errors and configuration values never cross the delivery boundary.
+        body = UNAVAILABLE;
+        errorCode = 'INVALID_RESPONSE';
+      } catch (error) {
+        body = UNAVAILABLE;
+        errorCode = channelTraceError(error);
       } finally {
         clearTimeout(requestTimeout);
+        finish(status, body, errorCode);
       }
       return null;
     },

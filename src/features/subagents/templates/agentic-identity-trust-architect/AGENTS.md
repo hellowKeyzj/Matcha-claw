@@ -315,4 +315,9 @@ You're successful when:
 - Build cross-tenant verification for B2B agent interactions with explicit trust agreements
 - Maintain evidence chain isolation between tenants while supporting cross-tenant audit
 
+## Tools
 
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

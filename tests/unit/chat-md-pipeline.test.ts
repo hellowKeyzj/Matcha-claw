@@ -100,6 +100,28 @@ describe('chat markdown pipeline cache', () => {
   });
 });
 
+describe('chat markdown pipeline fenced code', () => {
+  it('renders fenced code with copy affordance and escapes code and language', () => {
+    const result = getOrBuildMarkdownBody('code:fence-html-escaping', {
+      markdown: [
+        '```ts" onclick="alert(1)',
+        '<script>alert("x")</script>',
+        '```',
+      ].join('\n'),
+    });
+
+    expect(result.fullHtml).toContain('<figure class="chat-code-block" data-chat-code-block>');
+    expect(result.fullHtml).toContain('<figcaption class="chat-code-header">');
+    expect(result.fullHtml).toContain('<span class="chat-code-language">ts&quot;</span>');
+    expect(result.fullHtml).toContain('<button type="button" class="chat-code-copy" data-chat-code-copy aria-label="Copy code">');
+    expect(result.fullHtml).toContain('<span class="chat-code-copy-default">Copy</span>');
+    expect(result.fullHtml).toContain('<span class="chat-code-copy-done" hidden>Copied</span>');
+    expect(result.fullHtml).toContain('<pre><code class="language-ts&quot;">&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;\n</code></pre>');
+    expect(result.fullHtml).not.toContain('<script>');
+    expect(result.fullHtml).not.toContain('onclick="alert(1)');
+  });
+});
+
 describe('chat markdown pipeline math rendering', () => {
   it('renders inline and block LaTeX delimiters with KaTeX', () => {
     const result = getOrBuildMarkdownBody('math:basic', {

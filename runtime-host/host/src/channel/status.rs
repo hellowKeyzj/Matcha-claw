@@ -100,6 +100,12 @@ impl ChannelStatusOutcome {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChannelSnapshotOutcome {
     ts: u64,
+    #[serde(skip_serializing_if = "is_true")]
+    ready: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    refreshing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     channel_order: Vec<String>,
     channels: BTreeMap<String, ChannelSummarySnapshot>,
     channel_accounts: BTreeMap<String, Vec<ChannelAccountSnapshot>>,
@@ -109,6 +115,9 @@ pub(crate) struct ChannelSnapshotOutcome {
 impl ChannelSnapshotOutcome {
     pub(crate) fn new(
         ts: u64,
+        ready: bool,
+        refreshing: bool,
+        error: Option<String>,
         channel_order: Vec<String>,
         channels: BTreeMap<String, ChannelSummarySnapshot>,
         channel_accounts: BTreeMap<String, Vec<ChannelAccountSnapshot>>,
@@ -116,12 +125,23 @@ impl ChannelSnapshotOutcome {
     ) -> Self {
         Self {
             ts,
+            ready,
+            refreshing,
+            error,
             channel_order,
             channels,
             channel_accounts,
             channel_default_account_id,
         }
     }
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

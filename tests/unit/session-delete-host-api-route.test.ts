@@ -77,7 +77,6 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list },
         sessionCreateTransport: { create },
         sessionDeleteTransport: { delete: remove },
@@ -90,7 +89,7 @@ describe('session Host API routes', () => {
       scope: { kind: 'agent', endpoint, agentId: 'main' },
       target: { kind: 'agent', agentId: 'main' },
       input: { endpoint, agentId: 'main', endpointSessionId: 'session-1' },
-    });
+    }, null);
     expect(remove).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(result.state).toEqual({ statusCode: 200, body: { outcome: 'succeeded', sessionKey: 'agent:main:session-1' } });
@@ -107,7 +106,6 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list },
         sessionCreateTransport: { create: vi.fn() },
         sessionDeleteTransport: { delete: remove },
@@ -137,7 +135,6 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list },
         sessionCreateTransport: { create: vi.fn() },
         sessionDeleteTransport: { delete: remove },
@@ -173,7 +170,6 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: { list },
         sessionCreateTransport: { create: vi.fn() },
         sessionDeleteTransport: { delete: remove },

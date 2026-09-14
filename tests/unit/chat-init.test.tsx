@@ -715,6 +715,116 @@ describe('useChatInit', () => {
     }
   });
 
+  it('当前 MatchaAgent 会话收到 OpenClaw ready 事件时补齐 OpenClaw agents 且不重载会话', async () => {
+    vi.useFakeTimers();
+    let unmount: (() => void) | null = null;
+    try {
+      const loadAgents = vi.fn().mockImplementation(async () => {
+        useSubagentsStore.setState({
+          agentsResource: {
+            ...readyResource,
+            data: [{ id: 'main', name: 'main', isDefault: true }],
+            lastLoadedAt: Date.now(),
+          },
+        } as never);
+      });
+      const loadSessions = vi.fn().mockImplementation(async () => {
+        useChatStore.setState({
+          sessionCatalogStatus: readyResource,
+        } as never);
+      });
+      const loadHistory = vi.fn().mockResolvedValue(undefined);
+      const bootstrapSessionRuntime = vi.fn().mockImplementation(async () => {
+        const hasOpenClaw = useRuntimeEndpointsStore.getState().endpoints
+          .some((endpoint) => endpoint.id === 'openclaw-local');
+        useChatStore.setState({
+          sessionRuntimeCatalog: {
+            status: 'ready',
+            error: null,
+            endpoints: hasOpenClaw
+              ? [buildOpenClawRuntimeTarget(), buildMatchaAgentRuntimeTarget()]
+              : [buildMatchaAgentRuntimeTarget()],
+            defaultSessionPromptScope: matchaAgentScope,
+          },
+        } as never);
+        syncSessionRuntimeState();
+      });
+      useSubagentsStore.setState({
+        agentsResource: idleResource,
+      } as never);
+      useChatStore.setState({
+        currentSessionKey: matchaRecordKey,
+        loadedSessions: {
+          [matchaRecordKey]: buildSessionRecord({
+            meta: {
+              runtimeScopeKey: buildRuntimeScopeKey(matchaSessionIdentity.endpoint),
+              agentId: 'matcha',
+              protocolId: 'matcha-agent-app-server',
+              runtimeEndpointId: 'local',
+              sessionIdentity: matchaSessionIdentity,
+              historyStatus: 'ready',
+            },
+          }),
+        },
+        sessionCatalogStatus: readyResource,
+        sessionCatalogLoadedAtByRuntimeScopeKey: {
+          [buildRuntimeScopeKey(matchaAgentTestRuntimeEndpoint)]: Date.now(),
+        },
+      } as never);
+      syncSessionRuntimeState();
+
+      ({ unmount } = renderHook(() => useChatInit({
+        isActive: true,
+        locationSearch: '',
+        navigate: vi.fn(),
+        switchSession: vi.fn(),
+        openAgentConversation: vi.fn(),
+        bootstrapSessionRuntime,
+        loadAgents,
+        loadSessions,
+        loadHistory,
+        cleanupEmptySession: vi.fn(),
+      })));
+
+      await act(async () => {
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(80);
+      });
+      bootstrapSessionRuntime.mockClear();
+      loadAgents.mockClear();
+      loadSessions.mockClear();
+      loadHistory.mockClear();
+
+      await act(async () => {
+        useRuntimeEndpointsStore.setState({
+          status: 'ready',
+          endpoints: [buildMatchaAgentEndpointSummary(), buildOpenClawEndpointSummary()],
+          error: null,
+          hasLoadedOnce: true,
+          revision: 1,
+          changedRuntimeScopeKeys: [buildRuntimeScopeKey(openClawTestRuntimeEndpoint)],
+          revisionByRuntimeScopeKey: {
+            [buildRuntimeScopeKey(openClawTestRuntimeEndpoint)]: 1,
+          },
+        });
+        await vi.advanceTimersByTimeAsync(120);
+        await Promise.resolve();
+      });
+
+      expect(bootstrapSessionRuntime).toHaveBeenCalledTimes(1);
+      expect(loadAgents).toHaveBeenCalledTimes(1);
+      expect(loadSessions).not.toHaveBeenCalled();
+      expect(loadHistory).not.toHaveBeenCalled();
+      expect(useChatStore.getState().currentConversation?.runtimeScopeKey)
+        .toBe(buildRuntimeScopeKey(matchaAgentTestRuntimeEndpoint));
+      expect(useChatStore.getState().sessionRuntimeCatalog.endpoints.map((endpoint) => endpoint.endpointId).sort())
+        .toEqual(['matcha-agent-local', 'openclaw-local']);
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
+  });
+
   it('当前 MatchaAgent 会话收到 OpenClaw ready 事件时刷新 catalog 且不重载会话', async () => {
     vi.useFakeTimers();
     let unmount: (() => void) | null = null;

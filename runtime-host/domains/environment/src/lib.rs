@@ -8,7 +8,6 @@ mod consumer;
 mod definition;
 mod event;
 mod ingress;
-mod license;
 mod ports;
 mod provider_account;
 mod provider_account_store;
@@ -59,11 +58,6 @@ pub use ingress::{
     EnvironmentAuthorization, EnvironmentAuthorizationPort, EnvironmentAuthorizationRejection,
     EnvironmentCommandEnvelope, EnvironmentIngress, EnvironmentIngressFailure, EnvironmentNonce,
     EnvironmentPrincipal, EnvironmentProvenance,
-};
-pub use license::{
-    LicenseClientContext, LicenseConfig, LicenseGateProjection, LicenseGateState, LicenseOwner,
-    LicenseOwnerError, LicensePolicyMode, LicenseRenewalAlert, LicenseStoredKeySummary,
-    LicenseValidationResult,
 };
 pub use ports::{
     AppliedProjection, ChannelObservation, ChannelRuntimeStatus, ConnectorObservation,

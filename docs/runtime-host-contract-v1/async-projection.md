@@ -28,10 +28,11 @@ Session send
 ```
 
 ```text
-Toolchain install
-  -> platform.runtime / toolchain.installUv, target=platform-runtime
-  -> Electron public adapter calls Rust private openclaw.toolchain.install-uv
-  -> wait for the real native result; installed/rejected/unknown is projected directly
+Toolchain prepare
+  -> Renderer lazy hostToolchainPrepare after explicit main-entry
+  -> Electron POST /api/toolchain/uv/prepare
+  -> Rust private host.toolchain.prepare
+  -> external/toolchain NativeToolchain waits for the real uv/Python result
 ```
 
 ```text

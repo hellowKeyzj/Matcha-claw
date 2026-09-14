@@ -1,12 +1,14 @@
 use std::{
+    collections::BTreeMap,
     fmt,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::gateway::{
     client::GatewayClient,
@@ -18,10 +20,11 @@ mod operations;
 pub mod readme;
 
 pub use operations::{
-    OpenClawSkillOperations, PrivateSkillValue, SkillDetail, SkillDetailLatestVersion,
-    SkillDetailMetadata, SkillDetailOwner, SkillDetailRequest, SkillDetailSkill,
-    SkillInstallRequest, SkillInstallSource, SkillMutationOutcome, SkillReadError,
-    SkillRequestError, SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk, SkillUploadCommit,
+    OpenClawSkillOperations, PrivateSkillValue, SkillConfigRemoveOutcome, SkillDetail,
+    SkillDetailLatestVersion, SkillDetailMetadata, SkillDetailOwner, SkillDetailRequest,
+    SkillDetailSkill, SkillInstallRequest, SkillInstallSource, SkillMutationOutcome,
+    SkillReadError, SkillRequestContext, SkillRequestError, SkillUpdateRequest, SkillUploadBegin,
+    SkillUploadChunk, SkillUploadCommit,
 };
 
 const SKILLS_STATUS_METHOD: &str = "skills.status";
@@ -45,20 +48,75 @@ impl InstalledSkillCatalog {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct SkillStatusRequest {
+    agent_id: Option<String>,
+}
+
+impl SkillStatusRequest {
+    pub fn ambient() -> Self {
+        Self { agent_id: None }
+    }
+
+    pub fn for_agent(agent_id: String) -> Result<Self, SkillStatusRequestError> {
+        let agent_id =
+            clean_status_identity(agent_id).ok_or(SkillStatusRequestError::InvalidAgentId)?;
+        Ok(Self {
+            agent_id: Some(agent_id),
+        })
+    }
+
+    fn params(&self) -> Value {
+        let mut params = serde_json::Map::new();
+        if let Some(agent_id) = &self.agent_id {
+            params.insert("agentId".to_owned(), Value::String(agent_id.clone()));
+        }
+        Value::Object(params)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkillStatusRequestError {
+    InvalidAgentId,
+}
+
+impl fmt::Debug for SkillStatusRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SkillStatusRequest")
+            .field("agent_id", &self.agent_id.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 pub struct OpenClawInstalledSkillCatalog {
     gateway: Arc<GatewayClient>,
+    request: SkillStatusRequest,
 }
 
 impl OpenClawInstalledSkillCatalog {
     pub fn new(gateway: Arc<GatewayClient>) -> Self {
-        Self { gateway }
+        Self {
+            gateway,
+            request: SkillStatusRequest::ambient(),
+        }
+    }
+
+    pub fn for_agent(
+        gateway: Arc<GatewayClient>,
+        agent_id: String,
+    ) -> Result<Self, SkillStatusRequestError> {
+        Ok(Self {
+            gateway,
+            request: SkillStatusRequest::for_agent(agent_id)?,
+        })
     }
 
     pub async fn read(&self) -> Option<InstalledSkillCatalog> {
         let request = wire::operations_request(
             next_request_id("skill-status"),
             SKILLS_STATUS_METHOD,
-            json!({}),
+            self.request.params(),
         )
         .ok()?;
         let _ = SKILL_STATUS_METHODS;
@@ -78,30 +136,69 @@ impl fmt::Debug for OpenClawInstalledSkillCatalog {
 ///
 /// This is deliberately distinct from TeamSkill's selectable-name catalog and
 /// agent configuration. It retains only the native facts needed to present a
-/// skill, never a native source, path, configuration, version, author, or raw
-/// diagnostic.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// skill, never a raw source, configuration, version, author, or diagnostic.
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct SkillStatusCatalog {
     entries: Vec<SkillStatusEntry>,
+    locators: BTreeMap<String, SkillStatusLocator>,
 }
 
 impl SkillStatusCatalog {
     pub fn entries(&self) -> &[SkillStatusEntry] {
         &self.entries
     }
+
+    pub fn locator(&self, skill_key: &str) -> Option<&SkillStatusLocator> {
+        self.locators.get(skill_key)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SkillStatusLocator {
+    base_dir: Option<String>,
+    file_path: Option<String>,
+}
+
+impl SkillStatusLocator {
+    pub fn base_dir(&self) -> Option<&str> {
+        self.base_dir.as_deref()
+    }
+
+    pub fn file_path(&self) -> Option<&str> {
+        self.file_path.as_deref()
+    }
+}
+
+impl fmt::Debug for SkillStatusCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SkillStatusCatalog")
+            .field("entries", &self.entries)
+            .field("locator_count", &self.locators.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for SkillStatusLocator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SkillStatusLocator([REDACTED])")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillStatusEntry {
     key: String,
+    slug: Option<String>,
     display_name: String,
     description: String,
     enabled: bool,
     selectable: bool,
-    installed: bool,
     eligible: bool,
     blocked_by_allowlist: bool,
-    blocked_by_agent_filter: bool,
+    bundled: Option<bool>,
+    always: Option<bool>,
+    emoji: Option<String>,
+    source: Option<SkillStatusSource>,
     unavailable_reason: Option<SkillStatusUnavailableReason>,
     missing_requirement_categories: Vec<MissingSkillRequirementCategory>,
 }
@@ -109,6 +206,10 @@ pub struct SkillStatusEntry {
 impl SkillStatusEntry {
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    pub fn slug(&self) -> Option<&str> {
+        self.slug.as_deref()
     }
 
     pub fn display_name(&self) -> &str {
@@ -127,10 +228,6 @@ impl SkillStatusEntry {
         self.selectable
     }
 
-    pub fn installed(&self) -> bool {
-        self.installed
-    }
-
     pub fn eligible(&self) -> bool {
         self.eligible
     }
@@ -139,8 +236,20 @@ impl SkillStatusEntry {
         self.blocked_by_allowlist
     }
 
-    pub fn blocked_by_agent_filter(&self) -> bool {
-        self.blocked_by_agent_filter
+    pub fn bundled(&self) -> Option<bool> {
+        self.bundled
+    }
+
+    pub fn always(&self) -> Option<bool> {
+        self.always
+    }
+
+    pub fn emoji(&self) -> Option<&str> {
+        self.emoji.as_deref()
+    }
+
+    pub fn source(&self) -> Option<SkillStatusSource> {
+        self.source
     }
 
     pub fn unavailable_reason(&self) -> Option<SkillStatusUnavailableReason> {
@@ -153,9 +262,35 @@ impl SkillStatusEntry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkillStatusSource {
+    Bundled,
+    OpenClawBundled,
+    Managed,
+    OpenClawManaged,
+    OpenClawWorkspace,
+    OpenClawExtra,
+    AgentsSkillsPersonal,
+    AgentsSkillsProject,
+}
+
+impl SkillStatusSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::OpenClawBundled => "openclaw-bundled",
+            Self::Managed => "managed",
+            Self::OpenClawManaged => "openclaw-managed",
+            Self::OpenClawWorkspace => "openclaw-workspace",
+            Self::OpenClawExtra => "openclaw-extra",
+            Self::AgentsSkillsPersonal => "agents-skills-personal",
+            Self::AgentsSkillsProject => "agents-skills-project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillStatusUnavailableReason {
     Disabled,
-    Blocked,
     MissingRequirements,
     Ineligible,
 }
@@ -191,16 +326,26 @@ impl OpenClawSkillStatusCatalog {
         let request = wire::operations_request(
             next_request_id("skill-status-catalog"),
             SKILLS_STATUS_METHOD,
-            json!({}),
+            SkillStatusRequest::ambient().params(),
         )
         .map_err(|_| SkillStatusCatalogError::Protocol)?;
         let _ = SKILL_STATUS_METHODS;
+        eprintln!("[startup-trace] source=skills-status phase=rpc detail=request");
         match self.gateway.rpc_query(request).await {
-            Ok(GatewayResponse::Failure { .. }) => Err(SkillStatusCatalogError::Rejected),
-            Ok(response) => {
-                decode_skill_status_catalog(response).map_err(|_| SkillStatusCatalogError::Protocol)
+            Ok(GatewayResponse::Failure { .. }) => {
+                eprintln!("[startup-trace] source=skills-status phase=rpc detail=gateway-rejected");
+                Err(SkillStatusCatalogError::Rejected)
             }
-            Err(_) => Err(SkillStatusCatalogError::Unavailable),
+            Ok(response) => decode_skill_status_catalog(response).map_err(|_| {
+                eprintln!("[startup-trace] source=skills-status phase=decode detail=wire-rejected");
+                SkillStatusCatalogError::Protocol
+            }),
+            Err(_) => {
+                eprintln!(
+                    "[startup-trace] source=skills-status phase=rpc detail=gateway-unavailable"
+                );
+                Err(SkillStatusCatalogError::Unavailable)
+            }
         }
     }
 }
@@ -219,41 +364,92 @@ fn decode_skill_status_catalog(response: GatewayResponse) -> Result<SkillStatusC
         ..
     } = response
     else {
+        trace_status_decode("wire-shape", 0, 0, 0);
         return Err(());
     };
-    let skills = payload.get("skills").and_then(Value::as_array).ok_or(())?;
-    let mut entries = skills
-        .iter()
-        .map(decode_skill_status_entry)
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| left.key.cmp(&right.key));
-    if entries.windows(2).any(|pair| pair[0].key == pair[1].key) {
-        return Err(());
+    let skills = payload
+        .get("skills")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            trace_status_decode("skills-shape", 0, 0, 0);
+        })?;
+    let total = skills.len();
+    let mut items = Vec::with_capacity(total);
+    let mut rejected = 0usize;
+    let mut last_reject_reason = None;
+    for skill in skills {
+        match decode_skill_status_item(skill) {
+            Ok(item) => items.push(item),
+            Err(reason) => {
+                rejected += 1;
+                last_reject_reason = Some(reason);
+            }
+        }
     }
-    Ok(SkillStatusCatalog { entries })
+    items.sort_by(|left, right| left.entry.key.cmp(&right.entry.key));
+    let before_dedup = items.len();
+    items.dedup_by(|left, right| left.entry.key == right.entry.key);
+    rejected += before_dedup - items.len();
+    if before_dedup != items.len() {
+        last_reject_reason = Some(StatusEntryRejectReason::DuplicateKey);
+    }
+    let mut entries = Vec::with_capacity(items.len());
+    let mut locators = BTreeMap::new();
+    for item in items {
+        locators.insert(item.entry.key.clone(), item.locator);
+        entries.push(item.entry);
+    }
+    trace_status_decode(
+        last_reject_reason.map_or("ok", StatusEntryRejectReason::as_str),
+        total,
+        entries.len(),
+        rejected,
+    );
+    Ok(SkillStatusCatalog { entries, locators })
 }
 
-fn decode_skill_status_entry(value: &Value) -> Result<SkillStatusEntry, ()> {
-    let skill = value.as_object().ok_or(())?;
-    let key = skill
+struct SkillStatusItem {
+    entry: SkillStatusEntry,
+    locator: SkillStatusLocator,
+}
+
+fn decode_skill_status_item(value: &Value) -> Result<SkillStatusItem, StatusEntryRejectReason> {
+    let skill = value
+        .as_object()
+        .ok_or(StatusEntryRejectReason::EntryShape)?;
+    let key_value = skill
         .get("skillKey")
+        .ok_or(StatusEntryRejectReason::MissingKey)?;
+    let key = key_value
+        .as_str()
+        .ok_or(StatusEntryRejectReason::KeyType)
+        .and_then(clean_status_key)?;
+    let slug = skill
+        .get("clawhub")
+        .and_then(|value| value.get("slug"))
         .and_then(Value::as_str)
-        .and_then(canonical_status_skill_key)
-        .ok_or(())?;
-    let display_name = required_status_text(skill.get("name"))?.unwrap_or_else(|| key.clone());
-    let description = required_status_text(skill.get("description"))?.unwrap_or_default();
-    let installed = optional_status_bool(skill, "installed")?.unwrap_or(true);
+        .and_then(canonical_status_slug)
+        .or_else(|| canonical_status_slug(&key));
+    let display_name = optional_status_text(skill.get("name"), 256)?.unwrap_or_else(|| key.clone());
+    let description = optional_status_text(skill.get("description"), 8_192)?.unwrap_or_default();
     let eligible = optional_status_bool(skill, "eligible")?.unwrap_or(false);
     let disabled = optional_status_bool(skill, "disabled")?.unwrap_or(false);
     let blocked_by_allowlist = optional_status_bool(skill, "blockedByAllowlist")?.unwrap_or(false);
-    let blocked_by_agent_filter =
-        optional_status_bool(skill, "blockedByAgentFilter")?.unwrap_or(false);
+    let bundled = optional_status_bool(skill, "bundled")?;
+    if blocked_by_allowlist || (bundled == Some(true) && !eligible) {
+        return Err(StatusEntryRejectReason::Filtered);
+    }
+    let always = optional_status_bool(skill, "always")?;
+    let emoji = optional_status_text(skill.get("emoji"), 32)?;
+    let source = optional_status_source(skill.get("source"))?;
+    let locator = SkillStatusLocator {
+        base_dir: optional_status_path(skill.get("baseDir"), false),
+        file_path: optional_status_path(skill.get("filePath"), true),
+    };
     let missing_requirement_categories =
         decode_missing_requirement_categories(skill.get("missing"))?;
     let unavailable_reason = if disabled {
         Some(SkillStatusUnavailableReason::Disabled)
-    } else if blocked_by_allowlist || blocked_by_agent_filter {
-        Some(SkillStatusUnavailableReason::Blocked)
     } else if !missing_requirement_categories.is_empty() {
         Some(SkillStatusUnavailableReason::MissingRequirements)
     } else if !eligible {
@@ -261,63 +457,182 @@ fn decode_skill_status_entry(value: &Value) -> Result<SkillStatusEntry, ()> {
     } else {
         None
     };
-    Ok(SkillStatusEntry {
-        key,
-        display_name,
-        description,
-        enabled: !disabled,
-        selectable: installed && eligible && unavailable_reason.is_none(),
-        installed,
-        eligible,
-        blocked_by_allowlist,
-        blocked_by_agent_filter,
-        unavailable_reason,
-        missing_requirement_categories,
+    Ok(SkillStatusItem {
+        locator,
+        entry: SkillStatusEntry {
+            key,
+            slug,
+            display_name,
+            description,
+            enabled: !disabled,
+            selectable: eligible && unavailable_reason.is_none(),
+            eligible,
+            blocked_by_allowlist,
+            bundled,
+            always,
+            emoji,
+            source,
+            unavailable_reason,
+            missing_requirement_categories,
+        },
     })
 }
 
-fn canonical_status_skill_key(value: &str) -> Option<String> {
-    let value = value.trim().to_ascii_lowercase();
-    let bytes = value.as_bytes();
-    if value.is_empty()
-        || !bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| byte.is_ascii_alphanumeric() || (index > 0 && *byte == b'-'))
-        || value.ends_with('-')
-    {
-        None
-    } else {
-        Some(value)
+fn clean_status_key(value: &str) -> Result<String, StatusEntryRejectReason> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(StatusEntryRejectReason::EmptyKey);
+    }
+    if value.len() > 4096 {
+        return Err(StatusEntryRejectReason::LongKey);
+    }
+    if value.contains('\0') {
+        return Err(StatusEntryRejectReason::NulKey);
+    }
+    Ok(value.to_owned())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatusEntryRejectReason {
+    EntryShape,
+    MissingKey,
+    KeyType,
+    EmptyKey,
+    LongKey,
+    NulKey,
+    FieldType,
+    DuplicateKey,
+    Filtered,
+}
+
+impl StatusEntryRejectReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EntryShape => "entry-shape",
+            Self::MissingKey => "missing-key",
+            Self::KeyType => "key-type",
+            Self::EmptyKey => "empty-key",
+            Self::LongKey => "long-key",
+            Self::NulKey => "nul-key",
+            Self::FieldType => "field-type",
+            Self::DuplicateKey => "duplicate-key",
+            Self::Filtered => "filtered",
+        }
     }
 }
 
-fn required_status_text(value: Option<&Value>) -> Result<Option<String>, ()> {
+fn trace_status_decode(reason: &str, total: usize, accepted: usize, rejected: usize) {
+    eprintln!(
+        "[startup-trace] source=skills-status phase=decode detail={} total={} accepted={} rejected={}",
+        reason, total, accepted, rejected
+    );
+}
+
+fn canonical_status_slug(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let mut slug = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            slug.push(byte as char);
+            last_was_dash = false;
+        } else if (byte == b'-' || byte == b'_' || byte == b'/' || byte.is_ascii_whitespace())
+            && !slug.is_empty()
+            && !last_was_dash
+        {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    (!slug.is_empty() && slug.len() <= 128).then_some(slug)
+}
+
+fn clean_status_identity(value: String) -> Option<String> {
+    let value = value.trim().to_owned();
+    (!value.is_empty() && value.len() <= 4096 && !value.contains('\0')).then_some(value)
+}
+
+fn optional_status_text(
+    value: Option<&Value>,
+    limit: usize,
+) -> Result<Option<String>, StatusEntryRejectReason> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.trim().to_owned())),
-        Some(_) => Err(()),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            if value.len() > limit || value.contains('\0') {
+                return Err(StatusEntryRejectReason::FieldType);
+            }
+            Ok(Some(value.to_owned()))
+        }
+        Some(_) => Err(StatusEntryRejectReason::FieldType),
     }
+}
+
+fn optional_status_path(value: Option<&Value>, manifest_only: bool) -> Option<String> {
+    let value = value.and_then(Value::as_str)?.trim();
+    if value.is_empty()
+        || value.len() > 4096
+        || value.contains('\0')
+        || !Path::new(value).is_absolute()
+    {
+        return None;
+    }
+    if manifest_only
+        && !Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn optional_status_bool(
     skill: &serde_json::Map<String, Value>,
     field: &str,
-) -> Result<Option<bool>, ()> {
+) -> Result<Option<bool>, StatusEntryRejectReason> {
     match skill.get(field) {
         None => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
-        _ => Err(()),
+        _ => Err(StatusEntryRejectReason::FieldType),
+    }
+}
+
+fn optional_status_source(
+    value: Option<&Value>,
+) -> Result<Option<SkillStatusSource>, StatusEntryRejectReason> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(match value.trim() {
+            "bundled" => Some(SkillStatusSource::Bundled),
+            "openclaw-bundled" => Some(SkillStatusSource::OpenClawBundled),
+            "managed" => Some(SkillStatusSource::Managed),
+            "openclaw-managed" => Some(SkillStatusSource::OpenClawManaged),
+            "openclaw-workspace" => Some(SkillStatusSource::OpenClawWorkspace),
+            "openclaw-extra" => Some(SkillStatusSource::OpenClawExtra),
+            "agents-skills-personal" => Some(SkillStatusSource::AgentsSkillsPersonal),
+            "agents-skills-project" => Some(SkillStatusSource::AgentsSkillsProject),
+            _ => None,
+        }),
+        Some(_) => Err(StatusEntryRejectReason::FieldType),
     }
 }
 
 fn decode_missing_requirement_categories(
     value: Option<&Value>,
-) -> Result<Vec<MissingSkillRequirementCategory>, ()> {
+) -> Result<Vec<MissingSkillRequirementCategory>, StatusEntryRejectReason> {
     let Some(Value::Object(missing)) = value else {
         return match value {
             None | Some(Value::Null) => Ok(Vec::new()),
-            Some(_) => Err(()),
+            Some(_) => Err(StatusEntryRejectReason::FieldType),
         };
     };
     let mut categories = Vec::new();
@@ -332,13 +647,13 @@ fn decode_missing_requirement_categories(
             None | Some(Value::Null) => {}
             Some(Value::Array(values)) => {
                 if values.iter().any(|value| value.as_str().is_none()) {
-                    return Err(());
+                    return Err(StatusEntryRejectReason::FieldType);
                 }
                 if !values.is_empty() {
                     categories.push(category);
                 }
             }
-            Some(_) => return Err(()),
+            Some(_) => return Err(StatusEntryRejectReason::FieldType),
         }
     }
     categories.sort();

@@ -90,6 +90,55 @@ describe('channel status Host API route', () => {
     });
   });
 
+  it('propagates snapshot refresh and public error fields into the historical GET envelope', async () => {
+    const readSnapshot = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        ts: 1_725_000_000_000,
+        ready: false,
+        refreshing: true,
+        error: 'Channel status reported an error',
+        channelOrder: ['discord'],
+        channels: { discord: { configured: true, running: true, error: 'Channel status reported an error' } },
+        channelAccounts: {
+          discord: [{ accountId: 'primary', connected: true }],
+        },
+        channelDefaultAccountId: { discord: 'primary' },
+      },
+    });
+    const result = response();
+
+    await expect(handleChannelStatusRoutes(
+      request({}, 'GET') as never,
+      result.raw as never,
+      new URL('http://127.0.0.1/api/channels/snapshot'),
+      { read: vi.fn(), readSnapshot },
+    )).resolves.toBe(true);
+
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: {
+        success: true,
+        snapshot: {
+          ts: 1_725_000_000_000,
+          ready: false,
+          refreshing: true,
+          error: 'Channel status reported an error',
+          channelOrder: ['discord'],
+          channels: { discord: { configured: true, running: true, error: 'Channel status reported an error' } },
+          channelAccounts: {
+            discord: [{ accountId: 'primary', connected: true }],
+          },
+          channelDefaultAccountId: { discord: 'primary' },
+        },
+        ready: false,
+        refreshing: true,
+        updatedAt: 1_725_000_000_000,
+        error: 'Channel status reported an error',
+      },
+    });
+  });
+
   it('fails closed when snapshot delivery is unavailable or malformed', async () => {
     for (const readSnapshot of [
       vi.fn().mockResolvedValue({

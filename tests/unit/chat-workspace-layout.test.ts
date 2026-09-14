@@ -10,26 +10,15 @@ import {
 } from '@/pages/Chat/chat-workspace-layout';
 
 describe('chat workspace layout', () => {
-  it('auto-collapses the agent sessions pane when the workspace becomes too narrow', () => {
-    const wideLayout = resolveChatWorkspaceLayout({
+  it('keeps the chat workspace width independent from the floating switchboard', () => {
+    expect(resolveChatWorkspaceLayout({
       containerWidth: 1200,
       sidebarVisible: true,
       sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
-      agentSessionsUserCollapsed: false,
-    });
-
-    expect(wideLayout.agentSessionsCollapsed).toBe(false);
-    expect(wideLayout.agentSessionsWidth).toBe(CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth);
-
-    const narrowLayout = resolveChatWorkspaceLayout({
-      containerWidth: 760,
-      sidebarVisible: true,
+    })).toEqual({
       sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
-      agentSessionsUserCollapsed: false,
+      sidebarOccupiedWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth + CHAT_WORKSPACE_LAYOUT.paneResizerWidth,
     });
-
-    expect(narrowLayout.agentSessionsCollapsed).toBe(true);
-    expect(narrowLayout.agentSessionsWidth).toBe(CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth);
   });
 
   it('docks the chat side panel only when the chat main area can keep its minimum width', () => {
@@ -76,13 +65,14 @@ describe('chat workspace layout', () => {
     expect(getChatSidePanelMaxWidth(1200)).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelLightMaxWidth);
     expect(getChatSidePanelMaxWidth(700)).toBe(340);
     expect(getChatSidePanelMaxWidth(580)).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth);
-    expect(getChatSidePanelMaxWidth(1200, 'artifacts')).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelArtifactMaxWidth);
+    expect(getChatSidePanelMaxWidth(1200, 'artifacts')).toBe(1020);
+    expect(getChatSidePanelMaxWidth(2000, 'artifacts')).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelArtifactMaxWidth);
     expect(getChatSidePanelMaxWidth(900, 'artifacts')).toBe(720);
 
     expect(clampChatSidePanelWidth(120, 1200)).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth);
     expect(clampChatSidePanelWidth(500, 1200)).toBe(500);
     expect(clampChatSidePanelWidth(1000, 1200)).toBe(CHAT_WORKSPACE_LAYOUT.sidePanelLightMaxWidth);
-    expect(clampChatSidePanelWidth(1000, 1200, 'artifacts')).toBe(960);
+    expect(clampChatSidePanelWidth(1800, 2000, 'artifacts')).toBe(1600);
   });
 
   it('uses the caller-provided width for both docked and overlay side panel layouts', () => {

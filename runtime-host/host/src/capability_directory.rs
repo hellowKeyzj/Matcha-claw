@@ -78,12 +78,13 @@ fn invalid_input() -> CommandOutcome {
 
 fn descriptors() -> Vec<Value> {
     let mut descriptors = vec![
-        platform_runtime(),
         plugin_runtime(),
         provider_routing(),
         scheduler_cron(),
         skill_management(),
         integration_channel(),
+        openclaw_browser(),
+        openclaw_mcp_app(),
         subagent_skills(),
         subagent_tools(),
         subagent_management(),
@@ -173,30 +174,8 @@ fn dynamic_descriptor_for_scope(id: &str, scope: &Value) -> Option<Value> {
             scope.clone(),
             vec![operation("tools.invoke", "Invoke tool", "tool")],
         )),
-        ("task.management", Some("session")) => Some(scoped_descriptor(
-            "task.management",
-            "task-management",
-            scope.clone(),
-            vec![
-                operation("tasks.list", "List tasks", "task-manager"),
-                operation("tasks.get", "Get task", "task-manager"),
-                operation("tasks.create", "Create task", "task-manager"),
-                operation("tasks.update", "Update task", "task-manager"),
-                operation("todos.get", "Get todos", "task-manager"),
-                operation("todos.write", "Write todos", "task-manager"),
-            ],
-        )),
-        ("task.control", Some("session")) | ("task.control", Some("team-run")) => {
-            Some(scoped_descriptor(
-                "task.control",
-                "task-control",
-                scope.clone(),
-                vec![
-                    operation("tasks.output", "Read background task output", "task"),
-                    operation("tasks.stop", "Stop background task", "task"),
-                ],
-            ))
-        }
+        ("task.management", Some("session")) => runtime_identity_for_scope(scope)
+            .map(|identity| task_management_descriptor(scope.clone(), identity)),
         ("team.runtime", Some("runtime-instance")) => {
             let identity = runtime_identity_for_scope(scope)?;
             identity
@@ -271,26 +250,6 @@ fn dynamic_descriptor_for_scope(id: &str, scope: &Value) -> Option<Value> {
         )),
         _ => None,
     }
-}
-
-fn platform_runtime() -> Value {
-    json!({
-        "id": "platform.runtime",
-        "kind": "platform-runtime",
-        "scopeKind": "runtime-instance",
-        "scope": native_runtime_instance_scope(),
-        "targetKinds": ["platform-runtime"],
-        "runtimeAdapterId": "openclaw",
-        "runtimeInstanceId": "local",
-        "supportLevel": "native",
-        "availability": "available",
-        "operations": [
-            operation("toolchain.installUv", "Install uv toolchain", "platform-runtime"),
-        ],
-        "policyScope": "platform.runtime",
-        "ownerModuleId": "platform",
-        "routeOwnerId": "operations",
-    })
 }
 
 fn subagent_skills() -> Value {
@@ -444,6 +403,31 @@ fn team_runtime() -> Value {
     )
 }
 
+fn task_management_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Value {
+    json!({
+        "id": "task.management",
+        "kind": "task-management",
+        "scopeKind": "session",
+        "scope": scope,
+        "targetKinds": ["task-manager"],
+        "runtimeAdapterId": identity.runtime_adapter_id(),
+        "runtimeInstanceId": identity.runtime_instance_id(),
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [
+            operation("tasks.list", "List tasks", "task-manager"),
+            operation("tasks.get", "Get task", "task-manager"),
+            operation("tasks.create", "Create task", "task-manager"),
+            operation("tasks.update", "Update task", "task-manager"),
+            operation("todos.get", "Get todos", "task-manager"),
+            operation("todos.write", "Write todos", "task-manager"),
+        ],
+        "policyScope": "task.management",
+        "ownerModuleId": "task-management",
+        "routeOwnerId": identity.runtime_adapter_id(),
+    })
+}
+
 fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Value {
     json!({
         "id": "team.runtime",
@@ -539,6 +523,46 @@ fn integration_channel() -> Value {
         ],
         "policyScope": "integration.channel",
         "ownerModuleId": "integration",
+        "routeOwnerId": "openclaw",
+    })
+}
+
+fn openclaw_browser() -> Value {
+    json!({
+        "id": "openclaw.browser",
+        "kind": "openclaw-browser",
+        "scopeKind": "runtime-instance",
+        "scope": native_runtime_instance_scope(),
+        "targetKinds": ["none"],
+        "runtimeAdapterId": "openclaw",
+        "runtimeInstanceId": "local",
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [
+            operation("browser.request", "Request Browser runtime", "none"),
+        ],
+        "policyScope": "openclaw.browser",
+        "ownerModuleId": "openclaw-gateway",
+        "routeOwnerId": "openclaw",
+    })
+}
+
+fn openclaw_mcp_app() -> Value {
+    json!({
+        "id": "openclaw.mcpApp",
+        "kind": "openclaw-mcp-app",
+        "scopeKind": "runtime-instance",
+        "scope": native_runtime_instance_scope(),
+        "targetKinds": ["none"],
+        "runtimeAdapterId": "openclaw",
+        "runtimeInstanceId": "local",
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [
+            operation("mcp.app.*", "Request MCP app view", "none"),
+        ],
+        "policyScope": "openclaw.mcpApp",
+        "ownerModuleId": "openclaw-gateway",
         "routeOwnerId": "openclaw",
     })
 }
@@ -752,7 +776,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "integration.channel",
-                "platform.runtime",
+                "openclaw.browser",
+                "openclaw.mcpApp",
                 "plugin.runtime",
                 "provider.routing",
                 "scheduler.cron",
@@ -763,7 +788,13 @@ mod tests {
                 "team.runtime",
             ]
         );
-        let skill_config = &outcome["result"]["capabilities"][7];
+        let browser = &outcome["result"]["capabilities"][1];
+        assert_eq!(browser["kind"], "openclaw-browser");
+        assert_eq!(browser["operations"][0]["id"], "browser.request");
+        let mcp_app = &outcome["result"]["capabilities"][2];
+        assert_eq!(mcp_app["kind"], "openclaw-mcp-app");
+        assert_eq!(mcp_app["operations"][0]["id"], "mcp.app.*");
+        let skill_config = &outcome["result"]["capabilities"][8];
         assert_eq!(skill_config["kind"], "subagent-skills");
         assert_eq!(skill_config["scopeKind"], "agent");
         assert_eq!(skill_config["scope"]["agentId"], "main");
@@ -771,7 +802,7 @@ mod tests {
         assert_eq!(skill_config["operations"].as_array().unwrap().len(), 2);
         assert_eq!(skill_config["operations"][0]["id"], "subagentSkills.get");
         assert_eq!(skill_config["operations"][1]["id"], "subagentSkills.set");
-        let tool_config = &outcome["result"]["capabilities"][8];
+        let tool_config = &outcome["result"]["capabilities"][9];
         assert_eq!(tool_config["kind"], "subagent-tools");
         assert_eq!(tool_config["scopeKind"], "agent");
         assert_eq!(tool_config["scope"]["agentId"], "main");
@@ -784,27 +815,13 @@ mod tests {
         assert_eq!(channel["operations"].as_array().unwrap().len(), 11);
         assert_eq!(channel["operations"][0]["id"], "channels.catalog.read");
         assert_eq!(channel["operations"][10]["id"], "channels.snapshot.read");
-        let platform = &outcome["result"]["capabilities"][1];
-        assert_eq!(platform["kind"], "platform-runtime");
-        assert_eq!(platform["scopeKind"], "runtime-instance");
-        assert_eq!(platform["targetKinds"], json!(["platform-runtime"]));
-        assert_eq!(platform["supportLevel"], "native");
-        assert_eq!(
-            platform["operations"][0],
-            json!({
-                "id": "toolchain.installUv",
-                "title": "Install uv toolchain",
-                "targetKind": "platform-runtime",
-                "targetRequired": true,
-            })
-        );
-        let scheduler_cron = &outcome["result"]["capabilities"][4];
+        let scheduler_cron = &outcome["result"]["capabilities"][5];
         assert_eq!(scheduler_cron["kind"], "scheduler-cron");
         assert_eq!(scheduler_cron["supportLevel"], "native");
         assert_eq!(scheduler_cron["operations"].as_array().unwrap().len(), 5);
         assert_eq!(scheduler_cron["operations"][0]["id"], "cron.trigger");
         assert_eq!(scheduler_cron["operations"][4]["id"], "cron.toggle");
-        let subagent = &outcome["result"]["capabilities"][6];
+        let subagent = &outcome["result"]["capabilities"][7];
         assert_eq!(subagent["kind"], "subagent-management");
         assert_eq!(subagent["scopeKind"], "agent");
         assert_eq!(subagent["scope"]["agentId"], "main");
@@ -829,7 +846,7 @@ mod tests {
                 "targetRequired": true,
             })
         );
-        let team = &outcome["result"]["capabilities"][9];
+        let team = &outcome["result"]["capabilities"][10];
         assert_eq!(team["kind"], "team-runtime");
         assert_eq!(team["supportLevel"], "native");
         let settled = team["operations"]
@@ -892,6 +909,20 @@ mod tests {
 
         for (id, operation_id, title, target_kind, scope) in [
             (
+                "openclaw.browser",
+                "browser.request",
+                "Request Browser runtime",
+                "none",
+                native_runtime_instance_scope(),
+            ),
+            (
+                "openclaw.mcpApp",
+                "mcp.app.*",
+                "Request MCP app view",
+                "none",
+                native_runtime_instance_scope(),
+            ),
+            (
                 "subagent.skills",
                 "subagentSkills.get",
                 "Get subagent skills",
@@ -904,13 +935,6 @@ mod tests {
                 "Get subagent tools",
                 "subagent",
                 native_agent_scope("main"),
-            ),
-            (
-                "platform.runtime",
-                "toolchain.installUv",
-                "Install uv toolchain",
-                "platform-runtime",
-                native_runtime_instance_scope(),
             ),
         ] {
             let described = to_value(describe(CommandInput(json!({
@@ -926,7 +950,7 @@ mod tests {
                     "id": operation_id,
                     "title": title,
                     "targetKind": target_kind,
-                    "targetRequired": true,
+                    "targetRequired": target_kind != "none",
                 })
             );
         }
@@ -1005,6 +1029,38 @@ mod tests {
                 "files.writeText",
             ]
         );
+
+        let openclaw_task = to_value(describe(CommandInput(json!({
+            "id": "task.management",
+            "scope": {
+                "kind": "session",
+                "identity": {
+                    "endpoint": native_endpoint(),
+                    "agentId": "main",
+                    "sessionKey": "agent:main:session-1",
+                },
+            },
+        }))))
+        .unwrap();
+        assert_eq!(openclaw_task["kind"], "succeeded");
+        assert_eq!(
+            openclaw_task["result"]["capability"]["runtimeAdapterId"],
+            "openclaw"
+        );
+
+        let matcha_task = to_value(describe(CommandInput(json!({
+            "id": "task.management",
+            "scope": {
+                "kind": "session",
+                "identity": {
+                    "endpoint": native_endpoint_for(RuntimeDriverIdentity::matcha_agent()),
+                    "agentId": "matcha",
+                    "sessionKey": "matcha-session",
+                },
+            },
+        }))))
+        .unwrap();
+        assert_eq!(matcha_task["error"]["message"], SCOPE_NOT_AVAILABLE_MESSAGE);
 
         let cron = to_value(describe(CommandInput(json!({
             "id": "scheduler.cron",

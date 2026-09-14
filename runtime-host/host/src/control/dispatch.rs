@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -10,11 +10,10 @@ use serde_json::{Value, json};
 use crate::{
     RuntimeSessionError, capability_directory,
     composition::PeerHandle,
-    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle},
+    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     fleet::handle::FleetHandle,
     openclaw_session::{
-        AbortChatRequest, AbortChatResponse, ChatHistoryResponse, InvalidPayload, SendChatRequest,
-        SendChatResponse,
+        AbortChatRequest, AbortChatResponse, InvalidPayload, SendChatRequest, SendChatResponse,
     },
     organization::{
         ManualTeamProvision, OrganizationHandle, TeamGraphPatchDraft, TeamNodeEventCommandOutcome,
@@ -58,6 +57,7 @@ pub(crate) async fn execute(
     fleet: &FleetHandle,
     session: &crate::sessions::SessionHandle,
     platform_runtime: &PlatformRuntimeHandle,
+    toolchain: &ToolchainHandle,
     plugins: &PluginsHandle,
     skills: &SkillsHandle,
     cron: &CronHandle,
@@ -91,10 +91,8 @@ pub(crate) async fn execute(
         Command::OpenClawToolPermissionSet { input } => {
             openclaw_tool_permission_set(platform_runtime, input).await
         }
-        Command::OpenClawToolchainStatus {} => openclaw_toolchain_status(platform_runtime).await,
-        Command::OpenClawToolchainInstallUv {} => {
-            openclaw_toolchain_install_uv(platform_runtime).await
-        }
+        Command::HostToolchainStatus {} => host_toolchain_status(toolchain).await,
+        Command::HostToolchainPrepare {} => host_toolchain_prepare(toolchain).await,
         Command::OpenClawSubagentTemplateCatalog {} => {
             subagent_template_catalog(platform_runtime).await
         }
@@ -112,7 +110,8 @@ pub(crate) async fn execute(
         Command::OpenClawManualCronTrigger { input } => {
             manually_trigger_openclaw_cron(cron, input).await
         }
-        Command::OpenClawChatHistory { input } => history_openclaw_chat(session, input).await,
+        Command::OpenClawBrowserRequest { input } => openclaw_browser_request(peer, input).await,
+        Command::OpenClawMcpAppRequest { input } => openclaw_mcp_app_request(peer, input).await,
         Command::OpenClawChatSend { input } => send_openclaw_chat(session, input).await,
         Command::OpenClawChatAbort { input } => abort_openclaw_chat(session, input).await,
         Command::FleetCredentialsWrite { input } => fleet_credentials_write(fleet, input).await,
@@ -3669,7 +3668,7 @@ fn is_skill_capability_request(operation: &str, target: &Value, input: &Value) -
                         !keys.is_empty()
                             && keys
                                 .iter()
-                                .all(|key| key.as_str().is_some_and(valid_skill_key))
+                                .all(|key| key.as_str().is_some_and(valid_openclaw_skill_key))
                     })
                 && input.get("enabled").is_some_and(Value::is_boolean)
                 && input.len() == 2
@@ -3688,6 +3687,15 @@ fn is_skill_capability_request(operation: &str, target: &Value, input: &Value) -
         "clawhub.openReadme" | "clawhub.openPath" => {
             skill_target_matches_input(target, input)
                 && input
+                    .get("slug")
+                    .is_none_or(|value| value.as_str().is_some_and(valid_openclaw_skill_key))
+                && input
+                    .get("filePath")
+                    .is_none_or(|value| value.as_str().is_some_and(valid_skill_manifest_path))
+                && input
+                    .get("baseDir")
+                    .is_none_or(|value| value.as_str().is_some_and(valid_skill_base_dir))
+                && input
                     .keys()
                     .all(|key| matches!(key.as_str(), "skillKey" | "slug" | "filePath" | "baseDir"))
         }
@@ -3695,21 +3703,44 @@ fn is_skill_capability_request(operation: &str, target: &Value, input: &Value) -
     }
 }
 
+struct SkillTarget<'a> {
+    id: &'a str,
+    slug: Option<&'a str>,
+}
+
 fn skill_target_matches_input(
     target: &serde_json::Map<String, Value>,
     input: &serde_json::Map<String, Value>,
 ) -> bool {
-    target.len() == 3
-        && target.get("kind") == Some(&json!("skill"))
-        && target
-            .get("skillId")
-            .and_then(Value::as_str)
-            .is_some_and(valid_skill_key)
-        && target
+    let Some(target) = decode_skill_target(target) else {
+        return false;
+    };
+    input.get("skillKey").and_then(Value::as_str) == Some(target.id)
+        && input
             .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(valid_skill_key)
-        && input.get("skillKey") == target.get("skillId")
+            .is_none_or(|value| value.as_str().is_some_and(|slug| target.slug == Some(slug)))
+}
+
+fn decode_skill_target(target: &serde_json::Map<String, Value>) -> Option<SkillTarget<'_>> {
+    if target
+        .keys()
+        .any(|key| !matches!(key.as_str(), "kind" | "skillId" | "slug"))
+    {
+        return None;
+    }
+    if target.get("kind").and_then(Value::as_str) != Some("skill") {
+        return None;
+    }
+    let id = target.get("skillId").and_then(Value::as_str)?;
+    if !valid_openclaw_skill_key(id) {
+        return None;
+    }
+    let slug = match target.get("slug").and_then(Value::as_str) {
+        Some(slug) if valid_openclaw_skill_key(slug) => Some(slug),
+        Some(_) => return None,
+        None => None,
+    };
+    Some(SkillTarget { id, slug })
 }
 
 fn skill_keys_input(input: &serde_json::Map<String, Value>) -> bool {
@@ -3721,12 +3752,34 @@ fn skill_keys_input(input: &serde_json::Map<String, Value>) -> bool {
                 !keys.is_empty()
                     && keys
                         .iter()
-                        .all(|key| key.as_str().is_some_and(valid_skill_key))
+                        .all(|key| key.as_str().is_some_and(valid_bundle_skill_key))
             })
 }
 
-fn valid_skill_key(value: &str) -> bool {
-    !value.trim().is_empty()
+fn valid_openclaw_skill_key(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= 4096 && !value.contains('\0')
+}
+
+fn valid_skill_base_dir(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.contains('\0')
+        && Path::new(value).is_absolute()
+}
+
+fn valid_skill_manifest_path(value: &str) -> bool {
+    valid_skill_base_dir(value)
+        && Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+}
+
+fn valid_bundle_skill_key(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
         && value.len() <= 96
         && value
             .bytes()
@@ -3905,12 +3958,13 @@ async fn dispatch_skill_operation(
                 Err(_) => unavailable(),
             }
         }
-        "clawhub.openReadme" | "clawhub.openPath" => {
+        "clawhub.openReadme" => {
             let Some(skill_key) = input.get("skillKey").and_then(Value::as_str) else {
                 return invalid_input();
             };
-            let command = match crate::skill_management::Command::readme(
+            let command = match crate::skill_management::Command::open_readme(
                 skill_key.to_owned(),
+                input.get("slug").and_then(Value::as_str).map(str::to_owned),
                 input
                     .get("filePath")
                     .and_then(Value::as_str)
@@ -3932,6 +3986,38 @@ async fn dispatch_skill_operation(
                     }))
                 }
                 Ok(crate::skill_management::Outcome::Readme(Err(_)))
+                | Ok(crate::skill_management::Outcome::Rejected) => CommandOutcome::rejected(
+                    RejectionCode::Failed,
+                    "Skill path receipt was rejected.",
+                ),
+                Ok(crate::skill_management::Outcome::Unavailable) | Err(_) => unavailable(),
+                _ => internal_error(),
+            }
+        }
+        "clawhub.openPath" => {
+            let Some(skill_key) = input.get("skillKey").and_then(Value::as_str) else {
+                return invalid_input();
+            };
+            let command = match crate::skill_management::Command::open_path(
+                skill_key.to_owned(),
+                input.get("slug").and_then(Value::as_str).map(str::to_owned),
+                input
+                    .get("filePath")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                input
+                    .get("baseDir")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ) {
+                Ok(command) => command,
+                Err(_) => return invalid_input(),
+            };
+            match skills.manage_skills(command).await {
+                Ok(crate::skill_management::Outcome::OpenPath(Ok(_))) => {
+                    CommandOutcome::succeeded(json!({ "success": true }))
+                }
+                Ok(crate::skill_management::Outcome::OpenPath(Err(_)))
                 | Ok(crate::skill_management::Outcome::Rejected) => CommandOutcome::rejected(
                     RejectionCode::Failed,
                     "Skill path receipt was rejected.",
@@ -4009,21 +4095,9 @@ fn skill_management_outcome(
 
 fn skill_status_outcome(result: Result<crate::skill_status::Outcome, ()>) -> CommandOutcome {
     match result {
-        Ok(crate::skill_status::Outcome::Available(catalog)) => CommandOutcome::succeeded(json!({
-            "skills": catalog.entries.iter().map(|entry| json!({
-                "key": entry.key,
-                "name": entry.name,
-                "description": entry.description,
-                "enabled": entry.enabled,
-                "selectable": entry.selectable,
-                "installed": entry.installed,
-                "eligible": entry.eligible,
-                "blockedByAllowlist": entry.blocked_by_allowlist,
-                "blockedByAgentFilter": entry.blocked_by_agent_filter,
-                "unavailableReason": entry.unavailable_reason.map(|reason| format!("{reason:?}").to_ascii_lowercase()),
-                "missingCategories": entry.missing_categories.iter().map(|category| format!("{category:?}").to_ascii_lowercase()).collect::<Vec<_>>()
-            })).collect::<Vec<_>>(),
-        })),
+        Ok(crate::skill_status::Outcome::Available(catalog)) => {
+            CommandOutcome::succeeded(crate::skill_status::project(&catalog))
+        }
         Ok(crate::skill_status::Outcome::Unavailable) | Err(_) => unavailable(),
     }
 }
@@ -4175,8 +4249,8 @@ async fn openclaw_tool_permission_set(
     }
 }
 
-async fn openclaw_toolchain_status(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
-    match platform_runtime.toolchain_status().await {
+async fn host_toolchain_status(toolchain: &ToolchainHandle) -> CommandOutcome {
+    match toolchain.status().await {
         Ok(Ok(status)) => CommandOutcome::succeeded(json!({
             "result": serde_json::to_value(status).expect("toolchain status serializable")
         })),
@@ -4184,19 +4258,22 @@ async fn openclaw_toolchain_status(platform_runtime: &PlatformRuntimeHandle) -> 
     }
 }
 
-async fn openclaw_toolchain_install_uv(platform_runtime: &PlatformRuntimeHandle) -> CommandOutcome {
-    match platform_runtime.install_uv().await {
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Installed)) => {
+async fn host_toolchain_prepare(toolchain: &ToolchainHandle) -> CommandOutcome {
+    match toolchain.prepare().await {
+        Ok(Ok(toolchain::PrepareOutcome::Ready)) => {
+            CommandOutcome::succeeded(json!({ "result": { "outcome": "ready" } }))
+        }
+        Ok(Ok(toolchain::PrepareOutcome::Installed)) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "installed" } }))
         }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Rejected)) => {
+        Ok(Ok(toolchain::PrepareOutcome::Rejected)) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "rejected" } }))
         }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unknown)) => {
+        Ok(Ok(toolchain::PrepareOutcome::Unknown)) => {
             CommandOutcome::succeeded(json!({ "result": { "outcome": "unknown" } }))
         }
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unavailable)) => unavailable(),
-        Ok(Ok(openclaw::toolchain::UvInstallOutcome::Unsupported)) => unavailable(),
+        Ok(Ok(toolchain::PrepareOutcome::Unavailable)) => unavailable(),
+        Ok(Ok(toolchain::PrepareOutcome::Unsupported)) => unavailable(),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
 }
@@ -4246,16 +4323,193 @@ async fn manually_trigger_openclaw_cron(cron: &CronHandle, input: CommandInput) 
                 openclaw::port::CronRunDisposition::AlreadyRunning => "already-running",
                 openclaw::port::CronRunDisposition::NotDue => "not-due",
                 openclaw::port::CronRunDisposition::InvalidSpec => "invalid-spec",
+                openclaw::port::CronRunDisposition::Disabled => "disabled",
+                openclaw::port::CronRunDisposition::Stopped => "stopped",
             };
             CommandOutcome::succeeded(
                 json!({ "result": { "outcome": "skipped", "reason": reason } }),
             )
         }
         Ok(openclaw::port::CronTriggerOutcome::OutcomeUnknown) => {
-            CommandOutcome::succeeded(json!({ "result": { "outcome": "outcome-unknown" } }))
+            CommandOutcome::unknown(json!({ "result": { "outcome": "outcome-unknown" } }))
         }
         Err(_) => CommandOutcome::rejected(RejectionCode::Unavailable, RUNTIME_UNAVAILABLE_MESSAGE),
     }
+}
+
+#[derive(Debug)]
+struct OpenClawBrowserRequest {
+    method: String,
+    path: String,
+    query: Option<Value>,
+    body: Option<Value>,
+    timeout_ms: Option<u64>,
+    target: Option<String>,
+    node: Option<String>,
+}
+
+#[derive(Debug)]
+struct OpenClawMcpAppRequest {
+    operation_id: String,
+    session_key: String,
+    view_id: String,
+    standalone: Option<bool>,
+}
+
+async fn openclaw_browser_request(peer: &PeerHandle, input: CommandInput) -> CommandOutcome {
+    let request = match decode_browser_request(input) {
+        Ok(request) => request,
+        Err(_) => return invalid_input(),
+    };
+    match peer
+        .open_claw_browser_request(
+            request.method,
+            request.path,
+            request.query,
+            request.body,
+            request.timeout_ms,
+            request.target,
+            request.node,
+        )
+        .await
+    {
+        Ok(outcome) => openclaw_gateway_request_outcome(outcome),
+        Err(_) => unavailable(),
+    }
+}
+
+async fn openclaw_mcp_app_request(peer: &PeerHandle, input: CommandInput) -> CommandOutcome {
+    let request = match decode_mcp_app_request(input) {
+        Ok(request) => request,
+        Err(_) => return invalid_input(),
+    };
+    match peer
+        .open_claw_mcp_app_request(
+            request.operation_id,
+            request.session_key,
+            request.view_id,
+            request.standalone,
+        )
+        .await
+    {
+        Ok(outcome) => openclaw_gateway_request_outcome(outcome),
+        Err(_) => unavailable(),
+    }
+}
+
+fn openclaw_gateway_request_outcome(
+    outcome: openclaw::port::OpenClawGatewayRequestOutcome,
+) -> CommandOutcome {
+    match outcome {
+        openclaw::port::OpenClawGatewayRequestOutcome::Succeeded(payload) => {
+            CommandOutcome::succeeded(payload)
+        }
+        openclaw::port::OpenClawGatewayRequestOutcome::Rejected => {
+            CommandOutcome::rejected(RejectionCode::Failed, COMMAND_FAILED_MESSAGE)
+        }
+        openclaw::port::OpenClawGatewayRequestOutcome::Unavailable => unavailable(),
+        openclaw::port::OpenClawGatewayRequestOutcome::CapacityExhausted => {
+            CommandOutcome::rejected(
+                RejectionCode::CapacityExhausted,
+                "OpenClaw Gateway request capacity is exhausted.",
+            )
+        }
+        openclaw::port::OpenClawGatewayRequestOutcome::OutcomeUnknown => {
+            CommandOutcome::unknown(json!({ "outcome": "unknown" }))
+        }
+    }
+}
+
+fn decode_browser_request(input: CommandInput) -> Result<OpenClawBrowserRequest, InvalidPayload> {
+    let input = input.into_value();
+    let object = input.as_object().ok_or(InvalidPayload)?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "method" | "path" | "query" | "body" | "timeoutMs" | "target" | "node"
+        )
+    }) || !object.contains_key("method")
+        || !object.contains_key("path")
+    {
+        return Err(InvalidPayload);
+    }
+    let query = object.get("query").cloned();
+    if query.as_ref().is_some_and(|value| !value.is_object()) {
+        return Err(InvalidPayload);
+    }
+    let timeout_ms = match object.get("timeoutMs") {
+        Some(value) => {
+            let timeout_ms = value.as_u64().ok_or(InvalidPayload)?;
+            if timeout_ms == 0 {
+                return Err(InvalidPayload);
+            }
+            Some(timeout_ms)
+        }
+        None => None,
+    };
+    let target = match object.get("target") {
+        Some(value) => {
+            let target = bounded_gateway_text(Some(value))?;
+            if target != "host" && target != "node" {
+                return Err(InvalidPayload);
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    let node = match object.get("node") {
+        Some(value) if target.as_deref() == Some("node") => {
+            Some(bounded_gateway_text(Some(value))?)
+        }
+        Some(_) => return Err(InvalidPayload),
+        None => None,
+    };
+    Ok(OpenClawBrowserRequest {
+        method: bounded_gateway_text(object.get("method"))?,
+        path: bounded_gateway_text(object.get("path"))?,
+        query,
+        body: object.get("body").cloned(),
+        timeout_ms,
+        target,
+        node,
+    })
+}
+
+fn decode_mcp_app_request(input: CommandInput) -> Result<OpenClawMcpAppRequest, InvalidPayload> {
+    let input = input.into_value();
+    let object = input.as_object().ok_or(InvalidPayload)?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "operationId" | "sessionKey" | "viewId" | "standalone"
+        )
+    }) || !object.contains_key("operationId")
+        || !object.contains_key("sessionKey")
+        || !object.contains_key("viewId")
+    {
+        return Err(InvalidPayload);
+    }
+    let operation_id = bounded_gateway_text(object.get("operationId"))?;
+    if !operation_id.starts_with("mcp.app.") {
+        return Err(InvalidPayload);
+    }
+    Ok(OpenClawMcpAppRequest {
+        operation_id,
+        session_key: bounded_gateway_text(object.get("sessionKey"))?,
+        view_id: bounded_gateway_text(object.get("viewId"))?,
+        standalone: match object.get("standalone") {
+            Some(value) => Some(value.as_bool().ok_or(InvalidPayload)?),
+            None => None,
+        },
+    })
+}
+
+fn bounded_gateway_text(value: Option<&Value>) -> Result<String, InvalidPayload> {
+    let value = value.and_then(Value::as_str).ok_or(InvalidPayload)?;
+    if value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(InvalidPayload);
+    }
+    Ok(value.to_owned())
 }
 
 async fn send_openclaw_chat(
@@ -4272,22 +4526,6 @@ async fn send_openclaw_chat(
         Err(_) => return internal_error(),
     };
     CommandOutcome::succeeded(json!({ "result": SendChatResponse::from(outcome) }))
-}
-
-async fn history_openclaw_chat(
-    session: &crate::sessions::SessionHandle,
-    input: CommandInput,
-) -> CommandOutcome {
-    let params = match decode_history(input) {
-        Ok(params) => params,
-        Err(_) => return invalid_input(),
-    };
-    let result = match session.openclaw_history(params).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => return session_failure(error),
-        Err(_) => return internal_error(),
-    };
-    CommandOutcome::succeeded(json!({ "result": ChatHistoryResponse::from(result) }))
 }
 
 #[derive(Deserialize)]
@@ -4379,12 +4617,6 @@ fn decode_send(
     input: CommandInput,
 ) -> Result<openclaw::session::protocol::ChatSendParams, InvalidPayload> {
     decode::<SendChatRequest>(input)?.into_params()
-}
-
-fn decode_history(
-    input: CommandInput,
-) -> Result<openclaw::session::protocol::ChatHistoryParams, InvalidPayload> {
-    decode(input)
 }
 
 fn decode_abort(

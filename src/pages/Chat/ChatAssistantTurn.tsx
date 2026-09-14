@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, memo, useReducer } from 'react';
+import { useCallback, useEffect, useMemo, useState, memo, useReducer } from 'react';
 import type { ChatAssistantTurnItem } from './chat-render-item-model';
 import type { AttachedFileMeta } from '@/stores/chat';
 import { AssistantMessageBody } from './assistant-message-body';
@@ -14,7 +14,9 @@ import {
   ToolCardList,
   type MessageLightboxState,
 } from './chat-message-parts';
-import type { SessionRenderAssistantBubbleToolResult } from '../../types/session/tool-card';
+import type { SessionRenderAssistantBubbleToolResult, SessionRenderToolCard } from '../../types/session/tool-card';
+import { isOpenClawTool, readBrowserTabPreview, readMcpAppPreview } from './tool-renderers/openclaw-details';
+import { openChatRuntimeSurface, type ChatRuntimeSurfaceDescriptor } from './useChatSidePanelController';
 import { formatDuration } from './message-utils';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
@@ -134,6 +136,71 @@ function toAssistantBubbleToolResult(segment: ChatAssistantTurnItem['segments'][
   };
 }
 
+function hasBrowserTabPreview(tool: SessionRenderToolCard): boolean {
+  return isOpenClawTool(tool) && readBrowserTabPreview(tool.details) != null;
+}
+
+function buildRuntimeSurfaceDescriptor(tool: SessionRenderToolCard): ChatRuntimeSurfaceDescriptor | null {
+  if (!isOpenClawTool(tool)) {
+    return null;
+  }
+  const browserTab = readBrowserTabPreview(tool.details);
+  if (browserTab) {
+    return {
+      ...browserTab,
+      toolName: tool.name,
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+    };
+  }
+  const mcpAppPreview = readMcpAppPreview(tool.details);
+  if (!mcpAppPreview) {
+    return null;
+  }
+  return {
+    kind: 'mcp-app',
+    toolName: tool.name,
+    ...(mcpAppPreview.surface ? { surface: mcpAppPreview.surface } : {}),
+    ...(mcpAppPreview.title ? { title: mcpAppPreview.title } : {}),
+    ...(mcpAppPreview.url ? { url: mcpAppPreview.url } : {}),
+    ...(mcpAppPreview.viewId ? { viewId: mcpAppPreview.viewId } : {}),
+    ...(mcpAppPreview.preferredHeight !== undefined ? { preferredHeight: mcpAppPreview.preferredHeight } : {}),
+    ...(mcpAppPreview.sandbox ? { sandbox: mcpAppPreview.sandbox } : {}),
+    ...(mcpAppPreview.boardWidgetName ? { boardWidgetName: mcpAppPreview.boardWidgetName } : {}),
+    ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+    ...(mcpAppPreview.mcpApp ? { mcpApp: mcpAppPreview.mcpApp } : {}),
+  };
+}
+
+type AssistantTurnRenderPart =
+  | { kind: 'segment'; segment: ChatAssistantTurnItem['segments'][number] }
+  | { kind: 'tool-group'; key: string; tools: SessionRenderToolCard[] };
+
+function buildAssistantTurnRenderParts(item: ChatAssistantTurnItem): AssistantTurnRenderPart[] {
+  const parts: AssistantTurnRenderPart[] = [];
+  for (let index = 0; index < item.segments.length; index += 1) {
+    const segment = item.segments[index];
+    if (segment.kind !== 'tool' || toAssistantBubbleToolResult(segment) || !hasBrowserTabPreview(segment.tool)) {
+      parts.push({ kind: 'segment', segment });
+      continue;
+    }
+
+    const tools: SessionRenderToolCard[] = [segment.tool];
+    let endIndex = index;
+    while (endIndex + 1 < item.segments.length) {
+      const nextSegment = item.segments[endIndex + 1];
+      if (nextSegment.kind !== 'tool' || toAssistantBubbleToolResult(nextSegment) || !hasBrowserTabPreview(nextSegment.tool)) {
+        break;
+      }
+      tools.push(nextSegment.tool);
+      endIndex += 1;
+    }
+
+    parts.push({ kind: 'tool-group', key: segment.key, tools });
+    index = endIndex;
+  }
+  return parts;
+}
+
 function isActiveReplyStatus(status: ChatAssistantTurnItem['status']): boolean {
   return status === 'streaming' || status === 'waiting_tool';
 }
@@ -210,6 +277,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   }, [item]);
 
   const messageRenderTextByKey = useMemo(() => buildMessageSegmentRenderTextByKey(item), [item]);
+  const renderParts = useMemo(() => buildAssistantTurnRenderParts(item), [item]);
 
   const hasContentSegments = item.segments.some((segment) => {
     if (segment.kind === 'thinking') {
@@ -223,8 +291,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     }
     return segment.images.length > 0 || segment.attachedFiles.length > 0;
   });
-  const pendingMode = !hasContentSegments
-    ? (item.status === 'waiting_tool' ? 'activity' : (isStreaming ? 'typing' : null))
+  const pendingMode = !hasContentSegments && isStreaming
+    ? (item.pendingState ?? (item.status === 'waiting_tool' ? 'activity' : 'typing'))
     : null;
   const rawPlainText = getAssistantTurnPlainText(item);
   const plainText = sanitizeAssistantDisplayText(rawPlainText);
@@ -379,6 +447,23 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         };
       })
   ), [derivedAttachedFiles, derivedGatewayPreviews, validatedDerivedPaths]);
+  const renderToolCards = useCallback((tools: SessionRenderToolCard[], collapseKey: string) => {
+    const descriptors = tools
+      .map(buildRuntimeSurfaceDescriptor)
+      .filter((descriptor): descriptor is ChatRuntimeSurfaceDescriptor => descriptor != null);
+    if (descriptors.length === 0) {
+      return <ToolCardList tools={tools} collapseVersion={collapseVersion} />;
+    }
+    return (
+      <div
+        data-testid={`chat-runtime-surface-open-${collapseKey}`}
+        className="w-full cursor-pointer"
+        onClick={() => openChatRuntimeSurface(descriptors[descriptors.length - 1]!)}
+      >
+        <ToolCardList tools={tools} collapseVersion={collapseVersion} />
+      </div>
+    );
+  }, [collapseVersion]);
   if (!hasContentSegments && visibleDerivedAttachedFiles.length === 0 && !pendingMode) {
     return null;
   }
@@ -399,7 +484,15 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           </div>
         ) : null}
 
-        {item.segments.map((segment) => {
+        {renderParts.map((part) => {
+          if (part.kind === 'tool-group') {
+            return (
+              <div key={part.key} className="flex w-full flex-col items-start gap-0 pt-0">
+                {renderToolCards(part.tools, part.key)}
+              </div>
+            );
+          }
+          const { segment } = part;
           if (segment.kind === 'thinking') {
             if (!showThinking || !segment.text.trim()) {
               return null;
@@ -424,7 +517,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
             }
             return (
               <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
-                <ToolCardList tools={[segment.tool]} collapseVersion={collapseVersion} />
+                {renderToolCards([segment.tool], segment.key)}
               </div>
             );
           }

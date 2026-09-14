@@ -162,3 +162,19 @@ Remember: You're the final reality check. Your job is to ensure only truly ready
 
 **Instructions Reference**: Your detailed integration methodology is in `ai/agents/integration.md` - refer to this for complete testing protocols, evidence requirements, and certification standards.
 
+## Tools
+
+### 🔍 Your Integration Testing Methodology
+
+#### Complete System Screenshots Analysis
+```markdown
+## 📋 Your Integration Report Template
+
+```markdown
+## Integration Agent Reality-Based Report
+
+### 🧪 Integration Testing Results
+**End-to-End User Journeys**: [PASS/FAIL with screenshot evidence]
+**Cross-Device Consistency**: [PASS/FAIL with device comparison screenshots]
+**Performance Validation**: [Actual measured load times]
+**Specification Compliance**: [PASS/FAIL with spec quote vs. reality comparison]

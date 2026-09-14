@@ -17,6 +17,11 @@ import type { SessionDeleteTransport } from '../../main/runtime-host-delivery/tr
 import type { SessionContentLoadRequest, SessionContentTransport } from '../../main/runtime-host-delivery/transport/sessions/content';
 import type { SessionListTransport } from '../../main/runtime-host-delivery/transport/sessions/list';
 import type { SessionModelSelectionRequest, SessionModelSelectionTransport } from '../../main/runtime-host-delivery/transport/sessions/model-selection';
+import type {
+  SessionPermissionOperationId,
+  SessionPermissionRequest,
+  SessionPermissionTransport,
+} from '../../main/runtime-host-delivery/transport/sessions/permission';
 import type { SessionRenameTransport } from '../../main/runtime-host-delivery/transport/sessions/rename';
 import type { SessionSendRequest, SessionSendTransport } from '../../main/runtime-host-delivery/transport/sessions/send';
 import type { SessionTimelineTransport } from '../../main/runtime-host-delivery/transport/sessions/timeline';
@@ -48,6 +53,7 @@ export type SessionCapabilityRouteDeps = Readonly<{
   sessionApprovalTransport: SessionApprovalTransport;
   sessionSendTransport: SessionSendTransport;
   sessionModelSelectionTransport: SessionModelSelectionTransport;
+  sessionPermissionTransport: SessionPermissionTransport;
   rendererEventRoutes: Pick<RendererEventRouteRegistry, 'issue' | 'isMatchaRoute' | 'release'>;
   workspaceMediaTransport?: WorkspaceMediaTransport;
 }>;
@@ -98,6 +104,15 @@ export async function dispatchSessionCapability(
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.rename') {
     return await deps.sessionRenameTransport.rename(adaptSessionRenameRequest(body));
+  }
+  if (body.id === 'session.management'
+    && (body.operationId === 'sessions.permission.get' || body.operationId === 'sessions.permission.set')) {
+    return await dispatchSessionPermission(
+      deps,
+      adaptSessionPermissionRequest(body, body.operationId, traceId),
+      body.operationId,
+      traceId,
+    );
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.list') {
     const request = adaptSessionListRequest(body);
@@ -163,6 +178,18 @@ async function dispatchSessionContent(
   return traceId === undefined
     ? await deps.sessionContentTransport.load(request)
     : await deps.sessionContentTransport.load(request, traceId);
+}
+
+async function dispatchSessionPermission(
+  deps: SessionCapabilityRouteDeps,
+  request: SessionPermissionRequest,
+  operationId: SessionPermissionOperationId,
+  traceId?: string | null,
+): Promise<PublicTransportResponse> {
+  const method = operationId === 'sessions.permission.get' ? 'get' : 'set';
+  return traceId === undefined
+    ? await deps.sessionPermissionTransport[method](request)
+    : await deps.sessionPermissionTransport[method](request, traceId);
 }
 
 async function dispatchSessionSend(
@@ -1078,6 +1105,77 @@ function adaptSessionRenameRequest(body: Record<string, unknown>): Record<string
   };
 }
 
+function adaptSessionPermissionRequest(
+  body: Record<string, unknown>,
+  operationId: SessionPermissionOperationId,
+  traceId?: string | null,
+): SessionPermissionRequest {
+  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
+    || body.id !== 'session.management'
+    || body.operationId !== operationId
+    || !isRecord(body.scope)
+    || !hasExactKeys(body.scope, ['kind', 'identity'])
+    || body.scope.kind !== 'session'
+    || !isSessionIdentity(body.scope.identity)
+    || !isRecord(body.target)
+    || !hasExactKeys(body.target, ['kind', 'identity'])
+    || body.target.kind !== 'session'
+    || !isSessionIdentity(body.target.identity)
+    || !sameIdentity(body.scope.identity, body.target.identity)
+    || !isRecord(body.input)
+    || !hasExactKeys(body.input, operationId === 'sessions.permission.get'
+      ? ['sessionKey', 'sessionIdentity']
+      : ['sessionKey', 'sessionIdentity', 'permissionMode'])
+    || !isSessionIdentity(body.input.sessionIdentity)
+    || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
+    || body.input.sessionKey !== body.scope.identity.sessionKey
+    || (operationId === 'sessions.permission.set' && !isSessionPermissionMode(body.input.permissionMode))) {
+    logSessionTrace('electron.permission.route.invalid', traceId, {
+      operationId,
+      envelope: summarizePermissionBody(body),
+    });
+    throw new Error('Session permission request is invalid');
+  }
+  const request = {
+    id: 'session.management',
+    operationId,
+    scope: { kind: 'session', identity: body.scope.identity },
+    target: { kind: 'session', identity: body.target.identity },
+    input: operationId === 'sessions.permission.get'
+      ? {
+          sessionKey: body.input.sessionKey,
+          sessionIdentity: body.input.sessionIdentity,
+        }
+      : {
+          sessionKey: body.input.sessionKey,
+          sessionIdentity: body.input.sessionIdentity,
+          permissionMode: body.input.permissionMode,
+        },
+  } satisfies SessionPermissionRequest;
+  logSessionTrace('electron.permission.route.adapted', traceId, {
+    operationId,
+    adapter: body.scope.identity.endpoint.runtimeAdapterId,
+    instance: body.scope.identity.endpoint.runtimeInstanceId,
+    sessionKey: summarizeIdentifier(body.input.sessionKey as string),
+    permissionMode: operationId === 'sessions.permission.set' ? body.input.permissionMode : null,
+  });
+  return request;
+}
+
+function summarizePermissionBody(body: Record<string, unknown>) {
+  const scope = isRecord(body.scope) ? body.scope : null;
+  const target = isRecord(body.target) ? body.target : null;
+  const input = isRecord(body.input) ? body.input : null;
+  return {
+    bodyKeys: Object.keys(body).sort(),
+    scopeIdentity: summarizeIdentityShape(scope?.identity),
+    targetIdentity: summarizeIdentityShape(target?.identity),
+    inputIdentity: summarizeIdentityShape(input?.sessionIdentity),
+    inputSessionKey: summarizeString(input?.sessionKey),
+    permissionMode: input?.permissionMode === undefined ? null : input.permissionMode,
+  };
+}
+
 function adaptSessionListRequest(body: Record<string, unknown>): Record<string, unknown> {
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     || body.id !== 'session.management'
@@ -1333,6 +1431,14 @@ function isMatchaAgentIdentity(
 
 function isApprovalDecision(value: unknown): value is 'allow-once' | 'allow-always' | 'deny' {
   return value === 'allow-once' || value === 'allow-always' || value === 'deny';
+}
+
+function isSessionPermissionMode(value: unknown): value is null | 'read-only' | 'guarded' | 'workspace' | 'full' {
+  return value === null
+    || value === 'read-only'
+    || value === 'guarded'
+    || value === 'workspace'
+    || value === 'full';
 }
 
 function adaptSessionModelSelectionRequest(body: Record<string, unknown>, traceId?: string | null): SessionModelSelectionRequest {

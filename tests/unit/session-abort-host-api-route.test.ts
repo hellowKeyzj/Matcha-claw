@@ -89,7 +89,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionAbortTransport: { abort },
         sessionSendTransport: {} as never,
@@ -119,7 +118,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionApprovalTransport: { list, respond },
       } as never,
@@ -166,7 +164,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionApprovalTransport: { list, respond },
       } as never,
@@ -228,7 +225,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionApprovalTransport: { list, respond },
       } as never,
@@ -265,7 +261,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionApprovalTransport: { list, respond: vi.fn() },
       } as never,
@@ -287,7 +282,6 @@ describe('session abort Host API route', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        licenseService: {} as never,
         sessionListTransport: {} as never,
         sessionAbortTransport: { abort },
         sessionSendTransport: {} as never,

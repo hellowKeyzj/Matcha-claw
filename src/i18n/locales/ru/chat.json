@@ -5,6 +5,17 @@
     "title": "Preparing workspace",
     "description": "Starting and connecting OpenClaw. You can start chatting in a moment."
   },
+  "workspaceUnavailable": {
+    "title": "Workspace unavailable",
+    "description": "This session's workspace cannot be opened: {{path}}. Restore the folder, or choose a new workspace and start a new session.",
+    "unknownPath": "unknown workspace",
+    "chooseWorkspaceAndNewSession": "Choose workspace and start new session",
+    "updating": "Updating…",
+    "pickTitle": "Choose a new agent workspace",
+    "pickButton": "Choose workspace",
+    "updateSuccess": "Agent workspace updated and a new session was started.",
+    "updateFailed": "Failed to update workspace: {{error}}"
+  },
   "welcome": {
     "title": "Чат MatchaClaw",
     "subtitle": "Чем могу помочь?",
@@ -31,7 +42,8 @@
     "attachmentReady": "{{count}} attachment ready",
     "attachmentsReady": "{{count}} attachments ready",
     "contextUsageLabel": "Context used {{pct}}%",
-    "contextUsageTitle": "Context used {{pct}}% ({{detail}})"
+    "contextUsageTitle": "Context used {{pct}}% ({{detail}})",
+    "imageGenerationActive": "Generating image"
   },
   "noLogs": "(Журналы ещё недоступны)",
   "toolbar": {
@@ -39,7 +51,6 @@
     "openSidePanel": "Open side panel",
     "closeSidePanel": "Close side panel",
     "skillConfig": "Skill Configuration",
-    "skillShortLabel": "Навыки",
     "showThinking": "Показать размышления",
     "hideThinking": "Скрыть размышления",
     "exportMarkdown": "Export Markdown"
@@ -57,6 +68,16 @@
     "typing": "Thinking",
     "activity": "Working",
     "compacting": "Compressing context, then the reply will continue"
+  },
+  "runtimeStatus": {
+    "providerFallback": "Provider fallback applied",
+    "guardian": {
+      "reviewing": "Guardian is reviewing the action",
+      "approved": "Guardian approved the action",
+      "denied": "Guardian blocked the action",
+      "warning": "Guardian warning",
+      "strictReviewRequired": "Guardian requires strict review"
+    }
   },
   "imageGeneration": {
     "previewLoading": "Загрузка предпросмотра изображения…",
@@ -139,6 +160,8 @@
     "changesTab": "Изменения",
     "previewTab": "Предпросмотр",
     "workspaceTab": "Рабочая папка",
+    "collapseWorkspaceTree": "Свернуть дерево рабочей папки",
+    "expandWorkspaceTree": "Развернуть дерево рабочей папки",
     "openExternal": "Открыть вне приложения",
     "openDirectly": "Открыть напрямую",
     "reveal": "Показать в папке",
@@ -165,6 +188,7 @@
     "directoryPreviewDescription": "Каталог не рендерится напрямую справа. Продолжайте навигацию по дереву рабочей папки или откройте каталог в системном файловом менеджере.",
     "created": "Создан",
     "modified": "Изменён",
+    "deleted": "Удалён",
     "revealFailed": "Не удалось показать файл в файловом менеджере",
     "workspaceEmpty": "Нет доступной рабочей директории для просмотра.",
     "workspaceLoadFailed": "Не удалось загрузить рабочую директорию: {{error}}"

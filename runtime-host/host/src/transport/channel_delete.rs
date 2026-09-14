@@ -11,7 +11,7 @@ const MAX_IDENTITY_LENGTH: usize = 128;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Request {
     pub(crate) channel: String,
-    pub(crate) account_id: String,
+    pub(crate) account_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,26 +26,42 @@ pub(crate) fn decode(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<Request, DecodeError> {
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            AUTHORIZATION_SCOPE,
-            OPERATION_ID,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    let Value::Object(body) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if body.len() != 2 || !body.contains_key("channel") || !body.contains_key("accountId") {
-        return Err(DecodeError::Invalid);
-    }
-    Ok(Request {
-        channel: identity(body.get("channel")).ok_or(DecodeError::Invalid)?,
-        account_id: identity(body.get("accountId")).ok_or(DecodeError::Invalid)?,
-    })
+    let mut span =
+        crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_delete.decode");
+    let result = (|| {
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                AUTHORIZATION_SCOPE,
+                OPERATION_ID,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let Value::Object(body) = value else {
+            return Err(DecodeError::Invalid);
+        };
+        if body
+            .keys()
+            .any(|key| key != "channel" && key != "accountId")
+        {
+            return Err(DecodeError::Invalid);
+        }
+        Ok(Request {
+            channel: identity(body.get("channel")).ok_or(DecodeError::Invalid)?,
+            account_id: body
+                .get("accountId")
+                .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
+                .transpose()?,
+        })
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 fn identity(value: Option<&Value>) -> Option<String> {
@@ -85,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delete_request_requires_exact_channel_and_account_fields() {
+    fn delete_request_requires_authorization() {
         let request = decode(
             serde_json::json!({"channel": "whatsapp", "accountId": "primary"}),
             "invalid",

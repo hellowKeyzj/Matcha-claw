@@ -693,7 +693,7 @@ impl Delivery {
         }
     }
 
-    pub(crate) fn active_claim(&self) -> Option<&DeliveryClaim> {
+    pub fn active_claim(&self) -> Option<&DeliveryClaim> {
         match &self.phase {
             DeliveryPhase::Delivering(claim) => Some(claim),
             _ => None,

@@ -205,3 +205,9 @@ You're successful when:
 - Validate Dolby Atmos and DTS:X object audio configurations on console targets
 - Build automated audio regression tests that run in CI to catch parameter drift between builds
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

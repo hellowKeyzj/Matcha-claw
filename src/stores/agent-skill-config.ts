@@ -34,7 +34,6 @@ export interface AgentSkillConfigOption {
   skillKey: string;
   displayName: string;
   description: string;
-  installed: boolean;
   selectable: boolean;
   unavailableReason?: 'globalSkillDisabled' | 'blockedByRuntimeAllowlist' | 'missingRequirements';
   missingRequirements?: AgentSkillMissingRequirements;
@@ -150,14 +149,11 @@ function normalizeSkillConfigOption(value: unknown): AgentSkillConfigOption | nu
     && ['globalSkillDisabled', 'blockedByRuntimeAllowlist', 'missingRequirements'].includes(record.unavailableReason)
     ? record.unavailableReason as AgentSkillConfigOption['unavailableReason']
     : undefined;
-  const isInstalled = record.installed === true;
-  const isSelectableWhenInstalled = typeof record.selectable === 'boolean' ? record.selectable : true;
   return {
     skillKey,
     displayName: typeof record.displayName === 'string' && record.displayName.trim() ? record.displayName : skillKey,
     description: typeof record.description === 'string' ? record.description : '',
-    installed: isInstalled,
-    selectable: isInstalled && isSelectableWhenInstalled,
+    selectable: record.selectable !== false,
     ...(unavailableReason ? { unavailableReason } : {}),
     ...(missingRequirements ? { missingRequirements } : {}),
   };

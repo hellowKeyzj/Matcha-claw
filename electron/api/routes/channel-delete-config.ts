@@ -4,6 +4,7 @@ import type {
   ChannelDeleteConfigTransport,
 } from '../../main/runtime-host-delivery/transport/channels/delete-config';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;
@@ -16,22 +17,28 @@ export async function handleChannelDeleteConfigRoutes(
 ): Promise<boolean> {
   if (url.pathname !== '/api/channels/delete-config' || req.method !== 'POST') return false;
 
+  const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
     body = await parseJsonBody(req);
   } catch {
+    beginChannelTrace('route.invalid', traceId)(400, { outcome: 'rejected' });
     sendJson(res, 400, INVALID);
     return true;
   }
   if (!isRequest(body)) {
+    beginChannelTrace('route.invalid', traceId)(400, { outcome: 'rejected' });
     sendJson(res, 400, INVALID);
     return true;
   }
 
+  const finish = beginChannelTrace('route.delete', traceId);
   try {
-    const response = await transport.deleteConfig(body);
+    const response = await transport.deleteConfig(body, traceId);
+    finish(response.status, response.body);
     sendJson(res, response.status, response.body);
-  } catch {
+  } catch (error) {
+    finish(503, UNKNOWN, channelTraceError(error));
     sendJson(res, 503, UNKNOWN);
   }
   return true;
@@ -39,9 +46,9 @@ export async function handleChannelDeleteConfigRoutes(
 
 function isRequest(value: unknown): value is ChannelDeleteConfigRequest {
   return isRecord(value)
-    && Object.keys(value).length === 2
+    && Object.keys(value).every((key) => key === 'channel' || key === 'accountId')
     && isIdentity(value.channel)
-    && isIdentity(value.accountId);
+    && (value.accountId === undefined || isIdentity(value.accountId));
 }
 
 function isIdentity(value: unknown): value is string {

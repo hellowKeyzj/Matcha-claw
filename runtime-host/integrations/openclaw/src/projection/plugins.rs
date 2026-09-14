@@ -19,7 +19,6 @@ pub use managed_reconcile::{ManagedPluginReconcile, PluginReconcileError};
 
 const MANIFEST: &str = "openclaw.plugin.json";
 const PACKAGE: &str = "package.json";
-const MANAGED_MARKER: &str = ".matchaclaw-managed";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -73,6 +72,16 @@ pub struct Runtime {
     pub plugins: Vec<RuntimeEntry>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPluginPreparation {
+    pub is_external_managed_channel: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    pub artifact_changed: bool,
+    pub peer_link_ok: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetEnabledOutcome {
     Configured,
@@ -95,13 +104,20 @@ pub enum PluginOperationOutcome {
 }
 
 const MANAGED_PLUGIN_IDS: &[&str] = &[
+    "qianfan",
+    "stepfun",
+    "tencent",
+    "xiaomi",
+    "qwen",
+    "kimi",
+    "volcengine",
+    "opencode",
+    "opencode-go",
     "dingtalk",
     "openclaw-lark",
     "wecom",
     "openclaw-qqbot",
     "openclaw-weixin",
-    "discord",
-    "whatsapp",
     "task-manager",
     "security-core",
     "browser-relay",
@@ -109,7 +125,7 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
     "matchaclaw-media",
 ];
 
-const OPERATION_PLUGIN_IDS: &[&str] = &[
+const MANUALLY_CONFIGURABLE_PLUGIN_IDS: &[&str] = &[
     "task-manager",
     "security-core",
     "browser-relay",
@@ -121,6 +137,7 @@ pub struct PluginProjection {
     state_dir: CanonicalStateDir,
     companion_skill_source_root: PathBuf,
     managed_plugin_root: PathBuf,
+    working_directory: PathBuf,
 }
 
 impl PluginProjection {
@@ -128,11 +145,13 @@ impl PluginProjection {
         state_dir: CanonicalStateDir,
         companion_skill_source_root: impl Into<PathBuf>,
         managed_plugin_root: impl Into<PathBuf>,
+        working_directory: impl Into<PathBuf>,
     ) -> Self {
         Self {
             state_dir,
             companion_skill_source_root: companion_skill_source_root.into(),
             managed_plugin_root: managed_plugin_root.into(),
+            working_directory: working_directory.into(),
         }
     }
 
@@ -141,6 +160,43 @@ impl PluginProjection {
             .read_private()
             .map_err(|_| PluginError::Config)?;
         Ok(super::channel::configured_plugin_ids(&document))
+    }
+
+    pub fn prepare_configured_channel_plugin(
+        &self,
+        channel_type: &str,
+        openclaw_root: &Path,
+    ) -> Result<ChannelPluginPreparation, PluginError> {
+        let Some(plugin_id) = configured_channel_plugin_id(channel_type) else {
+            return Ok(ChannelPluginPreparation {
+                is_external_managed_channel: false,
+                plugin_id: None,
+                artifact_changed: false,
+                peer_link_ok: true,
+            });
+        };
+        let mut configured_plugin_ids = self.configured_channel_plugin_ids()?;
+        if !configured_plugin_ids.iter().any(|id| id == &plugin_id) {
+            configured_plugin_ids.push(plugin_id.clone());
+        }
+        let reconcile = self
+            .reconcile_configured_channel_plugins(&configured_plugin_ids)
+            .map_err(|_| PluginError::Config)?;
+        let peer_link_ok = managed_reconcile::repair_channel_peer_link(
+            &self.state_dir.as_path().join("extensions"),
+            &plugin_id,
+            openclaw_root,
+        )
+        .map_err(|_| PluginError::Config)?;
+        self.reconcile_installed_records()?;
+        Ok(ChannelPluginPreparation {
+            is_external_managed_channel: true,
+            artifact_changed: reconcile.installed_ids.contains(&plugin_id)
+                || reconcile.updated_ids.contains(&plugin_id)
+                || !reconcile.removed_ids.is_empty(),
+            plugin_id: Some(plugin_id),
+            peer_link_ok,
+        })
     }
 
     pub fn catalog(&self) -> Result<Catalog, PluginError> {
@@ -172,6 +228,7 @@ impl PluginProjection {
         for entry in &mut entries {
             entry.enabled = enabled.contains(&entry.id);
         }
+        entries.retain(|entry| is_manually_configurable_plugin(&entry.id));
         entries.sort_by(|a, b| (&a.platform, &a.kind, &a.id).cmp(&(&b.platform, &b.kind, &b.id)));
         Ok(Catalog {
             success: true,
@@ -225,6 +282,45 @@ impl PluginProjection {
             &self.managed_plugin_root,
             configured_channel_plugin_ids,
         )
+    }
+
+    pub fn apply_configured_channel_startup_config(
+        &self,
+        configured_channel_plugin_ids: &[String],
+    ) -> Result<(), PluginError> {
+        OpenClawConfigStore::new(self.state_dir.clone())
+            .update_private_document(|document| {
+                let changed = configured_channel_plugin_ids
+                    .iter()
+                    .fold(false, |changed, id| {
+                        changed | set_plugin_enabled_config(document, id, true)
+                    });
+                if changed {
+                    OpenClawConfigMutation::changed()
+                } else {
+                    OpenClawConfigMutation::unchanged()
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| PluginError::Config)
+    }
+
+    pub fn reconcile_preinstalled_skills(&self) -> Result<(), PluginError> {
+        super::preinstalled_skills::reconcile(&self.state_dir, &self.working_directory)
+            .map(|_| ())
+            .map_err(|_| PluginError::Config)
+    }
+
+    pub fn reconcile_installed_records(&self) -> Result<(), PluginError> {
+        match super::installed_records::reconcile(&self.state_dir).status {
+            super::installed_records::InstalledRecordsReconcileStatus::Skipped(
+                super::installed_records::InstalledRecordsSkipReason::InvalidInstalledIndex
+                | super::installed_records::InstalledRecordsSkipReason::InvalidInstallRecords,
+            ) => Err(PluginError::Config),
+            super::installed_records::InstalledRecordsReconcileStatus::Changed
+            | super::installed_records::InstalledRecordsReconcileStatus::Unchanged
+            | super::installed_records::InstalledRecordsReconcileStatus::Skipped(_) => Ok(()),
+        }
     }
 
     pub fn apply_startup_lifecycle(&self, enabled_ids: &[String]) -> Result<(), PluginError> {
@@ -353,10 +449,10 @@ impl PluginProjection {
         let Some(plugin_id) = canonical_plugin_id(plugin_id.trim()) else {
             return PluginOperationOutcome::Rejected;
         };
-        if !OPERATION_PLUGIN_IDS.contains(&plugin_id) {
+        if !MANUALLY_CONFIGURABLE_PLUGIN_IDS.contains(&plugin_id) {
             return PluginOperationOutcome::Rejected;
         }
-        let target = self.state_dir.as_path().join("extensions").join(plugin_id);
+        let extensions = self.state_dir.as_path().join("extensions");
         match operation {
             PluginOperation::Install | PluginOperation::Update => {
                 let selected = [plugin_id.to_owned()];
@@ -375,14 +471,17 @@ impl PluginProjection {
                     Err(_) => PluginOperationOutcome::Unknown,
                 }
             }
-            PluginOperation::Uninstall => match owned_target_exists(&target, plugin_id) {
-                Ok(true) => match self.apply_transition_lifecycle(&[plugin_id.to_owned()], &[]) {
-                    Ok(()) => PluginOperationOutcome::Configured,
+            PluginOperation::Uninstall => {
+                match managed_reconcile::managed_target_exists(&extensions, plugin_id) {
+                    Ok(true) => match self.apply_transition_lifecycle(&[plugin_id.to_owned()], &[])
+                    {
+                        Ok(()) => PluginOperationOutcome::Configured,
+                        Err(_) => PluginOperationOutcome::Unknown,
+                    },
+                    Ok(false) => PluginOperationOutcome::Rejected,
                     Err(_) => PluginOperationOutcome::Unknown,
-                },
-                Ok(false) => PluginOperationOutcome::Rejected,
-                Err(_) => PluginOperationOutcome::Unknown,
-            },
+                }
+            }
         }
     }
 
@@ -390,11 +489,11 @@ impl PluginProjection {
         let Some(plugin_id) = canonical_plugin_id(plugin_id.trim()) else {
             return PluginOperationOutcome::Rejected;
         };
-        if !OPERATION_PLUGIN_IDS.contains(&plugin_id) {
+        if !MANUALLY_CONFIGURABLE_PLUGIN_IDS.contains(&plugin_id) {
             return PluginOperationOutcome::Rejected;
         }
-        let target = self.state_dir.as_path().join("extensions").join(plugin_id);
-        match remove_owned_target(&target, plugin_id) {
+        let extensions = self.state_dir.as_path().join("extensions");
+        match managed_reconcile::remove_managed_target(&extensions, plugin_id) {
             Ok(true) => PluginOperationOutcome::Configured,
             Ok(false) | Err(_) => PluginOperationOutcome::Unknown,
         }
@@ -679,6 +778,23 @@ fn canonical_plugin_id(id: &str) -> Option<&str> {
     })
 }
 
+fn is_manually_configurable_plugin(id: &str) -> bool {
+    MANUALLY_CONFIGURABLE_PLUGIN_IDS.contains(&id)
+}
+
+fn configured_channel_plugin_id(channel_type: &str) -> Option<String> {
+    let mut document = OpenClawConfigDocument::empty();
+    let mut channel = Map::new();
+    channel.insert("appId".into(), Value::String("configured".into()));
+    channel.insert("accounts".into(), serde_json::json!({"selected": {}}));
+    let mut channels = Map::new();
+    channels.insert(channel_type.to_owned(), Value::Object(channel));
+    document.insert("channels".into(), Value::Object(channels));
+    super::channel::configured_plugin_ids(&document)
+        .into_iter()
+        .next()
+}
+
 fn set_plugin_enabled_config(
     document: &mut OpenClawConfigDocument,
     plugin_id: &str,
@@ -740,24 +856,12 @@ fn canonicalize_entries(entries: Map<String, Value>) -> Map<String, Value> {
     result
 }
 
-fn owned_target_exists(path: &Path, id: &str) -> Result<bool, std::io::Error> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+#[cfg(test)]
+fn remove_owned_target(path: &Path, id: &str) -> Result<bool, PluginReconcileError> {
+    let Some(extensions) = path.parent() else {
+        return Ok(false);
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Ok(false);
-    }
-    Ok(managed_reconcile::read_managed_marker(path, id)?.is_some())
-}
-
-fn remove_owned_target(path: &Path, id: &str) -> Result<bool, std::io::Error> {
-    if !owned_target_exists(path, id)? {
-        return Ok(false);
-    }
-    fs::remove_dir_all(path)?;
-    Ok(true)
+    managed_reconcile::remove_managed_target(extensions, id)
 }
 
 impl SetEnabledOutcome {
@@ -827,14 +931,16 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use rusqlite::Connection;
     use serde_json::{Map, Value};
 
     use super::{
-        MANAGED_MARKER, MANAGED_PLUGIN_IDS, PluginOperation, PluginOperationOutcome,
+        ChannelPluginPreparation, MANAGED_PLUGIN_IDS, PluginOperation, PluginOperationOutcome,
         PluginProjection, SetEnabledOutcome, canonicalize_entries, canonicalize_ids,
         companion_skills_ready, enabled_ids, managed_target_version, parse_version,
     };
 
+    const MANAGED_MARKER: &str = ".matchaclaw-managed";
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
 
     struct TestRoot(PathBuf);
@@ -848,6 +954,46 @@ mod tests {
             ));
             fs::create_dir_all(&root).unwrap();
             Self(root)
+        }
+
+        fn projection(
+            &self,
+            state_dir: crate::lifecycle::state_dir::CanonicalStateDir,
+            companion_source: impl Into<PathBuf>,
+            plugin_root: impl Into<PathBuf>,
+        ) -> PluginProjection {
+            PluginProjection::new(state_dir, companion_source, plugin_root, self.0.clone())
+        }
+
+        fn write_bundle(&self, plugin_root: &std::path::Path, id: &str, version: &str) {
+            fs::create_dir_all(plugin_root.join(id).join("dist")).unwrap();
+            fs::write(
+                plugin_root.join(id).join("openclaw.plugin.json"),
+                serde_json::json!({"id": id, "name": id}).to_string(),
+            )
+            .unwrap();
+            fs::write(
+                plugin_root.join(id).join("package.json"),
+                serde_json::json!({"name": format!("@matchaclaw/{id}"), "version": version})
+                    .to_string(),
+            )
+            .unwrap();
+            fs::write(plugin_root.join(id).join("dist/index.js"), version).unwrap();
+        }
+
+        fn create_openclaw_database(
+            &self,
+            state_dir: &crate::lifecycle::state_dir::CanonicalStateDir,
+        ) {
+            let database_path = state_dir.as_path().join("state").join("openclaw.sqlite");
+            fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+            Connection::open(database_path)
+                .unwrap()
+                .execute(
+                    "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT",
+                    [],
+                )
+                .unwrap();
         }
     }
 
@@ -922,6 +1068,186 @@ mod tests {
     }
 
     #[test]
+    fn prepare_configured_channel_plugin_maps_feishu_to_lark() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        let plugin_root = root.0.join("plugins");
+        root.write_bundle(&plugin_root, "openclaw-lark", "1.0.0");
+        fs::write(
+            plugin_root.join("openclaw-lark/package.json"),
+            r#"{"name":"@matchaclaw/openclaw-lark","version":"1.0.0","peerDependencies":{"openclaw":"*"}}"#,
+        )
+        .unwrap();
+        let openclaw_root = root.0.join("openclaw");
+        fs::create_dir(&openclaw_root).unwrap();
+        fs::write(
+            openclaw_root.join("package.json"),
+            r#"{"name":"openclaw","version":"2026.9.3"}"#,
+        )
+        .unwrap();
+        fs::write(state_dir.as_path().join("openclaw.json"), r#"{}"#).unwrap();
+        root.create_openclaw_database(&state_dir);
+        let projection = root.projection(
+            state_dir.clone(),
+            root.0.join("companion-source"),
+            plugin_root,
+        );
+
+        assert_eq!(
+            projection
+                .prepare_configured_channel_plugin("feishu", &root.0.join("openclaw"))
+                .unwrap(),
+            ChannelPluginPreparation {
+                is_external_managed_channel: true,
+                plugin_id: Some("openclaw-lark".into()),
+                artifact_changed: true,
+                peer_link_ok: true,
+            }
+        );
+        assert!(
+            state_dir
+                .as_path()
+                .join("extensions/openclaw-lark/.matchaclaw-managed")
+                .is_file()
+        );
+        let peer_link = state_dir
+            .as_path()
+            .join("extensions/openclaw-lark/node_modules/openclaw");
+        assert_eq!(
+            peer_link.canonicalize().unwrap(),
+            openclaw_root.canonicalize().unwrap()
+        );
+        let unchanged = projection
+            .prepare_configured_channel_plugin("feishu", &openclaw_root)
+            .unwrap();
+        assert!(unchanged.peer_link_ok);
+        assert!(!unchanged.artifact_changed);
+        let failed = projection
+            .prepare_configured_channel_plugin("feishu", &root.0.join("missing-runtime"))
+            .unwrap();
+        assert!(!failed.peer_link_ok);
+        assert!(!failed.artifact_changed);
+        fs::write(
+            state_dir
+                .as_path()
+                .join("extensions/openclaw-lark/package.json"),
+            b"invalid",
+        )
+        .unwrap();
+        assert!(
+            projection
+                .prepare_configured_channel_plugin("feishu", &openclaw_root)
+                .is_err()
+        );
+        let document = super::OpenClawConfigStore::new(state_dir).read().unwrap();
+        assert!(document.as_value().get("plugins").is_none());
+    }
+
+    #[test]
+    fn prepare_configured_channel_plugin_ignores_non_external_channels() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        fs::write(state_dir.as_path().join("openclaw.json"), r#"{}"#).unwrap();
+        let projection = root.projection(
+            state_dir,
+            root.0.join("companion-source"),
+            root.0.join("plugins"),
+        );
+
+        assert_eq!(
+            projection
+                .prepare_configured_channel_plugin("telegram", &root.0.join("openclaw"))
+                .unwrap(),
+            ChannelPluginPreparation {
+                is_external_managed_channel: false,
+                plugin_id: None,
+                artifact_changed: false,
+                peer_link_ok: true,
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_configured_channel_plugin_keeps_other_configured_channel_targets() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        let plugin_root = root.0.join("plugins");
+        root.write_bundle(&plugin_root, "openclaw-lark", "1.0.0");
+        root.write_bundle(&plugin_root, "wecom", "1.0.0");
+        fs::write(
+            state_dir.as_path().join("openclaw.json"),
+            r#"{"channels":{"feishu":{"appId":"configured"}}}"#,
+        )
+        .unwrap();
+        root.create_openclaw_database(&state_dir);
+        let projection = root.projection(
+            state_dir.clone(),
+            root.0.join("companion-source"),
+            plugin_root,
+        );
+
+        projection
+            .prepare_configured_channel_plugin("wecom", &root.0.join("openclaw"))
+            .unwrap();
+
+        assert!(
+            state_dir
+                .as_path()
+                .join("extensions/openclaw-lark/.matchaclaw-managed")
+                .is_file()
+        );
+        assert!(
+            state_dir
+                .as_path()
+                .join("extensions/wecom/.matchaclaw-managed")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn prepare_configured_channel_plugin_reports_artifact_update_and_no_change() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        let plugin_root = root.0.join("plugins");
+        root.write_bundle(&plugin_root, "wecom", "1.0.0");
+        fs::write(state_dir.as_path().join("openclaw.json"), r#"{}"#).unwrap();
+        root.create_openclaw_database(&state_dir);
+        let projection = root.projection(
+            state_dir,
+            root.0.join("companion-source"),
+            plugin_root.clone(),
+        );
+
+        assert!(
+            projection
+                .prepare_configured_channel_plugin("wecom", &root.0.join("openclaw"))
+                .unwrap()
+                .artifact_changed
+        );
+        assert!(
+            !projection
+                .prepare_configured_channel_plugin("wecom", &root.0.join("openclaw"))
+                .unwrap()
+                .artifact_changed
+        );
+        root.write_bundle(&plugin_root, "wecom", "2.0.0");
+        assert!(
+            projection
+                .prepare_configured_channel_plugin("wecom", &root.0.join("openclaw"))
+                .unwrap()
+                .artifact_changed
+        );
+    }
+
+    #[test]
     fn plugin_operations_install_with_companion_and_reject_unmanaged_targets() {
         let root = TestRoot::new();
         let state_dir =
@@ -947,7 +1273,7 @@ mod tests {
         )
         .unwrap();
         fs::write(state_dir.as_path().join("openclaw.json"), r#"{}"#).unwrap();
-        let projection = PluginProjection::new(state_dir.clone(), companion_source, plugin_root);
+        let projection = root.projection(state_dir.clone(), companion_source, plugin_root);
 
         assert_eq!(
             projection.operation(PluginOperation::Uninstall, "browser-relay"),
@@ -999,7 +1325,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let projection = PluginProjection::new(
+        let projection = root.projection(
             state_dir.clone(),
             root.0.join("companion-source"),
             plugin_root,
@@ -1026,6 +1352,94 @@ mod tests {
     }
 
     #[test]
+    fn catalog_lists_only_manually_configurable_plugins_but_keeps_execution_state() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        let plugin_root = root.0.join("plugins");
+        for plugin_id in [
+            "browser-relay",
+            "matchaclaw-media",
+            "memory-lancedb-pro",
+            "openclaw-weixin",
+            "qwen",
+            "security-core",
+            "task-manager",
+        ] {
+            root.write_bundle(&plugin_root, plugin_id, "1.0.0");
+        }
+        fs::write(
+            state_dir.as_path().join("openclaw.json"),
+            r#"{"plugins":{"allow":["browser-relay","matchaclaw-media","memory-lancedb-pro","openclaw-weixin","qwen","security-core","task-manager"]}}"#,
+        )
+        .unwrap();
+        let projection = root.projection(state_dir, root.0.join("companion-source"), plugin_root);
+
+        let catalog = projection.catalog().unwrap();
+        let visible_ids = catalog
+            .plugins
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            visible_ids,
+            vec![
+                "browser-relay",
+                "matchaclaw-media",
+                "memory-lancedb-pro",
+                "security-core",
+                "task-manager",
+            ]
+        );
+        assert_eq!(
+            catalog.execution.enabled_plugin_ids,
+            vec![
+                "browser-relay",
+                "matchaclaw-media",
+                "memory-lancedb-pro",
+                "openclaw-weixin",
+                "qwen",
+                "security-core",
+                "task-manager",
+            ]
+        );
+    }
+
+    #[test]
+    fn allowed_managed_channel_is_reconciled_as_matcha_extension() {
+        let root = TestRoot::new();
+        let state_dir =
+            crate::lifecycle::state_dir::CanonicalStateDir::provision(root.0.join("state"))
+                .unwrap();
+        let plugin_root = root.0.join("plugins");
+        root.write_bundle(&plugin_root, "openclaw-weixin", "2.4.8");
+        fs::write(
+            state_dir.as_path().join("openclaw.json"),
+            r#"{"plugins":{"allow":["openclaw-weixin"]}}"#,
+        )
+        .unwrap();
+        let projection = root.projection(
+            state_dir.clone(),
+            root.0.join("companion-source"),
+            plugin_root,
+        );
+        let catalog = projection.catalog().unwrap();
+
+        projection
+            .reconcile_enabled_managed_plugins(&catalog.execution.enabled_plugin_ids)
+            .unwrap();
+
+        assert!(
+            state_dir
+                .as_path()
+                .join("extensions/openclaw-weixin/.matchaclaw-managed")
+                .is_file()
+        );
+    }
+
+    #[test]
     fn set_enabled_applies_transition_once_without_separate_config_owner() {
         let root = TestRoot::new();
         let state_dir =
@@ -1046,7 +1460,7 @@ mod tests {
             b"# Browser Relay\n",
         )
         .unwrap();
-        let projection = PluginProjection::new(state_dir.clone(), companion_source, plugin_root);
+        let projection = root.projection(state_dir.clone(), companion_source, plugin_root);
 
         assert_eq!(
             projection.set_enabled("browser-relay", true),
@@ -1086,7 +1500,7 @@ mod tests {
         fs::write(target.join("skills/lesson/SKILL.md"), b"lesson").unwrap();
         fs::write(state_dir.as_path().join("openclaw.json"), r#"{}"#).unwrap();
 
-        let projection = PluginProjection::new(
+        let projection = root.projection(
             state_dir.clone(),
             root.0.join("companion-source"),
             root.0.join("managed-plugins"),

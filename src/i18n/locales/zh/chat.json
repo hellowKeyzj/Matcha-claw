@@ -7,6 +7,17 @@
         "title": "没有可用运行时",
         "description": "当前没有可用的聊天运行时 endpoint。请稍后重试，或到设置中检查 Runtime Host。"
     },
+    "workspaceUnavailable": {
+        "title": "工作区不可用",
+        "description": "当前会话的工作区无法打开：{{path}}。请恢复该目录，或选择新的工作区并新建会话。",
+        "unknownPath": "未知工作区",
+        "chooseWorkspaceAndNewSession": "选择新工作区并新建会话",
+        "updating": "正在更新…",
+        "pickTitle": "选择新的 Agent 工作区",
+        "pickButton": "选择工作区",
+        "updateSuccess": "已更新 Agent 工作区，并新建会话。",
+        "updateFailed": "更新工作区失败：{{error}}"
+    },
     "welcome": {
         "title": "MatchaClaw 聊天",
         "subtitle": "您的 AI 助手已就绪。在下方开始对话。",
@@ -20,12 +31,26 @@
         "gatewayRecoveringNotice": "运行时正在准备…",
         "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
         "approvalWaitingPlaceholder": "等待审批中...",
+        "imageGenerationActive": "正在生成图片",
         "pickModel": "选择模型",
         "modelPickerTitle": "切换当前 Agent 模型",
         "pickPermissionMode": "选择权限模式",
-        "permissionPickerTitle": "切换 OpenClaw 工具权限",
-        "permissionDefault": "默认权限",
-        "permissionFullAccess": "完全访问权限",
+        "permissionPickerTitle": "切换当前会话权限",
+        "permissionDefault": "默认",
+        "permissionDefaultWithMode": "默认（{{mode}}）",
+        "permissionDefaultDescription": "使用 Agent 预设权限",
+        "permissionReadOnly": "只读",
+        "permissionReadOnlyDescription": "只能读取，禁止写入和命令",
+        "permissionGuarded": "受保护",
+        "permissionGuardedDescription": "敏感操作先由人工确认",
+        "permissionWorkspace": "工作区",
+        "permissionWorkspaceDescription": "允许工作区内读写和命令",
+        "permissionFull": "完全访问",
+        "permissionFullDescription": "不限制文件和命令操作",
+        "permissionFullRequiresAccess": "当前无权选择完全访问",
+        "permissionLoading": "权限加载中…",
+        "permissionPending": "权限切换中…",
+        "permissionUnsupported": "权限控制暂未接入",
         "permissionLoadFailed": "权限加载失败：{{error}}",
         "permissionSwitchFailed": "权限切换失败：{{error}}",
         "modelSwitchFailed": "模型切换失败：{{error}}",
@@ -42,7 +67,6 @@
         "openSidePanel": "打开右侧栏",
         "closeSidePanel": "关闭右侧栏",
         "skillConfig": "技能配置",
-        "skillShortLabel": "技能",
         "showThinking": "显示思考过程",
         "hideThinking": "隐藏思考过程",
         "exportMarkdown": "导出 Markdown"
@@ -60,6 +84,16 @@
         "typing": "正在思考",
         "activity": "正在调用工具",
         "compacting": "正在压缩上下文，完成后会继续回复"
+    },
+    "runtimeStatus": {
+        "providerFallback": "已切换备用 Provider",
+        "guardian": {
+            "reviewing": "Guardian 正在审核操作",
+            "approved": "Guardian 已放行操作",
+            "denied": "Guardian 已拦截操作",
+            "warning": "Guardian 风险提醒",
+            "strictReviewRequired": "Guardian 需要严格复核"
+        }
     },
     "errors": {
         "activeRunDisconnected": "当前这轮回复在收到结束事件前就断开了连接。",
@@ -138,6 +172,8 @@
         "changesTab": "变更",
         "previewTab": "预览",
         "workspaceTab": "工作区",
+        "collapseWorkspaceTree": "收起工作区目录",
+        "expandWorkspaceTree": "展开工作区目录",
         "enterFullscreen": "全屏查看产物工作台",
         "exitFullscreen": "退出产物全屏",
         "openExternal": "系统打开",
@@ -166,6 +202,7 @@
         "directoryPreviewDescription": "右侧不会直接渲染文件夹内容，请在工作区树中继续浏览，或用系统文件管理器打开。",
         "created": "新建",
         "modified": "修改",
+        "deleted": "删除",
         "revealFailed": "在文件管理器中定位失败",
         "workspaceEmpty": "当前没有可浏览的工作区目录。",
         "workspaceLoadFailed": "工作区读取失败：{{error}}"

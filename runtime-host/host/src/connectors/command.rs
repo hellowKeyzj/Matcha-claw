@@ -3,8 +3,9 @@ use foundation::execution::{CommandRoute, QueryRoute};
 use tokio::sync::oneshot;
 
 use crate::external_connectors::{
-    CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, ProbeOutcome, SessionIdentity,
-    SessionStatusOutcome, StatusOutcome,
+    CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, OpenClawMcpServersOutcome,
+    ProbeOutcome, SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget,
+    SessionStatusOutcome, SessionStatusTarget, StatusOutcome,
 };
 use crate::transport::provider_accounts::private_auth::Resolver;
 
@@ -25,6 +26,10 @@ pub(crate) enum ConnectorCommand {
     ConfigurePrivateResolver {
         resolver: Resolver,
         reply: oneshot::Sender<()>,
+    },
+    SetSessionMcpServerEnabled {
+        target: SessionMcpServerEnabledTarget,
+        reply: oneshot::Sender<SessionMcpServerEnabledOutcome>,
     },
 }
 
@@ -47,17 +52,21 @@ pub(crate) enum ConnectorQuery {
         reply: oneshot::Sender<ProbeOutcome>,
     },
     SessionStatus {
-        identity: SessionIdentity,
+        target: SessionStatusTarget,
         reply: oneshot::Sender<SessionStatusOutcome>,
+    },
+    OpenClawMcpServers {
+        reply: oneshot::Sender<OpenClawMcpServersOutcome>,
     },
 }
 
 impl ConnectorCommand {
     pub(super) fn route(&self) -> CommandRoute<ConnectorOwnerKey> {
         match self {
-            Self::Upsert { .. } | Self::Remove { .. } | Self::ConfigurePrivateResolver { .. } => {
-                CommandRoute::Global
-            }
+            Self::Upsert { .. }
+            | Self::Remove { .. }
+            | Self::ConfigurePrivateResolver { .. }
+            | Self::SetSessionMcpServerEnabled { .. } => CommandRoute::Global,
         }
     }
 }
@@ -70,7 +79,8 @@ impl ConnectorQuery {
             | Self::Status { .. }
             | Self::Get { .. }
             | Self::Probe { .. }
-            | Self::SessionStatus { .. } => QueryRoute::Global,
+            | Self::SessionStatus { .. }
+            | Self::OpenClawMcpServers { .. } => QueryRoute::Global,
         }
     }
 }

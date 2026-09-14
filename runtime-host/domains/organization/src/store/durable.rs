@@ -14,11 +14,14 @@ use super::{
     },
 };
 use crate::{
+    ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
+    ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     AgentNodeEventResolution, AuthorizedGraphResolution, AuthorizedGraphResolutionOutcome,
-    ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim, DeliveryId,
-    DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord, GraphDefinition,
-    GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey, NativeTerminalStatus, RecordOutcome,
-    TeamId, TerminalObservationOutcome, TriggerFireRequest, TriggerRegistration,
+    ControlExecutionStep, ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim,
+    DeliveryId, DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord,
+    GraphDefinition, GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey,
+    NativeTerminalStatus, RecordOutcome, TeamId, TerminalObservationOutcome, TriggerFireRequest,
+    TriggerRegistration,
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         artifact::{ArtifactRecord, ArtifactRecordOutcome},
@@ -56,11 +59,14 @@ impl OrganizationStore {
             recovered.facts.recover_interrupted_materializations();
         let recovered_interrupted_work = recovered.had_interrupted_delivery
             && recovered.facts.recover_interrupted_deliveries(observed_at);
+        let recovered_interrupted_activity = recovered.had_interrupted_activity
+            && recovered.facts.recover_interrupted_activities(observed_at);
         let recovered_interrupted_cancellation = recovered
             .facts
             .recover_interrupted_graph_run_cancellations(observed_at);
         let epoch = if recovered_interrupted_materialization
             || recovered_interrupted_work
+            || recovered_interrupted_activity
             || recovered_interrupted_cancellation
         {
             commit_recovered_facts(&path, recovered.epoch, &recovered.facts)?
@@ -442,6 +448,60 @@ impl OrganizationStore {
         Ok(outcome)
     }
 
+    pub fn register_activity_and_start_attempt(
+        &mut self,
+        request: ActivityRequest,
+        started_at: u64,
+    ) -> Result<ActivityRegistrationOutcome, StoreFault> {
+        self.transact(|facts| {
+            let run_id = request.run_id.clone();
+            let node_id = request.node_id.clone();
+            let fence = request.fence.clone();
+            let outcome = facts
+                .register_activity(request)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            if matches!(&outcome, ActivityRegistrationOutcome::Recorded(_)) {
+                let run = facts
+                    .run(&run_id)
+                    .cloned()
+                    .ok_or(StoreFault::InvalidFacts)?;
+                let graph = crate::reduce(
+                    run.graph().clone(),
+                    GraphEvent::AttemptStarted {
+                        node_id,
+                        fence,
+                        started_at,
+                    },
+                )
+                .map_err(|_| StoreFault::InvalidFacts)?;
+                facts
+                    .replace_run_graph(&run_id, graph)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+            }
+            Ok(outcome)
+        })
+    }
+
+    pub fn register_activity(
+        &mut self,
+        request: ActivityRequest,
+    ) -> Result<ActivityRegistrationOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .register_activity(request)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(&outcome, ActivityRegistrationOutcome::Recorded(_)) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
     pub fn resolve_human_decision(
         &mut self,
         command: HumanDecisionCommand,
@@ -620,6 +680,138 @@ impl OrganizationStore {
             facts
                 .install_runtime_receipt(receipt)
                 .map_err(StoreFault::RuntimeReceipt)
+        })
+    }
+
+    pub fn claim_agent_activity(
+        &mut self,
+        activity_id: &ActivityId,
+        delivery: crate::DeliveryRequest,
+        claimed_at: u64,
+    ) -> Result<ActivityClaim, StoreFault> {
+        if delivery.delivery_id.as_str() != activity_id.as_str() {
+            return Err(StoreFault::InvalidFacts);
+        }
+        self.transact(|facts| {
+            match facts
+                .register_delivery(delivery)
+                .map_err(StoreFault::DeliveryRequest)?
+            {
+                crate::RegisterOutcome::Recorded(_) | crate::RegisterOutcome::Replayed(_) => {}
+                crate::RegisterOutcome::ConflictingIdempotencyKey
+                | crate::RegisterOutcome::ConflictingDeliveryId { .. } => {
+                    return Err(StoreFault::InvalidFacts);
+                }
+            }
+            let claim = match facts
+                .claim_activity(activity_id, claimed_at)
+                .map_err(|_| StoreFault::InvalidFacts)?
+            {
+                ActivityClaimOutcome::Claimed(claim) => claim,
+                ActivityClaimOutcome::AlreadyClaimed(_) | ActivityClaimOutcome::Terminal(_) => {
+                    return Err(StoreFault::InvalidFacts);
+                }
+            };
+            match facts
+                .dispatch_activity(&claim, claimed_at)
+                .map_err(|_| StoreFault::InvalidFacts)?
+            {
+                ActivityDispatchOutcome::Recorded => {}
+                ActivityDispatchOutcome::Replayed => return Err(StoreFault::InvalidFacts),
+            }
+            let delivery_id = DeliveryId::new(activity_id.as_str().to_owned())
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            match facts
+                .claim_delivery(&delivery_id, claimed_at)
+                .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?
+            {
+                DeliveryStart::Claimed(_) => Ok(claim),
+                DeliveryStart::AlreadyClaimed(_)
+                | DeliveryStart::AwaitingRetry { .. }
+                | DeliveryStart::Terminal(_) => Err(StoreFault::InvalidFacts),
+            }
+        })
+    }
+
+    pub fn settle_agent_activity_dispatch(
+        &mut self,
+        claim: &ActivityClaim,
+        receipt: DeliveryReceipt,
+        activity_settlement: Option<ActivitySettlement>,
+    ) -> Result<(DeliveryResolution, Option<ActivitySettlementOutcome>), StoreFault> {
+        self.transact(|facts| {
+            let delivery_id = DeliveryId::new(claim.activity_id().as_str().to_owned())
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            let delivery_claim = facts
+                .deliveries()
+                .delivery(&delivery_id)
+                .and_then(|delivery| delivery.active_claim().cloned())
+                .ok_or(StoreFault::InvalidFacts)?;
+            let delivery = facts
+                .settle_delivery(&delivery_claim, receipt, 0)
+                .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
+            let activity = activity_settlement
+                .map(|settlement| {
+                    facts
+                        .settle_activity(claim, settlement)
+                        .map_err(|_| StoreFault::InvalidFacts)
+                })
+                .transpose()?;
+            Ok((delivery, activity))
+        })
+    }
+
+    pub fn claim_activity(
+        &mut self,
+        activity_id: &ActivityId,
+        claimed_at: u64,
+    ) -> Result<ActivityClaimOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .claim_activity(activity_id, claimed_at)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(&outcome, ActivityClaimOutcome::Claimed(_)) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn dispatch_activity(
+        &mut self,
+        claim: &ActivityClaim,
+        dispatched_at: u64,
+    ) -> Result<ActivityDispatchOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .dispatch_activity(claim, dispatched_at)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(&outcome, ActivityDispatchOutcome::Recorded) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn settle_activity(
+        &mut self,
+        claim: &ActivityClaim,
+        settlement: ActivitySettlement,
+    ) -> Result<ActivitySettlementOutcome, StoreFault> {
+        self.transact(|facts| {
+            facts
+                .settle_activity(claim, settlement)
+                .map_err(StoreFault::ActivityTransition)
         })
     }
 
@@ -867,6 +1059,34 @@ impl OrganizationStore {
         Ok(outcome)
     }
 
+    pub fn apply_graph_event(
+        &mut self,
+        run_id: &GraphRunId,
+        event: GraphEvent,
+    ) -> Result<(), StoreFault> {
+        self.transact(|facts| {
+            let run = facts.run(run_id).cloned().ok_or(StoreFault::InvalidFacts)?;
+            let graph =
+                crate::reduce(run.graph().clone(), event).map_err(|_| StoreFault::InvalidFacts)?;
+            facts
+                .replace_run_graph(run_id, graph)
+                .map_err(|_| StoreFault::InvalidFacts)
+        })
+    }
+
+    pub fn apply_control_execution_step(
+        &mut self,
+        run_id: &GraphRunId,
+        step: ControlExecutionStep,
+    ) -> Result<(), StoreFault> {
+        match step {
+            ControlExecutionStep::GraphEvent(event) => self.apply_graph_event(run_id, event),
+            ControlExecutionStep::ControlResolution(resolution) => {
+                self.apply_control_node_resolution(resolution).map(|_| ())
+            }
+        }
+    }
+
     pub fn apply_control_node_resolution(
         &mut self,
         resolution: ControlNodeResolution,
@@ -924,7 +1144,9 @@ impl OrganizationStore {
         if recovered.truncated_tail {
             truncate_to_recovered_prefix(&self.path, recovered.committed_len)?;
         }
-        if recovered.had_interrupted_delivery && recovered.facts != self.facts {
+        if (recovered.had_interrupted_delivery || recovered.had_interrupted_activity)
+            && recovered.facts != self.facts
+        {
             return Err(StoreFault::RecoveryRequired);
         }
         self.facts = recovered.facts;
@@ -1000,6 +1222,7 @@ fn initialize_log_file(path: &Path) -> Result<RecoveredFacts, StoreFault> {
                 committed_len: HEADER_LEN as u64,
                 truncated_tail: false,
                 had_interrupted_delivery: false,
+                had_interrupted_activity: false,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

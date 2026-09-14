@@ -68,22 +68,17 @@ pub(crate) async fn handle_status(
         .await
         .map_err(|_| RequestError::Invalid)?
     {
-        skill_status::Outcome::Available(catalog) => Ok(json!({
-            "skills": catalog.entries.iter().map(|entry| json!({
-                "key": entry.key,
-                "name": entry.name,
-                "description": entry.description,
-                "enabled": entry.enabled,
-                "selectable": entry.selectable,
-                "installed": entry.installed,
-                "eligible": entry.eligible,
-                "blockedByAllowlist": entry.blocked_by_allowlist,
-                "blockedByAgentFilter": entry.blocked_by_agent_filter,
-                "unavailableReason": entry.unavailable_reason.map(|reason| format!("{reason:?}").to_ascii_lowercase()),
-                "missingCategories": entry.missing_categories.iter().map(|category| format!("{category:?}").to_ascii_lowercase()).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        })),
-        skill_status::Outcome::Unavailable => Err(RequestError::Invalid),
+        skill_status::Outcome::Available(catalog) => {
+            eprintln!(
+                "[startup-trace] source=skills-status phase=transport detail=available entries={}",
+                catalog.entries.len()
+            );
+            Ok(skill_status::project(&catalog))
+        }
+        skill_status::Outcome::Unavailable => {
+            eprintln!("[startup-trace] source=skills-status phase=transport detail=unavailable");
+            Err(RequestError::Invalid)
+        }
     }
 }
 
@@ -237,6 +232,7 @@ struct UploadCommitRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UninstallRequest {
     skill_key: String,
+    slug: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -263,6 +259,7 @@ struct BundleFileRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadmeRequest {
     skill_key: String,
+    slug: Option<String>,
     file_path: Option<String>,
     base_dir: Option<String>,
 }
@@ -326,8 +323,9 @@ fn decode(endpoint: &str, value: Value) -> Result<Command, ()> {
             Command::upload_commit(request.upload_id, request.sha256)
         }
         UNINSTALL_ENDPOINT => {
+            reject_nulls(&value, &["slug"])?;
             let request = serde_json::from_value::<UninstallRequest>(value).map_err(|_| ())?;
-            Command::uninstall(request.skill_key)
+            Command::uninstall(request.skill_key, request.slug)
         }
         IMPORT_MARKDOWN_ENDPOINT => {
             let request = serde_json::from_value::<MarkdownImportRequest>(value).map_err(|_| ())?;
@@ -338,9 +336,14 @@ fn decode(endpoint: &str, value: Value) -> Result<Command, ()> {
         }
         IMPORT_BUNDLE_ENDPOINT => decode_bundle_import(value),
         README_ENDPOINT => {
-            reject_nulls(&value, &["filePath", "baseDir"])?;
+            reject_nulls(&value, &["slug", "filePath", "baseDir"])?;
             let request = serde_json::from_value::<ReadmeRequest>(value).map_err(|_| ())?;
-            Command::readme(request.skill_key, request.file_path, request.base_dir)
+            Command::readme(
+                request.skill_key,
+                request.slug,
+                request.file_path,
+                request.base_dir,
+            )
         }
         _ => Err(()),
     }
@@ -464,6 +467,9 @@ pub(crate) fn response(outcome: Outcome) -> (u16, Value) {
         ),
         Outcome::Readme(Err(ReadmeError::Rejected)) => (400, json!({ "outcome": "rejected" })),
         Outcome::Readme(Err(ReadmeError::Unknown)) => (503, json!({ "outcome": "unknown" })),
+        Outcome::OpenPath(Ok(_)) => (200, json!({ "success": true })),
+        Outcome::OpenPath(Err(ReadmeError::Rejected)) => (400, json!({ "outcome": "rejected" })),
+        Outcome::OpenPath(Err(ReadmeError::Unknown)) => (503, json!({ "outcome": "unknown" })),
         Outcome::Upload(UploadOutcome::Rejected) => (400, json!({ "outcome": "rejected" })),
         Outcome::Upload(UploadOutcome::Unknown) => (503, json!({ "outcome": "unknown" })),
         Outcome::Mutation(MutationOutcome::Accepted) => (200, json!({ "outcome": "accepted" })),
@@ -569,6 +575,51 @@ mod tests {
                 })
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn config_and_clawhub_install_decode_current_api_payloads() {
+        assert!(matches!(
+            decode(CONFIG_ENDPOINT, json!({"skillKey": "web-search", "enabled": false})),
+            Ok(Command::Config { skill_key, enabled: Some(false), api_key: None, env: None })
+                if skill_key == "web-search"
+        ));
+        assert!(matches!(
+            decode(CLAWHUB_INSTALL_ENDPOINT, json!({"slug": "web-search", "force": true})),
+            Ok(Command::ClawHubInstall { slug, version: None, force: true })
+                if slug == "web-search"
+        ));
+        assert!(matches!(
+            decode(
+                UNINSTALL_ENDPOINT,
+                json!({"skillKey": "163邮箱助手专业版", "slug": "163-email-assistant"})
+            ),
+            Ok(Command::Uninstall { skill_key, slug: Some(slug) })
+                if skill_key == "163邮箱助手专业版" && slug == "163-email-assistant"
+        ));
+        assert!(
+            decode(
+                UNINSTALL_ENDPOINT,
+                json!({"skillKey": "163邮箱助手专业版", "slug": null})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn skill_mutation_response_preserves_config_status_codes() {
+        assert_eq!(
+            response(Outcome::Mutation(MutationOutcome::Accepted)),
+            (200, json!({"outcome": "accepted"}))
+        );
+        assert_eq!(
+            response(Outcome::Mutation(MutationOutcome::Rejected)),
+            (400, json!({"outcome": "rejected"}))
+        );
+        assert_eq!(
+            response(Outcome::Mutation(MutationOutcome::Unknown)),
+            (503, json!({"outcome": "unknown"}))
         );
     }
 

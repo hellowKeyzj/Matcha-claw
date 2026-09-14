@@ -2,6 +2,7 @@
  * Cron State Store
  * Manages scheduled task state
  */
+import { useEffect } from 'react';
 import { create } from 'zustand';
 import {
   hostApiFetch,
@@ -21,7 +22,7 @@ interface CronState {
   error: string | null;
   
   // Actions
-  fetchJobs: (options?: { silent?: boolean }) => Promise<void>;
+  fetchJobs: (options?: { refreshAfterInflight?: boolean; silent?: boolean }) => Promise<void>;
   createJob: (input: CronJobCreateInput) => Promise<CronJob>;
   updateJob: (id: string, input: CronJobUpdateInput) => Promise<void>;
   deleteJob: (id: string) => Promise<void>;
@@ -43,12 +44,16 @@ let inflightCronFetchPromise: Promise<void> | null = null;
 let cronSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let cronEventCleanup: (() => void) | null = null;
 let cronEventGeneration = 0;
+let cronJobsEpoch = 0;
+let pendingCronFetchAfterInflight = false;
+let globalCronMutationCount = 0;
+let cronStoreSubscriberCount = 0;
 const CRON_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
 const SCHEDULER_CRON_CAPABILITY_ID = 'scheduler.cron';
 
 type CronMutationOperation = 'cron.create' | 'cron.update' | 'cron.delete' | 'cron.toggle';
 type CronTriggerOutcome = 'accepted' | 'skipped' | 'failed' | 'outcome-unknown';
-type CronTriggerSkipReason = 'already-running' | 'not-due' | 'invalid-spec';
+type CronTriggerSkipReason = 'already-running' | 'not-due' | 'invalid-spec' | 'disabled' | 'stopped';
 type CronTriggerResult = {
   outcome: CronTriggerOutcome;
   reason?: CronTriggerSkipReason;
@@ -62,11 +67,14 @@ function clearCronSnapshotRetry(): void {
 }
 
 function scheduleCronSnapshotRetry(fetchJobs: () => Promise<void>): void {
-  if (cronSnapshotRetryTimer) {
+  if (cronSnapshotRetryTimer || cronStoreSubscriberCount === 0) {
     return;
   }
   cronSnapshotRetryTimer = setTimeout(() => {
     cronSnapshotRetryTimer = null;
+    if (cronStoreSubscriberCount === 0) {
+      return;
+    }
     void fetchJobs();
   }, CRON_SNAPSHOT_NOT_READY_RETRY_MS);
 }
@@ -117,7 +125,7 @@ function isCronTriggerOutcome(value: unknown): value is CronTriggerOutcome {
 }
 
 function isCronTriggerSkipReason(value: unknown): value is CronTriggerSkipReason {
-  return value === 'already-running' || value === 'not-due' || value === 'invalid-spec';
+  return value === 'already-running' || value === 'not-due' || value === 'invalid-spec' || value === 'disabled' || value === 'stopped';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -172,7 +180,19 @@ function decodeCronJobsSnapshot(payload: unknown): CronJobsSnapshot {
 }
 
 function hasMutatingJobs(mutatingByJobId: Record<string, number>): boolean {
-  return Object.keys(mutatingByJobId).length > 0;
+  return globalCronMutationCount > 0 || Object.keys(mutatingByJobId).length > 0;
+}
+
+function beginGlobalCronMutation(): void {
+  globalCronMutationCount += 1;
+}
+
+function endGlobalCronMutation(): void {
+  globalCronMutationCount = Math.max(0, globalCronMutationCount - 1);
+}
+
+function incrementCronJobsEpoch(): void {
+  cronJobsEpoch += 1;
 }
 
 function incrementMutatingJob(mutatingByJobId: Record<string, number>, jobId: string): Record<string, number> {
@@ -196,7 +216,7 @@ function decrementMutatingJob(mutatingByJobId: Record<string, number>, jobId: st
   };
 }
 
-export const useCronStore = create<CronState>((set, get) => ({
+const useCronStoreBase = create<CronState>((set, get) => ({
   jobs: [],
   snapshotReady: false,
   initialLoading: false,
@@ -211,9 +231,13 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
     const silent = options?.silent === true;
     if (inflightCronFetchPromise) {
+      if (options?.refreshAfterInflight === true) {
+        pendingCronFetchAfterInflight = true;
+      }
       await inflightCronFetchPromise;
       return;
     }
+    const requestEpoch = cronJobsEpoch;
     const hasSnapshot = get().snapshotReady;
     if (hasSnapshot) {
       if (!silent) {
@@ -226,13 +250,17 @@ export const useCronStore = create<CronState>((set, get) => ({
     const task = (async () => {
       try {
         const snapshot = decodeCronJobsSnapshot(await hostApiFetch<unknown>('/api/cron/jobs'));
+        if (requestEpoch !== cronJobsEpoch) {
+          set({ initialLoading: false, refreshing: false });
+          return;
+        }
         if (!snapshot.ready) {
           set((state) => ({
             initialLoading: !state.snapshotReady,
             refreshing: true,
             error: snapshot.error,
           }));
-          scheduleCronSnapshotRetry(() => get().fetchJobs({ silent: true }));
+          scheduleCronSnapshotRetry(() => get().fetchJobs({ refreshAfterInflight: true, silent: true }));
           return;
         }
         clearCronSnapshotRetry();
@@ -244,6 +272,10 @@ export const useCronStore = create<CronState>((set, get) => ({
           error: null,
         });
       } catch (error) {
+        if (requestEpoch !== cronJobsEpoch) {
+          set({ initialLoading: false, refreshing: false });
+          return;
+        }
         set({
           initialLoading: false,
           refreshing: false,
@@ -258,11 +290,16 @@ export const useCronStore = create<CronState>((set, get) => ({
     } finally {
       if (inflightCronFetchPromise === task) {
         inflightCronFetchPromise = null;
+        if (pendingCronFetchAfterInflight) {
+          pendingCronFetchAfterInflight = false;
+          void get().fetchJobs({ refreshAfterInflight: true, silent: true });
+        }
       }
     }
   },
   
   createJob: async (input) => {
+    beginGlobalCronMutation();
     set({ mutating: true });
     try {
       const job = await cronMutationRequest<CronJob>(
@@ -272,6 +309,7 @@ export const useCronStore = create<CronState>((set, get) => ({
           name: input.name,
           agentId: input.agentId ?? 'main',
           message: input.message,
+          model: input.model,
           schedule: input.schedule,
           delivery: input.delivery ?? { mode: 'none' },
           enabled: input.enabled ?? true,
@@ -281,13 +319,16 @@ export const useCronStore = create<CronState>((set, get) => ({
       if (!isRecord(job) || typeof job.id !== 'string') {
         throw new Error('Invalid cron create response');
       }
+      incrementCronJobsEpoch();
       set((state) => ({ jobs: [...state.jobs, job], snapshotReady: true }));
+      incrementCronJobsEpoch();
       return job;
     } catch (error) {
       console.error('Failed to create cron job:', error);
       throw error;
     } finally {
-      set({ mutating: false });
+      endGlobalCronMutation();
+      set((state) => ({ mutating: hasMutatingJobs(state.mutatingByJobId) }));
     }
   },
   
@@ -309,9 +350,11 @@ export const useCronStore = create<CronState>((set, get) => ({
       if (!job || typeof job.id !== 'string' || job.id !== id) {
         throw new Error('Invalid cron update response');
       }
+      incrementCronJobsEpoch();
       set((state) => ({
         jobs: state.jobs.map((current) => current.id === id ? job : current),
       }));
+      incrementCronJobsEpoch();
     } catch (error) {
       console.error('Failed to update cron job:', error);
       throw error;
@@ -345,9 +388,11 @@ export const useCronStore = create<CronState>((set, get) => ({
         throw new Error('Invalid cron delete response');
       }
       if (result.removed) {
+        incrementCronJobsEpoch();
         set((state) => ({
           jobs: state.jobs.filter((job) => job.id !== id),
         }));
+        incrementCronJobsEpoch();
       }
     } catch (error) {
       console.error('Failed to delete cron job:', error);
@@ -381,9 +426,11 @@ export const useCronStore = create<CronState>((set, get) => ({
       if (!job || typeof job.id !== 'string' || job.id !== id) {
         throw new Error('Invalid cron toggle response');
       }
+      incrementCronJobsEpoch();
       set((state) => ({
         jobs: state.jobs.map((current) => current.id === id ? job : current),
       }));
+      incrementCronJobsEpoch();
     } catch (error) {
       console.error('Failed to toggle cron job:', error);
       throw error;
@@ -431,8 +478,25 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  setJobs: (jobs) => set({ jobs, snapshotReady: true }),
+  setJobs: (jobs) => {
+    incrementCronJobsEpoch();
+    set({ jobs, snapshotReady: true });
+    incrementCronJobsEpoch();
+  },
 }));
+
+export const useCronStore: typeof useCronStoreBase = Object.assign(((...args: Parameters<typeof useCronStoreBase>) => {
+  useEffect(() => {
+    cronStoreSubscriberCount += 1;
+    return () => {
+      cronStoreSubscriberCount = Math.max(0, cronStoreSubscriberCount - 1);
+      if (cronStoreSubscriberCount === 0) {
+        clearCronSnapshotRetry();
+      }
+    };
+  }, []);
+  return useCronStoreBase(...args);
+}) as typeof useCronStoreBase, useCronStoreBase);
 
 export function initCronEvents(): () => void {
   cronEventCleanup?.();
@@ -441,7 +505,7 @@ export function initCronEvents(): () => void {
   const unsubscribe = subscribeHostEvent<unknown>('openclaw:cron', (event) => {
     if (!active || !isCronExecutionEvent(event)) return;
     if (!useCronStore.getState().jobs.some((job) => job.id === event.jobId)) return;
-    void useCronStore.getState().fetchJobs({ silent: true });
+    void useCronStore.getState().fetchJobs({ refreshAfterInflight: true, silent: true });
   });
   const cleanup = () => {
     if (!active) return;
@@ -449,6 +513,7 @@ export function initCronEvents(): () => void {
     unsubscribe();
     if (cronEventGeneration === generation) {
       cronEventCleanup = null;
+      clearCronSnapshotRetry();
     }
   };
   cronEventCleanup = cleanup;

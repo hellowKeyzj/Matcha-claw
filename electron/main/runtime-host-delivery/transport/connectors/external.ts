@@ -41,6 +41,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.status'
   | 'externalConnectors.probe'
   | 'externalConnectors.sessionStatus'
+  | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.get'
   | 'externalConnectors.upsert'
   | 'externalConnectors.remove';
@@ -111,6 +112,12 @@ function isRequest(value: unknown): value is Request {
       return hasExactKeys(value.input, ['kind', 'sessionIdentity'])
         && value.input.kind === 'sessionStatus'
         && !validateSessionIdentity(value.input.sessionIdentity);
+    case 'externalConnectors.sessionMcpServerEnabled':
+      return hasExactKeys(value.input, ['kind', 'sessionIdentity', 'serverId', 'enabled'])
+        && value.input.kind === 'sessionMcpServerEnabled'
+        && !validateSessionIdentity(value.input.sessionIdentity)
+        && isConnectorId(value.input.serverId)
+        && typeof value.input.enabled === 'boolean';
     case 'externalConnectors.probe':
     case 'externalConnectors.get':
     case 'externalConnectors.remove':
@@ -152,6 +159,12 @@ function isSuccessResponse(operation: ExternalConnectorOperation, value: unknown
       && hasExactKeys(value, ['statuses'])
       && Array.isArray(value.statuses)
       && value.statuses.every(isSessionStatus);
+  }
+  if (operation === 'externalConnectors.sessionMcpServerEnabled') {
+    return isRecord(value)
+      && hasExactKeys(value, ['success', 'effectiveNextRun'])
+      && value.success === true
+      && value.effectiveNextRun === true;
   }
   if (operation === 'externalConnectors.get') {
     return isRecord(value) && hasExactKeys(value, ['connector']) && isPublicConnector(value.connector);
@@ -281,6 +294,8 @@ function projectSessionStatus(value: Record<string, unknown>): Record<string, un
     ...(value.details.sessionKey === undefined ? {} : { sessionKey: value.details.sessionKey }),
     ...(value.details.toolCount === undefined ? {} : { toolCount: value.details.toolCount }),
     ...(value.details.launchSummary === undefined ? {} : { launchSummary: value.details.launchSummary }),
+    ...(value.details.enabledNextRun === undefined ? {} : { enabledNextRun: value.details.enabledNextRun }),
+    ...(value.details.enabledConfigurable === undefined ? {} : { enabledConfigurable: value.details.enabledConfigurable }),
   } : undefined;
   return {
     connectorId: value.connectorId,
@@ -295,11 +310,13 @@ function projectSessionStatus(value: Record<string, unknown>): Record<string, un
 
 function optionalSessionStatusDetails(value: unknown): boolean {
   return value === undefined || (isRecord(value)
-    && hasOnlyKeys(value, ['serverId', 'sessionKey', 'toolCount', 'launchSummary'])
+    && hasOnlyKeys(value, ['serverId', 'sessionKey', 'toolCount', 'launchSummary', 'enabledNextRun', 'enabledConfigurable'])
     && optionalText(value.serverId)
     && optionalText(value.sessionKey)
     && (value.toolCount === undefined || (typeof value.toolCount === 'number' && Number.isSafeInteger(value.toolCount) && value.toolCount >= 0))
-    && optionalText(value.launchSummary));
+    && optionalText(value.launchSummary)
+    && optionalBoolean(value.enabledNextRun)
+    && optionalBoolean(value.enabledConfigurable));
 }
 
 function isSessionResultType(value: unknown): boolean {

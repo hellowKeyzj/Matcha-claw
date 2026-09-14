@@ -7,12 +7,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const CATALOG_FILE: &str = "catalog.json";
-const TEMPLATE_FILES: [TemplateFile; 5] = [
+const METADATA_FILE_NAME: &str = "MEMORY.md";
+const TEMPLATE_FILES: [TemplateFile; 4] = [
     TemplateFile::Agents,
     TemplateFile::Soul,
-    TemplateFile::Tools,
-    TemplateFile::Identity,
     TemplateFile::User,
+    TemplateFile::Memory,
 ];
 
 #[derive(Clone, Eq, PartialEq)]
@@ -109,12 +109,10 @@ pub enum TemplateFile {
     Agents,
     #[serde(rename = "SOUL.md")]
     Soul,
-    #[serde(rename = "TOOLS.md")]
-    Tools,
-    #[serde(rename = "IDENTITY.md")]
-    Identity,
     #[serde(rename = "USER.md")]
     User,
+    #[serde(rename = "MEMORY.md")]
+    Memory,
 }
 
 impl TemplateFile {
@@ -122,9 +120,8 @@ impl TemplateFile {
         match self {
             Self::Agents => "AGENTS.md",
             Self::Soul => "SOUL.md",
-            Self::Tools => "TOOLS.md",
-            Self::Identity => "IDENTITY.md",
             Self::User => "USER.md",
+            Self::Memory => "MEMORY.md",
         }
     }
 }
@@ -170,9 +167,10 @@ impl SubagentTemplateCatalog {
             if files.is_empty() {
                 continue;
             }
-            let identity = read_regular(&path.join(TemplateFile::Identity.file_name()))?;
+            let metadata_file = read_regular(&path.join(METADATA_FILE_NAME))?;
             let agents = read_regular(&path.join(TemplateFile::Agents.file_name()))?;
-            let (name, summary) = identity_metadata(identity.as_deref(), &id, agents.as_deref());
+            let (name, summary) =
+                identity_metadata(metadata_file.as_deref(), &id, agents.as_deref());
             let meta = metadata.templates.get(&id);
             templates.push(Summary {
                 id,

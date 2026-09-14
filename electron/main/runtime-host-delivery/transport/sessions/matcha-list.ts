@@ -46,7 +46,7 @@ type SessionListResponse = Readonly<{
       agentId: 'matcha';
       sessionKey: string;
     }>;
-    kind: 'named';
+    kind: 'session';
     preferred: false;
     endpointSessionId: string;
     protocolId: 'matcha-agent-app-server';
@@ -114,7 +114,7 @@ function projectMatchaSessionList(value: MatchaSessionListResponse): SessionList
         agentId: 'matcha',
         sessionKey: `matcha-agent:matcha:${session.nativeSessionHandle}`,
       },
-      kind: 'named',
+      kind: 'session',
       preferred: false,
       endpointSessionId: session.nativeSessionHandle,
       protocolId: 'matcha-agent-app-server',

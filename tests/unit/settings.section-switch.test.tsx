@@ -68,14 +68,6 @@ const hostApiFetchMock = vi.hoisted(() => vi.fn(async (path: string, init?: Requ
 
 const hostRuntimeEndpointsListMock = vi.hoisted(() => vi.fn(async () => ({ endpoints: [] })));
 
-const licenseRuntimeMock = vi.hoisted(() => ({
-  clear: vi.fn().mockResolvedValue({ success: true }),
-  gate: vi.fn(),
-  revalidate: vi.fn(),
-  storedKey: vi.fn(),
-  validate: vi.fn(),
-}));
-
 vi.mock('@/lib/host-api', () => ({
   hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
@@ -89,14 +81,6 @@ vi.mock('@/lib/host-api', () => ({
   hostOpenClawStop: () => hostApiFetchMock('/api/openclaw/lifecycle/stop', { method: 'POST' }),
   hostOpenClawRestart: () => hostApiFetchMock('/api/openclaw/lifecycle/restart', { method: 'POST' }),
   hostRuntimeEndpointsList: hostRuntimeEndpointsListMock,
-}));
-
-vi.mock('@/lib/license-runtime', () => ({
-  hostLicenseClear: licenseRuntimeMock.clear,
-  hostLicenseGate: licenseRuntimeMock.gate,
-  hostLicenseRevalidate: licenseRuntimeMock.revalidate,
-  hostLicenseStoredKey: licenseRuntimeMock.storedKey,
-  hostLicenseValidate: licenseRuntimeMock.validate,
 }));
 
 function buildRuntimeEndpoint(runtimeAdapterId: 'openclaw' | 'matcha-agent') {
@@ -157,30 +141,6 @@ describe('settings page section switch', () => {
       changedRuntimeScopeKeys: [],
       revisionByRuntimeScopeKey: {},
     });
-    licenseRuntimeMock.gate.mockResolvedValue({
-      state: 'blocked',
-      reason: 'empty',
-      checkedAtMs: Date.now(),
-      hasStoredKey: false,
-      hasUsableCache: false,
-      nextRevalidateAtMs: null,
-      lastValidation: null,
-      renewalAlert: null,
-    });
-    licenseRuntimeMock.storedKey.mockResolvedValue({ masked: null });
-    licenseRuntimeMock.validate.mockResolvedValue({
-      valid: false,
-      code: 'empty',
-      masked: null,
-      last4: null,
-    });
-    licenseRuntimeMock.revalidate.mockResolvedValue({
-      valid: false,
-      code: 'empty',
-      masked: null,
-      last4: null,
-    });
-    licenseRuntimeMock.clear.mockResolvedValue({ success: true });
     i18n.changeLanguage('en');
 
     useSettingsStore.setState((state) => ({
@@ -193,7 +153,6 @@ describe('settings page section switch', () => {
       proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
       autoCheckUpdate: true,
       devModeUnlocked: false,
-      setupComplete: true,
       userAvatarDataUrl: null,
       initialized: true,
     }));
@@ -429,15 +388,6 @@ describe('settings page section switch', () => {
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/openclaw/lifecycle/status');
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/openclaw/runtime/snapshot');
     expect(refreshRuntimeHostStatus).not.toHaveBeenCalled();
-  });
-
-  it('URL section=license 时默认落在授权分栏', async () => {
-    await act(async () => {
-      renderWithRouter('/settings?section=license');
-    });
-
-    expect(screen.getByRole('heading', { name: 'License' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Validate License' })).toBeInTheDocument();
   });
 
   it('旧的 aiProviders 分栏链接会回退到默认分栏', async () => {

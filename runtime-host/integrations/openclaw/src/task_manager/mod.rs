@@ -2,6 +2,6 @@ mod operations;
 
 pub use operations::{
     Task, TaskCreate, TaskCreateReceipt, TaskManagerOperation, TaskMetadata, TaskMutationOutcome,
-    TaskOutput, TaskOutputKind, TaskReadFailure, TaskScope, TaskSnapshot, TaskStatus,
-    TaskStopResult, TaskUpdate, Todo, TodoSnapshot, TodoStatus,
+    TaskReadFailure, TaskScope, TaskSnapshot, TaskStatus, TaskUpdate, Todo, TodoSnapshot,
+    TodoStatus,
 };

@@ -10,6 +10,8 @@ import {
   decodeSessionDelta,
   type SessionDelta,
   type SessionChange,
+  type SessionWireContent,
+  type SessionWireItem,
 } from '../types/session/snapshot';
 import type { GatewayStatus } from '../types/gateway';
 import { applySessionDelta } from './chat/store-state-helpers';
@@ -47,9 +49,29 @@ interface GatewayErrorEventPayload {
 }
 
 function sessionDeltaTextLength(changes: readonly SessionChange[]): number {
-  return changes.reduce((total, change) => (
-    change.kind === 'messageDelta' ? total + change.text.length : total
+  return changes.reduce((total, change) => {
+    if (change.kind === 'messageDelta') return total + change.text.length;
+    if (change.kind !== 'messageUpdated') return total;
+    return total + sessionItemTextLength(change.item);
+  }, 0);
+}
+
+function sessionItemTextLength(item: SessionWireItem): number {
+  if (item.kind === 'userMessage') return itemTextOrSegmentsLength(item.text, item.content);
+  if (item.kind === 'assistantTurn') return itemTextOrSegmentsLength(item.text, item.segments);
+  return item.text.length;
+}
+
+function itemTextOrSegmentsLength(
+  text: string,
+  segments: readonly SessionWireContent[],
+): number {
+  const segmentsLength = segments.reduce((total, segment) => (
+    segment.kind === 'text' || segment.kind === 'thinking' || segment.kind === 'largeText'
+      ? total + segment.text.length
+      : total
   ), 0);
+  return segmentsLength > 0 ? segmentsLength : text.length;
 }
 
 function sessionDeltaRunId(delta: SessionDelta): string | undefined {
@@ -194,10 +216,11 @@ async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
     }));
     return status;
   } catch (error) {
-    console.warn(STARTUP_TRACE_PREFIX, {
+    console.warn(JSON.stringify({
+      prefix: STARTUP_TRACE_PREFIX,
       ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-snapshot-failed', null),
       ...summarizeStartupTraceError(error),
-    });
+    }));
     throw error;
   }
 }

@@ -129,6 +129,9 @@ export default defineConfig(({ command, mode }) => ({
   // automatically, but we declare it explicitly so the intent is clear and the
   // build remains correct even if plugin order ever changes.
   base: './',
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   plugins: [
     react(),
     electron([

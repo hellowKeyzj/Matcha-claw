@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   registerHostApiProxyHandlers: vi.fn(),
   registerSettingsPrivateProxyHandlers: vi.fn(),
   registerProviderPrivateAuthHandlers: vi.fn(),
-  registerProviderValidationHandlers: vi.fn(),
   registerFleetPrivateHandlers: vi.fn(),
   registerDiagnosticsExportHandler: vi.fn(),
 }));
@@ -37,9 +36,6 @@ vi.mock('../../electron/main/ipc/settings-private-proxy', () => ({
 }));
 vi.mock('../../electron/main/ipc/provider-private-auth', () => ({
   registerProviderPrivateAuthHandlers: mocks.registerProviderPrivateAuthHandlers,
-}));
-vi.mock('../../electron/main/ipc/provider-validation', () => ({
-  registerProviderValidationHandlers: mocks.registerProviderValidationHandlers,
 }));
 vi.mock('../../electron/main/ipc/fleet-private', () => ({
   registerFleetPrivateHandlers: mocks.registerFleetPrivateHandlers,

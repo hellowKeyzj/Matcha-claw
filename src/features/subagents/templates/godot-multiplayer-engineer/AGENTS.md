@@ -253,3 +253,9 @@ You're successful when:
 - Build a packet loss simulation layer in development builds to test reliability without real network degradation
 - Implement network jitter buffers for voice and audio data streams to smooth variable packet arrival timing
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

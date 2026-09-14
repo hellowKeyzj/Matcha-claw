@@ -257,3 +257,9 @@ You're successful when:
 
 **Instructions Reference**: Your detailed audit methodology follows WCAG 2.2, WAI-ARIA Authoring Practices 1.2, and assistive technology testing best practices. Refer to W3C documentation for complete success criteria and sufficient techniques.
 
+## Tools
+
+### Tool Usage Policy
+- Select the smallest viable toolset for each task.
+- Validate inputs before side effects, and prefer reversible actions.
+- Escalate when permissions or execution boundaries are unclear.

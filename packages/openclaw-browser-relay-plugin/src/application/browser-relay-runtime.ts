@@ -70,6 +70,89 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function requestBody(params: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(params.body) ? params.body : {}
+}
+
+function withEnvelopeDefaults(
+  params: Record<string, unknown>,
+  envelope: Record<string, unknown>,
+): BrowserActionParams {
+  const query = isRecord(envelope.query) ? envelope.query : {}
+  return {
+    ...(typeof envelope.timeoutMs === 'number' && Number.isFinite(envelope.timeoutMs) && !('timeoutMs' in params) ? { timeoutMs: envelope.timeoutMs } : {}),
+    ...(asString(query.profile) && !('profile' in params) ? { profile: asString(query.profile) } : {}),
+    ...(asString(envelope.target) && !('target' in params) ? { target: asString(envelope.target) } : {}),
+    ...(asString(envelope.node) && !('node' in params) ? { node: asString(envelope.node) } : {}),
+    ...params,
+  } as BrowserActionParams
+}
+
+function normalizeBrowserRequestPath(value: unknown): string | undefined {
+  const requestPath = asString(value)?.split('?')[0]?.replace(/\/+$/, '')
+  return requestPath || undefined
+}
+
+function resolveHttpBrowserActionParams(params: Record<string, unknown>): BrowserActionParams {
+  const method = asString(params.method)?.toUpperCase()
+  const requestPath = normalizeBrowserRequestPath(params.path)
+  if (!method || !requestPath) {
+    throw new Error('method and path are required for HTTP-shaped browser.request')
+  }
+
+  const body = requestBody(params)
+
+  if (method === 'GET' && requestPath === '/tabs') {
+    return withEnvelopeDefaults({ action: 'tabs' }, params)
+  }
+  if (method === 'POST' && requestPath === '/start') {
+    return withEnvelopeDefaults({ action: 'start' }, params)
+  }
+  if (method === 'POST' && requestPath === '/tabs/open') {
+    return withEnvelopeDefaults({
+      action: 'open',
+      url: body.url,
+      retain: body.retain,
+      sessionKey: body.sessionKey,
+    }, params)
+  }
+  if (method === 'POST' && requestPath === '/tabs/focus') {
+    return withEnvelopeDefaults({ action: 'focus', targetId: body.targetId }, params)
+  }
+  if (method === 'DELETE' && requestPath.startsWith('/tabs/')) {
+    return withEnvelopeDefaults({
+      action: 'close',
+      targetId: decodeURIComponent(requestPath.slice('/tabs/'.length)),
+    }, params)
+  }
+  if (method === 'POST' && requestPath === '/navigate') {
+    return withEnvelopeDefaults({ ...body, action: 'navigate' }, params)
+  }
+  if (method === 'POST' && requestPath === '/screenshot') {
+    return withEnvelopeDefaults({ ...body, action: 'screenshot', type: 'png' }, params)
+  }
+  if (method === 'POST' && requestPath === '/act') {
+    const request = isRecord(body.request) ? body.request : body
+    return withEnvelopeDefaults({
+      ...(isRecord(body.request) ? body : {}),
+      action: 'act',
+      request,
+    }, params)
+  }
+
+  throw new Error(`Unsupported HTTP-shaped browser.request route: ${method} ${requestPath}`)
+}
+
+function resolveBrowserActionParams(params: Record<string, unknown>): BrowserActionParams {
+  return asString(params.action)
+    ? params as BrowserActionParams
+    : resolveHttpBrowserActionParams(params)
+}
+
 function resolvePluginConfig(config: OpenClawConfig | undefined): BrowserRelayPluginConfig {
   const plugins = isRecord(config?.plugins) ? config.plugins : null
   const entries = plugins && isRecord(plugins.entries) ? plugins.entries : null
@@ -113,7 +196,7 @@ export function registerBrowserRelayRuntime(api: OpenClawPluginApi): void {
 
   api.registerGatewayMethod('browser.request', async (options: GatewayRequestOptions) => {
     await withGatewayGuard(options, async () => (
-      runtime.requireControl().handleRequest(options.params as BrowserActionParams)
+      runtime.requireControl().handleRequest(resolveBrowserActionParams(options.params))
     ))
   }, {
     scope: 'operator.admin',

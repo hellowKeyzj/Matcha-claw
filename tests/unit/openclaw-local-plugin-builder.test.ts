@@ -87,6 +87,35 @@ describe('openclaw local plugin builder', () => {
     expect(await readFile(path.join(distDir, 'nested', 'assets', 'message.txt'), 'utf8')).toBe('hello plugin')
   })
 
+  it('编译前阻止禁用的 OpenClaw SDK import', async () => {
+    const workspaceDir = await createTempDir('openclaw-local-plugin-builder-')
+    const packageDir = path.join(workspaceDir, 'plugin')
+    const sourceDir = path.join(packageDir, 'src')
+    const distDir = path.join(packageDir, 'dist')
+
+    await mkdir(sourceDir, { recursive: true })
+    await writeFile(
+      path.join(sourceDir, 'index.ts'),
+      [
+        "import type { PluginLogger } from 'openclaw/plugin-sdk'",
+        "import { resolveProviderHttpRequestConfig } from 'openclaw/plugin-sdk/provider-http'",
+        '',
+        'export const logger: PluginLogger | null = null',
+        'export { resolveProviderHttpRequestConfig }',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const { buildLocalPluginArtifacts } = await import('../../scripts/lib/openclaw-local-plugin-builder.mjs')
+
+    await expect(buildLocalPluginArtifacts({
+      packageDir,
+      sourceDir,
+      distDir,
+    })).rejects.toThrow(/src\/index\.ts -> openclaw\/plugin-sdk[\s\S]*src\/index\.ts -> openclaw\/plugin-sdk\/provider-http/)
+  })
+
   it('支持根入口文件与 src 目录一起编译，并保留包根路径解析', async () => {
     const workspaceDir = await createTempDir('openclaw-local-plugin-builder-')
     const packageDir = path.join(workspaceDir, 'plugin')

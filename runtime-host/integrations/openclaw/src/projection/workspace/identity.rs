@@ -32,7 +32,7 @@ pub(super) fn directory(path: &Path) -> Result<PathBuf, WorkspaceProjectionError
     Ok(external_path(canonical))
 }
 
-fn external_path(path: PathBuf) -> PathBuf {
+pub(super) fn external_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let path = path.to_string_lossy();
@@ -44,18 +44,6 @@ fn external_path(path: PathBuf) -> PathBuf {
         }
     }
     path
-}
-
-pub(super) fn ensure_directory(path: &Path) -> Result<(), WorkspaceProjectionError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(WorkspaceProjectionError::WorkspaceUnavailable);
-        }
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(WorkspaceProjectionError::WorkspaceUnavailable),
-    }
-    fs::create_dir(path).map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)
 }
 
 pub(super) fn read_regular(path: &Path) -> Result<Option<String>, WorkspaceProjectionError> {

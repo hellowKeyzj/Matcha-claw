@@ -14,6 +14,8 @@ type Operation =
   | 'subagents.files.set'
   | 'subagents.files.list'
   | 'subagents.displayConfig.get'
+  | 'subagents.package.export'
+  | 'subagents.package.install'
   | 'subagents.description.set'
   | 'subagents.model.set'
   | 'subagents.skills.set'
@@ -171,6 +173,8 @@ function isOperation(value: unknown): value is Operation {
     || value === 'subagents.files.set'
     || value === 'subagents.files.list'
     || value === 'subagents.displayConfig.get'
+    || value === 'subagents.package.export'
+    || value === 'subagents.package.install'
     || value === 'subagents.description.set'
     || value === 'subagents.model.set'
     || value === 'subagents.skills.set'
@@ -194,7 +198,7 @@ function isTarget(value: unknown, operation: Operation): value is AgentTarget | 
     return hasExactKeys(value, ['kind', 'agentId']) && value.kind === 'agent' && isText(value.agentId, 4096);
   }
   if (value.kind !== 'subagent') return false;
-  if (operation === 'subagents.create') return hasExactKeys(value, ['kind']);
+  if (operation === 'subagents.create' || operation === 'subagents.package.install') return hasExactKeys(value, ['kind']);
   return hasExactKeys(value, ['kind', 'subagentId']) && isText(value.subagentId, 4096);
 }
 
@@ -244,19 +248,22 @@ function isInput(
     && value.kind === 'list'
     && target.kind === 'agent';
   if (operation === 'subagents.create') {
-    return hasExactKeys(value, ['kind', 'endpoint', 'name', 'workspace', 'model'])
+    return hasAllowedKeys(value, ['kind', 'endpoint', 'name', 'workspace', 'model', 'workspaceInitialization'], ['kind', 'endpoint', 'name', 'workspace', 'model'])
       && value.kind === 'create'
       && isText(value.name, 4096)
       && isText(value.workspace, 4096)
-      && (value.model === null || isText(value.model, 4096));
+      && (value.model === null || isText(value.model, 4096))
+      && (!Object.hasOwn(value, 'workspaceInitialization') || isWorkspaceInitialization(value.workspaceInitialization));
   }
   if (operation === 'subagents.update') {
-    return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'workspace', 'model'])
+    return hasAllowedKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'workspace', 'model'], ['kind', 'endpoint', 'agentId'])
       && value.kind === 'update'
       && target.subagentId === value.agentId
       && isText(value.agentId, 4096)
-      && [value.name, value.workspace, value.model].some((field) => field !== null)
-      && [value.name, value.workspace, value.model].every((field) => field === null || isText(field, 4096));
+      && (Object.hasOwn(value, 'name') || Object.hasOwn(value, 'workspace') || Object.hasOwn(value, 'model'))
+      && (!Object.hasOwn(value, 'name') || isText(value.name, 4096))
+      && (!Object.hasOwn(value, 'workspace') || isText(value.workspace, 4096))
+      && (!Object.hasOwn(value, 'model') || value.model === null || isText(value.model, 4096));
   }
   if (operation === 'subagents.delete') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'deleteFiles'])
@@ -302,6 +309,20 @@ function isInput(
       && value.skills.every((skill) => isText(skill, 4096))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
+  if (operation === 'subagents.package.export') {
+    return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
+      && value.kind === 'packageExport'
+      && target.subagentId === value.agentId
+      && isText(value.agentId, 4096)
+      && endpoint.runtimeAdapterId === 'openclaw';
+  }
+  if (operation === 'subagents.package.install') {
+    return hasExactKeys(value, ['kind', 'endpoint', 'packagePath'])
+      && value.kind === 'packageInstall'
+      && target.subagentId === undefined
+      && isText(value.packagePath, 4096)
+      && endpoint.runtimeAdapterId === 'openclaw';
+  }
   if (operation === 'subagents.files.get') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name'])
       && value.kind === 'filesGet'
@@ -335,9 +356,12 @@ function endpointsEqual(left: Endpoint, right: Endpoint): boolean {
 function isRootedFileName(value: unknown): boolean {
   return value === 'AGENTS.md'
     || value === 'SOUL.md'
-    || value === 'TOOLS.md'
-    || value === 'IDENTITY.md'
-    || value === 'USER.md';
+    || value === 'USER.md'
+    || value === 'MEMORY.md';
+}
+
+function isWorkspaceInitialization(value: unknown): boolean {
+  return value === 'mainAgentTemplate' || value === 'emptyWorkspace';
 }
 
 function isSuccess(value: unknown, operation: Operation): boolean {
@@ -351,10 +375,17 @@ function isSuccess(value: unknown, operation: Operation): boolean {
       && (value.endedAt === null || isTimestamp(value.endedAt))
       && (value.startedAt === null || value.endedAt === null || value.endedAt >= value.startedAt);
   }
-  if (operation === 'subagents.list') return hasExactKeys(value, ['success', 'defaultId', 'agents'])
-    && isText(value.defaultId, 4096) && Array.isArray(value.agents) && value.agents.every(isAgent);
+  if (operation === 'subagents.list') return hasExactKeys(value, ['success', 'defaultId', 'selectionRequired', 'agents'])
+    && isText(value.defaultId, 4096)
+    && typeof value.selectionRequired === 'boolean'
+    && Array.isArray(value.agents)
+    && value.agents.every(isAgent);
   if (operation === 'subagents.files.list') return hasExactKeys(value, ['success', 'files'])
     && Array.isArray(value.files) && value.files.every(isFile);
+  if (operation === 'subagents.package.export') return hasExactKeys(value, ['success', 'package'])
+    && isPackageExport(value.package);
+  if (operation === 'subagents.package.install') return hasExactKeys(value, ['success', 'package'])
+    && isPackageInstall(value.package);
   if (operation === 'subagents.displayConfig.get') return hasExactKeys(value, ['success', 'defaults', 'agents'])
     && isConfigurationDefaults(value.defaults)
     && Array.isArray(value.agents)
@@ -374,11 +405,13 @@ function isSuccess(value: unknown, operation: Operation): boolean {
 
 function isAgent(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['id', 'name', 'workspace', 'model'])
+    && hasExactKeys(value, ['id', 'name', 'workspace', 'model', 'kind', 'sealed'])
     && isText(value.id, 4096)
     && (value.name === null || isText(value.name, 4096))
     && (value.workspace === null || isText(value.workspace, 4096))
-    && (value.model === null || isText(value.model, 4096));
+    && (value.model === null || isText(value.model, 4096))
+    && (value.kind === 'agent' || value.kind === 'system')
+    && typeof value.sealed === 'boolean';
 }
 
 function isMutationAgent(value: unknown): boolean {
@@ -397,6 +430,22 @@ function isFile(value: unknown): boolean {
     && (value.size === null || isTimestamp(value.size))
     && (value.updatedAtMs === null || isTimestamp(value.updatedAtMs))
     && (value.content === null || typeof value.content === 'string');
+}
+
+function isPackageExport(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['agentId', 'fileName', 'packagePath', 'size', 'exportedAtMs'])
+    && isText(value.agentId, 4096)
+    && isText(value.fileName, 4096)
+    && isText(value.packagePath, 4096)
+    && isTimestamp(value.size)
+    && isTimestamp(value.exportedAtMs);
+}
+
+function isPackageInstall(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['agentId'])
+    && isText(value.agentId, 4096);
 }
 
 function isSkillSelection(value: unknown): boolean {
@@ -453,7 +502,13 @@ function isConfigurationView(value: unknown, skill: boolean): boolean {
 function isSupport(value: unknown): boolean {
   return isRecord(value)
     && ((hasExactKeys(value, ['supportType']) && value.supportType === 'supported')
-      || (hasExactKeys(value, ['supportType', 'reason']) && value.supportType === 'unsupported' && value.reason === 'agentNotConfigured'));
+      || (hasExactKeys(value, ['supportType', 'reason']) && value.supportType === 'unsupported' && isUnsupportedReason(value.reason)));
+}
+
+function isUnsupportedReason(value: unknown): boolean {
+  return value === 'agentNotConfigured'
+    || value === 'runtimeDoesNotExposeAgentSkillConfig'
+    || value === 'runtimeDoesNotExposeAgentToolConfig';
 }
 
 function isSkillConfigurationView(value: Record<string, unknown>): boolean {
@@ -464,9 +519,9 @@ function isSkillConfigurationView(value: Record<string, unknown>): boolean {
 }
 
 function isSkillOption(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['skillKey', 'displayName', 'description', 'installed', 'selectable', 'unavailableReason', 'missingRequirements'])
+  return isRecord(value) && hasExactKeys(value, ['skillKey', 'displayName', 'description', 'selectable', 'unavailableReason', 'missingRequirements'])
     && isText(value.skillKey, 4096) && isText(value.displayName, 4096)
-    && typeof value.description === 'string' && typeof value.installed === 'boolean' && typeof value.selectable === 'boolean'
+    && typeof value.description === 'string' && typeof value.selectable === 'boolean'
     && (value.unavailableReason === null || value.unavailableReason === 'globalSkillDisabled' || value.unavailableReason === 'blockedByRuntimeAllowlist' || value.unavailableReason === 'missingRequirements')
     && (value.missingRequirements === null || isMissingSkillRequirements(value.missingRequirements));
 }
@@ -488,7 +543,24 @@ function isToolConfigurationView(value: Record<string, unknown>): boolean {
 function isToolPolicy(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profile', 'allow', 'deny']) && isText(value.profile, 4096) && Array.isArray(value.allow) && value.allow.every((key) => isText(key, 4096)) && Array.isArray(value.deny) && value.deny.every((key) => isText(key, 4096)); }
 function isToolProfile(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profileKey', 'displayName']) && isText(value.profileKey, 4096) && isText(value.displayName, 4096); }
 function isToolGroup(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['groupKey', 'displayName', 'source', 'pluginId', 'toolOptions']) && isText(value.groupKey, 4096) && isText(value.displayName, 4096) && (value.source === 'core' || value.source === 'plugin') && (value.pluginId === null || isText(value.pluginId, 4096)) && Array.isArray(value.toolOptions) && value.toolOptions.every(isToolOption); }
-function isToolOption(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['toolKey', 'displayName', 'optionType', 'description', 'source', 'pluginId', 'groupKey', 'groupDisplayName']) && isText(value.toolKey, 4096) && isText(value.displayName, 4096) && (value.optionType === 'tool' || value.optionType === 'group') && (value.description === null || typeof value.description === 'string') && (value.source === 'core' || value.source === 'plugin') && (value.pluginId === null || isText(value.pluginId, 4096)) && (value.groupKey === null || isText(value.groupKey, 4096)) && (value.groupDisplayName === null || isText(value.groupDisplayName, 4096)); }
+function isToolOption(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['toolKey', 'displayName', 'optionType', 'description', 'source', 'pluginId', 'optional', 'risk', 'tags', 'defaultProfiles', 'groupKey', 'groupDisplayName'])
+    && isText(value.toolKey, 4096)
+    && isText(value.displayName, 4096)
+    && (value.optionType === 'tool' || value.optionType === 'group')
+    && (value.description === null || typeof value.description === 'string')
+    && (value.source === 'core' || value.source === 'plugin')
+    && (value.pluginId === null || isText(value.pluginId, 4096))
+    && (value.optional === null || typeof value.optional === 'boolean')
+    && (value.risk === null || value.risk === 'low' || value.risk === 'medium' || value.risk === 'high')
+    && Array.isArray(value.tags)
+    && value.tags.every((tag) => isText(tag, 4096))
+    && Array.isArray(value.defaultProfiles)
+    && value.defaultProfiles.every((profile) => isText(profile, 4096))
+    && (value.groupKey === null || isText(value.groupKey, 4096))
+    && (value.groupDisplayName === null || isText(value.groupDisplayName, 4096));
+}
 
 function isModelInput(value: unknown): boolean {
   return isRecord(value)
@@ -551,4 +623,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasAllowedKeys(value: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): boolean {
+  const allowedSet = new Set(allowed);
+  return Object.keys(value).every((key) => allowedSet.has(key))
+    && required.every((key) => Object.hasOwn(value, key));
 }

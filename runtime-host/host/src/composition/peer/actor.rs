@@ -263,6 +263,41 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
                 .map(|()| control_lease_for_snapshot(shared, &snapshot));
             let _ = reply.send(result);
         }
+        PeerQuery::OpenClawBrowserRequest {
+            method,
+            path,
+            query,
+            body,
+            timeout_ms,
+            target,
+            node,
+            reply,
+        } => {
+            let result = match shared.admission.admit_request() {
+                Ok(()) => Ok(shared
+                    .open_claw
+                    .browser_request(method, path, query, body, timeout_ms, target, node)
+                    .await),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(result);
+        }
+        PeerQuery::OpenClawMcpAppRequest {
+            operation_id,
+            session_key,
+            view_id,
+            standalone,
+            reply,
+        } => {
+            let result = match shared.admission.admit_request() {
+                Ok(()) => Ok(shared
+                    .open_claw
+                    .mcp_app_request(operation_id, session_key, view_id, standalone)
+                    .await),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(result);
+        }
     }
 }
 
@@ -279,6 +314,7 @@ async fn autostart_open_claw(shared: &PeerShared, lifecycle: &dyn LifecycleOps) 
     let start_succeeded = matches!(&result, Ok(StartOutcome::Started));
     record_open_claw_start(shared, result);
     if start_succeeded {
+        apply_openclaw_ready_projections(shared).await;
         shared.team_run.recover_materialization_receipts().await;
     }
     notify_open_claw_runtime(shared);
@@ -372,13 +408,17 @@ async fn start_open_claw(
     let result = lifecycle.start().await;
     record_open_claw_start(shared, result.clone());
     let outcome = runtime_start_result(result);
-    notify_open_claw_runtime(shared);
     match outcome {
         Ok(()) => {
+            apply_openclaw_ready_projections(shared).await;
             shared.team_run.recover_materialization_receipts().await;
+            notify_open_claw_runtime(shared);
             Ok(open_claw_state(shared))
         }
-        Err(_) => Err(StartOpenClawError::RuntimeStart),
+        Err(_) => {
+            notify_open_claw_runtime(shared);
+            Err(StartOpenClawError::RuntimeStart)
+        }
     }
 }
 
@@ -405,17 +445,28 @@ async fn restart_open_claw(
     }
     apply_openclaw_prelaunch_projections(shared).await;
     let result = lifecycle.restart().await;
-    notify_open_claw_runtime(shared);
     match runtime_restart_result(result) {
         Ok(()) => {
+            apply_openclaw_ready_projections(shared).await;
             shared.team_run.recover_materialization_receipts().await;
+            notify_open_claw_runtime(shared);
             Ok(open_claw_state(shared))
         }
-        Err(_) => Err(RestartOpenClawError::RuntimeRestart),
+        Err(_) => {
+            notify_open_claw_runtime(shared);
+            Err(RestartOpenClawError::RuntimeRestart)
+        }
     }
 }
 
 async fn apply_openclaw_prelaunch_projections(shared: &PeerShared) {
+    if shared
+        .open_claw
+        .preseed_matcha_workspace_identity()
+        .is_err()
+    {
+        report_openclaw_startup_configuration_rejected(shared);
+    }
     let _ = shared
         .provider
         .prepare_openclaw_private_bootstrap(shared.open_claw.state_dir().clone())
@@ -430,6 +481,12 @@ async fn apply_openclaw_prelaunch_projections(shared: &PeerShared) {
         .await
         .is_err()
     {
+        report_openclaw_startup_configuration_rejected(shared);
+    }
+}
+
+async fn apply_openclaw_ready_projections(shared: &PeerShared) {
+    if shared.open_claw.merge_matcha_workspace_context().is_err() {
         report_openclaw_startup_configuration_rejected(shared);
     }
 }

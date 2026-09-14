@@ -21,6 +21,7 @@
 
 const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename } = require('path');
+const { safeRmSync } = require('./lib/safe-delete.mjs');
 const STRIP_LINKER_ARTIFACTS = process.env.MATCHACLAW_STRIP_LINKER_ARTIFACTS === '1';
 
 // On Windows, paths in pnpm's virtual store can exceed the default MAX_PATH
@@ -105,7 +106,7 @@ function cleanupUnnecessaryFiles(dir) {
 
       if (entry.isDirectory()) {
         if (REMOVE_DIRS.has(entry.name)) {
-          try { rmSync(fullPath, { recursive: true, force: true }); removedCount++; } catch { /* */ }
+          try { if (safeRmSync(fullPath, { root: dir })) removedCount++; } catch { /* */ }
         } else {
           walk(fullPath);
         }
@@ -134,7 +135,7 @@ function cleanupKoffi(nodeModulesDir, platform, arch) {
   let removed = 0;
   for (const entry of readdirSync(koffiDir)) {
     if (entry !== keepTarget) {
-      try { rmSync(join(koffiDir, entry), { recursive: true, force: true }); removed++; } catch { /* */ }
+      try { if (safeRmSync(join(koffiDir, entry), { root: koffiDir })) removed++; } catch { /* */ }
     }
   }
   return removed;
@@ -215,8 +216,9 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
 
       if (!isMatch) {
         try {
-          rmSync(join(scopeDir, entry), { recursive: true, force: true });
-          removed++;
+          if (safeRmSync(join(scopeDir, entry), { root: scopeDir })) {
+            removed++;
+          }
         } catch { /* */ }
       }
     }
@@ -240,8 +242,9 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
 
       if (!isMatch) {
         try {
-          rmSync(join(nodeModulesDir, entry), { recursive: true, force: true });
-          removed++;
+          if (safeRmSync(join(nodeModulesDir, entry), { root: nodeModulesDir })) {
+            removed++;
+          }
         } catch { /* */ }
       }
     }
@@ -269,8 +272,9 @@ function cleanupLanceDbPlatformPackages(nodeModulesDir, platform, arch) {
     const isMatch = pkgPlatform === platform && pkgArch === arch;
     if (!isMatch) {
       try {
-        rmSync(join(lancedbScopeDir, entry), { recursive: true, force: true });
-        removed++;
+        if (safeRmSync(join(lancedbScopeDir, entry), { root: lancedbScopeDir })) {
+          removed++;
+        }
       } catch { /* */ }
     }
   }
@@ -293,8 +297,9 @@ function cleanupOnnxRuntimeNodeBinaries(nodeModulesDir, platform, arch) {
 
     if (pkgPlatform !== platform) {
       try {
-        rmSync(platformDir, { recursive: true, force: true });
-        removed++;
+        if (safeRmSync(platformDir, { root: napiDir })) {
+          removed++;
+        }
       } catch { /* */ }
       continue;
     }
@@ -306,8 +311,9 @@ function cleanupOnnxRuntimeNodeBinaries(nodeModulesDir, platform, arch) {
       const pkgArch = baseArch(archEntry.name);
       if (pkgArch !== arch) {
         try {
-          rmSync(join(platformDir, archEntry.name), { recursive: true, force: true });
-          removed++;
+          if (safeRmSync(join(platformDir, archEntry.name), { root: platformDir })) {
+            removed++;
+          }
         } catch { /* */ }
       }
     }
@@ -476,7 +482,7 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
   try { realPluginPath = realpathSafe(pkgPath); } catch { realPluginPath = pkgPath; }
 
   // Copy plugin package itself
-  if (existsSync(normWin(destDir))) rmSync(normWin(destDir), { recursive: true, force: true });
+  safeRmSync(destDir, { root: dirname(destDir) });
   mkdirSync(normWin(destDir), { recursive: true });
   cpSync(normWin(realPluginPath), normWin(destDir), { recursive: true, dereference: true });
 
@@ -548,7 +554,7 @@ function copyPluginFromLocalCandidates(pluginId, candidates, destDir) {
     return false;
   }
 
-  if (existsSync(normWin(destDir))) rmSync(normWin(destDir), { recursive: true, force: true });
+  safeRmSync(destDir, { root: dirname(destDir) });
   mkdirSync(normWin(destDir), { recursive: true });
   cpSync(normWin(sourceDir), normWin(destDir), { recursive: true, dereference: true });
   console.log(`[after-pack] ✅ Plugin ${pluginId}: copied local mirror from ${sourceDir}`);
@@ -578,7 +584,6 @@ exports.default = async function afterPack(context) {
   const dest = join(openclawRoot, 'node_modules');
   const nodeModulesRoot = join(__dirname, '..', 'node_modules');
   const pluginsDestRoot = join(resourcesDir, 'openclaw-plugins');
-
 
   if (process.env.SKIP_MATCHA_AGENT_BUILD !== '1') {
     const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
@@ -619,9 +624,12 @@ exports.default = async function afterPack(context) {
     { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
     { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-    { npmName: '@openclaw/discord', pluginId: 'discord' },
     { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-    { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
+    ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode'].map((pluginId) => ({
+      pluginId,
+      required: true,
+      localSourceCandidates: [join(__dirname, '..', 'build', 'openclaw-plugins', pluginId)],
+    })),
     {
       pluginId: 'memory-lancedb-pro',
       localSourceCandidates: [
@@ -713,7 +721,7 @@ exports.default = async function afterPack(context) {
   // MatchaClaw bundles the openclaw-lark plugin separately. The built-in
   // OpenClaw feishu extension is redundant and its mirrored deps make macOS
   // codesign scan far more files.
-  rmSync(join(packExtDir, 'feishu'), { recursive: true, force: true });
+  safeRmSync(join(packExtDir, 'feishu'), { root: packExtDir });
   if (existsSync(buildExtDir)) {
     let extNMCount = 0;
     let mergedPkgCount = 0;
@@ -728,7 +736,7 @@ exports.default = async function afterPack(context) {
 
       const destExtRoot = join(packExtDir, extEntry.name);
       const destExtNM = join(destExtRoot, 'node_modules');
-      rmSync(destExtNM, { recursive: true, force: true });
+      safeRmSync(destExtNM, { root: destExtRoot });
       mkdirSync(destExtNM, { recursive: true });
       extNMCount++;
 

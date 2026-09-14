@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import type { PluginLogger } from 'openclaw/plugin-sdk'
+import type { PluginLogger } from '../plugin-types.js'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import { resolveRelayPluginStatePath } from './paths.js'

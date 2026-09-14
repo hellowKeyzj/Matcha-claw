@@ -3,7 +3,7 @@ import {
   type ProviderMutationReceipt,
 } from '@/lib/host-api-transport-contract';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
-import type { ProviderCredential, ProviderType } from '@/lib/providers';
+import { PROVIDER_TYPE_INFO, type ProviderCredential, type ProviderOAuthMode, type ProviderType } from '@/lib/providers';
 import { summarizeIdentifier } from '@/lib/session-trace';
 
 function invokePrivate<T>(channel: string, input: unknown): Promise<T> {
@@ -19,7 +19,7 @@ type AccountIntent = Readonly<{
   endpoint?: string;
   protocol?: 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
   mediaProtocol?: 'google' | 'openAi' | 'openRouter';
-  authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'local';
+  authMode: 'apiKey' | 'oauthBrowser' | 'oauthDevice' | 'token' | 'cliReuse' | 'local';
   revision: number;
 }>;
 
@@ -40,6 +40,8 @@ function authMode(authMode: ProviderCredential['authMode']): AccountIntent['auth
     case 'api_key': return 'apiKey';
     case 'oauth_browser': return 'oauthBrowser';
     case 'oauth_device': return 'oauthDevice';
+    case 'token': return 'token';
+    case 'cli_reuse': return 'cliReuse';
     case 'local': return 'local';
   }
 }
@@ -84,8 +86,9 @@ export async function hostProviderStartOAuth(input: {
   flowId: string;
   accountId: string;
   label: string;
+  mode: ProviderOAuthMode;
 }): Promise<{ flowId: string; status: 'started' }> {
-  const authMode = input.provider === 'openai' ? 'oauthBrowser' : 'oauthDevice';
+  const provider = PROVIDER_TYPE_INFO.find((candidate) => candidate.id === input.provider);
   return await invokePrivate('providers:startOAuth', {
     provider: input.provider,
     flowId: input.flowId,
@@ -95,7 +98,9 @@ export async function hostProviderStartOAuth(input: {
       label: input.label,
       enabled: true,
       kind: 'chat',
-      authMode,
+      ...(provider?.defaultBaseUrl ? { endpoint: provider.defaultBaseUrl } : {}),
+      ...(provider?.apiProtocol ? { protocol: apiProtocol(provider.apiProtocol) } : {}),
+      authMode: authMode(input.mode),
       revision: 1,
     },
   });
@@ -118,26 +123,15 @@ export async function hostProviderSubmitOAuthCode(input: {
   return await invokePrivate('providers:submitOAuthCode', { flowId: input.flowId, code: input.code });
 }
 
-export async function hostProviderValidate(input: {
-  accountId?: string;
-  vendorId: string;
-  apiKey: string;
-  options?: {
-    baseUrl?: string;
-    apiProtocol?: ProviderCredential['apiProtocol'];
-    headers?: Record<string, string>;
-  };
-}): Promise<{ valid: boolean; error?: string }> {
-  return await invokePrivate('providers:validateApiKey', input);
-}
-
 export async function hostProviderCreateAccount(
   account: ProviderCredential,
   apiKey?: string,
+  token?: string,
 ): Promise<ProjectionResult> {
   return await mutate('providers:storeAccount', {
     account: toAccount(account, 1),
     ...(apiKey?.trim() ? { apiKey } : {}),
+    ...(token?.trim() ? { token } : {}),
   }, 'stored');
 }
 
@@ -145,10 +139,12 @@ export async function hostProviderUpdateAccount(
   account: ProviderCredential,
   revision: number,
   apiKey?: string,
+  token?: string,
 ): Promise<ProjectionResult> {
   return await mutate('providers:storeAccount', {
     account: toAccount(account, revision),
     ...(apiKey?.trim() ? { apiKey } : {}),
+    ...(token?.trim() ? { token } : {}),
   }, 'stored');
 }
 
@@ -185,9 +181,38 @@ function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<strin
   };
 }
 
+function providerMutationInputTrace(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const account = value.account;
+  if (account && typeof account === 'object' && !Array.isArray(account)) {
+    const draft = account as Record<string, unknown>;
+    return {
+      operation: 'store',
+      accountId: summarizeIdentifier(typeof draft.id === 'string' ? draft.id : undefined),
+      provider: typeof draft.provider === 'string' ? draft.provider : undefined,
+      authMode: typeof draft.authMode === 'string' ? draft.authMode : undefined,
+      kind: typeof draft.kind === 'string' ? draft.kind : undefined,
+      enabled: typeof draft.enabled === 'boolean' ? draft.enabled : undefined,
+      revision: typeof draft.revision === 'number' ? draft.revision : undefined,
+      endpoint: summarizeIdentifier(typeof draft.endpoint === 'string' ? draft.endpoint : undefined),
+      protocol: typeof draft.protocol === 'string' ? draft.protocol : undefined,
+      mediaProtocol: typeof draft.mediaProtocol === 'string' ? draft.mediaProtocol : undefined,
+      privateAuthInputPresent: (typeof value.apiKey === 'string' && value.apiKey.trim().length > 0)
+        || (typeof value.token === 'string' && value.token.trim().length > 0),
+    };
+  }
+  return {
+    operation: 'delete',
+    accountId: summarizeIdentifier(typeof value.accountId === 'string' ? value.accountId : undefined),
+    revision: typeof value.revision === 'number' ? value.revision : undefined,
+  };
+}
+
 async function mutate(channel: string, input: unknown, success: 'stored' | 'deleted'): Promise<ProjectionResult> {
+  const trace = providerMutationInputTrace(input);
   try {
-    logProviderConfigTrace('request-start', { channel });
+    logProviderConfigTrace('request-start', { channel, ...trace });
     const result = await invokePrivate<MutationResult>(channel, input);
     const receipt = result.receipt
       ? decodeProviderMutationReceipt(result.receipt, result.status === 'unknown' ? 'commit-outcome-unknown' : 'committed')

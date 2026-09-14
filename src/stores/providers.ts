@@ -3,11 +3,7 @@
  * Manages AI provider configurations
  */
 import { create } from 'zustand';
-import type {
-  ProviderCredential,
-  ProviderWithKeyInfo,
-} from '@/lib/providers';
-import { normalizeProviderApiKeyInput } from '@/lib/providers';
+import type { ProviderCredential } from '@/lib/providers';
 import {
   fetchProviderSnapshot,
   normalizeProviderSnapshot,
@@ -17,14 +13,12 @@ import {
   hostProviderCreateAccount,
   hostProviderDeleteAccount,
   hostProviderUpdateAccount,
-  hostProviderValidate,
 } from '@/lib/provider-projection';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
 import type { ProviderMutationReceipt } from '@/lib/host-api-transport-contract';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 const PROVIDER_SNAPSHOT_TIMEOUT_MS = 20000;
-const PROVIDER_SNAPSHOT_CACHE_KEY = 'matchaclaw:providers:snapshot:v2';
 const DEFAULT_PROVIDER_SCOPE_KEY = 'default';
 
 let inflightProviderSnapshotTask: Promise<void> | null = null;
@@ -54,132 +48,6 @@ function createEmptySnapshot(): ProviderSnapshot {
     credentials: [],
     vendors: [],
     revisions: {},
-  };
-}
-
-function cloneSnapshot(snapshot: ProviderSnapshot): ProviderSnapshot {
-  return {
-    statuses: [...snapshot.statuses],
-    credentials: [...snapshot.credentials],
-    vendors: [...snapshot.vendors],
-    revisions: { ...snapshot.revisions },
-  };
-}
-
-function getLocalStorageSafe(): Storage | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-type PersistedProviderSnapshot = {
-  version: 2;
-  scopeKey: string;
-  snapshot: ProviderSnapshot;
-  cachedAtMs: number;
-};
-
-function readPersistedSnapshot(scopeKey: string): ProviderSnapshot | null {
-  const storage = getLocalStorageSafe();
-  if (!storage) {
-    return null;
-  }
-
-  try {
-    const raw = storage.getItem(PROVIDER_SNAPSHOT_CACHE_KEY);
-    if (!raw) {
-      return null;
-    }
-
-    const parsed = JSON.parse(raw) as Partial<PersistedProviderSnapshot>;
-    if (parsed.version !== 2 || parsed.scopeKey !== scopeKey) {
-      return null;
-    }
-    return normalizeProviderSnapshot(parsed.snapshot);
-  } catch {
-    return null;
-  }
-}
-
-function writePersistedSnapshot(scopeKey: string, snapshot: ProviderSnapshot): void {
-  const storage = getLocalStorageSafe();
-  if (!storage) {
-    return;
-  }
-
-  try {
-    const payload: PersistedProviderSnapshot = {
-      version: 2,
-      scopeKey,
-      snapshot,
-      cachedAtMs: Date.now(),
-    };
-    storage.setItem(PROVIDER_SNAPSHOT_CACHE_KEY, JSON.stringify(payload));
-  } catch {
-    // ignore cache write errors
-  }
-}
-
-function clearPersistedSnapshot(): void {
-  const storage = getLocalStorageSafe();
-  if (!storage) {
-    return;
-  }
-
-  try {
-    storage.removeItem(PROVIDER_SNAPSHOT_CACHE_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-function isAuthModeCredentialBased(authMode: ProviderCredential['authMode']): boolean {
-  return authMode === 'oauth_device' || authMode === 'oauth_browser' || authMode === 'local';
-}
-
-function inferHasKey(account: ProviderCredential, apiKey?: string): boolean {
-  if (isAuthModeCredentialBased(account.authMode)) {
-    return true;
-  }
-  return Boolean(apiKey?.trim());
-}
-
-function toProviderStatus(account: ProviderCredential, hasKey: boolean): ProviderWithKeyInfo {
-  return {
-    id: account.id,
-    name: account.label || account.vendorId,
-    type: account.vendorId,
-    baseUrl: account.baseUrl,
-    apiProtocol: account.apiProtocol,
-    headers: account.headers,
-    enabled: account.enabled,
-    createdAt: account.createdAt,
-    updatedAt: account.updatedAt,
-    hasKey,
-    keyMasked: hasKey ? '****' : null,
-  };
-}
-
-function syncStatusWithAccount(
-  status: ProviderWithKeyInfo,
-  account: ProviderCredential,
-  options?: { hasKeyOverride?: boolean },
-): ProviderWithKeyInfo {
-  return {
-    ...status,
-    name: account.label || status.name,
-    type: account.vendorId,
-    baseUrl: account.baseUrl,
-    apiProtocol: account.apiProtocol,
-    headers: account.headers,
-    enabled: account.enabled,
-    updatedAt: account.updatedAt,
-    hasKey: options?.hasKeyOverride ?? status.hasKey,
   };
 }
 
@@ -265,7 +133,6 @@ function resolveRefreshReason(trigger: ProviderRefreshTrigger, reason?: string):
 }
 
 const initialScopeKey = DEFAULT_PROVIDER_SCOPE_KEY;
-const initialPersistedSnapshot = readPersistedSnapshot(initialScopeKey);
 
 // Re-export types for consumers that imported from here
 export type {
@@ -291,18 +158,9 @@ interface ProviderState {
   init: () => Promise<void>;
   refreshProviderSnapshot: (options: ProviderRefreshOptions) => Promise<void>;
   resetProviderScope: (scopeKey?: string) => void;
-  createAccount: (account: ProviderCredential, apiKey?: string) => Promise<void>;
-  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, apiKey?: string) => Promise<void>;
+  createAccount: (account: ProviderCredential, apiKey?: string, token?: string) => Promise<void>;
+  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, apiKey?: string, token?: string) => Promise<void>;
   removeAccount: (accountId: string) => Promise<void>;
-  validateAccountApiKey: (
-    accountOrVendorId: string,
-    apiKey: string,
-    options?: {
-      baseUrl?: string;
-      apiProtocol?: ProviderCredential['apiProtocol'];
-      headers?: Record<string, string>;
-    },
-  ) => Promise<{ valid: boolean; error?: string }>;
 }
 
 function providerNativeWarning(receipt: ProviderMutationReceipt | undefined): string | null {
@@ -310,8 +168,8 @@ function providerNativeWarning(receipt: ProviderMutationReceipt | undefined): st
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
-  providerSnapshot: initialPersistedSnapshot ? cloneSnapshot(initialPersistedSnapshot) : createEmptySnapshot(),
-  snapshotReady: Boolean(initialPersistedSnapshot),
+  providerSnapshot: createEmptySnapshot(),
+  snapshotReady: false,
   scopeKey: initialScopeKey,
   initialLoading: false,
   refreshing: false,
@@ -395,7 +253,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
         const normalizedSnapshot = normalizeProviderSnapshot(snapshot);
         const changed = snapshotFingerprint(normalizedSnapshot) !== previousFingerprint;
-        writePersistedSnapshot(get().scopeKey, normalizedSnapshot);
         set({
           providerSnapshot: normalizedSnapshot,
           snapshotReady: true,
@@ -464,13 +321,11 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   resetProviderScope: (scopeKey = DEFAULT_PROVIDER_SCOPE_KEY) => {
     latestProviderSnapshotRequestId += 1;
     inflightProviderSnapshotTask = null;
-    clearPersistedSnapshot();
-    const persisted = readPersistedSnapshot(scopeKey);
 
     set({
       scopeKey,
-      providerSnapshot: persisted ? cloneSnapshot(persisted) : createEmptySnapshot(),
-      snapshotReady: Boolean(persisted),
+      providerSnapshot: createEmptySnapshot(),
+      snapshotReady: false,
       initialLoading: false,
       refreshing: false,
       error: null,
@@ -481,7 +336,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
   },
 
-  createAccount: async (account, apiKey) => {
+  createAccount: async (account, apiKey, token) => {
     set((state) => {
       const nextMutating = incrementMutation(state.mutatingActionsByAccountId, account.id, 'create');
       return {
@@ -491,44 +346,13 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderCreateAccount(account, apiKey);
+      const result = await hostProviderCreateAccount(account, apiKey, token);
       if (!result.success) {
         set({ lastMutationReceipt: result.receipt ?? null, warning: null });
         throw new Error(result.error || 'Failed to create provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-
-      set((state) => {
-        const baseSnapshot = state.providerSnapshot;
-        const nextCredentials = [
-          ...baseSnapshot.credentials.filter((item) => item.id !== account.id),
-          account,
-        ];
-
-        const hasKey = inferHasKey(account, apiKey);
-        const existingStatus = baseSnapshot.statuses.find((status) => status.id === account.id);
-        const nextStatuses = existingStatus
-          ? baseSnapshot.statuses.map((status) => (
-            status.id === account.id ? syncStatusWithAccount(status, account, { hasKeyOverride: hasKey }) : status
-          ))
-          : [...baseSnapshot.statuses, toProviderStatus(account, hasKey)];
-
-        const nextSnapshot: ProviderSnapshot = {
-          ...baseSnapshot,
-          credentials: nextCredentials,
-          statuses: nextStatuses,
-          revisions: { ...baseSnapshot.revisions, [account.id]: 1 },
-        };
-
-        writePersistedSnapshot(state.scopeKey, nextSnapshot);
-        return {
-          providerSnapshot: nextSnapshot,
-          snapshotReady: true,
-          error: null,
-        };
-      });
-
-      void get().refreshProviderSnapshot({
+      await get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_create',
       });
@@ -546,7 +370,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     }
   },
 
-  updateAccount: async (accountId, updates, apiKey) => {
+  updateAccount: async (accountId, updates, apiKey, token) => {
     set((state) => {
       const nextMutating = incrementMutation(state.mutatingActionsByAccountId, accountId, 'update');
       return {
@@ -568,45 +392,13 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         ...updates,
         updatedAt: new Date().toISOString(),
       };
-      const result = await hostProviderUpdateAccount(patchedAccount, nextRevision, apiKey);
+      const result = await hostProviderUpdateAccount(patchedAccount, nextRevision, apiKey, token);
       if (!result.success) {
         set({ lastMutationReceipt: result.receipt ?? null, warning: null });
         throw new Error(result.error || 'Failed to update provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-
-      set((state) => {
-        const baseSnapshot = state.providerSnapshot;
-        const nextCredentials = baseSnapshot.credentials.map((item) => (
-          item.id === accountId ? patchedAccount : item
-        ));
-
-        const existingStatus = baseSnapshot.statuses.find((status) => status.id === accountId);
-        const hasKeyOverride = apiKey?.trim() ? true : undefined;
-        const nextStatuses = existingStatus
-          ? baseSnapshot.statuses.map((status) => (
-            status.id === accountId
-              ? syncStatusWithAccount(status, patchedAccount, { hasKeyOverride })
-              : status
-          ))
-          : [...baseSnapshot.statuses, toProviderStatus(patchedAccount, inferHasKey(patchedAccount, apiKey))];
-
-        const nextSnapshot: ProviderSnapshot = {
-          ...baseSnapshot,
-          credentials: nextCredentials,
-          statuses: nextStatuses,
-          revisions: { ...baseSnapshot.revisions, [accountId]: nextRevision },
-        };
-
-        writePersistedSnapshot(state.scopeKey, nextSnapshot);
-        return {
-          providerSnapshot: nextSnapshot,
-          snapshotReady: true,
-          error: null,
-        };
-      });
-
-      void get().refreshProviderSnapshot({
+      await get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_update',
       });
@@ -644,26 +436,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to delete provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-
-      set((state) => {
-        const baseSnapshot = state.providerSnapshot;
-        const { [accountId]: _removedRevision, ...revisions } = baseSnapshot.revisions;
-        const nextSnapshot: ProviderSnapshot = {
-          ...baseSnapshot,
-          credentials: baseSnapshot.credentials.filter((item) => item.id !== accountId),
-          statuses: baseSnapshot.statuses.filter((status) => status.id !== accountId),
-          revisions,
-        };
-
-        writePersistedSnapshot(state.scopeKey, nextSnapshot);
-        return {
-          providerSnapshot: nextSnapshot,
-          snapshotReady: true,
-          error: null,
-        };
-      });
-
-      void get().refreshProviderSnapshot({
+      await get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_remove',
       });
@@ -678,20 +451,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
           mutating: hasAnyMutating(nextMutating),
         };
       });
-    }
-  },
-
-  validateAccountApiKey: async (accountOrVendorId, apiKey, options) => {
-    try {
-      const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
-      const account = get().providerSnapshot.credentials.find((candidate) => candidate.id === accountOrVendorId);
-      const payload = account
-        ? { accountId: account.id, vendorId: account.vendorId, apiKey: normalizedApiKey, options }
-        : { vendorId: accountOrVendorId, apiKey: normalizedApiKey, options };
-      const result = await hostProviderValidate(payload);
-      return result;
-    } catch (error) {
-      return { valid: false, error: String(error) };
     }
   },
 

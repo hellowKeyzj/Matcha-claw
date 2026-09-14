@@ -108,17 +108,56 @@ impl Delivery {
         match self {
             Self::Listed(_)
             | Self::Created { .. }
-            | Self::TeamDeleted { .. }
+            | Self::TeamDeleted {
+                outcome: TeamDeleteState::Deleted,
+                ..
+            }
             | Self::Resumed(_)
-            | Self::Cancellation { .. }
-            | Self::RunDeleted { .. } => 200,
-            Self::Rejected => 409,
+            | Self::Cancellation {
+                state:
+                    CancellationState::Cancelling
+                    | CancellationState::Cancelled
+                    | CancellationState::Tombstoned,
+                ..
+            }
+            | Self::RunDeleted {
+                state: TombstoneState::Purged | TombstoneState::Rejected,
+                ..
+            } => 200,
+            Self::TeamDeleted {
+                outcome: TeamDeleteState::OutcomeUnknown,
+                ..
+            }
+            | Self::Cancellation {
+                state: CancellationState::OutcomeUnknown,
+                ..
+            }
+            | Self::RunDeleted {
+                state: TombstoneState::OutcomeUnknown,
+                ..
+            }
+            | Self::Rejected => 409,
             Self::Unavailable => 503,
         }
     }
 
     pub(crate) fn body(&self) -> Value {
         match self {
+            Self::TeamDeleted {
+                outcome: TeamDeleteState::OutcomeUnknown,
+                ..
+            }
+            | Self::Cancellation {
+                state: CancellationState::OutcomeUnknown,
+                ..
+            }
+            | Self::RunDeleted {
+                state: TombstoneState::OutcomeUnknown,
+                ..
+            } => json!({
+                "success": false,
+                "error": "Team lifecycle outcome is unknown",
+            }),
             Self::Listed(runs) => json!({
                 "success": true,
                 "action": "list",

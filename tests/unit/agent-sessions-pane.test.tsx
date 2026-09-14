@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
 import { useChatStore } from '@/stores/chat';
@@ -213,13 +213,23 @@ function setupBaseState() {
   syncChatSessionRuntimeState();
 }
 
-function renderPane() {
+function renderPane(options: { open?: boolean; tab?: 'agent' | 'team' | 'session' } = {}) {
   syncChatSessionRuntimeState();
   render(
     <MemoryRouter>
       <AgentSessionsPane />
     </MemoryRouter>,
   );
+  if (options.open === false) {
+    return;
+  }
+  fireEvent.click(screen.getByTestId('agent-session-identity-beacon'));
+  if (options.tab === 'team') {
+    fireEvent.click(screen.getByRole('button', { name: 'Teams' }));
+  }
+  if (options.tab === 'session') {
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  }
 }
 
 describe('agent sessions pane', () => {
@@ -311,9 +321,8 @@ describe('agent sessions pane', () => {
       refreshSnapshot,
     } as never);
 
-    renderPane();
+    renderPane({ tab: 'team' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Teams' }));
     await waitFor(() => {
       expect(syncRunList).toHaveBeenCalledWith('team-1');
     });
@@ -328,12 +337,12 @@ describe('agent sessions pane', () => {
     expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
     expect(switchSession).not.toHaveBeenCalled();
     expect(refreshSnapshot).toHaveBeenCalledWith('team-1', { force: true });
+    expect(screen.queryByTestId('chat-switchboard')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }));
-    expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-new');
-
-    fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }).previousElementSibling as HTMLElement);
-    expect(screen.queryByRole('button', { name: /Leader session/i })).toBeNull();
+    fireEvent.click(screen.getByTestId('agent-session-identity-beacon'));
+    const newRunButton = screen.getByRole('button', { name: /teamrun-new/i });
+    fireEvent.click(newRunButton.previousElementSibling as HTMLElement);
+    expect(screen.getByRole('button', { name: /Leader/i })).toBeTruthy();
     const designerRoleButton = screen.getByRole('button', { name: /designer/i });
     expect(designerRoleButton).toBeTruthy();
 
@@ -350,7 +359,7 @@ describe('agent sessions pane', () => {
     expect(refreshSnapshot).toHaveBeenCalledWith('team-1', { force: true });
   });
 
-  it('将 agent 列表放在上方，会话历史在下方统一展示', async () => {
+  it('Agent 与会话历史在 Switchboard 中顶层分离', async () => {
     const now = Date.now();
     const sessions = [
       { key: 'agent:main:main', displayName: 'agent:main:main' },
@@ -380,11 +389,229 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
     expect(screen.getByTestId('agent-session-avatar-main')).toBeInTheDocument();
     expect(screen.getByTestId('agent-session-avatar-test')).toBeInTheDocument();
+    expect(screen.queryByText('主Agent会话')).not.toBeInTheDocument();
+    expect(screen.queryByText('测试Agent会话')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+
     expect(screen.getByText('主Agent会话')).toBeInTheDocument();
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-item-main')).not.toBeInTheDocument();
   });
 
-  it('普通历史列表只按 sealed role-session projection 过滤本地 session，并保留普通 agent session', () => {
+  it('点击 agent 时不把 automation 当作默认会话', () => {
+    const now = Date.now();
+    const ordinaryIdentity = createSessionIdentity('agent:test:session-ordinary', 'test');
+    const automationIdentity = createSessionIdentity('agent:test:cron:daily', 'test');
+    const ordinaryKey = recordKeyForSession('agent:test:session-ordinary', ordinaryIdentity);
+    const automationKey = recordKeyForSession('agent:test:cron:daily', automationIdentity);
+    const switchSession = vi.fn();
+    useChatStore.setState({
+      currentSessionKey: '',
+      loadedSessions: {
+        [ordinaryKey]: createSessionRecord({
+          sessionKey: 'agent:test:session-ordinary',
+          sessionIdentity: ordinaryIdentity,
+          historyStatus: 'ready',
+          label: '普通 Agent 历史会话',
+          lastActivityAt: now - 60_000,
+        }),
+        [automationKey]: {
+          ...createSessionRecord({
+            sessionKey: 'agent:test:cron:daily',
+            sessionIdentity: automationIdentity,
+            historyStatus: 'ready',
+            label: '自动化运行结果',
+            lastActivityAt: now,
+          }),
+          meta: {
+            ...createSessionRecord({
+              sessionKey: 'agent:test:cron:daily',
+              sessionIdentity: automationIdentity,
+            }).meta,
+            kind: 'automation' as never,
+            label: '自动化运行结果',
+            historyStatus: 'ready',
+            lastActivityAt: now,
+          },
+        },
+      },
+      switchSession,
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane();
+    fireEvent.click(screen.getByTestId('agent-item-test'));
+
+    expect(switchSession).toHaveBeenCalledWith(ordinaryKey);
+  });
+
+  it('agent 只有 automation 会话时，点击 agent 进入可发送草稿态', () => {
+    const now = Date.now();
+    const automationIdentity = createSessionIdentity('agent:test:cron:daily', 'test');
+    const automationKey = recordKeyForSession('agent:test:cron:daily', automationIdentity);
+    const switchSession = vi.fn();
+    useChatStore.setState({
+      currentSessionKey: '',
+      loadedSessions: {
+        [automationKey]: {
+          ...createSessionRecord({
+            sessionKey: 'agent:test:cron:daily',
+            sessionIdentity: automationIdentity,
+            historyStatus: 'ready',
+            label: '自动化运行结果',
+            lastActivityAt: now,
+          }),
+          meta: {
+            ...createSessionRecord({
+              sessionKey: 'agent:test:cron:daily',
+              sessionIdentity: automationIdentity,
+            }).meta,
+            kind: 'automation' as never,
+            label: '自动化运行结果',
+            historyStatus: 'ready',
+            lastActivityAt: now,
+          },
+        },
+      },
+      switchSession,
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane();
+    fireEvent.click(screen.getByTestId('agent-item-test'));
+
+    expect(switchSession).not.toHaveBeenCalled();
+    expect(useChatStore.getState().currentConversation).toMatchObject({
+      kind: 'draft',
+      agentId: 'test',
+    });
+  });
+
+  it('会话 tab 不把 automation 混入普通列表，并在独立只读分区展示', () => {
+    const now = Date.now();
+    const ordinaryAgentIdentity = createSessionIdentity('agent:test:session-ordinary-agent', 'test');
+    const automationIdentity = createSessionIdentity('agent:test:automation-run-1', 'test');
+    const ordinaryKey = recordKeyForSession('agent:test:session-ordinary-agent', ordinaryAgentIdentity);
+    const automationKey = recordKeyForSession('agent:test:automation-run-1', automationIdentity);
+    useChatStore.setState({
+      currentSessionKey: ordinaryKey,
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:session-ordinary-agent', displayName: '普通 Agent 历史会话' },
+        { key: 'agent:test:automation-run-1', displayName: '自动化运行结果' },
+      ]),
+      loadedSessions: {
+        [ordinaryKey]: createSessionRecord({
+          sessionKey: 'agent:test:session-ordinary-agent',
+          sessionIdentity: ordinaryAgentIdentity,
+          historyStatus: 'ready',
+          label: '普通 Agent 历史会话',
+          lastActivityAt: now,
+        }),
+        [automationKey]: {
+          ...createSessionRecord({
+            sessionKey: 'agent:test:automation-run-1',
+            sessionIdentity: automationIdentity,
+            historyStatus: 'ready',
+            label: '自动化运行结果',
+            lastActivityAt: now - 60_000,
+          }),
+          meta: {
+            ...createSessionRecord({
+              sessionKey: 'agent:test:automation-run-1',
+              sessionIdentity: automationIdentity,
+            }).meta,
+            kind: 'automation' as never,
+            label: '自动化运行结果',
+            historyStatus: 'ready',
+            lastActivityAt: now - 60_000,
+          },
+        },
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      renameSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane({ tab: 'session' });
+
+    expect(screen.getByRole('tab', { name: /Normal 1/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /Automation 1/i })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByText('普通 Agent 历史会话')).toBeInTheDocument();
+    expect(screen.queryByText('自动化运行结果')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: /Automation 1/i }));
+
+    expect(screen.getByRole('tab', { name: /Normal 1/i })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tab', { name: /Automation 1/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByText('普通 Agent 历史会话')).not.toBeInTheDocument();
+    expect(screen.getByText('自动化运行结果')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Delete session .*自动化运行结果/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Rename session 自动化运行结果/i })).toBeNull();
+  });
+
+  it('当前会话是 automation 时，会话 tab 默认打开自动化页', () => {
+    const now = Date.now();
+    const ordinaryAgentIdentity = createSessionIdentity('agent:test:session-ordinary-agent', 'test');
+    const automationIdentity = createSessionIdentity('agent:test:automation-run-1', 'test');
+    const ordinaryKey = recordKeyForSession('agent:test:session-ordinary-agent', ordinaryAgentIdentity);
+    const automationKey = recordKeyForSession('agent:test:automation-run-1', automationIdentity);
+    useChatStore.setState({
+      currentSessionKey: automationKey,
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:session-ordinary-agent', displayName: '普通 Agent 历史会话' },
+        { key: 'agent:test:automation-run-1', displayName: '自动化运行结果' },
+      ]),
+      loadedSessions: {
+        [ordinaryKey]: createSessionRecord({
+          sessionKey: 'agent:test:session-ordinary-agent',
+          sessionIdentity: ordinaryAgentIdentity,
+          historyStatus: 'ready',
+          label: '普通 Agent 历史会话',
+          lastActivityAt: now,
+        }),
+        [automationKey]: {
+          ...createSessionRecord({
+            sessionKey: 'agent:test:automation-run-1',
+            sessionIdentity: automationIdentity,
+            historyStatus: 'ready',
+            label: '自动化运行结果',
+            lastActivityAt: now - 60_000,
+          }),
+          meta: {
+            ...createSessionRecord({
+              sessionKey: 'agent:test:automation-run-1',
+              sessionIdentity: automationIdentity,
+            }).meta,
+            kind: 'automation' as never,
+            label: '自动化运行结果',
+            historyStatus: 'ready',
+            lastActivityAt: now - 60_000,
+          },
+        },
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      renameSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    syncChatSessionRuntimeState();
+
+    renderPane({ tab: 'session' });
+
+    expect(screen.getByRole('tab', { name: /Normal 1/i })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tab', { name: /Automation 1/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByText('普通 Agent 历史会话')).not.toBeInTheDocument();
+    expect(screen.getByText('自动化运行结果')).toBeInTheDocument();
+  });
+
+  it('会话 tab 展示已知 Team role 会话，并过滤未 hydrate 的 reserved 本地会话', () => {
     const now = Date.now();
     const bindingRoleIdentity = createSessionIdentity('agent:test:session-canonical-binding-role', 'test');
     const runListRoleIdentity = createSessionIdentity('agent:test:session-canonical-run-list-role', 'test');
@@ -483,10 +710,10 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
-    expect(screen.queryByText('Team binding role history')).not.toBeInTheDocument();
-    expect(screen.queryByText('Team run list role history')).not.toBeInTheDocument();
+    expect(screen.getByText('Team binding role history')).toBeInTheDocument();
+    expect(screen.getByText('Team run list role history')).toBeInTheDocument();
     expect(screen.getByText('普通 Agent 历史会话')).toBeInTheDocument();
   });
 
@@ -523,7 +750,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.queryByText('Cold start team role history')).not.toBeInTheDocument();
     expect(screen.getByText('普通 Leader Agent 历史')).toBeInTheDocument();
@@ -539,13 +766,12 @@ describe('agent sessions pane', () => {
       },
     } as never);
 
-    renderPane();
+    renderPane({ open: false });
 
-    expect(screen.getByRole('button', { name: 'New session' })).toBeDisabled();
+    expect(screen.getByTestId('agent-session-new-current')).toBeDisabled();
   });
 
-  it('收缩态头像区应负责展开，下半部应按当前 runtime 和当前 agent scope 新建会话', () => {
-    const onToggleCollapse = vi.fn();
+  it('常态露出身份 Beacon 和头像下方裸加号，点击 Beacon 打开 Switchboard', () => {
     const newSessionForScope = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       currentSessionKey: recordKeyForSession('agent:test:main'),
@@ -565,21 +791,20 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    render(
-      <MemoryRouter>
-        <AgentSessionsPane collapsed onToggleCollapse={onToggleCollapse} />
-      </MemoryRouter>,
-    );
+    renderPane({ open: false });
 
-    expect(screen.getByTestId('agent-sessions-collapsed-note')).toBeTruthy();
-    expect(screen.getByTestId('agent-sessions-collapsed-avatar')).toBeTruthy();
-    expect(screen.getByTestId('agent-sessions-collapsed-new-session')).toBeTruthy();
+    expect(screen.getByTestId('agent-session-new-current')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-session-identity-beacon')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-session-runtime-selector')).toBeNull();
+    expect(screen.queryByTestId('agent-list-scroll-area')).toBeNull();
+    expect(screen.queryByTestId('session-list-scroll-area')).toBeNull();
 
-    fireEvent.click(screen.getByTestId('agent-sessions-collapsed-expand'));
-    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('agent-session-identity-beacon'));
 
-    fireEvent.click(screen.getByTestId('agent-sessions-collapsed-new-session'));
-    expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
+    const switchboard = screen.getByTestId('chat-switchboard');
+    expect(within(switchboard).getByRole('button', { name: 'Agents' })).toBeInTheDocument();
+    expect(within(switchboard).getByRole('button', { name: 'Teams' })).toBeInTheDocument();
+    expect(within(switchboard).getByRole('button', { name: 'Sessions' })).toBeInTheDocument();
   });
 
   it('点击某个 agent 的新会话按钮，应按选中 runtime 中对应 agent scope 创建', async () => {
@@ -608,7 +833,7 @@ describe('agent sessions pane', () => {
     expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
   });
 
-  it('runtime catalog 增加第二个 endpoint 后 selector 不需要 remount 就可用', () => {
+  it('runtime catalog 增加第二个 endpoint 后 Switchboard 不需要 remount 就展示新 runtime', () => {
     useChatStore.setState({
       sessionRuntimeCatalog: {
         status: 'ready',
@@ -621,10 +846,10 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
-    expect(runtimeSelector).toBeDisabled();
-    expect(screen.queryByRole('option', { name: 'OpenClaw' })).toBeNull();
-    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+    let switchboard = screen.getByTestId('chat-switchboard');
+    expect(within(switchboard).queryByText('OpenClaw')).toBeNull();
+    expect(within(switchboard).getAllByText('Matcha Agent').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
 
     act(() => {
       useChatStore.setState({
@@ -633,12 +858,14 @@ describe('agent sessions pane', () => {
       syncChatSessionRuntimeState();
     });
 
-    expect(runtimeSelector).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: 'OpenClaw' })).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+    switchboard = screen.getByTestId('chat-switchboard');
+    expect(within(switchboard).getAllByText('OpenClaw').length).toBeGreaterThan(0);
+    expect(within(switchboard).getAllByText('Matcha Agent').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('agent-item-main')).toBeTruthy();
+    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
   });
 
-  it('runtime selector 切回 OpenClaw 时优先恢复该 runtime 上次选中的 session', () => {
+  it('点击 OpenClaw agent 行时优先恢复该 agent 的最近会话', () => {
     const openClawMainKey = recordKeyForSession('agent:main:main');
     const openClawRecentKey = recordKeyForSession('agent:test:session-recent');
     const matchaIdentity = createMatchaAgentSessionIdentity();
@@ -683,19 +910,27 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
-    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint));
+    fireEvent.click(screen.getByTestId('agent-item-test'));
 
-    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(openClawTestRuntimeEndpoint) } });
-
-    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(openClawTestRuntimeEndpoint));
     expect(useChatStore.getState().currentSessionKey).toBe(openClawRecentKey);
-    expect(screen.getByText('上次 OpenClaw 会话').closest('div')?.className).toContain('bg-secondary');
+    expect(screen.queryByTestId('chat-switchboard')).toBeNull();
   });
 
-  it('runtime selector 切到没有缓存 session 的 runtime 时进入 draft 且不创建远端会话', () => {
+  it('点击没有缓存 session 的 Matcha Agent 行时进入 draft 且不创建远端会话', () => {
     const newSession = vi.fn();
     const newSessionForScope = vi.fn().mockResolvedValue(undefined);
+    const openAgentConversation = vi.fn((agentId: string) => {
+      useChatStore.setState({
+        currentSessionKey: '',
+        currentConversation: {
+          kind: 'draft',
+          runtimeScopeKey: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint),
+          endpoint: matchaAgentTestRuntimeEndpoint,
+          agentId,
+          sessionPromptScope: matchaAgentMatchaScope,
+        },
+      } as never);
+    });
     useChatStore.setState({
       currentSessionKey: recordKeyForSession('agent:main:main'),
       lastSelectedSessionKeyByRuntimeScopeKey: {},
@@ -706,6 +941,7 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
+      openAgentConversation,
       newSession,
       newSessionForScope,
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -715,10 +951,9 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
-    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
+    fireEvent.click(screen.getByTestId('agent-item-matcha'));
 
-    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint));
+    expect(openAgentConversation).toHaveBeenCalledWith('matcha');
     expect(useChatStore.getState().currentSessionKey).toBe('');
     expect(useChatStore.getState().currentConversation).toMatchObject({
       kind: 'draft',
@@ -729,7 +964,7 @@ describe('agent sessions pane', () => {
     expect(newSessionForScope).not.toHaveBeenCalled();
   });
 
-  it('runtime selector 切到 Matcha Agent 后只显示 matcha endpoint agent，并用 matcha scope 新建会话', () => {
+  it('Agent tab 按 runtime 分组，并用对应 runtime scope 新建会话', () => {
     const newSessionForScope = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       currentSessionKey: recordKeyForSession('agent:main:main'),
@@ -748,28 +983,22 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
-    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(openClawTestRuntimeEndpoint));
-    expect(screen.getByRole('option', { name: 'OpenClaw' })).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+    const switchboard = screen.getByTestId('chat-switchboard');
+    expect(within(switchboard).getAllByText('OpenClaw').length).toBeGreaterThan(0);
+    expect(within(switchboard).getAllByText('Matcha Agent').length).toBeGreaterThan(0);
     expect(screen.getByTestId('agent-item-main')).toBeTruthy();
     expect(screen.getByTestId('agent-item-test')).toBeTruthy();
+    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
     expect(screen.queryByTestId('agent-item-default')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    fireEvent.click(screen.getByTestId('agent-new-session-main'));
     expect(newSessionForScope).toHaveBeenCalledTimes(1);
     expect(newSessionForScope).toHaveBeenCalledWith(openClawMainScope);
     expect(newSessionForScope).not.toHaveBeenCalledWith(openClawDefaultScope);
     newSessionForScope.mockClear();
 
-    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
-
-    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
-    expect(screen.queryByTestId('agent-item-default')).toBeNull();
-    expect(screen.queryByTestId('agent-item-main')).toBeNull();
-    expect(screen.queryByTestId('agent-item-test')).toBeNull();
-
-    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    fireEvent.click(screen.getByTestId('agent-session-identity-beacon'));
+    fireEvent.click(screen.getByTestId('agent-new-session-matcha'));
     expect(newSessionForScope).toHaveBeenCalledTimes(1);
     expect(newSessionForScope).toHaveBeenCalledWith(matchaAgentMatchaScope);
     expect(newSessionForScope).not.toHaveBeenCalledWith(openClawMainScope);
@@ -788,13 +1017,12 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByTestId('agent-list-error')).toHaveTextContent('Subagent management is unavailable');
-
-    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
-    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
-
-    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
-    expect(screen.queryByTestId('agent-list-error')).toBeNull();
+    const openClawSection = screen.getByTestId('agent-list-error').closest('section');
+    const matchaSection = screen.getByTestId('agent-item-matcha').closest('section');
+    expect(openClawSection).toBeTruthy();
+    expect(matchaSection).toBeTruthy();
+    expect(within(openClawSection!).getByTestId('agent-list-error')).toHaveTextContent('Subagent management is unavailable');
+    expect(within(matchaSection!).queryByTestId('agent-list-error')).toBeNull();
   });
 
   it('优先使用 catalog displayName 展示未 hydrate 历史会话标题', () => {
@@ -823,7 +1051,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.getByText('catalog title from transcript')).toBeTruthy();
     expect(screen.queryByText('New Session')).not.toBeInTheDocument();
@@ -857,7 +1085,7 @@ describe('agent sessions pane', () => {
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     const sessionTitle = screen.getByText('测试Agent会话');
     const sessionButton = sessionTitle.closest('button');
@@ -903,7 +1131,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.getByText('缺少 agentId 的会话')).toBeTruthy();
     expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeTruthy();
@@ -986,7 +1214,7 @@ describe('agent sessions pane', () => {
         loadSessions: vi.fn().mockResolvedValue(undefined),
       } as never);
 
-      renderPane();
+      renderPane({ tab: 'session' });
 
       expect(screen.getAllByText('Today').length).toBeGreaterThan(0);
       expect(screen.getByText('Last 7 Days')).toBeTruthy();
@@ -1032,7 +1260,7 @@ describe('agent sessions pane', () => {
         loadSessions: vi.fn().mockResolvedValue(undefined),
       } as never);
 
-      renderPane();
+      renderPane({ tab: 'session' });
 
       expect(screen.queryByText('Today')).toBeNull();
       expect(screen.getByText('Last 7 Days')).toBeTruthy();
@@ -1068,7 +1296,7 @@ describe('agent sessions pane', () => {
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     fireEvent.click(screen.getByRole('button', { name: /Delete session .*需要删除的会话/i }));
     expect(screen.getByRole('dialog', { name: /Delete .*需要删除的会话/i })).toBeTruthy();
@@ -1104,7 +1332,7 @@ describe('agent sessions pane', () => {
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     fireEvent.click(screen.getByRole('button', { name: /Rename session Old session title/i }));
     const input = screen.getByRole('textbox', { name: /Rename session Old session title/i });
@@ -1116,7 +1344,7 @@ describe('agent sessions pane', () => {
     });
   });
 
-  it('agent 列表和会话列表使用两个独立滚动区', () => {
+  it('agent 列表和会话列表按当前 tab 使用独立滚动区', () => {
     const now = Date.now();
     useSubagentsStore.setState({
       agents: Array.from({ length: 12 }, (_, index) => ({
@@ -1158,14 +1386,13 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    const agentScrollArea = screen.getByTestId('agent-list-scroll-area');
-    const sessionScrollArea = screen.getByTestId('session-list-scroll-area');
+    expect(screen.getByTestId('agent-list-scroll-area').className).toContain('overflow-y-auto');
+    expect(screen.queryByTestId('session-list-scroll-area')).toBeNull();
 
-    expect(agentScrollArea).toBeTruthy();
-    expect(sessionScrollArea).toBeTruthy();
-    expect(agentScrollArea).not.toBe(sessionScrollArea);
-    expect(agentScrollArea.className).toContain('overflow-y-auto');
-    expect(sessionScrollArea.className).toContain('overflow-y-auto');
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+
+    expect(screen.getByTestId('session-list-scroll-area').className).toContain('overflow-y-auto');
+    expect(screen.queryByTestId('agent-list-scroll-area')).toBeNull();
   });
 
   it('agents 数据未就绪时，不应先渲染占位 avatar 的 agent 行', () => {
@@ -1240,6 +1467,7 @@ describe('agent sessions pane', () => {
     renderPane();
 
     expect(screen.getByTestId('agent-list-error')).toHaveTextContent('agents failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(screen.getByText('测试Agent会话')).toBeTruthy();
   });
 
@@ -1286,7 +1514,7 @@ describe('agent sessions pane', () => {
       },
     } as never);
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.getByText('最新输入标题')).toBeTruthy();
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
@@ -1324,7 +1552,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.getByText('正文里的新标题')).toBeTruthy();
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
@@ -1355,7 +1583,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.queryByText('agent:test:session-1710000000000')).not.toBeInTheDocument();
   });
@@ -1381,7 +1609,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.getByText('真实历史会话')).toBeTruthy();
   });
@@ -1420,9 +1648,9 @@ describe('agent sessions pane', () => {
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    renderPane();
+    renderPane({ open: false });
 
-    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    fireEvent.click(screen.getByTestId('agent-session-new-current'));
     expect(newSession).not.toHaveBeenCalled();
   });
 
@@ -1447,6 +1675,7 @@ describe('agent sessions pane', () => {
 
     expect(screen.getByTestId('agent-item-main')).toBeTruthy();
     expect(screen.getByTestId('agent-item-test')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(screen.getByTestId('session-list-loading')).toBeTruthy();
   });
 
@@ -1471,6 +1700,7 @@ describe('agent sessions pane', () => {
 
     expect(screen.getByTestId('agent-item-main')).toBeTruthy();
     expect(screen.getByTestId('agent-item-test')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(screen.getByTestId('session-list-error')).toHaveTextContent('sessions failed');
   });
 
@@ -1500,7 +1730,7 @@ describe('agent sessions pane', () => {
     } as never);
     syncChatSessionRuntimeState();
 
-    renderPane();
+    renderPane({ tab: 'session' });
 
     expect(screen.queryByTestId('session-list-loading')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-list-error')).not.toBeInTheDocument();
@@ -1537,7 +1767,7 @@ describe('agent sessions pane', () => {
         loadSessions: vi.fn().mockResolvedValue(undefined),
       } as never);
 
-      renderPane();
+      renderPane({ tab: 'session' });
 
       expect(screen.getByText('新空会话')).toBeTruthy();
       expect(screen.queryByText('旧空会话')).toBeNull();

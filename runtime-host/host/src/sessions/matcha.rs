@@ -65,6 +65,7 @@ pub(crate) fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<S
                 input_text,
                 summary,
                 output,
+                details: None,
                 is_error,
             },
         }]),
@@ -263,6 +264,7 @@ mod tests {
                     input_text: Some("{\n  \"file_path\": \"src/main.rs\"\n}".to_owned()),
                     summary: Some("done".to_owned()),
                     output: Some(json!({"ok":true})),
+                    details: None,
                     is_error: Some(false),
                 },
             }]

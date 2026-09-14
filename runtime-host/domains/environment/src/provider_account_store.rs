@@ -357,6 +357,8 @@ enum ProviderAccountAuthModeDocument {
     ApiKey,
     OAuthBrowser,
     OAuthDevice,
+    Token,
+    CliReuse,
     Local,
 }
 
@@ -366,6 +368,8 @@ impl From<ProviderAccountAuthMode> for ProviderAccountAuthModeDocument {
             ProviderAccountAuthMode::ApiKey => Self::ApiKey,
             ProviderAccountAuthMode::OAuthBrowser => Self::OAuthBrowser,
             ProviderAccountAuthMode::OAuthDevice => Self::OAuthDevice,
+            ProviderAccountAuthMode::Token => Self::Token,
+            ProviderAccountAuthMode::CliReuse => Self::CliReuse,
             ProviderAccountAuthMode::Local => Self::Local,
         }
     }
@@ -377,6 +381,8 @@ impl From<ProviderAccountAuthModeDocument> for ProviderAccountAuthMode {
             ProviderAccountAuthModeDocument::ApiKey => Self::ApiKey,
             ProviderAccountAuthModeDocument::OAuthBrowser => Self::OAuthBrowser,
             ProviderAccountAuthModeDocument::OAuthDevice => Self::OAuthDevice,
+            ProviderAccountAuthModeDocument::Token => Self::Token,
+            ProviderAccountAuthModeDocument::CliReuse => Self::CliReuse,
             ProviderAccountAuthModeDocument::Local => Self::Local,
         }
     }

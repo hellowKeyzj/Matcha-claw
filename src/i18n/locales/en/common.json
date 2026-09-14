@@ -1,4 +1,9 @@
 {
+    "auth": {
+        "boot": {
+            "title": "Checking sign-in status"
+        }
+    },
     "sidebar": {
         "chat": "Chat",
         "newChat": "New Chat",
@@ -88,6 +93,8 @@
                 "subscriptionWeekly": "Weekly plan quota",
                 "subscriptionMonthly": "Monthly plan quota",
                 "platformMonthly": "{{platform}} monthly",
+                "availableBalance": "Available balance",
+                "frozenBalance": "Frozen balance",
                 "totalUsage": "Total usage"
             }
         }
@@ -117,10 +124,18 @@
         "current": {
             "subscriptionCount": "{{count}} Matcha subscriptions",
             "noSubscription": "No Matcha subscription",
+            "noActiveSubscription": "No active subscription",
+            "freePlan": "Free",
             "expiresAt": "Expires: {{date}}",
             "quotaTitle": "Subscription quota",
             "emptyQuota": "No quota details were returned for the current subscription.",
-            "platformQuotaTitle": "Platform quota"
+            "balanceTitle": "Account balance"
+        },
+        "balance": {
+            "details": "Balance details",
+            "available": "Available balance",
+            "frozen": "Frozen balance",
+            "total": "Total balance"
         },
         "quota": {
             "daily": "Daily quota",
@@ -128,6 +143,7 @@
             "monthly": "Monthly quota",
             "platformMonthly": "{{platform}} monthly",
             "unlimited": "Unlimited",
+            "usedOnly": "Used {{used}}",
             "usedOfLimit": "Used {{used}} / {{limit}}",
             "remaining": "Remaining {{amount}}",
             "resetsAt": "Resets: {{date}}"
@@ -223,6 +239,18 @@
         "configured": "Configured",
         "loading": "Loading...",
         "saving": "Saving..."
+    },
+    "switchboard": {
+        "quickSwitch": "Quick switch",
+        "runtime": "Runtime",
+        "teamSession": "Team session",
+        "tabs": {
+            "agents": "Agents",
+            "teams": "Teams",
+            "sessions": "Sessions"
+        },
+        "normalSessions": "Normal",
+        "automationSessions": "Automation"
     },
     "gateway": {
         "notRunning": "Gateway Not Running",

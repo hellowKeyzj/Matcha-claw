@@ -15,7 +15,7 @@ The bootstrap fields are process-private and must not become Renderer API. Sourc
 
 | Path | Method | Body | Timeout | Delivery semantics |
 | --- | --- | --- | --- | --- |
-| `/internal/runtime-host/shell-actions` | `POST` | `{ version, action, payload? }` | `15s` in Rust client | Rust client enum exists; current Electron `ParentCallbackReceiver` does not expose this path, so active wiring remains pending. |
+| `/internal/runtime-host/shell-actions` | `POST` | `{ version, action, payload }` | `15s` in Rust client | receiver validates token/content/action/payload, executes the allowlisted Electron shell action, returns opened/failure envelope. |
 | `/internal/runtime-host/gateway-events` | `POST` | `{ version, eventName, payload }` | `3s` | receiver validates token/content/event name, emits HostEventBus, returns accepted. |
 
 Sources: [parent-callback.ts](../../electron/main/runtime-host-delivery/parent-callback.ts)、[parent_callback.rs](../../runtime-host/host/src/parent_callback.rs)。
@@ -42,20 +42,15 @@ or:
 }
 ```
 
-Electron validates callback token; wrong token is `403`. Non-POST is `405`; bad content/body/version/event name is rejected before forwarding. Current receiver returns version/status envelopes without the legacy error-code body; do not claim shell/action envelope parity until that path is wired. Payload itself is primarily opaque at this boundary.
+Electron validates callback token; wrong token is `403`. Non-POST is `405`; bad content/body/version/event name/action/payload is rejected before forwarding. Current generic validation failures return version/status envelopes without the legacy error-code body. `shell.openPath` failure returns `500` with `SHELL_OPEN_PATH_FAILED`.
 
 ## Shell action allowlist
 
-Rust `ParentCallbackClient` still defines these shell actions, but current Electron `ParentCallbackReceiver` does not expose the shell-actions path. Treat shell action callback as `IMPLEMENTED` client-side and `BLOCKED` for active parent wiring until a receiver/contract test exists.
+Electron `ParentCallbackReceiver` only accepts `shell_open_path` on this path. Other Rust client enum variants are not wired parent actions and are rejected.
 
-| action | known payload | parent meaning |
+| action | payload | parent meaning |
 | --- | --- | --- |
-| `shell_open_path` | `{ path }` | Electron opens local path. |
-| `gateway_restart` | optional `{ reason? }` | restart accepted/queued; does **not** mean gateway is ready. |
-| `host_diagnostics_snapshot` | none | returns Electron/host diagnostic projection. |
-| `provider_oauth_start` | `{ provider, accountId, flowId, region?, label? }` | starts native OAuth/device flow. |
-| `provider_oauth_cancel` | `{ flowId, accountId, vendorId }` | cancels native flow. |
-| `provider_oauth_submit` | `{ code, flowId, accountId, vendorId }` | submits native OAuth input. |
+| `shell_open_path` | `{ path: string }`; trimmed non-empty, no NUL, absolute Windows or POSIX path | Electron opens local path via `shell.openPath`. |
 
 ## Gateway event callback
 

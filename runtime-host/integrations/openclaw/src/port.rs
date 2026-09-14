@@ -7,15 +7,15 @@ use platform::{exchange::InvocationOutcome, listener_identity::CertificateFinger
 use tokio::sync::{mpsc, watch};
 
 pub use crate::session::{
-    CanonicalIngressResult,
-    events::{
-        LifecycleEvent, SessionEvent, SessionEventProvenance, SessionUpdate, SessionUpdateKind,
-        TerminalOutcome,
-    },
+    CanonicalIngressResult, CanonicalSessionReplay, SessionReplayError, SessionReplaySourceError,
+    SessionReplaySourcePage, SessionReplaySourceRow, SessionReplaySourceSkip,
+    SessionReplaySourceSkipReason,
+    events::{LifecycleEvent, SessionEvent, SessionEventProvenance, TerminalOutcome},
 };
 pub use crate::skill::{
-    SkillDetail, SkillDetailRequest, SkillInstallRequest, SkillMutationOutcome, SkillReadError,
-    SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk, SkillUploadCommit,
+    SkillConfigRemoveOutcome, SkillDetail, SkillDetailRequest, SkillInstallRequest,
+    SkillMutationOutcome, SkillReadError, SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk,
+    SkillUploadCommit,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,10 +49,20 @@ pub use crate::operations::channel_login::{
     ChannelRuntimeAction, ChannelRuntimeEffect, LoginProgress, LoginProgressStatus, WebLoginStart,
     WebLoginStartEffect, WebLoginWait, WebLoginWaitEffect,
 };
+pub use crate::operations::plugin_refresh::PluginRefreshOutcome;
 pub use crate::operations::provider_native_config::{
     AppliedStatus, ObservedStatus, ProviderNativeConfigurationDiagnostic,
     ProviderNativeConfigurationEvidence, ProviderNativeConfigurationOperation,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenClawGatewayRequestOutcome {
+    Succeeded(Value),
+    Rejected,
+    Unavailable,
+    CapacityExhausted,
+    OutcomeUnknown,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderNativeConfigurationEffect {
@@ -103,6 +113,8 @@ use crate::{
     gateway::{
         auth::GatewaySecret,
         client::{GatewayClient, GatewayClientMetadata, GatewayControlReadiness, GatewayEndpoint},
+        delivery::{DispatcherError, MutationDelivery},
+        wire::{self, GatewayResponse},
     },
     lifecycle::state_dir::CanonicalStateDir,
     lifecycle::{readiness::OpenClawReadiness, stop::OpenClawGracefulStop},
@@ -117,7 +129,9 @@ use crate::{
             ChannelPairingApprovalEffect, ChannelPairingEffect, ChannelPairingOperation,
         },
         channel_status::{ChannelSnapshotEffect, ChannelStatusEffect, ChannelStatusOperation},
+        plugin_refresh::PluginRefreshOperation,
         security_audit::{SecurityAuditEffect, SecurityAuditOperation, SecurityAuditQuery},
+        settings_config::{SettingsConfigMutationOutcome, SettingsConfigOperation},
     },
     projection::agent_configuration::{
         AgentConfiguration, Display as AgentConfigurationDisplay, Model as AgentConfigurationModel,
@@ -131,9 +145,9 @@ use crate::{
         protocol::{
             ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
             ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
-            SessionDeleteResult, SessionLabelPatchParams, SessionLabelPatchResult,
-            SessionModelPatchParams, SessionModelPatchResult, SessionsListParams,
-            SessionsListResult,
+            SessionDeleteResult, SessionKey, SessionLabelPatchParams, SessionLabelPatchResult,
+            SessionModelPatchParams, SessionModelPatchResult, SessionPermissionPatchParams,
+            SessionPermissionProjection, SessionsListParams, SessionsListResult,
         },
     },
     session_window::{self, HistoryError, PageRequest, SessionWindow},
@@ -142,8 +156,8 @@ use crate::{
         OpenClawSkillStatusCatalog, SkillStatusCatalog, SkillStatusCatalogError,
     },
     task_manager::{
-        Task, TaskCreate, TaskCreateReceipt, TaskManagerOperation, TaskMutationOutcome, TaskOutput,
-        TaskReadFailure, TaskScope, TaskSnapshot, TaskStopResult, TaskUpdate, Todo, TodoSnapshot,
+        Task, TaskCreate, TaskCreateReceipt, TaskManagerOperation, TaskMutationOutcome,
+        TaskReadFailure, TaskScope, TaskSnapshot, TaskUpdate, Todo, TodoSnapshot,
     },
     team::{PromptDelivery, PromptDeliveryOutcome, TeamProvider},
 };
@@ -151,9 +165,37 @@ use organization::{
     MaterializationOperationOutcome, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
+fn next_request_id(operation: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    let sequence = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("matcha-{operation}-{sequence}")
+}
+
+fn gateway_request_outcome(delivery: MutationDelivery) -> OpenClawGatewayRequestOutcome {
+    match delivery {
+        MutationDelivery::Response(GatewayResponse::Success { payload, .. }) => {
+            OpenClawGatewayRequestOutcome::Succeeded(payload.unwrap_or(Value::Null))
+        }
+        MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
+            OpenClawGatewayRequestOutcome::Rejected
+        }
+        MutationDelivery::NotWritten(DispatcherError::Saturated) => {
+            OpenClawGatewayRequestOutcome::CapacityExhausted
+        }
+        MutationDelivery::NotWritten(_) => OpenClawGatewayRequestOutcome::Unavailable,
+        MutationDelivery::MayHaveReached(_) => OpenClawGatewayRequestOutcome::OutcomeUnknown,
+    }
+}
+
 pub struct OpenClawGateway {
     client: Arc<GatewayClient>,
+    state_dir: Option<CanonicalStateDir>,
     team_state_dir: Option<CanonicalStateDir>,
+    openclaw_dir: Option<std::path::PathBuf>,
+    schema_executable: Option<std::path::PathBuf>,
+    managed_plugin_root: Option<std::path::PathBuf>,
     pairing: Option<ChannelPairingOperation>,
     credentials: Option<ChannelCredentialsOperation>,
 }
@@ -161,6 +203,7 @@ pub struct OpenClawGateway {
 #[derive(Clone)]
 pub struct OpenClawSessionGateway {
     client: Arc<GatewayClient>,
+    state_dir: Option<CanonicalStateDir>,
 }
 
 impl OpenClawGateway {
@@ -193,19 +236,40 @@ impl OpenClawGateway {
             certificate_fingerprint,
             secret,
             metadata,
-            state_dir,
+            state_dir.clone(),
         )
         .with_event_ingest(ingest);
-        Self::with_client(Arc::new(client))
+        let mut gateway = Self::with_client(Arc::new(client));
+        gateway.state_dir = Some(state_dir);
+        gateway
     }
 
     fn with_client(client: Arc<GatewayClient>) -> Self {
         Self {
             client,
+            state_dir: None,
             team_state_dir: None,
+            openclaw_dir: None,
+            schema_executable: None,
+            managed_plugin_root: None,
             pairing: None,
             credentials: None,
         }
+    }
+
+    pub fn with_openclaw_dir(mut self, openclaw_dir: std::path::PathBuf) -> Self {
+        self.openclaw_dir = Some(openclaw_dir);
+        self
+    }
+
+    pub fn with_channel_schema_source(
+        mut self,
+        executable: std::path::PathBuf,
+        managed_plugin_root: std::path::PathBuf,
+    ) -> Self {
+        self.schema_executable = Some(executable);
+        self.managed_plugin_root = Some(managed_plugin_root);
+        self
     }
 
     pub fn with_team_state_dir(mut self, state_dir: CanonicalStateDir) -> Self {
@@ -243,10 +307,7 @@ impl OpenClawGateway {
         channel: String,
         account: Option<String>,
     ) -> ChannelPairingEffect {
-        match &self.pairing {
-            Some(pairing) => pairing.list(channel, account).await,
-            None => ChannelPairingEffect::OutcomeUnknown,
-        }
+        ChannelPairingOperation::list(&self.client, channel, account).await
     }
 
     pub async fn approve_channel_pairing(
@@ -300,11 +361,19 @@ impl OpenClawGateway {
     pub async fn observe_mcp_server_status(
         &self,
         session_key: String,
-        endpoint_session_id: Option<String>,
     ) -> Result<crate::gateway::wire::McpServerStatusList, crate::gateway::client::GatewayClientError>
     {
+        self.client.observe_mcp_server_status(session_key).await
+    }
+
+    pub async fn set_mcp_session_server_enabled(
+        &self,
+        session_key: String,
+        server_name: String,
+        enabled: bool,
+    ) -> Result<(), crate::gateway::client::GatewayClientError> {
         self.client
-            .observe_mcp_server_status(session_key, endpoint_session_id)
+            .set_mcp_session_server_enabled(session_key, server_name, enabled)
             .await
     }
 
@@ -318,6 +387,52 @@ impl OpenClawGateway {
         self.client.tail_logs(cursor, limit, max_bytes).await
     }
 
+    pub async fn browser_request(
+        &self,
+        method: String,
+        path: String,
+        query: Option<Value>,
+        body: Option<Value>,
+        timeout_ms: Option<u64>,
+        target: Option<String>,
+        node: Option<String>,
+    ) -> OpenClawGatewayRequestOutcome {
+        let request = match wire::browser_request(
+            next_request_id("browser-request"),
+            method,
+            path,
+            query,
+            body,
+            timeout_ms,
+            target,
+            node,
+        ) {
+            Ok(request) => request,
+            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
+        };
+        gateway_request_outcome(self.client.rpc_mutation(request).await)
+    }
+
+    pub async fn mcp_app_request(
+        &self,
+        operation_id: String,
+        session_key: String,
+        view_id: String,
+        standalone: Option<bool>,
+    ) -> OpenClawGatewayRequestOutcome {
+        let request = match wire::mcp_app_request(
+            next_request_id("mcp-app-request"),
+            operation_id,
+            session_key,
+            view_id,
+            standalone,
+        ) {
+            Ok(request) => request,
+            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
+        };
+        gateway_request_outcome(self.client.rpc_mutation(request).await)
+    }
+
     pub fn control_ui_url(&self) -> String {
         self.client.control_ui_url()
     }
@@ -329,7 +444,12 @@ impl OpenClawGateway {
     pub fn session_gateway(&self) -> OpenClawSessionGateway {
         OpenClawSessionGateway {
             client: Arc::clone(&self.client),
+            state_dir: self.state_dir.clone(),
         }
+    }
+
+    pub fn usage_projection(&self) -> crate::usage::UsageProjection {
+        crate::usage::UsageProjection::new(Arc::clone(&self.client))
     }
 
     pub async fn admit_cron_execution(
@@ -423,26 +543,53 @@ impl OpenClawGateway {
             .await
     }
 
-    pub async fn channel_catalog(&self) -> ChannelCatalogEffect {
-        ChannelConfigOperation::new(Arc::clone(&self.client))
-            .catalog()
-            .await
+    pub async fn channel_catalog(&self, runtime_running: bool) -> ChannelCatalogEffect {
+        ChannelConfigOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .catalog()
+        .await
     }
 
-    pub async fn channel_configure_form(&self, channel: String) -> ChannelConfigSchemaEffect {
-        ChannelConfigOperation::new(Arc::clone(&self.client))
-            .form(channel)
-            .await
+    pub async fn channel_configure_form(
+        &self,
+        channel: String,
+        runtime_running: bool,
+    ) -> ChannelConfigSchemaEffect {
+        ChannelConfigOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .with_openclaw_dir(self.openclaw_dir.clone())
+        .with_channel_schema_source(
+            self.schema_executable.clone(),
+            self.managed_plugin_root.clone(),
+        )
+        .form(channel)
+        .await
     }
 
     pub async fn read_channel_config(
         &self,
         channel: String,
         account_id: Option<String>,
+        runtime_running: bool,
     ) -> ChannelConfigReadEffect {
-        ChannelConfigOperation::new(Arc::clone(&self.client))
-            .read(channel, account_id)
-            .await
+        ChannelConfigOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .with_openclaw_dir(self.openclaw_dir.clone())
+        .with_channel_schema_source(
+            self.schema_executable.clone(),
+            self.managed_plugin_root.clone(),
+        )
+        .read(channel, account_id)
+        .await
     }
 
     pub async fn configure_channel(
@@ -450,9 +597,39 @@ impl OpenClawGateway {
         channel: String,
         account_id: String,
         patch: serde_json::Map<String, serde_json::Value>,
+        plugin_id: Option<String>,
+        agent_id: Option<String>,
+        runtime_running: bool,
+        login_completed: bool,
     ) -> ChannelConfigMutationOutcome {
-        ChannelConfigOperation::new(Arc::clone(&self.client))
-            .configure(channel, account_id, patch)
+        let operation = ChannelConfigOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        );
+        if login_completed {
+            operation
+                .finalize_login(channel, account_id, patch, plugin_id, agent_id)
+                .await
+        } else {
+            operation
+                .configure(channel, account_id, patch, plugin_id, agent_id)
+                .await
+        }
+    }
+
+    pub async fn refresh_plugins(&self) -> PluginRefreshOutcome {
+        PluginRefreshOperation::new(Arc::clone(&self.client))
+            .refresh()
+            .await
+    }
+
+    pub async fn discover_provider_models(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<crate::operations::provider_models::Model>, ()> {
+        crate::operations::provider_models::ProviderModelCatalog::new(Arc::clone(&self.client))
+            .discover(provider)
             .await
     }
 
@@ -463,6 +640,7 @@ impl OpenClawGateway {
         routing: Option<&environment::ProviderRouting>,
         retired: &[environment::ProviderAccount],
         required_auth_accounts: &std::collections::BTreeSet<environment::ProviderAccountId>,
+        auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
         ProviderNativeConfigurationOperation::new(
@@ -477,6 +655,7 @@ impl OpenClawGateway {
             routing,
             retired,
             required_auth_accounts,
+            auth_state_refresh_required,
             now_millis,
         )
         .await
@@ -485,11 +664,17 @@ impl OpenClawGateway {
     pub async fn delete_channel_config(
         &self,
         channel: String,
-        account_id: String,
+        account_id: Option<String>,
+        runtime_running: bool,
     ) -> DeleteConfigOutcome {
-        ChannelConfigOperation::new(Arc::clone(&self.client))
-            .delete_config(channel, account_id)
-            .await
+        ChannelConfigOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .with_openclaw_dir(self.openclaw_dir.clone())
+        .delete_config(channel, account_id)
+        .await
     }
 
     pub fn channel_login_operation(
@@ -550,15 +735,40 @@ impl OpenClawGateway {
             .await
     }
 
-    pub async fn observe_channel_accounts(&self) -> ChannelStatusEffect {
-        ChannelStatusOperation::new(Arc::clone(&self.client))
-            .observe()
-            .await
+    pub async fn observe_channel_accounts(&self, runtime_running: bool) -> ChannelStatusEffect {
+        ChannelStatusOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .observe()
+        .await
     }
 
-    pub async fn observe_channel_snapshot(&self) -> ChannelSnapshotEffect {
-        ChannelStatusOperation::new(Arc::clone(&self.client))
-            .observe_snapshot()
+    pub async fn observe_channel_snapshot(&self, runtime_running: bool) -> ChannelSnapshotEffect {
+        ChannelStatusOperation::new(
+            Arc::clone(&self.client),
+            self.state_dir.clone(),
+            runtime_running,
+        )
+        .observe_snapshot()
+        .await
+    }
+
+    pub async fn apply_settings_config_projection(
+        &self,
+        browser_mode: crate::projection::settings::BrowserMode,
+        proxy_endpoint: Option<String>,
+    ) -> SettingsConfigMutationOutcome {
+        let projection = match crate::projection::settings::SettingsProjection::try_new(
+            browser_mode,
+            proxy_endpoint.as_deref(),
+        ) {
+            Ok(projection) => projection,
+            Err(_) => return SettingsConfigMutationOutcome::Rejected,
+        };
+        SettingsConfigOperation::new(Arc::clone(&self.client))
+            .apply(&projection)
             .await
     }
 
@@ -711,7 +921,9 @@ impl OpenClawGateway {
     }
 
     pub async fn installed_skill_catalog(&self) -> Option<InstalledSkillCatalog> {
-        OpenClawInstalledSkillCatalog::new(Arc::clone(&self.client))
+        let agent_id = self.default_agent_id().await.ok()?;
+        OpenClawInstalledSkillCatalog::for_agent(Arc::clone(&self.client), agent_id)
+            .ok()?
             .read()
             .await
     }
@@ -724,43 +936,71 @@ impl OpenClawGateway {
             .await
     }
 
+    async fn default_agent_id(&self) -> Result<String, AgentsReadFailure> {
+        let agents = OpenClawAgents::new(Arc::clone(&self.client)).list().await?;
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.id == agents.default_id)
+            .then_some(agents.default_id)
+            .ok_or(AgentsReadFailure::Protocol)
+    }
+
     pub async fn detail_skill(
         &self,
         request: SkillDetailRequest,
     ) -> Result<SkillDetail, SkillReadError> {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .detail(request)
-            .await
+        let Ok(operations) = self.default_skill_operations().await else {
+            return Err(SkillReadError::Unavailable);
+        };
+        operations.detail(request).await
     }
 
     pub async fn install_skill(&self, request: SkillInstallRequest) -> SkillMutationOutcome {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .install(request)
-            .await
+        let Ok(operations) = self.default_skill_operations().await else {
+            return SkillMutationOutcome::Unknown;
+        };
+        operations.install(request).await
     }
 
     pub async fn update_skill(&self, request: SkillUpdateRequest) -> SkillMutationOutcome {
+        let Ok(operations) = self.default_skill_operations().await else {
+            return SkillMutationOutcome::Unknown;
+        };
+        operations.update(request).await
+    }
+
+    pub async fn remove_skill_config(&self, skill_key: String) -> SkillConfigRemoveOutcome {
         OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .update(request)
+            .remove_config(skill_key)
             .await
     }
 
     pub async fn begin_skill_upload(&self, request: SkillUploadBegin) -> SkillUploadOutcome {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .upload_begin(request)
-            .await
+        let Ok(operations) = self.default_skill_operations().await else {
+            return SkillUploadOutcome::Unknown;
+        };
+        operations.upload_begin(request).await
     }
 
     pub async fn chunk_skill_upload(&self, request: SkillUploadChunk) -> SkillUploadOutcome {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .upload_chunk(request)
-            .await
+        let Ok(operations) = self.default_skill_operations().await else {
+            return SkillUploadOutcome::Unknown;
+        };
+        operations.upload_chunk(request).await
     }
 
     pub async fn commit_skill_upload(&self, request: SkillUploadCommit) -> SkillUploadOutcome {
-        OpenClawSkillOperations::new(Arc::clone(&self.client))
-            .upload_commit(request)
-            .await
+        let Ok(operations) = self.default_skill_operations().await else {
+            return SkillUploadOutcome::Unknown;
+        };
+        operations.upload_commit(request).await
+    }
+
+    async fn default_skill_operations(&self) -> Result<OpenClawSkillOperations, AgentsReadFailure> {
+        let agent_id = self.default_agent_id().await?;
+        OpenClawSkillOperations::for_agent(Arc::clone(&self.client), agent_id)
+            .map_err(|_| AgentsReadFailure::Protocol)
     }
 
     /// Lists the task-manager snapshot through the Gateway control exchange.
@@ -819,27 +1059,6 @@ impl OpenClawGateway {
         self.task_manager(scope)?.todo_get().await
     }
 
-    /// Reads the native task output status through the Gateway control exchange.
-    pub async fn task_output(
-        &mut self,
-        scope: TaskScope,
-        task_id: String,
-    ) -> Result<TaskOutput, TaskReadFailure> {
-        self.task_manager(scope)?.output(task_id).await
-    }
-
-    /// Stops one native task without retrying an ambiguous mutation.
-    pub async fn stop_task(
-        &mut self,
-        scope: TaskScope,
-        task_id: String,
-    ) -> TaskMutationOutcome<TaskStopResult> {
-        match self.task_manager(scope) {
-            Ok(operation) => operation.stop(task_id).await,
-            Err(_) => TaskMutationOutcome::OutcomeUnknown,
-        }
-    }
-
     pub async fn list_sessions(
         &mut self,
         params: SessionsListParams,
@@ -873,18 +1092,45 @@ impl OpenClawGateway {
             .map_err(|error| OpenClawSessionError::Protocol(Some(error)))
     }
 
+    pub fn replay_source_page(
+        &self,
+        session_key: SessionKey,
+        request: PageRequest,
+    ) -> Result<SessionReplaySourcePage, SessionReplaySourceError> {
+        let Some(state_dir) = &self.state_dir else {
+            return Err(SessionReplaySourceError::MissingStateDir);
+        };
+        crate::session::load_session_replay_source(state_dir, session_key, request)
+    }
+
+    pub fn materialize_session_replay(
+        &self,
+        source: SessionReplaySourcePage,
+        source_epoch: Option<u64>,
+        route_key: Option<String>,
+    ) -> Result<CanonicalSessionReplay, SessionReplayError> {
+        crate::session::materialize_session_replay(
+            source.session_key().clone(),
+            source.into_events(),
+            source_epoch,
+            route_key,
+        )
+    }
+
     pub async fn enqueue_chat(
         &mut self,
         params: ChatSendParams,
         route_key: String,
     ) -> Result<ChatSendResult, OpenClawSessionError> {
         let session_key = params.session_key().clone();
+        let operation = SessionOperation::new(Arc::clone(&self.client));
+        operation.subscribe_session_messages(&session_key).await?;
         self.client.register_session_route(&session_key, route_key);
-        match self.send_chat(params).await {
+        match operation.send_chat(params).await {
             Ok(InvocationOutcome::Succeeded(result)) => Ok(result),
             Ok(InvocationOutcome::TargetRejected(error)) => {
                 self.client.unregister_session_route(&session_key);
-                Err(error)
+                Err(error.into())
             }
             Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => {
                 self.client.unregister_session_route(&session_key);
@@ -892,7 +1138,7 @@ impl OpenClawGateway {
             }
             Err(error) => {
                 self.client.unregister_session_route(&session_key);
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -1041,6 +1287,30 @@ impl OpenClawGateway {
             .map_err(Into::into)
     }
 
+    pub async fn get_session_permission(
+        &mut self,
+        session_key: SessionKey,
+    ) -> Result<SessionPermissionProjection, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .get_session_permission(session_key)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn set_session_permission(
+        &mut self,
+        params: SessionPermissionPatchParams,
+    ) -> Result<
+        InvocationOutcome<SessionPermissionProjection, OpenClawSessionError>,
+        OpenClawSessionError,
+    > {
+        SessionOperation::new(Arc::clone(&self.client))
+            .set_session_permission(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
     pub async fn create_session(
         &mut self,
         params: SessionCreateParams,
@@ -1096,6 +1366,14 @@ impl fmt::Debug for OpenClawGateway {
     }
 }
 
+fn skill_status_agent_error(error: AgentsReadFailure) -> SkillStatusCatalogError {
+    match error {
+        AgentsReadFailure::Rejected => SkillStatusCatalogError::Rejected,
+        AgentsReadFailure::Protocol => SkillStatusCatalogError::Protocol,
+        AgentsReadFailure::Unavailable => SkillStatusCatalogError::Unavailable,
+    }
+}
+
 fn port_outcome<T>(
     outcome: InvocationOutcome<T, OperationError>,
 ) -> InvocationOutcome<T, OpenClawSessionError> {
@@ -1141,18 +1419,45 @@ impl OpenClawSessionGateway {
             .map_err(|error| OpenClawSessionError::Protocol(Some(error)))
     }
 
+    pub fn replay_source_page(
+        &self,
+        session_key: SessionKey,
+        request: PageRequest,
+    ) -> Result<SessionReplaySourcePage, SessionReplaySourceError> {
+        let Some(state_dir) = &self.state_dir else {
+            return Err(SessionReplaySourceError::MissingStateDir);
+        };
+        crate::session::load_session_replay_source(state_dir, session_key, request)
+    }
+
+    pub fn materialize_session_replay(
+        &self,
+        source: SessionReplaySourcePage,
+        source_epoch: Option<u64>,
+        route_key: Option<String>,
+    ) -> Result<CanonicalSessionReplay, SessionReplayError> {
+        crate::session::materialize_session_replay(
+            source.session_key().clone(),
+            source.into_events(),
+            source_epoch,
+            route_key,
+        )
+    }
+
     pub async fn enqueue_chat(
         &self,
         params: ChatSendParams,
         route_key: String,
     ) -> Result<ChatSendResult, OpenClawSessionError> {
         let session_key = params.session_key().clone();
+        let operation = SessionOperation::new(Arc::clone(&self.client));
+        operation.subscribe_session_messages(&session_key).await?;
         self.client.register_session_route(&session_key, route_key);
-        match self.send_chat(params).await {
+        match operation.send_chat(params).await {
             Ok(InvocationOutcome::Succeeded(result)) => Ok(result),
             Ok(InvocationOutcome::TargetRejected(error)) => {
                 self.client.unregister_session_route(&session_key);
-                Err(error)
+                Err(error.into())
             }
             Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => {
                 self.client.unregister_session_route(&session_key);
@@ -1160,7 +1465,7 @@ impl OpenClawSessionGateway {
             }
             Err(error) => {
                 self.client.unregister_session_route(&session_key);
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -1242,6 +1547,30 @@ impl OpenClawSessionGateway {
     > {
         SessionOperation::new(Arc::clone(&self.client))
             .patch_session_label(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn get_session_permission(
+        &self,
+        session_key: SessionKey,
+    ) -> Result<SessionPermissionProjection, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .get_session_permission(session_key)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn set_session_permission(
+        &self,
+        params: SessionPermissionPatchParams,
+    ) -> Result<
+        InvocationOutcome<SessionPermissionProjection, OpenClawSessionError>,
+        OpenClawSessionError,
+    > {
+        SessionOperation::new(Arc::clone(&self.client))
+            .set_session_permission(params)
             .await
             .map(port_outcome)
             .map_err(Into::into)
@@ -1452,8 +1781,8 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
-    #[test]
-    fn gateway_port_debug_excludes_endpoint_and_secret() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_port_debug_excludes_endpoint_and_secret() {
         let identity = ListenerIdentity::generate_loopback().unwrap();
         let (events, _) = mpsc::channel(1);
         let (canonical_events, _) = mpsc::channel(32);
@@ -1484,6 +1813,65 @@ mod tests {
         assert!(event.has_run());
         assert!(!event.has_message());
         assert!(event.has_session_activity());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn skill_status_catalog_uses_global_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = TestTlsIdentity::generate();
+        let endpoint = GatewayEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
+        let acceptor = identity.acceptor();
+        let peer = tokio::spawn(async move {
+            let mut socket = accept_websocket(&listener, &acceptor).await;
+            send_json(
+                &mut socket,
+                json!({
+                    "type":"event",
+                    "event":"connect.challenge",
+                    "payload":{"nonce":"port-skill-nonce","ts":42}
+                }),
+            )
+            .await;
+            let connect = read_json(&mut socket).await;
+            assert_eq!(connect["method"], "connect");
+            send_json(&mut socket, hello(connect["id"].as_str().unwrap())).await;
+
+            let status = read_json(&mut socket).await;
+            assert_eq!(status["method"], "skills.status");
+            assert_eq!(status["params"], json!({}));
+            send_json(
+                &mut socket,
+                task_response(
+                    &status,
+                    json!({
+                        "skills":[{
+                            "skillKey":"Excel XLSX",
+                            "name":"Excel XLSX",
+                            "installed":true,
+                            "eligible":true,
+                            "clawhub":{"slug":"excel-xlsx"}
+                        }]
+                    }),
+                ),
+            )
+            .await;
+            socket.close(None).await.unwrap();
+        });
+        let (events, _) = mpsc::channel(1);
+        let (canonical_events, _) = mpsc::channel(32);
+        let gateway = OpenClawGateway::new(
+            endpoint,
+            identity.fingerprint(),
+            Arc::new(GatewaySecret::new("port-skill-secret".into()).unwrap()),
+            GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
+            events,
+            canonical_events,
+        );
+
+        let catalog = gateway.skill_status_catalog().await.unwrap();
+        assert_eq!(catalog.entries()[0].key(), "Excel XLSX");
+        assert_eq!(catalog.entries()[0].slug(), Some("excel-xlsx"));
+        timeout(TEST_TIMEOUT, peer).await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1567,28 +1955,6 @@ mod tests {
             )
             .await;
 
-            let output = read_json(&mut socket).await;
-            assert_task_request(&output, "TaskOutput");
-            send_json(
-                &mut socket,
-                task_response(
-                    &output,
-                    json!({"success":false,"taskId":"task-1","status":"not_found","message":"not found"}),
-                ),
-            )
-            .await;
-
-            let stop = read_json(&mut socket).await;
-            assert_task_request(&stop, "TaskStop");
-            send_json(
-                &mut socket,
-                task_response(
-                    &stop,
-                    json!({"success":false,"taskId":"task-1","found":false,"cancelled":false,"message":"not found"}),
-                ),
-            )
-            .await;
-
             match timeout(Duration::from_millis(100), socket.next()).await {
                 Err(_) | Ok(None) | Ok(Some(Ok(Message::Close(_)))) => {}
                 Ok(Some(Ok(frame))) => panic!("unexpected extra Gateway frame: {frame:?}"),
@@ -1650,21 +2016,11 @@ mod tests {
             TaskMutationOutcome::Applied(_)
         ));
         assert!(gateway.get_todos(task_scope_input()).await.is_ok());
-        assert_eq!(
-            gateway
-                .task_output(task_scope_input(), "task-1".into())
-                .await,
-            Ok(TaskOutput::NotFound)
-        );
-        assert!(matches!(
-            gateway.stop_task(task_scope_input(), "task-1".into()).await,
-            TaskMutationOutcome::Applied(_)
-        ));
         timeout(TEST_TIMEOUT, peer).await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_operations_use_gateway_control_without_subscribe() {
+    async fn session_operations_use_gateway_control() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let identity = TestTlsIdentity::generate();
         let endpoint = GatewayEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
@@ -1695,6 +2051,21 @@ mod tests {
             let history = read_json(&mut socket).await;
             assert_session_request(&history, "chat.history");
             send_json(&mut socket, session_response(&history, history_payload())).await;
+
+            let subscribe = read_json(&mut socket).await;
+            assert_session_request(&subscribe, "sessions.messages.subscribe");
+            assert_eq!(
+                subscribe["params"],
+                json!({"key":"agent:port-agent:session-1"})
+            );
+            send_json(
+                &mut socket,
+                session_response(
+                    &subscribe,
+                    json!({"subscribed":true,"key":"agent:port-agent:session-1"}),
+                ),
+            )
+            .await;
 
             let send = read_json(&mut socket).await;
             assert_session_request(&send, "chat.send");
@@ -2087,6 +2458,7 @@ mod tests {
                     "config.get",
                     "config.patch",
                     "config.apply",
+                    "plugins.refresh",
                     "agents.list",
                     "skills.status",
                     wire::SYSTEM_PRESENCE_METHOD,
@@ -2102,9 +2474,7 @@ mod tests {
                     "TaskList",
                     "TaskGet",
                     "TodoWrite",
-                    "TodoGet",
-                    "TaskOutput",
-                    "TaskStop"
+                    "TodoGet"
                 ],"events":["tick", "chat", "session.message", "session.operation", "session.tool", "sessions.changed"]},
                 "snapshot":{
                     "presence":[],

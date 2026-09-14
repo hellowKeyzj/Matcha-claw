@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use clawhub::ClawHubInstallRequest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -59,13 +58,20 @@ impl InstallRequest {
             return Err(RequestError::Invalid);
         }
         let request = serde_json::from_value::<Self>(value).map_err(|_| RequestError::Invalid)?;
-        let force = request.force;
-        let install = ClawHubInstallRequest::try_new(request.slug, request.version, force)
-            .map_err(|_| RequestError::Invalid)?;
-        let slug = install.slug().to_owned();
-        let version = install.version().map(str::to_owned);
+        let slug = request.slug.trim().to_owned();
+        let version = request.version.map(|version| version.trim().to_owned());
+        if version.as_deref().is_some_and(str::is_empty) {
+            return Err(RequestError::Invalid);
+        }
+        let command = SkillInstallCommand::new(slug.clone(), version.clone(), request.force);
+        crate::skill_management::Command::clawhub_install(
+            slug.clone(),
+            version.clone(),
+            request.force,
+        )
+        .map_err(|_| RequestError::Invalid)?;
         Ok(InstallCommand {
-            command: SkillInstallCommand::new(slug.clone(), version.clone(), force),
+            command,
             slug,
             version,
         })
@@ -167,12 +173,13 @@ mod tests {
         .expect("valid fixed install request");
         assert_eq!(command.slug, "safe-skill");
         assert_eq!(command.version.as_deref(), Some("1.2.3"));
-
         for invalid in [
             json!({ "slug": "safe-skill", "force": false, "extra": "private" }),
             json!({ "slug": "safe-skill", "force": "false" }),
             json!({ "slug": "safe-skill", "version": null, "force": false }),
             json!({ "slug": "../private-workspace", "force": false }),
+            json!({ "slug": "@owner/safe-skill", "force": false }),
+            json!({ "slug": "skills-sh:owner/repo/safe-skill", "force": false }),
             json!({ "slug": "safe-skill", "version": " ", "force": false }),
         ] {
             assert!(matches!(decode(invalid), Err(RequestError::Invalid)));

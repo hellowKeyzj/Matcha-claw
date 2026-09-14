@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use organization::{
     ManagedAgentReference, MaterializationOperationOutcome, MaterializationReceipt,
@@ -16,6 +16,7 @@ use super::{
     workspace::{ResolvedWorkspace, TeamExternalWorkspaces, TeamWorkspaceProjection},
 };
 use crate::{
+    agents::{AgentsReadFailure, OpenClawAgents},
     gateway::{
         client::{GatewayClient, GatewayClientError},
         delivery::MutationDelivery,
@@ -25,8 +26,8 @@ use crate::{
     projection::config_store::OpenClawConfigStore,
 };
 
-pub(crate) struct TeamProvider<'gateway> {
-    gateway: &'gateway GatewayClient,
+pub(crate) struct TeamProvider {
+    gateway: Arc<GatewayClient>,
     config: OpenClawConfigStore,
 }
 
@@ -53,32 +54,38 @@ pub(crate) enum ReadFailure {
     Protocol,
 }
 
-impl<'gateway> TeamProvider<'gateway> {
-    pub(crate) fn new(gateway: &'gateway GatewayClient, state_dir: CanonicalStateDir) -> Self {
+impl From<AgentsReadFailure> for ReadFailure {
+    fn from(error: AgentsReadFailure) -> Self {
+        match error {
+            AgentsReadFailure::Unavailable => Self::Unavailable,
+            AgentsReadFailure::Rejected => Self::Rejected,
+            AgentsReadFailure::Protocol => Self::Protocol,
+        }
+    }
+}
+
+impl TeamProvider {
+    pub(crate) fn new(gateway: &GatewayClient, state_dir: CanonicalStateDir) -> Self {
         Self {
-            gateway,
+            gateway: Arc::new(gateway.clone()),
             config: OpenClawConfigStore::new(state_dir),
         }
     }
 
     pub(crate) async fn list_agents(&self) -> Result<TeamAgents, ReadFailure> {
-        let request = wire::team::agents_list_request(next_request_id("agents-list"))
-            .map_err(|_| ReadFailure::Protocol)?;
-        match self.gateway.rpc_query(request).await {
-            Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
-            Ok(response) => wire::team::decode_agents_list(response)
-                .map(|agents| {
-                    TeamAgents::new(
-                        agents
-                            .agents
-                            .into_iter()
-                            .map(|agent| TeamAgent::new(agent.agent_id, agent.workspace))
-                            .collect(),
-                    )
-                })
-                .map_err(|_| ReadFailure::Protocol),
-            Err(error) => Err(map_read_connection_failure(error)),
-        }
+        OpenClawAgents::new(Arc::clone(&self.gateway))
+            .list()
+            .await
+            .map(|agents| {
+                TeamAgents::new(
+                    agents
+                        .agents
+                        .into_iter()
+                        .map(|agent| TeamAgent::new(agent.id, agent.workspace))
+                        .collect(),
+                )
+            })
+            .map_err(ReadFailure::from)
     }
 
     pub(crate) async fn recover(
@@ -615,13 +622,17 @@ impl<'gateway> TeamProvider<'gateway> {
             Ok(patch) => patch,
             Err(_) => return MutationOutcome::Rejected,
         };
-        let (raw, base_hash, restore_facts) = patch.into_parts();
-        let request =
-            match wire::team::config_set_request(next_request_id("config-set"), raw, base_hash) {
-                Ok(request) => request,
-                Err(_) => return MutationOutcome::Rejected,
-            };
-        match self.write_config_request(request).await {
+        let (raw, base_hash, restore_facts, replace_paths) = patch.into_parts();
+        let request = match wire::team::config_patch_request(
+            next_request_id("config-patch"),
+            raw,
+            base_hash,
+            replace_paths,
+        ) {
+            Ok(request) => request,
+            Err(_) => return MutationOutcome::Rejected,
+        };
+        match self.write_config_patch_request(request).await {
             MutationOutcome::Applied(()) => MutationOutcome::Applied(restore_facts),
             MutationOutcome::Rejected => MutationOutcome::Rejected,
             MutationOutcome::OutcomeUnknown => MutationOutcome::OutcomeUnknown,
@@ -642,7 +653,7 @@ impl<'gateway> TeamProvider<'gateway> {
             }
             Err(_) => return MutationOutcome::OutcomeUnknown,
         };
-        match self.write_config_request(request).await {
+        match self.write_config_patch_request(request).await {
             MutationOutcome::Applied(()) if !fenced => MutationOutcome::Applied(()),
             MutationOutcome::Applied(())
             | MutationOutcome::Rejected
@@ -650,9 +661,9 @@ impl<'gateway> TeamProvider<'gateway> {
         }
     }
 
-    async fn write_config_request(
+    async fn write_config_patch_request(
         &self,
-        request: wire::team::ConfigSetRequest,
+        request: wire::team::ConfigPatchRequest,
     ) -> MutationOutcome<()> {
         match self
             .gateway
@@ -668,7 +679,8 @@ impl<'gateway> TeamProvider<'gateway> {
             MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
                 MutationOutcome::Rejected
             }
-            MutationDelivery::Response(response) => match wire::team::decode_config_set(response) {
+            MutationDelivery::Response(response) => match wire::team::decode_config_patch(response)
+            {
                 Ok(_) => MutationOutcome::Applied(()),
                 Err(_) => MutationOutcome::OutcomeUnknown,
             },
@@ -734,7 +746,7 @@ struct MaterializationProgress {
 }
 
 impl MaterializationProgress {
-    async fn compensate(&mut self, provider: &TeamProvider<'_>) -> bool {
+    async fn compensate(&mut self, provider: &TeamProvider) -> bool {
         let mut confirmed = true;
         while self.written_markers > 0 {
             self.written_markers -= 1;
@@ -856,7 +868,7 @@ fn map_write_response<T>(
     }
 }
 
-impl fmt::Debug for TeamProvider<'_> {
+impl fmt::Debug for TeamProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TeamProvider")

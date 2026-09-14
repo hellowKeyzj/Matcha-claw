@@ -3,7 +3,13 @@ use serde_json::Value;
 
 use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
 
-use crate::{RuntimeSessionError, transport::authorization::CapabilityDecisionVerifier};
+use crate::{
+    RuntimeSessionError,
+    transport::{
+        authorization::CapabilityDecisionVerifier,
+        session_key::{is_cron_session_key, is_main_session_key},
+    },
+};
 
 mod content;
 mod rename;
@@ -155,6 +161,7 @@ impl SessionListDelivery {
 enum PublicSessionKind {
     Main,
     Session,
+    Automation,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -169,9 +176,11 @@ struct Session {
     updated_at: Option<u64>,
 }
 
-fn public_session_kind(endpoint_session_id: &str) -> PublicSessionKind {
-    if endpoint_session_id == "main" {
+fn public_session_kind(session_key: &str) -> PublicSessionKind {
+    if is_main_session_key(session_key) {
         PublicSessionKind::Main
+    } else if is_cron_session_key(session_key) {
+        PublicSessionKind::Automation
     } else {
         PublicSessionKind::Session
     }
@@ -181,7 +190,7 @@ fn project_session(session: openclaw::session::protocol::SessionSummary) -> Opti
     let entry = session.agent_scoped_catalog_entry()?;
     let key = entry.session_key.as_str().to_owned();
     let agent_id = entry.agent_id.as_str().to_owned();
-    let kind = public_session_kind(&entry.endpoint_session_id);
+    let kind = public_session_kind(&key);
     Some(Session {
         session_identity: SessionIdentity::try_new(
             openclaw_local_endpoint(),
@@ -324,6 +333,8 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(true),
             model: Some("private-model".into()),
+            permission_mode: None,
+            permission_mode_pending: None,
         }
     }
 
@@ -466,6 +477,56 @@ mod tests {
             sessions[1]["sessionIdentity"]["sessionKey"],
             sessions[1]["key"]
         );
+    }
+
+    #[test]
+    fn projects_cron_session_keys_as_automation_kind() {
+        let response = native_result(vec![
+            summary("agent:worker:cron:daily", SessionKind::Direct),
+            summary("agent:worker:cron:daily:run:run-7", SessionKind::Group),
+            summary_for_agent("cron:nightly", SessionKind::Direct, Some("worker")),
+        ]);
+
+        let sessions = response.body()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 3);
+        for session in sessions {
+            assert_eq!(session["kind"], "automation");
+        }
+    }
+
+    #[test]
+    fn does_not_project_regular_sessions_as_automation() {
+        let response = native_result(vec![
+            summary("agent:worker:direct-session", SessionKind::Direct),
+            summary("agent:worker:subagent:cron:daily", SessionKind::Group),
+            summary_for_agent("direct:cron:daily", SessionKind::Direct, Some("worker")),
+        ]);
+
+        let sessions = response.body()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 3);
+        for session in sessions {
+            assert_eq!(session["kind"], "session");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_cron_session_keys_without_opening_automation_kind() {
+        let response = native_result(vec![
+            summary("agent:worker:cron", SessionKind::Direct),
+            summary("agent:worker:cron:daily:run", SessionKind::Direct),
+            summary(
+                "agent:worker:cron:daily:run:run-7:extra",
+                SessionKind::Direct,
+            ),
+            summary_for_agent("cron", SessionKind::Direct, Some("worker")),
+            summary_for_agent("cron:nightly:extra", SessionKind::Direct, Some("worker")),
+        ]);
+
+        let sessions = response.body()["sessions"].as_array().unwrap().clone();
+        assert_eq!(sessions.len(), 5);
+        for session in sessions {
+            assert_eq!(session["kind"], "session");
+        }
     }
 
     #[test]

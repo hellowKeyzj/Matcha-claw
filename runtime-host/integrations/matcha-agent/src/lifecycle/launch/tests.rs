@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use foundation::toolchain::{ToolchainPlatform, UnsupportedToolchainCommandPort};
+use toolchain::{NativeToolchain, ToolchainPlatform, UnsupportedToolchainCommandPort};
 
 const SECRET_CANARY: &str = "synthetic-launch-secret-canary";
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -50,7 +50,7 @@ fn input(root: &TestRoot) -> LaunchInput {
         storage_root: root.0.clone(),
         port: 18_790,
         secret: Arc::new(Secret::new(SECRET_CANARY.to_owned()).unwrap()),
-        toolchain: Arc::new(NativeToolchainRuntime::new(
+        toolchain: Arc::new(NativeToolchain::new(
             ToolchainPlatform::current(),
             std::env::consts::ARCH,
             working_directory,
@@ -68,7 +68,7 @@ async fn materializes_exact_app_server_specification_without_files() {
     let mut launch = input(&root).try_into_launch_factory().unwrap();
 
     assert!(root.0.is_dir());
-    assert_exact_spec(&launch.spec, &root.0);
+    assert_exact_spec(&launch.spec, &root.0, None);
 
     let first = launch.materialize().await.unwrap();
     let second = launch.materialize().await.unwrap();
@@ -77,6 +77,23 @@ async fn materializes_exact_app_server_specification_without_files() {
 
     assert!(root.0.is_dir());
     assert!(!root.0.join("private").exists());
+}
+
+#[test]
+fn materializes_sealed_resource_target_when_requested() {
+    let root = TestRoot::new();
+    let launch = input(&root)
+        .try_into_launch_factory_with_sealed_target(Some(SealedResourceTarget {
+            endpoint: "http://127.0.0.1:29441/sealed".to_owned(),
+            token: "sealed-target-token".to_owned(),
+        }))
+        .unwrap();
+
+    assert_exact_spec(
+        &launch.spec,
+        &root.0,
+        Some(("http://127.0.0.1:29441/sealed", "sealed-target-token")),
+    );
 }
 
 #[test]
@@ -302,7 +319,7 @@ fn rejects_a_reparse_storage_ancestor_before_creating_private_material() {
     assert!(!target.join("storage").exists());
 }
 
-fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path) {
+fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path, sealed_target: Option<(&str, &str)>) {
     assert_eq!(spec.executable(), Path::new(&absolute_path("bin/bun")));
     assert_eq!(
         spec.working_directory(),
@@ -333,6 +350,19 @@ fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path) {
     assert_environment_omits(environment, "ANTHROPIC_API_KEY");
     assert_environment_omits(environment, "OPENAI_API_KEY");
     assert_environment_omits(environment, "MATCHA_AUTH_TOKEN");
+    if let Some((endpoint, token)) = sealed_target {
+        assert_environment_value(environment, MATCHA_SEALED_ENDPOINT, endpoint);
+        assert_environment_value(environment, MATCHA_SEALED_TOKEN, token);
+        assert_environment_value(
+            environment,
+            MATCHA_SEALED_RUNTIME,
+            MATCHA_SEALED_RUNTIME_MATCHA_AGENT,
+        );
+    } else {
+        assert_environment_omits(environment, MATCHA_SEALED_ENDPOINT);
+        assert_environment_omits(environment, MATCHA_SEALED_TOKEN);
+        assert_environment_omits(environment, MATCHA_SEALED_RUNTIME);
+    }
     #[cfg(windows)]
     {
         assert_environment_value(environment, SYSTEM_ROOT, windows_system_root().unwrap());

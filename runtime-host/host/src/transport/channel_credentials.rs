@@ -28,50 +28,60 @@ pub(crate) fn decode(
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
 ) -> Result<Request, DecodeError> {
-    verifier
-        .verify(
-            authorization,
-            now,
-            AUTHORIZATION_ENDPOINT,
-            AUTHORIZATION_SCOPE,
-            OPERATION_ID,
-            AUTHORIZATION_SUBJECT,
-        )
-        .map_err(|_| DecodeError::Unauthorized)?;
-    let Value::Object(body) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if body.len() != 2 || !body.contains_key("channelType") || !body.contains_key("config") {
-        return Err(DecodeError::Invalid);
-    }
-    let channel = identity(body.get("channelType")).ok_or(DecodeError::Invalid)?;
-    let config = body
-        .get("config")
-        .and_then(Value::as_object)
-        .ok_or(DecodeError::Invalid)?;
-    if config.len() > MAX_CONFIG_KEYS
-        || config.iter().any(|(key, value)| {
-            !identity_str(key)
-                || !value.is_string()
-                || value
-                    .as_str()
-                    .is_some_and(|value| value.len() > MAX_CONFIG_VALUE_BYTES)
-        })
-    {
-        return Err(DecodeError::Invalid);
-    }
-    let total = config
-        .values()
-        .filter_map(Value::as_str)
-        .try_fold(0usize, |total, value| total.checked_add(value.len()))
-        .ok_or(DecodeError::Invalid)?;
-    if total > MAX_CONFIG_TOTAL_BYTES {
-        return Err(DecodeError::Invalid);
-    }
-    let config = serde_json::to_vec(config)
-        .map(Zeroizing::new)
-        .map_err(|_| DecodeError::Invalid)?;
-    Ok(Request { channel, config })
+    let mut span =
+        crate::channel::trace::ChannelTraceSpan::begin("host.transport.channel_credentials.decode");
+    let result = (|| {
+        verifier
+            .verify(
+                authorization,
+                now,
+                AUTHORIZATION_ENDPOINT,
+                AUTHORIZATION_SCOPE,
+                OPERATION_ID,
+                AUTHORIZATION_SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let Value::Object(body) = value else {
+            return Err(DecodeError::Invalid);
+        };
+        if body.len() != 2 || !body.contains_key("channelType") || !body.contains_key("config") {
+            return Err(DecodeError::Invalid);
+        }
+        let channel = identity(body.get("channelType")).ok_or(DecodeError::Invalid)?;
+        let config = body
+            .get("config")
+            .and_then(Value::as_object)
+            .ok_or(DecodeError::Invalid)?;
+        if config.len() > MAX_CONFIG_KEYS
+            || config.iter().any(|(key, value)| {
+                !identity_str(key)
+                    || !value.is_string()
+                    || value
+                        .as_str()
+                        .is_some_and(|value| value.len() > MAX_CONFIG_VALUE_BYTES)
+            })
+        {
+            return Err(DecodeError::Invalid);
+        }
+        let total = config
+            .values()
+            .filter_map(Value::as_str)
+            .try_fold(0usize, |total, value| total.checked_add(value.len()))
+            .ok_or(DecodeError::Invalid)?;
+        if total > MAX_CONFIG_TOTAL_BYTES {
+            return Err(DecodeError::Invalid);
+        }
+        let config = serde_json::to_vec(config)
+            .map(Zeroizing::new)
+            .map_err(|_| DecodeError::Invalid)?;
+        Ok(Request { channel, config })
+    })();
+    span.finish(match &result {
+        Ok(_) => "decoded",
+        Err(DecodeError::Unauthorized) => "unauthorized",
+        Err(DecodeError::Invalid) => "invalid",
+    });
+    result
 }
 
 fn identity(value: Option<&Value>) -> Option<String> {

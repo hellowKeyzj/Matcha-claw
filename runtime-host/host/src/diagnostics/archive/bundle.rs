@@ -40,8 +40,13 @@ const EXECUTION_DIRECTORY: &str = "executions";
 const PACKAGE_DIRECTORY: &str = "packages";
 const PACKAGE_FILE_WHITELIST: &[&str] = &["team.skill.json", "package.json", "README.md"];
 const WORKSPACE_DIRECTORIES: &[&str] = &["workspace", "workspace-subagents"];
-const WORKSPACE_FILE_WHITELIST: &[&str] =
-    &["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
+const WORKSPACE_FILE_WHITELIST: &[&str] = &[
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "MEMORY.md",
+];
 const REDACTED_VALUE: &str = "***";
 const REDACTED_DOCUMENT: &[u8] = b"\"***\"";
 
@@ -606,7 +611,7 @@ mod tests {
             "runtime/agents/reviewer/sessions/session-1.jsonl",
             "runtime/agents/configured/sessions/sessions.json",
             "runtime/workspace/AGENTS.md",
-            "runtime/workspace-subagents/child/TOOLS.md",
+            "runtime/workspace-subagents/child/MEMORY.md",
             "runtime/executions/run-1/package-path.txt",
             "runtime/packages/team-reviewer/team.skill.json",
             "runtime/packages/team-reviewer/README.md",

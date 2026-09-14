@@ -16,9 +16,6 @@ vi.mock('react-i18next', () => ({
       if (key === 'taskInbox.planStatus.building') {
         return '执行中';
       }
-      if (key === 'toolbar.skillShortLabel') {
-        return '技能';
-      }
       if (key === 'artifacts.sectionLabel') {
         return '产物';
       }
@@ -178,17 +175,8 @@ describe('chat shell task panel layout', () => {
     taskRows = [];
   });
 
-  const skillConfigProps = {
+  const sidePanelProps = {
     artifactWorkbenchFullscreen: false,
-    skillConfigLabel: '技能配置',
-    skillConfigTitle: 'skill-config · main',
-    skillOptions: [
-      { id: 'skill-a', name: 'Skill A', icon: 'A' },
-      { id: 'skill-b', name: 'Skill B', icon: 'B' },
-    ],
-    skillsLoading: false,
-    selectedSkillIds: ['skill-a'],
-    onToggleSkill: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
     taskInboxTasks: [],
     taskInboxLoading: false,
@@ -238,7 +226,7 @@ describe('chat shell task panel layout', () => {
     expect(screen.getByTestId('chat-header').parentElement?.className).toContain('pointer-events-auto');
   });
 
-  it('adds a right panel column only when the chat side panel is docked open', () => {
+  it('adds a right panel column when the chat side panel is docked open', () => {
     const { container } = render(
       <ChatShell
         chatLayoutRef={{ current: null }}
@@ -265,14 +253,13 @@ describe('chat shell task panel layout', () => {
     expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
   });
 
-  it('keeps the dock track mounted without side panel content while opening', () => {
+  it('reserves the docked side panel track while opening', () => {
     const { container } = render(
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="opening"
         sidePanelMode="docked"
         sidePanelWidth={360}
-        sidePanelMainWidth={900}
         artifactWorkbenchFullscreen={false}
         isEmptyState={false}
         emptyState={null}
@@ -286,9 +273,36 @@ describe('chat shell task panel layout', () => {
     );
 
     const shell = container.firstElementChild as HTMLElement | null;
-    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 900px) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 1fr) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
     expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-side-panel')).toBeNull();
+  });
+
+  it('lets the docked side panel absorb extra window width when the main column is locked', () => {
+    const { container } = render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        sidePanelPhase="open"
+        sidePanelMode="docked"
+        sidePanelWidth={520}
+        sidePanelMainWidth={980}
+        artifactWorkbenchFullscreen={false}
+        onSidePanelResize={vi.fn()}
+        isEmptyState={false}
+        emptyState={null}
+        sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
+        header={<div data-testid="chat-header" />}
+        viewportPane={<div data-testid="thread-panel" />}
+        errorBanner={null}
+        approvalDock={null}
+        input={<div data-testid="chat-input" />}
+      />,
+    );
+
+    const shell = container.firstElementChild as HTMLElement | null;
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('980px var(--chat-side-panel-resizer-width) minmax(0, 1fr)');
+    expect(shell?.style.getPropertyValue('--chat-side-panel-width')).toBe('520px');
+    expect(screen.getByTestId('chat-side-panel')).toHaveAttribute('data-mode', 'docked');
   });
 
   it('keeps the dock track mounted without side panel content while closing', () => {
@@ -313,7 +327,7 @@ describe('chat shell task panel layout', () => {
     );
 
     const shell = container.firstElementChild as HTMLElement | null;
-    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('minmax(0, 900px) var(--chat-side-panel-resizer-width) var(--chat-side-panel-width)');
+    expect(shell?.style.getPropertyValue('grid-template-columns')).toBe('900px var(--chat-side-panel-resizer-width) minmax(0, 1fr)');
     expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-side-panel')).toBeNull();
   });
@@ -393,7 +407,7 @@ describe('chat shell task panel layout', () => {
     expect(screen.queryByTestId('chat-side-panel-resizer')).toBeNull();
   });
 
-  it('renders task and skill tabs inside one shared side panel shell', () => {
+  it('renders task, artifact, and runtime tabs inside one shared side panel shell', () => {
     const onTabChange = vi.fn();
     render(
       <ChatSidePanel
@@ -403,23 +417,25 @@ describe('chat shell task panel layout', () => {
         onTabChange={onTabChange}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
     expect(screen.getByRole('tab', { name: 'taskInbox.title' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '技能配置' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'artifacts.title' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '运行面' })).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
     expect(screen.getByRole('button', { name: 'taskInbox.collapse' })).toBeInTheDocument();
     expect(screen.queryByTitle('taskInbox.expand')).toBeNull();
     expect(screen.getByTestId('chat-side-panel').className).toContain('border-l');
     expect(screen.queryByText(/workspace/i)).toBeNull();
     expect(screen.queryByText(/mr\.key/i)).toBeNull();
     expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
-    expect(within(screen.getByTestId('chat-side-panel-tab-skills')).getByText('技能')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
-    fireEvent.mouseDown(screen.getByRole('tab', { name: '技能配置' }));
-    expect(onTabChange).toHaveBeenCalledWith('skills');
+    expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole('tab', { name: '运行面' }));
+    expect(onTabChange).toHaveBeenCalledWith('runtime');
   });
 
   it('renders the task refresh action inside the task panel header instead of the top bar', () => {
@@ -431,7 +447,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
@@ -448,7 +464,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={1}
-        {...skillConfigProps}
+        {...sidePanelProps}
         taskInboxTasks={[{
           id: 'task-1',
           subject: '执行任务',
@@ -482,7 +498,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={1}
-        {...skillConfigProps}
+        {...sidePanelProps}
         taskInboxTasks={[{
           id: 'task-1',
           subject: '执行任务',
@@ -512,7 +528,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         derivedPlanStatus="finished"
       />,
     );
@@ -530,38 +546,40 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
     const tasksTab = screen.getByTestId('chat-side-panel-tab-tasks');
-    const skillsTab = screen.getByTestId('chat-side-panel-tab-skills');
     const artifactsTab = screen.getByTestId('chat-side-panel-tab-artifacts');
+    const runtimeTab = screen.getByTestId('chat-side-panel-tab-runtime');
 
     expect(tasksTab).toHaveAttribute('title', 'taskInbox.title');
-    expect(skillsTab).toHaveAttribute('title', '技能配置');
     expect(artifactsTab).toHaveAttribute('title', 'artifacts.title');
+    expect(runtimeTab).toHaveAttribute('title', '运行面');
+    expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
     expect(within(tasksTab).queryByText('任务')).toBeNull();
-    expect(within(skillsTab).queryByText('技能')).toBeNull();
     expect(within(artifactsTab).queryByText('产物')).toBeNull();
+    expect(within(runtimeTab).queryByText('运行面')).toBeNull();
   });
 
   it('keeps top tab labels visible at medium side panel widths', () => {
     render(
       <ChatSidePanel
         mode="docked"
-        width={360}
+        width={420}
         activeTab="tasks"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
+    expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
     expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
-    expect(within(screen.getByTestId('chat-side-panel-tab-skills')).getByText('技能')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
+    expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
   });
 
   it('keeps top tab labels visible when the side panel is wide enough', () => {
@@ -573,13 +591,14 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
+    expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
     expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
-    expect(within(screen.getByTestId('chat-side-panel-tab-skills')).getByText('技能')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
+    expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
   });
 
   it('switches artifact section buttons to icon-only mode when per-tab space is not enough for labels', () => {
@@ -591,7 +610,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
@@ -613,7 +632,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
@@ -631,7 +650,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
       />,
     );
 
@@ -680,7 +699,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactWorkbenchFullscreen={false}
         onToggleArtifactWorkbenchFullscreen={onToggleArtifactWorkbenchFullscreen}
         onOpenGeneratedArtifactFile={onOpenGeneratedArtifactFile}
@@ -762,7 +781,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         onOpenArtifactGroup={onOpenArtifactGroup}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -827,7 +846,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         onOpenGeneratedArtifactFile={onOpenGeneratedArtifactFile}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -922,7 +941,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactGroups={[
           {
             graphItemKey: 'graph-1',
@@ -1001,7 +1020,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
           files: [{
@@ -1049,7 +1068,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
           files: [{
@@ -1100,7 +1119,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
           files: [{
@@ -1149,7 +1168,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
           files: [{
@@ -1202,7 +1221,7 @@ describe('chat shell task panel layout', () => {
         onTabChange={vi.fn()}
         onClose={vi.fn()}
         unfinishedTaskCount={0}
-        {...skillConfigProps}
+        {...sidePanelProps}
         artifactActiveSection="workspace"
         artifactViewMode="preview"
         artifactWorkspaceRoot="/workspace"
@@ -1211,25 +1230,6 @@ describe('chat shell task panel layout', () => {
     );
 
     expect(screen.getByTestId('workspace-browser-body')).toHaveTextContent('none');
-  });
-
-  it('renders the inline skill configuration content inside the shared side panel', () => {
-    render(
-      <ChatSidePanel
-        mode="overlay"
-        width={320}
-        activeTab="skills"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={0}
-        {...skillConfigProps}
-      />,
-    );
-
-    expect(screen.getByText('skill-config · main')).toBeInTheDocument();
-    expect(screen.getByRole('switch', { name: 'Skill A' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'skillConfigDialog.save' })).toBeNull();
-    expect(screen.getByRole('tabpanel').className).toContain('data-[state=active]:flex');
   });
 
   it('renders empty-state content in the stage center instead of the bottom composer overlay', () => {

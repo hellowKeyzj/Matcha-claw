@@ -19,6 +19,8 @@ import {
 } from '../../packages/openclaw-browser-relay-plugin/src/relay/ownership'
 import { readRelaySelection, writeRelaySelection } from '../../packages/openclaw-browser-relay-plugin/src/relay/selection-state'
 import { registerBrowserRelayRuntime } from '../../packages/openclaw-browser-relay-plugin/src/application/browser-relay-runtime'
+import { BrowserControlService } from '../../packages/openclaw-browser-relay-plugin/src/service/browser-control-service'
+import { PlaywrightActions } from '../../packages/openclaw-browser-relay-plugin/src/playwright/actions'
 
 const ENCRYPTED_PREFIX = 'E:'
 const logger = {
@@ -364,6 +366,112 @@ describe('openclaw browser relay plugin', () => {
     )
 
     await services[0]?.stop()
+  })
+
+  it('adapts HTTP-shaped browser.request params before calling browser control', async () => {
+    const gatewayMethods = new Map<string, (options: Record<string, unknown>) => Promise<void> | void>()
+    const services: Array<{ start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void }> = []
+    const stateDir = await ensureTempStateDir()
+    const receivedParams: unknown[] = []
+    const handleRequest = vi.spyOn(BrowserControlService.prototype, 'handleRequest').mockImplementation(async (params) => {
+      receivedParams.push(params)
+      return { ok: true, params }
+    })
+
+    registerBrowserRelayRuntime({
+      logger,
+      registerService(service: unknown) {
+        services.push(service as { start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void })
+      },
+      registerGatewayMethod(name: string, handler: (options: Record<string, unknown>) => Promise<void> | void) {
+        gatewayMethods.set(name, handler)
+      },
+      registerTool: vi.fn(),
+    } as never)
+
+    const relayPort = await findFreePort()
+    await services[0]?.start({
+      config: { plugins: { entries: { 'browser-relay': { config: { port: relayPort } } } } },
+      logger,
+      stateDir,
+    })
+
+    const gatewayHandler = gatewayMethods.get('browser.request')
+    expect(gatewayHandler).toBeTypeOf('function')
+
+    const calls = [
+      [{ method: 'GET', path: '/tabs', query: { profile: 'default' }, timeoutMs: 1_000, target: 'node', node: 'browser-node-1' }, { action: 'tabs', timeoutMs: 1_000, profile: 'default', target: 'node', node: 'browser-node-1' }],
+      [{ method: 'POST', path: '/start' }, { action: 'start' }],
+      [{ method: 'POST', path: '/tabs/open', body: { url: 'https://example.com', retain: true, sessionKey: 'session-a' } }, { action: 'open', url: 'https://example.com', retain: true, sessionKey: 'session-a' }],
+      [{ method: 'POST', path: '/tabs/focus', body: { targetId: 'target-a' } }, { action: 'focus', targetId: 'target-a' }],
+      [{ method: 'DELETE', path: '/tabs/target-b' }, { action: 'close', targetId: 'target-b' }],
+      [{ method: 'POST', path: '/navigate', body: { targetId: 'target-c', url: 'https://example.com/next', waitUntil: 'load' } }, { action: 'navigate', targetId: 'target-c', url: 'https://example.com/next', waitUntil: 'load' }],
+      [{ method: 'POST', path: '/screenshot', body: { targetId: 'target-d', fullPage: true, type: 'jpeg' } }, { action: 'screenshot', targetId: 'target-d', fullPage: true, type: 'png' }],
+      [{ method: 'POST', path: '/act', body: { kind: 'click', targetId: 'target-e', ref: 'button' } }, { action: 'act', request: { kind: 'click', targetId: 'target-e', ref: 'button' } }],
+      [{ method: 'POST', path: '/act', body: { kind: 'clickCoords', targetId: 'target-f', x: 12, y: 34, doubleClick: true, button: 'right', delayMs: 25 } }, { action: 'act', request: { kind: 'clickCoords', targetId: 'target-f', x: 12, y: 34, doubleClick: true, button: 'right', delayMs: 25 } }],
+      [{ method: 'POST', path: '/act', body: { request: { kind: 'press', key: 'Enter' }, timeoutMs: 2_000 } }, { action: 'act', request: { kind: 'press', key: 'Enter' }, timeoutMs: 2_000 }],
+    ] as const
+
+    try {
+      for (const [params, expected] of calls) {
+        const respond = vi.fn()
+        await gatewayHandler?.({ params, respond })
+        expect(respond).toHaveBeenCalledWith(true, { ok: true, params: expected })
+      }
+      expect(receivedParams).toEqual(calls.map(([, expected]) => expected))
+    } finally {
+      handleRequest.mockRestore()
+      await services[0]?.stop()
+    }
+  })
+
+  it('passes clickCoords browser control requests to Playwright actions', async () => {
+    const click = vi.spyOn(PlaywrightActions.prototype, 'click').mockResolvedValue(undefined)
+    const control = new BrowserControlService({
+      logger,
+      stateDir: await ensureTempStateDir(),
+      relay: {
+        hasExtensionConnection: true,
+        relayPort: 12345,
+        authHeaders: {},
+        resolveReadyTarget: vi.fn().mockResolvedValue({ targetId: 'target-a' }),
+        listAttachments: vi.fn().mockReturnValue([]),
+        onExtensionConnected: vi.fn().mockReturnValue(() => {}),
+      },
+    } as never)
+
+    try {
+      await expect(control.handleRequest({
+        action: 'act',
+        targetId: 'target-a',
+        request: {
+          kind: 'clickCoords',
+          targetId: 'target-a',
+          x: 12,
+          y: 34,
+          doubleClick: true,
+          button: 'right',
+          delayMs: 25,
+        },
+      })).resolves.toEqual({
+        ok: true,
+        action: 'act.clickCoords',
+        targetId: 'target-a',
+      })
+      expect(click).toHaveBeenCalledWith(expect.objectContaining({
+        cdpUrl: 'http://127.0.0.1:12345',
+        targetId: 'target-a',
+        mode: 'relay',
+        x: 12,
+        y: 34,
+        doubleClick: true,
+        button: 'right',
+        delayMs: 25,
+      }))
+    } finally {
+      click.mockRestore()
+      await control.stop()
+    }
   })
 
   it('allows the Python browser gateway client to call browser.request', async () => {

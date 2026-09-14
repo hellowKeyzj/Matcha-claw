@@ -14,12 +14,13 @@ import type {
   ChatSessionViewportState,
   ChatStoreState,
 } from './types';
-import type {
-  SessionAssistantTurnItem,
-  SessionExecutionGraphStep,
-  SessionRenderExecutionGraphItem,
-  SessionRenderItem,
-  SessionRenderSystemItem,
+import {
+  deriveSessionImageGenerationPendingStateFromItems,
+  type SessionAssistantTurnItem,
+  type SessionExecutionGraphStep,
+  type SessionRenderExecutionGraphItem,
+  type SessionRenderItem,
+  type SessionRenderSystemItem,
 } from '../../types/session/render-item';
 import type {
   SessionAssistantTurnSegment,
@@ -50,6 +51,7 @@ import { sanitizeCanonicalUserText } from './message-helpers';
 import { projectSessionMedia } from './media-projection';
 import { syncViewportState } from './viewport-state';
 import { useTaskSnapshotStore } from './task-snapshot-store';
+import { getCronSessionBaseKey } from './cron-session-utils';
 import {
   createSessionTraceId,
   logSessionTrace,
@@ -155,6 +157,8 @@ function buildAttachedFilesSignature(
     file.mimeType,
     String(file.fileSize),
     file.preview ?? '',
+    file.previewStatus ?? '',
+    file.attachmentStatus ?? '',
     file.source ?? '',
   ].join(':'));
   return hashStringDjb2(parts.join('|'));
@@ -214,12 +218,14 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
       segment.tool.id,
       segment.tool.toolCallId ?? '',
       segment.tool.name,
+      segment.tool.runtimeAdapterId ?? '',
       segment.tool.status,
       String(segment.tool.updatedAt ?? ''),
       String(segment.tool.durationMs ?? ''),
       toolPayloadSignature(segment.tool.input),
       hashText(segment.tool.inputText),
       toolPayloadSignature(segment.tool.output),
+      toolPayloadSignature(segment.tool.details),
       hashText(segment.tool.summary),
       buildAssistantToolResultSignature(segment.tool.result),
     ].join(':');
@@ -229,12 +235,14 @@ function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
     tool.id,
     tool.toolCallId ?? '',
     tool.name,
+    tool.runtimeAdapterId ?? '',
     tool.status,
     String(tool.updatedAt ?? ''),
     String(tool.durationMs ?? ''),
     toolPayloadSignature(tool.input),
     hashText(tool.inputText),
     toolPayloadSignature(tool.output),
+    toolPayloadSignature(tool.details),
     hashText(tool.summary),
     buildAssistantToolResultSignature(tool.result),
   ].join(':'));
@@ -652,6 +660,8 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
     runtimeActivity: null,
+    errorDetail: null,
+    runtimeNotice: null,
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,
@@ -732,6 +742,48 @@ function areTransportIssuesEquivalent(
       && left.details === right.details);
 }
 
+function areRuntimeErrorDetailsEquivalent(
+  left: ChatSessionRuntimeState['errorDetail'],
+  right: ChatSessionRuntimeState['errorDetail'],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.failoverReason === right.failoverReason
+    && left.providerRuntimeFailureKind === right.providerRuntimeFailureKind
+    && left.providerErrorType === right.providerErrorType
+    && left.providerErrorMessagePreview === right.providerErrorMessagePreview
+    && left.httpStatus === right.httpStatus;
+}
+
+function areRuntimeNoticesEquivalent(
+  left: ChatSessionRuntimeState['runtimeNotice'],
+  right: ChatSessionRuntimeState['runtimeNotice'],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.runId === right.runId
+    && left.kind === right.kind
+    && left.command === right.command
+    && left.riskLevel === right.riskLevel
+    && left.rationale === right.rationale
+    && left.message === right.message;
+}
+
+function areImageGenerationRuntimeEquivalent(
+  left: ChatSessionRuntimeState['imageGeneration'],
+  right: ChatSessionRuntimeState['imageGeneration'],
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.active === right.active
+    && left.pendingTaskIds.length === right.pendingTaskIds.length
+    && left.pendingTaskIds.every((taskId, index) => taskId === right.pendingTaskIds[index]);
+}
+
 function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatSessionRuntimeState): boolean {
   return left.activeRunId === right.activeRunId
     && left.runPhase === right.runPhase
@@ -739,6 +791,9 @@ function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatS
     && left.pendingTurnKey === right.pendingTurnKey
     && left.pendingTurnLaneKey === right.pendingTurnLaneKey
     && left.runtimeActivity === right.runtimeActivity
+    && areRuntimeErrorDetailsEquivalent(left.errorDetail, right.errorDetail)
+    && areRuntimeNoticesEquivalent(left.runtimeNotice, right.runtimeNotice)
+    && areImageGenerationRuntimeEquivalent(left.imageGeneration, right.imageGeneration)
     && left.lastUserMessageAt === right.lastUserMessageAt
     && left.lastError === right.lastError
     && areTransportIssuesEquivalent(left.lastIssue, right.lastIssue)
@@ -1048,6 +1103,10 @@ export function patchSessionSnapshot(
     model: catalog.model ?? current.meta.model ?? null,
     lastActivityAt: typeof catalog.updatedAt === 'number' ? toMs(catalog.updatedAt) : current.meta.lastActivityAt,
   };
+  const nextImageGenerationRuntime = deriveSessionImageGenerationPendingStateFromItems(
+    nextItems,
+    current.runtime.imageGeneration,
+  );
   const nextRuntime = {
     ...current.runtime,
     activeRunId: snapshot.runtime.activeRunId,
@@ -1055,8 +1114,11 @@ export function patchSessionSnapshot(
     activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
     pendingTurnKey: snapshot.runtime.pendingTurnKey,
     pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
+    imageGeneration: nextImageGenerationRuntime.active ? nextImageGenerationRuntime : undefined,
     lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
     runtimeActivity: snapshot.runtime.runtimeActivity,
+    errorDetail: snapshot.runtime.errorDetail,
+    runtimeNotice: snapshot.runtime.runtimeNotice ?? null,
     lastError: snapshot.runtime.lastError,
     lastIssue: snapshot.runtime.lastIssue,
     updatedAt: snapshot.runtime.updatedAt,
@@ -1110,7 +1172,9 @@ export function patchPendingApprovalsFromSnapshot(
   };
 }
 
-type SessionProjectionState = SessionView;
+type SessionProjectionState = SessionView & {
+  runtimeNotice?: ChatSessionRuntimeState['runtimeNotice'] | null;
+};
 type SessionProjectionStore = Map<string, SessionProjectionState>;
 
 const sessionProjectionByStore = new WeakMap<() => ChatStoreState, SessionProjectionStore>();
@@ -1125,6 +1189,19 @@ function projectionStore(get: () => ChatStoreState): SessionProjectionStore {
   sessionProjectionByStore.set(get, created);
   sessionProjectionStores.add(created);
   return created;
+}
+
+function resolveCronEquivalentProjectionKey(
+  store: SessionProjectionStore,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+): string {
+  const baseKey = getCronSessionBaseKey(sessionKey);
+  if (!baseKey || baseKey === sessionKey) return sessionKey;
+  if (store.has(baseKey) || Object.prototype.hasOwnProperty.call(state.loadedSessions, baseKey)) {
+    return baseKey;
+  }
+  return sessionKey;
 }
 
 export type SessionProjectionApplyResult =
@@ -1196,14 +1273,18 @@ function projectionItemStatus(status: SessionWireItem['status']): SessionAssista
   }
 }
 
-function projectionToolCard(tool: SessionWireTool): SessionRenderToolCard {
+function projectionToolCard(
+  tool: SessionWireTool,
+  runtimeAdapterId: SessionRenderToolCard['runtimeAdapterId'],
+): SessionRenderToolCard {
   const status = tool.phase === 'failed'
     ? 'error'
     : tool.phase === 'completed' ? 'completed' : 'running';
   const summary = tool.summary ?? undefined;
   const input = tool.input ?? {};
   const inputText = tool.inputText ?? stringifyToolPayload(tool.input);
-  const outputText = stringifyToolPayload(tool.output) ?? summary;
+  const outputText = typeof tool.output === 'string' ? tool.output : stringifyToolPayload(tool.output) ?? summary;
+  const resultKind = typeof tool.output === 'string' || tool.output === null ? 'text' : 'json';
   return {
     id: tool.toolCallId,
     toolCallId: tool.toolCallId,
@@ -1213,9 +1294,11 @@ function projectionToolCard(tool: SessionWireTool): SessionRenderToolCard {
     ...(inputText ? { inputText } : {}),
     status,
     ...(summary ? { summary } : {}),
+    ...(runtimeAdapterId ? { runtimeAdapterId } : {}),
     ...(tool.output === null ? {} : { output: tool.output }),
+    ...(tool.details == null ? {} : { details: tool.details }),
     result: outputText
-      ? { kind: tool.output === null ? 'text' : 'json', surface: 'tool-card', collapsedPreview: summary ?? outputText, bodyText: outputText }
+      ? { kind: resultKind, surface: 'tool-card', collapsedPreview: summary ?? outputText, bodyText: outputText }
       : { kind: 'none', surface: 'tool-card' },
   };
 }
@@ -1247,7 +1330,8 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
     return [];
   }
   const tools = factValue(view.tools) ?? [];
-  const toolsById = new Map(tools.map((tool) => [tool.toolCallId, projectionToolCard(tool)] as const));
+  const runtimeAdapterId = view.identity.endpoint.runtimeAdapterId;
+  const toolsById = new Map(tools.map((tool) => [tool.toolCallId, projectionToolCard(tool, runtimeAdapterId)] as const));
   return items.map((item) => {
     if (item.kind === 'userMessage') {
       const media = item.content.flatMap((content) => projectionMedia(content));
@@ -1290,7 +1374,7 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
         });
       } else if (content.kind === 'thinking') {
         segments.push({ kind: 'thinking', key: `${item.itemId}:thinking:${thinkingIndex++}`, text: content.text });
-      } else if (content.kind === 'media') {
+      } else if (content.kind === 'media' || content.kind === 'omitted') {
         const media = projectionMedia(content);
         if (media.images.length || media.attachedFiles.length) {
           segments.push({ kind: 'media', key: `${item.itemId}:media:${mediaIndex++}`, ...media });
@@ -1303,10 +1387,11 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
       }
     }
     const toolSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'tool' }> => segment.kind === 'tool');
+    const tools = toolSegments.map((segment) => segment.tool);
     const thinkingSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'thinking' }> => segment.kind === 'thinking');
     const messageSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'message' }> => segment.kind === 'message');
     const mediaSegments = segments.filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'media' }> => segment.kind === 'media');
-    return {
+    const assistantTurn: SessionAssistantTurnItem = {
       key: item.itemId,
       kind: 'assistant-turn',
       role: 'assistant',
@@ -1317,23 +1402,27 @@ export function projectSessionViewItems(view: SessionView): SessionRenderItem[] 
       status: projectionItemStatus(item.status),
       segments,
       thinking: thinkingSegments.length ? thinkingSegments.map((segment) => segment.text).join('\\n') : null,
-      tools: toolSegments.map((segment) => segment.tool),
+      tools,
       text: messageSegments.length ? messageSegments.map((segment) => segment.text).join('') : item.text,
       images: mediaSegments.flatMap((segment) => segment.images),
       attachedFiles: mediaSegments.flatMap((segment) => segment.attachedFiles),
       ...(item.messageId ? { messageId: item.messageId } : {}),
       ...(item.runId ? { runId: item.runId } : {}),
     };
+    return assistantTurn;
   });
 }
 
 function projectionRuntime(
   current: ChatSessionRuntimeState,
   fact: SessionFact<SessionWireRuntime>,
+  items: SessionRenderItem[],
+  runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
   if (!runtime) return createEmptySessionRuntime();
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
+  const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
   return {
     ...current,
     activeRunId: runtime.activeRunId,
@@ -1341,7 +1430,10 @@ function projectionRuntime(
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
-    runtimeActivity: null,
+    runtimeActivity: runtime.runtimeActivity,
+    errorDetail: runtime.errorDetail,
+    runtimeNotice,
+    imageGeneration: imageGeneration.active ? imageGeneration : undefined,
     lastUserMessageAt: null,
     lastError: runtime.issue === 'rejected' ? issueMessage : null,
     lastIssue: issueMessage ? { message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
@@ -1417,7 +1509,7 @@ function projectionApprovals(
 
 function applyDecodedSessionView(
   input: SessionProjectionApplyInput,
-  view: SessionView,
+  view: SessionProjectionState,
   epochChanged = false,
 ): boolean {
   const state = input.get();
@@ -1440,7 +1532,7 @@ function applyDecodedSessionView(
       sessionIdentity: nextIdentity,
     } : current.meta;
     const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));
-    const nextRuntime = projectionRuntime(current.runtime, view.runtime);
+    const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null);
     const nextWindow = projectionWindow(current.window, view.window);
     const loadedSessions = patchSessionRecord(nextState, recordKey, {
       meta: nextMeta,
@@ -1507,7 +1599,25 @@ function isTerminalRunPhase(phase: SessionWireRuntime['phase']): boolean {
     || phase === 'interrupted';
 }
 
-function applyProjectionChange(view: SessionView, change: SessionDelta['changes'][number]): SessionView {
+function runtimeNoticeAfterRuntimeChange(
+  notice: ChatSessionRuntimeState['runtimeNotice'],
+  runtime: SessionWireRuntime,
+): ChatSessionRuntimeState['runtimeNotice'] {
+  if (!notice || runtime.activeRunId !== notice.runId || isTerminalRunPhase(runtime.phase)) return null;
+  return notice;
+}
+
+function runtimeNoticeAfterRunPhaseChange(
+  notice: ChatSessionRuntimeState['runtimeNotice'],
+  runId: string,
+  phase: SessionWireRuntime['phase'],
+): ChatSessionRuntimeState['runtimeNotice'] {
+  if (!notice) return null;
+  if (notice.runId === runId) return isTerminalRunPhase(phase) ? null : notice;
+  return isTerminalRunPhase(phase) ? notice : null;
+}
+
+function applyProjectionChange(view: SessionProjectionState, change: SessionDelta['changes'][number]): SessionProjectionState {
   switch (change.kind) {
     case 'messageDelta':
       return { ...view, items: updateProjectionFact(view.items, () => [], (items) => {
@@ -1560,15 +1670,27 @@ function applyProjectionChange(view: SessionView, change: SessionDelta['changes'
         return next;
       }) };
     case 'runtimeChanged':
-      return { ...view, runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null }), () => change.runtime) };
+      return {
+        ...view,
+        runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null, runtimeActivity: null, errorDetail: null }), () => change.runtime),
+        runtimeNotice: runtimeNoticeAfterRuntimeChange(view.runtimeNotice ?? null, change.runtime),
+      };
+    case 'runtimeNoticeUpdated':
+      return { ...view, runtimeNotice: change.notice };
     case 'windowChanged':
       return { ...view, window: { incomplete: { facts: change.window, gaps: ['bounded_history'] } } };
     case 'runPhaseChanged':
-      return { ...view, runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null }), (runtime) => ({
-        ...runtime,
-        phase: change.phase,
-        activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
-      })) };
+      return {
+        ...view,
+        runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null, runtimeActivity: null, errorDetail: null }), (runtime) => ({
+          ...runtime,
+          phase: change.phase,
+          activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
+          runtimeActivity: null,
+          errorDetail: null,
+        })),
+        runtimeNotice: runtimeNoticeAfterRunPhaseChange(view.runtimeNotice ?? null, change.runId, change.phase),
+      };
     case 'recoveryRequired':
       return { ...view, completeness: change.reason === 'native_unavailable' ? 'unavailable' : change.reason === 'native_unknown' ? 'unknown' : { incomplete: { missing: ['replay_cursor'] } } };
   }
@@ -1580,7 +1702,9 @@ export function applySessionDelta(
 ): SessionProjectionApplyResult {
   const traceId = createSessionTraceId('session.delta.apply-boundary');
   const store = projectionStore(input.get);
-  const previous = store.get(delta.sessionKey);
+  const state = input.get();
+  const projectionKey = resolveCronEquivalentProjectionKey(store, state, delta.sessionKey);
+  const previous = store.get(projectionKey);
   logSessionTrace('session.delta.apply.start', traceId, {
     sessionKey: summarizeIdentifier(delta.sessionKey),
     incomingEpoch: delta.epoch,
@@ -1595,7 +1719,7 @@ export function applySessionDelta(
   });
   if (!previous) {
     const historyReason = 'session_delta_without_view';
-    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+    void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
     logSessionTrace('session.delta.history-load', traceId, {
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
@@ -1605,41 +1729,45 @@ export function applySessionDelta(
   if (delta.epoch < previous.epoch) {
     return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
   }
-  if (delta.epoch > previous.epoch) {
-    const historyReason = 'session_delta_epoch_mismatch';
-    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+  const epochChanged = delta.epoch > previous.epoch;
+  if (epochChanged && (delta.cursor !== 1 || delta.seq !== 1)) {
+    const historyReason = 'session_delta_epoch_gap';
+    void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
     logSessionTrace('session.delta.history-load', traceId, {
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
     });
-    return { status: 'epoch-mismatch', sessionKey: delta.sessionKey, reason: 'epoch mismatch' };
+    return { status: 'gap', sessionKey: delta.sessionKey, reason: 'new epoch delta did not start at seq 1, cursor 1' };
   }
-  if (delta.cursor < previous.cursor || delta.seq < previous.seq) {
-    return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  if (!epochChanged) {
+    if (delta.cursor < previous.cursor || delta.seq < previous.seq) {
+      return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+    }
+    if (delta.cursor === previous.cursor && delta.seq === previous.seq) {
+      return { status: 'duplicate', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+    }
+    if (delta.cursor !== previous.cursor + 1 || delta.seq !== previous.seq + 1) {
+      const historyReason = 'session_delta_gap';
+      void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
+      logSessionTrace('session.delta.history-load', traceId, {
+        sessionKey: summarizeIdentifier(delta.sessionKey),
+        reason: historyReason,
+      });
+      return { status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` };
+    }
   }
-  if (delta.cursor === previous.cursor && delta.seq === previous.seq) {
-    return { status: 'duplicate', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
-  }
-  if (delta.cursor !== previous.cursor + 1 || delta.seq !== previous.seq + 1) {
-    const historyReason = 'session_delta_gap';
-    void input.get().loadHistory({ sessionKey: delta.sessionKey, mode: 'quiet', scope: 'background', reason: historyReason });
-    logSessionTrace('session.delta.history-load', traceId, {
-      sessionKey: summarizeIdentifier(delta.sessionKey),
-      reason: historyReason,
-    });
-    return { status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` };
-  }
-  const nextView = delta.changes.reduce(applyProjectionChange, previous);
+  const nextView = delta.changes.reduce(applyProjectionChange, { ...previous, epoch: delta.epoch });
   const projected: SessionView = {
     ...nextView,
+    epoch: delta.epoch,
     seq: delta.seq,
     cursor: delta.cursor,
   };
-  if (!applyDecodedSessionView(input, projected)) {
+  if (!applyDecodedSessionView(input, projected, epochChanged)) {
     return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
   }
-  store.set(delta.sessionKey, projected);
-  return { status: 'applied', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  store.set(projectionKey, projected);
+  return { status: 'applied', sessionKey: projectionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
 }
 
 export function resetSessionProjection(sessionKey: string): void {

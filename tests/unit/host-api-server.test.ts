@@ -15,7 +15,6 @@ vi.mock('../../electron/api/routes/app', () => ({
 }));
 vi.mock('../../electron/api/routes/files', () => ({ handleFileRoutes: vi.fn() }));
 vi.mock('../../electron/api/routes/diagnostics', () => ({ handleDiagnosticsRoutes: vi.fn() }));
-vi.mock('../../electron/api/routes/license', () => ({ handleLicenseRoutes: vi.fn() }));
 vi.mock('../../electron/api/routes/capabilities', () => ({ handleCapabilityRoutes: vi.fn() }));
 vi.mock('../../electron/api/routes/openclaw', () => ({ handleOpenClawRoutes: vi.fn() }));
 vi.mock('../../electron/api/route-utils', () => ({

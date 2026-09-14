@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTaskBridgeState,
+  normalizeAutomaticSessionTitle,
   normalizeTaskSessionKey,
   parseSessionUpdatedAtMs,
   readSessionsFromState,
   resolvePreferredSessionKeyForAgent,
+  resolveSessionListLabel,
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
   shouldRetainLocalSessionRecord,
+  stripAutomaticWorkingDirectoryTitlePrefix,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -28,6 +31,9 @@ function createSessionRecord(input?: {
   sessionKey?: string;
   messages?: RawMessage[];
   label?: string | null;
+  titleSource?: 'user' | 'assistant' | 'none';
+  manualLabel?: boolean;
+  displayName?: string | null;
   lastActivityAt?: number | null;
   thinkingLevel?: string | null;
   runtime?: {
@@ -50,8 +56,9 @@ function createSessionRecord(input?: {
       label: input?.label ?? (messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
         ? String(messages[messages.length - 1]?.content)
         : null),
-      titleSource: input?.label ? 'user' as const : 'none' as const,
-      displayName: null,
+      titleSource: input?.titleSource ?? (input?.label ? 'user' as const : 'none' as const),
+      manualLabel: input?.manualLabel ?? false,
+      displayName: input?.displayName ?? null,
       model: null,
       lastActivityAt: input?.lastActivityAt ?? null,
       historyStatus: 'idle',
@@ -63,7 +70,12 @@ function createSessionRecord(input?: {
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
+      runtimeActivity: null,
+      errorDetail: null,
       lastUserMessageAt: null,
+      lastError: null,
+      lastIssue: null,
+      updatedAt: null,
     },
     items: buildRenderItemsFromMessages(sessionKey, messages),
     window: createViewportWindowState({
@@ -97,6 +109,60 @@ describe('chat session helpers', () => {
       'agent:main:main',
     )).toBe('high');
     expect(resolveSessionThinkingLevelFromList([], 'agent:main:main')).toBeNull();
+  });
+
+  it('normalizes automatic working-directory session titles', () => {
+    expect(stripAutomaticWorkingDirectoryTitlePrefix('[Working directory: E:/code/Matcha]\n\nExplain this repository'))
+      .toBe('Explain this repository');
+    expect(stripAutomaticWorkingDirectoryTitlePrefix('[Working directory: E:/code/Matcha]…')).toBeNull();
+    expect(stripAutomaticWorkingDirectoryTitlePrefix('[Working directory: E:/code/Matcha')).toBeNull();
+    expect(normalizeAutomaticSessionTitle('  Plain title  ')).toBe('Plain title');
+  });
+
+  it('keeps explicit user labels but cleans automatic session list titles', () => {
+    const explicitTitle = '[Working directory: E:/code/Matcha]…';
+    expect(resolveSessionListLabel({
+      loadedSessions: {
+        'agent:test:session-1': createSessionRecord({
+          label: explicitTitle,
+          titleSource: 'user',
+          manualLabel: true,
+        }),
+      },
+    } as never, 'agent:test:session-1')).toBe(explicitTitle);
+
+    expect(resolveSessionListLabel({
+      loadedSessions: {
+        'agent:test:session-1': createSessionRecord({
+          label: '[Working directory: E:/code/Matcha]\n\nExplain this repository',
+          titleSource: 'assistant',
+        }),
+      },
+    } as never, 'agent:test:session-1')).toBe('Explain this repository');
+
+    expect(resolveSessionListLabel({
+      loadedSessions: {
+        'agent:test:session-1': createSessionRecord({
+          label: '[Working directory: E:/code/Matcha]…',
+          titleSource: 'assistant',
+          messages: [{ role: 'user', content: '[Working directory: E:/code/Matcha]\n\nHydrate from prompt' }],
+        }),
+      },
+    } as never, 'agent:test:session-1')).toBe('Hydrate from prompt');
+  });
+
+  it('cleans automatic display names in session snapshots', () => {
+    const sessions = readSessionsFromState({
+      loadedSessions: {
+        'agent:test:session-1': createSessionRecord({
+          label: null,
+          displayName: '[Working directory: E:/code/Matcha]\n\nGenerated title',
+          lastActivityAt: 1,
+        }),
+      },
+    } as never);
+
+    expect(sessions[0]?.displayName).toBe('Generated title');
   });
 
   it('reads session collection directly from loaded session records and prefers local meta', () => {

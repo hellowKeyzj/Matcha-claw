@@ -1,12 +1,16 @@
 use openclaw::session::{
     events::TerminalOutcome,
-    projection::CanonicalSessionChange,
-    protocol::{MessageActivityLifecycle, ToolActivityPhase},
+    projection::{
+        AssistantTurnChunkKind, AssistantTurnSegment, AssistantTurnSnapshot, AssistantTurnStatus,
+        CanonicalRuntimeActivity, CanonicalSessionChange,
+    },
+    protocol::{RuntimeFallbackDetail, RuntimeGuardianNotice, ToolActivityPhase},
 };
 
 use super::state::{
-    ItemStatus, RecoveryReason, RunPhase, SessionChange, SessionContent, SessionItem, ToolPhase,
-    ToolView,
+    ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RuntimeActivity,
+    RuntimeErrorDetail, RuntimeNoticeKind, RuntimeView, SessionChange, SessionContent, SessionItem,
+    ToolPhase, ToolView,
 };
 
 pub(crate) fn openclaw_canonical_changes(
@@ -20,8 +24,8 @@ pub(crate) fn openclaw_canonical_changes(
         if changes.iter().any(|change| {
             matches!(
                 change,
-                CanonicalSessionChange::RunDelta { .. }
-                    | CanonicalSessionChange::MessageActivity { .. }
+                CanonicalSessionChange::AssistantTurnChunk { .. }
+                    | CanonicalSessionChange::AssistantTurnSnapshot { .. }
                     | CanonicalSessionChange::ToolActivity { .. }
             )
         }) {
@@ -34,42 +38,46 @@ pub(crate) fn openclaw_canonical_changes(
 
     for change in changes {
         match change {
-            CanonicalSessionChange::RunDelta {
+            CanonicalSessionChange::AssistantTurnChunk {
                 run_id,
                 message_id,
+                kind: AssistantTurnChunkKind::Text,
                 text,
                 replace,
+                status,
             } => {
                 projected.push(SessionChange::MessageDelta {
-                    item_id: message_id
-                        .as_ref()
-                        .map(|id| id.as_str().to_owned())
-                        .unwrap_or_else(|| run_id.as_str().to_owned()),
+                    item_id: message_item_id(
+                        run_id.as_str(),
+                        message_id.as_ref().map(|id| id.as_str()),
+                    ),
                     run_id: Some(run_id.as_str().to_owned()),
                     message_id: message_id.as_ref().map(|id| id.as_str().to_owned()),
                     text: text.clone(),
                     replace: *replace,
-                    status: ItemStatus::Streaming,
+                    status: assistant_status(*status),
                 });
             }
-            CanonicalSessionChange::MessageActivity {
+            CanonicalSessionChange::AssistantTurnChunk {
                 run_id,
                 message_id,
-                lifecycle,
+                kind: AssistantTurnChunkKind::Thinking,
                 text,
+                replace: _,
+                status,
             } => {
-                projected.push(SessionChange::MessageDelta {
-                    item_id: message_id.as_str().to_owned(),
-                    run_id: Some(run_id.as_str().to_owned()),
-                    message_id: Some(message_id.as_str().to_owned()),
-                    text: text.clone().unwrap_or_default(),
-                    replace: false,
-                    status: match lifecycle {
-                        MessageActivityLifecycle::Started | MessageActivityLifecycle::Delta => {
-                            ItemStatus::Streaming
-                        }
-                        MessageActivityLifecycle::Completed => ItemStatus::Final,
-                    },
+                projected.push(SessionChange::MessageUpdated {
+                    item: assistant_thinking_chunk_item(
+                        run_id,
+                        message_id.as_ref(),
+                        text,
+                        assistant_status(*status),
+                    ),
+                });
+            }
+            CanonicalSessionChange::AssistantTurnSnapshot { snapshot } => {
+                projected.push(SessionChange::MessageUpdated {
+                    item: assistant_snapshot_item(snapshot),
                 });
             }
             CanonicalSessionChange::ToolActivity {
@@ -81,6 +89,7 @@ pub(crate) fn openclaw_canonical_changes(
                 input,
                 input_text,
                 output,
+                details,
                 is_error,
             } => {
                 projected.push(SessionChange::ToolUpdated {
@@ -98,41 +107,149 @@ pub(crate) fn openclaw_canonical_changes(
                         input_text: input_text.clone(),
                         summary: summary.clone(),
                         output: output.clone(),
+                        details: details.clone(),
                         is_error: (*is_error)
                             .or_else(|| matches!(phase, ToolActivityPhase::Failed).then_some(true)),
                     },
                 });
             }
+            CanonicalSessionChange::RuntimeActivity { run_id, activity } => {
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase: RunPhase::Started,
+                });
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some(run_id.as_str().to_owned()),
+                        issue: None,
+                        runtime_activity: Some(runtime_activity(*activity)),
+                        error_detail: None,
+                    },
+                });
+            }
+            CanonicalSessionChange::RuntimeActivityCleared { run_id, .. } => {
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase: RunPhase::Started,
+                });
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some(run_id.as_str().to_owned()),
+                        issue: None,
+                        runtime_activity: None,
+                        error_detail: None,
+                    },
+                });
+            }
+            CanonicalSessionChange::RuntimeFallback { run_id, detail } => {
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase: RunPhase::Started,
+                });
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some(run_id.as_str().to_owned()),
+                        issue: None,
+                        runtime_activity: None,
+                        error_detail: Some(runtime_fallback_detail(detail)),
+                    },
+                });
+            }
+            CanonicalSessionChange::RuntimeFallbackCleared { run_id } => {
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase: RunPhase::Started,
+                });
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some(run_id.as_str().to_owned()),
+                        issue: None,
+                        runtime_activity: None,
+                        error_detail: None,
+                    },
+                });
+            }
+            CanonicalSessionChange::GuardianNotice { run_id, notice } => {
+                projected.push(SessionChange::RuntimeNoticeUpdated {
+                    notice: runtime_guardian_notice(run_id.as_str(), notice),
+                });
+            }
             CanonicalSessionChange::Terminal {
                 outcome,
                 run_id,
-                message_id,
-                message_text,
+                error_kind,
+                error_message,
+                stop_reason,
+                error_detail,
                 ..
             } => {
-                if let Some(text) = message_text {
-                    projected.push(SessionChange::MessageDelta {
-                        item_id: message_id
-                            .as_ref()
-                            .map(|id| id.as_str().to_owned())
-                            .unwrap_or_else(|| run_id.as_str().to_owned()),
-                        run_id: Some(run_id.as_str().to_owned()),
-                        message_id: message_id.as_ref().map(|id| id.as_str().to_owned()),
-                        text: text.clone(),
-                        replace: true,
-                        status: match outcome {
-                            TerminalOutcome::Completed => ItemStatus::Final,
-                            TerminalOutcome::Aborted => ItemStatus::Aborted,
-                            TerminalOutcome::Error => ItemStatus::Error,
+                let phase = match outcome {
+                    TerminalOutcome::Completed => RunPhase::Completed,
+                    TerminalOutcome::Aborted => RunPhase::Cancelled,
+                    TerminalOutcome::Error => RunPhase::Failed,
+                };
+                let error_detail = matches!(outcome, TerminalOutcome::Error)
+                    .then(|| {
+                        terminal_runtime_error_detail(
+                            error_detail,
+                            error_message,
+                            error_kind,
+                            stop_reason,
+                        )
+                    })
+                    .flatten();
+                if let Some(error_detail) = error_detail {
+                    projected.push(SessionChange::RuntimeChanged {
+                        runtime: RuntimeView {
+                            phase,
+                            active_run_id: Some(run_id.as_str().to_owned()),
+                            issue: None,
+                            runtime_activity: None,
+                            error_detail: Some(error_detail),
                         },
                     });
+                } else {
+                    projected.push(SessionChange::RunPhaseChanged {
+                        run_id: run_id.as_str().to_owned(),
+                        phase,
+                    });
                 }
-                projected.push(SessionChange::RunPhaseChanged {
-                    run_id: run_id.as_str().to_owned(),
-                    phase: match outcome {
-                        TerminalOutcome::Completed => RunPhase::Completed,
-                        TerminalOutcome::Aborted => RunPhase::Cancelled,
-                        TerminalOutcome::Error => RunPhase::Failed,
+            }
+            CanonicalSessionChange::ApprovalRequested {
+                run_id,
+                approval_id,
+                option_ids,
+            } => {
+                projected.push(SessionChange::ApprovalUpdated {
+                    approval: ApprovalView {
+                        approval_id: approval_id.as_str().to_owned(),
+                        run_id: Some(run_id.as_str().to_owned()),
+                        phase: ApprovalPhase::Requested,
+                        option_ids: option_ids
+                            .iter()
+                            .map(|option_id| option_id.as_str().to_owned())
+                            .collect(),
+                    },
+                });
+            }
+            CanonicalSessionChange::ApprovalResolved {
+                run_id,
+                approval_id,
+                option_ids,
+            } => {
+                projected.push(SessionChange::ApprovalUpdated {
+                    approval: ApprovalView {
+                        approval_id: approval_id.as_str().to_owned(),
+                        run_id: Some(run_id.as_str().to_owned()),
+                        phase: ApprovalPhase::Resolved,
+                        option_ids: option_ids
+                            .iter()
+                            .map(|option_id| option_id.as_str().to_owned())
+                            .collect(),
                     },
                 });
             }
@@ -160,17 +277,295 @@ pub(crate) fn openclaw_canonical_changes(
                     },
                 });
             }
+            CanonicalSessionChange::TranscriptMessage { .. } => {}
         }
     }
     projected
 }
 
+fn runtime_activity(activity: CanonicalRuntimeActivity) -> RuntimeActivity {
+    match activity {
+        CanonicalRuntimeActivity::Compacting => RuntimeActivity::Compacting,
+    }
+}
+
+fn runtime_fallback_detail(detail: &RuntimeFallbackDetail) -> RuntimeErrorDetail {
+    RuntimeErrorDetail {
+        failover_reason: detail.failover_reason.clone(),
+        provider_runtime_failure_kind: detail.provider_runtime_failure_kind.clone(),
+        provider_error_type: detail.provider_error_type.clone(),
+        provider_error_message_preview: detail.provider_error_message_preview.clone(),
+        http_status: detail.http_status,
+    }
+}
+
+fn runtime_guardian_notice(
+    run_id: &str,
+    notice: &RuntimeGuardianNotice,
+) -> super::state::RuntimeNotice {
+    super::state::RuntimeNotice {
+        run_id: run_id.to_owned(),
+        kind: match notice.phase {
+            openclaw::session::protocol::RuntimeGuardianPhase::Reviewing => {
+                super::state::RuntimeNoticeKind::GuardianReviewing
+            }
+            openclaw::session::protocol::RuntimeGuardianPhase::Approved => {
+                super::state::RuntimeNoticeKind::GuardianApproved
+            }
+            openclaw::session::protocol::RuntimeGuardianPhase::Denied => {
+                super::state::RuntimeNoticeKind::GuardianDenied
+            }
+            openclaw::session::protocol::RuntimeGuardianPhase::Warning => {
+                super::state::RuntimeNoticeKind::GuardianWarning
+            }
+            openclaw::session::protocol::RuntimeGuardianPhase::StrictReviewRequired => {
+                super::state::RuntimeNoticeKind::GuardianStrictReviewRequired
+            }
+        },
+        command: notice.command.clone(),
+        risk_level: notice.risk_level.clone(),
+        rationale: notice.rationale.clone(),
+        message: notice.message.clone(),
+    }
+}
+
+pub(crate) fn terminal_runtime_error_detail(
+    value: &Option<serde_json::Value>,
+    error_message: &Option<String>,
+    error_kind: &Option<openclaw::session::protocol::SessionErrorKind>,
+    stop_reason: &Option<String>,
+) -> Option<RuntimeErrorDetail> {
+    let mut detail = value
+        .as_ref()
+        .and_then(runtime_error_detail)
+        .unwrap_or_else(empty_runtime_error_detail);
+    if detail.provider_error_message_preview.is_none() {
+        detail.provider_error_message_preview = error_message.clone();
+    }
+    if detail.provider_error_type.is_none() {
+        detail.provider_error_type = error_kind.map(session_error_kind).map(str::to_owned);
+    }
+    if detail.failover_reason.is_none() {
+        detail.failover_reason = stop_reason.clone();
+    }
+    runtime_error_detail_if_present(detail)
+}
+
+fn empty_runtime_error_detail() -> RuntimeErrorDetail {
+    RuntimeErrorDetail {
+        failover_reason: None,
+        provider_runtime_failure_kind: None,
+        provider_error_type: None,
+        provider_error_message_preview: None,
+        http_status: None,
+    }
+}
+
+fn runtime_error_detail(value: &serde_json::Value) -> Option<RuntimeErrorDetail> {
+    let object = value.as_object()?;
+    runtime_error_detail_if_present(RuntimeErrorDetail {
+        failover_reason: object
+            .get("failoverReason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        provider_runtime_failure_kind: object
+            .get("providerRuntimeFailureKind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        provider_error_type: object
+            .get("providerErrorType")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        provider_error_message_preview: object
+            .get("providerErrorMessagePreview")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        http_status: object
+            .get("httpStatus")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok()),
+    })
+}
+
+fn runtime_error_detail_if_present(detail: RuntimeErrorDetail) -> Option<RuntimeErrorDetail> {
+    (detail.failover_reason.is_some()
+        || detail.provider_runtime_failure_kind.is_some()
+        || detail.provider_error_type.is_some()
+        || detail.provider_error_message_preview.is_some()
+        || detail.http_status.is_some())
+    .then_some(detail)
+}
+
+const fn session_error_kind(kind: openclaw::session::protocol::SessionErrorKind) -> &'static str {
+    match kind {
+        openclaw::session::protocol::SessionErrorKind::Refusal => "refusal",
+        openclaw::session::protocol::SessionErrorKind::Timeout => "timeout",
+        openclaw::session::protocol::SessionErrorKind::RateLimit => "rate_limit",
+        openclaw::session::protocol::SessionErrorKind::ContextLength => "context_length",
+        openclaw::session::protocol::SessionErrorKind::Unknown => "unknown",
+    }
+}
+
+fn message_item_id(run_id: &str, message_id: Option<&str>) -> String {
+    message_id.unwrap_or(run_id).to_owned()
+}
+
+fn assistant_turn_item(
+    item_id: &str,
+    run_id: Option<&str>,
+    message_id: Option<&str>,
+    status: ItemStatus,
+    segments: Vec<SessionContent>,
+    text: String,
+) -> SessionItem {
+    SessionItem::AssistantTurn {
+        item_id: item_id.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        message_id: message_id.map(str::to_owned),
+        status,
+        segments,
+        text,
+    }
+}
+
+fn assistant_snapshot_item(snapshot: &AssistantTurnSnapshot) -> SessionItem {
+    assistant_turn_item(
+        &message_item_id(
+            snapshot.run_id.as_str(),
+            snapshot.message_id.as_ref().map(|id| id.as_str()),
+        ),
+        Some(snapshot.run_id.as_str()),
+        snapshot.message_id.as_ref().map(|id| id.as_str()),
+        assistant_status(snapshot.status),
+        assistant_snapshot_segments(&snapshot.segments),
+        snapshot.text.clone(),
+    )
+}
+
+fn assistant_thinking_chunk_item(
+    run_id: &openclaw::session::protocol::RunId,
+    message_id: Option<&openclaw::session::protocol::MessageId>,
+    text: &str,
+    status: ItemStatus,
+) -> SessionItem {
+    assistant_turn_item(
+        &message_item_id(run_id.as_str(), message_id.map(|id| id.as_str())),
+        Some(run_id.as_str()),
+        message_id.map(|id| id.as_str()),
+        status,
+        vec![SessionContent::Thinking {
+            text: text.to_owned(),
+        }],
+        String::new(),
+    )
+}
+
+fn assistant_snapshot_segments(segments: &[AssistantTurnSegment]) -> Vec<SessionContent> {
+    segments.iter().map(assistant_snapshot_segment).collect()
+}
+
+fn assistant_snapshot_segment(segment: &AssistantTurnSegment) -> SessionContent {
+    match segment {
+        AssistantTurnSegment::Text { text } => SessionContent::Text { text: text.clone() },
+        AssistantTurnSegment::Thinking { text } => SessionContent::Thinking { text: text.clone() },
+        AssistantTurnSegment::ToolUse { tool_id, tool_name } => SessionContent::ToolUse {
+            name: tool_name.clone().unwrap_or_else(|| "unknown".to_owned()),
+            tool_call_id: tool_id.as_str().to_owned(),
+        },
+        AssistantTurnSegment::ToolResult {
+            tool_id,
+            summary,
+            is_error,
+        } => SessionContent::ToolResult {
+            tool_call_id: tool_id.as_str().to_owned(),
+            summary: summary.clone(),
+            is_error: *is_error,
+        },
+    }
+}
+
+const fn assistant_status(status: AssistantTurnStatus) -> ItemStatus {
+    match status {
+        AssistantTurnStatus::Streaming => ItemStatus::Streaming,
+        AssistantTurnStatus::WaitingForTool => ItemStatus::WaitingForTool,
+        AssistantTurnStatus::Final => ItemStatus::Final,
+        AssistantTurnStatus::Aborted => ItemStatus::Aborted,
+        AssistantTurnStatus::Error => ItemStatus::Error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use openclaw::session::protocol::{RunId, ToolId};
+    use openclaw::session::{
+        projection::{
+            AssistantTurnChunkKind, AssistantTurnSegment, AssistantTurnSnapshot,
+            AssistantTurnStatus, CanonicalRuntimeActivity,
+        },
+        protocol::{ApprovalId, ApprovalOptionId, MessageId, RunId, ToolId},
+    };
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn assistant_turn_text_delta_projects_run_started_and_message_delta() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::AssistantTurnChunk {
+                run_id: RunId::try_new("run-1").unwrap(),
+                message_id: Some(MessageId::try_new("message-1").unwrap()),
+                kind: AssistantTurnChunkKind::Text,
+                text: "hello".to_owned(),
+                replace: false,
+                status: AssistantTurnStatus::Streaming,
+            }],
+            Some("run-1"),
+        );
+
+        assert_eq!(
+            changes,
+            vec![
+                SessionChange::RunPhaseChanged {
+                    run_id: "run-1".to_owned(),
+                    phase: RunPhase::Started,
+                },
+                SessionChange::MessageDelta {
+                    item_id: "message-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "hello".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn assistant_turn_text_delta_uses_run_id_without_message_id() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::AssistantTurnChunk {
+                run_id: RunId::try_new("run-1").unwrap(),
+                message_id: None,
+                kind: AssistantTurnChunkKind::Text,
+                text: "hello".to_owned(),
+                replace: false,
+                status: AssistantTurnStatus::Streaming,
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [
+                SessionChange::RunPhaseChanged { .. },
+                SessionChange::MessageDelta {
+                    item_id,
+                    message_id: None,
+                    ..
+                }
+            ] if item_id == "run-1"
+        ));
+    }
 
     #[test]
     fn preserves_openclaw_live_tool_name() {
@@ -184,6 +579,7 @@ mod tests {
                 input: None,
                 input_text: None,
                 output: None,
+                details: None,
                 is_error: None,
             }],
             Some("run-1"),
@@ -199,9 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_preserves_input_input_text_output_is_error() {
-        let input = json!({ "path": "Cargo.toml" });
-        let output = json!({ "content": "workspace" });
+    fn live_tool_preserves_canonical_public_bounded_payload() {
+        // This layer projects only canonical public/bounded fields; raw private payloads are never logged here.
         let changes = openclaw_canonical_changes(
             &[CanonicalSessionChange::ToolActivity {
                 run_id: RunId::try_new("run-1").unwrap(),
@@ -209,9 +604,10 @@ mod tests {
                 tool_name: Some("read".to_owned()),
                 phase: ToolActivityPhase::Failed,
                 summary: Some("read failed".to_owned()),
-                input: Some(input.clone()),
+                input: Some(json!({ "path": "Cargo.toml" })),
                 input_text: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
-                output: Some(output.clone()),
+                output: Some(json!({ "content": "workspace" })),
+                details: Some(json!({ "lineCount": 1 })),
                 is_error: Some(false),
             }],
             Some("run-1"),
@@ -222,11 +618,313 @@ mod tests {
             [
                 SessionChange::RunPhaseChanged { .. },
                 SessionChange::ToolUpdated { tool }
-            ] if tool.input.as_ref() == Some(&input)
+            ] if tool.input == Some(json!({ "path": "Cargo.toml" }))
                 && tool.input_text.as_deref() == Some("{\"path\":\"Cargo.toml\"}")
-                && tool.output.as_ref() == Some(&output)
+                && tool.output == Some(json!({ "content": "workspace" }))
+                && tool.details == Some(json!({ "lineCount": 1 }))
+                && tool.summary.as_deref() == Some("read failed")
                 && tool.is_error == Some(false)
                 && tool.phase == ToolPhase::Failed
         ));
+    }
+
+    #[test]
+    fn assistant_turn_snapshot_preserves_canonical_segment_order() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::AssistantTurnSnapshot {
+                snapshot: AssistantTurnSnapshot::new(
+                    RunId::try_new("run-1").unwrap(),
+                    Some(MessageId::try_new("message-1").unwrap()),
+                    vec![
+                        AssistantTurnSegment::Text {
+                            text: "before".to_owned(),
+                        },
+                        AssistantTurnSegment::ToolUse {
+                            tool_id: ToolId::try_new("tool-1").unwrap(),
+                            tool_name: Some("read".to_owned()),
+                        },
+                        AssistantTurnSegment::ToolResult {
+                            tool_id: ToolId::try_new("tool-1").unwrap(),
+                            summary: Some("done".to_owned()),
+                            is_error: false,
+                        },
+                        AssistantTurnSegment::Text {
+                            text: "after".to_owned(),
+                        },
+                    ],
+                    "before\nafter",
+                    None,
+                    AssistantTurnStatus::Streaming,
+                ),
+            }],
+            Some("run-1"),
+        );
+
+        assert_eq!(
+            changes,
+            vec![
+                SessionChange::RunPhaseChanged {
+                    run_id: "run-1".to_owned(),
+                    phase: RunPhase::Started,
+                },
+                SessionChange::MessageUpdated {
+                    item: SessionItem::AssistantTurn {
+                        item_id: "message-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        message_id: Some("message-1".to_owned()),
+                        status: ItemStatus::Streaming,
+                        segments: vec![
+                            SessionContent::Text {
+                                text: "before".to_owned(),
+                            },
+                            SessionContent::ToolUse {
+                                name: "read".to_owned(),
+                                tool_call_id: "tool-1".to_owned(),
+                            },
+                            SessionContent::ToolResult {
+                                tool_call_id: "tool-1".to_owned(),
+                                summary: Some("done".to_owned()),
+                                is_error: false,
+                            },
+                            SessionContent::Text {
+                                text: "after".to_owned(),
+                            },
+                        ],
+                        text: "before\nafter".to_owned(),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn assistant_turn_snapshot_precedes_terminal_run_phase() {
+        let changes = openclaw_canonical_changes(
+            &[
+                CanonicalSessionChange::AssistantTurnSnapshot {
+                    snapshot: AssistantTurnSnapshot::new(
+                        RunId::try_new("run-1").unwrap(),
+                        Some(MessageId::try_new("message-1").unwrap()),
+                        vec![AssistantTurnSegment::Text {
+                            text: "final".to_owned(),
+                        }],
+                        "final",
+                        None,
+                        AssistantTurnStatus::Final,
+                    ),
+                },
+                CanonicalSessionChange::Terminal {
+                    run_id: RunId::try_new("run-1").unwrap(),
+                    outcome: TerminalOutcome::Completed,
+                    message_id: Some(MessageId::try_new("message-1").unwrap()),
+                    error_kind: None,
+                    error_message: None,
+                    stop_reason: None,
+                    error_detail: None,
+                },
+            ],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [
+                SessionChange::RunPhaseChanged {
+                    phase: RunPhase::Started,
+                    ..
+                },
+                SessionChange::MessageUpdated { item },
+                SessionChange::RunPhaseChanged {
+                    phase: RunPhase::Completed,
+                    ..
+                }
+            ] if matches!(item, SessionItem::AssistantTurn { status: ItemStatus::Final, .. })
+        ));
+    }
+
+    #[test]
+    fn runtime_activity_projects_compacting_runtime_change() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::RuntimeActivity {
+                run_id: RunId::try_new("run-1").unwrap(),
+                activity: CanonicalRuntimeActivity::Compacting,
+            }],
+            Some("run-1"),
+        );
+
+        assert_eq!(
+            changes,
+            vec![
+                SessionChange::RunPhaseChanged {
+                    run_id: "run-1".to_owned(),
+                    phase: RunPhase::Started,
+                },
+                SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some("run-1".to_owned()),
+                        issue: None,
+                        runtime_activity: Some(RuntimeActivity::Compacting),
+                        error_detail: None,
+                    },
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_notice_projects_guardian_delta() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::GuardianNotice {
+                run_id: RunId::try_new("run-1").unwrap(),
+                notice: RuntimeGuardianNotice {
+                    phase: openclaw::session::protocol::RuntimeGuardianPhase::Warning,
+                    command: Some("cargo test".to_owned()),
+                    risk_level: Some("medium".to_owned()),
+                    rationale: None,
+                    message: None,
+                },
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [SessionChange::RuntimeNoticeUpdated { notice }]
+                if notice.run_id == "run-1"
+                    && notice.kind == RuntimeNoticeKind::GuardianWarning
+                    && notice.command.as_deref() == Some("cargo test")
+                    && notice.risk_level.as_deref() == Some("medium")
+        ));
+    }
+
+    #[test]
+    fn runtime_fallback_clear_projects_runtime_change() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::RuntimeFallbackCleared {
+                run_id: RunId::try_new("run-1").unwrap(),
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [
+                SessionChange::RunPhaseChanged { run_id, phase: RunPhase::Started },
+                SessionChange::RuntimeChanged { runtime }
+            ] if run_id == "run-1"
+                && runtime.active_run_id.as_deref() == Some("run-1")
+                && runtime.runtime_activity.is_none()
+                && runtime.error_detail.is_none()
+        ));
+    }
+
+    #[test]
+    fn terminal_error_projects_message_only_error_detail_runtime_change() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::Terminal {
+                run_id: RunId::try_new("run-1").unwrap(),
+                outcome: TerminalOutcome::Error,
+                message_id: None,
+                error_kind: Some(openclaw::session::protocol::SessionErrorKind::RateLimit),
+                error_message: Some("provider overloaded".to_owned()),
+                stop_reason: Some("gateway_error".to_owned()),
+                error_detail: None,
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [SessionChange::RuntimeChanged { runtime }]
+                if runtime.phase == RunPhase::Failed
+                    && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("gateway_error")
+                        && detail.provider_error_type.as_deref() == Some("rate_limit")
+                        && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
+                        && detail.http_status.is_none())
+        ));
+    }
+
+    #[test]
+    fn terminal_error_detail_wins_and_missing_fields_are_filled() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::Terminal {
+                run_id: RunId::try_new("run-1").unwrap(),
+                outcome: TerminalOutcome::Error,
+                message_id: None,
+                error_kind: Some(openclaw::session::protocol::SessionErrorKind::RateLimit),
+                error_message: Some("provider overloaded".to_owned()),
+                stop_reason: Some("gateway_error".to_owned()),
+                error_detail: Some(json!({
+                    "failoverReason":"rate_limit",
+                    "httpStatus":429
+                })),
+            }],
+            Some("run-1"),
+        );
+
+        assert!(matches!(
+            changes.as_slice(),
+            [SessionChange::RuntimeChanged { runtime }]
+                if runtime.phase == RunPhase::Failed
+                    && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("rate_limit")
+                        && detail.provider_error_type.as_deref() == Some("rate_limit")
+                        && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
+                        && detail.http_status == Some(429))
+        ));
+    }
+
+    #[test]
+    fn approval_requested_projects_public_approval_update() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::ApprovalRequested {
+                run_id: RunId::try_new("run-1").unwrap(),
+                approval_id: ApprovalId::try_new("approval-1").unwrap(),
+                option_ids: vec![
+                    ApprovalOptionId::try_new("approve").unwrap(),
+                    ApprovalOptionId::try_new("deny").unwrap(),
+                ],
+            }],
+            Some("run-1"),
+        );
+
+        assert_eq!(
+            changes,
+            vec![SessionChange::ApprovalUpdated {
+                approval: ApprovalView {
+                    approval_id: "approval-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    phase: ApprovalPhase::Requested,
+                    option_ids: vec!["approve".to_owned(), "deny".to_owned()],
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn approval_resolved_projects_public_approval_update() {
+        let changes = openclaw_canonical_changes(
+            &[CanonicalSessionChange::ApprovalResolved {
+                run_id: RunId::try_new("run-1").unwrap(),
+                approval_id: ApprovalId::try_new("approval-1").unwrap(),
+                option_ids: vec![
+                    ApprovalOptionId::try_new("approve").unwrap(),
+                    ApprovalOptionId::try_new("deny").unwrap(),
+                ],
+            }],
+            Some("run-1"),
+        );
+
+        assert_eq!(
+            changes,
+            vec![SessionChange::ApprovalUpdated {
+                approval: ApprovalView {
+                    approval_id: "approval-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    phase: ApprovalPhase::Resolved,
+                    option_ids: vec!["approve".to_owned(), "deny".to_owned()],
+                },
+            }]
+        );
     }
 }

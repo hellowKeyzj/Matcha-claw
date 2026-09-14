@@ -1,14 +1,36 @@
 use environment::ProviderAccount;
 
 const MINIMAX_PORTAL_PROVIDER_KEY: &str = "minimax-portal";
+const ZAI_PROVIDER_KEY: &str = "zai";
 
 pub(crate) fn base_provider_key(account: &ProviderAccount) -> Option<String> {
     let provider = account.provider().as_str().strip_prefix("provider:")?;
     Some(match provider {
         "minimax-portal-cn" => MINIMAX_PORTAL_PROVIDER_KEY.to_owned(),
+        "zai-global" => ZAI_PROVIDER_KEY.to_owned(),
         "custom" | "ollama" => multi_instance_provider_key(provider, account.id().as_str()),
         _ => provider.to_owned(),
     })
+}
+
+pub(crate) fn is_single_slot_provider_key(provider_key: &str) -> bool {
+    matches!(
+        provider_key,
+        ZAI_PROVIDER_KEY
+            | "qianfan"
+            | "stepfun"
+            | "tencent-tokenhub"
+            | "tencent-tokenplan"
+            | "xiaomi"
+            | "xiaomi-token-plan"
+            | "qwen"
+            | "qwen-token-plan"
+            | "kimi"
+            | "volcengine-plan"
+            | "opencode"
+            | "opencode-go"
+            | "github-copilot"
+    )
 }
 
 fn multi_instance_provider_key(provider: &str, provider_id: &str) -> String {
@@ -49,6 +71,12 @@ fn normalize_provider_key_part(value: &str) -> String {
 
 fn uuid_head(value: &str) -> Option<&str> {
     let bytes = value.as_bytes();
-    (bytes.len() >= 9 && bytes[8] == b'-' && bytes[..8].iter().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(&value[..8])
+    if bytes.len() >= 9
+        && bytes[8] == b'-'
+        && bytes[..8].iter().all(|byte| byte.is_ascii_hexdigit())
+    {
+        Some(&value[..8])
+    } else {
+        None
+    }
 }

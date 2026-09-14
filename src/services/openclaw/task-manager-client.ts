@@ -1,6 +1,8 @@
-import { hostApiFetch } from '@/lib/host-api';
-import type {
-  SessionIdentity,
+import { hostApiFetch, hostCapabilityDescribe } from '@/lib/host-api';
+import {
+  buildSessionIdentityKey,
+  sessionScope,
+  type SessionIdentity,
 } from '../../../electron/desktop-contract/runtime-address';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
@@ -42,43 +44,79 @@ export interface TaskListSnapshot {
   todos: TodoItem[];
 }
 
-const TOOL_INVOKE_CAPABILITY_ID = 'tool.invoke';
-const TASK_CONTROL_CAPABILITY_ID = 'task.control';
-
-async function taskToolApi<T>(operationId: string, payload: {
-  sessionIdentity: SessionIdentity;
-  method: string;
-  params: Record<string, unknown>;
-}): Promise<T> {
-  return await hostApiFetch<T>('/api/capabilities/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: TOOL_INVOKE_CAPABILITY_ID,
-      operationId,
-      scope: { kind: 'session', identity: payload.sessionIdentity },
-      target: { kind: 'tool', toolName: payload.method, identity: payload.sessionIdentity },
-      input: payload,
-    }),
-    timeoutMs: 60_000,
-  });
+type ClosedTaskMutation = { outcome: 'rejected' | 'unknown' };
+export class TaskManagementUnavailableError extends Error {
+  constructor() {
+    super('Task management is not available for this session');
+    this.name = 'TaskManagementUnavailableError';
+  }
+}
+export interface TodoSnapshot {
+  todos: TodoItem[];
+  updatedAt?: number;
 }
 
-async function taskControlApi<T>(operationId: string, payload: {
+export type TaskCreateResult = { outcome: 'applied'; task: Task; snapshot: TaskListSnapshot } | ClosedTaskMutation;
+export type TaskUpdateResult = { outcome: 'applied'; snapshot: TaskListSnapshot } | ClosedTaskMutation;
+export type TodoWriteResult = { outcome: 'applied'; snapshot: TodoSnapshot } | ClosedTaskMutation;
+
+type TaskOperation =
+  | 'tasks.list'
+  | 'tasks.get'
+  | 'tasks.create'
+  | 'tasks.update'
+  | 'todos.get'
+  | 'todos.write';
+
+const TASK_MANAGEMENT_CAPABILITY_ID = 'task.management';
+const availableTaskManagementCapabilityKeys = new Set<string>();
+
+export async function isTaskManagementAvailable(sessionIdentity: SessionIdentity): Promise<boolean> {
+  const cacheKey = buildSessionIdentityKey(sessionIdentity);
+  if (availableTaskManagementCapabilityKeys.has(cacheKey)) {
+    return true;
+  }
+  try {
+    const { capability } = await hostCapabilityDescribe({
+      id: TASK_MANAGEMENT_CAPABILITY_ID,
+      scope: sessionScope(sessionIdentity),
+    });
+    const available = capability.availability === 'available'
+      && capability.operations.some((operation) => operation.id === 'tasks.list');
+    if (available) {
+      availableTaskManagementCapabilityKeys.add(cacheKey);
+    }
+    return available;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Capability is not available') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function taskManagementApi<T>(operationId: TaskOperation, payload: {
+  sessionKey: string;
   sessionIdentity: SessionIdentity;
-  taskId: string;
-  wait?: boolean;
-  timeoutMs?: number;
+  input: Record<string, unknown>;
 }): Promise<T> {
+  if (!payload.sessionKey || payload.sessionKey !== payload.sessionIdentity.sessionKey) {
+    throw new Error('Task manager session identity is invalid');
+  }
+  const identity = payload.sessionIdentity;
+  if (!await isTaskManagementAvailable(identity)) {
+    throw new TaskManagementUnavailableError();
+  }
   return await hostApiFetch<T>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
-      id: TASK_CONTROL_CAPABILITY_ID,
+      id: TASK_MANAGEMENT_CAPABILITY_ID,
       operationId,
-      scope: { kind: 'session', identity: payload.sessionIdentity },
-      target: { kind: 'task', taskId: payload.taskId, owner: { kind: 'session', identity: payload.sessionIdentity } },
-      input: payload,
+      scope: { kind: 'session', identity },
+      target: { kind: 'task-manager', identity },
+      input: { sessionIdentity: identity, ...payload.input },
     }),
-    timeoutMs: payload.timeoutMs ?? 60_000,
+    timeoutMs: 60_000,
   });
 }
 
@@ -149,32 +187,51 @@ function normalizeScope(raw: unknown): TaskScope | undefined {
   };
 }
 
+function normalizeSnapshot(raw: unknown): TaskListSnapshot {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const scope = normalizeScope(row.scope);
+  return {
+    ...(scope ? { scope } : {}),
+    tasks: Array.isArray(row.tasks) ? row.tasks.map(normalizeTask) : [],
+    todos: Array.isArray(row.todos) ? row.todos.map(normalizeTodo) : [],
+  };
+}
+
+function normalizeTodoSnapshot(raw: unknown): TodoSnapshot {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  return {
+    todos: Array.isArray(row.todos) ? row.todos.map(normalizeTodo) : [],
+    ...(typeof row.updatedAt === 'number' ? { updatedAt: row.updatedAt } : {}),
+  };
+}
+
 export async function listTaskSnapshot(payload: {
   sessionKey: string;
   sessionIdentity: SessionIdentity;
   teamKey?: string;
 }): Promise<TaskListSnapshot> {
-  const result = await taskToolApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tools.invoke', {
-    sessionIdentity: payload.sessionIdentity,
-    method: 'TaskList',
-    params: {
+  try {
+    const result = await taskManagementApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tasks.list', {
       sessionKey: payload.sessionKey,
-      ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
-    },
-  });
-  const tasks = Array.isArray(result.tasks) ? result.tasks.map(normalizeTask) : [];
-  const todos = Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [];
-  return { ...(normalizeScope(result.scope) ? { scope: normalizeScope(result.scope) } : {}), tasks, todos };
+      sessionIdentity: payload.sessionIdentity,
+      input: {
+        ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
+      },
+    });
+    return normalizeSnapshot(result);
+  } catch (error) {
+    if (error instanceof TaskManagementUnavailableError) {
+      return { tasks: [], todos: [] };
+    }
+    throw error;
+  }
 }
 
 export async function getTask(payload: { sessionKey: string; sessionIdentity: SessionIdentity; taskId: string }): Promise<Task | null> {
-  const result = await taskToolApi<{ task?: unknown | null }>('tools.invoke', {
+  const result = await taskManagementApi<{ task?: unknown | null }>('tasks.get', {
+    sessionKey: payload.sessionKey,
     sessionIdentity: payload.sessionIdentity,
-    method: 'TaskGet',
-    params: {
-      sessionKey: payload.sessionKey,
-      taskId: payload.taskId,
-    },
+    input: { taskId: payload.taskId },
   });
   return result.task ? normalizeTask(result.task) : null;
 }
@@ -187,12 +244,14 @@ export async function createTask(payload: {
   activeForm?: string;
   metadata?: Record<string, unknown>;
   owner?: string;
-}): Promise<{ task: Task; todos: TodoItem[] }> {
-  const result = await taskToolApi<{ task: unknown; todos?: unknown[] }>('tools.invoke', {
+}): Promise<TaskCreateResult> {
+  const result = await taskManagementApi<
+    | { outcome: 'applied'; task: unknown; snapshot: unknown }
+    | ClosedTaskMutation
+  >('tasks.create', {
+    sessionKey: payload.sessionKey,
     sessionIdentity: payload.sessionIdentity,
-    method: 'TaskCreate',
-    params: {
-      sessionKey: payload.sessionKey,
+    input: {
       subject: payload.subject,
       description: payload.description,
       ...(payload.activeForm ? { activeForm: payload.activeForm } : {}),
@@ -200,9 +259,13 @@ export async function createTask(payload: {
       ...(payload.owner ? { owner: payload.owner } : {}),
     },
   });
+  if (result.outcome !== 'applied') {
+    return result;
+  }
   return {
+    outcome: 'applied',
     task: normalizeTask(result.task),
-    todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
+    snapshot: normalizeSnapshot(result.snapshot),
   };
 }
 
@@ -219,12 +282,14 @@ export async function updateTask(payload: {
   addBlockedBy?: string[];
   addBlocks?: string[];
   metadata?: Record<string, unknown>;
-}): Promise<{ task?: Task; taskId?: string; deleted?: boolean; todos: TodoItem[] }> {
-  const result = await taskToolApi<{ task?: unknown; taskId?: string; deleted?: boolean; todos?: unknown[] }>('tools.invoke', {
+}): Promise<TaskUpdateResult> {
+  const result = await taskManagementApi<
+    | { outcome: 'applied'; snapshot: unknown }
+    | ClosedTaskMutation
+  >('tasks.update', {
+    sessionKey: payload.sessionKey,
     sessionIdentity: payload.sessionIdentity,
-    method: 'TaskUpdate',
-    params: {
-      sessionKey: payload.sessionKey,
+    input: {
       taskId: payload.taskId,
       ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
       ...(payload.status ? { status: payload.status } : {}),
@@ -237,11 +302,12 @@ export async function updateTask(payload: {
       ...(payload.metadata ? { metadata: payload.metadata } : {}),
     },
   });
+  if (result.outcome !== 'applied') {
+    return result;
+  }
   return {
-    ...(result.task ? { task: normalizeTask(result.task) } : {}),
-    ...(typeof result.taskId === 'string' ? { taskId: result.taskId } : {}),
-    ...(result.deleted === true ? { deleted: true } : {}),
-    todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
+    outcome: 'applied',
+    snapshot: normalizeSnapshot(result.snapshot),
   };
 }
 
@@ -250,51 +316,35 @@ export async function writeTodos(payload: {
   sessionIdentity: SessionIdentity;
   oldTodos: TodoItem[];
   newTodos: TodoItem[];
-}): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
-  const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
+}): Promise<TodoWriteResult> {
+  const result = await taskManagementApi<
+    | { outcome: 'applied'; snapshot: unknown }
+    | ClosedTaskMutation
+  >('todos.write', {
+    sessionKey: payload.sessionKey,
     sessionIdentity: payload.sessionIdentity,
-    method: 'TodoWrite',
-    params: {
-      sessionKey: payload.sessionKey,
+    input: {
       oldTodos: payload.oldTodos,
       newTodos: payload.newTodos,
     },
   });
+  if (result.outcome !== 'applied') {
+    return result;
+  }
   return {
-    todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
-    ...(typeof result.updatedAt === 'number' ? { updatedAt: result.updatedAt } : {}),
+    outcome: 'applied',
+    snapshot: normalizeTodoSnapshot(result.snapshot),
   };
 }
 
 export async function getTodos(payload: {
   sessionKey: string;
   sessionIdentity: SessionIdentity;
-}): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
-  const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
+}): Promise<TodoSnapshot> {
+  const result = await taskManagementApi<{ todos?: unknown[]; updatedAt?: unknown }>('todos.get', {
+    sessionKey: payload.sessionKey,
     sessionIdentity: payload.sessionIdentity,
-    method: 'TodoGet',
-    params: {
-      sessionKey: payload.sessionKey,
-    },
+    input: {},
   });
-  return {
-    todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
-    ...(typeof result.updatedAt === 'number' ? { updatedAt: result.updatedAt } : {}),
-  };
-}
-
-export async function getTaskOutput(payload: {
-  sessionIdentity: SessionIdentity;
-  taskId: string;
-  wait?: boolean;
-  timeoutMs?: number;
-}): Promise<unknown> {
-  return await taskControlApi('tasks.output', payload);
-}
-
-export async function stopTask(payload: {
-  sessionIdentity: SessionIdentity;
-  taskId: string;
-}): Promise<unknown> {
-  return await taskControlApi('tasks.stop', payload);
+  return normalizeTodoSnapshot(result);
 }

@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use foundation::execution::OwnerRuntimeHandle;
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
-    BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryClaim, DeliveryId, GraphDefinition,
-    GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, PromptDeliveryOutcome,
-    PromptDeliveryRequest, ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand,
-    StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
-    TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunQuery,
-    TeamRunQueryOutcome, TeamTriggerFireOutcome, TombstoneOutcome, TriggerFireRequest,
+    ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
+    GraphDefinition, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, ResumeOutcome,
+    RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault, TeamDecisionCommand,
+    TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
+    TeamNodeEventOutcome, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
+    TombstoneOutcome, TriggerFireRequest,
     package::{
         TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionError,
         TeamSkillSelectionId,
@@ -737,18 +737,6 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn pending_delivery_ids(
-        &self,
-        now: u64,
-    ) -> Result<Vec<DeliveryId>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_query(OrganizationQuery::PendingDeliveryIds { now, reply })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
     pub async fn terminal_observation_deliveries(
         &self,
     ) -> Result<Vec<DeliveryId>, RequestAdmissionClosed> {
@@ -764,7 +752,7 @@ impl OrganizationHandle {
         &self,
         run_id: GraphRunId,
         now: u64,
-    ) -> Result<Result<Vec<DeliveryId>, StoreFault>, RequestAdmissionClosed> {
+    ) -> Result<Result<Vec<ActivityId>, StoreFault>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::ScheduleReadyNodes { run_id, now, reply })
@@ -773,23 +761,45 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn claim_openclaw_delivery(
+    pub async fn pending_run_activity_ids(
         &self,
         run_id: GraphRunId,
-        delivery_id: DeliveryId,
+        now: u64,
+    ) -> Result<Vec<ActivityId>, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::PendingRunActivityIds { run_id, now, reply })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn activity_target(
+        &self,
+        activity_id: ActivityId,
+    ) -> Result<Option<crate::composition::TeamRunActivityTarget>, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::ActivityTarget { activity_id, reply })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn claim_activity(
+        &self,
+        run_id: GraphRunId,
+        activity_id: ActivityId,
         claimed_at: u64,
     ) -> Result<
-        Result<
-            crate::composition::OpenClawDeliveryStart,
-            crate::composition::OpenClawDeliveryError,
-        >,
+        Result<crate::composition::TeamRunActivityStart, crate::composition::TeamRunActivityError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
-            .send_command(OrganizationCommand::ClaimOpenClawDelivery {
+            .send_command(OrganizationCommand::ClaimActivity {
                 run_id,
-                delivery_id,
+                activity_id,
                 claimed_at,
                 reply,
             })
@@ -798,77 +808,24 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn claim_matcha_delivery(
+    pub async fn settle_activity(
         &self,
         run_id: GraphRunId,
-        delivery_id: DeliveryId,
-        claimed_at: u64,
+        claim: ActivityClaim,
+        outcome: crate::runtime_driver::ActivityExecutionOutcome,
     ) -> Result<
         Result<
-            crate::composition::MatchaDeliveryStartOutcome,
-            crate::composition::MatchaDeliveryError,
+            crate::composition::TeamRunActivityOutcome,
+            crate::composition::TeamRunActivityError,
         >,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
-            .send_command(OrganizationCommand::ClaimMatchaDelivery {
-                run_id,
-                delivery_id,
-                claimed_at,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
-    pub async fn settle_openclaw_delivery(
-        &self,
-        run_id: GraphRunId,
-        claim: DeliveryClaim,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<
-        Result<
-            crate::composition::OpenClawDeliveryOutcome,
-            crate::composition::OpenClawDeliveryError,
-        >,
-        RequestAdmissionClosed,
-    > {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::SettleOpenClawDelivery {
+            .send_command(OrganizationCommand::SettleActivity {
                 run_id,
                 claim,
                 outcome,
-                retry_at,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
-    pub async fn settle_matcha_delivery(
-        &self,
-        run_id: GraphRunId,
-        claim: DeliveryClaim,
-        delivery: PromptDeliveryRequest,
-        outcome: PromptDeliveryOutcome,
-        retry_at: u64,
-    ) -> Result<
-        Result<crate::composition::MatchaDeliveryOutcome, crate::composition::MatchaDeliveryError>,
-        RequestAdmissionClosed,
-    > {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::SettleMatchaDelivery {
-                run_id,
-                claim,
-                delivery,
-                outcome,
-                retry_at,
                 reply,
             })
             .await
@@ -916,18 +873,6 @@ impl OrganizationHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::ActiveRunIds { reply })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
-    pub async fn delivery_target(
-        &self,
-        delivery_id: DeliveryId,
-    ) -> Result<Option<crate::composition::TeamRunDeliveryTarget>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_query(OrganizationQuery::DeliveryTarget { delivery_id, reply })
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())

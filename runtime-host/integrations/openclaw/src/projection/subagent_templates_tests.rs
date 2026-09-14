@@ -23,7 +23,7 @@ fn catalog_projects_only_discovered_regular_templates_and_public_fields() {
     }"#,
     );
     root.write(
-        "brand-guardian/IDENTITY.md",
+        "brand-guardian/MEMORY.md",
         "# Brand Guardian\nProtect the brand.\n",
     );
     root.write("brand-guardian/AGENTS.md", "Brand rules.");
@@ -48,7 +48,7 @@ fn catalog_projects_only_discovered_regular_templates_and_public_fields() {
             "categories": [{"id": "design", "order": 10}],
             "templates": [
                 {"id": "plain-agent", "name": "Plain Agent", "summary": "Plain guidance.", "order": 1, "files": ["AGENTS.md"]},
-                {"id": "brand-guardian", "name": "Brand Guardian", "summary": "Protect the brand.", "categoryId": "design", "order": 2, "files": ["AGENTS.md", "IDENTITY.md"]}
+                {"id": "brand-guardian", "name": "Brand Guardian", "summary": "Protect the brand.", "categoryId": "design", "order": 2, "files": ["AGENTS.md", "MEMORY.md"]}
             ]
         })
     );
@@ -76,7 +76,9 @@ fn malformed_catalog_falls_back_to_discovered_template_without_metadata() {
 fn detail_is_limited_to_discovered_template_and_allowed_regular_files() {
     let root = TestRoot::new();
     root.write("brand-guardian/AGENTS.md", "Guard the brand.");
+    root.write("brand-guardian/MEMORY.md", "Remember durable context.");
     root.write("brand-guardian/TOOLS.md", "Use tools carefully.");
+    root.write("brand-guardian/IDENTITY.md", "Brand Guardian");
     root.write("brand-guardian/private.txt", "Must not be public.");
 
     let detail = SubagentTemplateCatalog::detail(&root.directory(), "brand-guardian").unwrap();
@@ -88,8 +90,13 @@ fn detail_is_limited_to_discovered_template_and_allowed_regular_files() {
         "Guard the brand."
     );
     assert_eq!(
-        serialized["template"]["fileContents"]["TOOLS.md"],
-        "Use tools carefully."
+        serialized["template"]["fileContents"]["MEMORY.md"],
+        "Remember durable context."
+    );
+    assert!(
+        serialized["template"]["fileContents"]
+            .get("TOOLS.md")
+            .is_none()
     );
     assert!(
         serialized["template"]["fileContents"]

@@ -35,7 +35,9 @@
       "apiKey": "API-ключ",
       "oauthDevice": "OAuth Устройство",
       "oauthBrowser": "OAuth Браузер",
-      "local": "Локальный"
+      "local": "Локальный",
+      "token": "Token / setup-token",
+      "cliReuse": "Использовать вход CLI"
     },
     "sections": {
       "credentials": "Настройки учётных данных"
@@ -64,6 +66,7 @@
       "replaceApiKey": "Заменить API-ключ",
       "replaceApiKeyHelp": "Оставьте это поле пустым, чтобы сохранить текущий API-ключ.",
       "baseUrl": "Базовый URL",
+      "codePlanMode": "Эндпоинт Code Plan",
       "protocol": "Протокол",
       "chatProvider": "Провайдер чата",
       "mediaProvider": "Медиа-провайдер",
@@ -74,7 +77,13 @@
       "save": "Сохранить",
       "customDoc": "Документация",
       "validate": "Проверить",
-      "failed": "Ошибка"
+      "failed": "Ошибка",
+      "authMode": "Способ входа",
+      "variant": "Сервис / тариф",
+      "endpointPreset": "Регион эндпоинта",
+      "cliReuseHelp": "Сначала войдите в Claude Code. Перед сохранением приложение проверит локальные учётные данные CLI; вставлять токен не нужно.",
+      "replaceToken": "Заменить токен",
+      "tokenHelp": "Выполните claude setup-token и вставьте полученный токен. Он хранится локально."
     },
     "protocols": {
       "openai": "Совместимый с OpenAI",
@@ -97,7 +106,8 @@
       "updated": "Провайдер обновлён",
       "failedUpdate": "Не удалось обновить провайдера",
       "invalidKey": "Неверный API-ключ",
-      "minimaxConflict": "Нельзя добавить оба провайдера MiniMax (Global) и MiniMax (CN)."
+      "minimaxConflict": "Нельзя добавить оба провайдера MiniMax (Global) и MiniMax (CN).",
+      "zaiConflict": "Нельзя добавить оба провайдера Z.AI (CN) и Z.AI (Global)."
     },
     "oauth": {
       "loginMode": "Вход через OAuth",
@@ -117,13 +127,33 @@
       "step1": "Скопируйте код авторизации ниже.",
       "step2": "Откройте страницу входа в браузере.",
       "step3": "Вставьте код для подтверждения доступа.",
-      "requestingCode": "Запрос кода безопасного входа..."
+      "requestingCode": "Запрос кода безопасного входа...",
+      "completeLogin": "Завершить вход",
+      "manualHelp": "Откройте страницу авторизации, войдите и вставьте URL обратного вызова или код ниже.",
+      "callbackPlaceholder": "URL обратного вызова или код",
+      "submitCode": "Отправить код"
     },
     "projectionErrors": {
       "diagnostic": "Не удалось синхронизировать конфигурацию OpenClaw: {{reason}}",
       "readbackMismatch": "Прочитанная конфигурация OpenClaw не совпадает с сохранёнными настройками провайдера.",
       "readbackUnavailable": "Конфигурация OpenClaw записана, но её не удалось прочитать для проверки.",
       "outcomeUnknown": "Результат синхронизации конфигурации OpenClaw неизвестен.",
+      "providerAccountConfigurationInvalid": "Конфигурация учётной записи провайдера OpenClaw недействительна. Проверьте провайдера, endpoint и протокол.",
+      "providerCascadeUnavailable": "Состояние конфигурации провайдеров недоступно. Обновите и повторите попытку.",
+      "providerCredentialUnavailable": "Текущие учётные данные провайдера недоступны. Введите их заново и сохраните.",
+      "providerKeyDuplicate": "Идентификаторы провайдеров OpenClaw конфликтуют. Удалите дубликаты учётных записей или используйте пользовательскую конфигурацию.",
+      "providerModelCapabilityInvalid": "Конфигурация возможностей модели недействительна. Проверьте тип модели и сохраните снова.",
+      "providerModelIdentifierInvalid": "ID модели недействителен. Проверьте его и сохраните снова.",
+      "providerModelPersistenceFailed": "Не удалось записать конфигурацию моделей OpenClaw. Проверьте права доступа к файлу.",
+      "providerModelTokenLimitInvalid": "Параметры Token модели недействительны. Максимальный вывод не должен превышать размер контекстного окна.",
+      "providerOwnerResponseUnavailable": "Запись конфигурации провайдера не вернула результат. Обновите и повторите попытку.",
+      "providerOwnerUnavailable": "Сервис конфигурации провайдеров недоступен. Перезапустите приложение и повторите попытку.",
+      "providerRoutingAccountUnavailable": "Маршрутизация модели ссылается на недоступную учётную запись провайдера. Выберите модель заново.",
+      "providerRoutingCredentialUnavailable": "Маршрутизация модели ссылается на недоступные учётные данные провайдера. Введите API-ключ заново и сохраните.",
+      "providerRoutingInvalid": "Правило маршрутизации модели недействительно. Проверьте и сохраните снова.",
+      "providerRoutingModelCapabilityUnavailable": "Модель, указанная в маршрутизации, не поддерживает эту возможность. Выберите другую модель.",
+      "providerRoutingModelUnavailable": "Маршрутизация модели ссылается на отсутствующую модель. Выберите модель заново.",
+      "providerRoutingPersistenceFailed": "Не удалось записать конфигурацию маршрутизации моделей OpenClaw. Проверьте права доступа к файлу.",
       "privateResolver": {
         "credentialMissing": "Для этой учётной записи нет сохранённого API-ключа. Введите ключ заново и сохраните.",
         "credentialDecryptFailed": "Сохранённый API-ключ нельзя расшифровать на этом устройстве. Введите его заново и сохраните.",
@@ -135,44 +165,6 @@
         "invalidRequest": "Внутренний запрос синхронизации авторизации недействителен. Повторите попытку.",
         "unknown": "Синхронизация авторизации OpenClaw не удалась. Введите API-ключ заново и сохраните."
       }
-    }
-  },
-  "license": {
-    "title": "License",
-    "description": "Activate and manage your local license authorization",
-    "gateStatus": "Gate Status",
-    "gateState": {
-      "checking": "Checking",
-      "granted": "Granted",
-      "blocked": "Blocked"
-    },
-    "renewAlert": {
-      "near_expiry_renew_failed": "Renewal failed near expiry. Please revalidate as soon as possible"
-    },
-    "inputLabel": "License Key",
-    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
-    "showKey": "Show license key",
-    "hideKey": "Hide license key",
-    "validate": "Validate License",
-    "revalidate": "Revalidate",
-    "clear": "Clear",
-    "messages": {
-      "valid": "License validated",
-      "cache_grace_valid": "License validated by cached grace period",
-      "empty": "Please enter a license key",
-      "format_invalid": "Invalid license key format",
-      "service_unconfigured": "License service is not configured",
-      "network_error": "Cannot reach license service, please check network and retry",
-      "server_rejected": "License was rejected by license service",
-      "expired": "License has expired",
-      "device_mismatch": "License device does not match this machine",
-      "not_allowed": "License is not allowed",
-      "checksum_invalid": "License checksum is invalid",
-      "unknown": "License validation failed"
-    },
-    "toast": {
-      "cleared": "Local license cleared",
-      "clearFailed": "Failed to clear local license: {{error}}"
     }
   },
   "diagnostics": {
@@ -439,9 +431,9 @@
     "refresh": "Обновить",
     "empty": "Нет моделей",
     "codePlan": {
-      "title": "Ark Code Plan",
-      "description": "Добавляет ark-code-latest в каталог моделей ark. Ark API Key и coding Base URL настраиваются в карточке provider.",
-      "add": "Добавить ark-code-latest",
+      "title": "Code Plan",
+      "description": "Добавляет модель Code Plan в каталог моделей этого provider. API Key и Code Plan Base URL настраиваются в карточке provider.",
+      "add": "Добавить {{model}}",
       "added": "Добавлено"
     },
     "create": {
@@ -450,8 +442,25 @@
       "add": "Создать"
     },
     "actions": {
+      "discover": "Получить модели",
       "add": "Добавить модель",
-      "save": "Сохранить"
+      "save": "Сохранить изменения",
+      "reset": "Отменить"
+    },
+    "pending": {
+      "summary_one": "{{count}} несохранённое изменение",
+      "summary_other": "{{count}} несохранённых изменений"
+    },
+    "discovery": {
+      "title": "Модели для импорта",
+      "loading": "Получение моделей...",
+      "empty": "Доступные модели не найдены",
+      "error": "Не удалось получить модели: {{error}}. Проверьте, что аккаунт может получить список моделей, затем повторите попытку.",
+      "rejected": "Не удалось получить модели: сервер отклонил запрос списка моделей. Проверьте API-ключ, права, группу и баланс аккаунта, затем повторите попытку.",
+      "importSelected": "Импортировать выбранные",
+      "duplicate": "Уже в каталоге",
+      "count_one": "· {{count}} модель",
+      "count_other": "· {{count}} моделей"
     },
     "group": {
       "subtitle_one": "1 модель",
@@ -469,6 +478,7 @@
       "resolutionLabel": "Разрешение",
       "qualityLabel": "Качество",
       "defaultOption": "По умолчанию",
+      "advanced": "Дополнительно",
       "remove": "Удалить"
     },
     "qualities": {

@@ -54,6 +54,18 @@ describe('Electron Main Usage transport', () => {
     );
   });
 
+  it('reads session timeseries through the same sealed projection', async () => {
+    const signDecision = vi.fn().mockReturnValue('signed-decision');
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => ({ entries: [] }) });
+    const transport = createUsageTransport({ verificationKey: 'public', signDecision }, 34_243, fetcher);
+
+    await expect(transport.readSessionTimeseries({ sessionId: 'session-1', agentId: 'main' })).resolves.toEqual({ status: 200, body: { entries: [] } });
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:34243/api/usage/session-timeseries?sessionId=session-1&agentId=main',
+      expect.objectContaining({ method: 'GET', headers: { Authorization: 'Bearer signed-decision' } }),
+    );
+  });
+
   it('accepts empty usage history as a valid recovered projection', async () => {
     const transport = createUsageTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },

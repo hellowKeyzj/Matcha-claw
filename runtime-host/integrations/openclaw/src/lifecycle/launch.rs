@@ -28,10 +28,15 @@ const SYSTEM_ROOT: &str = "SystemRoot";
 #[cfg(windows)]
 const OPENCLAW_GATEWAY_PORT: &str = "OPENCLAW_GATEWAY_PORT";
 const OPENCLAW_GATEWAY_TOKEN: &str = "OPENCLAW_GATEWAY_TOKEN";
+const OPENCLAW_EXEC_SHELL_SNAPSHOT: &str = "OPENCLAW_EXEC_SHELL_SNAPSHOT";
 const OPENCLAW_STATE_DIR: &str = "OPENCLAW_STATE_DIR";
 const OPENCLAW_CONFIG_DIR: &str = "OPENCLAW_CONFIG_DIR";
 const MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: &str = "MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT";
 const MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: &str = "MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN";
+const MATCHA_SEALED_ENDPOINT: &str = "MATCHA_SEALED_ENDPOINT";
+const MATCHA_SEALED_TOKEN: &str = "MATCHA_SEALED_TOKEN";
+const MATCHA_SEALED_RUNTIME: &str = "MATCHA_SEALED_RUNTIME";
+const OPENCLAW_SEALED_RUNTIME: &str = "openclaw";
 const OPENCLAW_NO_RESPAWN: &str = "OPENCLAW_NO_RESPAWN";
 const OPENCLAW_DISABLE_BONJOUR: &str = "OPENCLAW_DISABLE_BONJOUR";
 const OPENCLAW_SKIP_CHANNELS: &str = "OPENCLAW_SKIP_CHANNELS";
@@ -83,7 +88,15 @@ pub struct OpenClawLaunchInput {
 
 impl OpenClawLaunchInput {
     pub fn try_into_launch_factory(self) -> Result<LaunchFactory, LaunchError> {
+        self.try_into_launch_factory_with_sealed_runtime_host(None)
+    }
+
+    pub fn try_into_launch_factory_with_sealed_runtime_host(
+        self,
+        sealed_runtime_host: Option<SealedRuntimeHost>,
+    ) -> Result<LaunchFactory, LaunchError> {
         validate_input(&self)?;
+        validate_sealed_runtime_host(sealed_runtime_host.as_ref())?;
         let factory = LaunchFactory {
             electron_image: self.electron_image,
             working_directory: self.working_directory,
@@ -92,6 +105,7 @@ impl OpenClawLaunchInput {
             state_dir: self.state_dir,
             port: self.port,
             secret: self.secret,
+            sealed_runtime_host,
         };
         factory.validate_spec()?;
         #[cfg(windows)]
@@ -99,6 +113,22 @@ impl OpenClawLaunchInput {
             .ensure_canonical_document()
             .map_err(|_| LaunchError::InvalidInput)?;
         Ok(factory)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SealedRuntimeHost {
+    pub endpoint: String,
+    pub token: String,
+}
+
+impl fmt::Debug for SealedRuntimeHost {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("SealedRuntimeHost")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -110,6 +140,7 @@ pub struct LaunchFactory {
     state_dir: CanonicalStateDir,
     port: u16,
     secret: Arc<GatewaySecret>,
+    sealed_runtime_host: Option<SealedRuntimeHost>,
 }
 
 impl LaunchFactory {
@@ -158,6 +189,7 @@ impl LaunchFactory {
         public_environment.extend([
             (OPENCLAW_GATEWAY_PORT.into(), gateway_port.clone()),
             (OPENCLAW_GATEWAY_TOKEN.into(), gateway_token.clone()),
+            (OPENCLAW_EXEC_SHELL_SNAPSHOT.into(), "0".into()),
             (OPENCLAW_STATE_DIR.into(), self.state_dir.as_path().into()),
             (OPENCLAW_CONFIG_DIR.into(), self.state_dir.as_path().into()),
             (MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT.into(), gateway_port),
@@ -165,6 +197,19 @@ impl LaunchFactory {
             (OPENCLAW_NO_RESPAWN.into(), "1".into()),
             (OPENCLAW_DISABLE_BONJOUR.into(), "1".into()),
         ]);
+        if let Some(sealed_runtime_host) = &self.sealed_runtime_host {
+            public_environment.extend([
+                (
+                    MATCHA_SEALED_ENDPOINT.into(),
+                    sealed_runtime_host.endpoint.clone().into(),
+                ),
+                (
+                    MATCHA_SEALED_TOKEN.into(),
+                    sealed_runtime_host.token.clone().into(),
+                ),
+                (MATCHA_SEALED_RUNTIME.into(), OPENCLAW_SEALED_RUNTIME.into()),
+            ]);
+        }
         if skip_channels {
             public_environment.push((OPENCLAW_SKIP_CHANNELS.into(), "1".into()));
             public_environment.push((CLAWDBOT_SKIP_CHANNELS.into(), "1".into()));
@@ -237,9 +282,13 @@ fn is_managed_launch_env_key(key: &OsStr) -> bool {
         ELECTRON_RUN_AS_NODE,
         OPENCLAW_GATEWAY_PORT,
         OPENCLAW_GATEWAY_TOKEN,
+        OPENCLAW_EXEC_SHELL_SNAPSHOT,
         OPENCLAW_STATE_DIR,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN,
+        MATCHA_SEALED_ENDPOINT,
+        MATCHA_SEALED_TOKEN,
+        MATCHA_SEALED_RUNTIME,
         OPENCLAW_NO_RESPAWN,
         OPENCLAW_DISABLE_BONJOUR,
         OPENCLAW_SKIP_CHANNELS,
@@ -498,6 +547,18 @@ fn validate_input(input: &OpenClawLaunchInput) -> Result<(), LaunchError> {
     }
     let state_dir = input.state_dir.as_path();
     if state_dir.join(CANONICAL_CONFIG_FILE).to_str().is_none() {
+        return Err(LaunchError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn validate_sealed_runtime_host(
+    sealed_runtime_host: Option<&SealedRuntimeHost>,
+) -> Result<(), LaunchError> {
+    let Some(sealed_runtime_host) = sealed_runtime_host else {
+        return Ok(());
+    };
+    if sealed_runtime_host.endpoint.is_empty() || sealed_runtime_host.token.is_empty() {
         return Err(LaunchError::InvalidInput);
     }
     Ok(())

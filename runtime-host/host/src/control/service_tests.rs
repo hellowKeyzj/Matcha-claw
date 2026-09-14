@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::TcpListener,
     path::PathBuf,
     sync::{
         Arc,
@@ -69,6 +70,9 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     let mut input = host_input(&root);
     input.matcha.bun_executable = root.base.join("missing-matcha-bun");
     input.open_claw.electron_image = root.base.join("missing-openclaw-image");
+    input.open_claw.port = free_local_port();
+    input.cron_transport_port = free_local_port();
+    disable_openclaw_autostart(&input);
     let (mut parent_input, control_input) = duplex(8 * 1024);
     let (control_output, mut parent_output) = duplex(8 * 1024);
     let service = tokio::spawn(run(input, control_input, control_output));
@@ -93,23 +97,23 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     let descriptors = capabilities["outcome"]["result"]["capabilities"]
         .as_array()
         .expect("capability list must be an array");
-    assert_eq!(descriptors.len(), 10);
-    assert_eq!(descriptors[6]["id"], "subagent.management");
-    assert_eq!(descriptors[6]["kind"], "subagent-management");
-    assert_eq!(descriptors[6]["scopeKind"], "agent");
-    assert_eq!(descriptors[6]["targetKinds"], json!(["agent", "subagent"]));
-    assert_eq!(descriptors[6]["targetAgentIds"], json!(["main"]));
-    assert_eq!(descriptors[6]["operations"].as_array().unwrap().len(), 12);
-    assert_eq!(descriptors[6]["operations"][0]["targetKind"], "agent");
-    assert_eq!(descriptors[6]["operations"][1]["targetKind"], "agent");
-    assert_eq!(descriptors[6]["operations"][11]["targetKind"], "subagent");
-    assert_eq!(descriptors[4]["id"], "scheduler.cron");
-    assert_eq!(descriptors[4]["kind"], "scheduler-cron");
-    assert_eq!(descriptors[4]["scopeKind"], "runtime-instance");
-    assert_eq!(descriptors[4]["targetKinds"], json!(["cron-job"]));
-    assert_eq!(descriptors[4]["operations"].as_array().unwrap().len(), 5);
+    assert_eq!(descriptors.len(), 9);
+    assert_eq!(descriptors[5]["id"], "subagent.management");
+    assert_eq!(descriptors[5]["kind"], "subagent-management");
+    assert_eq!(descriptors[5]["scopeKind"], "agent");
+    assert_eq!(descriptors[5]["targetKinds"], json!(["agent", "subagent"]));
+    assert_eq!(descriptors[5]["targetAgentIds"], json!(["main"]));
+    assert_eq!(descriptors[5]["operations"].as_array().unwrap().len(), 12);
+    assert_eq!(descriptors[5]["operations"][0]["targetKind"], "agent");
+    assert_eq!(descriptors[5]["operations"][1]["targetKind"], "agent");
+    assert_eq!(descriptors[5]["operations"][11]["targetKind"], "subagent");
+    assert_eq!(descriptors[3]["id"], "scheduler.cron");
+    assert_eq!(descriptors[3]["kind"], "scheduler-cron");
+    assert_eq!(descriptors[3]["scopeKind"], "runtime-instance");
+    assert_eq!(descriptors[3]["targetKinds"], json!(["cron-job"]));
+    assert_eq!(descriptors[3]["operations"].as_array().unwrap().len(), 5);
     assert!(
-        descriptors[4]["operations"]
+        descriptors[3]["operations"]
             .as_array()
             .unwrap()
             .iter()
@@ -140,7 +144,7 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     .await;
     let described = read_outcome(&mut parent_output, "capability-describe-1").await;
     assert_eq!(described["outcome"]["kind"], "succeeded");
-    assert_eq!(described["outcome"]["result"]["capability"], descriptors[4]);
+    assert_eq!(described["outcome"]["result"]["capability"], descriptors[3]);
     assert_public_capability_details(&described);
 
     write_command(
@@ -213,11 +217,7 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     let status = read_outcome(&mut parent_output, "status-1").await;
     assert_eq!(status["id"], "status-1");
     assert_eq!(status["outcome"]["kind"], "succeeded");
-    assert_eq!(status["outcome"]["result"]["result"]["lifecycle"], "failed");
-    assert_eq!(
-        status["outcome"]["result"]["result"]["failure"],
-        "artifactUnavailable"
-    );
+    assert_eq!(status["outcome"]["result"]["result"]["lifecycle"], "idle");
     assert_no_private_details(&status);
 
     write_command(
@@ -644,6 +644,22 @@ async fn read_outcome(output: &mut tokio::io::DuplexStream, id: &str) -> Value {
     }
 }
 
+fn free_local_port() -> u16 {
+    TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn disable_openclaw_autostart(input: &HostInput) {
+    fs::write(
+        input.open_claw.state_dir.as_path().join("settings-desired.v1.json"),
+        br#"{"revision":1,"browserMode":"relay","proxy":{"enabled":false,"server":"","bypassRules":"<local>;localhost;127.0.0.1;::1"},"launchAtStartup":false,"gatewayAutoStart":false,"effect":"confirmed","correlations":[]}"#,
+    )
+    .unwrap();
+}
+
 fn host_input(root: &TestRoot) -> HostInput {
     let state_dir = CanonicalStateDir::provision(root.state_parent.join("openclaw")).unwrap();
 
@@ -661,6 +677,8 @@ fn host_input(root: &TestRoot) -> HostInput {
         },
         matcha_secret: Secret::new(entropy()).unwrap(),
         open_claw: OpenClawInput {
+            team_run_mcp_executable: absolute_path("runtime-host-mcp"),
+            team_run_mcp_state_dir: absolute_path("runtime-host"),
             electron_image: absolute_path("MatchaClaw"),
             working_directory: absolute_path("runtime"),
             openclaw_dir: root.openclaw.openclaw_dir().to_owned(),
@@ -674,6 +692,8 @@ fn host_input(root: &TestRoot) -> HostInput {
             entry: root.openclaw.openclaw_dir().join("openclaw.mjs"),
             state_dir,
             port: 18_789,
+            sealed_endpoint: None,
+            sealed_token: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),

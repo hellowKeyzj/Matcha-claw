@@ -14,6 +14,8 @@ interface SessionMediaContent {
   kind: string;
   mediaType?: string | null;
   reference?: string;
+  reason?: string;
+  omittedKind?: string;
 }
 
 function safeMediaReference(reference: string | undefined): string | undefined {
@@ -56,12 +58,37 @@ export function fileNameFromMediaReference(reference: string): string {
 }
 
 export function projectSessionMedia(content: SessionMediaContent): ProjectedSessionMedia {
+  if (content.kind === 'omitted') {
+    const reason = content.reason ?? content.omittedKind;
+    const attachmentStatus = reason === 'thinking'
+      ? 'thinking-omitted'
+      : reason === 'unsafe_media' || reason === 'unsafeMedia' ? 'unsafe-media-omitted' : 'unknown-omitted';
+    return {
+      images: [],
+      attachedFiles: [{
+        fileName: 'Attachment omitted',
+        mimeType: 'application/octet-stream',
+        fileSize: 0,
+        preview: null,
+        attachmentStatus,
+      }],
+    };
+  }
   if (content.kind !== 'media') {
     return { images: [], attachedFiles: [] };
   }
   const reference = safeMediaReference(content.reference);
   if (!reference) {
-    return { images: [], attachedFiles: [] };
+    return {
+      images: [],
+      attachedFiles: [{
+        fileName: 'Attachment',
+        mimeType: content.mediaType || 'application/octet-stream',
+        fileSize: 0,
+        preview: null,
+        attachmentStatus: 'unsafe-media-omitted',
+      }],
+    };
   }
   const mimeType = content.mediaType || 'application/octet-stream';
   const isImage = mimeType.toLowerCase().startsWith('image/');

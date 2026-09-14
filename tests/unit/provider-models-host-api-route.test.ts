@@ -57,6 +57,7 @@ describe('provider models Host API route', () => {
   it('reads the direct provider-model list without using the command transport', async () => {
     const read = vi.fn().mockResolvedValue({ status: 200, body: listBody });
     const readSelectable = vi.fn();
+    const discover = vi.fn();
     const execute = vi.fn();
     const result = response();
 
@@ -64,7 +65,7 @@ describe('provider models Host API route', () => {
       incoming({}, 'GET') as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/provider-models'),
-      { read, readSelectable, execute },
+      { read, readSelectable, discover, execute },
     )).resolves.toBe(true);
 
     expect(read).toHaveBeenCalledOnce();
@@ -76,6 +77,7 @@ describe('provider models Host API route', () => {
   it('reads the direct chat-selectable path with canonical selectionId and accountId', async () => {
     const read = vi.fn();
     const readSelectable = vi.fn().mockResolvedValue({ status: 200, body: selectableBody });
+    const discover = vi.fn();
     const execute = vi.fn();
     const result = response();
 
@@ -83,7 +85,7 @@ describe('provider models Host API route', () => {
       incoming({}, 'GET') as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/provider-models/selectable?capability=chat'),
-      { read, readSelectable, execute },
+      { read, readSelectable, discover, execute },
     )).resolves.toBe(true);
 
     expect(readSelectable).toHaveBeenCalledWith('chat');
@@ -95,6 +97,7 @@ describe('provider models Host API route', () => {
   it('rejects missing or invalid selectable queries without calling the transport', async () => {
     const read = vi.fn();
     const readSelectable = vi.fn();
+    const discover = vi.fn();
     const execute = vi.fn();
     for (const url of [
       'http://127.0.0.1/api/provider-models/selectable',
@@ -106,7 +109,7 @@ describe('provider models Host API route', () => {
         incoming({}, 'GET') as never,
         result.raw as never,
         new URL(url),
-        { read, readSelectable, execute },
+        { read, readSelectable, discover, execute },
       )).resolves.toBe(true);
       expect(result.state).toEqual({
         statusCode: 400,
@@ -121,6 +124,7 @@ describe('provider models Host API route', () => {
   it('does not claim nonmatching provider-model paths or methods', async () => {
     const read = vi.fn();
     const readSelectable = vi.fn();
+    const discover = vi.fn();
     const execute = vi.fn();
     for (const [url, method] of [
       ['http://127.0.0.1/api/providers', 'POST'],
@@ -132,7 +136,7 @@ describe('provider models Host API route', () => {
         incoming(request, method) as never,
         result.raw as never,
         new URL(url),
-        { read, readSelectable, execute },
+        { read, readSelectable, discover, execute },
       )).resolves.toBe(false);
     }
     expect(read).not.toHaveBeenCalled();
@@ -143,6 +147,7 @@ describe('provider models Host API route', () => {
   it('redacts direct GET and command transport failures', async () => {
     const read = vi.fn().mockRejectedValue(new Error('private list loopback failure'));
     const readSelectable = vi.fn().mockRejectedValue(new Error('private selectable loopback failure'));
+    const discover = vi.fn();
     const execute = vi.fn().mockRejectedValue(new Error('private POST loopback failure'));
 
     for (const [url, method, body] of [
@@ -155,7 +160,7 @@ describe('provider models Host API route', () => {
         incoming(body, method) as never,
         result.raw as never,
         new URL(url),
-        { read, readSelectable, execute },
+        { read, readSelectable, discover, execute },
       );
       expect(result.state).toEqual({
         statusCode: 503,

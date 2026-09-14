@@ -1,6 +1,6 @@
 use super::{
     events::{EventActivity, EventProjectionResult, RunLifecycle, SessionEventProjector},
-    model::{RunId, SessionId},
+    model::{RunId, Sequence, SessionId},
     protocol_event::EventEnvelope,
     receipt::TerminalRunStatus,
 };
@@ -19,6 +19,12 @@ impl TerminalEventWatcher {
     pub(crate) fn new(session_id: SessionId, run_id: RunId) -> Self {
         Self {
             projector: SessionEventProjector::new(session_id, run_id),
+        }
+    }
+
+    pub(crate) fn resume_after(session_id: SessionId, run_id: RunId, cursor: Sequence) -> Self {
+        Self {
+            projector: SessionEventProjector::resume_after(session_id, run_id, cursor),
         }
     }
 
@@ -43,11 +49,12 @@ impl TerminalEventWatcher {
                 | EventActivity::Approval(_)
                 | EventActivity::Ignored => TerminalWatchStep::Pending,
             },
-            EventProjectionResult::Duplicate { .. } => TerminalWatchStep::Pending,
+            EventProjectionResult::Duplicate { .. } | EventProjectionResult::OutOfRun { .. } => {
+                TerminalWatchStep::Pending
+            }
             EventProjectionResult::Rejected { .. }
             | EventProjectionResult::Gap { .. }
             | EventProjectionResult::Stale { .. }
-            | EventProjectionResult::OutOfRun { .. }
             | EventProjectionResult::OutOfSession { .. } => TerminalWatchStep::Stop,
         }
     }
@@ -130,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_foreign_session_or_run_before_their_terminal_lifecycle() {
+    fn rejects_foreign_session_but_skips_other_runs_in_the_same_stream() {
         let mut wrong_session = watcher();
         assert!(matches!(
             wrong_session.observe(envelope(
@@ -150,7 +157,11 @@ mod tests {
                 "run-2",
                 json!({"type":"run.completed","runId":"run-2"}),
             )),
-            TerminalWatchStep::Stop
+            TerminalWatchStep::Pending
+        ));
+        assert!(matches!(
+            wrong_run.observe(run_event(2, "completed")),
+            TerminalWatchStep::Terminal(TerminalRunStatus::Completed)
         ));
     }
 

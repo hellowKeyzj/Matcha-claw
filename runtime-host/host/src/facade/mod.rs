@@ -6,6 +6,7 @@ mod platform_tools;
 mod plugins;
 mod skills;
 mod task_manager;
+mod toolchain;
 mod usage;
 mod workspace;
 
@@ -17,5 +18,6 @@ pub(crate) use platform_tools::PlatformToolsHandle;
 pub(crate) use plugins::PluginsHandle;
 pub(crate) use skills::SkillsHandle;
 pub(crate) use task_manager::TaskManagerHandle;
+pub(crate) use toolchain::ToolchainHandle;
 pub(crate) use usage::UsageHandle;
 pub(crate) use workspace::WorkspaceHandle;

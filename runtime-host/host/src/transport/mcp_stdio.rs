@@ -15,7 +15,6 @@ use crate::{
         TeamEvidenceReferenceKind, TeamNodeTerminalResolution,
     },
     transport::{
-        authorization::CapabilityDecisionVerifier,
         mcp::{
             DecodeError, Framing, RequestId, decode_request, detect_framing, encode_error,
             encode_result,
@@ -33,23 +32,13 @@ const PARSE_ERROR: &str = "Parse error";
 const METHOD_NOT_FOUND: &str = "Method not found";
 const INVALID_PARAMS: &str = "Invalid params";
 const INTERNAL_ERROR: &str = "Internal error";
-const UNAUTHORIZED: &str = "Unauthorized";
-const MCP_ENDPOINT: &str = "stdio://teamrun-mcp";
-const MCP_SCOPE: &str = "teamrun:mcp";
-const MCP_SUBJECT: &str = "teamrun";
 
-pub fn run<R: BufRead, W: Write>(
-    facade: TeamRunMcpFacade,
-    verifier: CapabilityDecisionVerifier,
-    input: R,
-    output: W,
-) -> io::Result<()> {
-    Server { facade, verifier }.run(input, output)
+pub fn run<R: BufRead, W: Write>(facade: TeamRunMcpFacade, input: R, output: W) -> io::Result<()> {
+    Server { facade }.run(input, output)
 }
 
 struct Server {
     facade: TeamRunMcpFacade,
-    verifier: CapabilityDecisionVerifier,
 }
 
 impl Server {
@@ -117,66 +106,22 @@ impl Server {
 
     fn call_tool(&mut self, params: Option<&Value>) -> Result<Value, (i32, &'static str)> {
         let params = strict_object(params).map_err(|_| invalid_params())?;
-        require_exact_keys(params, &["name", "arguments", "authorization"])
-            .map_err(|_| invalid_params())?;
+        require_exact_keys(params, &["name", "arguments"]).map_err(|_| invalid_params())?;
         let name = required_string(params, "name").map_err(|_| invalid_params())?;
-        let authorization =
-            required_string(params, "authorization").map_err(|_| invalid_params())?;
         let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
         validate_argument_keys(name, arguments)?;
         let result = match name {
-            "team_graph_context" => {
-                self.authorize(name, authorization)?;
-                self.team_graph_context(arguments)
-            }
-            "team_graph_patch" => {
-                self.authorize(name, authorization)?;
-                self.team_graph_patch(arguments)
-            }
-            "team_node_event" => {
-                self.authorize(name, authorization)?;
-                self.team_node_event(arguments)
-            }
-            "team_approval_resolve" => {
-                self.authorize(name, authorization)?;
-                self.team_approval_resolve(arguments)
-            }
-            "team_run_decision_submit" => {
-                self.authorize(name, authorization)?;
-                self.team_run_decision_submit(arguments)
-            }
-            "team_evidence_record" => {
-                self.authorize(name, authorization)?;
-                self.team_evidence_record(arguments)
-            }
+            "team_graph_context" => self.team_graph_context(arguments),
+            "team_graph_patch" => self.team_graph_patch(arguments),
+            "team_node_event" => self.team_node_event(arguments),
+            "team_approval_resolve" => self.team_approval_resolve(arguments),
+            "team_run_decision_submit" => self.team_run_decision_submit(arguments),
+            "team_evidence_record" => self.team_evidence_record(arguments),
             _ => return Err(invalid_params()),
         }?;
         Ok(json!({
             "content": [{ "type": "text", "text": serde_json::to_string(&result).expect("closed MCP result is serializable") }]
         }))
-    }
-
-    fn authorize(&mut self, tool: &str, authorization: &str) -> Result<(), (i32, &'static str)> {
-        let capability = match tool {
-            "team_graph_context" => "teamrun.graph.context",
-            "team_graph_patch" => "teamrun.graph.patch",
-            "team_node_event" => "teamrun.node.event",
-            "team_approval_resolve" => "teamrun.approval.resolve",
-            "team_run_decision_submit" => "teamrun.run.decision.submit",
-            "team_evidence_record" => "teamrun.evidence.record",
-            _ => return Err(invalid_params()),
-        };
-        self.verifier
-            .verify(
-                authorization,
-                now_seconds().map_err(|_| internal_error())?,
-                MCP_ENDPOINT,
-                MCP_SCOPE,
-                capability,
-                MCP_SUBJECT,
-            )
-            .map(|_| ())
-            .map_err(|_| (-32001, UNAUTHORIZED))
     }
 
     fn team_graph_context(
@@ -591,8 +536,9 @@ fn tools_result() -> Value {
     json!({ "tools": [
         node_event_tool(),
         tool("team_approval_resolve", "Resolve an existing TeamRun approval receipt."),
-        tool("team_graph_patch", "Apply an authorized TeamRun graph patch."),
-        tool("team_graph_context", "Read an authorized redacted TeamRun graph context."),
+        tool("team_graph_patch", "Apply a TeamRun graph patch."),
+        tool("team_graph_context", "Read a redacted TeamRun graph context."),
+        decision_submit_tool(),
         evidence_record_tool(),
     ] })
 }
@@ -604,7 +550,7 @@ fn tool(name: &'static str, description: &'static str) -> Value {
 fn node_event_tool() -> Value {
     json!({
         "name": "team_node_event",
-        "description": "Record an authorized TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
+        "description": "Record a TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -615,7 +561,7 @@ fn node_event_tool() -> Value {
                 "nodeExecutionId": { "type": "string", "minLength": 1 },
                 "roleId": { "type": ["string", "null"], "minLength": 1 },
                 "event": { "enum": ["progress", "request_input", "request_approval", "complete", "reject"] },
-                "approvalAction": { "enum": ["approve", "deny", "abort"] },
+                "approvalAction": { "enum": ["continue_node", "execute_tool", "publish_result", "external_action"] },
                 "deliveryId": { "type": "string", "minLength": 1 },
                 "receipt": { "type": "string", "minLength": 1 },
                 "nodeId": { "type": "string", "minLength": 1 },
@@ -628,10 +574,29 @@ fn node_event_tool() -> Value {
     })
 }
 
+fn decision_submit_tool() -> Value {
+    json!({
+        "name": "team_run_decision_submit",
+        "description": "Submit a TeamRun continuation decision for a paused run stage.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "runId": { "type": "string", "minLength": 1 },
+                "stageId": { "type": ["string", "null"], "minLength": 1 },
+                "decision": { "enum": ["retry", "proceed_degraded", "abort"] },
+                "note": { "type": ["string", "null"], "minLength": 1 },
+                "idempotencyKey": { "type": "string", "minLength": 1 }
+            },
+            "required": ["runId", "decision", "idempotencyKey"]
+        }
+    })
+}
+
 fn evidence_record_tool() -> Value {
     json!({
         "name": "team_evidence_record",
-        "description": "Record an authorized opaque artifact evidence reference for a current TeamRun node execution.",
+        "description": "Record an opaque artifact evidence reference for a current TeamRun node execution.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -717,6 +682,9 @@ fn validate_argument_keys(
         ][..],
         "team_approval_resolve" => {
             &["runId", "approvalId", "decision", "note", "idempotencyKey"][..]
+        }
+        "team_run_decision_submit" => {
+            &["runId", "stageId", "decision", "note", "idempotencyKey"][..]
         }
         "team_evidence_record" => &[
             "evidenceId",

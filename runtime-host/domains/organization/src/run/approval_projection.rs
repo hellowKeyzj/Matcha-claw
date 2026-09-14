@@ -115,10 +115,10 @@ mod tests {
     use std::num::NonZeroU32;
 
     use crate::{
-        Approval, ApprovalDecision, ApprovalRequest, DeliveryLedger, GraphDefinition,
-        GraphRunFacts, GraphRunId, GraphState, MemberId, NodeDefinition, NodeId, OrganizationFacts,
-        RoleAssignment, RoleId, RoleKind, TeamDefinition, TeamFacts, TeamId, TeamMember,
-        TeamRevision, TeamRole, WorkAssignment,
+        ActivityLedgerSnapshot, Approval, ApprovalDecision, ApprovalRequest, DeliveryLedger,
+        GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId, NodeDefinition, NodeId,
+        OrganizationFacts, RoleAssignment, RoleId, RoleKind, TeamDefinition, TeamFacts, TeamId,
+        TeamMember, TeamRevision, TeamRole, WorkAssignment,
     };
 
     use crate::store::TeamRunFactsRestoreInput;
@@ -233,6 +233,7 @@ mod tests {
                     .unwrap(),
             ],
             deliveries: DeliveryLedger::default().snapshot(),
+            activities: ActivityLedgerSnapshot::new(Vec::new()),
             pending_workflow_plan_admissions: Vec::new(),
             templates: Vec::new(),
             triggers: Vec::new(),
