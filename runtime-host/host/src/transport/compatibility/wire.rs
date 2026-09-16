@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 pub const VERSION: u8 = 1;
@@ -13,8 +13,7 @@ pub(crate) struct DispatchRequest {
     pub payload: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub(crate) struct HealthResponse {
     pub version: u8,
     pub ok: bool,
@@ -23,7 +22,19 @@ pub(crate) struct HealthResponse {
     pub uptime_sec: u64,
 }
 
-#[derive(Debug, Serialize)]
+impl HealthResponse {
+    pub(crate) fn into_json(self) -> Value {
+        serde_json::json!({
+            "version": self.version,
+            "ok": self.ok,
+            "lifecycle": self.lifecycle,
+            "pid": self.pid,
+            "uptimeSec": self.uptime_sec,
+        })
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct DispatchSuccess {
     pub version: u8,
     pub success: bool,
@@ -31,7 +42,7 @@ pub(crate) struct DispatchSuccess {
     pub data: Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub(crate) struct DispatchFailure {
     pub version: u8,
     pub success: bool,
@@ -39,7 +50,7 @@ pub(crate) struct DispatchFailure {
     pub error: ErrorBody,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub(crate) struct ErrorBody {
     pub code: &'static str,
     pub message: String,
@@ -122,18 +133,6 @@ impl DispatchResponse {
         })
     }
 
-    pub(crate) fn target_rejected() -> Self {
-        Self::Failure(DispatchFailure {
-            version: VERSION,
-            success: false,
-            status: 400,
-            error: ErrorBody {
-                code: "TARGET_REJECTED",
-                message: "Capability target is invalid".to_owned(),
-            },
-        })
-    }
-
     pub(crate) fn internal_error() -> Self {
         Self::Failure(DispatchFailure {
             version: VERSION,
@@ -155,12 +154,21 @@ impl DispatchResponse {
 
     pub(crate) fn into_json(self) -> Value {
         match self {
-            Self::Success(value) => {
-                serde_json::to_value(value).expect("dispatch response serializable")
-            }
-            Self::Failure(value) => {
-                serde_json::to_value(value).expect("dispatch response serializable")
-            }
+            Self::Success(value) => serde_json::json!({
+                "version": value.version,
+                "success": value.success,
+                "status": value.status,
+                "data": value.data,
+            }),
+            Self::Failure(value) => serde_json::json!({
+                "version": value.version,
+                "success": value.success,
+                "status": value.status,
+                "error": {
+                    "code": value.error.code,
+                    "message": value.error.message,
+                },
+            }),
         }
     }
 }

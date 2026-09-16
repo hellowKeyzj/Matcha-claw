@@ -22,7 +22,7 @@ const ARCHIVE_ID_BYTES: usize = 16;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DiagnosticsArchiveTerminal {
+pub(crate) enum DiagnosticsArchiveTerminal {
     Completed,
     Cancelled,
     Failed,
@@ -95,7 +95,7 @@ impl From<&super::RuntimeState> for ArchiveRuntimeState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnosticsArchiveReceipt {
+pub(crate) struct DiagnosticsArchiveReceipt {
     archive_id: String,
     terminal: DiagnosticsArchiveTerminalWire,
     entries: usize,
@@ -144,7 +144,7 @@ impl DiagnosticsArchiveReceipt {
         Self::terminated("unavailable".to_owned(), DiagnosticsArchiveTerminal::Failed)
     }
 
-    pub fn archive_id(&self) -> &str {
+    pub(crate) fn archive_id(&self) -> &str {
         &self.archive_id
     }
 
@@ -156,7 +156,7 @@ impl DiagnosticsArchiveReceipt {
                 .all(|byte| byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte <= b'f'))
     }
 
-    pub fn terminal(&self) -> DiagnosticsArchiveTerminal {
+    pub(crate) fn terminal(&self) -> DiagnosticsArchiveTerminal {
         match self.terminal {
             DiagnosticsArchiveTerminalWire::Completed => DiagnosticsArchiveTerminal::Completed,
             DiagnosticsArchiveTerminalWire::Cancelled => DiagnosticsArchiveTerminal::Cancelled,
@@ -164,11 +164,11 @@ impl DiagnosticsArchiveReceipt {
         }
     }
 
-    pub fn entries(&self) -> usize {
+    pub(crate) fn entries(&self) -> usize {
         self.entries
     }
 
-    pub fn bytes(&self) -> u64 {
+    pub(crate) fn bytes(&self) -> u64 {
         self.bytes
     }
 }
@@ -365,40 +365,43 @@ pub(super) mod tests {
         assert!(receipt.bytes() > 0 && receipt.bytes() <= ARCHIVE_BYTE_LIMIT);
         let entries = published_entries(&root, &receipt.archive_id);
         assert_eq!(receipt.entries(), entries.len());
-        assert!(receipt.entries() >= 9);
         let document: Value =
             serde_json::from_slice(entries.get(bundle::HOST_STATE_ENTRY).unwrap()).unwrap();
         assert_eq!(document["lifecycle"], "ready");
         for expected in [
-            "runtime/openclaw.json",
-            "runtime/logs/runtime.log",
-            "runtime/agents/reviewer/sessions/sessions.json",
-            "runtime/agents/reviewer/sessions/session-1.jsonl",
-            "runtime/workspace/AGENTS.md",
-            "runtime/workspace-subagents/child/MEMORY.md",
-            "runtime/executions/run-1/package-path.txt",
-            "runtime/packages/team-reviewer/team.skill.json",
-            "runtime/packages/team-reviewer/README.md",
-            "runtime/extensions/browser/openclaw.plugin.json",
-            "userdata/logs/main.log",
+            bundle::HOST_STATE_ENTRY,
+            "runtime/logs/log-000.txt",
+            "runtime/logs/log-001.txt",
+            "userdata/logs/log-000.txt",
         ] {
             assert!(entries.contains_key(expected), "missing entry {expected}");
         }
-        let config = String::from_utf8(entries["runtime/openclaw.json"].clone()).unwrap();
-        assert!(!config.contains("config-token-canary"));
-        assert!(config.contains("***"));
-        let log = String::from_utf8(entries["runtime/logs/runtime.log"].clone()).unwrap();
+        for name in entries.keys() {
+            assert!(
+                name == bundle::HOST_STATE_ENTRY
+                    || name.starts_with("runtime/logs/log-")
+                    || name.starts_with("userdata/logs/log-"),
+                "unexpected diagnostics entry {name}"
+            );
+        }
+        let rendered = entries
+            .values()
+            .map(|content| String::from_utf8_lossy(content))
+            .collect::<Vec<_>>()
+            .join("\n");
         for forbidden in [
+            "config-token-canary",
+            "workspace-canary",
             "4321",
             "runtime-host",
             "C:\\private\\runtime",
             "log-token",
             "log-secret",
             "native",
+            "payload",
         ] {
-            assert!(!log.contains(forbidden), "log leaked {forbidden}");
+            assert!(!rendered.contains(forbidden), "archive leaked {forbidden}");
         }
-        assert!(log.contains("***"));
         let _ = fs::remove_dir_all(app_log_dir);
         let _ = fs::remove_dir_all(state_root);
     }

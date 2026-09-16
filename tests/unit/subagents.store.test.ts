@@ -1243,6 +1243,45 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toHaveLength(2);
   });
 
+  it('loadAvailableModels force 刷新会替换已缓存的可选模型', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce({
+        models: [{
+          accountId: 'removed',
+          selectionId: 'model-selection:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          label: 'Removed',
+          modelId: 'old-model',
+          capabilities: ['chat'],
+          modelReferences: ['removed/old-model'],
+        }],
+      })
+      .mockResolvedValueOnce({
+        models: [{
+          accountId: 'retained',
+          selectionId: 'model-selection:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          label: 'Retained',
+          modelId: 'new-model',
+          capabilities: ['chat'],
+          modelReferences: ['retained/new-model'],
+        }],
+      });
+
+    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels();
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(useSubagentsStore.getState().availableModels).toEqual([
+      expect.objectContaining({ accountId: 'removed', modelLabel: 'old-model' }),
+    ]);
+
+    await useSubagentsStore.getState().loadAvailableModels({ force: true });
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
+    expect(useSubagentsStore.getState().availableModels).toEqual([
+      expect.objectContaining({ accountId: 'retained', modelLabel: 'new-model' }),
+    ]);
+  });
+
   it('loadAvailableModels 不从 provider store snapshot 推断模型', async () => {
     hostApiFetchMock.mockResolvedValue({ models: [] });
 

@@ -52,15 +52,20 @@ describe('external connector sealed delivery', () => {
     });
   });
 
-  it('rejects catalog entries that expose connection or filesystem metadata', async () => {
+  it('preserves catalog connection metadata from the Rust DTO', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       programs: [{
         id: 'bundled-plugin:github',
         source: 'bundled-plugin',
         displayName: 'GitHub',
         connectorKinds: ['mcp-http'],
+        transport: 'streamable-http',
+        command: 'node',
+        args: ['server.js'],
         url: 'https://github.example.test/mcp',
         rootPath: '/private/runtime-data/plugins/github',
+        envKeys: ['DEBUG'],
+        headerKeys: ['X-Connector'],
       }],
     }), { status: 200 }));
     const transport = createExternalConnectorsTransport({ signDecision: () => 'decision' } as never, 43123, fetcher as never);
@@ -70,29 +75,54 @@ describe('external connector sealed delivery', () => {
       operationId: 'externalConnectors.catalog',
       input: { kind: 'catalog' },
     })).resolves.toEqual({
-      status: 503,
-      body: { success: false, error: 'External connectors are unavailable' },
+      status: 200,
+      body: {
+        programs: [{
+          id: 'bundled-plugin:github',
+          source: 'bundled-plugin',
+          displayName: 'GitHub',
+          connectorKinds: ['mcp-http'],
+          transport: 'streamable-http',
+          command: 'node',
+          args: ['server.js'],
+          url: 'https://github.example.test/mcp',
+          rootPath: '/private/runtime-data/plugins/github',
+          envKeys: ['DEBUG'],
+          headerKeys: ['X-Connector'],
+        }],
+      },
     });
   });
 
-  it('rejects public connector projections containing execution or credential fields', async () => {
+  it('preserves public connector execution metadata from the Rust DTO', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       connectors: [{
         id: 'local',
         kind: 'mcp-stdio',
         command: 'npx',
-        args: ['-y', 'private-server'],
-        cwd: '/private/runtime',
-        env: { API_TOKEN: 'private' },
-        headers: { Authorization: 'private' },
-        config: { credential: 'private' },
+        args: ['-y', 'public-server'],
+        cwd: '/runtime/connectors/local',
+        env: { MCP_MODE: 'public' },
+        headers: { 'X-Connector': 'public' },
+        config: { profile: 'default' },
       }],
     }), { status: 200 }));
     const transport = createExternalConnectorsTransport({ signDecision: () => 'decision' } as never, 43123, fetcher as never);
 
     await expect(transport.execute(request)).resolves.toEqual({
-      status: 503,
-      body: { success: false, error: 'External connectors are unavailable' },
+      status: 200,
+      body: {
+        connectors: [{
+          id: 'local',
+          kind: 'mcp-stdio',
+          command: 'npx',
+          args: ['-y', 'public-server'],
+          cwd: '/runtime/connectors/local',
+          env: { MCP_MODE: 'public' },
+          headers: { 'X-Connector': 'public' },
+          config: { profile: 'default' },
+        }],
+      },
     });
   });
 
@@ -152,7 +182,7 @@ describe('external connector sealed delivery', () => {
     })).resolves.toMatchObject({ status: 200 });
   });
 
-  it('projects the Rust desired revision out of a public mutation receipt', async () => {
+  it('preserves the Rust desired revision in a public mutation receipt', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       success: true,
       connector: { id: 'remote', kind: 'mcp-http', url: 'https://example.test/mcp' },
@@ -173,7 +203,7 @@ describe('external connector sealed delivery', () => {
         success: true,
         connector: { id: 'remote', kind: 'mcp-http', url: 'https://example.test/mcp' },
         resultType: 'created',
-        desired: { status: 'stored' },
+        desired: { status: 'stored', revision: 1 },
         applied: { status: 'unknown' },
         observed: { status: 'not-observed' },
       },

@@ -19,7 +19,9 @@ use windows_sys::{
 };
 
 use self::security::{SecurityDescriptor, ensure_owner_only, verify_owner_only};
-use super::{AgentId, StateDirError, auth_profiles};
+use super::StateDirError;
+#[cfg(test)]
+use super::{AgentId, auth_profiles};
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -44,6 +46,7 @@ impl StateDirHandle {
         self._handle.as_raw_handle() as F::HANDLE
     }
 
+    #[cfg(test)]
     pub(crate) fn read_auth_profiles(
         &self,
         agent: &AgentId,

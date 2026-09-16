@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeSet,
     fmt, fs,
-    fs::OpenOptions,
-    io::{self, Write as _},
+    fs::{File, OpenOptions},
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -12,10 +12,10 @@ use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use zeroize::Zeroize;
 
 use super::{
-    PackageRelativePath, RuntimeSkillTarget, SealSkillPackageReceipt, SealedResourceError,
-    SealedResourceMeteringBinding, SealedResourceMeteringKind, SealedResourceMeteringUse,
-    SealedResourceRead, SealedSkillDescriptor, SealedSkillFileRequest, SealedSkillPackage,
-    SkillKey,
+    PackageRelativePath, SealedResourceError, SealedResourceMeteringBinding,
+    SealedResourceMeteringKind, SealedResourceMeteringUse, SealedResourceRead,
+    SealedSkillDescriptor, SealedSkillTarget, SkillKey,
+    package::{SealSkillPackageReceipt, SealedSkillFileRequest, SealedSkillPackage},
 };
 
 const SEALED_SKILL_PACKAGE_EXTENSION: &str = "matcha-skillpkg";
@@ -25,42 +25,43 @@ const MAX_DIRECTORY_DEPTH: usize = 8;
 const MAX_DIRECTORY_FILES: usize = 64;
 const MAX_FILE_BYTES: u64 = 48 * 1024;
 const MAX_TOTAL_BYTES: u64 = 48 * 1024;
+const MAX_PACKAGE_FILE_BYTES: u64 = 256 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct RuntimeLocalSkillRoot {
-    runtime_target: RuntimeSkillTarget,
+struct SealedSkillRoot {
+    target: SealedSkillTarget,
     skills_directory: PathBuf,
 }
 
-impl RuntimeLocalSkillRoot {
-    pub fn openclaw(state_dir: CanonicalStateDir) -> Self {
+impl SealedSkillRoot {
+    fn openclaw(state_dir: CanonicalStateDir) -> Self {
         Self {
-            runtime_target: RuntimeSkillTarget::OpenClaw,
+            target: SealedSkillTarget::OpenClaw,
             skills_directory: state_dir.as_path().join("skills"),
         }
     }
 
-    pub fn runtime_target(&self) -> RuntimeSkillTarget {
-        self.runtime_target
+    fn target(&self) -> SealedSkillTarget {
+        self.target
     }
 
-    pub fn skills_directory(&self) -> &Path {
+    fn skills_directory(&self) -> &Path {
         &self.skills_directory
     }
 }
 
-impl fmt::Debug for RuntimeLocalSkillRoot {
+impl fmt::Debug for SealedSkillRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("RuntimeLocalSkillRoot")
-            .field("runtime_target", &self.runtime_target)
+            .debug_struct("SealedSkillRoot")
+            .field("target", &self.target)
             .field("skills_directory", &"[REDACTED]")
             .finish()
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedSkillCatalog {
+pub(crate) struct SealedSkillCatalog {
     entries: Vec<SealedSkillCatalogEntry>,
 }
 
@@ -71,9 +72,9 @@ impl SealedSkillCatalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedSkillCatalogEntry {
+pub(crate) struct SealedSkillCatalogEntry {
     skill_key: SkillKey,
-    runtime_target: RuntimeSkillTarget,
+    target: SealedSkillTarget,
     descriptor: SealedSkillDescriptor,
 }
 
@@ -82,8 +83,8 @@ impl SealedSkillCatalogEntry {
         &self.skill_key
     }
 
-    pub fn runtime_target(&self) -> RuntimeSkillTarget {
-        self.runtime_target
+    pub fn runtime_target(&self) -> SealedSkillTarget {
+        self.target
     }
 
     pub fn descriptor(&self) -> &SealedSkillDescriptor {
@@ -91,18 +92,15 @@ impl SealedSkillCatalogEntry {
     }
 }
 
-pub struct SealedSkillStore {
-    root: RuntimeLocalSkillRoot,
+pub(crate) struct SealedSkillStore {
+    root: SealedSkillRoot,
     private_directory: PathBuf,
     key_path: PathBuf,
     operation_lock: Mutex<()>,
 }
 
 impl SealedSkillStore {
-    pub fn new(
-        root: RuntimeLocalSkillRoot,
-        private_directory: PathBuf,
-    ) -> Result<Self, SealedResourceError> {
+    fn new(root: SealedSkillRoot, private_directory: PathBuf) -> Result<Self, SealedResourceError> {
         if !private_directory.is_absolute() {
             return Err(SealedResourceError::Rejected);
         }
@@ -120,7 +118,7 @@ impl SealedSkillStore {
         state_dir: CanonicalStateDir,
         private_root: PathBuf,
     ) -> Result<Self, SealedResourceError> {
-        Self::new(RuntimeLocalSkillRoot::openclaw(state_dir), private_root)
+        Self::new(SealedSkillRoot::openclaw(state_dir), private_root)
     }
 
     pub fn catalog(&self) -> Result<SealedSkillCatalog, SealedResourceError> {
@@ -168,8 +166,7 @@ impl SealedSkillStore {
         let directory = root.join(directory_name);
         let files = collect_plain_directory(&directory)?;
         let mut key = self.read_or_create_key()?;
-        let receipt =
-            SealedSkillPackage::seal(skill_key.clone(), self.root.runtime_target(), files, &key)?;
+        let receipt = SealedSkillPackage::seal(skill_key.clone(), self.root.target(), files, &key)?;
         let package = SealedSkillPackage::open(receipt.package_bytes(), &key);
         key.zeroize();
         let package = package?;
@@ -177,7 +174,7 @@ impl SealedSkillStore {
         self.remove_other_packages_locked(&skill_key, &installed_path)?;
         Ok(SealedSkillCatalogEntry {
             skill_key,
-            runtime_target: package.runtime_target(),
+            target: package.target(),
             descriptor: package.descriptor().clone(),
         })
     }
@@ -193,17 +190,12 @@ impl SealedSkillStore {
         if !package_path.is_absolute() || !is_sealed_package_path(&package_path) {
             return Err(SealedResourceError::Rejected);
         }
-        let metadata =
-            fs::symlink_metadata(&package_path).map_err(|_| SealedResourceError::NotFound)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(SealedResourceError::Rejected);
-        }
-        let bytes = fs::read(&package_path).map_err(|_| SealedResourceError::Unknown)?;
+        let bytes = read_package_file(&package_path, SealedResourceError::NotFound)?;
         let mut key = self.read_key()?;
         let package = SealedSkillPackage::open(&bytes, &key);
         key.zeroize();
         let package = package?;
-        if package.runtime_target() != self.root.runtime_target() {
+        if package.target() != self.root.target() {
             return Err(SealedResourceError::Rejected);
         }
         if self
@@ -216,7 +208,7 @@ impl SealedSkillStore {
         self.install_receipt_locked(&receipt)?;
         Ok(SealedSkillCatalogEntry {
             skill_key: package.skill_key().clone(),
-            runtime_target: package.runtime_target(),
+            target: package.target(),
             descriptor: package.descriptor().clone(),
         })
     }
@@ -313,9 +305,7 @@ impl SealedSkillStore {
                 continue;
             }
             let package = self.open_package_path_locked(&path)?;
-            if package.runtime_target() == self.root.runtime_target()
-                && package.skill_key() == skill_key
-            {
+            if package.target() == self.root.target() && package.skill_key() == skill_key {
                 if found.is_some() {
                     return Err(SealedResourceError::Rejected);
                 }
@@ -330,12 +320,12 @@ impl SealedSkillStore {
         path: &Path,
     ) -> Result<Option<SealedSkillCatalogEntry>, SealedResourceError> {
         let package = self.open_package_path_locked(path)?;
-        if package.runtime_target() != self.root.runtime_target() {
+        if package.target() != self.root.target() {
             return Ok(None);
         }
         Ok(Some(SealedSkillCatalogEntry {
             skill_key: package.skill_key().clone(),
-            runtime_target: package.runtime_target(),
+            target: package.target(),
             descriptor: package.descriptor().clone(),
         }))
     }
@@ -344,7 +334,7 @@ impl SealedSkillStore {
         &self,
         path: &Path,
     ) -> Result<SealedSkillPackage, SealedResourceError> {
-        let bytes = fs::read(path).map_err(|_| SealedResourceError::Unknown)?;
+        let bytes = read_package_file(path, SealedResourceError::Unknown)?;
         let mut key = self.read_key()?;
         let package = SealedSkillPackage::open(&bytes, &key);
         key.zeroize();
@@ -366,9 +356,7 @@ impl SealedSkillStore {
                 continue;
             }
             let package = self.open_package_path_locked(&path)?;
-            if package.runtime_target() == self.root.runtime_target()
-                && package.skill_key() == skill_key
-            {
+            if package.target() == self.root.target() && package.skill_key() == skill_key {
                 fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
             }
         }
@@ -488,7 +476,7 @@ fn collect_plain_directory_at(
             .map_err(|_| SealedResourceError::Rejected)?
             .to_string_lossy()
             .replace('\\', "/");
-        let content = fs::read(&canonical).map_err(|_| SealedResourceError::Unknown)?;
+        let content = read_limited_file(&canonical, metadata.len(), MAX_FILE_BYTES)?;
         files.push(SealedSkillFileRequest::try_new(relative_path, content)?);
     }
     files.sort_by(|left, right| left.path().cmp(right.path()));
@@ -533,6 +521,46 @@ fn sealed_package_file(path: &Path) -> Result<bool, SealedResourceError> {
         return Err(SealedResourceError::Rejected);
     }
     Ok(true)
+}
+
+fn read_package_file(
+    path: &Path,
+    missing_error: SealedResourceError,
+) -> Result<Vec<u8>, SealedResourceError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            missing_error
+        } else {
+            SealedResourceError::Unknown
+        }
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_PACKAGE_FILE_BYTES
+    {
+        return Err(SealedResourceError::Rejected);
+    }
+    read_limited_file(path, metadata.len(), MAX_PACKAGE_FILE_BYTES)
+}
+
+fn read_limited_file(
+    path: &Path,
+    metadata_len: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>, SealedResourceError> {
+    if metadata_len > max_bytes {
+        return Err(SealedResourceError::Rejected);
+    }
+    let mut file = File::open(path).map_err(|_| SealedResourceError::Unknown)?;
+    let mut bytes = Vec::with_capacity(metadata_len as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SealedResourceError::Unknown)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(SealedResourceError::Rejected);
+    }
+    Ok(bytes)
 }
 
 fn is_sealed_package_path(path: &Path) -> bool {
@@ -649,8 +677,8 @@ mod tests {
 
     fn store(root: &Path) -> SealedSkillStore {
         SealedSkillStore::new(
-            RuntimeLocalSkillRoot {
-                runtime_target: RuntimeSkillTarget::OpenClaw,
+            SealedSkillRoot {
+                target: SealedSkillTarget::OpenClaw,
                 skills_directory: root.join("skills"),
             },
             root.join("private"),

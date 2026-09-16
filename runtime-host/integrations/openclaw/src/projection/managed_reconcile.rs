@@ -60,7 +60,7 @@ pub(crate) fn reconcile(
     state_dir: &CanonicalStateDir,
     managed_plugin_root: &Path,
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
-    reconcile_bundles(state_dir, managed_plugin_root, None)
+    reconcile_bundles(state_dir, managed_plugin_root, None, false)
 }
 
 pub(crate) fn reconcile_selected(
@@ -69,7 +69,7 @@ pub(crate) fn reconcile_selected(
     plugin_ids: &[String],
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
     let selected_ids = selected_managed_source_ids(plugin_ids);
-    reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids))
+    reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids), false)
 }
 
 pub(crate) fn reconcile_selected_channels(
@@ -78,7 +78,7 @@ pub(crate) fn reconcile_selected_channels(
     plugin_ids: &[String],
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
     let selected_ids = selected_managed_ids(plugin_ids, MANAGED_CHANNEL_IDS);
-    let mut result = reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids))?;
+    let mut result = reconcile_bundles(state_dir, managed_plugin_root, Some(&selected_ids), true)?;
     result
         .removed_ids
         .extend(remove_unconfigured_managed_channel_targets(
@@ -113,6 +113,7 @@ fn reconcile_bundles(
     state_dir: &CanonicalStateDir,
     managed_plugin_root: &Path,
     selected_ids: Option<&BTreeSet<String>>,
+    replace_unmarked_targets: bool,
 ) -> Result<ManagedPluginReconcile, PluginReconcileError> {
     let bundles = discover_managed_bundles(managed_plugin_root, selected_ids)?;
     let extensions = state_dir.as_path().join("extensions");
@@ -136,6 +137,13 @@ fn reconcile_bundles(
                 result.unchanged_ids.push(bundle.id.clone());
             }
             TargetState::Managed { .. } => {
+                install_bundle(bundle, &target, &extensions)?;
+                result.updated_ids.push(bundle.id.clone());
+            }
+            TargetState::Unmanaged
+                if replace_unmarked_targets
+                    && replaceable_unmarked_target(&extensions, &target, &bundle.id)? =>
+            {
                 install_bundle(bundle, &target, &extensions)?;
                 result.updated_ids.push(bundle.id.clone());
             }
@@ -241,6 +249,30 @@ fn remove_marked_target(
     let deletion_root = target.canonicalize().map_err(PluginReconcileError::io)?;
     safe_remove_tree(extensions, &deletion_root, target)?;
     Ok(true)
+}
+
+fn replaceable_unmarked_target(
+    extensions: &Path,
+    target: &Path,
+    target_id: &str,
+) -> Result<bool, PluginReconcileError> {
+    if target.file_name().and_then(|name| name.to_str()) != Some(target_id) {
+        return Ok(false);
+    }
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PluginReconcileError::Io(error)),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Ok(false);
+    }
+    let Ok(canonical_target) = target.canonicalize() else {
+        return Ok(false);
+    };
+    Ok(canonical_target != extensions
+        && canonical_target.starts_with(extensions)
+        && canonical_target.file_name().and_then(|name| name.to_str()) == Some(target_id))
 }
 
 fn removable_marked_target(
@@ -1180,6 +1212,32 @@ mod tests {
         assert!(root.target("dingtalk").exists());
         assert!(!root.target("openclaw-weixin").exists());
         assert!(!root.target("browser-relay").exists());
+    }
+
+    #[test]
+    fn selected_channel_reconcile_replaces_legacy_unmarked_target() {
+        let root = TestRoot::new();
+        root.write_bundle("openclaw-weixin", "1.0.0");
+        fs::create_dir_all(root.target("openclaw-weixin")).expect("legacy target");
+        fs::write(
+            root.target("openclaw-weixin").join(PACKAGE),
+            serde_json::json!({ "name": "@tencent-weixin/openclaw-weixin", "version": "0.9.0" })
+                .to_string(),
+        )
+        .expect("legacy package");
+
+        let result = root.reconcile_selected_channels(&["openclaw-weixin"]);
+
+        assert_eq!(result.updated_ids, vec!["openclaw-weixin"]);
+        assert!(
+            fs::read_to_string(root.target("openclaw-weixin").join(MANAGED_MARKER))
+                .unwrap()
+                .contains("1.0.0")
+        );
+        assert_eq!(
+            fs::read_to_string(root.target("openclaw-weixin").join("dist/index.js")).unwrap(),
+            "export const version = '1.0.0';"
+        );
     }
 
     #[test]

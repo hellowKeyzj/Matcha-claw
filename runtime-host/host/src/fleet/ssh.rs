@@ -27,9 +27,9 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-pub struct SshTimeouts {
-    pub connect: Duration,
-    pub command: Duration,
+pub(crate) struct SshTimeouts {
+    connect: Duration,
+    command: Duration,
 }
 
 impl Default for SshTimeouts {
@@ -42,14 +42,14 @@ impl Default for SshTimeouts {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct SshOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: u32,
+pub(crate) struct SshOutput {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: u32,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum SshEffectError {
+pub(crate) enum SshEffectError {
     InvalidConfig,
     SecretUnavailable,
     SecretDenied,
@@ -169,7 +169,7 @@ impl SshUninstallReceipt {
 }
 
 #[derive(Clone, Debug)]
-pub struct SshEffect {
+pub(crate) struct SshEffect {
     timeouts: SshTimeouts,
 }
 impl Default for SshEffect {
@@ -179,11 +179,11 @@ impl Default for SshEffect {
 }
 
 impl SshEffect {
-    pub const fn new(timeouts: SshTimeouts) -> Self {
+    pub(crate) const fn new(timeouts: SshTimeouts) -> Self {
         Self { timeouts }
     }
 
-    pub async fn connect<R>(
+    pub(crate) async fn connect<R>(
         &self,
         target: &SshTargetConfig,
         resolver: &mut R,
@@ -241,7 +241,7 @@ impl SshEffect {
         })
     }
 
-    pub async fn probe<R>(
+    pub(crate) async fn probe<R>(
         &self,
         target: &SshTargetConfig,
         resolver: &mut R,
@@ -257,7 +257,7 @@ impl SshEffect {
             .await
     }
 
-    pub async fn exec<R>(
+    pub(crate) async fn exec<R>(
         &self,
         target: &SshTargetConfig,
         resolver: &mut R,
@@ -275,7 +275,7 @@ impl SshEffect {
             .await
     }
 
-    pub async fn install<R>(
+    pub(crate) async fn install<R>(
         &self,
         target: &SshTargetConfig,
         resolver: &mut R,
@@ -302,7 +302,7 @@ impl SshEffect {
 
     /// SSH configuration supplies installation only. Without a source-backed
     /// uninstall command, deletion must be an explicit unsupported result.
-    pub async fn execute_lifecycle<R>(
+    pub(crate) async fn execute_lifecycle<R>(
         &self,
         effect: SshLifecycleEffect,
         target: &SshTargetConfig,
@@ -331,7 +331,7 @@ impl SshEffect {
 
     /// Runs the SSH lifecycle but deliberately returns no managed-resource fact.
     /// SSH exposes installation semantics, not an authoritative resource identity.
-    pub async fn execute_lifecycle_readback<R>(
+    pub(crate) async fn execute_lifecycle_readback<R>(
         &self,
         effect: SshLifecycleEffect,
         target: &SshTargetConfig,
@@ -349,12 +349,12 @@ impl SshEffect {
     }
 }
 
-pub struct SshConnection {
+pub(crate) struct SshConnection {
     session: Handle<PinnedHandler>,
     timeouts: SshTimeouts,
 }
 
-pub async fn open_terminal<R>(
+pub(crate) async fn open_terminal<R>(
     target: &SshTargetConfig,
     resolver: &mut R,
     pinned_host_key: &PublicKey,
@@ -362,12 +362,9 @@ pub async fn open_terminal<R>(
     cols: u16,
 ) -> Result<
     (
-        mpsc::Sender<crate::transport::fleet_terminal::ProviderCommand>,
+        mpsc::Sender<crate::fleet::terminal::ProviderCommand>,
         mpsc::Receiver<
-            Result<
-                crate::transport::fleet_terminal::ProviderEvent,
-                crate::transport::fleet_terminal::ProviderError,
-            >,
+            Result<crate::fleet::terminal::ProviderEvent, crate::fleet::terminal::ProviderError>,
         >,
     ),
     SshEffectError,
@@ -398,23 +395,23 @@ where
         loop {
             tokio::select! {
                 command = commands_rx.recv() => match command {
-                    Some(crate::transport::fleet_terminal::ProviderCommand::Input(data)) => {
+                    Some(crate::fleet::terminal::ProviderCommand::Input(data)) => {
                         if channel.data_bytes(data).await.is_err() { break; }
                     }
-                    Some(crate::transport::fleet_terminal::ProviderCommand::Resize { rows, cols }) => {
+                    Some(crate::fleet::terminal::ProviderCommand::Resize { rows, cols }) => {
                         if channel.window_change(cols as u32, rows as u32, 0, 0).await.is_err() { break; }
                     }
                     None => { let _ = channel.eof().await; break; }
                 },
                 message = channel.wait() => match message {
                     Some(russh::ChannelMsg::Data { data }) => {
-                        if events_tx.send(Ok(crate::transport::fleet_terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
+                        if events_tx.send(Ok(crate::fleet::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
                     }
                     Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
-                        if events_tx.send(Ok(crate::transport::fleet_terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
+                        if events_tx.send(Ok(crate::fleet::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
                     }
                     Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
-                        let _ = events_tx.send(Ok(crate::transport::fleet_terminal::ProviderEvent::Exit { code: i32::try_from(exit_status).ok() })).await;
+                        let _ = events_tx.send(Ok(crate::fleet::terminal::ProviderEvent::Exit { code: i32::try_from(exit_status).ok() })).await;
                     }
                     Some(russh::ChannelMsg::Close) | None => break,
                     _ => {}

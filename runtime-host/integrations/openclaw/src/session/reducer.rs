@@ -387,6 +387,21 @@ impl SessionReducerActor {
         ))
     }
 
+    pub(crate) fn recover_replay(
+        &mut self,
+        source_epoch: Option<u64>,
+        source_cursor: u64,
+        route_key: Option<String>,
+    ) -> CanonicalIngressResult {
+        self.active_run = None;
+        CanonicalIngressResult::from_replay_recovery(
+            self.session_key.clone(),
+            source_epoch,
+            source_cursor,
+            route_key,
+        )
+    }
+
     fn reduce_chat(
         &mut self,
         mut event: SessionEventEnvelope,

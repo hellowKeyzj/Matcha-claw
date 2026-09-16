@@ -8,11 +8,11 @@ use foundation::{
     process::{ShutdownOutcome, supervision::SupervisorSnapshot},
 };
 
-use super::{Host, HostTransitionError};
-use crate::composition::{
-    owner::PendingSupervisorJoin,
-    session::{SessionShutdown, SessionShutdownFailure},
+use super::{
+    Host, HostTransitionError,
+    session_shutdown::{SessionShutdown, SessionShutdownFailure},
 };
+use crate::runtime::adapters::openclaw::owner::PendingSupervisorJoin;
 
 impl Host {
     pub async fn shutdown(&mut self) -> Result<ShutdownReport, HostShutdownError> {
@@ -302,17 +302,104 @@ async fn shutdown_matcha(host: &mut Host, observation: &ObservationSink) {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShutdownReport {
-    open_claw: Option<ShutdownOutcome>,
-    matcha: Option<ShutdownOutcome>,
+    open_claw: Option<RuntimeShutdownOutcome>,
+    matcha: Option<RuntimeShutdownOutcome>,
 }
 
 impl ShutdownReport {
-    pub fn open_claw(&self) -> Option<&ShutdownOutcome> {
+    pub const fn open_claw(&self) -> Option<&RuntimeShutdownOutcome> {
         self.open_claw.as_ref()
     }
 
-    pub fn matcha(&self) -> Option<&ShutdownOutcome> {
+    pub const fn matcha(&self) -> Option<&RuntimeShutdownOutcome> {
         self.matcha.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeShutdownOutcome {
+    Detached,
+    AuthorityLost,
+    Failed(RuntimeShutdownFailure),
+    Forced(RuntimeExit),
+    Graceful(RuntimeExit),
+    NoProcess,
+    Unresolved { failure: RuntimeShutdownFailure },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeShutdownFailure {
+    AuthorityLost,
+    CleanupUnconfirmed,
+    MaterialCleanupFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeExit {
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl RuntimeExit {
+    pub const fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    pub const fn signal(&self) -> Option<i32> {
+        self.signal
+    }
+}
+
+fn runtime_shutdown_outcome(outcome: &ShutdownOutcome) -> RuntimeShutdownOutcome {
+    match outcome {
+        ShutdownOutcome::Detached => RuntimeShutdownOutcome::Detached,
+        ShutdownOutcome::Terminated(outcome) => runtime_termination_outcome(outcome),
+        ShutdownOutcome::Unresolved { failure } => RuntimeShutdownOutcome::Unresolved {
+            failure: runtime_shutdown_failure(*failure),
+        },
+    }
+}
+
+fn runtime_termination_outcome(
+    outcome: &foundation::process::TerminationOutcome,
+) -> RuntimeShutdownOutcome {
+    match outcome {
+        foundation::process::TerminationOutcome::AuthorityLost => {
+            RuntimeShutdownOutcome::AuthorityLost
+        }
+        foundation::process::TerminationOutcome::Failed(failure) => {
+            RuntimeShutdownOutcome::Failed(runtime_shutdown_failure(*failure))
+        }
+        foundation::process::TerminationOutcome::Forced(exit) => {
+            RuntimeShutdownOutcome::Forced(runtime_exit(exit))
+        }
+        foundation::process::TerminationOutcome::Graceful(exit) => {
+            RuntimeShutdownOutcome::Graceful(runtime_exit(exit))
+        }
+        foundation::process::TerminationOutcome::NoProcess => RuntimeShutdownOutcome::NoProcess,
+    }
+}
+
+const fn runtime_shutdown_failure(
+    failure: foundation::process::TerminationFailure,
+) -> RuntimeShutdownFailure {
+    match failure {
+        foundation::process::TerminationFailure::AuthorityLost => {
+            RuntimeShutdownFailure::AuthorityLost
+        }
+        foundation::process::TerminationFailure::CleanupUnconfirmed => {
+            RuntimeShutdownFailure::CleanupUnconfirmed
+        }
+        foundation::process::TerminationFailure::MaterialCleanupFailed => {
+            RuntimeShutdownFailure::MaterialCleanupFailed
+        }
+    }
+}
+
+const fn runtime_exit(exit: &foundation::process::ExitObservation) -> RuntimeExit {
+    RuntimeExit {
+        exit_code: exit.exit_code(),
+        signal: exit.signal(),
     }
 }
 
@@ -406,8 +493,8 @@ impl ShutdownState {
 
     fn report(&self) -> ShutdownReport {
         ShutdownReport {
-            open_claw: self.open_claw.outcome().cloned(),
-            matcha: self.matcha.outcome().cloned(),
+            open_claw: self.open_claw.outcome().map(runtime_shutdown_outcome),
+            matcha: self.matcha.outcome().map(runtime_shutdown_outcome),
         }
     }
 

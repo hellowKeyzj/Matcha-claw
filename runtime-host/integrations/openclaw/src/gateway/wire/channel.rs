@@ -18,7 +18,6 @@ pub(crate) const WEB_LOGIN_WAIT_METHOD: &str = "web.login.wait";
 pub(crate) const QR_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 pub(crate) const MAX_QR_DATA_URL_LENGTH: usize = 16_384;
 pub(crate) const CONFIG_GET_METHOD: &str = "config.get";
-pub(crate) const CONFIG_PATCH_METHOD: &str = "config.patch";
 pub(crate) const CONFIG_SCHEMA_LOOKUP_METHOD: &str = "config.schema.lookup";
 const MAX_SCHEMA_FIELDS: usize = 64;
 const MAX_SCHEMA_OPTIONS: usize = 64;
@@ -525,98 +524,6 @@ pub(crate) fn decode_config_document(
     ))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ChannelAccountReadback {
-    pub(crate) present: bool,
-    pub(crate) configured: bool,
-    pub(crate) running: bool,
-}
-
-pub(crate) fn decode_channel_account_readback(
-    response: GatewayResponse,
-    channel: &str,
-    account_id: &str,
-) -> Result<ChannelAccountReadback, WireError> {
-    let payload = match response {
-        GatewayResponse::Success {
-            payload: Some(Value::Object(payload)),
-            ..
-        } => payload,
-        _ => return Err(WireError::InvalidChannelConfigPatch),
-    };
-    let partial = read_status_partial(&payload)?;
-    validate_status_warnings(&payload)?;
-    let channels = payload
-        .get("channelAccounts")
-        .and_then(Value::as_object)
-        .ok_or(WireError::InvalidChannelConfigPatch)?;
-    let Some(accounts) = channels.get(channel) else {
-        return if partial {
-            Err(WireError::InvalidChannelConfigPatch)
-        } else {
-            Ok(ChannelAccountReadback {
-                present: false,
-                configured: false,
-                running: false,
-            })
-        };
-    };
-    let accounts = accounts
-        .as_array()
-        .ok_or(WireError::InvalidChannelConfigPatch)?;
-    let mut found = None;
-    for account in accounts {
-        let account = account
-            .as_object()
-            .ok_or(WireError::InvalidChannelConfigPatch)?;
-        let id = account
-            .get("accountId")
-            .and_then(Value::as_str)
-            .filter(|value| valid_string(value))
-            .ok_or(WireError::InvalidChannelConfigPatch)?;
-        if id != account_id {
-            continue;
-        }
-        if found.is_some() {
-            return Err(WireError::InvalidChannelConfigPatch);
-        }
-        let configured = account
-            .get("configured")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        found = Some(ChannelAccountReadback {
-            present: true,
-            configured,
-            running: account
-                .get("running")
-                .and_then(Value::as_bool)
-                .or_else(|| account.get("connected").and_then(Value::as_bool))
-                .unwrap_or(false),
-        });
-    }
-    Ok(found.unwrap_or(ChannelAccountReadback {
-        present: false,
-        configured: false,
-        running: false,
-    }))
-}
-
-fn read_status_partial(payload: &Map<String, Value>) -> Result<bool, WireError> {
-    match payload.get("partial") {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Bool(partial)) => Ok(*partial),
-        Some(_) => Err(WireError::InvalidChannelConfigPatch),
-    }
-}
-
-fn validate_status_warnings(payload: &Map<String, Value>) -> Result<(), WireError> {
-    match payload.get("warnings") {
-        None | Some(Value::Null) => Ok(()),
-        Some(Value::Array(warnings)) if warnings.iter().all(Value::is_string) => Ok(()),
-        Some(_) => Err(WireError::InvalidChannelConfigPatch),
-    }
-}
-
 pub(crate) fn config_patch_request(
     request_id: String,
     raw: Zeroizing<Vec<u8>>,
@@ -703,14 +610,6 @@ pub(crate) fn decode_channel_catalog(
             })
         })
         .collect()
-}
-
-pub(crate) fn decode_config_base_hash(
-    response: GatewayResponse,
-) -> Result<Zeroizing<Vec<u8>>, WireError> {
-    decode_config_snapshot(response)?
-        .base_hash
-        .ok_or(WireError::InvalidChannelConfigPatch)
 }
 
 pub(crate) fn is_config_conflict(error: &super::GatewayError) -> bool {
@@ -842,47 +741,6 @@ mod tests {
         assert_eq!(catalog[0].id, "telegram");
         assert!(!catalog[0].configured);
         assert!(!format!("{catalog:?}").contains("native warning"));
-    }
-
-    #[test]
-    fn readback_accepts_82_status_extras_for_reported_target_account() {
-        let readback = decode_channel_account_readback(
-            response(json!({
-                "partial": true,
-                "warnings": ["native warning"],
-                "eventLoop": {"degraded": true},
-                "channelMeta": [{"id":"telegram","label":"Telegram","detailLabel":"Bot API"}],
-                "channels": {"telegram": {"configured": false}},
-                "channelAccounts": {"telegram": [{"accountId": "primary", "configured": false, "running": true}]}
-            })),
-            "telegram",
-            "primary",
-        )
-        .unwrap();
-        assert_eq!(
-            readback,
-            ChannelAccountReadback {
-                present: true,
-                configured: false,
-                running: true,
-            }
-        );
-    }
-
-    #[test]
-    fn readback_rejects_unreported_target_during_partial_status() {
-        assert!(
-            decode_channel_account_readback(
-                response(json!({
-                    "partial": true,
-                    "warnings": ["native warning"],
-                    "channelAccounts": {"other": [{"accountId": "primary"}]}
-                })),
-                "telegram",
-                "primary",
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -1027,7 +885,7 @@ mod tests {
         assert!(!debug.contains("replace-path-canary"));
         assert!(debug.contains("replace_paths: 0"));
         let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
-        assert_eq!(encoded["method"], CONFIG_PATCH_METHOD);
+        assert_eq!(encoded["method"], "config.patch");
         assert!(encoded["params"].get("replacePaths").is_none());
         let raw: Value = serde_json::from_str(encoded["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(

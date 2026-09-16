@@ -1,17 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::provider::{
+    account_draft::ProviderAccountDraft,
+    auth::Resolver,
+    native::ProviderNativeConfigurationView,
+    runtime_identity::{
+        ProviderRuntimeIdentity, provider_runtime_identities, provider_runtime_identity,
+    },
+};
 use environment::{
-    ProviderAccount, ProviderAccountAuthMode, ProviderAccountId, ProviderAccountRevision,
-    ProviderCascade,
-};
-use openclaw::projection::provider_models::{
-    ProviderModelRuntimeIdentity, public_provider_model_identities, public_provider_model_identity,
-};
-use serde_json::Value;
-
-use crate::transport::provider_accounts::{
-    AccountDraft, ProviderAccountsDelivery,
-    private_auth::{Resolver, ResolverFailure},
+    ProviderAccount, ProviderAccountAuthMode, ProviderAccountId, ProviderAccountKind,
+    ProviderAccountRevision, ProviderApiProtocol, ProviderCascade, ProviderMediaApiProtocol,
+    provider_routing_account_ids,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +36,47 @@ pub(crate) struct ProviderAccountsOwner {
     private_resolver: Resolver,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderAccountView {
+    pub(crate) id: String,
+    pub(crate) provider: String,
+    pub(crate) label: String,
+    pub(crate) enabled: bool,
+    pub(crate) kind: &'static str,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) protocol: Option<&'static str>,
+    pub(crate) media_protocol: Option<&'static str>,
+    pub(crate) auth_mode: &'static str,
+    pub(crate) revision: u64,
+}
+
+impl ProviderAccountView {
+    pub(crate) fn from_account(account: &ProviderAccount) -> Self {
+        let configuration = account.configuration();
+        Self {
+            id: account.id().as_str().to_owned(),
+            provider: account
+                .provider()
+                .as_str()
+                .strip_prefix("provider:")
+                .expect("ProviderAccount provider references are canonical")
+                .to_owned(),
+            label: configuration.label().to_owned(),
+            enabled: configuration.enabled(),
+            kind: provider_account_kind_name(configuration.kind()),
+            endpoint: configuration
+                .endpoint()
+                .map(|endpoint| endpoint.as_str().to_owned()),
+            protocol: configuration.protocol().map(provider_api_protocol_name),
+            media_protocol: configuration
+                .media_protocol()
+                .map(provider_media_api_protocol_name),
+            auth_mode: provider_account_auth_mode_name(configuration.auth_mode()),
+            revision: account.revision().get(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProviderAccountsDesiredOutcome {
     Stored,
@@ -45,10 +86,36 @@ pub(super) enum ProviderAccountsDesiredOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderAccountsDelivery {
+    List(Vec<ProviderAccountView>),
+    Account(ProviderAccountView),
+    Stored {
+        account: ProviderAccountView,
+        persisted: ProviderPersistedOutcome,
+        native: ProviderNativeConfigurationView,
+        commit: ProviderCommitOutcome,
+    },
+    Deleted {
+        persisted: ProviderPersistedOutcome,
+        native: ProviderNativeConfigurationView,
+        commit: ProviderCommitOutcome,
+    },
+    Rejected,
+    Missing,
+    Unknown {
+        desired: ProviderAccountMutationKind,
+        persisted: ProviderPersistedOutcome,
+        native: ProviderNativeConfigurationView,
+        commit: ProviderCommitOutcome,
+    },
+    Unavailable,
+}
+
 pub(super) struct ProviderAccountsMutation {
     pub(super) desired: ProviderAccountsDesiredOutcome,
     pub(super) kind: Option<ProviderAccountMutationKind>,
-    pub(super) account: Option<Value>,
+    pub(super) account: Option<ProviderAccount>,
     pub(super) retired: Vec<ProviderAccount>,
     pub(super) required_auth_accounts: BTreeSet<ProviderAccountId>,
     pub(super) persisted: ProviderPersistedOutcome,
@@ -100,50 +167,30 @@ impl ProviderAccountsOwner {
         self.private_resolver = private_resolver;
     }
 
-    pub(crate) fn list(&mut self, cascade: &mut ProviderCascade) -> ProviderAccountsDelivery {
-        if cascade.reload().is_err() {
-            return ProviderAccountsDelivery::Unavailable;
-        }
-        ProviderAccountsDelivery::List(cascade.accounts().iter().map(account_json).collect())
-    }
-
-    pub(crate) fn get(
-        &mut self,
-        cascade: &mut ProviderCascade,
-        id: ProviderAccountId,
-    ) -> ProviderAccountsDelivery {
-        if cascade.reload().is_err() {
-            return ProviderAccountsDelivery::Unavailable;
-        }
-        cascade
-            .account(&id)
-            .map(account_json)
-            .map(ProviderAccountsDelivery::Account)
-            .unwrap_or(ProviderAccountsDelivery::Missing)
-    }
-
     pub(super) fn replace(
         &mut self,
         cascade: &mut ProviderCascade,
-        draft: AccountDraft,
+        draft: ProviderAccountDraft,
     ) -> ProviderAccountsMutation {
         if cascade.reload().is_err() {
             return ProviderAccountsMutation::completed(
                 ProviderAccountsDesiredOutcome::Unavailable,
             );
         }
-        let existing = cascade.account_for_draft(&draft).cloned();
+        let existing = match draft.existing_account(cascade.accounts()) {
+            Ok(existing) => existing.cloned(),
+            Err(_) => {
+                return ProviderAccountsMutation::completed(
+                    ProviderAccountsDesiredOutcome::Rejected,
+                );
+            }
+        };
         if existing.as_ref().is_some_and(|current| {
-            current.revision().get() == draft.revision()
-                && !crate::transport::provider_accounts::same_public_facts_for_owner(
-                    current, &draft,
-                )
+            current.revision().get() == draft.revision_value() && !draft.same_public_facts(current)
         }) {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         }
-        let Some(account) =
-            crate::transport::provider_accounts::materialize_for_owner(&draft, existing.as_ref())
-        else {
+        let Ok(account) = draft.materialize(existing.as_ref(), current_timestamp()) else {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         };
         if cascade.persist_account(account.clone()).is_err() {
@@ -168,7 +215,7 @@ impl ProviderAccountsOwner {
                                         profile_provider.as_str(),
                                         account.revision().get(),
                                     )
-                                    .map_err(PrivateProfileProjectionError::Resolver)
+                                    .map_err(PrivateProfileProjectionError::resolver)
                             }),
                         true,
                     ),
@@ -180,7 +227,7 @@ impl ProviderAccountsOwner {
             | ProviderAccountAuthMode::OAuthBrowser
             | ProviderAccountAuthMode::OAuthDevice => {
                 if account.configuration().enabled() {
-                    let identities = public_provider_model_identities(cascade.accounts())
+                    let identities = provider_runtime_identities(cascade.accounts())
                         .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey);
                     (
                         identities.and_then(|identities| {
@@ -200,7 +247,7 @@ impl ProviderAccountsOwner {
                                             profile_provider.as_str(),
                                             account.revision().get(),
                                         )
-                                        .map_err(PrivateProfileProjectionError::Resolver)
+                                        .map_err(PrivateProfileProjectionError::resolver)
                                 }),
                             true,
                         ),
@@ -214,7 +261,7 @@ impl ProviderAccountsOwner {
             .into_iter()
             .collect::<Vec<_>>();
         let required_auth_accounts = BTreeSet::from([account.id().clone()]);
-        let account = cascade.account(account.id()).map(account_json);
+        let account = cascade.account(account.id()).cloned();
         ProviderAccountsMutation {
             desired: account
                 .as_ref()
@@ -269,11 +316,8 @@ impl ProviderAccountsOwner {
         }
         let required_auth_accounts = cascade
             .routing()
-            .into_iter()
-            .flat_map(|routing| routing.routes())
-            .flat_map(|(_, route)| std::iter::once(route.primary()).chain(route.fallbacks()))
-            .map(|reference| reference.account_id().clone())
-            .collect();
+            .map(provider_routing_account_ids)
+            .unwrap_or_default();
         let auth_state_refresh_required = account_has_private_auth_profile(&account);
         ProviderAccountsMutation {
             desired: ProviderAccountsDesiredOutcome::Deleted,
@@ -288,7 +332,7 @@ impl ProviderAccountsOwner {
         }
     }
 
-    pub(crate) fn apply_private_profiles_for_provider_config(
+    pub(super) fn apply_private_profiles_for_provider_config(
         &self,
         accounts: &[ProviderAccount],
         required_account_ids: &BTreeSet<ProviderAccountId>,
@@ -296,7 +340,7 @@ impl ProviderAccountsOwner {
         if required_account_ids.is_empty() {
             return Ok(false);
         }
-        let identities = public_provider_model_identities(accounts)
+        let identities = provider_runtime_identities(accounts)
             .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)?;
         let mut applied = false;
         for account in accounts
@@ -313,7 +357,7 @@ impl ProviderAccountsOwner {
 
     fn apply_private_profile(
         &self,
-        identities: &BTreeMap<String, ProviderModelRuntimeIdentity>,
+        identities: &BTreeMap<String, ProviderRuntimeIdentity>,
         account: &ProviderAccount,
     ) -> Result<(), PrivateProfileProjectionError> {
         match account.configuration().auth_mode() {
@@ -338,7 +382,7 @@ impl ProviderAccountsOwner {
                         account.configuration().auth_mode(),
                         account.revision().get(),
                     )
-                    .map_err(PrivateProfileProjectionError::Resolver)
+                    .map_err(PrivateProfileProjectionError::resolver)
             }
         }
     }
@@ -347,32 +391,52 @@ impl ProviderAccountsOwner {
 pub(super) enum PrivateProfileProjectionError {
     CredentialMissing,
     InvalidProviderKey,
-    Resolver(ResolverFailure),
+    Resolver,
 }
 
 impl PrivateProfileProjectionError {
-    pub(super) fn diagnostic_detail(&self) -> String {
-        match self {
-            Self::CredentialMissing => "credential-missing".to_owned(),
-            Self::InvalidProviderKey => "invalid-provider-key".to_owned(),
-            Self::Resolver(error) => format!(
-                "{}{}",
-                error.reason(),
-                error
-                    .status()
-                    .map(|status| format!(" status={status}"))
-                    .unwrap_or_default()
-            ),
-        }
+    fn resolver(_error: crate::provider::auth::ResolverFailure) -> Self {
+        Self::Resolver
     }
-}
-
-fn account_json(account: &ProviderAccount) -> Value {
-    crate::transport::provider_accounts::account_json_for_owner(account)
 }
 
 fn credential_provider_name(account: &ProviderAccount) -> Option<&str> {
     account.provider().as_str().strip_prefix("provider:")
+}
+
+fn provider_account_kind_name(value: ProviderAccountKind) -> &'static str {
+    match value {
+        ProviderAccountKind::Chat => "chat",
+        ProviderAccountKind::Media => "media",
+    }
+}
+
+fn provider_api_protocol_name(value: ProviderApiProtocol) -> &'static str {
+    match value {
+        ProviderApiProtocol::AnthropicMessages => "anthropicMessages",
+        ProviderApiProtocol::GoogleGenerativeAi => "googleGenerativeAi",
+        ProviderApiProtocol::OpenAiCompletions => "openAiCompletions",
+        ProviderApiProtocol::OpenAiResponses => "openAiResponses",
+    }
+}
+
+fn provider_media_api_protocol_name(value: ProviderMediaApiProtocol) -> &'static str {
+    match value {
+        ProviderMediaApiProtocol::Google => "google",
+        ProviderMediaApiProtocol::OpenAi => "openAi",
+        ProviderMediaApiProtocol::OpenRouter => "openRouter",
+    }
+}
+
+fn provider_account_auth_mode_name(value: ProviderAccountAuthMode) -> &'static str {
+    match value {
+        ProviderAccountAuthMode::ApiKey => "apiKey",
+        ProviderAccountAuthMode::Token => "token",
+        ProviderAccountAuthMode::CliReuse => "cliReuse",
+        ProviderAccountAuthMode::OAuthBrowser => "oauthBrowser",
+        ProviderAccountAuthMode::OAuthDevice => "oauthDevice",
+        ProviderAccountAuthMode::Local => "local",
+    }
 }
 
 fn account_has_private_auth_profile(account: &ProviderAccount) -> bool {
@@ -390,29 +454,25 @@ fn account_uses_private_auth_mode(account: &ProviderAccount) -> bool {
 }
 
 fn private_profile_provider_key_for_account(account: &ProviderAccount) -> Result<String, ()> {
-    public_provider_model_identity(account)
+    provider_runtime_identity(account)
         .map(|identity| identity.provider_key().to_owned())
         .map_err(|_| ())
 }
 
 fn private_profile_provider_key<'a>(
-    identities: &'a BTreeMap<String, ProviderModelRuntimeIdentity>,
+    identities: &'a BTreeMap<String, ProviderRuntimeIdentity>,
     account: &ProviderAccount,
 ) -> Result<&'a str, ()> {
     identities
         .get(account.id().as_str())
-        .map(ProviderModelRuntimeIdentity::provider_key)
+        .map(ProviderRuntimeIdentity::provider_key)
         .ok_or(())
 }
 
-trait AccountDraftLookup {
-    fn account_for_draft(&self, draft: &AccountDraft) -> Option<&ProviderAccount>;
-}
-
-impl AccountDraftLookup for ProviderCascade {
-    fn account_for_draft(&self, draft: &AccountDraft) -> Option<&ProviderAccount> {
-        crate::transport::provider_accounts::account_id_for_owner(draft)
-            .ok()
-            .and_then(|id| self.account(&id))
-    }
+fn current_timestamp() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("unix:{millis}")
 }

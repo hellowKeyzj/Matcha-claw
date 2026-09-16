@@ -2,11 +2,12 @@ use tokio::sync::oneshot;
 
 use foundation::execution::QueryRoute;
 
-use serde_json::Value;
-
 use crate::{
-    HostState, RuntimeState, composition::OpenClawLogSnapshot,
-    runtime_driver::RuntimeDriverIdentity,
+    HostState, RuntimeState,
+    composition::{
+        OpenClawBrowserGatewayRequest, OpenClawLogSnapshot, OpenClawMcpAppGatewayRequest,
+    },
+    runtime::driver::RuntimeDriverIdentity,
 };
 
 use super::PeerKey;
@@ -52,22 +53,13 @@ pub(crate) enum PeerQuery {
         >,
     },
     OpenClawBrowserRequest {
-        method: String,
-        path: String,
-        query: Option<Value>,
-        body: Option<Value>,
-        timeout_ms: Option<u64>,
-        target: Option<String>,
-        node: Option<String>,
+        request: OpenClawBrowserGatewayRequest,
         reply: oneshot::Sender<
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
     OpenClawMcpAppRequest {
-        operation_id: String,
-        session_key: String,
-        view_id: String,
-        standalone: Option<bool>,
+        request: OpenClawMcpAppGatewayRequest,
         reply: oneshot::Sender<
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,

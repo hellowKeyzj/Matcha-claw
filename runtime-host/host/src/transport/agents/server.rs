@@ -14,7 +14,9 @@ use tokio::{
 
 use crate::{
     facade::AgentsHandle,
-    transport::{authorization::CapabilityDecisionVerifier, session_trace},
+    transport::{
+        common::authorization::CapabilityDecisionVerifier, sessions::trace as session_trace,
+    },
 };
 
 use super::{AgentsRequest, Delivery, map_outcome};

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DirectRuntimeHostDeliveryError,
   launchDirectRuntimeHost,
@@ -99,6 +99,10 @@ function readyFrame(): Uint8Array {
   return controlFrame({ version: 1, type: 'ready' });
 }
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 async function readyHost(child = createChild()) {
   const hostPromise = launchDirectRuntimeHost(createLaunch(), { spawn: () => child });
   await Promise.resolve();
@@ -107,8 +111,16 @@ async function readyHost(child = createChild()) {
 }
 
 describe('launchDirectRuntimeHost', () => {
-  it('spawns with sealed delivery options, frames bootstrap first, and becomes ready only from child stdout', async () => {
-    const launch = createLaunch();
+  it('spawns with inherited delivery environment, frames bootstrap first, and becomes ready only from child stdout', async () => {
+    vi.stubEnv('PATH', 'E:/parent/bin');
+    vi.stubEnv('APPDATA', 'E:/parent/appdata');
+    const launch = createLaunch({
+      environment: {
+        PATH: 'E:/runtime/bin',
+        MATCHA_RUNTIME_HOST_PORT: '51234',
+        MATCHA_RUNTIME_HOST_MODE: 'delivery',
+      },
+    });
     const child = createChild();
     const spawn = vi.fn<DirectRuntimeHostSpawner>(() => child);
     const hostPromise = launchDirectRuntimeHost(launch, { spawn });
@@ -122,7 +134,12 @@ describe('launchDirectRuntimeHost', () => {
     expect(spawn).toHaveBeenCalledOnce();
     expect(spawn).toHaveBeenCalledWith(launch.executablePath, [], {
       cwd: launch.workingDirectory,
-      env: launch.environment,
+      env: expect.objectContaining({
+        PATH: 'E:/runtime/bin',
+        APPDATA: 'E:/parent/appdata',
+        MATCHA_RUNTIME_HOST_PORT: '51234',
+        MATCHA_RUNTIME_HOST_MODE: 'delivery',
+      }),
       shell: false,
       stdio: 'pipe',
     });

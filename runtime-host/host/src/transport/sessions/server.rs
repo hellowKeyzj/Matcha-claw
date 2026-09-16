@@ -14,15 +14,15 @@ use tokio::{
 
 use crate::{
     composition::PeerHandle, facade::PlatformToolsHandle,
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 use super::{
-    DecodeError, SessionListDelivery, SessionListRequest, content, map_native_outcome, timeline,
+    DecodeError, SessionListDelivery, SessionListRequest, content, map_catalog_outcome, timeline,
 };
 use crate::transport::{
-    matcha_session_catalog, platform_tools, session_create, session_delete, session_permission,
-    session_trace, sessions::rename,
+    runtime::{peer_directory, platform_tools},
+    sessions::{create, delete, matcha_catalog, permission, rename, trace as session_trace},
 };
 
 #[cfg(test)]
@@ -117,9 +117,7 @@ async fn handle(
     session: crate::sessions::SessionHandle,
 ) -> Response {
     if request.method == "GET" && request.path == "/api/runtime-endpoints/list" {
-        let response =
-            crate::transport::peer_directory::server::handle(&request.headers, verifier, peer)
-                .await;
+        let response = peer_directory::server::handle(&request.headers, verifier, peer).await;
         return Response::from_peer_directory(response);
     }
     if request.method == "GET" && request.path == "/api/platform/tools" {
@@ -131,23 +129,15 @@ async fn handle(
         return Response::not_found();
     }
     if request.path == "/api/sessions/create" {
-        let response = session_create::server::handle(
-            &request.headers,
-            &request.body,
-            verifier,
-            session.clone(),
-        )
-        .await;
+        let response =
+            create::server::handle(&request.headers, &request.body, verifier, session.clone())
+                .await;
         return Response::from_create(response);
     }
     if request.path == "/api/sessions/delete" {
-        let response = session_delete::server::handle(
-            &request.headers,
-            &request.body,
-            verifier,
-            session.clone(),
-        )
-        .await;
+        let response =
+            delete::server::handle(&request.headers, &request.body, verifier, session.clone())
+                .await;
         return Response::from_delete(response);
     }
     if request.path == "/api/sessions/rename" {
@@ -157,17 +147,12 @@ async fn handle(
     }
     if request.path == "/api/sessions/permission" {
         return Response::from_permission(
-            session_permission::server::handle(
-                &request.headers,
-                &request.body,
-                verifier,
-                session.clone(),
-            )
-            .await,
+            permission::server::handle(&request.headers, &request.body, verifier, session.clone())
+                .await,
         );
     }
     if request.path == "/api/matcha/sessions" {
-        let response = matcha_session_catalog::server::handle(
+        let response = matcha_catalog::server::handle(
             &request.headers,
             &request.body,
             verifier,
@@ -209,7 +194,7 @@ async fn handle(
         };
     drop(verifier);
     let delivery = match session.list_openclaw_sessions().await {
-        Ok(result) => map_native_outcome(result),
+        Ok(result) => map_catalog_outcome(result),
         Err(_) => SessionListDelivery::Unavailable,
     };
     Response::from_delivery(delivery)
@@ -464,14 +449,14 @@ impl Response {
         }
     }
 
-    fn from_create(response: session_create::server::Response) -> Self {
+    fn from_create(response: create::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,
         }
     }
 
-    fn from_delete(response: session_delete::server::Response) -> Self {
+    fn from_delete(response: delete::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,
@@ -485,21 +470,21 @@ impl Response {
         }
     }
 
-    fn from_permission(response: session_permission::server::Response) -> Self {
+    fn from_permission(response: permission::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,
         }
     }
 
-    fn from_matcha_catalog(response: matcha_session_catalog::server::Response) -> Self {
+    fn from_matcha_catalog(response: matcha_catalog::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,
         }
     }
 
-    fn from_peer_directory(response: crate::transport::peer_directory::server::Response) -> Self {
+    fn from_peer_directory(response: peer_directory::server::Response) -> Self {
         Self {
             status: response.status,
             body: response.body,

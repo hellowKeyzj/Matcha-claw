@@ -7,18 +7,12 @@ use super::{
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     model_selection::{SessionModelSelectionCommand, SessionModelSelectionOutcome},
+    openclaw_direct,
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     state::{SessionDelta, SessionIdentity, SessionProvider, SessionSourceBinding, SessionState},
 };
-
-pub(crate) type OpenClawSessionResult<T> =
-    Result<T, crate::RuntimeSessionError<openclaw::port::OpenClawSessionError>>;
-pub(crate) type OpenClawInvocationResult<T> = Result<
-    platform::exchange::InvocationOutcome<T, openclaw::port::OpenClawSessionError>,
-    crate::RuntimeSessionError<openclaw::port::OpenClawSessionError>,
->;
 
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEnsureOutcome {
@@ -59,11 +53,7 @@ pub(crate) enum SessionSendRequest {
         command: SessionSendCommand,
         reply: oneshot::Sender<SessionSendOutcome>,
     },
-    OpenClawChat {
-        params: openclaw::session::protocol::ChatSendParams,
-        reply:
-            oneshot::Sender<OpenClawInvocationResult<openclaw::session::protocol::ChatSendResult>>,
-    },
+    OpenClaw(openclaw_direct::SendCommand),
 }
 
 pub(crate) enum SessionAbortRequest {
@@ -71,11 +61,7 @@ pub(crate) enum SessionAbortRequest {
         command: SessionAbortCommand,
         reply: oneshot::Sender<SessionAbortOutcome>,
     },
-    OpenClawChat {
-        params: openclaw::session::protocol::ChatAbortParams,
-        reply:
-            oneshot::Sender<OpenClawInvocationResult<openclaw::session::protocol::ChatAbortResult>>,
-    },
+    OpenClaw(openclaw_direct::AbortCommand),
 }
 
 pub(crate) enum SessionCommand {
@@ -87,10 +73,6 @@ pub(crate) enum SessionCommand {
         identity: SessionIdentity,
         event: SessionEvent,
         reply: oneshot::Sender<SessionIngestOutcome>,
-    },
-    Touch {
-        session_key: String,
-        reply: oneshot::Sender<()>,
     },
     Evict {
         session_key: String,
@@ -137,9 +119,6 @@ impl SessionCommand {
             Self::Ingest { reply, .. } => {
                 let _ = reply.send(SessionIngestOutcome::RuntimeNotFound);
             }
-            Self::Touch { reply, .. } => {
-                let _ = reply.send(());
-            }
             Self::Evict { reply, .. } => {
                 let _ = reply.send(SessionEvictOutcome::Failed);
             }
@@ -150,17 +129,13 @@ impl SessionCommand {
                 SessionSendRequest::Session { reply, .. } => {
                     let _ = reply.send(SessionSendOutcome::Unavailable);
                 }
-                SessionSendRequest::OpenClawChat { reply, .. } => {
-                    let _ = reply.send(Err(crate::RuntimeSessionError::RuntimeUnavailable));
-                }
+                SessionSendRequest::OpenClaw(command) => command.send_unavailable(),
             },
             Self::Abort { request } => match request {
                 SessionAbortRequest::Session { reply, .. } => {
                     let _ = reply.send(SessionAbortOutcome::Unavailable);
                 }
-                SessionAbortRequest::OpenClawChat { reply, .. } => {
-                    let _ = reply.send(Err(crate::RuntimeSessionError::RuntimeUnavailable));
-                }
+                SessionAbortRequest::OpenClaw(command) => command.send_unavailable(),
             },
             Self::Delete { reply, .. } => {
                 let _ = reply.send(SessionDeleteOutcome::Unknown);
@@ -192,7 +167,7 @@ impl SessionCommand {
                 identity.provider(),
                 event.binding.session_key(),
             )),
-            Self::Touch { session_key, .. } | Self::Evict { session_key, .. } => {
+            Self::Evict { session_key, .. } => {
                 CommandRoute::Keyed(inferred_session_lane_key(session_key))
             }
             Self::Delete {
@@ -232,13 +207,13 @@ impl SessionCommand {
                 SessionSendRequest::Session { command, .. } => CommandRoute::Keyed(
                     session_lane_key(command.endpoint.provider(), &command.session_key),
                 ),
-                SessionSendRequest::OpenClawChat { .. } => CommandRoute::Global,
+                SessionSendRequest::OpenClaw(_) => CommandRoute::Global,
             },
             Self::Abort { request } => match request {
                 SessionAbortRequest::Session { command, .. } => CommandRoute::Keyed(
                     session_lane_key(command.endpoint.provider(), &command.session_key),
                 ),
-                SessionAbortRequest::OpenClawChat { .. } => CommandRoute::Global,
+                SessionAbortRequest::OpenClaw(_) => CommandRoute::Global,
             },
             Self::Approval { command, .. } => CommandRoute::Keyed(session_lane_key(
                 command.endpoint.provider(),

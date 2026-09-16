@@ -187,7 +187,7 @@ function spawnDirectRuntimeHost(
   try {
     return createChild(launch.executablePath, [], {
       cwd: launch.workingDirectory,
-      env: launch.environment,
+      env: buildDirectRuntimeHostEnvironment(launch.environment),
       shell: false,
       stdio: 'pipe',
     });
@@ -199,6 +199,23 @@ function spawnDirectRuntimeHost(
     });
     throw new DirectRuntimeHostDeliveryError('SPAWN_FAILED');
   }
+}
+
+function buildDirectRuntimeHostEnvironment(
+  environment: DirectRuntimeHostLaunch['environment'],
+): Readonly<Record<string, string>> {
+  const inheritedEnvironment: Record<string, string> = {};
+  const launchEnvironmentNames = new Set(Object.keys(environment).map(normalizeEnvironmentName));
+  for (const [name, value] of Object.entries(process.env)) {
+    if (typeof value === 'string' && !launchEnvironmentNames.has(normalizeEnvironmentName(name))) {
+      inheritedEnvironment[name] = value;
+    }
+  }
+  return { ...inheritedEnvironment, ...environment };
+}
+
+function normalizeEnvironmentName(name: string): string {
+  return process.platform === 'win32' ? name.toUpperCase() : name;
 }
 
 function monitorChildExit(

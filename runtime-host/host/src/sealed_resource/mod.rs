@@ -1,33 +1,29 @@
+#[allow(dead_code)]
 mod agent_package;
+#[allow(dead_code)]
 mod agent_store;
 mod descriptor;
+#[allow(dead_code)]
 mod identity;
+#[allow(dead_code)]
 mod package;
 mod path;
+#[allow(dead_code)]
 mod store;
 
+use std::fmt;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-pub use agent_package::{
-    SealAgentPackageReceipt, SealedAgentFile, SealedAgentFileRequest, SealedAgentPackage,
-};
-pub use agent_store::{
-    RuntimeLocalAgentRoot, SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentPackageExport,
-    SealedAgentStore,
-};
-pub use descriptor::SealedSkillDescriptor;
-pub use identity::{AgentKey, SkillKey};
-pub use package::{
-    SealSkillPackageReceipt, SealedSkillFile, SealedSkillFileRequest, SealedSkillPackage,
-};
-pub use path::PackageRelativePath;
-pub use store::{
-    RuntimeLocalSkillRoot, SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillStore,
-};
+pub(crate) use agent_store::{SealedAgentCatalogEntry, SealedAgentPackageExport, SealedAgentStore};
+pub(crate) use descriptor::SealedSkillDescriptor;
+pub(crate) use identity::{AgentKey, SkillKey};
+pub(crate) use path::PackageRelativePath;
+pub(crate) use store::{SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillStore};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedResourceRead {
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct SealedResourceRead {
     content: Vec<u8>,
     metering_binding: Option<SealedResourceMeteringBinding>,
 }
@@ -52,8 +48,21 @@ impl SealedResourceRead {
     }
 }
 
+impl fmt::Debug for SealedResourceRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedResourceRead")
+            .field(
+                "content",
+                &format_args!("[REDACTED:{} bytes]", self.content.len()),
+            )
+            .field("metering_binding", &self.metering_binding)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedResourceMeteringBinding(String);
+pub(crate) struct SealedResourceMeteringBinding(String);
 
 impl SealedResourceMeteringBinding {
     pub(crate) fn openclaw(
@@ -106,28 +115,13 @@ struct SealedResourceMeteringPayload<'a> {
     usage: SealedResourceMeteringUse,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum RuntimeSkillTarget {
-    #[serde(rename = "openclaw")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SealedSkillTarget {
     OpenClaw,
 }
 
-impl RuntimeSkillTarget {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenClaw => "openclaw",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum RuntimeAgentTarget {
-    #[serde(rename = "openclaw")]
-    OpenClaw,
-}
-
-impl RuntimeAgentTarget {
-    pub fn as_str(self) -> &'static str {
+impl SealedSkillTarget {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::OpenClaw => "openclaw",
         }
@@ -135,7 +129,20 @@ impl RuntimeAgentTarget {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SealedResourceError {
+pub(crate) enum SealedAgentTarget {
+    OpenClaw,
+}
+
+impl SealedAgentTarget {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenClaw => "openclaw",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SealedResourceError {
     AlreadyExists,
     NotFound,
     Rejected,

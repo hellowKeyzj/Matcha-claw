@@ -2,7 +2,7 @@ use crate::sessions::state::{
     ApprovalPhase, ApprovalView, ItemStatus, MAX_CONTENT_REF_BYTES, MissingFact, OmissionReason,
     RunPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeView, SessionCompleteness,
     SessionContent, SessionFact, SessionIdentity, SessionItem, SessionProvider, SessionView,
-    SessionWindow, ToolPhase, ToolView,
+    SessionWindow, ToolPhase, ToolView, public_media_reference,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -685,7 +685,7 @@ impl OpenClawReplayWindow {
 }
 
 pub(crate) async fn load_openclaw(
-    ops: &dyn crate::runtime_driver::SessionOps,
+    ops: &dyn crate::runtime::driver::SessionOps,
     command: Command,
     epoch: u64,
 ) -> Outcome {
@@ -1726,10 +1726,17 @@ fn transcript_content(
                 media_type,
                 reference: Some(reference),
                 bytes: None,
-            } => Some(SessionContent::Media {
-                media_type: media_type.clone(),
-                reference: reference.clone(),
-            }),
+            } => public_media_reference(reference).map_or(
+                Some(SessionContent::Omitted {
+                    reason: OmissionReason::UnsafeMedia,
+                }),
+                |reference| {
+                    Some(SessionContent::Media {
+                        media_type: media_type.clone(),
+                        reference,
+                    })
+                },
+            ),
             openclaw::session_window::MessageContent::Media { .. } => {
                 Some(SessionContent::Omitted {
                     reason: OmissionReason::UnsafeMedia,
@@ -2349,7 +2356,7 @@ mod tests {
     use super::*;
     use crate::{
         RuntimeSessionError,
-        runtime_driver::{RuntimeDriverIdentity, SessionFuture, SessionOps},
+        runtime::driver::{RuntimeDriverIdentity, SessionFuture, SessionOps},
         sessions::{
             abort::{SessionAbortCommand, SessionAbortOutcome},
             create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome},

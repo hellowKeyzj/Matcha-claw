@@ -38,23 +38,16 @@ use super::{
     timeline::{self, ContentCommand, ContentOutcome},
 };
 use crate::{
-    RuntimeSessionError,
     provider::handle::ProviderHandle,
-    runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::{LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure},
+    runtime::directory::RuntimeDriverDirectory,
+    runtime::driver::{
+        LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure,
+    },
 };
 use matcha_agent::session::{
     client::AppServerClientError as MatchaAppServerClientError,
     model::{SessionId as MatchaSessionId, WorkerRuntimeState as MatchaWorkerRuntimeState},
 };
-use openclaw::{
-    port::OpenClawSessionError,
-    session::protocol::{
-        ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-        ChatSendResult,
-    },
-};
-use platform::exchange::InvocationOutcome;
 
 pub(crate) struct SessionSnapshot {
     pub(crate) states: HashMap<String, SessionState>,
@@ -265,78 +258,18 @@ impl SessionShared {
         ops.load_session_content(command).await
     }
 
-    async fn handle_list_openclaw(
-        &self,
-    ) -> Result<
-        openclaw::session::protocol::SessionsListResult,
-        RuntimeSessionError<openclaw::port::OpenClawSessionError>,
-    > {
-        let driver = self
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
-            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
-        let Some(ops) = driver.session_ops() else {
-            return Err(RuntimeSessionError::RuntimeUnavailable);
-        };
-        ops.list_sessions(Default::default()).await
-    }
-
-    async fn handle_openclaw_history(
-        &self,
-        params: ChatHistoryParams,
-    ) -> Result<ChatHistoryResult, RuntimeSessionError<OpenClawSessionError>> {
-        let driver = self
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
-            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
-        let Some(ops) = driver.session_ops() else {
-            return Err(RuntimeSessionError::RuntimeUnavailable);
-        };
-        ops.history(params).await
-    }
-
-    async fn handle_openclaw_send(
-        &self,
-        params: ChatSendParams,
-    ) -> Result<
-        InvocationOutcome<ChatSendResult, OpenClawSessionError>,
-        RuntimeSessionError<OpenClawSessionError>,
-    > {
-        let driver = self
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
-            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
-        let Some(ops) = driver.session_ops() else {
-            return Err(RuntimeSessionError::RuntimeUnavailable);
-        };
-        ops.send_open_claw_chat(params).await
-    }
-
-    async fn handle_openclaw_abort(
-        &self,
-        params: ChatAbortParams,
-    ) -> Result<
-        InvocationOutcome<ChatAbortResult, OpenClawSessionError>,
-        RuntimeSessionError<OpenClawSessionError>,
-    > {
-        let driver = self
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
-            .map_err(|_| RuntimeSessionError::RuntimeUnavailable)?;
-        let Some(ops) = driver.session_ops() else {
-            return Err(RuntimeSessionError::RuntimeUnavailable);
-        };
-        ops.abort_open_claw_chat(params).await
-    }
-
-    async fn handle_list_matcha(&self) -> crate::matcha_session_catalog::Outcome {
+    async fn handle_list_matcha(&self) -> crate::sessions::matcha_session_catalog::Outcome {
         let driver = match self
             .running_session_driver(Some(RuntimeDriverIdentity::matcha_agent().endpoint()))
         {
             Ok(driver) => driver,
-            Err(_) => return crate::matcha_session_catalog::Outcome::Unavailable,
+            Err(_) => return crate::sessions::matcha_session_catalog::Outcome::Unavailable,
         };
         let Some(ops) = driver.session_ops() else {
-            return crate::matcha_session_catalog::Outcome::Unavailable;
+            return crate::sessions::matcha_session_catalog::Outcome::Unavailable;
         };
         let outcome = ops.list_matcha_sessions().await;
-        if let crate::matcha_session_catalog::Outcome::Listed(sessions) = &outcome {
+        if let crate::sessions::matcha_session_catalog::Outcome::Listed(sessions) = &outcome {
             self.store_matcha_catalog_bindings(sessions).await;
         }
         outcome
@@ -344,11 +277,11 @@ impl SessionShared {
 
     async fn store_matcha_catalog_bindings(
         &self,
-        sessions: &[crate::matcha_session_catalog::Session],
+        sessions: &[crate::sessions::matcha_session_catalog::Session],
     ) {
         let states = sessions
             .iter()
-            .filter_map(|session| matcha_catalog_state(&session.endpoint_session_id, self.epoch))
+            .filter_map(|session| matcha_catalog_state(session.endpoint_session_id(), self.epoch))
             .collect::<Vec<_>>();
         if states.is_empty() {
             return;
@@ -375,16 +308,16 @@ impl SessionShared {
 
     async fn handle_matcha_history(
         &self,
-        command: crate::matcha_history::Command,
-    ) -> crate::matcha_history::Outcome {
+        command: crate::sessions::matcha_history::Command,
+    ) -> crate::sessions::matcha_history::Outcome {
         let driver = match self
             .running_session_driver(Some(RuntimeDriverIdentity::matcha_agent().endpoint()))
         {
             Ok(driver) => driver,
-            Err(_) => return crate::matcha_history::Outcome::Unavailable,
+            Err(_) => return crate::sessions::matcha_history::Outcome::Unavailable,
         };
         let Some(ops) = driver.session_ops() else {
-            return crate::matcha_history::Outcome::Unavailable;
+            return crate::sessions::matcha_history::Outcome::Unavailable;
         };
         ops.load_matcha_history(command).await
     }
@@ -444,16 +377,20 @@ impl SessionShared {
     async fn handle_global_command(&self, command: SessionCommand) {
         match command {
             SessionCommand::Send {
-                request: SessionSendRequest::OpenClawChat { params, reply },
+                request: SessionSendRequest::OpenClaw(command),
             } => {
-                let outcome = self.handle_openclaw_send(params).await;
-                let _ = reply.send(outcome);
+                let outcome =
+                    super::openclaw_direct::send_chat(&self.runtime_directory, command.params)
+                        .await;
+                let _ = command.reply.send(outcome);
             }
             SessionCommand::Abort {
-                request: SessionAbortRequest::OpenClawChat { params, reply },
+                request: SessionAbortRequest::OpenClaw(command),
             } => {
-                let outcome = self.handle_openclaw_abort(params).await;
-                let _ = reply.send(outcome);
+                let outcome =
+                    super::openclaw_direct::abort_chat(&self.runtime_directory, command.params)
+                        .await;
+                let _ = command.reply.send(outcome);
             }
             command => command.send_unavailable(),
         }
@@ -467,13 +404,8 @@ impl SessionShared {
             SessionQuery::GetSession { session_key, reply } => {
                 let _ = reply.send(self.get_session_view(&session_key));
             }
-            SessionQuery::ListOpenClaw { reply } => {
-                let outcome = self.handle_list_openclaw().await;
-                let _ = reply.send(outcome);
-            }
-            SessionQuery::OpenClawHistory { params, reply } => {
-                let outcome = self.handle_openclaw_history(params).await;
-                let _ = reply.send(outcome);
+            SessionQuery::OpenClaw(query) => {
+                super::openclaw_direct::reply_query(&self.runtime_directory, query).await;
             }
             SessionQuery::ListMatcha { reply } => {
                 let outcome = self.handle_list_matcha().await;
@@ -509,10 +441,6 @@ impl SessionLane {
                 let outcome = self.handle_ingest(shared, &key, identity, event).await;
                 let _ = reply.send(outcome);
             }
-            Touch { session_key, reply } => {
-                self.handle_touch(session_key);
-                let _ = reply.send(());
-            }
             Evict { reply, .. } => {
                 let outcome = self.handle_evict(shared, key).await;
                 let _ = reply.send(outcome);
@@ -526,9 +454,13 @@ impl SessionLane {
                     let outcome = self.handle_send(shared, command).await;
                     let _ = reply.send(outcome);
                 }
-                SessionSendRequest::OpenClawChat { params, reply } => {
-                    let outcome = shared.handle_openclaw_send(params).await;
-                    let _ = reply.send(outcome);
+                SessionSendRequest::OpenClaw(command) => {
+                    let outcome = super::openclaw_direct::send_chat(
+                        &shared.runtime_directory,
+                        command.params,
+                    )
+                    .await;
+                    let _ = command.reply.send(outcome);
                 }
             },
             Abort { request } => match request {
@@ -536,9 +468,13 @@ impl SessionLane {
                     let outcome = self.handle_abort(shared, command).await;
                     let _ = reply.send(outcome);
                 }
-                SessionAbortRequest::OpenClawChat { params, reply } => {
-                    let outcome = shared.handle_openclaw_abort(params).await;
-                    let _ = reply.send(outcome);
+                SessionAbortRequest::OpenClaw(command) => {
+                    let outcome = super::openclaw_direct::abort_chat(
+                        &shared.runtime_directory,
+                        command.params,
+                    )
+                    .await;
+                    let _ = command.reply.send(outcome);
                 }
             },
             Delete { command, reply } => {
@@ -786,8 +722,6 @@ impl SessionLane {
             }
         }
     }
-
-    fn handle_touch(&mut self, _session_key: String) {}
 
     async fn handle_evict(
         &mut self,
@@ -1281,15 +1215,14 @@ impl SessionLane {
                 };
                 let _ = reply.send(outcome);
             }
-            SessionQuery::OpenClawHistory { params, reply } => {
-                let outcome = shared.handle_openclaw_history(params).await;
-                let _ = reply.send(outcome);
+            SessionQuery::OpenClaw(query) => {
+                super::openclaw_direct::reply_query(&shared.runtime_directory, query).await;
             }
             SessionQuery::MatchaHistory { command, reply } => {
                 let outcome = shared.handle_matcha_history(command).await;
                 let _ = reply.send(outcome);
             }
-            query @ (SessionQuery::ListOpenClaw { .. } | SessionQuery::ListMatcha { .. }) => {
+            query @ SessionQuery::ListMatcha { .. } => {
                 shared.handle_global_query(query).await;
             }
         }

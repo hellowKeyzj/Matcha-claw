@@ -369,19 +369,6 @@ impl HydratedMessage {
         self
     }
 
-    pub(crate) fn try_new(role: HydratedMessageRole, text: String) -> Result<Self, DecodeFailure> {
-        let text = bounded_text(text).ok_or(DecodeFailure::TextTooLarge)?;
-        Ok(Self {
-            id: None,
-            parent_id: None,
-            timestamp: None,
-            origin_message_id: None,
-            source_index: None,
-            role,
-            content: vec![HydratedContentBlock::Text { text }],
-            tool_call_id: None,
-        })
-    }
 
     pub(crate) fn try_from_parts(
         id: Option<String>,

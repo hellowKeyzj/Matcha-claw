@@ -1,6 +1,5 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     path::{Component, Path},
@@ -16,7 +15,7 @@ use crate::{
         CronHistoryCommand, CronScheduleCommand, CronUpdateCommand,
     },
     facade::CronHandle,
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 pub(crate) const PATH: &str = "/api/cron/broker";
@@ -81,7 +80,6 @@ pub(crate) async fn handle(
     let request = match decode_request(value) {
         Ok(request) => request,
         Err(DecodeError::Invalid) => return super::server::Response::bad_request(),
-        Err(DecodeError::Unauthorized) => return super::server::Response::unauthorized(),
     };
     let scope = request.scope();
     let decision = {
@@ -100,7 +98,7 @@ pub(crate) async fn handle(
     };
     if decision.principal() != PRINCIPAL
         || decision.correlation() != request.request_id
-        || decision.revision() != context_hash(&request)
+        || decision.revision() != request.context_hash()
     {
         return super::server::Response::unauthorized();
     }
@@ -162,7 +160,7 @@ pub(crate) async fn handle(
     }
 
     let outcome = execute(cron, request).await;
-    let retryable = matches!(&outcome, CronBrokerOutcome::Unavailable { .. });
+    let retryable = outcome.is_retryable();
     if let Some(entry) = ledger.lock().await.entries.get_mut(&operation_id) {
         entry.state = if retryable {
             LedgerState::Unavailable
@@ -176,11 +174,7 @@ pub(crate) async fn handle(
 async fn execute(cron: CronHandle, request: CronBrokerRequest) -> CronBrokerOutcome {
     match request.operation {
         CronBrokerOperation::List => {
-            let outcome = match cron.list().await {
-                Ok(jobs) => crate::cron::CronListOutcome::Listed(jobs),
-                Err(failure) => failure.into(),
-            };
-            CronBrokerOutcome::Applied(CronBrokerResult::List(outcome))
+            CronBrokerOutcome::Applied(CronBrokerResult::List(cron.list().await))
         }
         CronBrokerOperation::History { command } => {
             CronBrokerOutcome::Applied(CronBrokerResult::History(cron.load_history(command).await))
@@ -190,19 +184,29 @@ async fn execute(cron: CronHandle, request: CronBrokerRequest) -> CronBrokerOutc
         }
         CronBrokerOperation::Update {
             command,
-            expected_revision: _,
-        } => CronBrokerOutcome::Applied(CronBrokerResult::Job(cron.update(command).await)),
-        CronBrokerOperation::Delete {
-            command,
-            expected_revision: _,
-        } => CronBrokerOutcome::Applied(CronBrokerResult::Delete(cron.delete(command).await)),
+            expected_config_revision,
+        } => {
+            let command = match command.with_expected_config_revision(expected_config_revision) {
+                Ok(command) => command,
+                Err(_) => {
+                    return CronBrokerOutcome::Rejected {
+                        code: "INVALID_EXPECTED_CONFIG_REVISION",
+                        message: "Cron expectedConfigRevision is invalid",
+                    };
+                }
+            };
+            CronBrokerOutcome::Applied(CronBrokerResult::Job(cron.update(command).await))
+        }
+        CronBrokerOperation::Delete => CronBrokerOutcome::Conflict {
+            code: "DELETE_PRECONDITION_UNSUPPORTED",
+            message: "Cron delete cannot safely apply expectedRevision",
+        },
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DecodeError {
     Invalid,
-    Unauthorized,
 }
 
 #[derive(Deserialize)]
@@ -248,7 +252,7 @@ fn decode_request(value: Value) -> Result<CronBrokerRequest, DecodeError> {
         "input": wire.input,
         "expectedRevision": wire.expected_revision,
     });
-    if sha256_hex(&canonical_json(&payload)) != wire.payload_hash {
+    if sha256_hex(&crate::cron::canonical_json(&payload)) != wire.payload_hash {
         return Err(DecodeError::Invalid);
     }
     let context = serde_json::json!({
@@ -264,7 +268,7 @@ fn decode_request(value: Value) -> Result<CronBrokerRequest, DecodeError> {
         "input": wire.input,
         "payloadHash": wire.payload_hash,
     });
-    if sha256_hex(&canonical_json(&context)) != wire.context_hash {
+    if sha256_hex(&crate::cron::canonical_json(&context)) != wire.context_hash {
         return Err(DecodeError::Invalid);
     }
 
@@ -303,34 +307,22 @@ fn decode_request(value: Value) -> Result<CronBrokerRequest, DecodeError> {
             }
         }
         "update" => {
-            let expected_revision = wire
-                .expected_revision
-                .as_deref()
-                .filter(|value| opaque(value))
-                .ok_or(DecodeError::Invalid)?
-                .to_owned();
+            let expected_revision = expected_revision(wire.expected_revision.as_deref())?;
             let target = job_target(&wire.target)?;
             CronBrokerOperation::Update {
                 command: update_command(target.job_id, wire.input)?,
-                expected_revision,
+                expected_config_revision: expected_revision,
             }
         }
         "delete" => {
-            let expected_revision = wire
-                .expected_revision
-                .as_deref()
-                .filter(|value| opaque(value))
-                .ok_or(DecodeError::Invalid)?
-                .to_owned();
+            let expected_revision = expected_revision(wire.expected_revision.as_deref())?;
             let target = job_target(&wire.target)?;
             if !is_empty_object(&wire.input) {
                 return Err(DecodeError::Invalid);
             }
-            CronBrokerOperation::Delete {
-                command: CronDeleteCommand::try_new(target.job_id)
-                    .map_err(|_| DecodeError::Invalid)?,
-                expected_revision,
-            }
+            CronDeleteCommand::try_new(target.job_id).map_err(|_| DecodeError::Invalid)?;
+            let _ = expected_revision;
+            CronBrokerOperation::Delete
         }
         _ => return Err(DecodeError::Invalid),
     };
@@ -364,6 +356,13 @@ fn job_target(value: &Value) -> Result<JobTarget, DecodeError> {
         return Err(DecodeError::Invalid);
     }
     Ok(target)
+}
+
+fn expected_revision(value: Option<&str>) -> Result<String, DecodeError> {
+    value
+        .filter(|value| opaque(value))
+        .map(str::to_owned)
+        .ok_or(DecodeError::Invalid)
 }
 
 #[derive(Deserialize)]
@@ -549,66 +548,9 @@ fn canonical_cwd(value: &str) -> bool {
             .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
 }
 
-fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("JSON string is serializable"),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Value::Object(values) => {
-            let mut keys = values.keys().collect::<Vec<_>>();
-            keys.sort();
-            format!(
-                "{{{}}}",
-                keys.into_iter()
-                    .map(|key| format!(
-                        "{}:{}",
-                        serde_json::to_string(key).expect("JSON key is serializable"),
-                        canonical_json(&values[key])
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }
-    }
-}
-
-fn context_hash(request: &CronBrokerRequest) -> String {
-    let value = serde_json::json!({
-        "version": 1,
-        "requestId": request.request_id,
-        "operationId": request.operation_id,
-        "operation": operation_name(&request.operation),
-        "sessionId": request.context.session_id,
-        "cwd": request.context.cwd,
-        "owner": request.context.owner,
-        "expectedRevision": request.context.expected_revision,
-        "target": request.context.target,
-        "input": request.context.input,
-        "payloadHash": request.payload_hash,
-    });
-    sha256_hex(&canonical_json(&value))
-}
-
-fn operation_name(operation: &CronBrokerOperation) -> &'static str {
-    match operation {
-        CronBrokerOperation::List => "list",
-        CronBrokerOperation::History { .. } => "history",
-        CronBrokerOperation::Create { .. } => "create",
-        CronBrokerOperation::Update { .. } => "update",
-        CronBrokerOperation::Delete { .. } => "delete",
-    }
-}
-
 fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
     Sha256::digest(value.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -626,16 +568,7 @@ fn now_millis() -> u64 {
 
 fn project_outcome(outcome: CronBrokerOutcome) -> super::server::Response {
     let (status, body) = match outcome {
-        CronBrokerOutcome::Applied(result) => match project_result(result) {
-            Some(result) => (
-                200,
-                serde_json::json!({ "outcome": "applied", "result": result }),
-            ),
-            None => unknown_response(
-                "NATIVE_OUTCOME_UNKNOWN",
-                "Cron result could not be projected",
-            ),
-        },
+        CronBrokerOutcome::Applied(result) => project_result(result),
         CronBrokerOutcome::Rejected { code, message } => rejected_response(code, message),
         CronBrokerOutcome::Conflict { code, message } => (
             409,
@@ -644,57 +577,105 @@ fn project_outcome(outcome: CronBrokerOutcome) -> super::server::Response {
                 "error": { "code": code, "message": message, "retryable": false }
             }),
         ),
-        CronBrokerOutcome::Unknown { code, message } => unknown_response(code, message),
-        CronBrokerOutcome::Unavailable { code, message } => (
-            503,
-            serde_json::json!({
-                "outcome": "unavailable",
-                "error": { "code": code, "message": message, "retryable": true }
-            }),
-        ),
     };
     super::server::Response { status, body }
 }
 
-fn project_result(result: CronBrokerResult) -> Option<Value> {
+fn project_result(result: CronBrokerResult) -> (u16, Value) {
     match result {
         CronBrokerResult::List(outcome) => match outcome {
             crate::cron::CronListOutcome::Listed(jobs) => {
-                let jobs = jobs
+                let Some(jobs) = jobs
                     .jobs
                     .into_iter()
                     .map(project_job)
-                    .collect::<Option<Vec<_>>>()?;
-                Some(serde_json::json!({ "jobs": jobs }))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return unknown_response(
+                        "NATIVE_OUTCOME_UNKNOWN",
+                        "Cron list result could not be projected",
+                    );
+                };
+                applied_response(serde_json::json!({ "jobs": jobs }))
             }
-            crate::cron::CronListOutcome::Unavailable => None,
-            crate::cron::CronListOutcome::Rejected | crate::cron::CronListOutcome::Protocol => None,
+            crate::cron::CronListOutcome::Unavailable => {
+                unavailable_response("CRON_UNAVAILABLE", "Cron list is unavailable")
+            }
+            crate::cron::CronListOutcome::Rejected => {
+                rejected_response("CRON_REJECTED", "Cron list was rejected")
+            }
+            crate::cron::CronListOutcome::Protocol => {
+                unknown_response("CRON_PROTOCOL", "Cron list response is invalid")
+            }
         },
         CronBrokerResult::History(outcome) => match outcome {
-            crate::cron::CronHistoryOutcome::Loaded(history) => Some(
-                serde_json::to_value(crate::openclaw_session::ChatHistoryResponse::from(history))
-                    .ok()?,
+            crate::cron::CronHistoryOutcome::Loaded(history) => {
+                applied_response(project_history(history))
+            }
+            crate::cron::CronHistoryOutcome::Rejected => {
+                rejected_response("CRON_HISTORY_REJECTED", "Cron history was rejected")
+            }
+            crate::cron::CronHistoryOutcome::Protocol => {
+                unknown_response("CRON_HISTORY_PROTOCOL", "Cron history response is invalid")
+            }
+            crate::cron::CronHistoryOutcome::Unavailable => {
+                unavailable_response("CRON_HISTORY_UNAVAILABLE", "Cron history is unavailable")
+            }
+            crate::cron::CronHistoryOutcome::Deadline => unavailable_response(
+                "CRON_HISTORY_DEADLINE",
+                "Cron history deadline was exceeded",
             ),
-            _ => None,
         },
         CronBrokerResult::Job(outcome) => match outcome {
-            crate::cron::CronJobMutationOutcome::Applied(job) => project_job(*job),
-            _ => None,
-        },
-        CronBrokerResult::Delete(outcome) => match outcome {
-            crate::cron::CronDeleteOutcome::Applied(receipt) => {
-                Some(serde_json::json!({ "removed": receipt.removed }))
+            crate::cron::CronJobMutationOutcome::Applied(job) => match project_job(*job) {
+                Some(job) => applied_response(job),
+                None => unknown_response(
+                    "NATIVE_OUTCOME_UNKNOWN",
+                    "Cron mutation result could not be projected",
+                ),
+            },
+            crate::cron::CronJobMutationOutcome::Rejected => {
+                rejected_response("CRON_MUTATION_REJECTED", "Cron mutation was rejected")
             }
-            _ => None,
+            crate::cron::CronJobMutationOutcome::OutcomeUnknown => unknown_response(
+                "CRON_MUTATION_OUTCOME_UNKNOWN",
+                "Cron mutation outcome is unknown",
+            ),
+            crate::cron::CronJobMutationOutcome::Unavailable => {
+                unavailable_response("CRON_MUTATION_UNAVAILABLE", "Cron mutation is unavailable")
+            }
         },
     }
 }
 
-fn project_job(job: openclaw::gateway::wire::CronJob) -> Option<Value> {
+fn project_job(job: crate::cron::CronJobView) -> Option<Value> {
     let revision = job.updated_at_ms.to_string();
-    let mut value = serde_json::to_value(super::JobResponse::try_from(job).ok()?).ok()?;
+    let mut value = super::project_job_response(super::JobResponse::try_from(job).ok()?);
     value["revision"] = Value::String(revision);
     Some(value)
+}
+
+fn project_history(history: crate::cron::CronHistoryView) -> Value {
+    serde_json::json!({
+        "messages": history.messages.into_iter().map(project_history_message).collect::<Vec<_>>()
+    })
+}
+
+fn project_history_message(message: crate::cron::CronHistoryMessageView) -> Value {
+    serde_json::json!({
+        "role": match message.role {
+            crate::cron::CronHistoryRole::User => "user",
+            crate::cron::CronHistoryRole::Assistant => "assistant",
+        },
+        "text": message.text,
+    })
+}
+
+fn applied_response(result: Value) -> (u16, Value) {
+    (
+        200,
+        serde_json::json!({ "outcome": "applied", "result": result }),
+    )
 }
 
 fn rejected_response(code: &'static str, message: &'static str) -> (u16, Value) {
@@ -703,6 +684,16 @@ fn rejected_response(code: &'static str, message: &'static str) -> (u16, Value) 
         serde_json::json!({
             "outcome": "rejected",
             "error": { "code": code, "message": message, "retryable": false }
+        }),
+    )
+}
+
+fn unavailable_response(code: &'static str, message: &'static str) -> (u16, Value) {
+    (
+        503,
+        serde_json::json!({
+            "outcome": "unavailable",
+            "error": { "code": code, "message": message, "retryable": true }
         }),
     )
 }

@@ -193,7 +193,11 @@ impl NativeToolchain {
 
     pub fn bundled_uv_path_candidates(&self) -> Vec<PathBuf> {
         let executable = self.platform.bundled_uv_name();
-        let target = format!("{}-{}", self.platform.target_name(), self.arch);
+        let target = format!(
+            "{}-{}",
+            self.platform.target_name(),
+            resource_arch_key(&self.arch)
+        );
         let mut candidates = Vec::new();
 
         if let Some(path) = self.uv_override.as_ref() {
@@ -368,6 +372,14 @@ impl fmt::Debug for NativeToolchain {
     }
 }
 
+fn resource_arch_key(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => arch,
+    }
+}
+
 fn push_candidate(candidates: &mut Vec<PathBuf>, path: &Path, base: &Path) {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -433,17 +445,34 @@ mod tests {
             platform: ToolchainPlatform,
             commands: Arc<FakeCommands>,
         ) -> NativeToolchain {
-            NativeToolchain::new(platform, "x64", self.path.clone(), None, commands)
+            self.runtime_with_arch(platform, "x64", commands)
+        }
+
+        fn runtime_with_arch(
+            &self,
+            platform: ToolchainPlatform,
+            arch: impl Into<String>,
+            commands: Arc<FakeCommands>,
+        ) -> NativeToolchain {
+            NativeToolchain::new(platform, arch, self.path.clone(), None, commands)
         }
 
         fn bundled_uv(&self, platform: ToolchainPlatform) -> PathBuf {
+            self.bundled_uv_for_arch(platform, "x64")
+        }
+
+        fn bundled_uv_for_arch(&self, platform: ToolchainPlatform, arch: &str) -> PathBuf {
             let executable = match platform {
                 ToolchainPlatform::Windows => "uv.exe",
                 ToolchainPlatform::Unix => "uv",
             };
             self.path
                 .join("resources/bin")
-                .join(format!("{}-x64", platform.target_name()))
+                .join(format!(
+                    "{}-{}",
+                    platform.target_name(),
+                    resource_arch_key(arch)
+                ))
                 .join(executable)
         }
     }
@@ -599,6 +628,41 @@ mod tests {
         assert!(candidates.contains(&root.path.join("resources/bin/win32-x64/uv.exe")));
         assert!(candidates.contains(&root.path.join("bin/uv.exe")));
         assert_eq!(format!("{runtime:?}"), "NativeToolchain([REDACTED])");
+    }
+
+    #[test]
+    fn native_candidates_use_electron_resource_arch_keys() {
+        let root = TestRoot::new();
+        for (platform, arch, expected_arch) in [
+            (ToolchainPlatform::Windows, "x86_64", "x64"),
+            (ToolchainPlatform::Windows, "aarch64", "arm64"),
+            (ToolchainPlatform::Windows, "x64", "x64"),
+            (ToolchainPlatform::Windows, "arm64", "arm64"),
+            (ToolchainPlatform::Unix, "x86_64", "x64"),
+            (ToolchainPlatform::Unix, "aarch64", "arm64"),
+            (ToolchainPlatform::Unix, "riscv64", "riscv64"),
+        ] {
+            let runtime = NativeToolchain::new(
+                platform,
+                arch,
+                root.path.clone(),
+                None,
+                Arc::new(UnsupportedToolchainCommandPort),
+            );
+            let candidates = runtime.bundled_uv_path_candidates();
+            let executable = platform.bundled_uv_name();
+            let expected_target = format!("{}-{}", platform.target_name(), expected_arch);
+
+            assert!(
+                candidates.contains(
+                    &root
+                        .path
+                        .join("resources/bin")
+                        .join(expected_target)
+                        .join(executable)
+                )
+            );
+        }
     }
 
     #[tokio::test]

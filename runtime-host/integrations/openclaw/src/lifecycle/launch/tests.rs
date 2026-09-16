@@ -73,16 +73,6 @@ fn input(root: &TestRoot) -> OpenClawLaunchInput {
     }
 }
 
-fn write_settings(root: &TestRoot, proxy: &str) {
-    fs::write(
-        root.path().join(SETTINGS_DESIRED_FILE),
-        format!(
-            r#"{{"revision":1,"browserMode":"relay","proxy":{proxy},"launchAtStartup":false,"gatewayAutoStart":true,"effect":"confirmed","correlations":[]}}"#
-        ),
-    )
-    .unwrap();
-}
-
 #[tokio::test]
 async fn launch_attempt_uses_only_the_legacy_gateway_contract() {
     let root = TestRoot::new();
@@ -304,15 +294,21 @@ fn malformed_canonical_config_fails_closed_without_materializing_an_attempt() {
     for contents in [b"not-json".as_slice(), br#"[]"#] {
         let root = TestRoot::new();
         fs::write(root.path().join(CANONICAL_CONFIG_FILE), contents).unwrap();
-        let mut launch = input(&root).try_into_launch_factory().unwrap();
-
-        let failure = match launch.prepare_attempt() {
-            Ok(_) => panic!("malformed canonical config must fail closed"),
-            Err(failure) => failure,
+        let rendered = match input(&root).try_into_launch_factory() {
+            Ok(mut launch) => {
+                let failure = match launch.prepare_attempt() {
+                    Ok(_) => panic!("malformed canonical config must fail closed"),
+                    Err(failure) => failure,
+                };
+                assert_eq!(failure, LaunchFailure::ResourceUnavailable);
+                format!("{failure:?}")
+            }
+            Err(error) => {
+                assert_eq!(error, LaunchError::InvalidInput);
+                format!("{error:?} {error}")
+            }
         };
 
-        assert_eq!(failure, LaunchFailure::ResourceUnavailable);
-        let rendered = format!("{failure:?}");
         assert!(!rendered.contains(std::str::from_utf8(contents).unwrap()));
         assert!(!rendered.contains(root.path().to_string_lossy().as_ref()));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
@@ -426,6 +422,9 @@ fn launch_environment_strips_legacy_systemd_and_non_legacy_material() {
         ),
         (MATCHA_SEALED_TOKEN.into(), "stale-sealed-token".into()),
         (MATCHA_SEALED_RUNTIME.into(), "stale-sealed-runtime".into()),
+        (OPENCLAW_PROXY_URL.into(), "stale-openclaw-proxy".into()),
+        ("HTTP_PROXY".into(), "stale-http-proxy".into()),
+        ("NO_PROXY".into(), "stale-no-proxy".into()),
         ("SAFE_ENV".into(), "kept".into()),
     ]);
 
@@ -433,42 +432,6 @@ fn launch_environment_strips_legacy_systemd_and_non_legacy_material() {
         environment,
         vec![(OsString::from("SAFE_ENV"), OsString::from("kept"))]
     );
-}
-
-#[test]
-fn disabled_proxy_blanks_proxy_environment() {
-    let root = TestRoot::new();
-    write_settings(
-        &root,
-        r#"{"enabled":false,"server":"http://proxy.test:8080","bypassRules":"localhost;127.0.0.1"}"#,
-    );
-
-    assert_eq!(
-        proxy_environment(&root.state_dir).unwrap(),
-        blank_proxy_environment()
-    );
-}
-
-#[test]
-fn enabled_proxy_matches_legacy_gateway_environment() {
-    let root = TestRoot::new();
-    write_settings(
-        &root,
-        r#"{"enabled":true,"server":"proxy.test:8080","bypassRules":"localhost; 127.0.0.1\n::1"}"#,
-    );
-
-    let expected = proxy_environment_keys()
-        .into_iter()
-        .map(|key| {
-            let value = if key.eq_ignore_ascii_case(NO_PROXY) {
-                "localhost,127.0.0.1,::1"
-            } else {
-                "http://proxy.test:8080"
-            };
-            (key.into(), value.into())
-        })
-        .collect::<Vec<(OsString, OsString)>>();
-    assert_eq!(proxy_environment(&root.state_dir).unwrap(), expected);
 }
 
 fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
@@ -489,8 +452,7 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
             "--allow-unconfigured".into(),
         ]
     );
-    let mut expected_environment =
-        base_launch_environment(&root.working_directory, &root.state_dir).unwrap();
+    let mut expected_environment = base_launch_environment(&root.working_directory).unwrap();
     expected_environment.extend([
         (OPENCLAW_GATEWAY_PORT.into(), "18789".into()),
         (OPENCLAW_GATEWAY_TOKEN.into(), SECRET_CANARY.into()),
@@ -512,12 +474,10 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
     assert_eq!(spec.public_environment(), expected_environment);
     assert_eq!(spec.stdio(), OPENCLAW_STDIO);
 
-    let mut required_environment = vec![
+    for required in [
         (UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_INSTALL_MIRROR_URL),
         (UV_INDEX_URL, UV_INDEX_MIRROR_URL),
-    ];
-    required_environment.extend(proxy_environment_keys().into_iter().map(|key| (key, "")));
-    for required in required_environment {
+    ] {
         assert!(
             spec.public_environment()
                 .contains(&(required.0.into(), required.1.into())),

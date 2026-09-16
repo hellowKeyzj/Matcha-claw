@@ -143,8 +143,14 @@ impl CronProvider {
         &self,
         job_id: String,
         patch: wire::cron::CronJobPatch,
+        expected_config_revision: Option<String>,
     ) -> CronMutationOutcome<wire::cron::CronJob> {
-        let request = match wire::cron::update_request(next_request_id("update"), job_id, patch) {
+        let request = match wire::cron::update_request(
+            next_request_id("update"),
+            job_id,
+            patch,
+            expected_config_revision,
+        ) {
             Ok(request) => request,
             Err(_) => return CronMutationOutcome::Rejected,
         };

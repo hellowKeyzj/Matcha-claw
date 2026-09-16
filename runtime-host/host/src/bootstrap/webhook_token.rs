@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use runtime_host::transport::team_trigger::WebhookToken;
+use runtime_host::transport::team::trigger::WebhookToken;
 use zeroize::Zeroize;
 
 use super::BootstrapError;

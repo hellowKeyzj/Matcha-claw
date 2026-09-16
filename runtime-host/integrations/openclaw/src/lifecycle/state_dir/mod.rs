@@ -3,8 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
 pub(crate) use auth_profiles::{AgentId, PrivateAuthProfiles};
 
+#[cfg(test)]
 mod auth_profiles;
 #[cfg(unix)]
 mod posix;
@@ -61,6 +63,7 @@ impl CanonicalStateDir {
             .replace_regular_file_bounded(name, contents, byte_limit)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_auth_profiles(
         &self,
         agent: &AgentId,

@@ -344,24 +344,12 @@ impl PluginProjection {
             next.iter().cloned(),
         );
         let store = OpenClawConfigStore::new(self.state_dir.clone());
-        store
-            .update_private_document(|document| {
-                let mut changed = false;
-                for plugin_id in &transition.next_enabled_plugin_ids {
-                    changed |= set_plugin_enabled_config(document, plugin_id, true);
-                    changed |= super::plugin_lifecycle::apply_enable_config(document, plugin_id);
-                }
-                for plugin_id in &transition.newly_disabled_plugin_ids {
-                    changed |= set_plugin_enabled_config(document, plugin_id, false);
-                    changed |= super::plugin_lifecycle::apply_disable_config(document, plugin_id);
-                }
-                if changed {
-                    OpenClawConfigMutation::changed()
-                } else {
-                    OpenClawConfigMutation::unchanged()
-                }
-            })
-            .map_err(|_| PluginError::Config)?;
+        super::plugin_lifecycle::apply_transition_config(
+            &store,
+            &transition,
+            set_plugin_enabled_config,
+        )
+        .map_err(|_| PluginError::Config)?;
         for plugin_id in &transition.newly_disabled_plugin_ids {
             self.apply_companion(plugin_id, false)?;
             self.apply_manifest_skills(plugin_id, false)?;

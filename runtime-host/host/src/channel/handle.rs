@@ -5,11 +5,12 @@ use zeroize::Zeroizing;
 use super::{
     ChannelKey,
     catalog::{ChannelCatalogOutcome, ChannelConfigureFormOutcome, ChannelConfigureOutcome},
-    command::{ChannelCommand, ChannelOwnerUnavailable, ChannelQuery},
+    command::{ChannelCommand, ChannelOwnerUnavailable},
     config_read as channel_config_read,
     control::ChannelControlAction,
     delete as channel_delete,
     login::Outcome as ChannelLoginOutcome,
+    query::ChannelQuery,
     status::{
         ChannelPairingApprovalOutcome, ChannelPairingOutcome, ChannelSnapshotOutcome,
         ChannelStatusFailure, ChannelStatusOutcome,
@@ -78,11 +79,11 @@ impl ChannelHandle {
             .await
             .is_err()
         {
-            return channel_config_read::Outcome::Unknown;
+            return channel_config_read::Outcome::Unavailable;
         }
         reply_rx
             .await
-            .unwrap_or(channel_config_read::Outcome::Unknown)
+            .unwrap_or(channel_config_read::Outcome::Unavailable)
     }
 
     pub(crate) async fn configure(
@@ -421,26 +422,5 @@ impl ChannelHandle {
             );
             ChannelOwnerUnavailable
         })?
-    }
-
-    pub(crate) async fn shutdown(&self) -> Result<(), ChannelOwnerUnavailable> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.owner
-            .send_command(ChannelCommand::Shutdown(reply))
-            .await
-            .map_err(|_| {
-                openclaw::operations::channel_config::channel_trace(
-                    "host.actor.delivery",
-                    "outcome=owner_unavailable",
-                );
-                ChannelOwnerUnavailable
-            })?;
-        reply_rx.await.map_err(|_| {
-            openclaw::operations::channel_config::channel_trace(
-                "host.actor.delivery",
-                "outcome=owner_unavailable",
-            );
-            ChannelOwnerUnavailable
-        })
     }
 }

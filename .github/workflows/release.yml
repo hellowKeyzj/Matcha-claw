@@ -128,6 +128,10 @@ jobs:
         if: matrix.platform == 'mac'
         run: pnpm run uv:download:mac
 
+      - name: Download Bun binaries for macOS
+        if: matrix.platform == 'mac'
+        run: pnpm run bun:download:mac
+
       - name: Download uv binaries for Windows
         if: matrix.platform == 'win'
         run: pnpm run uv:download:win
@@ -135,6 +139,10 @@ jobs:
       - name: Download uv binaries for Linux
         if: matrix.platform == 'linux'
         run: pnpm run uv:download:linux
+
+      - name: Download Bun binaries for Linux
+        if: matrix.platform == 'linux'
+        run: pnpm run bun:download:linux
 
       # macOS specific steps
       - name: Free disk space (macOS)
@@ -588,10 +596,20 @@ jobs:
           subject-path: ${{ env.WINDOWS_NSIS_EVIDENCE_RECEIPT }}
 
       # Linux specific steps
+      - name: Install Linux ARM64 Rust linker
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
       - name: Build Linux
         if: matrix.platform == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: node scripts/build-runtime-host-native.mjs --platform linux --arch x64 && node scripts/build-runtime-host-native.mjs --platform linux --arch arm64 && pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
 
       - name: Prove Linux x64 extracted package runtime host

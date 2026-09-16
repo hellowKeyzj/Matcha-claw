@@ -1,62 +1,61 @@
-use environment::Connector;
+use environment::connectors::Connector;
 use foundation::execution::{CommandRoute, QueryRoute};
 use tokio::sync::oneshot;
 
-use crate::external_connectors::{
-    CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, OpenClawMcpServersOutcome,
-    ProbeOutcome, SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget,
-    SessionStatusOutcome, SessionStatusTarget, StatusOutcome,
+use super::receipt::{
+    ConnectorCatalogReceipt, ConnectorGetReceipt, ConnectorListReceipt, ConnectorMutationReceipt,
+    ConnectorProbeReceipt, ConnectorSessionMcpServerEnabledReceipt,
+    ConnectorSessionMcpServerEnabledTarget, ConnectorSessionStatusReceipt, ConnectorSessionTarget,
+    ConnectorStatusReceipt, OpenClawMcpServersReceipt,
 };
-use crate::transport::provider_accounts::private_auth::Resolver;
+use crate::provider::auth::Resolver;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ConnectorOwnerKey {
-    Installation,
-}
+pub(crate) enum ConnectorOwnerKey {}
 
 pub(crate) enum ConnectorCommand {
     Upsert {
         connector: Box<Connector>,
-        reply: oneshot::Sender<MutationOutcome>,
+        reply: oneshot::Sender<ConnectorMutationReceipt>,
     },
     Remove {
         id: String,
-        reply: oneshot::Sender<MutationOutcome>,
+        reply: oneshot::Sender<ConnectorMutationReceipt>,
     },
     ConfigurePrivateResolver {
         resolver: Resolver,
         reply: oneshot::Sender<()>,
     },
     SetSessionMcpServerEnabled {
-        target: SessionMcpServerEnabledTarget,
-        reply: oneshot::Sender<SessionMcpServerEnabledOutcome>,
+        target: ConnectorSessionMcpServerEnabledTarget,
+        reply: oneshot::Sender<ConnectorSessionMcpServerEnabledReceipt>,
     },
 }
 
 pub(crate) enum ConnectorQuery {
     List {
-        reply: oneshot::Sender<ListOutcome>,
+        reply: oneshot::Sender<ConnectorListReceipt>,
     },
     Catalog {
-        reply: oneshot::Sender<CatalogOutcome>,
+        reply: oneshot::Sender<ConnectorCatalogReceipt>,
     },
     Status {
-        reply: oneshot::Sender<StatusOutcome>,
+        reply: oneshot::Sender<ConnectorStatusReceipt>,
     },
     Get {
         id: String,
-        reply: oneshot::Sender<GetOutcome>,
+        reply: oneshot::Sender<ConnectorGetReceipt>,
     },
     Probe {
         id: String,
-        reply: oneshot::Sender<ProbeOutcome>,
+        reply: oneshot::Sender<ConnectorProbeReceipt>,
     },
     SessionStatus {
-        target: SessionStatusTarget,
-        reply: oneshot::Sender<SessionStatusOutcome>,
+        target: ConnectorSessionTarget,
+        reply: oneshot::Sender<ConnectorSessionStatusReceipt>,
     },
     OpenClawMcpServers {
-        reply: oneshot::Sender<OpenClawMcpServersOutcome>,
+        reply: oneshot::Sender<OpenClawMcpServersReceipt>,
     },
 }
 

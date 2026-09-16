@@ -1103,10 +1103,7 @@ fn push_delivery_media(
 
 fn safe_delivery_media_reference(reference: &str) -> Option<String> {
     let value = reference.trim();
-    if value.is_empty()
-        || value.len() > MAX_DELIVERY_MEDIA_REF_BYTES
-        || value.chars().any(char::is_control)
-    {
+    if !valid_media_reference_shape(value, MAX_DELIVERY_MEDIA_REF_BYTES) {
         return None;
     }
     if value.starts_with(OUTGOING_MEDIA_PREFIX) {
@@ -1115,7 +1112,12 @@ fn safe_delivery_media_reference(reference: &str) -> Option<String> {
     if value.starts_with(OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH) {
         return Some(format!("/{value}"));
     }
-    (value.starts_with("https://") || value.starts_with("http://")).then(|| value.to_owned())
+    ((value.starts_with("https://") || value.starts_with("http://")) && !value.contains(['?', '#']))
+        .then(|| value.to_owned())
+}
+
+fn valid_media_reference_shape(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 fn explicit_media_type(object: &Map<String, Value>) -> Option<String> {
@@ -1786,5 +1788,68 @@ pub fn direction(value: &str) -> Option<Direction> {
         "older" => Some(Direction::Older),
         "newer" => Some(Direction::Newer),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn message_tool_delivery_omits_tokenized_public_media_urls() {
+        let window = decode_window(
+            json!({
+                "messages": [{
+                    "role": "toolResult",
+                    "toolName": "message",
+                    "content": [{
+                        "type": "toolResult",
+                        "toolName": "message",
+                        "result": { "ok": true }
+                    }],
+                    "details": {
+                        "sourceReplySink": "internal-ui",
+                        "sourceReply": {
+                            "text": "uploaded",
+                            "mediaUrls": [
+                                "https://cdn.example.test/image.png?token=secret",
+                                "https://cdn.example.test/image.png#secret",
+                                "https://cdn.example.test/image.png",
+                                "/api/chat/media/outgoing/session/image.png",
+                                "api/chat/media/outgoing/session/relative.png"
+                            ]
+                        }
+                    }
+                }]
+            }),
+            PageRequest::latest(),
+        )
+        .unwrap();
+
+        let media = message_tool_delivery_media(&window);
+        let references = media
+            .iter()
+            .map(|media| media.reference())
+            .collect::<Vec<_>>();
+
+        assert!(!references.contains(&"https://cdn.example.test/image.png?token=secret"));
+        assert!(!references.contains(&"https://cdn.example.test/image.png#secret"));
+        assert!(references.contains(&"https://cdn.example.test/image.png"));
+        assert!(references.contains(&"/api/chat/media/outgoing/session/image.png"));
+        assert!(references.contains(&"/api/chat/media/outgoing/session/relative.png"));
+    }
+
+    fn message_tool_delivery_media(window: &SessionWindow) -> &[MessageToolDeliveryMedia] {
+        window
+            .messages()
+            .iter()
+            .flat_map(|message| message.content())
+            .find_map(|content| match content {
+                MessageContent::MessageToolDelivery { media, .. } => Some(media.as_slice()),
+                _ => None,
+            })
+            .unwrap()
     }
 }

@@ -92,9 +92,7 @@ impl TeamProvider {
         &self,
         request: TeamRecoveryRequest,
     ) -> Result<TeamRecoveryOutcome, ReadFailure> {
-        self.list_agents()
-            .await
-            .map(|agents| recovery::recover_agents(agents.as_slice(), request))
+        self.list_agents().await.map(|agents| agents.recover(request))
     }
 
     /// Rebuilds a receipt only from a native `agents.list` readback. The durable

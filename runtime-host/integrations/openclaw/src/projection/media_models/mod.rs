@@ -6,11 +6,14 @@ pub use catalog::{
     ProviderModels,
 };
 
+use crate::projection::config_store::OpenClawConfigDocument;
+#[cfg(test)]
 use crate::projection::config_store::{
     OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigUpdate,
 };
 
 impl MediaProviderCatalog {
+    #[cfg(test)]
     pub(crate) fn apply(
         &self,
         store: &OpenClawConfigStore,
@@ -28,7 +31,7 @@ impl MediaProviderCatalog {
 
     pub(crate) fn apply_to_document(
         &self,
-        document: &mut crate::projection::config_store::OpenClawConfigDocument,
+        document: &mut OpenClawConfigDocument,
     ) -> bool {
         plugin_config::apply(self, document)
     }

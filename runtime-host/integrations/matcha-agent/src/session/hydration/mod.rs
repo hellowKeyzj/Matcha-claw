@@ -340,10 +340,11 @@ mod tests {
 
     #[test]
     fn close_failure_does_not_replace_a_provisional_complete_snapshot() {
-        let snapshot = HydrationSnapshot::new(
-            vec![HydratedMessage::try_new(HydratedMessageRole::User, "visible".into()).unwrap()],
-            HydrationWindow::new(1, 0, 1),
-        );
+        let snapshot = hydrate_lines(
+            &[String::from(r#"{"message":{"role":"user","content":"visible"}}"#)],
+            HydrationWindowRequest::latest(),
+        )
+        .unwrap();
         assert!(matches!(
             crate::session::client::outcome_after_cleanup(
                 HydrationResult::Complete(snapshot),
@@ -367,11 +368,15 @@ mod tests {
 
     #[test]
     fn debug_redacts_message_text() {
-        let message = HydratedMessage::try_new(
-            HydratedMessageRole::Assistant,
-            "secret-canary cwd-canary path-canary".into(),
+        let message = hydrate_lines(
+            &[String::from(
+                r#"{"message":{"role":"assistant","content":"secret-canary cwd-canary path-canary"}}"#,
+            )],
+            HydrationWindowRequest::latest(),
         )
-        .unwrap();
+        .unwrap()
+        .messages()[0]
+            .clone();
         let rendered = format!("{message:?}");
         for canary in ["secret-canary", "cwd-canary", "path-canary"] {
             assert!(!rendered.contains(canary));

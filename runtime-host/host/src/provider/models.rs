@@ -6,21 +6,19 @@ use environment::{
     ProviderAccountAuthMode, ProviderAccountId, ProviderApiProtocol, ProviderCascade,
     ProviderCascadeFault, ProviderModel, ProviderModelCapability, ProviderModelStoreFault,
 };
-use openclaw::{
-    port::ProviderNativeConfigurationEffect,
-    projection::provider_models::public_provider_model_identities,
-};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    provider::auth::Resolver,
     provider::{
         accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
         model_reference,
+        native::ProviderNativeConfigurationView,
+        runtime_identity::{provider_runtime_identities, provider_runtime_identity},
     },
     sessions::model_selection::{
         MatchaProviderRuntimeConfig, MatchaProviderSecret, SessionModelSelectionDiagnostic,
     },
-    transport::provider_accounts::private_auth::Resolver,
 };
 
 const MATCHA_PROVIDER_FINGERPRINT_PREFIX: &str = "matcha-provider:v1:";
@@ -39,18 +37,18 @@ const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderModelDraft {
-    pub model_id: String,
-    pub capabilities: Vec<ProviderModelCapability>,
-    pub context_window: Option<u64>,
-    pub max_tokens: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub aspect_ratio: Option<String>,
-    pub resolution: Option<String>,
-    pub quality: Option<String>,
+    pub(crate) model_id: String,
+    pub(crate) capabilities: Vec<ProviderModelCapability>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) timeout_ms: Option<u64>,
+    pub(crate) aspect_ratio: Option<String>,
+    pub(crate) resolution: Option<String>,
+    pub(crate) quality: Option<String>,
 }
 
 impl ProviderModelDraft {
-    pub fn materialize(
+    pub(crate) fn materialize(
         self,
         account_id: ProviderAccountId,
         runtime_provider_key: Option<&str>,
@@ -71,23 +69,54 @@ impl ProviderModelDraft {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderModelView {
-    pub account_id: String,
-    pub label: String,
-    pub model_id: String,
-    pub capabilities: Vec<ProviderModelCapability>,
-    pub context_window: Option<u64>,
-    pub max_tokens: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub aspect_ratio: Option<String>,
-    pub resolution: Option<String>,
-    pub quality: Option<String>,
+    pub(crate) account_id: String,
+    pub(crate) label: String,
+    pub(crate) model_id: String,
+    pub(crate) capabilities: Vec<&'static str>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) timeout_ms: Option<u64>,
+    pub(crate) aspect_ratio: Option<String>,
+    pub(crate) resolution: Option<String>,
+    pub(crate) quality: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderModelDiscoveryView {
+    pub(crate) model_id: String,
+    pub(crate) capabilities: Vec<&'static str>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) timeout_ms: Option<u64>,
+    pub(crate) aspect_ratio: Option<String>,
+    pub(crate) resolution: Option<String>,
+    pub(crate) quality: Option<String>,
+}
+
+impl ProviderModelDiscoveryView {
+    fn from_draft(draft: ProviderModelDraft) -> Self {
+        Self {
+            model_id: draft.model_id,
+            capabilities: draft
+                .capabilities
+                .into_iter()
+                .map(provider_model_capability_name)
+                .collect(),
+            context_window: draft.context_window,
+            max_tokens: draft.max_tokens,
+            timeout_ms: draft.timeout_ms,
+            aspect_ratio: draft.aspect_ratio,
+            resolution: draft.resolution,
+            quality: draft.quality,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectableProviderModelView {
-    pub model: ProviderModelView,
-    pub selection_id: String,
-    pub model_references: Vec<String>,
+    pub(crate) model: ProviderModelView,
+    pub(crate) selection_id: String,
+    pub(crate) model_references: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,7 +159,7 @@ pub enum ProviderModelSelectableOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderModelDiscoverOutcome {
-    Discovered(Vec<ProviderModelDraft>),
+    Discovered(Vec<ProviderModelDiscoveryView>),
     Rejected,
     Unavailable,
 }
@@ -141,7 +170,7 @@ pub enum ProviderModelReplaceOutcome {
     /// never runtime acceptance, health, or observation.
     DesiredStored {
         persisted: ProviderPersistedOutcome,
-        native: ProviderNativeConfigurationEffect,
+        native: ProviderNativeConfigurationView,
         commit: ProviderCommitOutcome,
     },
     Rejected,
@@ -150,10 +179,11 @@ pub enum ProviderModelReplaceOutcome {
 
 pub(crate) struct ProviderModelOwner {
     private_resolver: Resolver,
-    openclaw: Option<std::sync::Arc<crate::composition::OpenClawInstance>>,
+    openclaw: Option<std::sync::Arc<crate::runtime::adapters::openclaw::OpenClawInstance>>,
 }
 
 impl ProviderModelOwner {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
             private_resolver: Resolver::disabled(),
@@ -162,7 +192,7 @@ impl ProviderModelOwner {
     }
 
     pub(crate) fn with_openclaw(
-        openclaw: std::sync::Arc<crate::composition::OpenClawInstance>,
+        openclaw: std::sync::Arc<crate::runtime::adapters::openclaw::OpenClawInstance>,
     ) -> Self {
         Self {
             private_resolver: Resolver::disabled(),
@@ -172,42 +202,6 @@ impl ProviderModelOwner {
 
     pub(crate) fn set_private_resolver(&mut self, private_resolver: Resolver) {
         self.private_resolver = private_resolver;
-    }
-
-    fn views(&self, cascade: &ProviderCascade) -> Vec<ProviderModelView> {
-        cascade
-            .catalog()
-            .models()
-            .iter()
-            .filter_map(|model| view_for(cascade, model))
-            .collect()
-    }
-
-    fn selectable(
-        &self,
-        cascade: &ProviderCascade,
-        capability: ProviderModelCapability,
-    ) -> Option<Vec<SelectableProviderModelView>> {
-        let identities = public_provider_model_identities(cascade.accounts()).ok()?;
-        Some(
-            cascade
-                .catalog()
-                .selectable_for(capability)
-                .into_iter()
-                .filter_map(|model| {
-                    let account = cascade.account(model.account_id())?;
-                    let identity = identities.get(account.id().as_str())?;
-                    let view = view_for(cascade, model)?;
-                    let model_reference =
-                        identity.runtime_model_ref(account.configuration().kind(), &view.model_id);
-                    Some(SelectableProviderModelView {
-                        model: view,
-                        selection_id: model.selection_id(),
-                        model_references: vec![model_reference],
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
     }
 
     pub(crate) fn resolve_selection(
@@ -274,7 +268,7 @@ impl ProviderModelOwner {
         let account_id =
             ProviderAccountId::try_new(selection.view.account_id.clone()).map_err(|_| ())?;
         let account = cascade.account(&account_id).ok_or(())?;
-        let identities = public_provider_model_identities(cascade.accounts()).map_err(|_| ())?;
+        let identities = provider_runtime_identities(cascade.accounts()).map_err(|_| ())?;
         let identity = identities.get(account.id().as_str()).ok_or(())?;
         Ok(identity.runtime_model_ref(account.configuration().kind(), &selection.view.model_id))
     }
@@ -292,26 +286,6 @@ impl ProviderModelOwner {
             provider_fingerprint: matcha_provider_fingerprint(account),
             provider_runtime: matcha_provider_runtime_config(account, &self.private_resolver)?,
         })
-    }
-
-    pub(super) fn list(&mut self, cascade: &mut ProviderCascade) -> ProviderModelListOutcome {
-        if cascade.reload().is_err() {
-            return ProviderModelListOutcome::Unavailable;
-        }
-        ProviderModelListOutcome::Available(self.views(cascade))
-    }
-
-    pub(super) fn selectable_models(
-        &mut self,
-        cascade: &mut ProviderCascade,
-        capability: ProviderModelCapability,
-    ) -> ProviderModelSelectableOutcome {
-        if cascade.reload().is_err() {
-            return ProviderModelSelectableOutcome::Unavailable;
-        }
-        self.selectable(cascade, capability)
-            .map(ProviderModelSelectableOutcome::Available)
-            .unwrap_or(ProviderModelSelectableOutcome::Unavailable)
     }
 
     pub(crate) async fn discover(
@@ -349,9 +323,7 @@ impl ProviderModelOwner {
             let Some(openclaw) = &self.openclaw else {
                 return ProviderModelDiscoverOutcome::Unavailable;
             };
-            let Ok(identity) =
-                openclaw::projection::provider_models::public_provider_model_identity(&account)
-            else {
+            let Ok(identity) = provider_runtime_identity(&account) else {
                 return ProviderModelDiscoverOutcome::Rejected;
             };
             let Ok(models) = openclaw
@@ -379,12 +351,12 @@ impl ProviderModelOwner {
                     }
                 }
             }
-            return ProviderModelDiscoverOutcome::Discovered(drafts);
+            return ProviderModelDiscoverOutcome::Discovered(discovery_views(drafts));
         }
         let private_resolver = self.private_resolver.clone();
         tokio::task::spawn_blocking(move || {
             match discover_provider_models(&account, &private_resolver) {
-                Ok(models) => ProviderModelDiscoverOutcome::Discovered(models),
+                Ok(models) => ProviderModelDiscoverOutcome::Discovered(discovery_views(models)),
                 Err(ProviderModelDiscoveryError::Rejected) => {
                     ProviderModelDiscoverOutcome::Rejected
                 }
@@ -423,7 +395,7 @@ impl ProviderModelOwner {
             return ProviderModelReplaceOutcome::Rejected;
         };
         let runtime_provider_key = if account.configuration().enabled() {
-            match public_provider_model_identities(cascade.accounts()) {
+            match provider_runtime_identities(cascade.accounts()) {
                 Ok(identities) => identities
                     .get(account_id.as_str())
                     .map(|identity| identity.provider_key().to_owned()),
@@ -460,7 +432,7 @@ impl ProviderModelOwner {
             } else {
                 ProviderPersistedOutcome::Unknown
             },
-            native: ProviderNativeConfigurationEffect::Unavailable,
+            native: ProviderNativeConfigurationView::unavailable(),
             commit: if confirmed {
                 ProviderCommitOutcome::Committed
             } else {
@@ -474,6 +446,13 @@ impl ProviderModelOwner {
 enum ProviderModelDiscoveryError {
     Rejected,
     Unavailable,
+}
+
+fn discovery_views(drafts: Vec<ProviderModelDraft>) -> Vec<ProviderModelDiscoveryView> {
+    drafts
+        .into_iter()
+        .map(ProviderModelDiscoveryView::from_draft)
+        .collect()
 }
 
 fn discover_provider_models(
@@ -887,7 +866,12 @@ fn view_for(cascade: &ProviderCascade, model: &ProviderModel) -> Option<Provider
         account_id: account.id().as_str().to_owned(),
         label: account.configuration().label().to_owned(),
         model_id: model.model_id().to_owned(),
-        capabilities: model.capabilities().to_vec(),
+        capabilities: model
+            .capabilities()
+            .iter()
+            .copied()
+            .map(provider_model_capability_name)
+            .collect(),
         context_window: model.context_window(),
         max_tokens: model.max_tokens(),
         timeout_ms: model.timeout_ms(),
@@ -895,6 +879,20 @@ fn view_for(cascade: &ProviderCascade, model: &ProviderModel) -> Option<Provider
         resolution: model.resolution().map(str::to_owned),
         quality: model.quality().map(str::to_owned),
     })
+}
+
+pub(crate) const fn provider_model_capability_name(
+    capability: ProviderModelCapability,
+) -> &'static str {
+    match capability {
+        ProviderModelCapability::Chat => "chat",
+        ProviderModelCapability::ImageUnderstand => "imageUnderstand",
+        ProviderModelCapability::ImageGenerate => "imageGenerate",
+        ProviderModelCapability::VideoGenerate => "videoGenerate",
+        ProviderModelCapability::MusicGenerate => "musicGenerate",
+        ProviderModelCapability::TextToSpeech => "tts",
+        ProviderModelCapability::Transcribe => "transcribe",
+    }
 }
 
 fn provider_api_protocol_label(protocol: ProviderApiProtocol) -> &'static str {
@@ -967,7 +965,7 @@ fn replace_fault(fault: ProviderCascadeFault) -> ProviderModelReplaceOutcome {
         ProviderModelStoreFault::CommitOutcomeUnknown(_)
         | ProviderModelStoreFault::RecoveryRequired => ProviderModelReplaceOutcome::DesiredStored {
             persisted: ProviderPersistedOutcome::Unknown,
-            native: ProviderNativeConfigurationEffect::Unavailable,
+            native: ProviderNativeConfigurationView::unavailable(),
             commit: ProviderCommitOutcome::CommitOutcomeUnknown,
         },
         ProviderModelStoreFault::Commit(_) | ProviderModelStoreFault::WriterBusy => {

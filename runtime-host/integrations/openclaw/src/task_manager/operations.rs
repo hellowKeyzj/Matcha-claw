@@ -546,6 +546,7 @@ impl TodoSnapshot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskReadFailure {
+    NotFound,
     Unavailable,
     Rejected,
     Protocol,

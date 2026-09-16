@@ -1,6 +1,8 @@
 use foundation::execution::OwnerRuntimeHandle;
 
-use super::{SettingsCommand, SettingsQuery, desired};
+use environment::settings;
+
+use super::{command::SettingsCommand, query::SettingsQuery, read_model::DesiredReadModel};
 
 #[derive(Clone)]
 pub struct SettingsHandle {
@@ -15,12 +17,12 @@ impl SettingsHandle {
     pub(crate) async fn replace(
         &self,
         correlation: String,
-        desired: desired::Desired,
-    ) -> desired::Settlement {
+        desired: settings::Desired,
+    ) -> settings::Settlement {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .inner
-            .send_command(SettingsCommand::Replace {
+            .send_command(SettingsCommand::ReplaceDesired {
                 correlation,
                 desired,
                 reply: tx,
@@ -28,25 +30,25 @@ impl SettingsHandle {
             .await
             .is_err()
         {
-            return desired::Settlement::unknown(0);
+            return settings::Settlement::unknown(0);
         }
-        rx.await.unwrap_or(desired::Settlement::unknown(0))
+        rx.await.unwrap_or(settings::Settlement::unknown(0))
     }
 
-    pub(crate) async fn recover_pending(&self) -> Option<desired::Settlement> {
+    pub(crate) async fn recover_pending(&self) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .inner
-            .send_command(SettingsCommand::RecoverPending { reply: tx })
+            .send_command(SettingsCommand::RecoverPendingProjection { reply: tx })
             .await
             .is_err()
         {
-            return None;
+            return;
         }
-        rx.await.unwrap_or(None)
+        let _ = rx.await;
     }
 
-    pub(crate) async fn apply_saved_projection(&self) -> desired::Outcome {
+    pub(crate) async fn apply_saved_projection(&self) -> settings::Outcome {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .inner
@@ -54,36 +56,22 @@ impl SettingsHandle {
             .await
             .is_err()
         {
-            return desired::Outcome::Unknown;
+            return settings::Outcome::Unknown;
         }
-        rx.await.unwrap_or(desired::Outcome::Unknown)
+        rx.await.unwrap_or(settings::Outcome::Unknown)
     }
 
-    pub(crate) async fn pending(&self) -> Option<desired::PendingDesired> {
+    pub(crate) async fn desired_snapshot(&self) -> DesiredReadModel {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .inner
-            .send_query(SettingsQuery::Pending { reply: tx })
+            .send_query(SettingsQuery::DesiredReadModel { reply: tx })
             .await
             .is_err()
         {
-            return None;
+            return DesiredReadModel::default();
         }
-        rx.await.unwrap_or(None)
-    }
-
-    pub(crate) async fn desired_snapshot(&self) -> desired::PublicDesiredSnapshot {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if self
-            .inner
-            .send_query(SettingsQuery::DesiredSnapshot { reply: tx })
-            .await
-            .is_err()
-        {
-            return desired::PublicDesiredSnapshot::default();
-        }
-        rx.await
-            .unwrap_or_else(|_| desired::PublicDesiredSnapshot::default())
+        rx.await.unwrap_or_else(|_| DesiredReadModel::default())
     }
 
     pub(crate) async fn gateway_auto_start(&self) -> bool {

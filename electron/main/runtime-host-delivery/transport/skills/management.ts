@@ -24,15 +24,7 @@ export type SkillsTransportFailure = Readonly<{
   outcome: 'rejected' | 'unknown';
 }>;
 
-export type SkillsSafeSource =
-  | 'bundled'
-  | 'openclaw-bundled'
-  | 'managed'
-  | 'openclaw-managed'
-  | 'openclaw-workspace'
-  | 'openclaw-extra'
-  | 'agents-skills-personal'
-  | 'agents-skills-project';
+export type SkillsSafeSource = string;
 
 export type SkillMissingCategory = 'binaries' | 'anyBinaries' | 'environment' | 'configuration' | 'operatingSystem';
 
@@ -389,14 +381,7 @@ function isProjectedSkillStatusEntry(value: unknown): value is ProjectedSkillSta
 }
 
 function isSafeSource(value: unknown): value is SkillsSafeSource {
-  return value === 'bundled'
-    || value === 'openclaw-bundled'
-    || value === 'managed'
-    || value === 'openclaw-managed'
-    || value === 'openclaw-workspace'
-    || value === 'openclaw-extra'
-    || value === 'agents-skills-personal'
-    || value === 'agents-skills-project';
+  return isText(value, 4 * 1024);
 }
 
 function isSkillUnavailableReason(value: unknown): value is SkillUnavailableReason {

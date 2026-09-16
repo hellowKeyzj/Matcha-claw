@@ -19,6 +19,7 @@ const LONG_TIMEOUT: Duration = Duration::from_secs(600);
 const BODY_LIMIT: usize = 64 * 1024;
 const OUTPUT_TAIL: usize = 12 * 1024;
 const POLL: Duration = Duration::from_secs(1);
+#[cfg(test)]
 const MANAGED: &str = "com.matchaclaw.remote-fleet.managed";
 const SETUP: &str = "set -e; mkdir -p /workspace; if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends bash ca-certificates curl git openssh-client procps; apt-get clean; rm -rf /var/lib/apt/lists/*; fi";
 
@@ -116,12 +117,12 @@ pub(crate) struct DockerEffectClient {
     config: DockerTargetConfig,
     ownership: BTreeMap<String, String>,
 }
-pub async fn open_terminal<R: FleetSecretResolverPort>(
+pub(crate) async fn open_terminal<R: FleetSecretResolverPort>(
     config: &DockerTargetConfig,
     resolver: &mut R,
     rows: u16,
     cols: u16,
-) -> Result<crate::transport::fleet_terminal::TerminalProviderOpen, DockerEffectError>
+) -> Result<crate::fleet::terminal::TerminalProviderOpen, DockerEffectError>
 where
     R::Secret: AsRef<str>,
 {
@@ -172,10 +173,12 @@ where
                     }
                     loop {
                         match rx.recv().await {
-                            Some(crate::transport::fleet_terminal::ProviderCommand::Input(
-                                data,
-                            )) if !data.is_empty() => return Some((Ok(data), (None, rx))),
-                            Some(crate::transport::fleet_terminal::ProviderCommand::Resize {
+                            Some(crate::fleet::terminal::ProviderCommand::Input(data))
+                                if !data.is_empty() =>
+                            {
+                                return Some((Ok(data), (None, rx)));
+                            }
+                            Some(crate::fleet::terminal::ProviderCommand::Resize {
                                 rows,
                                 cols,
                             }) => {
@@ -188,7 +191,7 @@ where
                                 )
                                 .await;
                             }
-                            Some(crate::transport::fleet_terminal::ProviderCommand::Input(_)) => {}
+                            Some(crate::fleet::terminal::ProviderCommand::Input(_)) => {}
                             None => return None,
                         }
                     }
@@ -206,21 +209,17 @@ where
         }
         let Ok(response) = request.send().await else {
             let _ = events
-                .send(Err(
-                    crate::transport::fleet_terminal::ProviderError::message(
-                        "Docker stream failed",
-                    ),
-                ))
+                .send(Err(crate::fleet::terminal::ProviderError::message(
+                    "Docker stream failed",
+                )))
                 .await;
             return;
         };
         if !response.status().is_success() {
             let _ = events
-                .send(Err(
-                    crate::transport::fleet_terminal::ProviderError::message(
-                        "Docker stream rejected",
-                    ),
-                ))
+                .send(Err(crate::fleet::terminal::ProviderError::message(
+                    "Docker stream rejected",
+                )))
                 .await;
             return;
         }
@@ -229,7 +228,7 @@ where
             match chunk {
                 Ok(chunk) if !chunk.is_empty() => {
                     if events
-                        .send(Ok(crate::transport::fleet_terminal::ProviderEvent::Output(
+                        .send(Ok(crate::fleet::terminal::ProviderEvent::Output(
                             chunk.to_vec(),
                         )))
                         .await
@@ -241,23 +240,21 @@ where
                 Ok(_) => {}
                 Err(_) => {
                     let _ = events
-                        .send(Err(
-                            crate::transport::fleet_terminal::ProviderError::message(
-                                "Docker stream failed",
-                            ),
-                        ))
+                        .send(Err(crate::fleet::terminal::ProviderError::message(
+                            "Docker stream failed",
+                        )))
                         .await;
                     return;
                 }
             }
         }
         let _ = events
-            .send(Ok(crate::transport::fleet_terminal::ProviderEvent::Exit {
+            .send(Ok(crate::fleet::terminal::ProviderEvent::Exit {
                 code: None,
             }))
             .await;
     });
-    Ok(crate::transport::fleet_terminal::TerminalProviderOpen {
+    Ok(crate::fleet::terminal::TerminalProviderOpen {
         commands,
         events: events_rx,
     })

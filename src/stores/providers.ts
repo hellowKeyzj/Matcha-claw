@@ -14,6 +14,9 @@ import {
   hostProviderDeleteAccount,
   hostProviderUpdateAccount,
 } from '@/lib/provider-projection';
+import { useCapabilityRoutingStore } from '@/stores/capability-routing';
+import { useProviderModelCatalogStore } from '@/stores/provider-model-catalog';
+import { useSubagentsStore } from '@/stores/subagents';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
 import type { ProviderMutationReceipt } from '@/lib/host-api-transport-contract';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
@@ -436,10 +439,15 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to delete provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-      await get().refreshProviderSnapshot({
-        trigger: 'reconcile',
-        reason: 'mutation_remove',
-      });
+      await Promise.all([
+        get().refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'mutation_remove',
+        }),
+        useProviderModelCatalogStore.getState().refresh(),
+        useCapabilityRoutingStore.getState().refresh(),
+        useSubagentsStore.getState().loadAvailableModels({ force: true }),
+      ]);
     } catch (error) {
       console.error('Failed to delete account:', error);
       throw error;

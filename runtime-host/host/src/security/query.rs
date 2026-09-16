@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::security_audit;
+use super::audit as security_audit;
 
 pub(crate) enum SecurityQuery {
     CurrentPolicy {

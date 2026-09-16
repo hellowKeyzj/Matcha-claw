@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::{
     sessions::state::{SessionCompleteness, SessionView},
     sessions::timeline::{Command, Direction, Outcome, Provider, WindowRequest},
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 const CAPABILITY_ID: &str = "session.management";
@@ -249,9 +249,7 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Complete(view) => {
-                serde_json::to_value(view).expect("Session view public response is serializable")
-            }
+            Self::Complete(view) => crate::transport::sessions::presenter::session_view(view),
             Self::Unavailable => serde_json::json!({
                 "success": false,
                 "error": "Session timeline is unavailable",

@@ -1,7 +1,10 @@
 mod actor;
 mod command;
 mod handle;
+mod matcha;
+mod openclaw;
 mod query;
+mod status;
 
 pub(crate) use actor::{PeerOwner, PeerStartupState};
 pub(crate) use command::{

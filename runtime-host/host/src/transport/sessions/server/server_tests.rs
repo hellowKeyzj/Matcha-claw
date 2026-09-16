@@ -23,7 +23,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner};
+use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -89,7 +89,7 @@ impl Drop for TestRoot {
 
 struct RunningServer {
     root: TestRoot,
-    owner: owner::Owner,
+    owner: crate::host_actor::Owner,
     task: JoinHandle<io::Result<()>>,
     port: u16,
 }
@@ -98,7 +98,7 @@ impl RunningServer {
     async fn start() -> Self {
         let root = TestRoot::new();
         let (host, events, handles) = Host::new(host_input(&root)).expect("construct host");
-        let owner = owner::Owner::spawn(host, events);
+        let owner = crate::host_actor::Owner::spawn(host, events);
         let verifier = CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
         let server = Server::bind(
             0,
@@ -737,8 +737,8 @@ async fn localhost_transport_projects_native_unavailability_without_private_deta
 #[test]
 fn session_transport_does_not_reintroduce_gateway_subscription_client() {
     for source in [
-        include_str!("../../../composition/session.rs"),
-        include_str!("../../../composition/host.rs"),
+        include_str!("../../../sessions/runtime_error.rs"),
+        include_str!("../../../composition/host/mod.rs"),
         include_str!("../mod.rs"),
         include_str!("../server.rs"),
     ] {
@@ -845,7 +845,7 @@ fn delete_request() -> Value {
             "runtimeInstanceId": "local",
         },
         "agentId": "main",
-        "sessionKey": "session-1",
+        "sessionKey": "agent:main:session-1",
     });
     json!({
         "id": "session.management",

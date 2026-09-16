@@ -12,17 +12,17 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{facade::UsageHandle, transport::authorization::CapabilityDecisionVerifier};
+use crate::{facade::UsageHandle, transport::common::authorization::CapabilityDecisionVerifier};
 
-use super::{DecodeError, UsageDelivery, decode_limit};
+use super::{
+    AUTHORIZATION_ENDPOINT, DecodeError, SESSION_TIMESERIES_ENDPOINT, UsageDelivery, decode_limit,
+};
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
-const PATH: &str = "/api/usage/recent";
-const SESSION_TIMESERIES_PATH: &str = "/api/usage/session-timeseries";
 
 pub(crate) struct Server {
     listener: TcpListener,
@@ -114,7 +114,7 @@ async fn handle(
         }
         Route::Unknown => return Response::not_found(),
     };
-    Response::from_delivery(UsageDelivery::from_native(result))
+    Response::from_delivery(UsageDelivery::from_facade(result))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,8 +248,8 @@ struct Query {
 
 fn parse_query(pathname: &str, query: Option<&str>) -> Result<Query, ()> {
     let route = match pathname {
-        PATH => Route::Recent,
-        SESSION_TIMESERIES_PATH => Route::SessionTimeseries,
+        AUTHORIZATION_ENDPOINT => Route::Recent,
+        SESSION_TIMESERIES_ENDPOINT => Route::SessionTimeseries,
         _ => Route::Unknown,
     };
     let mut limit = None;

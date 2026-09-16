@@ -3,7 +3,7 @@ use std::fmt;
 const MAX_KEY_BYTES: usize = 4096;
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SkillKey(String);
+pub(crate) struct SkillKey(String);
 
 impl SkillKey {
     pub fn parse(value: impl Into<String>) -> Result<Self, ()> {
@@ -26,7 +26,7 @@ impl fmt::Debug for SkillKey {
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AgentKey(String);
+pub(crate) struct AgentKey(String);
 
 impl AgentKey {
     pub fn parse(value: impl Into<String>) -> Result<Self, ()> {

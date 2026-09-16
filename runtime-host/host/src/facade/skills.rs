@@ -1,14 +1,16 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    composition::HostAdmission, runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::RuntimeDriverIdentity, sealed_resource::SealedSkillStore,
+    composition::HostAdmission, runtime::directory::RuntimeDriverDirectory,
+    sealed_resource::SealedSkillStore,
 };
+
+use super::driver_lookup::RuntimeDrivers;
 
 #[derive(Clone)]
 pub(crate) struct SkillsHandle {
     admission: Arc<HostAdmission>,
-    runtime_directory: Arc<RuntimeDriverDirectory>,
+    runtimes: RuntimeDrivers,
     sealed_store: Arc<SealedSkillStore>,
     sealed_runtime_token: Option<Arc<str>>,
 }
@@ -22,7 +24,7 @@ impl SkillsHandle {
     ) -> Self {
         Self {
             admission,
-            runtime_directory,
+            runtimes: RuntimeDrivers::new(runtime_directory),
             sealed_store,
             sealed_runtime_token,
         }
@@ -30,62 +32,62 @@ impl SkillsHandle {
 
     pub(crate) async fn install_clawhub_skill(
         &self,
-        command: crate::skill_install::Command,
-    ) -> Result<crate::skill_install::Outcome, ()> {
+        command: crate::skills::install::Command,
+    ) -> Result<crate::skills::install::Outcome, ()> {
         if self.admission.admit_request().is_err() {
-            return Ok(crate::skill_install::Outcome::Unknown);
+            return Ok(crate::skills::install::Outcome::Unknown);
         }
         let Some(driver) = self.running_openclaw_driver() else {
-            return Ok(crate::skill_install::Outcome::Unknown);
+            return Ok(crate::skills::install::Outcome::Unknown);
         };
         match driver.skill_ops() {
             Some(ops) => Ok(ops.install_clawhub_skill(command).await),
-            None => Ok(crate::skill_install::Outcome::Unknown),
+            None => Ok(crate::skills::install::Outcome::Unknown),
         }
     }
 
-    pub(crate) async fn skill_status(&self) -> Result<crate::skill_status::Outcome, ()> {
+    pub(crate) async fn skill_status(&self) -> Result<crate::skills::status::Outcome, ()> {
         if self.admission.admit_request().is_err() {
-            return Ok(crate::skill_status::Outcome::Unavailable);
+            return Ok(crate::skills::status::Outcome::Unavailable);
         }
         let Some(driver) = self.running_openclaw_driver() else {
-            return Ok(crate::skill_status::Outcome::Unavailable);
+            return Ok(crate::skills::status::Outcome::Unavailable);
         };
         match driver.skill_ops() {
             Some(ops) => Ok(ops.skill_status().await),
-            None => Ok(crate::skill_status::Outcome::Unavailable),
+            None => Ok(crate::skills::status::Outcome::Unavailable),
         }
     }
 
     pub(crate) async fn manage_skills(
         &self,
-        command: crate::skill_management::Command,
-    ) -> Result<crate::skill_management::Outcome, ()> {
+        command: crate::skills::management::Command,
+    ) -> Result<crate::skills::management::Outcome, ()> {
         if self.admission.admit_request().is_err() {
-            return Ok(crate::skill_management::Outcome::Unavailable);
+            return Ok(crate::skills::management::Outcome::Unavailable);
         }
         let Some(driver) = self.running_openclaw_driver() else {
-            return Ok(crate::skill_management::Outcome::Unavailable);
+            return Ok(crate::skills::management::Outcome::Unavailable);
         };
         match driver.skill_ops() {
             Some(ops) => Ok(ops.manage_skills(command).await),
-            None => Ok(crate::skill_management::Outcome::Unavailable),
+            None => Ok(crate::skills::management::Outcome::Unavailable),
         }
     }
 
     pub(crate) async fn skill_bundles(
         &self,
-        command: crate::skill_bundle::Command,
-    ) -> Result<crate::skill_bundle::Outcome, ()> {
+        command: crate::skills::bundle::Command,
+    ) -> Result<crate::skills::bundle::Outcome, ()> {
         if self.admission.admit_request().is_err() {
-            return Ok(crate::skill_bundle::Outcome::Unknown);
+            return Ok(crate::skills::bundle::Outcome::Unknown);
         }
-        let Some(driver) = self.running_openclaw_driver() else {
-            return Ok(crate::skill_bundle::Outcome::Unknown);
+        let Some(driver) = self.runtimes.openclaw_driver() else {
+            return Ok(crate::skills::bundle::Outcome::Unknown);
         };
         match driver.skill_ops() {
             Some(ops) => Ok(ops.skill_bundles(command).await),
-            None => Ok(crate::skill_bundle::Outcome::Unknown),
+            None => Ok(crate::skills::bundle::Outcome::Unknown),
         }
     }
 
@@ -144,13 +146,7 @@ impl SkillsHandle {
         self.sealed_store.remove_package(skill_key)
     }
 
-    fn running_openclaw_driver(&self) -> Option<Arc<dyn crate::runtime_driver::RuntimeDriver>> {
-        let driver = self
-            .runtime_directory
-            .lookup(&RuntimeDriverIdentity::open_claw().endpoint())?;
-        driver
-            .lifecycle_ops()
-            .is_some_and(|ops| ops.readiness())
-            .then_some(driver)
+    fn running_openclaw_driver(&self) -> Option<Arc<dyn crate::runtime::driver::RuntimeDriver>> {
+        self.runtimes.ready_openclaw_driver()
     }
 }

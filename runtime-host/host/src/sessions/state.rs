@@ -5,7 +5,7 @@ use std::{
     mem,
 };
 
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 
 pub const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -21,6 +21,8 @@ pub const MAX_MISSING_FACTS: usize = 16;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_RENDERER_ROUTE_KEY_BYTES: usize = 128;
 const MAX_ACCEPTED_EVENT_IDENTITIES: usize = 1024;
+const OUTGOING_MEDIA_PREFIX: &str = "/api/chat/media/outgoing/";
+const OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH: &str = "api/chat/media/outgoing/";
 const UNKNOWN_TOOL_ANCHOR_NAME: &str = "tool";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -471,8 +473,7 @@ impl SessionFacts {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionView {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
@@ -486,6 +487,46 @@ pub struct SessionView {
     pub runtime: SessionFact<RuntimeView>,
     pub window: SessionFact<SessionWindow>,
     pub completeness: SessionCompleteness,
+}
+
+impl Serialize for SessionView {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            session_key: &'a str,
+            endpoint_session_id: Option<&'a str>,
+            identity: &'a SessionIdentity,
+            epoch: u64,
+            seq: u64,
+            cursor: u64,
+            items: SessionFact<Vec<SessionItem>>,
+            tools: SessionFact<Vec<ToolView>>,
+            approvals: &'a SessionFact<Vec<ApprovalView>>,
+            runtime: SessionFact<RuntimeView>,
+            window: &'a SessionFact<SessionWindow>,
+            completeness: &'a SessionCompleteness,
+        }
+
+        Wire {
+            session_key: &self.session_key,
+            endpoint_session_id: self.endpoint_session_id.as_deref(),
+            identity: &self.identity,
+            epoch: self.epoch,
+            seq: self.seq,
+            cursor: self.cursor,
+            items: public_items_fact(&self.items),
+            tools: public_tools_fact(&self.tools),
+            approvals: &self.approvals,
+            runtime: public_runtime_fact(&self.runtime),
+            window: &self.window,
+            completeness: &self.completeness,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for SessionView {
@@ -633,18 +674,87 @@ pub enum RecoveryReason {
     NativeEventOverflow,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionDelta {
     pub session_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub route_key: Option<String>,
     pub epoch: u64,
     pub seq: u64,
     pub cursor: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     pub changes: Vec<SessionChange>,
+}
+
+impl Serialize for SessionDelta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            session_key: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            route_key: Option<&'a str>,
+            epoch: u64,
+            seq: u64,
+            cursor: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            run_id: Option<&'a str>,
+            changes: Vec<SessionChange>,
+        }
+
+        Wire {
+            session_key: &self.session_key,
+            route_key: self.route_key.as_deref(),
+            epoch: self.epoch,
+            seq: self.seq,
+            cursor: self.cursor,
+            run_id: self.run_id.as_deref(),
+            changes: self.changes.iter().map(public_delta_change).collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+fn public_items_fact(items: &SessionFact<Vec<SessionItem>>) -> SessionFact<Vec<SessionItem>> {
+    match items {
+        SessionFact::Complete(items) => {
+            SessionFact::Complete(items.iter().map(public_delta_item).collect())
+        }
+        SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+            facts: facts.iter().map(public_delta_item).collect(),
+            gaps: gaps.clone(),
+        },
+        SessionFact::Unavailable => SessionFact::Unavailable,
+        SessionFact::Unknown => SessionFact::Unknown,
+    }
+}
+
+fn public_tools_fact(tools: &SessionFact<Vec<ToolView>>) -> SessionFact<Vec<ToolView>> {
+    match tools {
+        SessionFact::Complete(tools) => {
+            SessionFact::Complete(tools.iter().map(public_delta_tool).collect())
+        }
+        SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+            facts: facts.iter().map(public_delta_tool).collect(),
+            gaps: gaps.clone(),
+        },
+        SessionFact::Unavailable => SessionFact::Unavailable,
+        SessionFact::Unknown => SessionFact::Unknown,
+    }
+}
+
+fn public_runtime_fact(runtime: &SessionFact<RuntimeView>) -> SessionFact<RuntimeView> {
+    match runtime {
+        SessionFact::Complete(runtime) => SessionFact::Complete(public_delta_runtime(runtime)),
+        SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+            facts: public_delta_runtime(facts),
+            gaps: gaps.clone(),
+        },
+        SessionFact::Unavailable => SessionFact::Unavailable,
+        SessionFact::Unknown => SessionFact::Unknown,
+    }
 }
 
 impl<'de> Deserialize<'de> for SessionDelta {
@@ -676,6 +786,116 @@ impl<'de> Deserialize<'de> for SessionDelta {
         };
         delta.validate().map_err(D::Error::custom)?;
         Ok(delta)
+    }
+}
+
+fn public_delta_change(change: &SessionChange) -> SessionChange {
+    match change {
+        SessionChange::MessageUpdated { item } => SessionChange::MessageUpdated {
+            item: public_delta_item(item),
+        },
+        SessionChange::MessageReplaced { item } => SessionChange::MessageReplaced {
+            item: public_delta_item(item),
+        },
+        SessionChange::ToolUpdated { tool } => SessionChange::ToolUpdated {
+            tool: public_delta_tool(tool),
+        },
+        SessionChange::RuntimeChanged { runtime } => SessionChange::RuntimeChanged {
+            runtime: public_delta_runtime(runtime),
+        },
+        SessionChange::RuntimeNoticeUpdated { notice } => SessionChange::RuntimeNoticeUpdated {
+            notice: public_delta_runtime_notice(notice),
+        },
+        SessionChange::RunPhaseChanged { .. }
+        | SessionChange::MessageDelta { .. }
+        | SessionChange::ApprovalUpdated { .. }
+        | SessionChange::WindowChanged { .. }
+        | SessionChange::RecoveryRequired { .. } => change.clone(),
+    }
+}
+
+fn public_delta_item(item: &SessionItem) -> SessionItem {
+    match item {
+        SessionItem::UserMessage {
+            item_id,
+            message_id,
+            text,
+            content,
+            status,
+        } => SessionItem::UserMessage {
+            item_id: item_id.clone(),
+            message_id: message_id.clone(),
+            text: text.clone(),
+            content: content.iter().map(public_delta_content).collect(),
+            status: *status,
+        },
+        SessionItem::AssistantTurn {
+            item_id,
+            run_id,
+            message_id,
+            status,
+            segments,
+            text,
+        } => SessionItem::AssistantTurn {
+            item_id: item_id.clone(),
+            run_id: run_id.clone(),
+            message_id: message_id.clone(),
+            status: *status,
+            segments: segments.iter().map(public_delta_content).collect(),
+            text: text.clone(),
+        },
+        SessionItem::System {
+            item_id,
+            text,
+            status,
+        } => SessionItem::System {
+            item_id: item_id.clone(),
+            text: text.clone(),
+            status: *status,
+        },
+    }
+}
+
+fn public_delta_content(content: &SessionContent) -> SessionContent {
+    match content {
+        SessionContent::Media {
+            media_type,
+            reference,
+        } => public_media_reference(reference).map_or(
+            SessionContent::Omitted {
+                reason: OmissionReason::UnsafeMedia,
+            },
+            |reference| SessionContent::Media {
+                media_type: media_type.clone(),
+                reference,
+            },
+        ),
+        _ => content.clone(),
+    }
+}
+
+fn public_delta_tool(tool: &ToolView) -> ToolView {
+    tool.clone()
+}
+
+fn public_delta_runtime(runtime: &RuntimeView) -> RuntimeView {
+    RuntimeView {
+        phase: runtime.phase,
+        active_run_id: runtime.active_run_id.clone(),
+        issue: runtime.issue,
+        runtime_activity: runtime.runtime_activity,
+        error_detail: runtime.error_detail.clone(),
+    }
+}
+
+fn public_delta_runtime_notice(notice: &RuntimeNotice) -> RuntimeNotice {
+    RuntimeNotice {
+        run_id: notice.run_id.clone(),
+        kind: notice.kind,
+        command: notice.command.clone(),
+        risk_level: notice.risk_level.clone(),
+        rationale: notice.rationale.clone(),
+        message: notice.message.clone(),
     }
 }
 
@@ -1403,17 +1623,19 @@ impl SessionState {
                 if !valid_runtime(runtime) {
                     return false;
                 }
-                if let Some(run_id) = runtime.active_run_id.as_deref() {
-                    if self.terminal_run_ids.contains(run_id) {
+                let mut runtime = runtime.clone();
+                if let Some(run_id) = runtime.active_run_id.clone() {
+                    if self.terminal_run_ids.contains(&run_id) {
                         return false;
                     }
                     if terminal_run_phase(runtime.phase) {
-                        self.terminal_run_ids.insert(run_id.to_owned());
+                        self.terminal_run_ids.insert(run_id);
+                        runtime.active_run_id = None;
                     }
                 } else if !terminal_run_phase(runtime.phase) {
                     return false;
                 }
-                self.runtime = event_runtime(runtime.clone());
+                self.runtime = event_runtime(runtime);
                 true
             }
             SessionChange::RuntimeNoticeUpdated { notice } => {
@@ -2496,6 +2718,35 @@ fn valid_route_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'-' | b'_'))
 }
 
+pub(crate) fn public_media_reference(reference: &str) -> Option<String> {
+    let value = reference.trim();
+    if !valid_id_with_limit(value, MAX_CONTENT_REF_BYTES) {
+        return None;
+    }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX) {
+        return Some(value.to_owned());
+    }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH) {
+        return Some(format!("/{value}"));
+    }
+    if !value.contains(['?', '#'])
+        && (value.starts_with("https://") || value.starts_with("http://"))
+    {
+        return Some(value.to_owned());
+    }
+    valid_opaque_media_reference(value).then(|| value.to_owned())
+}
+
+fn valid_opaque_media_reference(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic()) {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b':' | b'.'))
+}
+
 fn valid_id(value: &str) -> bool {
     valid_id_with_limit(value, MAX_ID_BYTES)
 }
@@ -2810,6 +3061,13 @@ mod tests {
                         summary: Some("done".to_owned()),
                         is_error: false,
                     },
+                    SessionContent::Thinking {
+                        text: "private view thinking".to_owned(),
+                    },
+                    SessionContent::Media {
+                        media_type: Some("image/png".to_owned()),
+                        reference: "C:private.png".to_owned(),
+                    },
                     SessionContent::Media {
                         media_type: Some("image".to_owned()),
                         reference: "media-1".to_owned(),
@@ -2846,11 +3104,22 @@ mod tests {
         assert_eq!(item["messageId"], "message-1");
         assert_eq!(item["content"][0]["toolCallId"], "tool-1");
         assert_eq!(item["content"][1]["isError"], false);
-        assert_eq!(item["content"][2]["mediaType"], "image");
+        assert_eq!(item["content"][2]["kind"], "thinking");
+        assert_eq!(item["content"][2]["text"], "private view thinking");
+        assert_eq!(item["content"][3]["kind"], "omitted");
+        assert_eq!(item["content"][3]["reason"], "unsafe_media");
+        assert_eq!(item["content"][4]["mediaType"], "image");
+        assert_eq!(
+            encoded["tools"]["complete"][0]["input"]["path"],
+            "src/main.rs"
+        );
+        assert_eq!(encoded["tools"]["complete"][0]["output"]["ok"], true);
         assert_eq!(encoded["tools"]["complete"][0]["details"]["rows"], 1);
-        assert!(encoded.to_string().contains("toolCallId"));
-        assert!(!encoded.to_string().contains("tool_call_id"));
-        assert!(!encoded.to_string().contains("item_id"));
+        let rendered = encoded.to_string();
+        assert!(rendered.contains("toolCallId"));
+        assert!(!rendered.contains("tool_call_id"));
+        assert!(!rendered.contains("item_id"));
+        assert!(!rendered.contains("C:private.png"));
 
         let delta = SessionDelta {
             session_key: "session-1".to_owned(),
@@ -2859,21 +3128,111 @@ mod tests {
             seq: 1,
             cursor: 1,
             run_id: Some("run-1".to_owned()),
-            changes: vec![SessionChange::MessageDelta {
-                item_id: "item-1".to_owned(),
-                run_id: Some("run-1".to_owned()),
-                message_id: Some("message-1".to_owned()),
-                text: "hello".to_owned(),
-                replace: false,
-                status: ItemStatus::Streaming,
-            }],
+            changes: vec![
+                SessionChange::MessageDelta {
+                    item_id: "item-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: Some("message-1".to_owned()),
+                    text: "hello".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                },
+                SessionChange::MessageUpdated {
+                    item: SessionItem::AssistantTurn {
+                        item_id: "assistant-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        message_id: Some("message-2".to_owned()),
+                        status: ItemStatus::Streaming,
+                        segments: vec![SessionContent::Thinking {
+                            text: "private thinking".to_owned(),
+                        }],
+                        text: String::new(),
+                    },
+                },
+                SessionChange::ToolUpdated {
+                    tool: ToolView {
+                        tool_call_id: "tool-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        name: Some("Read".to_owned()),
+                        phase: ToolPhase::Completed,
+                        input: Some(serde_json::json!({ "path": "C:/private/file" })),
+                        input_text: Some("private input".to_owned()),
+                        summary: Some("read complete".to_owned()),
+                        output: Some(serde_json::json!({ "secret": true })),
+                        details: Some(serde_json::json!({ "raw": "native" })),
+                        is_error: Some(false),
+                    },
+                },
+                SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Failed,
+                        active_run_id: Some("run-1".to_owned()),
+                        issue: None,
+                        runtime_activity: None,
+                        error_detail: Some(RuntimeErrorDetail {
+                            failover_reason: Some("private failover".to_owned()),
+                            provider_runtime_failure_kind: None,
+                            provider_error_type: None,
+                            provider_error_message_preview: Some(
+                                "private provider error".to_owned(),
+                            ),
+                            http_status: Some(500),
+                        }),
+                    },
+                },
+                SessionChange::RuntimeNoticeUpdated {
+                    notice: RuntimeNotice {
+                        run_id: "run-1".to_owned(),
+                        kind: RuntimeNoticeKind::GuardianWarning,
+                        command: Some("private command".to_owned()),
+                        risk_level: Some("high".to_owned()),
+                        rationale: Some("private rationale".to_owned()),
+                        message: Some("private notice".to_owned()),
+                    },
+                },
+            ],
         };
         let encoded = serde_json::to_value(&delta).unwrap();
         let change = &encoded["changes"][0];
         assert_eq!(change["itemId"], "item-1");
         assert_eq!(change["runId"], "run-1");
         assert_eq!(change["messageId"], "message-1");
-        assert!(!encoded.to_string().contains("message_id"));
+        assert_eq!(
+            encoded["changes"][1]["item"]["segments"][0]["kind"],
+            "thinking"
+        );
+        assert_eq!(
+            encoded["changes"][1]["item"]["segments"][0]["text"],
+            "private thinking"
+        );
+        assert_eq!(
+            encoded["changes"][2]["tool"]["input"]["path"],
+            "C:/private/file"
+        );
+        assert_eq!(encoded["changes"][2]["tool"]["inputText"], "private input");
+        assert_eq!(encoded["changes"][2]["tool"]["summary"], "read complete");
+        assert_eq!(encoded["changes"][2]["tool"]["output"]["secret"], true);
+        assert_eq!(encoded["changes"][2]["tool"]["details"]["raw"], "native");
+        assert_eq!(
+            encoded["changes"][3]["runtime"]["errorDetail"]["failoverReason"],
+            "private failover"
+        );
+        assert_eq!(
+            encoded["changes"][3]["runtime"]["errorDetail"]["providerErrorMessagePreview"],
+            "private provider error"
+        );
+        assert_eq!(
+            encoded["changes"][3]["runtime"]["errorDetail"]["httpStatus"],
+            500
+        );
+        assert_eq!(
+            encoded["changes"][4]["notice"]["command"],
+            "private command"
+        );
+        assert_eq!(encoded["changes"][4]["notice"]["message"], "private notice");
+        let rendered = encoded.to_string();
+        assert!(!rendered.contains("message_id"));
+        assert!(rendered.contains("private rationale"));
     }
 
     #[test]
@@ -2931,12 +3290,12 @@ mod tests {
             SessionFact::Incomplete {
                 facts: RuntimeView {
                     phase: RunPhase::Failed,
-                    active_run_id: Some(ref run_id),
+                    active_run_id: None,
                     issue: Some(RuntimeIssue::Rejected),
                     ..
                 },
                 ..
-            } if run_id == "ack-run-1"
+            }
         ));
         assert!(matches!(
             state.view().items,
@@ -2949,6 +3308,63 @@ mod tests {
                         ..
                     }] if run_id == "ack-run-1"
                 )
+        ));
+    }
+
+    #[test]
+    fn terminal_runtime_change_clears_active_run_and_closes_run() {
+        let mut state = SessionState::new(identity(), 1).expect("state");
+        let result = state.apply(
+            None,
+            Some("run-1".to_owned()),
+            1,
+            vec![SessionChange::RuntimeChanged {
+                runtime: RuntimeView {
+                    phase: RunPhase::Failed,
+                    active_run_id: Some("run-1".to_owned()),
+                    issue: None,
+                    runtime_activity: None,
+                    error_detail: Some(RuntimeErrorDetail {
+                        failover_reason: Some("auth_error".to_owned()),
+                        provider_runtime_failure_kind: None,
+                        provider_error_type: Some("authentication".to_owned()),
+                        provider_error_message_preview: Some("invalid key".to_owned()),
+                        http_status: Some(401),
+                    }),
+                },
+            }],
+        );
+
+        assert!(matches!(result, SessionApplyResult::Applied(_)));
+        assert!(matches!(
+            state.view().runtime,
+            SessionFact::Incomplete {
+                facts: RuntimeView {
+                    phase: RunPhase::Failed,
+                    active_run_id: None,
+                    error_detail: Some(_),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            state.apply(
+                None,
+                Some("run-1".to_owned()),
+                2,
+                vec![SessionChange::MessageDelta {
+                    item_id: "assistant-1".to_owned(),
+                    run_id: Some("run-1".to_owned()),
+                    message_id: None,
+                    text: "late".to_owned(),
+                    replace: false,
+                    status: ItemStatus::Streaming,
+                }],
+            ),
+            SessionApplyResult::Rejected {
+                reason: SessionApplyRejection::InvalidChange
+            }
         ));
     }
 

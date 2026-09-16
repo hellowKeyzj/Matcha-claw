@@ -76,16 +76,23 @@ impl SettingsConfigOperation {
             )
             .await
         {
-            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
-                SettingsConfigMutationOutcome::Rejected
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                if wire::channel::is_config_restart_required(&error) {
+                    SettingsConfigMutationOutcome::RestartRequired
+                } else {
+                    SettingsConfigMutationOutcome::Rejected
+                }
             }
             MutationDelivery::Response(response) => {
-                match wire::channel::decode_config_patch(response) {
-                    Ok(wire::channel::ConfigPatchOutcome::Written) => {
+                match wire::channel::decode_channel_config_patch(response) {
+                    Ok(wire::channel::ChannelConfigPatchOutcome::Written) => {
                         SettingsConfigMutationOutcome::Confirmed
                     }
-                    Ok(wire::channel::ConfigPatchOutcome::Noop) => {
+                    Ok(wire::channel::ChannelConfigPatchOutcome::Noop) => {
                         SettingsConfigMutationOutcome::Noop
+                    }
+                    Ok(wire::channel::ChannelConfigPatchOutcome::RestartRequired) => {
+                        SettingsConfigMutationOutcome::RestartRequired
                     }
                     Err(_) => SettingsConfigMutationOutcome::Unknown,
                 }
@@ -100,6 +107,7 @@ impl SettingsConfigOperation {
 pub enum SettingsConfigMutationOutcome {
     Confirmed,
     Noop,
+    RestartRequired,
     Rejected,
     Unknown,
 }
@@ -177,6 +185,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn restart_required_config_patch_response_requests_restart() {
+        let (outcome, write) = run_settings_operation(
+            config_needing_native_patch(),
+            Some(PatchReply::RestartRequired),
+        )
+        .await;
+
+        assert_eq!(outcome, SettingsConfigMutationOutcome::RestartRequired);
+        assert_native_patch(write.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn rejected_config_patch_response_reports_rejected() {
         let (outcome, write) =
             run_settings_operation(config_needing_native_patch(), Some(PatchReply::Rejected)).await;
@@ -198,6 +218,7 @@ mod tests {
     enum PatchReply {
         Written,
         Noop,
+        RestartRequired,
         Rejected,
         Invalid,
     }
@@ -268,12 +289,17 @@ mod tests {
                     BROWSER_RELAY_PLUGIN: { "enabled": false, "custom": true }
                 }
             },
+            "proxy": {
+                "enabled": true,
+                "proxyUrl": "http://proxy.internal:8080",
+                "loopbackMode": "gateway-only"
+            },
             "channels": {
                 "telegram": {
                     "defaultAccount": "work",
                     "accounts": {
                         "work": {
-                            "proxy": "http://proxy.internal:8080",
+                            "proxy": "http://channel.proxy:8080",
                             "label": "preserve"
                         }
                     }
@@ -334,6 +360,13 @@ mod tests {
                 "type": "res", "id": request_id, "ok": true,
                 "payload": {"ok": true, "noop": true}
             }),
+            PatchReply::RestartRequired => json!({
+                "type": "res", "id": request_id, "ok": true,
+                "payload": {
+                    "ok": true,
+                    "sentinel": {"payload": {"stats": {"requiresRestart": true}}}
+                }
+            }),
             PatchReply::Rejected => json!({
                 "type": "res", "id": request_id, "ok": false,
                 "error": {"code": "INVALID_REQUEST", "message": "rejected"}
@@ -357,10 +390,10 @@ mod tests {
             patch["plugins"]["entries"][BROWSER_RELAY_PLUGIN]["enabled"],
             false
         );
-        assert_eq!(
-            patch["channels"]["telegram"]["accounts"]["work"]["proxy"],
-            "http://proxy.internal:8080"
-        );
+        assert_eq!(patch["proxy"]["enabled"], true);
+        assert_eq!(patch["proxy"]["proxyUrl"], "http://proxy.internal:8080");
+        assert_eq!(patch["proxy"]["loopbackMode"], "gateway-only");
+        assert!(patch.get("channels").is_none());
     }
 
     fn test_client(
@@ -403,6 +436,7 @@ mod tests {
                             "plugins.refresh",
                             "agents.list",
                             "skills.status",
+                            "channels.pairing.list",
                             wire::SYSTEM_PRESENCE_METHOD
                         ],
                         "events": ["tick"]

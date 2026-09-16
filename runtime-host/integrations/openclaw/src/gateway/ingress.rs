@@ -19,25 +19,17 @@ impl GatewayEpoch {
         Ok(Self(value))
     }
 
-    pub(crate) fn next(self) -> Result<Self, EpochError> {
-        self.0
-            .checked_add(1)
-            .ok_or(EpochError::Exhausted)
-            .and_then(Self::try_new)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EpochError {
     Zero,
-    Exhausted,
 }
 
 impl fmt::Display for EpochError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Zero => "gateway epoch must be non-zero",
-            Self::Exhausted => "gateway epoch is exhausted",
         })
     }
 }
@@ -75,9 +67,6 @@ impl Ingress {
         Ok(())
     }
 
-    pub(crate) fn active_epoch(&self) -> Option<GatewayEpoch> {
-        self.lock_state().epoch
-    }
 
     pub(crate) fn try_ingest(
         &self,

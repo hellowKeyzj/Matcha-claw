@@ -7,7 +7,7 @@ use std::{
 };
 
 fn main() -> ExitCode {
-    let Ok(config) = ArtifactConfig::parse() else {
+    let Ok(config) = TeamRunMcpInvocation::parse() else {
         eprintln!("runtime-host-mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
     };
@@ -22,11 +22,11 @@ fn main() -> ExitCode {
     }
 }
 
-struct ArtifactConfig {
+struct TeamRunMcpInvocation {
     state_dir: PathBuf,
 }
 
-impl ArtifactConfig {
+impl TeamRunMcpInvocation {
     fn parse() -> Result<Self, ()> {
         let mut args = std::env::args_os();
         let _program = args.next();

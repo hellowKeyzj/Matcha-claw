@@ -23,6 +23,10 @@ impl ChannelPairingRequestMeta {
     pub(crate) fn new(account_id: String) -> Self {
         Self { account_id }
     }
+
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -30,6 +34,15 @@ impl ChannelPairingRequestMeta {
 pub(crate) enum ChannelPairingRequestStatus {
     Pending,
     Unknown,
+}
+
+impl ChannelPairingRequestStatus {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -40,6 +53,32 @@ pub(crate) struct ChannelPairingList {
 impl ChannelPairingList {
     pub(crate) fn new(requests: Vec<ChannelPairingRequest>) -> Self {
         Self { requests }
+    }
+
+    pub(crate) fn requests(&self) -> &[ChannelPairingRequest] {
+        &self.requests
+    }
+}
+
+impl ChannelPairingRequest {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    pub(crate) fn last_seen_at(&self) -> &str {
+        &self.last_seen_at
+    }
+
+    pub(crate) fn meta(&self) -> Option<&ChannelPairingRequestMeta> {
+        self.meta.as_ref()
+    }
+
+    pub(crate) fn status(&self) -> ChannelPairingRequestStatus {
+        self.status
     }
 }
 
@@ -58,6 +97,16 @@ pub(crate) enum ChannelPairingApprovalOutcome {
     Unknown,
 }
 
+impl ChannelPairingApprovalOutcome {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::TargetRejected => "target_rejected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChannelAccountStatus {
@@ -73,6 +122,18 @@ impl ChannelAccountStatus {
             account_id,
             connection,
         }
+    }
+
+    pub(crate) fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    pub(crate) fn connection(&self) -> ChannelConnection {
+        self.connection
     }
 }
 
@@ -93,6 +154,10 @@ pub(crate) struct ChannelStatusOutcome {
 impl ChannelStatusOutcome {
     pub(crate) fn new(accounts: Vec<ChannelAccountStatus>) -> Self {
         Self { accounts }
+    }
+
+    pub(crate) fn accounts(&self) -> &[ChannelAccountStatus] {
+        &self.accounts
     }
 }
 
@@ -134,6 +199,38 @@ impl ChannelSnapshotOutcome {
             channel_default_account_id,
         }
     }
+
+    pub(crate) fn ts(&self) -> u64 {
+        self.ts
+    }
+
+    pub(crate) fn ready(&self) -> bool {
+        self.ready
+    }
+
+    pub(crate) fn refreshing(&self) -> bool {
+        self.refreshing
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub(crate) fn channel_order(&self) -> &[String] {
+        &self.channel_order
+    }
+
+    pub(crate) fn channels(&self) -> &BTreeMap<String, ChannelSummarySnapshot> {
+        &self.channels
+    }
+
+    pub(crate) fn channel_accounts(&self) -> &BTreeMap<String, Vec<ChannelAccountSnapshot>> {
+        &self.channel_accounts
+    }
+
+    pub(crate) fn channel_default_account_id(&self) -> &BTreeMap<String, String> {
+        &self.channel_default_account_id
+    }
 }
 
 const fn is_true(value: &bool) -> bool {
@@ -170,6 +267,22 @@ impl ChannelSummarySnapshot {
             error,
             last_error,
         }
+    }
+
+    pub(crate) fn configured(&self) -> Option<bool> {
+        self.configured
+    }
+
+    pub(crate) fn running(&self) -> Option<bool> {
+        self.running
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub(crate) fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 }
 
@@ -232,6 +345,54 @@ impl ChannelAccountSnapshot {
             probe,
         }
     }
+
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    pub(crate) fn configured(&self) -> Option<bool> {
+        self.configured
+    }
+
+    pub(crate) fn connected(&self) -> Option<bool> {
+        self.connected
+    }
+
+    pub(crate) fn running(&self) -> Option<bool> {
+        self.running
+    }
+
+    pub(crate) fn linked(&self) -> Option<bool> {
+        self.linked
+    }
+
+    pub(crate) fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn last_connected_at(&self) -> Option<Option<u64>> {
+        self.last_connected_at
+    }
+
+    pub(crate) fn last_inbound_at(&self) -> Option<Option<u64>> {
+        self.last_inbound_at
+    }
+
+    pub(crate) fn last_outbound_at(&self) -> Option<Option<u64>> {
+        self.last_outbound_at
+    }
+
+    pub(crate) fn last_probe_at(&self) -> Option<Option<u64>> {
+        self.last_probe_at
+    }
+
+    pub(crate) fn probe(&self) -> Option<&ChannelProbeSnapshot> {
+        self.probe.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -243,6 +404,10 @@ pub(crate) struct ChannelProbeSnapshot {
 impl ChannelProbeSnapshot {
     pub(crate) const fn new(ok: bool) -> Self {
         Self { ok }
+    }
+
+    pub(crate) const fn ok(&self) -> bool {
+        self.ok
     }
 }
 

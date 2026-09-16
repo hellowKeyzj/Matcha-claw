@@ -6,7 +6,7 @@ use std::{
 const MAX_PACKAGE_PATH_BYTES: usize = 240;
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct PackageRelativePath(String);
+pub(crate) struct PackageRelativePath(String);
 
 impl PackageRelativePath {
     pub fn parse(value: impl Into<String>) -> Result<Self, ()> {

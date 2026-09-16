@@ -153,14 +153,17 @@ impl ManifestSkillIntent {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
 
+    #[cfg(test)]
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
 
+    #[cfg(test)]
     pub(crate) fn slugs(&self) -> &[String] {
         &self.slugs
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use foundation::execution::{ObservationSink, ServiceHandle};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{composition::HostAdmission, runtime_directory::RuntimeDriverDirectory};
+use crate::{composition::HostAdmission, runtime::directory::RuntimeDriverDirectory};
 
 use super::OrganizationHandle;
 

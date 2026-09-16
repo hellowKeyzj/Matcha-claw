@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use serde_json::Value;
@@ -17,7 +17,7 @@ use tokio::{
 use crate::{
     composition::PeerHandle,
     facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
-    owner,
+    host_actor,
     sessions::SessionHandle,
 };
 
@@ -54,7 +54,7 @@ impl Lifecycle {
 
 pub(crate) struct Server {
     listener: TcpListener,
-    owner: owner::Handle,
+    owner: host_actor::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
     toolchain: ToolchainHandle,
@@ -68,7 +68,7 @@ pub(crate) struct Server {
 impl Server {
     pub(crate) async fn bind(
         port: u16,
-        owner: owner::Handle,
+        owner: host_actor::Handle,
         peer: PeerHandle,
         platform_runtime: PlatformRuntimeHandle,
         toolchain: ToolchainHandle,
@@ -88,14 +88,6 @@ impl Server {
             lifecycle: Arc::new(AtomicU8::new(LIFECYCLE_RUNNING)),
             started_at: SystemTime::now(),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn port(&self) -> u16 {
-        self.listener
-            .local_addr()
-            .expect("compatibility listener address")
-            .port()
     }
 
     pub(crate) async fn run(self) -> io::Result<()> {
@@ -131,7 +123,7 @@ impl Server {
 
 async fn serve(
     mut stream: TcpStream,
-    owner: owner::Handle,
+    owner: host_actor::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
     toolchain: ToolchainHandle,
@@ -170,7 +162,7 @@ async fn serve(
 
 async fn handle(
     request: Request,
-    owner: owner::Handle,
+    owner: host_actor::Handle,
     peer: PeerHandle,
     platform_runtime: PlatformRuntimeHandle,
     toolchain: ToolchainHandle,
@@ -211,7 +203,7 @@ async fn handle(
             )
         }
         ("POST", "/lifecycle/restart") => {
-            CompatibilityResponse::Dispatch(restart_lifecycle(peer, lifecycle).await)
+            CompatibilityResponse::Dispatch(DispatchResponse::lifecycle_restart_unavailable())
         }
         ("POST", "/lifecycle/stop") => {
             let accepted = lifecycle
@@ -247,7 +239,7 @@ async fn handle(
     }
 }
 
-async fn shutdown_until_terminal(owner: owner::Handle, lifecycle: Arc<AtomicU8>) {
+async fn shutdown_until_terminal(owner: host_actor::Handle, lifecycle: Arc<AtomicU8>) {
     loop {
         match owner.shutdown().await {
             Ok(attempt) if attempt.terminal => {
@@ -272,28 +264,6 @@ fn stopped_dispatch_response() -> DispatchResponse {
     })
 }
 
-async fn restart_lifecycle(peer: PeerHandle, lifecycle: Arc<AtomicU8>) -> DispatchResponse {
-    if lifecycle_from_atomic(lifecycle.load(Ordering::Acquire)) != Lifecycle::Running {
-        return DispatchResponse::lifecycle_restart_unavailable();
-    }
-    if !peer_restart_succeeded(peer).await {
-        lifecycle.store(u8::MAX, Ordering::Release);
-        return DispatchResponse::lifecycle_restart_unavailable();
-    }
-    lifecycle.store(LIFECYCLE_RUNNING, Ordering::Release);
-    DispatchResponse::Success(super::wire::DispatchSuccess {
-        version: VERSION,
-        success: true,
-        status: 200,
-        data: serde_json::json!({ "lifecycle": "running" }),
-    })
-}
-
-async fn peer_restart_succeeded(peer: PeerHandle) -> bool {
-    matches!(peer.restart_open_claw().await, Ok(Ok(_)))
-        && matches!(peer.restart_matcha().await, Ok(Ok(_)))
-}
-
 enum CompatibilityResponse {
     Health(HealthResponse),
     Dispatch(DispatchResponse),
@@ -309,9 +279,7 @@ impl CompatibilityResponse {
 
     fn into_json(self) -> Value {
         match self {
-            Self::Health(response) => {
-                serde_json::to_value(response).expect("health response serializable")
-            }
+            Self::Health(response) => response.into_json(),
             Self::Dispatch(response) => response.into_json(),
         }
     }
@@ -460,16 +428,6 @@ fn lifecycle_from_atomic(value: u8) -> Lifecycle {
     }
 }
 
-#[allow(dead_code)]
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -572,8 +530,7 @@ mod tests {
     #[test]
     fn invalid_lifecycle_state_projects_safe_error_health() {
         let lifecycle = Arc::new(AtomicU8::new(u8::MAX));
-        let payload = serde_json::to_value(build_health_response(lifecycle, SystemTime::now()))
-            .expect("health response serializable");
+        let payload = build_health_response(lifecycle, SystemTime::now()).into_json();
 
         assert_eq!(payload["version"], VERSION);
         assert_eq!(payload["ok"], false);

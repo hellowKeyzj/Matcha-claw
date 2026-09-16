@@ -2,7 +2,7 @@ use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Serialize;
 
 use super::state::SessionProvider;
-use crate::runtime_driver::RuntimeDriverIdentity;
+use crate::runtime::driver::RuntimeDriverIdentity;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -181,58 +181,6 @@ impl SessionSendCommand {
         self.idempotency_key = None;
         Ok(self)
     }
-
-    /// Produces only the native receipt key confirmed by a successful Matcha send.
-    ///
-    /// OpenClaw queue admission and every non-success outcome remain without a
-    /// legacy job crosswalk. The native returned run ID is the receipt identity;
-    /// the requested ID is retained only as owner-local correlation metadata.
-    pub(crate) fn dependency_result(
-        &self,
-        outcome: &SessionSendOutcome,
-    ) -> SessionSendDependencyResult {
-        match (self.endpoint, outcome) {
-            (NativeEndpoint::MatchaAgentLocal, SessionSendOutcome::Succeeded { run_id, .. })
-                if !run_id.trim().is_empty() =>
-            {
-                SessionSendDependencyResult::Receipt(SessionSendReceipt {
-                    requested_run_id: self.requested_run_id().map(str::to_owned),
-                    key: SessionRunReceiptKey {
-                        endpoint: self.endpoint,
-                        session_key: self.session_key.clone(),
-                        run_id: run_id.clone(),
-                    },
-                })
-            }
-            _ => SessionSendDependencyResult::JobCrosswalkUnavailable(JobCrosswalkUnavailable),
-        }
-    }
-}
-
-/// Stable native identity available only after a successful Matcha send.
-///
-/// This is owner-local and deliberately has no serialized or legacy `jobId`
-/// projection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SessionRunReceiptKey {
-    pub(crate) endpoint: NativeEndpoint,
-    pub(crate) session_key: String,
-    pub(crate) run_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SessionSendReceipt {
-    pub(crate) requested_run_id: Option<String>,
-    pub(crate) key: SessionRunReceiptKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct JobCrosswalkUnavailable;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SessionSendDependencyResult {
-    Receipt(SessionSendReceipt),
-    JobCrosswalkUnavailable(JobCrosswalkUnavailable),
 }
 
 fn valid_bounded_text(value: &str, max_bytes: usize) -> bool {

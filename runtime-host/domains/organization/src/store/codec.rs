@@ -3914,7 +3914,7 @@ mod tests {
                     rejection: MaterializationRejection::Permanent,
                 },
             });
-        let facts = OrganizationFacts::restore_with_materialization_lifecycles(
+        let facts = OrganizationFacts::restore_with_materialization_lifecycles_and_decisions_and_artifacts_and_task_board_and_purged_runs(
             MaterializationLifecycleFactsRestoreInput {
                 teams: vec![TeamFacts::new(
                     team_definition("team:one"),
@@ -3933,6 +3933,10 @@ mod tests {
                 events: Default::default(),
                 evidence: Vec::new(),
             },
+            TeamDecisionLedgerSnapshot::default(),
+            [],
+            TaskBoardFacts::default(),
+            [],
         )
         .unwrap();
 

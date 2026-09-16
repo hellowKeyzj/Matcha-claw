@@ -71,7 +71,7 @@ pub(crate) fn parse_patch(bytes: Zeroizing<Vec<u8>>) -> Result<Map<String, Value
     parse_values(bytes)
 }
 
-pub(crate) fn parse_values(mut bytes: Zeroizing<Vec<u8>>) -> Result<Map<String, Value>, ()> {
+fn parse_values(mut bytes: Zeroizing<Vec<u8>>) -> Result<Map<String, Value>, ()> {
     let parsed = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|value| match value {

@@ -25,7 +25,7 @@ use tokio::{
 };
 
 use super::*;
-use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, owner};
+use crate::{Host, HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -91,7 +91,7 @@ impl ObservationObserver for RecordingObserver {
 
 struct RunningServer {
     root: TestRoot,
-    owner: owner::Owner,
+    owner: crate::host_actor::Owner,
     task: JoinHandle<io::Result<()>>,
     port: u16,
 }
@@ -105,7 +105,7 @@ impl RunningServer {
         let root = TestRoot::new();
         let (mut host, events, handles) = Host::new(host_input(&root)).expect("construct host");
         host.start().await.expect("start host");
-        let owner = owner::Owner::spawn(host, events);
+        let owner = crate::host_actor::Owner::spawn(host, events);
         let verifier = CapabilityDecisionVerifier::try_new(&verification_key()).expect("verifier");
         let server = Server::bind(0, verifier, handles.diagnostics.clone(), observation)
             .await

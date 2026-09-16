@@ -22,18 +22,17 @@ use organization::{
     },
 };
 
-use crate::{
-    HostPhase, RequestAdmissionClosed,
-    composition::{
-        ManualTeamCreateOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
-        TeamNodePromptSettledResult, TeamNodeTerminalResult, TeamRunCommandOutcome,
-        TeamRunTriggerOutcome,
-    },
-    transport::team_task_board,
-};
+use crate::{HostPhase, RequestAdmissionClosed};
 
 use super::{
     OrganizationCommand, OrganizationQuery,
+    team_run::{
+        ArmedTrigger, ManualTeamCreateOutcome, MatchaTerminalObservationError,
+        MatchaTerminalObservationOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
+        TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
+        TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart, TeamRunActivityTarget,
+        TeamRunCommandOutcome, TeamRunTriggerOutcome,
+    },
     team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
 };
 
@@ -418,7 +417,7 @@ impl OrganizationHandle {
     pub async fn trigger_list(
         &self,
         team_id: Option<TeamId>,
-    ) -> Result<Vec<crate::composition::ArmedTrigger>, RequestAdmissionClosed> {
+    ) -> Result<Vec<ArmedTrigger>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::TriggerList { team_id, reply })
@@ -624,7 +623,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         node_execution_id: OpaqueId,
         event: String,
-        terminal: Option<crate::composition::team_run_mcp::TeamNodeTerminalResolution>,
+        terminal: Option<TeamNodeTerminalResolution>,
         summary: String,
         output_port: Option<String>,
         idempotency_key: String,
@@ -693,8 +692,8 @@ impl OrganizationHandle {
         &self,
         team_id: TeamId,
         run_id: GraphRunId,
-        operation: team_task_board::Operation,
-    ) -> Result<Result<team_task_board::MutationResult, StoreFault>, RequestAdmissionClosed> {
+        operation: super::task_board::TaskBoardMutation,
+    ) -> Result<Result<super::task_board::MutationResult, StoreFault>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::TaskBoardMutate {
@@ -777,7 +776,7 @@ impl OrganizationHandle {
     pub async fn activity_target(
         &self,
         activity_id: ActivityId,
-    ) -> Result<Option<crate::composition::TeamRunActivityTarget>, RequestAdmissionClosed> {
+    ) -> Result<Option<TeamRunActivityTarget>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::ActivityTarget { activity_id, reply })
@@ -791,10 +790,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         activity_id: ActivityId,
         claimed_at: u64,
-    ) -> Result<
-        Result<crate::composition::TeamRunActivityStart, crate::composition::TeamRunActivityError>,
-        RequestAdmissionClosed,
-    > {
+    ) -> Result<Result<TeamRunActivityStart, TeamRunActivityError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::ClaimActivity {
@@ -812,14 +808,8 @@ impl OrganizationHandle {
         &self,
         run_id: GraphRunId,
         claim: ActivityClaim,
-        outcome: crate::runtime_driver::ActivityExecutionOutcome,
-    ) -> Result<
-        Result<
-            crate::composition::TeamRunActivityOutcome,
-            crate::composition::TeamRunActivityError,
-        >,
-        RequestAdmissionClosed,
-    > {
+        outcome: crate::runtime::driver::ActivityExecutionOutcome,
+    ) -> Result<Result<TeamRunActivityOutcome, TeamRunActivityError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::SettleActivity {
@@ -840,10 +830,7 @@ impl OrganizationHandle {
         status: TerminalRunStatus,
         observed_at: u64,
     ) -> Result<
-        Result<
-            crate::composition::MatchaTerminalObservationOutcome,
-            crate::composition::MatchaTerminalObservationError,
-        >,
+        Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();

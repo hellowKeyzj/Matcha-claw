@@ -563,7 +563,7 @@ fn output_round_trips_with_semantic_outcomes_and_typed_events() {
         Output::Ready(Ready::new()),
         Output::Outcome(Outcome::new(
             request.id.clone(),
-            CommandOutcome::succeeded(json!({ "health": { "ok": true } })),
+            CommandOutcome::succeeded(CommandResult::private(json!({ "health": { "ok": true } }))),
         )),
         Output::Outcome(Outcome::new(
             request.id.clone(),
@@ -571,7 +571,7 @@ fn output_round_trips_with_semantic_outcomes_and_typed_events() {
         )),
         Output::Outcome(Outcome::new(
             request.id.clone(),
-            CommandOutcome::unknown(json!({ "outcome": "unknown" })),
+            CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "unknown" }))),
         )),
         Output::Outcome(Outcome::new(
             request.id.clone(),
@@ -1054,7 +1054,6 @@ fn session_handle_separates_query_and_mutation_mailboxes() {
     for method in [
         "pub(crate) async fn ensure_session",
         "pub(crate) async fn ingest_event",
-        "pub(crate) async fn touch_session",
         "pub(crate) async fn evict_session",
         "pub(crate) async fn create_session",
         "pub(crate) async fn send_session",

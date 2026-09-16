@@ -1,17 +1,71 @@
 use std::collections::BTreeSet;
 
-use environment::{
-    ProviderAccount, ProviderCascade, ProviderCascadeFault, ProviderModel, ProviderModelCapability,
-    ProviderRouting, ProviderRoutingCapability, ProviderRoutingStoreFault,
+use crate::provider::{
+    accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
+    native::ProviderNativeConfigurationView,
 };
-use openclaw::port::ProviderNativeConfigurationEffect;
+use environment::{
+    ProviderAccountId, ProviderCascade, ProviderCascadeFault, ProviderRouting,
+    ProviderRoutingCapability, ProviderRoutingStoreFault, provider_routing_account_ids,
+    provider_routing_is_admissible,
+};
 
-use crate::provider::accounts::{ProviderCommitOutcome, ProviderPersistedOutcome};
-
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderRoutingListOutcome {
-    Desired(Option<ProviderRouting>),
+    Desired(Option<ProviderRoutingView>),
     Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderRoutingView {
+    pub(crate) revision: u64,
+    pub(crate) routes: Vec<ProviderRouteView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderRouteView {
+    pub(crate) capability: &'static str,
+    pub(crate) primary: ProviderModelReferenceView,
+    pub(crate) fallbacks: Vec<ProviderModelReferenceView>,
+    pub(crate) timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderModelReferenceView {
+    pub(crate) account_id: String,
+    pub(crate) model_id: String,
+}
+
+impl ProviderRoutingView {
+    pub(crate) fn from_routing(routing: &ProviderRouting) -> Self {
+        Self {
+            revision: routing.revision().get(),
+            routes: routing
+                .routes()
+                .iter()
+                .map(|(capability, route)| ProviderRouteView {
+                    capability: provider_routing_capability_name(*capability),
+                    primary: ProviderModelReferenceView::from_reference(route.primary()),
+                    fallbacks: route
+                        .fallbacks()
+                        .iter()
+                        .map(ProviderModelReferenceView::from_reference)
+                        .collect(),
+                    timeout_ms: route.timeout_ms(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ProviderModelReferenceView {
+    fn from_reference(reference: &environment::ProviderModelReference) -> Self {
+        Self {
+            account_id: reference.account_id().as_str().to_owned(),
+            model_id: reference.model_id().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,7 +74,7 @@ pub enum ProviderRoutingReplaceOutcome {
     /// acceptance, health, or observed state.
     DesiredStored {
         persisted: ProviderPersistedOutcome,
-        native: ProviderNativeConfigurationEffect,
+        native: ProviderNativeConfigurationView,
         commit: ProviderCommitOutcome,
     },
     Rejected,
@@ -34,13 +88,6 @@ impl ProviderRoutingOwner {
         Self
     }
 
-    pub(super) fn list(&mut self, cascade: &mut ProviderCascade) -> ProviderRoutingListOutcome {
-        if cascade.reload().is_err() {
-            return ProviderRoutingListOutcome::Unavailable;
-        }
-        ProviderRoutingListOutcome::Desired(cascade.routing().cloned())
-    }
-
     pub(super) fn replace(
         &mut self,
         cascade: &mut ProviderCascade,
@@ -49,11 +96,7 @@ impl ProviderRoutingOwner {
         if cascade.reload().is_err() {
             return ProviderRoutingReplaceOutcome::Unavailable;
         }
-        if !routing
-            .routes()
-            .iter()
-            .all(|(capability, route)| self.route_is_admissible(cascade, *capability, route))
-        {
+        if !provider_routing_is_admissible(&routing, cascade.accounts(), cascade.catalog()) {
             return ProviderRoutingReplaceOutcome::Rejected;
         }
         if let Err(fault) = cascade.replace_routing(routing.clone()) {
@@ -66,7 +109,7 @@ impl ProviderRoutingOwner {
             } else {
                 ProviderPersistedOutcome::Unknown
             },
-            native: ProviderNativeConfigurationEffect::Unavailable,
+            native: ProviderNativeConfigurationView::unavailable(),
             commit: if confirmed {
                 ProviderCommitOutcome::Committed
             } else {
@@ -78,79 +121,22 @@ impl ProviderRoutingOwner {
     pub(super) fn route_account_ids(
         &self,
         cascade: &ProviderCascade,
-    ) -> BTreeSet<environment::ProviderAccountId> {
+    ) -> BTreeSet<ProviderAccountId> {
         cascade
             .routing()
-            .map(|routing| {
-                routing
-                    .routes()
-                    .iter()
-                    .flat_map(|(_, route)| {
-                        std::iter::once(route.primary()).chain(route.fallbacks())
-                    })
-                    .map(|reference| reference.account_id().clone())
-                    .collect()
-            })
+            .map(provider_routing_account_ids)
             .unwrap_or_default()
     }
-
-    fn route_is_admissible(
-        &self,
-        cascade: &ProviderCascade,
-        capability: ProviderRoutingCapability,
-        route: &environment::ProviderRoute,
-    ) -> bool {
-        self.reference_is_admissible(cascade, capability, route.primary())
-            && route
-                .fallbacks()
-                .iter()
-                .all(|reference| self.reference_is_admissible(cascade, capability, reference))
-    }
-
-    fn reference_is_admissible(
-        &self,
-        cascade: &ProviderCascade,
-        capability: ProviderRoutingCapability,
-        reference: &environment::ProviderModelReference,
-    ) -> bool {
-        let Some(account) = self.account_for(cascade, reference.account_id()) else {
-            return false;
-        };
-        account.configuration().enabled()
-            && cascade
-                .catalog()
-                .models()
-                .iter()
-                .any(|model| model_matches(model, capability, reference))
-    }
-
-    fn account_for<'a>(
-        &self,
-        cascade: &'a ProviderCascade,
-        account_id: &environment::ProviderAccountId,
-    ) -> Option<&'a ProviderAccount> {
-        cascade.account(account_id)
-    }
 }
 
-fn model_matches(
-    model: &ProviderModel,
-    capability: ProviderRoutingCapability,
-    reference: &environment::ProviderModelReference,
-) -> bool {
-    model.account_id() == reference.account_id()
-        && model.model_id() == reference.model_id()
-        && model.supports(model_capability(capability))
-}
-
-const fn model_capability(capability: ProviderRoutingCapability) -> ProviderModelCapability {
+const fn provider_routing_capability_name(capability: ProviderRoutingCapability) -> &'static str {
     match capability {
-        ProviderRoutingCapability::Chat => ProviderModelCapability::Chat,
-        ProviderRoutingCapability::ImageUnderstand => ProviderModelCapability::ImageUnderstand,
-        ProviderRoutingCapability::ImageGenerate => ProviderModelCapability::ImageGenerate,
-        ProviderRoutingCapability::VideoGenerate => ProviderModelCapability::VideoGenerate,
-        ProviderRoutingCapability::MusicGenerate => ProviderModelCapability::MusicGenerate,
-        ProviderRoutingCapability::Tts => ProviderModelCapability::TextToSpeech,
+        ProviderRoutingCapability::Chat => "chat",
+        ProviderRoutingCapability::ImageUnderstand => "imageUnderstand",
+        ProviderRoutingCapability::ImageGenerate => "imageGenerate",
+        ProviderRoutingCapability::VideoGenerate => "videoGenerate",
+        ProviderRoutingCapability::MusicGenerate => "musicGenerate",
+        ProviderRoutingCapability::Tts => "tts",
     }
 }
 
@@ -170,7 +156,7 @@ fn replace_fault(fault: ProviderCascadeFault) -> ProviderRoutingReplaceOutcome {
         | ProviderRoutingStoreFault::RecoveryRequired => {
             ProviderRoutingReplaceOutcome::DesiredStored {
                 persisted: ProviderPersistedOutcome::Unknown,
-                native: ProviderNativeConfigurationEffect::Unavailable,
+                native: ProviderNativeConfigurationView::unavailable(),
                 commit: ProviderCommitOutcome::CommitOutcomeUnknown,
             }
         }
@@ -183,6 +169,10 @@ fn replace_fault(fault: ProviderCascadeFault) -> ProviderRoutingReplaceOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use environment::{
+        ProviderModel, ProviderModelCapability, provider_model_matches_routing_reference,
+        provider_routing_model_capability,
+    };
 
     fn account_id() -> environment::ProviderAccountId {
         environment::ProviderAccountId::try_new("routing-test").expect("valid account identifier")
@@ -207,12 +197,12 @@ mod tests {
     fn routing_model_requires_its_selected_capability() {
         let reference = environment::ProviderModelReference::try_new(account_id(), "model")
             .expect("valid model reference");
-        assert!(model_matches(
+        assert!(provider_model_matches_routing_reference(
             &model(vec![ProviderModelCapability::ImageGenerate]),
             ProviderRoutingCapability::ImageGenerate,
             &reference,
         ));
-        assert!(!model_matches(
+        assert!(!provider_model_matches_routing_reference(
             &model(vec![ProviderModelCapability::Chat]),
             ProviderRoutingCapability::ImageGenerate,
             &reference,
@@ -222,11 +212,11 @@ mod tests {
     #[test]
     fn routing_capabilities_map_to_final_provider_model_capabilities() {
         assert_eq!(
-            model_capability(ProviderRoutingCapability::Tts),
+            provider_routing_model_capability(ProviderRoutingCapability::Tts),
             ProviderModelCapability::TextToSpeech
         );
         assert_eq!(
-            model_capability(ProviderRoutingCapability::ImageUnderstand),
+            provider_routing_model_capability(ProviderRoutingCapability::ImageUnderstand),
             ProviderModelCapability::ImageUnderstand
         );
     }

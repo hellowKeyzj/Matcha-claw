@@ -50,13 +50,6 @@ impl WorkspaceFiles {
         Self { selection }
     }
 
-    pub(super) fn read_text(
-        &self,
-        relative_path: &str,
-    ) -> Result<WorkspaceText, WorkspaceFileError> {
-        self.read_text_with_limit(relative_path, MAX_TEXT_BYTES)
-    }
-
     pub(super) fn read_text_with_limit(
         &self,
         relative_path: &str,
@@ -105,13 +98,6 @@ impl WorkspaceFiles {
         })
     }
 
-    pub(super) fn list_dir(
-        &self,
-        relative_path: &str,
-    ) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
-        self.list_dir_with_options(relative_path, false)
-    }
-
     pub(super) fn list_dir_with_options(
         &self,
         relative_path: &str,
@@ -119,10 +105,6 @@ impl WorkspaceFiles {
     ) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
         let path = RelativePath::try_new(relative_path)?;
         self.list_directory(path.components(), include_hidden)
-    }
-
-    pub(super) fn list_root_dir(&self) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
-        self.list_root_dir_with_options(false)
     }
 
     pub(super) fn list_root_dir_with_options(

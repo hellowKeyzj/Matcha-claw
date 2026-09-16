@@ -698,20 +698,14 @@ fn valid_segment(value: &str, max_bytes: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-#[cfg(unix)]
 fn set_private_mode(path: &Path, directory: bool) -> Result<(), FleetCredentialVaultError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = if directory { 0o700 } else { 0o600 };
-    let mut permissions = fs::metadata(path)
-        .map_err(|_| FleetCredentialVaultError::Storage)?
-        .permissions();
-    permissions.set_mode(mode);
-    fs::set_permissions(path, permissions).map_err(|_| FleetCredentialVaultError::Storage)
-}
-
-#[cfg(not(unix))]
-fn set_private_mode(_path: &Path, _directory: bool) -> Result<(), FleetCredentialVaultError> {
-    Ok(())
+    let mode = if directory {
+        foundation::storage::PrivateMode::Directory
+    } else {
+        foundation::storage::PrivateMode::File
+    };
+    foundation::storage::set_private_mode(path, mode)
+        .map_err(|_| FleetCredentialVaultError::Storage)
 }
 
 #[cfg(test)]
@@ -736,5 +730,62 @@ mod tests {
     fn plaintext_debug_is_redacted() {
         let plaintext = FleetCredentialPlaintext::new("credential-canary".to_owned()).unwrap();
         assert!(!format!("{plaintext:?}").contains("credential-canary"));
+    }
+
+    #[test]
+    fn rejects_relative_private_root() {
+        assert!(matches!(
+            FleetCredentialVault::open(PathBuf::from("relative-private-root")),
+            Err(FleetCredentialVaultError::InvalidInput)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vault_private_paths_are_hardened_on_windows() {
+        let root = TempRoot::new();
+        let private_root = root.path().join("private");
+        foundation::storage::provision_private_directory(&private_root).unwrap();
+        let vault = FleetCredentialVault::open(&private_root).unwrap();
+
+        set_private_mode(&vault.directory, true).unwrap();
+        let request = FleetCredentialWriteRequest {
+            operation_id: "op-1".into(),
+            credential_id: "target-1".into(),
+            credential_name: FleetCredentialName::SshPassword,
+            plaintext: FleetCredentialPlaintext::new("secret".into()).unwrap(),
+            written_at: "2026-09-15T00:00:00+00:00".into(),
+        };
+        vault.write_credential(request).unwrap();
+        set_private_mode(&vault.key_path, false).unwrap();
+        set_private_mode(&vault.state_path, false).unwrap();
+    }
+
+    #[cfg(windows)]
+    struct TempRoot(PathBuf);
+
+    #[cfg(windows)]
+    impl TempRoot {
+        fn new() -> Self {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "matcha-fleet-credential-private-{}-{id}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }

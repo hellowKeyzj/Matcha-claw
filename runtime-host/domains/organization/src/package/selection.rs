@@ -562,6 +562,14 @@ impl TeamSkillDependencyPlan {
         &self.selection_id
     }
 
+    pub fn package_name(&self) -> &str {
+        &self.package_name
+    }
+
+    pub fn package_version(&self) -> &str {
+        &self.package_version
+    }
+
     pub fn items(&self) -> &[TeamSkillDependencyPlanItem] {
         &self.items
     }
@@ -611,6 +619,22 @@ impl TeamSkillDependencyPlanItem {
             },
             installable: !available && dependency.source().is_some_and(is_installable_source),
         }
+    }
+
+    pub const fn kind(&self) -> TeamSkillDependencyKind {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
+    pub fn purpose(&self) -> &str {
+        &self.purpose
     }
 
     pub const fn status(&self) -> TeamSkillDependencyStatus {

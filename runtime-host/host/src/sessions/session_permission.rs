@@ -2,7 +2,7 @@ use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Serialize;
 
 use super::state::SessionProvider;
-use crate::runtime_driver::RuntimeDriverIdentity;
+use crate::runtime::driver::RuntimeDriverIdentity;
 
 const MAX_AGENT_ID_BYTES: usize = 256;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -193,11 +193,7 @@ impl SessionPermissionProjection {
                 projection.can_select_full,
             )
         } else {
-            Self::unsupported(
-                projection
-                    .reason
-                    .unwrap_or_else(|| "Session permission is unsupported".into()),
-            )
+            Self::unsupported("Session permission is unsupported")
         }
     }
 }

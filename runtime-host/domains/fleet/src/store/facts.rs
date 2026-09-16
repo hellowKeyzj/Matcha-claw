@@ -307,6 +307,7 @@ impl FleetFacts {
         &self.leases
     }
 
+    #[cfg(test)]
     pub(crate) fn leases_mut(&mut self) -> &mut LeaseBook<platform::endpoint::EndpointId> {
         &mut self.leases
     }

@@ -1177,6 +1177,7 @@ fn zeroize_value(value: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn unavailable_evidence(changed: bool) -> ProviderNativeConfigurationEvidence {
     ProviderNativeConfigurationEvidence::new(
         changed,

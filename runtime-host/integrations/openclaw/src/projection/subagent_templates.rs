@@ -115,7 +115,61 @@ pub enum TemplateFile {
     Memory,
 }
 
+impl Category {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn order(&self) -> Option<i64> {
+        self.order
+    }
+}
+
+impl Summary {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    pub fn category_id(&self) -> Option<&str> {
+        self.category_id.as_deref()
+    }
+
+    pub fn subcategory_id(&self) -> Option<&str> {
+        self.subcategory_id.as_deref()
+    }
+
+    pub fn order(&self) -> Option<i64> {
+        self.order
+    }
+
+    pub fn files(&self) -> &[TemplateFile] {
+        &self.files
+    }
+}
+
+impl Template {
+    pub fn summary(&self) -> &Summary {
+        &self.summary
+    }
+
+    pub fn file_contents(&self) -> &BTreeMap<TemplateFile, String> {
+        &self.file_contents
+    }
+}
+
 impl TemplateFile {
+    pub fn public_name(self) -> &'static str {
+        self.file_name()
+    }
+
     fn file_name(self) -> &'static str {
         match self {
             Self::Agents => "AGENTS.md",

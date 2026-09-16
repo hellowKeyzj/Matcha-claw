@@ -35,8 +35,10 @@ function createUnpackedArtifact(root: string, platform: 'darwin' | 'linux' | 'wi
   mkdirSync(runtimeHostDir, { recursive: true });
   const runtimeHost = join(runtimeHostDir, platform === 'win32' ? 'runtime-host.exe' : 'runtime-host');
   const runtimeHostMcp = join(runtimeHostDir, platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp');
+  const bun = join(resources, 'bin', platform === 'win32' ? 'bun.exe' : 'bun');
   writeFileSync(runtimeHost, 'fixture-runtime-host');
   writeFileSync(runtimeHostMcp, 'fixture-runtime-host-mcp');
+  writeFileSync(bun, 'fixture-bun');
   if (platform !== 'win32') {
     writeFileSync(join(runtimeHostDir, 'runtime-host-guardian'), 'fixture-guardian');
   }
@@ -154,6 +156,7 @@ describe('runtime-host package smoke runner', () => {
     });
 
     expect(inspectRuntimeHostPackageInventory(plan)).toMatchObject({
+      bun: 'present',
       guardian: 'present',
       packageArtifact: 'not-provided',
       runtimeHost: 'present',
@@ -174,6 +177,25 @@ describe('runtime-host package smoke runner', () => {
     rmSync(join(unpacked, 'resources', 'bin', 'win32-x64', 'runtime-host-mcp.exe'));
 
     expect(() => inspectRuntimeHostPackageInventory(plan)).toThrow(/runtime-host-mcp artifact/);
+  });
+
+  it.each([
+    ['darwin', 'arm64', 'zip', 'bun'],
+    ['linux', 'x64', 'AppImage', 'bun'],
+    ['win32', 'x64', 'nsis', 'bun.exe'],
+  ] as const)('rejects a missing packaged Bun artifact for %s %s %s', (platform, arch, target, bunName) => {
+    const root = createTempRoot();
+    const unpacked = createUnpackedArtifact(root, platform, arch);
+    const plan = createRuntimeHostPackageSmokePlan({
+      platform, arch, target, unpackedArtifactPath: unpacked,
+    });
+    const resources = platform === 'darwin'
+      ? join(unpacked, 'Contents', 'Resources')
+      : join(unpacked, 'resources');
+
+    rmSync(join(resources, 'bin', bunName));
+
+    expect(() => inspectRuntimeHostPackageInventory(plan)).toThrow(/Bun artifact/);
   });
 
   it('rejects a missing Unix guardian, a Windows guardian, and legacy package entries', () => {
@@ -491,6 +513,8 @@ describe('runtime-host package smoke runner', () => {
       'installed-runtime-host',
       'unpacked-runtime-host-mcp',
       'installed-runtime-host-mcp',
+      'unpacked-bun',
+      'installed-bun',
     ]);
     expect(receipt.inventory.every((entry) => /^[a-f0-9]{64}$/.test(entry.sha256))).toBe(true);
 

@@ -494,9 +494,10 @@ impl OpenClawGateway {
         &self,
         job_id: String,
         patch: crate::gateway::wire::CronJobPatch,
+        expected_config_revision: Option<String>,
     ) -> CronMutationOutcome<crate::gateway::wire::CronJob> {
         CronProvider::new(Arc::clone(&self.client))
-            .update(job_id, patch)
+            .update(job_id, patch, expected_config_revision)
             .await
     }
 
@@ -1363,14 +1364,6 @@ impl fmt::Debug for OpenClawGateway {
         formatter
             .debug_struct("OpenClawGateway")
             .finish_non_exhaustive()
-    }
-}
-
-fn skill_status_agent_error(error: AgentsReadFailure) -> SkillStatusCatalogError {
-    match error {
-        AgentsReadFailure::Rejected => SkillStatusCatalogError::Rejected,
-        AgentsReadFailure::Protocol => SkillStatusCatalogError::Protocol,
-        AgentsReadFailure::Unavailable => SkillStatusCatalogError::Unavailable,
     }
 }
 

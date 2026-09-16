@@ -546,13 +546,6 @@ pub struct EnvironmentCleanupPlan {
 }
 
 impl EnvironmentCleanupPlan {
-    pub(crate) fn from_delete_ids(delete: Vec<ManagedResourceId>) -> Self {
-        Self {
-            delete,
-            skipped: Vec::new(),
-        }
-    }
-
     pub fn delete(&self) -> &[ManagedResourceId] {
         &self.delete
     }

@@ -1,13 +1,11 @@
 use serde_json::Value;
 
-use crate::{
-    composition::{HostPhase, RequestAdmissionClosed},
-    security_audit, security_delivery,
-    security_emergency::SecurityEmergencyOutcome,
-    security_operation,
-};
+use crate::composition::{HostPhase, RequestAdmissionClosed};
 
-use super::{command::SecurityCommand, query::SecurityQuery};
+use super::{
+    SecurityPolicyDeliverySettlement, audit as security_audit, command::SecurityCommand,
+    emergency::SecurityEmergencyOutcome, operation as security_operation, query::SecurityQuery,
+};
 
 #[derive(Clone)]
 pub(crate) struct SecurityHandle {
@@ -49,7 +47,7 @@ impl SecurityHandle {
         &self,
         correlation: String,
         policy: Value,
-    ) -> Result<security_delivery::Settlement, RequestAdmissionClosed> {
+    ) -> Result<SecurityPolicyDeliverySettlement, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.owner
             .send_command(SecurityCommand::ReplacePolicy {

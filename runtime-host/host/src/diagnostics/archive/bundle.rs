@@ -1,22 +1,15 @@
 //! Data collection for the diagnostics archive.
 //!
-//! Collects two independent roots. The runtime data root that the peer runtime owns contributes
-//! recent logs, per-agent session index and transcripts, whitelisted workspace documents, plugin
-//! manifests and the redacted runtime config; the desktop shell's own log directory contributes its
-//! recent logs. Collection is bounded and total: an unreadable, oversized or non-whitelisted input
-//! is skipped so a busy runtime still yields a usable bundle instead of no bundle at all. The entry
-//! order is diagnostic priority order, so truncation drops the least valuable inputs first.
+//! The archive carries only sealed host diagnostics and bounded log projections. It deliberately does
+//! not copy peer runtime config, transcripts, workspace files, package material or plugin/native
+//! manifests: those are private runtime facts, not diagnostic output.
 
 use std::{
-    collections::BTreeSet,
     fs::{self, File, Metadata, OpenOptions},
     io::Read,
-    path::{Component, Path, PathBuf},
-    str,
+    path::{Path, PathBuf},
     time::SystemTime,
 };
-
-use serde_json::Value;
 
 pub(super) const HOST_STATE_ENTRY: &str = "diagnostics.json";
 pub(super) const ENTRY_LIMIT: usize = 64;
@@ -28,27 +21,7 @@ const MAX_DIRECTORY_DEPTH: usize = 8;
 const MAX_ARCHIVE_PATH_LENGTH: usize = 160;
 const RUNTIME_PREFIX: &str = "runtime";
 const APP_LOG_PREFIX: &str = "userdata/logs";
-const RUNTIME_CONFIG_FILE: &str = "openclaw.json";
 const LOG_DIRECTORY: &str = "logs";
-const AGENT_DIRECTORY: &str = "agents";
-const SESSION_DIRECTORY: &str = "sessions";
-const SESSION_INDEX_FILE: &str = "sessions.json";
-const SESSION_TRANSCRIPT_SUFFIX: &str = ".jsonl";
-const EXTENSION_DIRECTORY: &str = "extensions";
-const PLUGIN_MANIFEST_FILE: &str = "openclaw.plugin.json";
-const EXECUTION_DIRECTORY: &str = "executions";
-const PACKAGE_DIRECTORY: &str = "packages";
-const PACKAGE_FILE_WHITELIST: &[&str] = &["team.skill.json", "package.json", "README.md"];
-const WORKSPACE_DIRECTORIES: &[&str] = &["workspace", "workspace-subagents"];
-const WORKSPACE_FILE_WHITELIST: &[&str] = &[
-    "AGENTS.md",
-    "SOUL.md",
-    "IDENTITY.md",
-    "USER.md",
-    "MEMORY.md",
-];
-const REDACTED_VALUE: &str = "***";
-const REDACTED_DOCUMENT: &[u8] = b"\"***\"";
 
 pub(super) struct ArchiveEntry {
     pub(super) name: String,
@@ -76,7 +49,6 @@ fn is_allowed_entry_name(name: &str) -> bool {
 }
 
 struct ContainedFile {
-    path: PathBuf,
     file: File,
 }
 
@@ -185,51 +157,31 @@ impl FileIdentity {
     }
 }
 
-/// Collects the sealed Host state document plus every collection root that is currently resolvable.
+/// Collects the sealed Host state document plus safe projections of recent diagnostic logs.
 pub(super) fn collect(
     state_root: &Path,
     app_log_root: Option<&Path>,
     host_state: Vec<u8>,
 ) -> Vec<ArchiveEntry> {
-    let runtime = Source::new(state_root, RUNTIME_PREFIX);
+    let runtime = Source::new(state_root);
     let mut bundle = Bundle::new();
     bundle.push(HOST_STATE_ENTRY.to_owned(), host_state);
-    bundle.collect_runtime_config(&runtime);
-    bundle.collect_sessions(&runtime);
     bundle.collect_runtime_logs(&runtime);
     if let Some(app_log_root) = app_log_root {
-        bundle.collect_app_logs(&Source::new(app_log_root, APP_LOG_PREFIX));
+        bundle.collect_app_logs(&Source::new(app_log_root));
     }
-    bundle.collect_workspace(&runtime);
-    bundle.collect_execution_paths(&runtime);
-    bundle.collect_package_paths(&runtime);
-    bundle.collect_plugin_manifests(&runtime);
     bundle.entries
 }
 
-/// A canonical collection root paired with the archive prefix its files are named under. Every
-/// traversal and every entry name is resolved against the root, so no collected path can escape it.
+/// A canonical collection root. Every traversal is resolved against the root, so no collected file
+/// can escape it; archive entry names are generated and never reuse native path segments.
 struct Source<'root> {
     root: &'root Path,
-    prefix: &'static str,
 }
 
 impl<'root> Source<'root> {
-    fn new(root: &'root Path, prefix: &'static str) -> Self {
-        Self { root, prefix }
-    }
-
-    fn entry_name(&self, path: &Path) -> Option<String> {
-        let relative = path.strip_prefix(self.root).ok()?;
-        let mut name = String::from(self.prefix);
-        for component in relative.components() {
-            let Component::Normal(segment) = component else {
-                return None;
-            };
-            name.push('/');
-            name.push_str(segment.to_str()?);
-        }
-        (name.len() > self.prefix.len()).then_some(name)
+    fn new(root: &'root Path) -> Self {
+        Self { root }
     }
 
     fn contained_file(&self, path: &Path) -> Option<ContainedFile> {
@@ -249,7 +201,7 @@ impl<'root> Source<'root> {
         {
             return None;
         }
-        Some(ContainedFile { path, file })
+        Some(ContainedFile { file })
     }
 
     fn contained_directory(&self, path: &Path) -> Option<PathBuf> {
@@ -273,89 +225,22 @@ impl Bundle {
         }
     }
 
-    fn collect_runtime_config(&mut self, source: &Source<'_>) {
-        let config = source.root.join(RUNTIME_CONFIG_FILE);
-        self.push_file(source, &config, Redaction::SensitiveJson);
-    }
-
-    fn collect_sessions(&mut self, source: &Source<'_>) {
-        for agent_id in agent_ids(source) {
-            let sessions = source
-                .root
-                .join(AGENT_DIRECTORY)
-                .join(agent_id)
-                .join(SESSION_DIRECTORY);
-            self.push_file(
-                source,
-                &sessions.join(SESSION_INDEX_FILE),
-                Redaction::SafeJson,
-            );
-            self.walk(
-                source,
-                &sessions,
-                &|name| name.ends_with(SESSION_TRANSCRIPT_SUFFIX),
-                Recency::Recent,
-            );
-        }
-    }
-
     fn collect_runtime_logs(&mut self, source: &Source<'_>) {
         let logs = source.root.join(LOG_DIRECTORY);
-        self.walk(source, &logs, &|_| true, Recency::Recent);
+        self.walk_logs(source, &logs, "runtime/logs");
     }
 
     /// The desktop shell's log directory is itself the root, so it is walked in place.
     fn collect_app_logs(&mut self, source: &Source<'_>) {
-        self.walk(source, source.root, &|_| true, Recency::Recent);
+        self.walk_logs(source, source.root, APP_LOG_PREFIX);
     }
 
-    fn collect_workspace(&mut self, source: &Source<'_>) {
-        for directory in WORKSPACE_DIRECTORIES {
-            let root = source.root.join(directory);
-            self.walk(
-                source,
-                &root,
-                &|name| WORKSPACE_FILE_WHITELIST.contains(&name),
-                Recency::Any,
-            );
-        }
-    }
-
-    fn collect_execution_paths(&mut self, source: &Source<'_>) {
-        let executions = source.root.join(EXECUTION_DIRECTORY);
-        self.walk(source, &executions, &|_| true, Recency::Recent);
-    }
-
-    fn collect_package_paths(&mut self, source: &Source<'_>) {
-        let packages = source.root.join(PACKAGE_DIRECTORY);
-        self.walk(
-            source,
-            &packages,
-            &|name| PACKAGE_FILE_WHITELIST.contains(&name),
-            Recency::Any,
-        );
-    }
-
-    fn collect_plugin_manifests(&mut self, source: &Source<'_>) {
-        let extensions = source.root.join(EXTENSION_DIRECTORY);
-        for extension in child_directory_names(&extensions) {
-            let manifest = extensions.join(extension).join(PLUGIN_MANIFEST_FILE);
-            self.push_file(source, &manifest, Redaction::SafeJson);
-        }
-    }
-
-    fn walk(
-        &mut self,
-        source: &Source<'_>,
-        root: &Path,
-        accepts: &dyn Fn(&str) -> bool,
-        recency: Recency,
-    ) {
+    fn walk_logs(&mut self, source: &Source<'_>, root: &Path, archive_prefix: &'static str) {
         let Some(root) = source.contained_directory(root) else {
             return;
         };
-        let mut pending = vec![root];
-        while let Some(directory) = pending.pop() {
+        let mut pending = vec![(root, 0_usize)];
+        while let Some((directory, depth)) = pending.pop() {
             if self.is_full() {
                 return;
             }
@@ -370,40 +255,42 @@ impl Bundle {
                     continue;
                 }
                 if kind.is_dir() {
-                    pending.push(child.path());
+                    if depth + 1 < MAX_DIRECTORY_DEPTH {
+                        pending.push((child.path(), depth + 1));
+                    }
                     continue;
                 }
-                let Some(name) = child.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                if !kind.is_file() || !accepts(&name) {
-                    continue;
-                }
-                if !child
-                    .metadata()
-                    .is_ok_and(|metadata| recency.admits(&metadata, self.cutoff_ms))
+                if !kind.is_file()
+                    || !child
+                        .metadata()
+                        .is_ok_and(|metadata| Recency::Recent.admits(&metadata, self.cutoff_ms))
                 {
                     continue;
                 }
-                self.push_file(source, &child.path(), Redaction::SafeText);
+                self.push_log_summary(source, &child.path(), archive_prefix);
             }
         }
     }
 
-    fn push_file(&mut self, source: &Source<'_>, path: &Path, redaction: Redaction) {
+    fn push_log_summary(&mut self, source: &Source<'_>, path: &Path, archive_prefix: &'static str) {
         if self.is_full() {
             return;
         }
         let Some(file) = source.contained_file(path) else {
             return;
         };
-        let Some(name) = source.entry_name(&file.path) else {
-            return;
-        };
         let Some(content) = read_bounded_file(file) else {
             return;
         };
-        self.push(name, redaction.apply(content));
+        let index = self
+            .entries
+            .iter()
+            .filter(|entry| entry.name.starts_with(archive_prefix))
+            .count();
+        self.push(
+            format!("{archive_prefix}/log-{index:03}.txt"),
+            project_log_summary(&content),
+        );
     }
 
     fn push(&mut self, name: String, content: Vec<u8>) {
@@ -425,14 +312,12 @@ impl Bundle {
 
 #[derive(Clone, Copy)]
 enum Recency {
-    Any,
     Recent,
 }
 
 impl Recency {
     fn admits(self, metadata: &Metadata, cutoff_ms: u128) -> bool {
         match self {
-            Self::Any => true,
             Self::Recent => metadata
                 .modified()
                 .is_ok_and(|modified| unix_millis(modified) >= cutoff_ms),
@@ -440,146 +325,18 @@ impl Recency {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Redaction {
-    SafeText,
-    SafeJson,
-    SensitiveJson,
-}
-
-impl Redaction {
-    fn apply(self, content: Vec<u8>) -> Vec<u8> {
-        match self {
-            Self::SafeText => redact_sensitive_text(&content),
-            Self::SafeJson | Self::SensitiveJson => redact_sensitive_json(&content),
-        }
-    }
-}
-
-/// Configured agents plus agents that only left a session directory behind.
-fn agent_ids(source: &Source<'_>) -> BTreeSet<String> {
-    let mut ids = configured_agent_ids(source);
-    ids.extend(child_directory_names(&source.root.join(AGENT_DIRECTORY)));
-    ids
-}
-
-fn configured_agent_ids(source: &Source<'_>) -> BTreeSet<String> {
-    let Some(config) = source.contained_file(&source.root.join(RUNTIME_CONFIG_FILE)) else {
-        return BTreeSet::new();
+fn project_log_summary(raw: &[u8]) -> Vec<u8> {
+    let (utf8, lines) = match std::str::from_utf8(raw) {
+        Ok(text) => (true, text.lines().count()),
+        Err(_) => (false, 0),
     };
-    let Some(raw) = read_bounded_file(config) else {
-        return BTreeSet::new();
-    };
-    let Ok(document) = serde_json::from_slice::<Value>(&raw) else {
-        return BTreeSet::new();
-    };
-    document
-        .get("agents")
-        .and_then(|agents| agents.get("list"))
-        .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(|agent| agent.get("id").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn child_directory_names(root: &Path) -> BTreeSet<String> {
-    let Ok(children) = fs::read_dir(root) else {
-        return BTreeSet::new();
-    };
-    children
-        .flatten()
-        .filter(|child| child.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|child| child.file_name().to_str().map(str::trim).map(str::to_owned))
-        .filter(|name| !name.is_empty())
-        .collect()
-}
-
-/// Replaces every string value held under a credential-shaped key with a fixed marker.
-fn redact_sensitive_text(raw: &[u8]) -> Vec<u8> {
-    let Ok(text) = str::from_utf8(raw) else {
-        return REDACTED_DOCUMENT.to_vec();
-    };
-    let mut safe = String::with_capacity(text.len());
-    for line in text.lines() {
-        if !safe.is_empty() {
-            safe.push('\n');
-        }
-        safe.push_str(&redact_sensitive_line(line));
-    }
-    safe.into_bytes()
-}
-
-fn redact_sensitive_line(line: &str) -> String {
-    let mut start = 0;
-    while let Some(relative) =
-        line[start..].find(|character: char| character == ':' || character == '=')
-    {
-        let delimiter = start + relative;
-        let key_start = line[..delimiter]
-            .rfind(|character: char| {
-                character.is_whitespace()
-                    || character == '{'
-                    || character == ','
-                    || character == '['
-            })
-            .map_or(0, |index| index + 1);
-        let key = line[key_start..delimiter].trim_matches(['"', '\'']);
-        if is_sensitive_key(key) {
-            return REDACTED_VALUE.to_owned();
-        }
-        start = delimiter + 1;
-    }
-    line.to_owned()
-}
-
-fn redact_sensitive_json(raw: &[u8]) -> Vec<u8> {
-    let Ok(mut document) = serde_json::from_slice::<Value>(raw) else {
-        return REDACTED_DOCUMENT.to_vec();
-    };
-    redact_sensitive_values(&mut document, "");
-    serde_json::to_vec_pretty(&document).unwrap_or_else(|_| REDACTED_DOCUMENT.to_vec())
-}
-
-fn redact_sensitive_values(value: &mut Value, key: &str) {
-    match value {
-        Value::Object(members) => {
-            for (member_key, member) in members {
-                redact_sensitive_values(member, member_key);
-            }
-        }
-        Value::Array(members) => {
-            for member in members {
-                redact_sensitive_values(member, key);
-            }
-        }
-        Value::String(text) if is_sensitive_key(key) && !text.trim().is_empty() => {
-            *text = REDACTED_VALUE.to_owned();
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "key"
-        || [
-            "token",
-            "secret",
-            "password",
-            "apikey",
-            "api_key",
-            "authorization",
-            "cookie",
-            "proxy",
-        ]
-        .iter()
-        .any(|marker| key.contains(marker))
+    format!(
+        "redacted=true\nkind=diagnosticLog\nbytes={}\nlines={}\nutf8={}\n",
+        raw.len(),
+        lines,
+        utf8
+    )
+    .into_bytes()
 }
 
 fn unix_millis(time: SystemTime) -> u128 {
@@ -595,7 +352,7 @@ mod tests {
     use crate::diagnostics::archive::tests::{fixture_root, write_runtime_fixture};
 
     #[test]
-    fn runtime_bundle_recovers_the_full_runtime_data_layout() {
+    fn runtime_bundle_carries_only_host_state_and_log_projections() {
         let state_root = fixture_root();
         write_runtime_fixture(&state_root);
         let state_root = fs::canonicalize(&state_root).unwrap();
@@ -603,27 +360,27 @@ mod tests {
         let entries = collected(&state_root, None);
 
         assert!(entries.contains_key(HOST_STATE_ENTRY));
-        for expected in [
-            "runtime/openclaw.json",
-            "runtime/logs/runtime.log",
-            "runtime/logs/nested/gateway.log",
-            "runtime/agents/reviewer/sessions/sessions.json",
-            "runtime/agents/reviewer/sessions/session-1.jsonl",
-            "runtime/agents/configured/sessions/sessions.json",
-            "runtime/workspace/AGENTS.md",
-            "runtime/workspace-subagents/child/MEMORY.md",
-            "runtime/executions/run-1/package-path.txt",
-            "runtime/packages/team-reviewer/team.skill.json",
-            "runtime/packages/team-reviewer/README.md",
-            "runtime/extensions/browser/openclaw.plugin.json",
-        ] {
-            assert!(entries.contains_key(expected), "missing entry {expected}");
+        assert!(
+            entries
+                .keys()
+                .any(|name| name == "runtime/logs/log-000.txt")
+        );
+        assert!(
+            entries
+                .keys()
+                .any(|name| name == "runtime/logs/log-001.txt")
+        );
+        for name in entries.keys() {
+            assert!(
+                name == HOST_STATE_ENTRY || name.starts_with("runtime/logs/log-"),
+                "unexpected diagnostics entry {name}"
+            );
         }
         let _ = fs::remove_dir_all(state_root);
     }
 
     #[test]
-    fn runtime_bundle_excludes_unlisted_stale_and_oversized_inputs() {
+    fn runtime_bundle_excludes_private_runtime_sources_and_oversized_logs() {
         let state_root = fixture_root();
         write_runtime_fixture(&state_root);
         let oversized = vec![b'x'; ENTRY_BYTE_LIMIT as usize + 1];
@@ -633,78 +390,68 @@ mod tests {
         let entries = collected(&state_root, None);
 
         for excluded in [
-            "runtime/workspace/notes.txt",
-            "runtime/logs/oversized.log",
-            "runtime/agents/reviewer/sessions/stale.jsonl",
-            "runtime/packages/team-reviewer/private.env",
-            "runtime/extensions/browser/package.json",
+            "openclaw.json",
+            "agents",
+            "sessions",
+            "workspace",
+            "workspace-subagents",
+            "executions",
+            "packages",
+            "extensions",
+            "private.env",
+            "oversized",
         ] {
             assert!(
-                !entries.contains_key(excluded),
-                "unexpected entry {excluded}"
+                !entries.keys().any(|name| name.contains(excluded)),
+                "unexpected private entry containing {excluded}"
             );
         }
         let _ = fs::remove_dir_all(state_root);
     }
 
     #[test]
-    fn runtime_config_credentials_are_redacted_in_place() {
+    fn runtime_config_credentials_are_not_collected() {
         let state_root = fixture_root();
         write_runtime_fixture(&state_root);
         let state_root = fs::canonicalize(&state_root).unwrap();
 
-        let mut entries = collected(&state_root, None);
-        let config = String::from_utf8(entries.remove("runtime/openclaw.json").unwrap()).unwrap();
+        let entries = collected(&state_root, None);
+        let rendered = render_entries(&entries);
 
-        assert!(!config.contains("config-token-canary"));
-        assert!(!config.contains("nested-secret-canary"));
-        assert!(config.contains(REDACTED_VALUE));
-        assert!(config.contains("configured"));
-        assert!(config.contains("8080"));
+        assert!(!entries.contains_key("runtime/openclaw.json"));
+        assert!(!rendered.contains("config-token-canary"));
+        assert!(!rendered.contains("nested-secret-canary"));
+        assert!(!rendered.contains("configured"));
+        assert!(!rendered.contains("8080"));
         let _ = fs::remove_dir_all(state_root);
     }
 
     #[test]
-    fn sensitive_keys_cover_credential_shapes_without_swallowing_plain_fields() {
-        for sensitive in [
-            "token",
-            "accessToken",
-            "apiKey",
-            "api_key",
-            "key",
-            "PASSWORD",
-            "authorization",
-            "cookie",
-            "proxyUrl",
-            "clientSecret",
-        ] {
-            assert!(is_sensitive_key(sensitive), "{sensitive} must be sensitive");
-        }
-        for plain in ["id", "model", "keyring_label", "lifecycle", "workspace"] {
-            assert!(!is_sensitive_key(plain), "{plain} must stay verbatim");
-        }
-    }
-
-    #[test]
-    fn safe_text_redaction_removes_sensitive_diagnostics_canaries() {
+    fn log_projection_never_includes_raw_diagnostic_content() {
         let raw = br#"pid=4321 argv=["runtime-host", "--token=argv-token"] path=C:\private\runtime token=log-token secret=log-secret payload={"native":true}"#;
 
-        let safe = String::from_utf8(redact_sensitive_text(raw)).unwrap();
+        let safe = String::from_utf8(project_log_summary(raw)).unwrap();
 
-        assert!(!safe.contains("4321"));
-        assert!(!safe.contains("runtime-host"));
-        assert!(!safe.contains("argv-token"));
-        assert!(!safe.contains("C:\\private\\runtime"));
-        assert!(!safe.contains("log-token"));
-        assert!(!safe.contains("log-secret"));
-        assert!(!safe.contains("native"));
-        assert!(safe.contains(REDACTED_VALUE));
+        for forbidden in [
+            "4321",
+            "runtime-host",
+            "argv-token",
+            "C:\\private\\runtime",
+            "log-token",
+            "log-secret",
+            "native",
+            "payload",
+        ] {
+            assert!(!safe.contains(forbidden));
+        }
+        assert!(safe.contains("redacted=true"));
+        assert!(safe.contains("kind=diagnosticLog"));
     }
 
     /// The desktop log directory lives outside the runtime state root in production, so the two
-    /// sources must contribute independently and neither may name a file under the other's prefix.
+    /// sources must contribute independently and neither may reuse native file names in the archive.
     #[test]
-    fn app_logs_are_collected_under_their_own_prefix_beside_the_runtime_root() {
+    fn app_logs_are_collected_under_their_own_anonymous_prefix() {
         let state_root = fixture_root();
         let app_log_root = fixture_root();
         write_runtime_fixture(&state_root);
@@ -714,11 +461,12 @@ mod tests {
 
         let entries = collected(&state_root, Some(&app_log_root));
 
-        assert!(entries.contains_key("userdata/logs/main.log"));
-        assert!(entries.contains_key("userdata/logs/nested/renderer.log"));
-        assert!(!entries.contains_key("userdata/logs/stale.log"));
-        assert!(entries.contains_key("runtime/logs/runtime.log"));
-        assert!(entries.contains_key("runtime/openclaw.json"));
+        assert!(entries.contains_key("userdata/logs/log-000.txt"));
+        assert!(entries.contains_key("userdata/logs/log-001.txt"));
+        assert!(!entries.keys().any(|name| name.contains("main.log")));
+        assert!(!entries.keys().any(|name| name.contains("renderer.log")));
+        assert!(!entries.keys().any(|name| name.contains("stale.log")));
+        assert!(entries.contains_key("runtime/logs/log-000.txt"));
         assert!(!entries.contains_key("userdata/logs/openclaw.json"));
         let _ = fs::remove_dir_all(state_root);
         let _ = fs::remove_dir_all(app_log_root);
@@ -735,26 +483,26 @@ mod tests {
         let entries = collected(&state_root, Some(&absent));
 
         assert!(!entries.keys().any(|name| name.starts_with(APP_LOG_PREFIX)));
-        assert!(entries.contains_key("runtime/logs/runtime.log"));
+        assert!(entries.contains_key("runtime/logs/log-000.txt"));
         let _ = fs::remove_dir_all(state_root);
     }
 
     #[test]
-    fn entry_names_reject_escapes_and_keep_the_source_prefix() {
-        let runtime = Source::new(Path::new("/state"), RUNTIME_PREFIX);
-        let app_logs = Source::new(Path::new("/userData/logs"), APP_LOG_PREFIX);
-
-        assert_eq!(
-            runtime.entry_name(Path::new("/state/logs/runtime.log")),
-            Some("runtime/logs/runtime.log".to_owned())
-        );
-        assert_eq!(
-            app_logs.entry_name(Path::new("/userData/logs/main.log")),
-            Some("userdata/logs/main.log".to_owned())
-        );
-        assert_eq!(runtime.entry_name(Path::new("/state")), None);
-        assert_eq!(runtime.entry_name(Path::new("/elsewhere/x")), None);
-        assert_eq!(app_logs.entry_name(Path::new("/userData")), None);
+    fn generated_entry_names_reject_native_path_escapes() {
+        for rejected in [
+            "/runtime/logs/log-000.txt",
+            "runtime/../logs/log-000.txt",
+            "runtime/logs/native\\path.txt",
+            "userdata/logs/\0.txt",
+            "elsewhere/logs/log-000.txt",
+        ] {
+            assert!(
+                !is_allowed_entry_name(rejected),
+                "{rejected} must be rejected"
+            );
+        }
+        assert!(is_allowed_entry_name("runtime/logs/log-000.txt"));
+        assert!(is_allowed_entry_name("userdata/logs/log-000.txt"));
     }
 
     fn collected(state_root: &Path, app_log_root: Option<&Path>) -> BTreeMap<String, Vec<u8>> {
@@ -762,6 +510,14 @@ mod tests {
             .into_iter()
             .map(|entry| (entry.name, entry.content))
             .collect()
+    }
+
+    fn render_entries(entries: &BTreeMap<String, Vec<u8>>) -> String {
+        entries
+            .iter()
+            .map(|(name, content)| format!("{name}\n{}", String::from_utf8_lossy(content)))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Mirrors the desktop shell log directory, including a log past the recency window.

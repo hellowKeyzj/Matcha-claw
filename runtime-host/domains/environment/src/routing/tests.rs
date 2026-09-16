@@ -24,6 +24,13 @@ fn remove(path: &PathBuf) {
     let _ = fs::remove_file(temporary_path(path));
 }
 
+fn missing_path(path: &PathBuf, name: &str) -> PathBuf {
+    path.with_file_name(format!(
+        "{}-{name}.json",
+        path.file_stem().unwrap().to_string_lossy()
+    ))
+}
+
 fn reference(account_id: &str, model_id: &str) -> ProviderModelReference {
     ProviderModelReference::try_new(ProviderAccountId::try_new(account_id).unwrap(), model_id)
         .unwrap()
@@ -195,9 +202,14 @@ fn legacy_routing_is_migrated_to_canonical_and_reopens() {
         Err(ProviderRoutingStoreFault::Decode)
     ));
     migrate_provider_legacy_stores(
-        path.with_file_name("missing-provider-accounts.json"),
-        path.with_file_name("missing-provider-models.json"),
+        missing_path(&path, "provider-accounts"),
+        missing_path(&path, "provider-models"),
         &path,
+        (
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+        ),
     )
     .unwrap();
     let store = ProviderRoutingStore::open(&path).unwrap();
@@ -241,9 +253,14 @@ fn legacy_routing_requires_primary_and_prunes_invalid_fallbacks() {
     .unwrap();
 
     migrate_provider_legacy_stores(
-        path.with_file_name("missing-provider-accounts.json"),
-        path.with_file_name("missing-provider-models.json"),
+        missing_path(&path, "provider-accounts"),
+        missing_path(&path, "provider-models"),
         &path,
+        (
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+        ),
     )
     .unwrap();
     let store = ProviderRoutingStore::open(&path).unwrap();
@@ -285,9 +302,14 @@ fn legacy_routing_ignores_secret_bearing_unknown_fields() {
     .unwrap();
 
     migrate_provider_legacy_stores(
-        path.with_file_name("missing-provider-accounts.json"),
-        path.with_file_name("missing-provider-models.json"),
+        missing_path(&path, "provider-accounts"),
+        missing_path(&path, "provider-models"),
         &path,
+        (
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+            Vec::<PathBuf>::new(),
+        ),
     )
     .unwrap();
     let store = ProviderRoutingStore::open(&path).unwrap();

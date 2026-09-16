@@ -8,17 +8,14 @@ use foundation::execution::{OperationHandle, TraceContext};
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    composition::{TeamRunActivityError, TeamRunActivityStart, TeamRunActivityTarget},
-    runtime_driver::{
-        ActivityExecutionOutcome, ActivityExecutionRequest, OwnedRuntimeFuture,
-        RuntimeDriverIdentity,
-    },
+use crate::runtime::driver::{
+    ActivityExecutionOutcome, ActivityExecutionRequest, OwnedRuntimeFuture, RuntimeDriverIdentity,
 };
 
 use super::{
     coordinator::TeamRunCoordinatorInput,
     receipt_router::{ActivityReceipt, ActivityReceiptStatus, TeamRunReceiptRouter},
+    team_run::{TeamRunActivityError, TeamRunActivityStart, TeamRunActivityTarget},
 };
 
 const READY_NODES_OPERATION: &str = "teamRun.readyNodes";

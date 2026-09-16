@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use super::{AgentKey, PackageRelativePath, RuntimeAgentTarget, SealedResourceError};
+use super::{AgentKey, PackageRelativePath, SealedAgentTarget, SealedResourceError};
 
 const PACKAGE_FORMAT: &str = "matcha-agentpkg";
 const PACKAGE_FORMAT_VERSION: u8 = 1;
@@ -28,13 +28,13 @@ const AGENT_BOOTSTRAP_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "USER.md", "MEM
 const REQUIRED_AGENT_BOOTSTRAP_FILE: &str = "AGENTS.md";
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct SealedAgentFileRequest {
+pub(super) struct SealedAgentFileRequest {
     path: PackageRelativePath,
     content: Vec<u8>,
 }
 
 impl SealedAgentFileRequest {
-    pub fn try_new(
+    pub(super) fn try_new(
         path: impl Into<String>,
         content: impl Into<Vec<u8>>,
     ) -> Result<Self, SealedResourceError> {
@@ -50,11 +50,11 @@ impl SealedAgentFileRequest {
         Ok(Self { path, content })
     }
 
-    pub fn path(&self) -> &PackageRelativePath {
+    pub(super) fn path(&self) -> &PackageRelativePath {
         &self.path
     }
 
-    pub fn content(&self) -> &[u8] {
+    pub(super) fn content(&self) -> &[u8] {
         &self.content
     }
 }
@@ -73,17 +73,17 @@ impl fmt::Debug for SealedAgentFileRequest {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct SealedAgentFile {
+pub(super) struct SealedAgentFile {
     path: PackageRelativePath,
     content: Vec<u8>,
 }
 
 impl SealedAgentFile {
-    pub fn path(&self) -> &PackageRelativePath {
+    pub(super) fn path(&self) -> &PackageRelativePath {
         &self.path
     }
 
-    pub fn content(&self) -> &[u8] {
+    pub(super) fn content(&self) -> &[u8] {
         &self.content
     }
 }
@@ -102,26 +102,26 @@ impl fmt::Debug for SealedAgentFile {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedAgentPackage {
+pub(super) struct SealedAgentPackage {
     agent_key: AgentKey,
-    runtime_target: RuntimeAgentTarget,
+    target: SealedAgentTarget,
     package_sha256: String,
     files: Vec<SealedAgentFile>,
 }
 
 impl SealedAgentPackage {
-    pub fn seal(
+    pub(super) fn seal(
         agent_key: AgentKey,
-        runtime_target: RuntimeAgentTarget,
+        target: SealedAgentTarget,
         files: Vec<SealedAgentFileRequest>,
         key: &[u8],
     ) -> Result<SealAgentPackageReceipt, SealedResourceError> {
         let files = normalize_files(files)?;
-        let manifest = PackageManifest::from_files(&agent_key, runtime_target, &files)?;
+        let manifest = PackageManifest::from_files(&agent_key, target, &files)?;
         let mut plaintext = payload_plaintext(&files)?;
         let payload = encrypt_payload(
             key,
-            &payload_aad(agent_key.as_str(), runtime_target, manifest.sha256.as_str())?,
+            &payload_aad(agent_key.as_str(), target, manifest.sha256.as_str())?,
             &plaintext,
         )?;
         plaintext.zeroize();
@@ -136,7 +136,7 @@ impl SealedAgentPackage {
         Ok(SealAgentPackageReceipt::from_package_bytes(bytes))
     }
 
-    pub fn open(bytes: &[u8], key: &[u8]) -> Result<Self, SealedResourceError> {
+    pub(super) fn open(bytes: &[u8], key: &[u8]) -> Result<Self, SealedResourceError> {
         let wire: SealedAgentPackageWire =
             serde_json::from_slice(bytes).map_err(|_| SealedResourceError::Rejected)?;
         if wire.format != PACKAGE_FORMAT || wire.version != PACKAGE_FORMAT_VERSION {
@@ -144,7 +144,7 @@ impl SealedAgentPackage {
         }
         let agent_key = AgentKey::parse(wire.manifest.agent_key.clone())
             .map_err(|_| SealedResourceError::Rejected)?;
-        if wire.manifest.runtime_target != RuntimeAgentTarget::OpenClaw
+        if wire.manifest.target != SealedAgentTarget::OpenClaw
             || wire.manifest_sha256 != wire.manifest.sha256
             || manifest_digest(&wire.manifest)? != wire.manifest.sha256
         {
@@ -154,7 +154,7 @@ impl SealedAgentPackage {
             key,
             &payload_aad(
                 agent_key.as_str(),
-                wire.manifest.runtime_target,
+                wire.manifest.target,
                 wire.manifest_sha256.as_str(),
             )?,
             wire.payload,
@@ -162,42 +162,42 @@ impl SealedAgentPackage {
         let files = open_payload(payload, &wire.manifest)?;
         Ok(Self {
             agent_key,
-            runtime_target: wire.manifest.runtime_target,
+            target: wire.manifest.target,
             package_sha256: hex_digest(bytes),
             files,
         })
     }
 
-    pub fn agent_key(&self) -> &AgentKey {
+    pub(super) fn agent_key(&self) -> &AgentKey {
         &self.agent_key
     }
 
-    pub fn runtime_target(&self) -> RuntimeAgentTarget {
-        self.runtime_target
+    pub(super) fn target(&self) -> SealedAgentTarget {
+        self.target
     }
 
-    pub fn package_sha256(&self) -> &str {
+    pub(super) fn package_sha256(&self) -> &str {
         &self.package_sha256
     }
 
-    pub fn files(&self) -> &[SealedAgentFile] {
+    pub(super) fn files(&self) -> &[SealedAgentFile] {
         &self.files
     }
 
-    pub fn file(&self, path: &PackageRelativePath) -> Option<&SealedAgentFile> {
+    pub(super) fn file(&self, path: &PackageRelativePath) -> Option<&SealedAgentFile> {
         self.files.iter().find(|file| file.path == *path)
     }
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct SealAgentPackageReceipt {
+pub(super) struct SealAgentPackageReceipt {
     package_file_name: String,
     package_sha256: String,
     package_bytes: Vec<u8>,
 }
 
 impl SealAgentPackageReceipt {
-    pub fn from_package_bytes(package_bytes: Vec<u8>) -> Self {
+    pub(super) fn from_package_bytes(package_bytes: Vec<u8>) -> Self {
         let package_sha256 = hex_digest(&package_bytes);
         let package_file_name = format!("{}.{}", package_sha256, SEALED_AGENT_PACKAGE_EXTENSION);
         Self {
@@ -207,23 +207,23 @@ impl SealAgentPackageReceipt {
         }
     }
 
-    pub fn package_file_name(&self) -> &str {
+    pub(super) fn package_file_name(&self) -> &str {
         &self.package_file_name
     }
 
-    pub fn package_sha256(&self) -> &str {
+    pub(super) fn package_sha256(&self) -> &str {
         &self.package_sha256
     }
 
-    pub fn package_bytes(&self) -> &[u8] {
+    pub(super) fn package_bytes(&self) -> &[u8] {
         &self.package_bytes
     }
 
-    pub fn package_size(&self) -> u64 {
+    pub(super) fn package_size(&self) -> u64 {
         self.package_bytes.len() as u64
     }
 
-    pub fn into_package_bytes(self) -> Vec<u8> {
+    pub(super) fn into_package_bytes(self) -> Vec<u8> {
         self.package_bytes
     }
 }
@@ -264,7 +264,11 @@ struct EncryptedPayload {
 #[serde(rename_all = "camelCase")]
 struct PackageManifest {
     agent_key: String,
-    runtime_target: RuntimeAgentTarget,
+    #[serde(
+        deserialize_with = "deserialize_agent_target_code",
+        serialize_with = "serialize_agent_target_code"
+    )]
+    target: SealedAgentTarget,
     files: Vec<PackageManifestFile>,
     sha256: String,
 }
@@ -272,12 +276,12 @@ struct PackageManifest {
 impl PackageManifest {
     fn from_files(
         agent_key: &AgentKey,
-        runtime_target: RuntimeAgentTarget,
+        target: SealedAgentTarget,
         files: &[SealedAgentFile],
     ) -> Result<Self, SealedResourceError> {
         let mut manifest = Self {
             agent_key: agent_key.as_str().to_owned(),
-            runtime_target,
+            target,
             files: files
                 .iter()
                 .map(|file| PackageManifestFile {
@@ -314,8 +318,35 @@ struct PayloadAad<'a> {
     format: &'a str,
     version: u8,
     agent_key: &'a str,
-    runtime_target: RuntimeAgentTarget,
+    #[serde(serialize_with = "serialize_agent_target_code")]
+    target: SealedAgentTarget,
     manifest_sha256: &'a str,
+}
+
+fn parse_agent_target_code(value: &str) -> Result<SealedAgentTarget, SealedResourceError> {
+    match value {
+        "openclaw" => Ok(SealedAgentTarget::OpenClaw),
+        _ => Err(SealedResourceError::Rejected),
+    }
+}
+
+fn serialize_agent_target_code<S>(
+    target: &SealedAgentTarget,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(target.as_str())
+}
+
+fn deserialize_agent_target_code<'de, D>(deserializer: D) -> Result<SealedAgentTarget, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    parse_agent_target_code(&value)
+        .map_err(|_| serde::de::Error::custom("invalid sealed agent target"))
 }
 
 fn normalize_files(
@@ -494,14 +525,14 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], SealedResourceEr
 
 fn payload_aad(
     agent_key: &str,
-    runtime_target: RuntimeAgentTarget,
+    target: SealedAgentTarget,
     manifest_sha256: &str,
 ) -> Result<Vec<u8>, SealedResourceError> {
     serde_json::to_vec(&PayloadAad {
         format: PACKAGE_FORMAT,
         version: PACKAGE_FORMAT_VERSION,
         agent_key,
-        runtime_target,
+        target,
         manifest_sha256,
     })
     .map_err(|_| SealedResourceError::Unknown)

@@ -4,7 +4,7 @@
 //! symlink/reparse swap of the path cannot redirect archive writes or downloads.
 
 use std::{
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
@@ -558,7 +558,7 @@ impl FileIdentity {
         Self::from_metadata(&metadata).ok_or(DiagnosticsArchiveError::InvalidRoot)
     }
 
-    fn from_metadata(metadata: &Metadata) -> Option<Self> {
+    fn from_metadata(metadata: &fs::Metadata) -> Option<Self> {
         use std::os::unix::fs::MetadataExt;
 
         Some(Self {
@@ -567,7 +567,7 @@ impl FileIdentity {
         })
     }
 
-    fn matches(self, metadata: &Metadata) -> bool {
+    fn matches(self, metadata: &fs::Metadata) -> bool {
         Self::from_metadata(metadata) == Some(self)
     }
 }
@@ -631,7 +631,7 @@ impl FileIdentity {
         Ok(Self)
     }
 
-    fn matches(self, _metadata: &Metadata) -> bool {
+    fn matches(self, _metadata: &fs::Metadata) -> bool {
         true
     }
 }

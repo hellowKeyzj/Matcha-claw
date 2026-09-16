@@ -150,25 +150,6 @@ impl WorkspaceMedia {
         })
     }
 
-    pub fn thumbnails(
-        &self,
-        files: &WorkspaceFiles,
-        paths: &[WorkspaceMediaPath],
-    ) -> Vec<WorkspaceMediaThumbnailEntry> {
-        paths
-            .iter()
-            .map(|path| {
-                let thumbnail = self
-                    .thumbnail(files, path.relative_path(), path.mime_type())
-                    .unwrap_or_else(|_| WorkspaceMediaThumbnail::empty());
-                WorkspaceMediaThumbnailEntry {
-                    key: path.key().to_owned(),
-                    thumbnail,
-                }
-            })
-            .collect()
-    }
-
     pub fn thumbnails_with_gateway_context(
         &self,
         state_dir: &CanonicalStateDir,

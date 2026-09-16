@@ -1,9 +1,9 @@
 use std::{
     collections::BTreeSet,
     fmt, fs,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,34 +14,36 @@ use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use zeroize::Zeroize;
 
 use super::{
-    AgentKey, PackageRelativePath, RuntimeAgentTarget, SealAgentPackageReceipt,
-    SealedAgentFileRequest, SealedAgentPackage, SealedResourceError, SealedResourceMeteringBinding,
-    SealedResourceMeteringKind, SealedResourceMeteringUse, SealedResourceRead,
+    AgentKey, PackageRelativePath, SealedAgentTarget, SealedResourceError,
+    SealedResourceMeteringBinding, SealedResourceMeteringKind, SealedResourceMeteringUse,
+    SealedResourceRead,
+    agent_package::{SealAgentPackageReceipt, SealedAgentFileRequest, SealedAgentPackage},
 };
 
 const SEALED_AGENT_PACKAGE_EXTENSION: &str = "matcha-agentpkg";
 const KEY_BYTES: usize = 32;
 const KEY_FILE: &str = "sealed-agent.key";
 const MAX_FILE_BYTES: u64 = 48 * 1024;
+const MAX_PACKAGE_FILE_BYTES: u64 = 256 * 1024;
 const AGENT_BOOTSTRAP_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "USER.md", "MEMORY.md"];
 const REQUIRED_AGENT_BOOTSTRAP_FILE: &str = "AGENTS.md";
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct RuntimeLocalAgentRoot {
-    runtime_target: RuntimeAgentTarget,
+struct SealedAgentRoot {
+    target: SealedAgentTarget,
     state_dir: CanonicalStateDir,
 }
 
-impl RuntimeLocalAgentRoot {
-    pub fn openclaw(state_dir: CanonicalStateDir) -> Self {
+impl SealedAgentRoot {
+    fn openclaw(state_dir: CanonicalStateDir) -> Self {
         Self {
-            runtime_target: RuntimeAgentTarget::OpenClaw,
+            target: SealedAgentTarget::OpenClaw,
             state_dir,
         }
     }
 
-    pub fn runtime_target(&self) -> RuntimeAgentTarget {
-        self.runtime_target
+    fn target(&self) -> SealedAgentTarget {
+        self.target
     }
 
     fn workspace_directory(&self, agent_key: &AgentKey) -> Result<PathBuf, SealedResourceError> {
@@ -67,15 +69,29 @@ impl RuntimeLocalAgentRoot {
             .map_err(|_| SealedResourceError::Unknown)
     }
 
-    fn ensure_agent_config(
+    fn install_projection(&self) -> SealedAgentInstallProjection {
+        match self.target {
+            SealedAgentTarget::OpenClaw => SealedAgentInstallProjection::OpenClaw {
+                state_dir: self.state_dir.clone(),
+            },
+        }
+    }
+}
+
+enum SealedAgentInstallProjection {
+    OpenClaw { state_dir: CanonicalStateDir },
+}
+
+impl SealedAgentInstallProjection {
+    fn ensure_agent_entry(
         &self,
         agent_key: &AgentKey,
         workspace: &Path,
     ) -> Result<(), SealedResourceError> {
-        match self.runtime_target {
-            RuntimeAgentTarget::OpenClaw => {
+        match self {
+            Self::OpenClaw { state_dir } => {
                 openclaw::projection::sealed_agent_config::ensure_sealed_agent_config(
-                    self.state_dir.clone(),
+                    state_dir.clone(),
                     agent_key.as_str(),
                     workspace,
                 )
@@ -98,18 +114,18 @@ fn sealed_agent_config_error(
     }
 }
 
-impl fmt::Debug for RuntimeLocalAgentRoot {
+impl fmt::Debug for SealedAgentRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("RuntimeLocalAgentRoot")
-            .field("runtime_target", &self.runtime_target)
+            .debug_struct("SealedAgentRoot")
+            .field("target", &self.target)
             .field("state_dir", &"[REDACTED]")
             .finish()
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedAgentCatalog {
+pub(crate) struct SealedAgentCatalog {
     entries: Vec<SealedAgentCatalogEntry>,
 }
 
@@ -120,9 +136,9 @@ impl SealedAgentCatalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedAgentCatalogEntry {
+pub(crate) struct SealedAgentCatalogEntry {
     agent_key: AgentKey,
-    runtime_target: RuntimeAgentTarget,
+    target: SealedAgentTarget,
 }
 
 impl SealedAgentCatalogEntry {
@@ -130,13 +146,13 @@ impl SealedAgentCatalogEntry {
         &self.agent_key
     }
 
-    pub fn runtime_target(&self) -> RuntimeAgentTarget {
-        self.runtime_target
+    pub fn runtime_target(&self) -> SealedAgentTarget {
+        self.target
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedAgentPackageExport {
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct SealedAgentPackageExport {
     agent_key: AgentKey,
     file_name: String,
     package_path: PathBuf,
@@ -166,18 +182,28 @@ impl SealedAgentPackageExport {
     }
 }
 
-pub struct SealedAgentStore {
-    root: RuntimeLocalAgentRoot,
+impl fmt::Debug for SealedAgentPackageExport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedAgentPackageExport")
+            .field("agent_key", &self.agent_key)
+            .field("file_name", &self.file_name)
+            .field("package_path", &"[REDACTED]")
+            .field("size", &self.size)
+            .field("exported_at_ms", &self.exported_at_ms)
+            .finish()
+    }
+}
+
+pub(crate) struct SealedAgentStore {
+    root: SealedAgentRoot,
     private_directory: PathBuf,
     key_path: PathBuf,
     operation_lock: Mutex<()>,
 }
 
 impl SealedAgentStore {
-    pub fn new(
-        root: RuntimeLocalAgentRoot,
-        private_directory: PathBuf,
-    ) -> Result<Self, SealedResourceError> {
+    fn new(root: SealedAgentRoot, private_directory: PathBuf) -> Result<Self, SealedResourceError> {
         if !private_directory.is_absolute() {
             return Err(SealedResourceError::Rejected);
         }
@@ -195,7 +221,7 @@ impl SealedAgentStore {
         state_dir: CanonicalStateDir,
         private_root: PathBuf,
     ) -> Result<Self, SealedResourceError> {
-        Self::new(RuntimeLocalAgentRoot::openclaw(state_dir), private_root)
+        Self::new(SealedAgentRoot::openclaw(state_dir), private_root)
     }
 
     pub fn catalog(&self) -> Result<SealedAgentCatalog, SealedResourceError> {
@@ -228,6 +254,25 @@ impl SealedAgentStore {
             .map_err(|_| SealedResourceError::Unknown)?;
         self.find_sealed_package_locked(agent_key)
             .map(|entry| entry.is_some())
+    }
+
+    pub fn contains_agents(
+        &self,
+        agent_keys: &[AgentKey],
+    ) -> Result<BTreeSet<AgentKey>, SealedResourceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
+        let requested = agent_keys.iter().collect::<BTreeSet<_>>();
+        let mut sealed = BTreeSet::new();
+        for directory in self.root.maintenance_workspace_directories()? {
+            let Some(directory) = existing_workspace_directory(&directory)? else {
+                continue;
+            };
+            self.collect_matching_agents_locked(&directory, &requested, &mut sealed)?;
+        }
+        Ok(sealed)
     }
 
     pub fn read_file(
@@ -268,8 +313,7 @@ impl SealedAgentStore {
             existing_workspace_directory(&workspace)?.ok_or(SealedResourceError::NotFound)?;
         let files = collect_agent_files(&workspace)?;
         let mut key = self.read_or_create_key()?;
-        let receipt =
-            SealedAgentPackage::seal(agent_key.clone(), self.root.runtime_target(), files, &key)?;
+        let receipt = SealedAgentPackage::seal(agent_key.clone(), self.root.target(), files, &key)?;
         let package = SealedAgentPackage::open(receipt.package_bytes(), &key);
         key.zeroize();
         let package = package?;
@@ -295,17 +339,12 @@ impl SealedAgentStore {
         if !package_path.is_absolute() || !is_sealed_package_path(&package_path) {
             return Err(SealedResourceError::Rejected);
         }
-        let metadata =
-            fs::symlink_metadata(&package_path).map_err(|_| SealedResourceError::NotFound)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(SealedResourceError::Rejected);
-        }
-        let bytes = fs::read(&package_path).map_err(|_| SealedResourceError::Unknown)?;
+        let bytes = read_package_file(&package_path, SealedResourceError::NotFound)?;
         let mut key = self.read_key()?;
         let package = SealedAgentPackage::open(&bytes, &key);
         key.zeroize();
         let package = package?;
-        if package.runtime_target() != self.root.runtime_target() {
+        if package.target() != self.root.target() {
             return Err(SealedResourceError::Rejected);
         }
         if self
@@ -315,14 +354,32 @@ impl SealedAgentStore {
             return Err(SealedResourceError::AlreadyExists);
         }
         let workspace = self.root.workspace_directory(package.agent_key())?;
+        let workspace_preexisted = existing_workspace_directory(&workspace)?.is_some();
         let workspace = ensure_workspace_directory(&workspace)?;
-        self.root
-            .ensure_agent_config(package.agent_key(), &workspace)?;
         let receipt = SealAgentPackageReceipt::from_package_bytes(bytes);
-        self.install_receipt_locked(&workspace, &receipt)?;
+        let installed_path = match self.install_receipt_locked(&workspace, &receipt) {
+            Ok(path) => path,
+            Err(error) => {
+                if !workspace_preexisted {
+                    let _ = fs::remove_dir(&workspace);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .root
+            .install_projection()
+            .ensure_agent_entry(package.agent_key(), &workspace)
+        {
+            let _ = fs::remove_file(installed_path);
+            if !workspace_preexisted {
+                let _ = fs::remove_dir(&workspace);
+            }
+            return Err(error);
+        }
         Ok(SealedAgentCatalogEntry {
             agent_key: package.agent_key().clone(),
-            runtime_target: package.runtime_target(),
+            target: package.target(),
         })
     }
 
@@ -346,7 +403,7 @@ impl SealedAgentStore {
         for entry in fs::read_dir(directory).map_err(|_| SealedResourceError::Unknown)? {
             let entry = entry.map_err(|_| SealedResourceError::Unknown)?;
             let path = entry.path();
-            let metadata = entry.metadata().map_err(|_| SealedResourceError::Unknown)?;
+            let metadata = fs::symlink_metadata(&path).map_err(|_| SealedResourceError::Unknown)?;
             if metadata.file_type().is_symlink() {
                 return Err(SealedResourceError::Rejected);
             }
@@ -355,6 +412,38 @@ impl SealedAgentStore {
                 && let Some(entry) = self.catalog_sealed_package_locked(&path)?
             {
                 entries.push(entry);
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_matching_agents_locked(
+        &self,
+        directory: &Path,
+        requested: &BTreeSet<&AgentKey>,
+        sealed: &mut BTreeSet<AgentKey>,
+    ) -> Result<(), SealedResourceError> {
+        if requested.is_empty() || sealed.len() == requested.len() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(directory).map_err(|_| SealedResourceError::Unknown)? {
+            let entry = entry.map_err(|_| SealedResourceError::Unknown)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| SealedResourceError::Unknown)?;
+            if metadata.file_type().is_symlink() {
+                return Err(SealedResourceError::Rejected);
+            }
+            if !metadata.is_file() || !is_sealed_package_path(&path) {
+                continue;
+            }
+            let package = self.open_package_path_locked(&path)?;
+            if package.target() == self.root.target() && requested.contains(package.agent_key()) {
+                if !sealed.insert(package.agent_key().clone()) {
+                    return Err(SealedResourceError::Rejected);
+                }
+                if sealed.len() == requested.len() {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -381,7 +470,7 @@ impl SealedAgentStore {
         for entry in fs::read_dir(workspace).map_err(|_| SealedResourceError::Unknown)? {
             let entry = entry.map_err(|_| SealedResourceError::Unknown)?;
             let path = entry.path();
-            let metadata = entry.metadata().map_err(|_| SealedResourceError::Unknown)?;
+            let metadata = fs::symlink_metadata(&path).map_err(|_| SealedResourceError::Unknown)?;
             if metadata.file_type().is_symlink() {
                 return Err(SealedResourceError::Rejected);
             }
@@ -389,9 +478,7 @@ impl SealedAgentStore {
                 continue;
             }
             let package = self.open_package_path_locked(&path)?;
-            if package.runtime_target() == self.root.runtime_target()
-                && package.agent_key() == agent_key
-            {
+            if package.target() == self.root.target() && package.agent_key() == agent_key {
                 if found.is_some() {
                     return Err(SealedResourceError::Rejected);
                 }
@@ -406,12 +493,12 @@ impl SealedAgentStore {
         path: &Path,
     ) -> Result<Option<SealedAgentCatalogEntry>, SealedResourceError> {
         let package = self.open_package_path_locked(path)?;
-        if package.runtime_target() != self.root.runtime_target() {
+        if package.target() != self.root.target() {
             return Ok(None);
         }
         Ok(Some(SealedAgentCatalogEntry {
             agent_key: package.agent_key().clone(),
-            runtime_target: package.runtime_target(),
+            target: package.target(),
         }))
     }
 
@@ -419,7 +506,7 @@ impl SealedAgentStore {
         &self,
         path: &Path,
     ) -> Result<SealedAgentPackage, SealedResourceError> {
-        let bytes = fs::read(path).map_err(|_| SealedResourceError::Unknown)?;
+        let bytes = read_package_file(path, SealedResourceError::Unknown)?;
         let mut key = self.read_key()?;
         let package = SealedAgentPackage::open(&bytes, &key);
         key.zeroize();
@@ -469,7 +556,7 @@ impl SealedAgentStore {
             if path == keep_path {
                 continue;
             }
-            let metadata = entry.metadata().map_err(|_| SealedResourceError::Unknown)?;
+            let metadata = fs::symlink_metadata(&path).map_err(|_| SealedResourceError::Unknown)?;
             if metadata.file_type().is_symlink() {
                 return Err(SealedResourceError::Rejected);
             }
@@ -477,9 +564,7 @@ impl SealedAgentStore {
                 continue;
             }
             let package = self.open_package_path_locked(&path)?;
-            if package.runtime_target() == self.root.runtime_target()
-                && package.agent_key() == agent_key
-            {
+            if package.target() == self.root.target() && package.agent_key() == agent_key {
                 fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
             }
         }
@@ -560,7 +645,7 @@ fn collect_agent_files(
         {
             return Err(SealedResourceError::Rejected);
         }
-        let content = fs::read(&path).map_err(|_| SealedResourceError::Unknown)?;
+        let content = read_limited_file(&path, metadata.len(), MAX_FILE_BYTES)?;
         if *name == REQUIRED_AGENT_BOOTSTRAP_FILE {
             found_required = true;
         }
@@ -595,6 +680,46 @@ fn ensure_workspace_directory(path: &Path) -> Result<PathBuf, SealedResourceErro
         Err(_) => return Err(SealedResourceError::Unknown),
     }
     fs::canonicalize(path).map_err(|_| SealedResourceError::Unknown)
+}
+
+fn read_package_file(
+    path: &Path,
+    missing_error: SealedResourceError,
+) -> Result<Vec<u8>, SealedResourceError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            missing_error
+        } else {
+            SealedResourceError::Unknown
+        }
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_PACKAGE_FILE_BYTES
+    {
+        return Err(SealedResourceError::Rejected);
+    }
+    read_limited_file(path, metadata.len(), MAX_PACKAGE_FILE_BYTES)
+}
+
+fn read_limited_file(
+    path: &Path,
+    metadata_len: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>, SealedResourceError> {
+    if metadata_len > max_bytes {
+        return Err(SealedResourceError::Rejected);
+    }
+    let mut file = File::open(path).map_err(|_| SealedResourceError::Unknown)?;
+    let mut bytes = Vec::with_capacity(metadata_len as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SealedResourceError::Unknown)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(SealedResourceError::Rejected);
+    }
+    Ok(bytes)
 }
 
 fn is_sealed_package_path(path: &Path) -> bool {
@@ -642,7 +767,7 @@ fn set_private_mode(_path: &Path, _directory: bool) -> Result<(), SealedResource
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, io, path::Path};
 
     use serde_json::{Value, json};
 
@@ -715,7 +840,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(entry.agent_key(), &agent_key);
-        assert_eq!(entry.runtime_target(), RuntimeAgentTarget::OpenClaw);
+        assert_eq!(entry.runtime_target(), SealedAgentTarget::OpenClaw);
         assert_eq!(
             target
                 .read_file(
@@ -743,6 +868,159 @@ mod tests {
         assert_eq!(config["agents"]["entries"]["writer"]["skipBootstrap"], true);
         assert_plaintext_bootstrap_absent(&workspace);
         assert_eq!(sealed_packages(&workspace).len(), 1);
+    }
+
+    #[test]
+    fn catalog_rejects_sealed_agent_package_file_links() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let workspace = root.path().join("writer-workspace");
+        let target = root.path().join("target.matcha-agentpkg");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(&target, b"not a package").unwrap();
+        if !create_file_link(&target, &workspace.join("linked.matcha-agentpkg")).unwrap() {
+            return;
+        }
+        fs::write(
+            state_dir.as_path().join("openclaw.json"),
+            serde_json::to_vec(&json!({
+                "agents": { "entries": { "writer": { "workspace": workspace } } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+
+        assert_eq!(store.catalog().unwrap_err(), SealedResourceError::Rejected);
+    }
+
+    #[test]
+    fn install_package_path_rejects_oversized_package_before_reading() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let package_path = root.path().join("oversized.matcha-agentpkg");
+        fs::write(
+            &package_path,
+            vec![0_u8; (MAX_PACKAGE_FILE_BYTES + 1) as usize],
+        )
+        .unwrap();
+        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+
+        assert_eq!(
+            store.install_package_path(package_path).unwrap_err(),
+            SealedResourceError::Rejected
+        );
+    }
+
+    #[test]
+    fn contains_agents_reads_sealed_state_in_one_catalog_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let writer_workspace = root.path().join("writer-workspace");
+        let reviewer_workspace = root.path().join("reviewer-workspace");
+        fs::create_dir(&writer_workspace).unwrap();
+        fs::create_dir(&reviewer_workspace).unwrap();
+        fs::write(writer_workspace.join("AGENTS.md"), "writer instructions").unwrap();
+        fs::write(
+            reviewer_workspace.join("AGENTS.md"),
+            "reviewer instructions",
+        )
+        .unwrap();
+        fs::write(
+            state_dir.as_path().join("openclaw.json"),
+            serde_json::to_vec(&json!({
+                "agents": { "entries": {
+                    "writer": { "workspace": writer_workspace },
+                    "reviewer": { "workspace": reviewer_workspace }
+                } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+        store
+            .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
+            .unwrap();
+
+        let sealed = store
+            .contains_agents(&[
+                AgentKey::parse("writer").unwrap(),
+                AgentKey::parse("reviewer").unwrap(),
+            ])
+            .unwrap();
+
+        assert!(sealed.contains(&AgentKey::parse("writer").unwrap()));
+        assert!(!sealed.contains(&AgentKey::parse("reviewer").unwrap()));
+    }
+
+    #[test]
+    fn package_export_debug_redacts_package_path() {
+        let export = SealedAgentPackageExport {
+            agent_key: AgentKey::parse("writer").unwrap(),
+            file_name: "sealed.matcha-agentpkg".to_owned(),
+            package_path: PathBuf::from("C:/secret/sealed.matcha-agentpkg"),
+            size: 7,
+            exported_at_ms: 11,
+        };
+
+        let debug = format!("{export:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("C:/secret"));
+    }
+
+    #[test]
+    fn install_package_path_removes_installed_package_when_config_update_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let source_state = CanonicalStateDir::provision(root.path().join("source-state")).unwrap();
+        let source_workspace = root.path().join("source-workspace");
+        fs::create_dir(&source_workspace).unwrap();
+        fs::write(
+            source_workspace.join("AGENTS.md"),
+            "source agent instructions",
+        )
+        .unwrap();
+        fs::write(
+            source_state.as_path().join("openclaw.json"),
+            serde_json::to_vec(&json!({
+                "agents": { "entries": { "writer": { "workspace": source_workspace } } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let private = root.path().join("private");
+        let source = SealedAgentStore::openclaw(source_state, private.clone()).unwrap();
+        let package = source
+            .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
+            .unwrap();
+
+        let target_state = CanonicalStateDir::provision(root.path().join("target-state")).unwrap();
+        let writer_workspace = root
+            .path()
+            .join("target-state")
+            .join("workspace-subagents")
+            .join("writer");
+        fs::write(
+            target_state.as_path().join("openclaw.json"),
+            serde_json::to_vec(&json!({
+                "agents": { "list": [
+                    { "id": "writer", "workspace": writer_workspace },
+                    { "id": "writer", "workspace": writer_workspace },
+                ] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target = SealedAgentStore::openclaw(target_state, private).unwrap();
+
+        assert_eq!(
+            target
+                .install_package_path(package.package_path().to_owned())
+                .unwrap_err(),
+            SealedResourceError::Rejected
+        );
+        assert!(sealed_packages(&writer_workspace).is_empty());
+        assert!(!writer_workspace.exists());
     }
 
     #[test]
@@ -819,11 +1097,24 @@ mod tests {
     }
 
     fn sealed_packages(workspace: &Path) -> Vec<PathBuf> {
-        fs::read_dir(workspace)
-            .unwrap()
+        let Ok(entries) = fs::read_dir(workspace) else {
+            return Vec::new();
+        };
+        entries
             .map(|entry| entry.unwrap().path())
             .filter(|path| is_sealed_package_path(path))
             .collect()
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<bool> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<bool> {
+        Ok(std::os::windows::fs::symlink_file(target, link).is_ok())
     }
 
     fn read_config(path: &Path) -> Value {

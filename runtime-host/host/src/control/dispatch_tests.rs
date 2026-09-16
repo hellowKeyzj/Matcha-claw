@@ -1,6 +1,9 @@
 use serde_json::{Value, json, to_value};
 
 use super::*;
+use crate::organization::{TeamRuntimeCommand, TeamRuntimeCommandOutcome};
+
+use sessions::{ChatAbortResponse, ChatSendResponse};
 
 const TEST_UNKNOWN_CAPABILITY_MESSAGE: &str = "Capability descriptor is not available.";
 const TEST_INVALID_SCOPE_MESSAGE: &str = "Capability scope is invalid.";
@@ -126,7 +129,7 @@ fn control_payload_decoders_keep_the_fixed_product_dtos() {
         decode::<ToolPermissionModeRequest>(CommandInput(json!({ "mode": "fullAccess" })))
             .unwrap()
             .mode,
-        openclaw::projection::tool_permission::Mode::FullAccess,
+        crate::facade::ToolPermissionMode::FullAccess,
     );
 }
 
@@ -403,7 +406,7 @@ fn team_run_decision_decode_accepts_supported_decisions() {
 
 #[test]
 fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
-    let outcome = to_value(crate::capability_directory::list()).unwrap();
+    let outcome = to_value(crate::capabilities::directory::list()).unwrap();
     assert_eq!(outcome["kind"], "succeeded");
     let capabilities = outcome["result"]["capabilities"].as_array().unwrap();
     assert_eq!(
@@ -457,29 +460,35 @@ fn capabilities_list_is_complete_and_uses_one_fixed_descriptor_source() {
 #[test]
 fn capabilities_describe_reuses_list_descriptors_and_validates_scope() {
     let listed =
-        to_value(crate::capability_directory::list()).unwrap()["result"]["capabilities"].clone();
+        to_value(crate::capabilities::directory::list()).unwrap()["result"]["capabilities"].clone();
     for descriptor in listed.as_array().unwrap() {
-        let outcome = to_value(crate::capability_directory::describe(CommandInput(json!({
-            "id": descriptor["id"].clone(),
-            "scope": descriptor["scope"].clone(),
-        }))))
+        let outcome = to_value(crate::capabilities::directory::describe(CommandInput(
+            json!({
+                "id": descriptor["id"].clone(),
+                "scope": descriptor["scope"].clone(),
+            }),
+        )))
         .unwrap();
         assert_eq!(outcome["kind"], "succeeded");
         assert_eq!(outcome["result"]["capability"], *descriptor);
     }
 
-    let unknown = to_value(crate::capability_directory::describe(CommandInput(json!({
-        "id": "unknown.capability",
-        "scope": test_runtime_instance_scope(),
-    }))))
+    let unknown = to_value(crate::capabilities::directory::describe(CommandInput(
+        json!({
+            "id": "unknown.capability",
+            "scope": test_runtime_instance_scope(),
+        }),
+    )))
     .unwrap();
     assert_eq!(unknown["error"]["code"], "INVALID_INPUT");
     assert_eq!(unknown["error"]["message"], TEST_UNKNOWN_CAPABILITY_MESSAGE);
 
-    let wrong_scope = to_value(crate::capability_directory::describe(CommandInput(json!({
-        "id": "scheduler.cron",
-        "scope": test_agent_scope("main"),
-    }))))
+    let wrong_scope = to_value(crate::capabilities::directory::describe(CommandInput(
+        json!({
+            "id": "scheduler.cron",
+            "scope": test_agent_scope("main"),
+        }),
+    )))
     .unwrap();
     assert_eq!(
         wrong_scope["error"]["message"],
@@ -511,7 +520,10 @@ fn capabilities_describe_reuses_list_descriptors_and_validates_scope() {
             "token": "must-be-rejected",
         }),
     ] {
-        let outcome = to_value(crate::capability_directory::describe(CommandInput(input))).unwrap();
+        let outcome = to_value(crate::capabilities::directory::describe(CommandInput(
+            input,
+        )))
+        .unwrap();
         assert_eq!(outcome["error"]["code"], "INVALID_INPUT");
         assert_eq!(outcome["error"]["message"], INVALID_INPUT_MESSAGE);
     }
@@ -541,10 +553,12 @@ fn capabilities_describe_reuses_list_descriptors_and_validates_scope() {
             },
         }),
     ] {
-        let outcome = to_value(crate::capability_directory::describe(CommandInput(json!({
-            "id": "scheduler.cron",
-            "scope": scope,
-        }))))
+        let outcome = to_value(crate::capabilities::directory::describe(CommandInput(
+            json!({
+                "id": "scheduler.cron",
+                "scope": scope,
+            }),
+        )))
         .unwrap();
         assert_eq!(outcome["error"]["code"], "INVALID_INPUT");
         assert_eq!(outcome["error"]["message"], TEST_INVALID_SCOPE_MESSAGE);
@@ -580,10 +594,12 @@ fn capabilities_describe_reuses_list_descriptors_and_validates_scope() {
             },
         }),
     ] {
-        let outcome = to_value(crate::capability_directory::describe(CommandInput(json!({
-            "id": "unknown.capability",
-            "scope": scope,
-        }))))
+        let outcome = to_value(crate::capabilities::directory::describe(CommandInput(
+            json!({
+                "id": "unknown.capability",
+                "scope": scope,
+            }),
+        )))
         .unwrap();
         assert_eq!(outcome["error"]["message"], TEST_UNKNOWN_CAPABILITY_MESSAGE);
     }
@@ -592,7 +608,7 @@ fn capabilities_describe_reuses_list_descriptors_and_validates_scope() {
 #[test]
 fn descriptor_operations_have_reachable_execute_or_transport_paths() {
     let capabilities =
-        to_value(crate::capability_directory::list()).unwrap()["result"]["capabilities"]
+        to_value(crate::capabilities::directory::list()).unwrap()["result"]["capabilities"]
             .as_array()
             .unwrap()
             .clone();
@@ -863,15 +879,314 @@ fn openclaw_browser_and_mcp_app_decode_strict_private_dtos() {
 }
 
 #[test]
-fn openclaw_gateway_request_outcomes_project_without_private_payloads() {
+fn team_legacy_placeholder_paths_are_fixed_empty_values() {
+    assert_eq!(team::TEAM_PUBLIC_PLACEHOLDER_PATH, "");
+}
+
+#[test]
+fn team_role_binding_projection_redacts_session_identity() {
+    let binding = organization::RoleSessionReceipt::new(
+        organization::TeamId::try_new("team:one").unwrap(),
+        organization::GraphRunId::new("run:one"),
+        organization::RoleId::try_new("leader").unwrap(),
+        organization::LocalSessionReference::try_new("local:secret").unwrap(),
+        organization::ExternalSessionReference::try_new("native-session:secret").unwrap(),
+        organization::ManagedAgentReference::try_new("agent:leader").unwrap(),
+        organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+    );
+
+    let value = team::team_role_binding_legacy_json(&binding).unwrap();
     assert_eq!(
-        to_value(openclaw_gateway_request_outcome(
-            openclaw::port::OpenClawGatewayRequestOutcome::Succeeded(json!({
-                "leaseId": "lease-1",
-            }))
-        ))
+        value,
+        json!({
+            "teamId": "team:one",
+            "runId": "run:one",
+            "roleId": "leader",
+            "sessionRef": "local:secret",
+            "status": "available",
+        })
+    );
+    let serialized = value.to_string();
+    for private in [
+        "endpointRef",
+        "localSessionId",
+        "endpointSessionId",
+        "sessionIdentity",
+        "sessionKey",
+        "agentId",
+        "agent:leader",
+        "native",
+        "endpoint:openclaw",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+}
+
+#[test]
+fn team_run_snapshot_roles_use_safe_session_projection() {
+    let facts = team_snapshot_facts();
+    let snapshot = match organization::run::public_projection::query_team_run_public_snapshot(
+        &facts,
+        &organization::TeamId::try_new("team:one").unwrap(),
+        &organization::GraphRunId::new("run:one"),
+    ) {
+        organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(
+            snapshot,
+        ) => snapshot,
+        organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(_) => {
+            panic!("expected team run public snapshot")
+        }
+    };
+    let sessions = match organization::query_team_role_sessions(
+        &facts,
+        &organization::TeamId::try_new("team:one").unwrap(),
+    ) {
+        organization::TeamRoleSessionQueryOutcome::Available(sessions) => sessions,
+        organization::TeamRoleSessionQueryOutcome::Unavailable
+        | organization::TeamRoleSessionQueryOutcome::OutcomeUnknown => {
+            panic!("expected team role session projection")
+        }
+    };
+
+    let outcome = team_runtime_outcome(
+        TeamRuntimeCommandOutcome::RunSnapshot {
+            snapshot:
+                organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(
+                    snapshot,
+                ),
+            role_sessions: Some(sessions),
+        },
+        Some("team:one"),
+        Some("run:one"),
+    );
+    let value = to_value(outcome).unwrap();
+
+    assert_eq!(value["kind"], "succeeded");
+    assert_eq!(
+        value["result"]["roles"],
+        json!([{
+            "teamId": "team:one",
+            "runId": "run:one",
+            "roleId": "writer",
+            "sessionRef": "local-session-secret",
+            "status": "available",
+        }])
+    );
+    let serialized = value.to_string();
+    for private in [
+        "endpointRef",
+        "localSessionId",
+        "endpointSessionId",
+        "sessionIdentity",
+        "sessionKey",
+        "agentId",
+        "private-agent-secret",
+        "external-session-secret",
+        "private-runtime-endpoint",
+        "native",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+}
+
+fn team_snapshot_facts() -> organization::OrganizationFacts {
+    organization::OrganizationFacts::restore(
+        vec![organization::TeamFacts::new(
+            team_snapshot_definition(),
+            organization::TeamRevision::initial(),
+            false,
+        )],
+        vec![team_snapshot_materialization()],
+        vec![
+            organization::GraphRunFacts::new(
+                organization::TeamId::try_new("team:one").unwrap(),
+                organization::TeamRevision::initial(),
+                team_snapshot_graph(),
+                Some(team_snapshot_runtime()),
+            )
+            .unwrap(),
+        ],
+        organization::DeliveryLedger::default().snapshot(),
+    )
+    .unwrap()
+}
+
+fn team_snapshot_definition() -> organization::TeamDefinition {
+    let leader = organization::TeamMember::try_new(
+        organization::MemberId::try_new("member:leader").unwrap(),
+        "Leader",
+    )
+    .unwrap();
+    let writer = organization::TeamMember::try_new(
+        organization::MemberId::try_new("member:writer").unwrap(),
+        "Writer",
+    )
+    .unwrap();
+    let leader_role = organization::TeamRole::try_new(
+        organization::RoleId::try_new("leader").unwrap(),
+        "Leader",
+        organization::RoleKind::Leader,
+    )
+    .unwrap();
+    let writer_role = organization::TeamRole::try_new(
+        organization::RoleId::try_new("writer").unwrap(),
+        "Writer",
+        organization::RoleKind::Member,
+    )
+    .unwrap();
+    organization::TeamDefinition::try_new(
+        organization::TeamId::try_new("team:one").unwrap(),
+        "Test team",
+        vec![leader.clone(), writer.clone()],
+        vec![leader_role.clone(), writer_role.clone()],
+        vec![
+            organization::RoleAssignment::new(
+                leader.member_id().clone(),
+                leader_role.role_id().clone(),
+            ),
+            organization::RoleAssignment::new(
+                writer.member_id().clone(),
+                writer_role.role_id().clone(),
+            ),
+        ],
+    )
+    .unwrap()
+}
+
+fn team_snapshot_graph() -> organization::GraphState {
+    organization::GraphState::initialize(
+        organization::GraphDefinition::new(
+            "graph:one",
+            "plan:one",
+            organization::GraphRunId::new("run:one"),
+            "Snapshot graph",
+            vec![
+                organization::NodeDefinition::start(
+                    organization::NodeId::new("start"),
+                    "Start",
+                    std::num::NonZeroU32::new(1).unwrap(),
+                    None,
+                ),
+                organization::NodeDefinition::work(
+                    organization::NodeId::new("draft"),
+                    "Draft",
+                    std::num::NonZeroU32::new(1).unwrap(),
+                    organization::WorkAssignment::new("draft", "writer"),
+                ),
+            ],
+            vec![organization::EdgeDefinition::new(
+                organization::EdgeId::new("start-to-draft"),
+                organization::NodeId::new("start"),
+                "done",
+                organization::NodeId::new("draft"),
+                "input",
+                organization::EdgeAction::Activate,
+            )],
+        )
         .unwrap(),
-        json!({ "kind": "succeeded", "result": { "leaseId": "lease-1" } })
+        1,
+    )
+}
+
+fn team_snapshot_materialization() -> organization::MaterializationReceipt {
+    let endpoint =
+        organization::RuntimeEndpointReference::try_new("private-runtime-endpoint").unwrap();
+    organization::MaterializationReceipt::try_new(
+        organization::TeamId::try_new("team:one").unwrap(),
+        endpoint.clone(),
+        vec![organization::RoleMaterializationReceipt::new(
+            organization::RoleId::try_new("writer").unwrap(),
+            organization::ManagedAgentReference::try_new("private-agent-secret").unwrap(),
+            endpoint,
+        )],
+    )
+    .unwrap()
+}
+
+fn team_snapshot_runtime() -> organization::RunRuntimeReceipt {
+    let endpoint =
+        organization::RuntimeEndpointReference::try_new("private-runtime-endpoint").unwrap();
+    organization::RunRuntimeReceipt::try_new(
+        organization::GraphRunId::new("run:one"),
+        vec![organization::RoleSessionReceipt::new(
+            organization::TeamId::try_new("team:one").unwrap(),
+            organization::GraphRunId::new("run:one"),
+            organization::RoleId::try_new("writer").unwrap(),
+            organization::LocalSessionReference::try_new("local-session-secret").unwrap(),
+            organization::ExternalSessionReference::try_new("external-session-secret").unwrap(),
+            organization::ManagedAgentReference::try_new("private-agent-secret").unwrap(),
+            endpoint,
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn skill_status_control_projection_preserves_path_fields() {
+    let value = skills::skill_status_json(&crate::skills::status::Catalog {
+        entries: vec![crate::skills::status::Entry {
+            key: "browser-flow".into(),
+            slug: Some("browser-flow".into()),
+            name: "Browser Flow".into(),
+            description: "Browser flow".into(),
+            enabled: true,
+            selectable: true,
+            eligible: true,
+            blocked_by_allowlist: false,
+            bundled: Some(false),
+            always: Some(false),
+            emoji: Some("B".into()),
+            source: Some("C:/skills/source-root".into()),
+            base_dir: Some("C:/skills/browser-flow".into()),
+            file_path: Some("C:/skills/browser-flow/SKILL.md".into()),
+            missing_categories: Vec::new(),
+        }],
+    });
+
+    assert_eq!(
+        value,
+        json!({
+            "skills": [{
+                "key": "browser-flow",
+                "name": "Browser Flow",
+                "description": "Browser flow",
+                "enabled": true,
+                "selectable": true,
+                "unavailableReason": null,
+                "missingCategories": [],
+                "eligible": true,
+                "bundled": false,
+                "always": false,
+                "emoji": "B",
+                "slug": "browser-flow",
+                "source": "C:/skills/source-root",
+                "baseDir": "C:/skills/browser-flow",
+                "filePath": "C:/skills/browser-flow/SKILL.md",
+            }]
+        })
+    );
+}
+
+#[test]
+fn openclaw_gateway_request_outcomes_preserve_native_payloads() {
+    let succeeded = to_value(openclaw_gateway_request_outcome(
+        openclaw::port::OpenClawGatewayRequestOutcome::Succeeded(json!({
+            "leaseId": "lease-1",
+            "token": "secret-token",
+            "path": "C:/private/openclaw",
+        })),
+    ))
+    .unwrap();
+    assert_eq!(
+        succeeded,
+        json!({
+            "kind": "succeeded",
+            "result": {
+                "leaseId": "lease-1",
+                "token": "secret-token",
+                "path": "C:/private/openclaw",
+            }
+        })
     );
     assert_eq!(
         to_value(openclaw_gateway_request_outcome(
@@ -897,18 +1212,18 @@ fn openclaw_gateway_request_outcomes_project_without_private_payloads() {
 
 #[test]
 fn unknown_mutation_outcomes_remain_safe_and_distinguishable() {
-    let send = CommandOutcome::succeeded(json!({
-        "result": SendChatResponse::from(platform::exchange::InvocationOutcome::<
+    let send = CommandOutcome::succeeded(CommandResult::private(json!({
+        "result": ChatSendResponse::from(platform::exchange::InvocationOutcome::<
             openclaw::session::protocol::ChatSendResult,
             (),
         >::Unknown),
-    }));
-    let abort = CommandOutcome::succeeded(json!({
-        "result": AbortChatResponse::from(platform::exchange::InvocationOutcome::<
+    })));
+    let abort = CommandOutcome::succeeded(CommandResult::private(json!({
+        "result": ChatAbortResponse::from(platform::exchange::InvocationOutcome::<
             openclaw::session::protocol::ChatAbortResult,
             (),
         >::Unknown),
-    }));
+    })));
     for outcome in [send, abort] {
         assert_eq!(
             to_value(outcome).unwrap(),
@@ -936,13 +1251,13 @@ fn matcha_lifecycle_projection_is_exact_and_redacted() {
 
 #[test]
 fn lifecycle_results_exclude_private_details() {
-    let start = CommandOutcome::succeeded(json!({
+    let start = CommandOutcome::succeeded(CommandResult::private(json!({
         "result": {
             "lifecycle": crate::RuntimeLifecycle::Running,
             "pid": 42,
             "failure": serde_json::Value::Null,
         },
-    }));
+    })));
 
     let start = to_value(start).unwrap().to_string();
     for private in [

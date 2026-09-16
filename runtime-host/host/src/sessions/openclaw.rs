@@ -9,8 +9,8 @@ use openclaw::session::{
 
 use super::state::{
     ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RuntimeActivity,
-    RuntimeErrorDetail, RuntimeNoticeKind, RuntimeView, SessionChange, SessionContent, SessionItem,
-    ToolPhase, ToolView,
+    RuntimeErrorDetail, RuntimeView, SessionChange, SessionContent, SessionItem, ToolPhase,
+    ToolView,
 };
 
 pub(crate) fn openclaw_canonical_changes(
@@ -202,20 +202,19 @@ pub(crate) fn openclaw_canonical_changes(
                         )
                     })
                     .flatten();
+                projected.push(SessionChange::RunPhaseChanged {
+                    run_id: run_id.as_str().to_owned(),
+                    phase,
+                });
                 if let Some(error_detail) = error_detail {
                     projected.push(SessionChange::RuntimeChanged {
                         runtime: RuntimeView {
                             phase,
-                            active_run_id: Some(run_id.as_str().to_owned()),
+                            active_run_id: None,
                             issue: None,
                             runtime_activity: None,
                             error_detail: Some(error_detail),
                         },
-                    });
-                } else {
-                    projected.push(SessionChange::RunPhaseChanged {
-                        run_id: run_id.as_str().to_owned(),
-                        phase,
                     });
                 }
             }
@@ -505,6 +504,7 @@ mod tests {
     };
     use serde_json::json;
 
+    use super::super::state::RuntimeNoticeKind;
     use super::*;
 
     #[test]
@@ -836,12 +836,16 @@ mod tests {
 
         assert!(matches!(
             changes.as_slice(),
-            [SessionChange::RuntimeChanged { runtime }]
-                if runtime.phase == RunPhase::Failed
-                    && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("gateway_error")
-                        && detail.provider_error_type.as_deref() == Some("rate_limit")
-                        && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
-                        && detail.http_status.is_none())
+            [
+                SessionChange::RunPhaseChanged { run_id, phase: RunPhase::Failed },
+                SessionChange::RuntimeChanged { runtime }
+            ] if run_id == "run-1"
+                && runtime.phase == RunPhase::Failed
+                && runtime.active_run_id.is_none()
+                && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("gateway_error")
+                    && detail.provider_error_type.as_deref() == Some("rate_limit")
+                    && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
+                    && detail.http_status.is_none())
         ));
     }
 
@@ -865,12 +869,16 @@ mod tests {
 
         assert!(matches!(
             changes.as_slice(),
-            [SessionChange::RuntimeChanged { runtime }]
-                if runtime.phase == RunPhase::Failed
-                    && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("rate_limit")
-                        && detail.provider_error_type.as_deref() == Some("rate_limit")
-                        && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
-                        && detail.http_status == Some(429))
+            [
+                SessionChange::RunPhaseChanged { run_id, phase: RunPhase::Failed },
+                SessionChange::RuntimeChanged { runtime }
+            ] if run_id == "run-1"
+                && runtime.phase == RunPhase::Failed
+                && runtime.active_run_id.is_none()
+                && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("rate_limit")
+                    && detail.provider_error_type.as_deref() == Some("rate_limit")
+                    && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
+                    && detail.http_status == Some(429))
         ));
     }
 

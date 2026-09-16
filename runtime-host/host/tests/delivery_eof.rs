@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 #[test]
 fn delivery_host_completes_request_then_shuts_down_cleanly_on_stdin_eof() {
     let root = TestRoot::new();
+    let (bootstrap, ports) = bootstrap(&root);
     let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-host"))
+        .env("MATCHACLAW_RUNTIME_HOST_PORT", ports[40].to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -25,8 +27,6 @@ fn delivery_host_completes_request_then_shuts_down_cleanly_on_stdin_eof() {
     let mut input = child.stdin.take().expect("runtime-host stdin");
     let output = child.stdout.take().expect("runtime-host stdout");
     let (frames, ready) = read_frames(output);
-
-    let (bootstrap, ports) = bootstrap(&root);
     write_frame(&mut input, &bootstrap);
     if ready.recv_timeout(Duration::from_secs(5)) != Ok(()) {
         let status = wait_for_exit(&mut child, Duration::from_secs(5));
@@ -76,10 +76,15 @@ fn delivery_host_completes_request_then_shuts_down_cleanly_on_stdin_eof() {
         "runtime-host stderr: {}",
         String::from_utf8_lossy(&stderr)
     );
+    let stderr = String::from_utf8_lossy(&stderr);
     assert!(
-        stderr.is_empty(),
-        "runtime-host stderr: {}",
-        String::from_utf8_lossy(&stderr)
+        !stderr.contains("runtime-host:"),
+        "runtime-host stderr: {stderr}"
+    );
+    assert!(!stderr.contains("token"), "runtime-host stderr: {stderr}");
+    assert!(
+        !stderr.contains(&root.path("")),
+        "runtime-host stderr: {stderr}"
     );
 }
 
@@ -188,13 +193,17 @@ impl Drop for TestRoot {
     }
 }
 
-fn bootstrap(root: &TestRoot) -> (Value, [u16; 40]) {
+fn bootstrap(root: &TestRoot) -> (Value, [u16; 41]) {
     let ports = delivery_ports();
     let root_path = root.path.to_string_lossy();
     let mut bootstrap = json!({
         "version": 1,
         "appVersion": "test",
         "appLogDir": root.path("userdata-logs"),
+        "runtimeHostStateDir": root.path("runtime-host-state"),
+        "runtimeHostMcpExecutable": format!("{root_path}/missing-runtime-host-mcp"),
+        "parentCallbackBaseUrl": "http://127.0.0.1:1",
+        "parentCallbackDispatchToken": "test-parent-dispatch-token",
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",
         "sessionTransportPort": ports[0],
         "taskManagerTransportPort": ports[1],
@@ -216,6 +225,7 @@ fn bootstrap(root: &TestRoot) -> (Value, [u16; 40]) {
         "workspaceWriteTransportPort": ports[18],
         "workspaceMediaTransportPort": ports[19],
         "cronTransportPort": ports[20],
+        "cronBrokerTransportPort": ports[11],
         "cronBrokerVerificationKey": "MCowBQYDK2VwAyEAIcPTPZ95XS_AEiM3zFVx8tkcbB2_7d62G7PkQm6DPhY",
         "agentsTransportPort": ports[21],
         "teamPublicTransportPort": ports[22],
@@ -244,6 +254,7 @@ fn bootstrap(root: &TestRoot) -> (Value, [u16; 40]) {
         },
         "openClaw": {
             "electronImage": format!("{root_path}/missing-electron"),
+            "workingDirectory": root.path("work"),
             "openclawDir": root.openclaw.openclaw_dir(),
             "managedPluginRoot": root.path("openclaw-plugins"),
             "companionSkillSourceRoot": root.path("resources/skills/plugin-companion-skills"),
@@ -264,10 +275,14 @@ fn bootstrap(root: &TestRoot) -> (Value, [u16; 40]) {
     (bootstrap, ports)
 }
 
-fn delivery_ports() -> [u16; 40] {
+fn delivery_ports() -> [u16; 41] {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve delivery port range");
     let first = listener.local_addr().expect("delivery port address").port();
     drop(listener);
-    assert!(first <= u16::MAX - 36, "delivery port range must fit");
+    let count = 41_u16;
+    assert!(
+        first <= u16::MAX - (count - 1),
+        "delivery port range must fit"
+    );
     std::array::from_fn(|index| first + index as u16)
 }

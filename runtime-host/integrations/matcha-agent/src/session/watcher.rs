@@ -16,12 +16,6 @@ pub(crate) enum TerminalWatchStep {
 }
 
 impl TerminalEventWatcher {
-    pub(crate) fn new(session_id: SessionId, run_id: RunId) -> Self {
-        Self {
-            projector: SessionEventProjector::new(session_id, run_id),
-        }
-    }
-
     pub(crate) fn resume_after(session_id: SessionId, run_id: RunId, cursor: Sequence) -> Self {
         Self {
             projector: SessionEventProjector::resume_after(session_id, run_id, cursor),
@@ -93,9 +87,10 @@ mod tests {
     }
 
     fn watcher() -> TerminalEventWatcher {
-        TerminalEventWatcher::new(
+        TerminalEventWatcher::resume_after(
             SessionId::try_new("session-1").unwrap(),
             RunId::try_new("run-1").unwrap(),
+            sequence(0),
         )
     }
 

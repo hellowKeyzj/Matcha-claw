@@ -123,6 +123,7 @@ describe('useProviderStore mutation states', () => {
       expect.objectContaining({ id: 'openai-main' }),
       2,
       undefined,
+      undefined,
     );
     expect(useProviderStore.getState().providerSnapshot.credentials[0]?.label).toBe('OpenAI primary');
     expect(useProviderStore.getState().refreshing).toBe(false);
@@ -157,7 +158,7 @@ describe('useProviderStore mutation states', () => {
     });
 
     await createTask;
-    expect(hostProviderCreateAccountMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'ollama-local' }), undefined);
+    expect(hostProviderCreateAccountMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'ollama-local' }), undefined, undefined);
     expect(useProviderStore.getState().providerSnapshot.credentials).toContainEqual(
       expect.objectContaining({ id: 'ollama-local', vendorId: 'ollama' }),
     );

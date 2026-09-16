@@ -1,5 +1,5 @@
 use std::{
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -10,7 +10,7 @@ use matcha_agent::lifecycle::secret::Secret;
 use openclaw::{gateway::client::GatewayClientMetadata, lifecycle::state_dir::CanonicalStateDir};
 use runtime_host::{
     HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,
-    transport::{authorization::CapabilityDecisionVerifier, team_trigger::WebhookToken},
+    transport::{common::authorization::CapabilityDecisionVerifier, team::trigger::WebhookToken},
 };
 use serde::Deserialize;
 use zeroize::Zeroize;
@@ -24,8 +24,7 @@ pub(crate) struct Bootstrap {
     runtime_host_mcp_executable: PathBuf,
     parent_callback_base_url: String,
     parent_callback_dispatch_token: String,
-    provider_credential_resolver:
-        Option<runtime_host::transport::provider_accounts::private_auth::Resolver>,
+    provider_credential_resolver: Option<runtime_host::ProviderCredentialResolver>,
     runtime_observation: RuntimeObservationConfig,
     matcha: MatchaConfig,
     open_claw: OpenClawConfig,
@@ -78,8 +77,7 @@ pub(crate) struct BootstrapParts {
     pub(crate) host: HostInput,
     pub(crate) verifier: CapabilityDecisionVerifier,
     pub(crate) cron_broker_verifier: CapabilityDecisionVerifier,
-    pub(crate) provider_credential_resolver:
-        Option<runtime_host::transport::provider_accounts::private_auth::Resolver>,
+    pub(crate) provider_credential_resolver: Option<runtime_host::ProviderCredentialResolver>,
     pub(crate) webhook_token: WebhookToken,
     pub(crate) compatibility_transport_port: u16,
     pub(crate) session_transport_port: u16,
@@ -290,10 +288,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
     let provider_credential_resolver = wire
         .provider_credential_resolver
         .map(|value| {
-            runtime_host::transport::provider_accounts::private_auth::Resolver::try_new(
-                value.endpoint,
-                value.authorization,
-            )
+            runtime_host::ProviderCredentialResolver::try_new(value.endpoint, value.authorization)
         })
         .transpose()
         .map_err(|_| BootstrapError)?;
@@ -650,18 +645,7 @@ fn compatibility_port() -> u16 {
 }
 
 fn provision_runtime_host_state_dir(path: &Path) -> Result<PathBuf, BootstrapError> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path).map_err(|_| BootstrapError)?;
-    let metadata = fs::symlink_metadata(path).map_err(|_| BootstrapError)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(BootstrapError);
-    }
+    foundation::storage::provision_private_directory(path).map_err(|_| BootstrapError)?;
     Ok(path.to_path_buf())
 }
 

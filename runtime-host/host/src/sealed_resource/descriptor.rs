@@ -1,16 +1,13 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const MAX_DESCRIPTOR_NAME_BYTES: usize = 256;
 const MAX_DESCRIPTOR_DESCRIPTION_BYTES: usize = 8 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SealedSkillDescriptor {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SealedSkillDescriptor {
     name: String,
     description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     user_invocable: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     disable_model_invocation: Option<bool>,
 }
 

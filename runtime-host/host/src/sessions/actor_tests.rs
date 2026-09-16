@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::command::{SessionCommand, SessionSendRequest};
+    use super::super::openclaw_direct;
     use super::super::query::SessionQuery;
     use super::super::send::{NativeEndpoint, SessionSendCommand};
     use super::super::state::{SessionIdentity, SessionProvider};
@@ -24,23 +25,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn touch_and_evict_route_to_their_session_lane() {
-        let (tx1, _rx1) = oneshot::channel();
-        let (tx2, _rx2) = oneshot::channel();
-
-        let touch_cmd = SessionCommand::Touch {
-            session_key: "test-session".to_string(),
-            reply: tx1,
-        };
+    async fn evict_routes_to_its_session_lane() {
+        let (reply, _rx) = oneshot::channel();
         let evict_cmd = SessionCommand::Evict {
             session_key: "test-session".to_string(),
-            reply: tx2,
+            reply,
         };
 
-        assert_eq!(
-            touch_cmd.route(),
-            CommandRoute::Keyed("openclaw:test-session".to_owned())
-        );
         assert_eq!(
             evict_cmd.route(),
             CommandRoute::Keyed("openclaw:test-session".to_owned())
@@ -116,7 +107,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             SessionCommand::Send {
-                request: SessionSendRequest::OpenClawChat { params, reply }
+                request: SessionSendRequest::OpenClaw(openclaw_direct::SendCommand {
+                    params,
+                    reply
+                })
             }
             .route(),
             CommandRoute::Global
@@ -143,7 +137,7 @@ mod integration_tests {
             ProviderAccountsOwner, ProviderModelOwner, ProviderRoutingOwner, actor::ProviderOwner,
             handle::ProviderHandle,
         },
-        runtime_directory::RuntimeDriverDirectory,
+        runtime::directory::RuntimeDriverDirectory,
     };
     use environment::ProviderCascade;
     use foundation::execution::{OwnerRuntimeConfig, OwnerRuntimeSystem};
@@ -161,9 +155,7 @@ mod integration_tests {
         .expect("provider cascade");
         let owner = crate::provider::actor::ProviderOwner::new(
             cascade,
-            ProviderAccountsOwner::new(
-                crate::transport::provider_accounts::private_auth::Resolver::disabled(),
-            ),
+            ProviderAccountsOwner::new(crate::provider::auth::Resolver::disabled()),
             ProviderModelOwner::new(),
             ProviderRoutingOwner::new(),
             Arc::new(RuntimeDriverDirectory::new()),

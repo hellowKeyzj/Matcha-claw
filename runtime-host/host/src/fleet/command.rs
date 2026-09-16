@@ -25,8 +25,8 @@ pub(crate) enum FleetCommand {
     },
     TerminalProviderOpen {
         target_id: fleet::TargetId,
-        context: crate::transport::fleet_terminal::TerminalContext,
-        reply: oneshot::Sender<Result<crate::transport::fleet_terminal::TerminalProviderOpen, ()>>,
+        context: crate::fleet::terminal::TerminalContext,
+        reply: oneshot::Sender<Result<crate::fleet::terminal::TerminalProviderOpen, ()>>,
     },
     TerminalClose {
         session: fleet::terminal::SessionId,
@@ -462,20 +462,14 @@ pub(crate) enum FleetQuery {
     TerminalContext {
         summary: fleet::terminal::SessionSummary,
         reply: oneshot::Sender<
-            Result<
-                Option<crate::transport::fleet_terminal::TerminalContext>,
-                fleet::FleetDeliveryError,
-            >,
+            Result<Option<crate::fleet::terminal::TerminalContext>, fleet::FleetDeliveryError>,
         >,
     },
     TerminalResolveContext {
         selector: crate::fleet::owner::FleetTerminalTargetSelector,
         summary: fleet::terminal::SessionSummary,
         reply: oneshot::Sender<
-            Result<
-                Option<crate::transport::fleet_terminal::TerminalContext>,
-                fleet::FleetDeliveryError,
-            >,
+            Result<Option<crate::fleet::terminal::TerminalContext>, fleet::FleetDeliveryError>,
         >,
     },
     TerminalList {
@@ -692,8 +686,8 @@ mod tests {
         fleet::terminal::SessionId::try_new("terminal-session").unwrap()
     }
 
-    fn terminal_context() -> crate::transport::fleet_terminal::TerminalContext {
-        crate::transport::fleet_terminal::TerminalContext {
+    fn terminal_context() -> crate::fleet::terminal::TerminalContext {
+        crate::fleet::terminal::TerminalContext {
             session: terminal_session_id(),
             target: fleet::terminal::TargetId::try_new("target").unwrap(),
             provider: fleet::terminal::ProviderId::try_new("provider").unwrap(),

@@ -7,13 +7,14 @@ use foundation::execution::{LaneRetention, OwnerSpec};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::runtime_directory::RuntimeDriverDirectory;
+use crate::runtime::directory::RuntimeDriverDirectory;
 
 use super::{
     catalog::ChannelConfigureOutcome,
-    command::{ChannelCommand, ChannelOwnerUnavailable, ChannelQuery},
+    command::{ChannelCommand, ChannelOwnerUnavailable},
     login::{LoginProgressStatus, Outcome as ChannelLoginOutcome},
     operations::{ChannelKey, ChannelMutation, ChannelMutationEffect, LoginFinalizationOutcome},
+    query::ChannelQuery,
 };
 
 #[derive(Clone)]
@@ -101,11 +102,8 @@ impl OwnerSpec for ChannelOwner {
     async fn handle_global_command(
         _shared: Self::Shared,
         _state: &mut Self::GlobalState,
-        command: Self::Command,
+        _command: Self::Command,
     ) {
-        if let ChannelCommand::Shutdown(reply) = command {
-            let _ = reply.send(());
-        }
     }
 
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
@@ -459,7 +457,6 @@ async fn handle_keyed_command(
             };
             let _ = reply.send(outcome);
         }
-        ChannelCommand::Shutdown(_) => {}
     }
 }
 
@@ -540,7 +537,7 @@ async fn catalog(
     runtime_directory: &RuntimeDriverDirectory,
 ) -> crate::channel::catalog::ChannelCatalogOutcome {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
         return crate::channel::catalog::ChannelCatalogOutcome::Unknown;
     };
@@ -555,7 +552,7 @@ async fn configure_form(
     channel_id: String,
 ) -> crate::channel::catalog::ChannelConfigureFormOutcome {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
         return crate::channel::catalog::ChannelConfigureFormOutcome::Unknown;
     };
@@ -571,12 +568,12 @@ async fn config_read(
     account_id: Option<String>,
 ) -> crate::channel::config_read::Outcome {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
-        return crate::channel::config_read::Outcome::Unknown;
+        return crate::channel::config_read::Outcome::Unavailable;
     };
     let Some(ops) = driver.channel_ops() else {
-        return crate::channel::config_read::Outcome::Unknown;
+        return crate::channel::config_read::Outcome::Unavailable;
     };
     ops.read_channel_config(channel_id, account_id).await
 }
@@ -588,7 +585,7 @@ async fn status(
     crate::channel::status::ChannelStatusFailure,
 > {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
         return Err(crate::channel::status::ChannelStatusFailure::Unavailable);
     };
@@ -605,7 +602,7 @@ async fn snapshot(
     crate::channel::status::ChannelStatusFailure,
 > {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
         return Err(crate::channel::status::ChannelStatusFailure::Unavailable);
     };
@@ -621,7 +618,7 @@ async fn pairing(
     account_id: Option<String>,
 ) -> crate::channel::status::ChannelPairingOutcome {
     let Some(driver) = runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::open_claw().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::open_claw().endpoint())
     else {
         return crate::channel::status::ChannelPairingOutcome::OutcomeUnknown;
     };
@@ -845,7 +842,7 @@ fn project_finalization(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{channel::login::LoginProgress, runtime_driver::RuntimeDriverIdentity};
+    use crate::{channel::login::LoginProgress, runtime::driver::RuntimeDriverIdentity};
 
     fn channel_key(account_id: Option<&str>) -> ChannelKey {
         ChannelKey::try_new(

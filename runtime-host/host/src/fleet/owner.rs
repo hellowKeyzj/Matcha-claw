@@ -159,7 +159,7 @@ pub(crate) struct FleetNodeCommandResolution {
 
 pub(crate) struct FleetTerminalOpenResult {
     pub(crate) opened: OpenedSession,
-    pub(crate) context: crate::transport::fleet_terminal::TerminalContext,
+    pub(crate) context: crate::fleet::terminal::TerminalContext,
 }
 
 impl DurableReachabilityMutation for FleetOwner {
@@ -275,7 +275,7 @@ impl FleetOwner {
         let opened = self
             .terminal
             .open_allocated(target, provider, dimensions, now)?;
-        let context = crate::transport::fleet_terminal::TerminalContext {
+        let context = crate::fleet::terminal::TerminalContext {
             session: opened.session.id().clone(),
             target: opened.session.target().clone(),
             provider: opened.session.provider().clone(),
@@ -499,8 +499,8 @@ impl FleetOwner {
 
     pub(crate) async fn terminal_provider_open(
         &mut self,
-        context: crate::transport::fleet_terminal::TerminalContext,
-    ) -> Result<crate::transport::fleet_terminal::TerminalProviderOpen, ()> {
+        context: crate::fleet::terminal::TerminalContext,
+    ) -> Result<crate::fleet::terminal::TerminalProviderOpen, ()> {
         let target = TargetId::try_from(context.target.as_str()).map_err(|_| ())?;
         let provider = context.provider.as_str();
         let config = self.target_config(&target).ok_or(())?;
@@ -516,7 +516,7 @@ impl FleetOwner {
                 )
                 .await
                 .map_err(|_| ())?;
-                Ok(crate::transport::fleet_terminal::TerminalProviderOpen { commands, events })
+                Ok(crate::fleet::terminal::TerminalProviderOpen { commands, events })
             }
             ("docker", FleetTargetConfig::Docker(config)) => crate::fleet::docker::open_terminal(
                 &config,
@@ -530,8 +530,7 @@ impl FleetOwner {
                 let Some(terminal) = config.terminal() else {
                     return Err(());
                 };
-                if terminal.transport() != fleet::CustomTerminalTransport::Websocket
-                    || terminal.protocol_version() != "remote-fleet-terminal/v1"
+                if !crate::fleet::custom::supports_terminal_protocol(terminal)
                     || !self.custom_terminal_capability_ready(&context.endpoint)
                 {
                     return Err(());
@@ -566,7 +565,7 @@ impl FleetOwner {
     pub(crate) fn terminal_context(
         &self,
         summary: &SessionSummary,
-    ) -> Option<crate::transport::fleet_terminal::TerminalContext> {
+    ) -> Option<crate::fleet::terminal::TerminalContext> {
         self.resolve_terminal_context(
             &FleetTerminalTargetSelector::Target(summary.target().clone()),
             summary,
@@ -644,12 +643,12 @@ impl FleetOwner {
         &self,
         selector: &FleetTerminalTargetSelector,
         summary: &SessionSummary,
-    ) -> Option<crate::transport::fleet_terminal::TerminalContext> {
+    ) -> Option<crate::fleet::terminal::TerminalContext> {
         let (target, endpoint) = self.resolve_terminal_target_endpoint(selector)?;
         if summary.target().as_str() != target.as_str() {
             return None;
         }
-        Some(crate::transport::fleet_terminal::TerminalContext {
+        Some(crate::fleet::terminal::TerminalContext {
             session: summary.id().clone(),
             target: summary.target().clone(),
             provider: summary.provider().clone(),

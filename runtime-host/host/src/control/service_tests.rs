@@ -97,23 +97,53 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     let descriptors = capabilities["outcome"]["result"]["capabilities"]
         .as_array()
         .expect("capability list must be an array");
-    assert_eq!(descriptors.len(), 9);
-    assert_eq!(descriptors[5]["id"], "subagent.management");
-    assert_eq!(descriptors[5]["kind"], "subagent-management");
-    assert_eq!(descriptors[5]["scopeKind"], "agent");
-    assert_eq!(descriptors[5]["targetKinds"], json!(["agent", "subagent"]));
-    assert_eq!(descriptors[5]["targetAgentIds"], json!(["main"]));
-    assert_eq!(descriptors[5]["operations"].as_array().unwrap().len(), 12);
-    assert_eq!(descriptors[5]["operations"][0]["targetKind"], "agent");
-    assert_eq!(descriptors[5]["operations"][1]["targetKind"], "agent");
-    assert_eq!(descriptors[5]["operations"][11]["targetKind"], "subagent");
-    assert_eq!(descriptors[3]["id"], "scheduler.cron");
-    assert_eq!(descriptors[3]["kind"], "scheduler-cron");
-    assert_eq!(descriptors[3]["scopeKind"], "runtime-instance");
-    assert_eq!(descriptors[3]["targetKinds"], json!(["cron-job"]));
-    assert_eq!(descriptors[3]["operations"].as_array().unwrap().len(), 5);
+    assert_eq!(descriptors.len(), 11);
+    let descriptor = |id: &str| {
+        descriptors
+            .iter()
+            .find(|descriptor| descriptor["id"] == id)
+            .cloned()
+            .expect("capability descriptor exists")
+    };
+    let subagent_management = descriptor("subagent.management");
+    assert_eq!(subagent_management["kind"], "subagent-management");
+    assert_eq!(subagent_management["scopeKind"], "agent");
+    assert_eq!(
+        subagent_management["targetKinds"],
+        json!(["agent", "subagent"])
+    );
+    assert_eq!(subagent_management["targetAgentIds"], json!(["main"]));
+    assert_eq!(
+        subagent_management["operations"].as_array().unwrap().len(),
+        12
+    );
+    assert_eq!(subagent_management["operations"][0]["targetKind"], "agent");
+    assert_eq!(subagent_management["operations"][1]["targetKind"], "agent");
+    assert_eq!(
+        subagent_management["operations"][11]["targetKind"],
+        "subagent"
+    );
+    assert_eq!(
+        descriptor("subagent.skills")["operations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        descriptor("subagent.tools")["operations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let scheduler_cron = descriptor("scheduler.cron");
+    assert_eq!(scheduler_cron["kind"], "scheduler-cron");
+    assert_eq!(scheduler_cron["scopeKind"], "runtime-instance");
+    assert_eq!(scheduler_cron["targetKinds"], json!(["cron-job"]));
+    assert_eq!(scheduler_cron["operations"].as_array().unwrap().len(), 5);
     assert!(
-        descriptors[3]["operations"]
+        scheduler_cron["operations"]
             .as_array()
             .unwrap()
             .iter()
@@ -144,7 +174,7 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
     .await;
     let described = read_outcome(&mut parent_output, "capability-describe-1").await;
     assert_eq!(described["outcome"]["kind"], "succeeded");
-    assert_eq!(described["outcome"]["result"]["capability"], descriptors[3]);
+    assert_eq!(described["outcome"]["result"]["capability"], scheduler_cron);
     assert_public_capability_details(&described);
 
     write_command(
@@ -290,30 +320,6 @@ async fn control_service_emits_bounded_matcha_lifecycle_outcomes_and_shuts_down_
 async fn control_service_exposes_openclaw_non_secret_projection_outcomes() {
     let root = TestRoot::new();
     let input = host_input(&root);
-    let openclaw_directory = input.open_claw.openclaw_dir.to_str().unwrap().to_owned();
-    let state_directory = input
-        .open_claw
-        .state_dir
-        .as_path()
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let workspace_directory = input
-        .open_claw
-        .state_dir
-        .as_path()
-        .join("workspace")
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let skills_directory = input
-        .open_claw
-        .state_dir
-        .as_path()
-        .join("skills")
-        .to_str()
-        .unwrap()
-        .to_owned();
     let (mut parent_input, control_input) = duplex(8 * 1024);
     let (control_output, mut parent_output) = duplex(8 * 1024);
     let service = tokio::spawn(run(input, control_input, control_output));
@@ -337,7 +343,6 @@ async fn control_service_exposes_openclaw_non_secret_projection_outcomes() {
                 "result": {
                     "packageExists": false,
                     "isBuilt": false,
-                    "dir": openclaw_directory.clone(),
                 },
             },
         })
@@ -355,18 +360,10 @@ async fn control_service_exposes_openclaw_non_secret_projection_outcomes() {
             "kind": "succeeded",
             "result": {
                 "result": {
-                    "openclawDirectory": openclaw_directory,
-                    "configDirectory": state_directory,
-                    "workspaceDirectory": workspace_directory.clone(),
-                    "taskWorkspaceDirectories": [workspace_directory],
-                    "skillsDirectory": skills_directory,
+                    "available": true,
                 },
             },
         })
-    );
-    assert_eq!(
-        status["outcome"]["result"]["result"]["dir"],
-        paths["outcome"]["result"]["result"]["openclawDirectory"]
     );
     assert_no_private_details(&status);
     assert_no_private_details(&paths);

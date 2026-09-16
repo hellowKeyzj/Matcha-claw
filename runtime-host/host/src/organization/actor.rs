@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -8,11 +7,10 @@ use std::{
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
-    ActivityId, ActivityKind, ActivityPhase, ActivityTarget, BeginCancellationOutcome,
-    CreateGraphRunOutcome, DeliveryId, GraphRunId, GraphRunLifecycleState, IdempotencyKey,
-    MatchaTerminalReceiptTarget, MaterializationRecordOutcome, NativeDeletionEvidence,
-    NativeTerminalStatus, OrganizationStore, RoleAbortOutcome, RuntimeEndpointReference,
-    StoreFault, TeamId,
+    ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId, GraphRunId,
+    GraphRunLifecycleState, IdempotencyKey, MatchaTerminalReceiptTarget,
+    MaterializationRecordOutcome, NativeDeletionEvidence, NativeTerminalStatus, OrganizationStore,
+    RoleAbortOutcome, RuntimeEndpointReference, StoreFault, TeamId,
     package::{
         TeamSkillDependencyCatalog, TeamSkillDependencyPlanResult, TeamSkillPackageValidation,
         TeamSkillSelectionError, TeamSkillSelectionId, TeamSkillSelectionResolver,
@@ -23,19 +21,23 @@ use organization::{
 };
 
 use crate::{
-    composition::{
-        ManualTeamCreateOutcome, ManualTeamMaterializationInput, RuntimeReceiptOutcome,
-        TeamDeleteOutcome, TeamMaterializationCommandOutcome,
-        team::{self, install_prepared_runtime_receipt, prepare_runtime_receipt},
-        team_run::TeamRunOwner,
-    },
-    runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::{
+    runtime::directory::RuntimeDriverDirectory,
+    runtime::driver::{
         OwnedRuntimeFuture, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure,
     },
 };
 
-use super::{OrganizationCommand, OrganizationQuery, team_runtime::TeamRuntimeStatus};
+use super::{
+    OrganizationCommand, OrganizationQuery,
+    team_run::{
+        ManualTeamCreateOutcome, ManualTeamMaterializationInput, MatchaTerminalObservationError,
+        MatchaTerminalObservationOutcome, RuntimeReceiptOutcome, TeamDeleteOutcome,
+        TeamMaterializationCommandOutcome, TeamRunActivityError, TeamRunActivityOutcome,
+        TeamRunActivityStart, TeamRunActivityTarget, TeamRunOwner, TeamTriggerFireResolution,
+        install_prepared_runtime_receipt, prepare_runtime_receipt, settle_public_cancellation,
+    },
+    team_runtime::TeamRuntimeStatus,
+};
 
 pub(crate) struct OrganizationOwnerInput {
     pub store: OrganizationStore,
@@ -58,6 +60,10 @@ pub(crate) struct OrganizationGlobalState {
 pub(crate) struct OrganizationRunLane {
     store_path: PathBuf,
     team_run: TeamRunOwner,
+}
+
+struct TeamSkillRuntime {
+    driver: Arc<dyn RuntimeDriver>,
 }
 
 pub(crate) struct OrganizationOwner {
@@ -214,17 +220,24 @@ impl OrganizationShared {
         }
     }
 
-    async fn installed_skill_catalog(&self) -> Option<openclaw::skill::InstalledSkillCatalog> {
-        for driver in self.runtime_directory.all_drivers() {
-            if driver.identity() != RuntimeDriverIdentity::open_claw() {
-                continue;
-            }
-            let Some(ops) = driver.skill_ops() else {
-                return None;
-            };
-            return ops.installed_skill_catalog().await;
-        }
-        None
+    fn team_skill_runtime(&self) -> Option<TeamSkillRuntime> {
+        self.runtime_directory
+            .lookup(&RuntimeDriverIdentity::open_claw().endpoint())
+            .map(|driver| TeamSkillRuntime { driver })
+    }
+}
+
+impl TeamSkillRuntime {
+    fn endpoint(&self) -> RuntimeEndpointReference {
+        RuntimeEndpointReference::try_new(self.driver.identity().runtime_endpoint_reference())
+            .expect("team skill runtime endpoint must be a valid Organization endpoint reference")
+    }
+
+    async fn installed_skill_names(&self) -> Option<Vec<String>> {
+        let ops = self.driver.skill_ops()?;
+        ops.installed_skill_catalog()
+            .await
+            .map(|catalog| catalog.names().iter().cloned().collect())
     }
 }
 
@@ -260,12 +273,14 @@ impl OrganizationGlobalState {
         shared: &OrganizationShared,
         selection_id: TeamSkillSelectionId,
     ) -> TeamSkillDependencyPlanResult {
-        let catalog = match shared.installed_skill_catalog().await {
-            Some(catalog) => catalog,
+        let Some(runtime) = shared.team_skill_runtime() else {
+            return TeamSkillDependencyPlanResult::Unavailable;
+        };
+        let installed_names = match runtime.installed_skill_names().await {
+            Some(names) => names,
             None => return TeamSkillDependencyPlanResult::Unavailable,
         };
-        let catalog =
-            TeamSkillDependencyCatalog::from_installed_names(catalog.names().iter().cloned());
+        let catalog = TeamSkillDependencyCatalog::from_installed_names(installed_names);
         self.team_skill_selections
             .dependency_plan(&selection_id, &catalog)
     }
@@ -277,10 +292,27 @@ impl OrganizationGlobalState {
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
     ) -> TeamMaterializationCommandOutcome {
-        let endpoint = RuntimeEndpointReference::try_new(
-            RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
-        )
-        .expect("fixed OpenClaw endpoint must be valid");
+        let Some(runtime) = shared.team_skill_runtime() else {
+            return TeamMaterializationCommandOutcome::Unavailable;
+        };
+        let installed_names = match runtime.installed_skill_names().await {
+            Some(names) => names,
+            None => return TeamMaterializationCommandOutcome::Unavailable,
+        };
+        match self.team_skill_selections.dependency_plan(
+            &selection_id,
+            &TeamSkillDependencyCatalog::from_installed_names(installed_names),
+        ) {
+            TeamSkillDependencyPlanResult::Available { plan } if plan.can_proceed() => {}
+            TeamSkillDependencyPlanResult::Available { .. }
+            | TeamSkillDependencyPlanResult::Invalid => {
+                return TeamMaterializationCommandOutcome::Rejected;
+            }
+            TeamSkillDependencyPlanResult::Unavailable => {
+                return TeamMaterializationCommandOutcome::Unavailable;
+            }
+        }
+        let endpoint = runtime.endpoint();
         let materialization =
             match self
                 .team_skill_selections
@@ -525,7 +557,7 @@ impl OrganizationGlobalState {
         let outcome = shared
             .team_abort_role_sessions(plan.bindings().to_vec())
             .await;
-        team::settle_public_cancellation(
+        settle_public_cancellation(
             &mut self.store,
             &self.team_run,
             &run_id,
@@ -875,48 +907,19 @@ impl OrganizationGlobalState {
             .collect()
     }
 
-    fn schedule_ready_nodes(
-        &mut self,
-        run_id: GraphRunId,
-        now: u64,
-    ) -> Result<Vec<ActivityId>, StoreFault> {
-        schedule_ready_nodes(&self.team_run, &mut self.store, run_id, now)
-    }
-
     fn pending_run_activity_ids(&self, run_id: &GraphRunId, now: u64) -> Vec<ActivityId> {
-        pending_run_activity_ids(&self.store, run_id, now)
+        super::run_scheduler::pending_run_activity_ids(&self.store, run_id, now)
     }
 
-    fn activity_target(
-        &self,
-        activity_id: &ActivityId,
-    ) -> Option<crate::composition::TeamRunActivityTarget> {
-        let open_claw_endpoint = RuntimeEndpointReference::try_new(
-            RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
-        )
-        .expect("fixed OpenClaw endpoint must be valid");
-        let matcha_endpoint = RuntimeEndpointReference::try_new(
-            RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference(),
-        )
-        .expect("fixed Matcha endpoint must be valid");
-        activity_target(
-            &self.store,
-            activity_id,
-            &open_claw_endpoint,
-            &matcha_endpoint,
-        )
-    }
-
-    fn active_run_local_sessions(&self, run_id: &GraphRunId) -> BTreeSet<String> {
-        active_run_local_sessions(&self.store, run_id)
+    fn activity_target(&self, activity_id: &ActivityId) -> Option<TeamRunActivityTarget> {
+        super::run_scheduler::activity_target(&self.store, activity_id)
     }
 
     fn claim_activity(
         &mut self,
         activity_id: ActivityId,
         claimed_at: u64,
-    ) -> Result<crate::composition::TeamRunActivityStart, crate::composition::TeamRunActivityError>
-    {
+    ) -> Result<TeamRunActivityStart, TeamRunActivityError> {
         self.team_run
             .claim_agent_activity(&mut self.store, activity_id, claimed_at)
     }
@@ -924,9 +927,8 @@ impl OrganizationGlobalState {
     fn settle_activity(
         &mut self,
         claim: organization::ActivityClaim,
-        outcome: crate::runtime_driver::ActivityExecutionOutcome,
-    ) -> Result<crate::composition::TeamRunActivityOutcome, crate::composition::TeamRunActivityError>
-    {
+        outcome: crate::runtime::driver::ActivityExecutionOutcome,
+    ) -> Result<TeamRunActivityOutcome, TeamRunActivityError> {
         self.team_run
             .settle_agent_activity_dispatch(&mut self.store, claim, outcome)
     }
@@ -944,12 +946,9 @@ impl OrganizationGlobalState {
         delivery_id: DeliveryId,
         status: TerminalRunStatus,
         observed_at: u64,
-    ) -> Result<
-        crate::composition::MatchaTerminalObservationOutcome,
-        crate::composition::MatchaTerminalObservationError,
-    > {
+    ) -> Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError> {
         let Some(target) = self.matcha_terminal_target(&delivery_id) else {
-            return Ok(crate::composition::MatchaTerminalObservationOutcome::NotFound);
+            return Ok(MatchaTerminalObservationOutcome::NotFound);
         };
         let native_terminal = match status {
             TerminalRunStatus::Completed => NativeTerminalStatus::Completed,
@@ -959,8 +958,8 @@ impl OrganizationGlobalState {
         };
         self.team_run
             .observe_matcha_terminal(&mut self.store, target, native_terminal, observed_at)
-            .map(crate::composition::MatchaTerminalObservationOutcome::Observed)
-            .map_err(crate::composition::MatchaTerminalObservationError::Store)
+            .map(MatchaTerminalObservationOutcome::Observed)
+            .map_err(MatchaTerminalObservationError::Store)
     }
 
     async fn recover_materialization_receipts(&mut self, shared: &OrganizationShared) {
@@ -1231,7 +1230,7 @@ impl OwnerSpec for OrganizationOwner {
                         let outcome = shared
                             .team_abort_role_sessions(plan.bindings().to_vec())
                             .await;
-                        team::settle_public_cancellation(
+                        settle_public_cancellation(
                             &mut store,
                             &state.team_run,
                             &run_id,
@@ -1374,13 +1373,18 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 let outcome = state.open_store().and_then(|mut store| {
-                    task_board_mutate(&mut store, team_id, run_id, operation)
+                    super::task_board::mutate(&mut store, team_id, run_id, operation)
                 });
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::ScheduleReadyNodes { run_id, now, reply } => {
                 let outcome = state.open_store().and_then(|mut store| {
-                    schedule_ready_nodes(&state.team_run, &mut store, run_id, now)
+                    super::run_scheduler::schedule_ready_nodes(
+                        &state.team_run,
+                        &mut store,
+                        run_id,
+                        now,
+                    )
                 });
                 let _ = reply.send(outcome);
             }
@@ -1392,10 +1396,11 @@ impl OwnerSpec for OrganizationOwner {
             } => {
                 let outcome = state
                     .open_store()
-                    .map_err(crate::composition::TeamRunActivityError::Store)
+                    .map_err(TeamRunActivityError::Store)
                     .and_then(|mut store| {
-                        if !activity_belongs_to(&store, &run_id, &activity_id) {
-                            return Err(crate::composition::TeamRunActivityError::SessionMismatch);
+                        if !super::run_scheduler::activity_belongs_to(&store, &run_id, &activity_id)
+                        {
+                            return Err(TeamRunActivityError::SessionMismatch);
                         }
                         state
                             .team_run
@@ -1411,10 +1416,14 @@ impl OwnerSpec for OrganizationOwner {
             } => {
                 let outcome = state
                     .open_store()
-                    .map_err(crate::composition::TeamRunActivityError::Store)
+                    .map_err(TeamRunActivityError::Store)
                     .and_then(|mut store| {
-                        if !activity_belongs_to(&store, &run_id, claim.activity_id()) {
-                            return Err(crate::composition::TeamRunActivityError::SessionMismatch);
+                        if !super::run_scheduler::activity_belongs_to(
+                            &store,
+                            &run_id,
+                            claim.activity_id(),
+                        ) {
+                            return Err(TeamRunActivityError::SessionMismatch);
                         }
                         state
                             .team_run
@@ -1431,19 +1440,15 @@ impl OwnerSpec for OrganizationOwner {
             } => {
                 let outcome = state
                     .open_store()
-                    .map_err(crate::composition::MatchaTerminalObservationError::Store)
+                    .map_err(MatchaTerminalObservationError::Store)
                     .and_then(|mut store| {
                         let Some(target) =
                             state.team_run.matcha_terminal_target(&store, &delivery_id)
                         else {
-                            return Ok(
-                                crate::composition::MatchaTerminalObservationOutcome::NotFound,
-                            );
+                            return Ok(MatchaTerminalObservationOutcome::NotFound);
                         };
                         if target.graph_run_id() != &run_id {
-                            return Err(
-                                crate::composition::MatchaTerminalObservationError::Correlation,
-                            );
+                            return Err(MatchaTerminalObservationError::Correlation);
                         }
                         let native_terminal = match status {
                             TerminalRunStatus::Completed => NativeTerminalStatus::Completed,
@@ -1459,8 +1464,8 @@ impl OwnerSpec for OrganizationOwner {
                                 native_terminal,
                                 observed_at,
                             )
-                            .map(crate::composition::MatchaTerminalObservationOutcome::Observed)
-                            .map_err(crate::composition::MatchaTerminalObservationError::Store)
+                            .map(MatchaTerminalObservationOutcome::Observed)
+                            .map_err(MatchaTerminalObservationError::Store)
                     });
                 let _ = reply.send(outcome);
             }
@@ -1618,14 +1623,14 @@ impl OwnerSpec for OrganizationOwner {
                     &webhook_path,
                     idempotency_key,
                 ) {
-                    crate::composition::TeamTriggerFireResolution::Request(request) => state
+                    TeamTriggerFireResolution::Request(request) => state
                         .team_run
                         .fire_team_trigger(&mut state.store, request, fired_at)
                         .map_err(|_| TeamRuntimeStatus::Unavailable),
-                    crate::composition::TeamTriggerFireResolution::NotFound => {
+                    TeamTriggerFireResolution::NotFound => {
                         Ok(organization::TeamTriggerFireOutcome::NotFound)
                     }
-                    crate::composition::TeamTriggerFireResolution::Rejected => {
+                    TeamTriggerFireResolution::Rejected => {
                         Ok(organization::TeamTriggerFireOutcome::Rejected)
                     }
                 };
@@ -1717,13 +1722,7 @@ impl OwnerSpec for OrganizationOwner {
             } => {
                 let outcome = state.open_store().map_or(
                     organization::run::public_projection::TeamPublicQueryOutcome::Unavailable,
-                    |store| {
-                        organization::run::public_projection::query_team_public_projection(
-                            store.facts(),
-                            &team_id,
-                            &run_id,
-                        )
-                    },
+                    |store| super::projection::team_public_projection(&store, &team_id, &run_id),
                 );
                 let _ = reply.send(outcome);
             }
@@ -1734,29 +1733,14 @@ impl OwnerSpec for OrganizationOwner {
                 event_limit,
                 reply,
             } => {
-                let outcome = state.open_store().ok().and_then(|store| match team_id {
-                    Some(team_id) => {
-                        organization::run::public_projection::TeamRunPublicSnapshotRequest::try_new(
-                            team_id,
-                            run_id,
-                            event_cursor.unwrap_or_default(),
-                            event_limit,
-                        )
-                        .ok()
-                        .map(|request| {
-                            organization::run::public_projection::produce_team_run_public_snapshot(
-                                store.facts(),
-                                &request,
-                            )
-                        })
-                    }
-                    None => organization::run::public_projection::produce_team_run_public_snapshot_for_run(
-                        store.facts(),
-                        &run_id,
-                        event_cursor.unwrap_or_default(),
+                let outcome = state.open_store().ok().and_then(|store| {
+                    super::projection::team_run_public_snapshot(
+                        &store,
+                        team_id,
+                        run_id,
+                        event_cursor,
                         event_limit,
                     )
-                    .ok(),
                 });
                 let _ = reply.send(outcome);
             }
@@ -1992,304 +1976,6 @@ impl OwnerSpec for OrganizationOwner {
     }
 }
 
-fn schedule_ready_nodes(
-    team_run: &TeamRunOwner,
-    store: &mut OrganizationStore,
-    run_id: GraphRunId,
-    now: u64,
-) -> Result<Vec<ActivityId>, StoreFault> {
-    const MAX_ACTIVE_ROLE_PROMPTS: usize = 2;
-    let Some(run) = store.facts().run(&run_id).cloned() else {
-        return Ok(Vec::new());
-    };
-    if !matches!(run.lifecycle().state(), GraphRunLifecycleState::Active) {
-        return Ok(Vec::new());
-    }
-
-    let control = organization::run::control::plan_ready_control_execution(
-        run.graph().definition(),
-        run.graph(),
-        now,
-    )
-    .map_err(|_| StoreFault::InvalidFacts)?;
-    for step in control.into_steps() {
-        team_run.apply_control_execution_step(store, &run_id, step)?;
-    }
-    let run = store
-        .facts()
-        .run(&run_id)
-        .cloned()
-        .ok_or(StoreFault::InvalidFacts)?;
-    let active_local_sessions = active_run_local_sessions(store, &run_id);
-    let selected = organization::run::scheduler::schedule_ready_nodes(
-        run.graph(),
-        MAX_ACTIVE_ROLE_PROMPTS,
-        active_local_sessions.len().min(MAX_ACTIVE_ROLE_PROMPTS),
-    )
-    .map_err(|_| StoreFault::InvalidFacts)?;
-    let bindings = run
-        .runtime()
-        .map(|runtime| runtime.bindings())
-        .unwrap_or(&[]);
-    let mut reserved = active_local_sessions;
-    let mut activity_ids = Vec::new();
-
-    for item in selected {
-        let Some(node) = run.graph().definition().node(item.node_id()) else {
-            continue;
-        };
-        let ActivityKind::AgentTask { role_id, .. } = item.activity_kind() else {
-            continue;
-        };
-        let Some(binding) = bindings
-            .iter()
-            .find(|binding| binding.role().as_str() == role_id)
-        else {
-            continue;
-        };
-        if !reserved.insert(binding.local_session().as_str().to_owned()) {
-            continue;
-        }
-        let activity = item
-            .bind_activity_target(
-                ActivityTarget::new(binding.local_session().as_str().to_owned())
-                    .map_err(|_| StoreFault::InvalidFacts)?,
-                now,
-                node.max_attempts().get(),
-            )
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        match store.register_activity_and_start_attempt(activity, now)? {
-            organization::ActivityRegistrationOutcome::Recorded(activity)
-            | organization::ActivityRegistrationOutcome::Replayed(activity) => {
-                activity_ids.push(activity.facts().activity_id.clone());
-            }
-            organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey
-            | organization::ActivityRegistrationOutcome::ConflictingActivityId { .. } => {
-                return Err(StoreFault::InvalidFacts);
-            }
-        }
-    }
-    Ok(activity_ids)
-}
-
-fn active_run_local_sessions(store: &OrganizationStore, run_id: &GraphRunId) -> BTreeSet<String> {
-    store
-        .facts()
-        .activities()
-        .activities()
-        .filter(|activity| activity.facts().run_id == *run_id)
-        .filter(|activity| {
-            matches!(
-                activity.phase(),
-                ActivityPhase::Pending
-                    | ActivityPhase::RetryScheduled { .. }
-                    | ActivityPhase::Claimed(_)
-                    | ActivityPhase::Dispatched(_)
-            )
-        })
-        .map(|activity| activity.facts().target.as_str().to_owned())
-        .collect()
-}
-
-fn pending_run_activity_ids(
-    store: &OrganizationStore,
-    run_id: &GraphRunId,
-    now: u64,
-) -> Vec<ActivityId> {
-    store
-        .facts()
-        .activities()
-        .activities()
-        .filter(|activity| activity.facts().run_id == *run_id)
-        .filter_map(|activity| match activity.phase() {
-            ActivityPhase::Pending => Some(activity.facts().activity_id.clone()),
-            ActivityPhase::RetryScheduled { retry_at, .. } if *retry_at <= now => {
-                Some(activity.facts().activity_id.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn activity_belongs_to(
-    store: &OrganizationStore,
-    run_id: &GraphRunId,
-    activity_id: &ActivityId,
-) -> bool {
-    store
-        .facts()
-        .activities()
-        .activity(activity_id)
-        .is_some_and(|activity| activity.facts().run_id == *run_id)
-}
-
-fn activity_target(
-    store: &OrganizationStore,
-    activity_id: &ActivityId,
-    open_claw_endpoint: &RuntimeEndpointReference,
-    matcha_endpoint: &RuntimeEndpointReference,
-) -> Option<crate::composition::TeamRunActivityTarget> {
-    let activity = store.facts().activities().activity(activity_id)?;
-    let run_id = activity.facts().run_id.clone();
-    let run = store.facts().run(&run_id)?;
-    let ActivityKind::AgentTask { role_id, .. } = &activity.facts().activity_kind else {
-        return None;
-    };
-    let role = organization::RoleId::try_new(role_id.clone()).ok()?;
-    let binding = run
-        .runtime()?
-        .bindings()
-        .iter()
-        .find(|binding| binding.role() == &role)?;
-    if binding.local_session().as_str() != activity.facts().target.as_str() {
-        return None;
-    }
-    if binding.endpoint() == open_claw_endpoint {
-        Some(crate::composition::TeamRunActivityTarget::OpenClaw { run_id })
-    } else if binding.endpoint() == matcha_endpoint {
-        Some(crate::composition::TeamRunActivityTarget::Matcha { run_id })
-    } else {
-        None
-    }
-}
-
-fn task_board_mutate(
-    store: &mut OrganizationStore,
-    team_id: TeamId,
-    run_id: GraphRunId,
-    operation: crate::transport::team_task_board::Operation,
-) -> Result<crate::transport::team_task_board::MutationResult, StoreFault> {
-    use crate::transport::team_task_board::{MutationResult, Operation};
-
-    store
-        .task_board_mutate(|board| match operation {
-            Operation::ClaimNext {
-                agent_id,
-                session,
-                lease_seconds,
-                now,
-            } => organization::run::task_board::claim_next(
-                board,
-                &team_id,
-                &run_id,
-                &agent_id,
-                &session,
-                lease_seconds,
-                now,
-            )
-            .map(|task_id| MutationResult::ClaimNext { task_id }),
-            Operation::Heartbeat {
-                task_id,
-                agent_id,
-                session,
-                lease_seconds,
-                now,
-            } => organization::run::task_board::heartbeat(
-                board,
-                &team_id,
-                &run_id,
-                &task_id,
-                &agent_id,
-                &session,
-                lease_seconds,
-                now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::Release {
-                task_id,
-                agent_id,
-                session,
-                now,
-            } => organization::run::task_board::release(
-                board, &team_id, &run_id, &task_id, &agent_id, &session, now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::Transition {
-                task_id,
-                next,
-                agent,
-                summary,
-                error,
-                now,
-            } => organization::run::task_board::transition(
-                board,
-                &team_id,
-                &run_id,
-                &task_id,
-                next,
-                agent
-                    .as_ref()
-                    .map(|(agent_id, session)| (agent_id.as_str(), session.as_str())),
-                summary,
-                error,
-                now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::StartRunner {
-                runner_id,
-                session,
-                now,
-            } => organization::run::task_board::start_runner(
-                board, &team_id, &run_id, &runner_id, &session, now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::PauseRunner {
-                runner_id,
-                session,
-                now,
-            } => organization::run::task_board::pause_runner(
-                board, &team_id, &run_id, &runner_id, &session, now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::CloseRunner {
-                runner_id,
-                session,
-                now,
-            } => organization::run::task_board::close_runner(
-                board, &team_id, &run_id, &runner_id, &session, now,
-            )
-            .map(|_| MutationResult::Changed),
-            Operation::ReclaimExpired { now } => Ok(MutationResult::Reclaimed {
-                count: organization::run::task_board::reclaim_expired_for_run(
-                    board, &team_id, &run_id, now,
-                ),
-            }),
-            Operation::PostMailbox { message } => {
-                if message.team_id() != &team_id || message.run_id() != &run_id {
-                    return Err(organization::run::task_board::TaskBoardError::InvalidIdentity);
-                }
-                organization::run::task_board::post(board, message)
-                    .map(|posted| MutationResult::Posted { posted })
-            }
-            Operation::PullMailbox { cursor, limit } => organization::run::task_board::pull(
-                board,
-                &team_id,
-                &run_id,
-                cursor.as_deref(),
-                limit,
-            )
-            .map(|(messages, next_cursor)| MutationResult::Messages {
-                messages,
-                next_cursor,
-            }),
-            Operation::UpsertPlan {
-                plan,
-                now,
-                fingerprint,
-            } => {
-                if plan
-                    .iter()
-                    .any(|entry| entry.team_id != team_id || entry.run_id != run_id)
-                {
-                    return Err(organization::run::task_board::TaskBoardError::InvalidIdentity);
-                }
-                organization::run::task_board::upsert_plan(board, plan, now, &fingerprint)
-                    .map(|task_ids| MutationResult::Plan { task_ids })
-            }
-        })
-        .map_err(|_| StoreFault::InvalidFacts)
-}
-
 fn manual_materialization_outcome(
     outcome: organization::MaterializationOperationOutcome,
 ) -> ManualTeamCreateOutcome {
@@ -2347,7 +2033,9 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::organization::run_scheduler::schedule_ready_nodes;
     use std::{
+        fs,
         num::NonZeroU32,
         sync::{
             Arc,
@@ -2355,7 +2043,7 @@ mod tests {
         },
     };
 
-    use crate::runtime_driver::{RuntimeCapabilitySurface, TeamOps};
+    use crate::runtime::driver::{RuntimeCapabilitySurface, SkillOps, TeamOps};
 
     use organization::{
         ActivityFailure, ActivityPhase, DeliveryLedgerSnapshot, EdgeAction, EdgeDefinition, EdgeId,
@@ -2534,6 +2222,34 @@ mod tests {
         assert!(activities.iter().any(|activity| {
             activity.facts().node_execution_id == *second_fence.node_execution_id()
         }));
+    }
+
+    #[tokio::test]
+    async fn team_skill_materialize_rejects_missing_required_dependencies_before_native_effect() {
+        let root = package_root("missing-required-dependency");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let selections = temp_dir.path().join("team-skill-selections.json");
+        let mut state = organization_state(store_without_team_materialization().1);
+        state.team_skill_selections = TeamSkillSelectionResolver::open(selections).unwrap();
+        let selection_id = state.team_skill_selections.authorize(&root).unwrap();
+        let driver = Arc::new(FixedTeamDriver::new(
+            organization::MaterializationOperationOutcome::OutcomeUnknown,
+        ));
+        let shared = organization_shared(driver.clone());
+
+        assert_eq!(
+            state
+                .materialize_team_skill_selection(
+                    &shared,
+                    selection_id,
+                    team_id(),
+                    idempotency_key("team-skill:materialize"),
+                )
+                .await,
+            TeamMaterializationCommandOutcome::Rejected,
+        );
+        assert_eq!(driver.materialize_count(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2872,6 +2588,21 @@ mod tests {
         store_with_runs(vec![(graph, runtime_receipt())])
     }
 
+    fn package_root(name: &str) -> PathBuf {
+        static NEXT_PACKAGE_ROOT: AtomicUsize = AtomicUsize::new(0);
+        let sequence = NEXT_PACKAGE_ROOT.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "matchaclaw-team-skill-{name}-{}-{sequence}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(root.join("roles")).unwrap();
+        fs::write(root.join("SKILL.md"), "---\nname: research\nversion: 1.0.0\ndescription: Research package\nkind: team-skill\nroles:\n  - id: researcher\n    purpose: Research facts\n---\n# Research\n").unwrap();
+        fs::write(root.join("workflow.md"), "# Workflow").unwrap();
+        fs::write(root.join("dependencies.yaml"), "skills:\n  - name: web\n    required: true\n    purpose: Search\n    source: clawhub:web\n").unwrap();
+        fs::write(root.join("roles/researcher.md"), "# Researcher").unwrap();
+        root
+    }
+
     fn store_with_runs(
         runs: Vec<(GraphState, RunRuntimeReceipt)>,
     ) -> (tempfile::TempDir, OrganizationStore) {
@@ -3054,6 +2785,7 @@ mod tests {
     struct FixedTeamDriver {
         outcome: organization::MaterializationOperationOutcome,
         delete_evidence: NativeDeletionEvidence,
+        materialize_count: AtomicUsize,
         remove_count: AtomicUsize,
         delete_count: AtomicUsize,
     }
@@ -3063,6 +2795,7 @@ mod tests {
             Self {
                 outcome,
                 delete_evidence: NativeDeletionEvidence::OutcomeUnknown,
+                materialize_count: AtomicUsize::new(0),
                 remove_count: AtomicUsize::new(0),
                 delete_count: AtomicUsize::new(0),
             }
@@ -3071,6 +2804,10 @@ mod tests {
         fn with_delete_evidence(mut self, evidence: NativeDeletionEvidence) -> Self {
             self.delete_evidence = evidence;
             self
+        }
+
+        fn materialize_count(&self) -> usize {
+            self.materialize_count.load(Ordering::SeqCst)
         }
 
         fn remove_count(&self) -> usize {
@@ -3094,6 +2831,45 @@ mod tests {
         fn team_ops(&self) -> Option<&dyn TeamOps> {
             Some(self)
         }
+
+        fn skill_ops(&self) -> Option<&dyn SkillOps> {
+            Some(self)
+        }
+    }
+
+    impl SkillOps for FixedTeamDriver {
+        fn installed_skill_catalog(
+            &self,
+        ) -> OwnedRuntimeFuture<Option<openclaw::skill::InstalledSkillCatalog>> {
+            Box::pin(async { Some(openclaw::skill::InstalledSkillCatalog::default()) })
+        }
+
+        fn install_clawhub_skill<'a>(
+            &'a self,
+            _command: crate::skills::install::Command,
+        ) -> crate::runtime::driver::SessionFuture<'a, crate::skills::install::Outcome> {
+            Box::pin(async { crate::skills::install::Outcome::Unknown })
+        }
+
+        fn skill_status<'a>(
+            &'a self,
+        ) -> crate::runtime::driver::SessionFuture<'a, crate::skills::status::Outcome> {
+            Box::pin(async { crate::skills::status::Outcome::Unavailable })
+        }
+
+        fn manage_skills<'a>(
+            &'a self,
+            _command: crate::skills::management::Command,
+        ) -> crate::runtime::driver::SessionFuture<'a, crate::skills::management::Outcome> {
+            Box::pin(async { crate::skills::management::Outcome::Unavailable })
+        }
+
+        fn skill_bundles<'a>(
+            &'a self,
+            _command: crate::skills::bundle::Command,
+        ) -> crate::runtime::driver::SessionFuture<'a, crate::skills::bundle::Outcome> {
+            Box::pin(async { crate::skills::bundle::Outcome::Unknown })
+        }
     }
 
     impl TeamOps for FixedTeamDriver {
@@ -3101,6 +2877,7 @@ mod tests {
             &self,
             _request: organization::TeamMaterializationRequest,
         ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
+            self.materialize_count.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { organization::MaterializationOperationOutcome::OutcomeUnknown })
         }
 

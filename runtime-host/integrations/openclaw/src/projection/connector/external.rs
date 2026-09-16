@@ -4,8 +4,8 @@ use std::{
 };
 
 use environment::{
-    Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretRef, ConnectorSecretResolution,
-    ConnectorSecretResolverPort, McpTransport,
+    ConnectorCatalog, ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
+    connectors::{Connector, ConnectorKind, McpTransport},
 };
 use futures_util::StreamExt;
 use reqwest::{Client, header};
@@ -113,28 +113,30 @@ pub fn project_runtime_mcp_connectors(
         if !connector.enabled() {
             report
                 .skipped
-                .push((connector.id.clone(), ConnectorProjectionSkip::Disabled));
+                .push((connector.id().to_owned(), ConnectorProjectionSkip::Disabled));
             continue;
         }
         match server_for(connector, secrets) {
             Ok(Some(server)) => {
-                let server_id = managed_external_server_id(&connector.id);
+                let server_id = managed_external_server_id(connector.id());
                 report.projected.push(server_id.clone());
                 servers.insert(server_id, server);
             }
             Ok(None) if !connector.enabled() => report
                 .skipped
-                .push((connector.id.clone(), ConnectorProjectionSkip::Disabled)),
-            Ok(None) => report
-                .skipped
-                .push((connector.id.clone(), ConnectorProjectionSkip::Unsupported)),
+                .push((connector.id().to_owned(), ConnectorProjectionSkip::Disabled)),
+            Ok(None) => report.skipped.push((
+                connector.id().to_owned(),
+                ConnectorProjectionSkip::Unsupported,
+            )),
             Err(
                 ConnectorProjectionError::InvalidSecretReference
                 | ConnectorProjectionError::SecretUnavailable,
             ) => {
-                report
-                    .skipped
-                    .push((connector.id.clone(), ConnectorProjectionSkip::Unsupported));
+                report.skipped.push((
+                    connector.id().to_owned(),
+                    ConnectorProjectionSkip::Unsupported,
+                ));
                 return Ok((ConnectorProjectionEffect::Unavailable, report));
             }
             Err(error) => return Err(error),
@@ -235,38 +237,34 @@ fn server_for(
     if !connector.enabled() {
         return Ok(None);
     }
-    match connector.kind {
+    match connector.kind() {
         ConnectorKind::McpStdio => {
-            let Some(command) = connector.command.as_ref() else {
+            let Some(command) = connector.command() else {
                 return Ok(None);
             };
             let mut server = Map::new();
-            server.insert("command".into(), Value::String(command.clone()));
-            optional_strings(&mut server, "args", connector.args.as_ref());
-            let env = merge_secret_values(
-                connector.env.as_ref(),
-                connector.secret_env_references(),
-                secrets,
-            )?;
+            server.insert("command".into(), Value::String(command.to_owned()));
+            optional_strings(&mut server, "args", connector.args());
+            let env =
+                merge_secret_values(connector.env(), connector.secret_env_references(), secrets)?;
             if !env.is_empty() {
                 server.insert("env".into(), Value::Object(env));
             }
-            optional_text(&mut server, "cwd", connector.cwd.as_ref());
+            optional_text(&mut server, "cwd", connector.cwd());
             Ok(Some(Value::Object(server)))
         }
         ConnectorKind::McpHttp => {
-            let Some(url) = connector.url.as_ref() else {
+            let Some(url) = connector.url() else {
                 return Err(ConnectorProjectionError::MissingHttpUrl);
             };
             let mut server = Map::new();
-            server.insert("url".into(), Value::String(url.clone()));
+            server.insert("url".into(), Value::String(url.to_owned()));
             server.insert(
                 "transport".into(),
                 Value::String(
                     match connector
-                        .transport
-                        .as_ref()
-                        .unwrap_or(&McpTransport::StreamableHttp)
+                        .transport()
+                        .unwrap_or(McpTransport::StreamableHttp)
                     {
                         McpTransport::StreamableHttp => "streamable-http",
                         McpTransport::Sse => "sse",
@@ -275,14 +273,14 @@ fn server_for(
                 ),
             );
             let headers = merge_secret_values(
-                connector.headers.as_ref(),
+                connector.headers(),
                 connector.secret_header_references(),
                 secrets,
             )?;
             if !headers.is_empty() {
                 server.insert("headers".into(), Value::Object(headers));
             }
-            if let Some(timeout) = connector.connection_timeout_ms {
+            if let Some(timeout) = connector.connection_timeout_ms() {
                 server.insert("connectionTimeoutMs".into(), Value::Number(timeout.into()));
             }
             Ok(Some(Value::Object(server)))
@@ -317,12 +315,12 @@ fn merge_secret_values<'a>(
     Ok(values)
 }
 
-fn optional_text(object: &mut Map<String, Value>, key: &str, value: Option<&String>) {
+fn optional_text(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
     if let Some(value) = value {
-        object.insert(key.into(), Value::String(value.clone()));
+        object.insert(key.into(), Value::String(value.to_owned()));
     }
 }
-fn optional_strings<T: serde::Serialize>(
+fn optional_strings<T: serde::Serialize + ?Sized>(
     object: &mut Map<String, Value>,
     key: &str,
     value: Option<&T>,
@@ -352,7 +350,7 @@ pub fn observe_external_connector(connector: &Connector) -> ConnectorObservation
         return ConnectorObservation::Unsupported;
     }
 
-    match connector.kind {
+    match connector.kind() {
         ConnectorKind::McpHttp => ConnectorObservation::Unknown,
         ConnectorKind::McpStdio | ConnectorKind::Cli | ConnectorKind::Sdk | ConnectorKind::Http => {
             ConnectorObservation::Unsupported
@@ -368,16 +366,16 @@ pub async fn probe_external_connector(connector: &Connector) -> ConnectorObserva
         return ConnectorObservation::Unsupported;
     }
 
-    let ConnectorKind::McpHttp = connector.kind else {
+    let ConnectorKind::McpHttp = connector.kind() else {
         return ConnectorObservation::Unsupported;
     };
-    let Some(url) = connector.url.as_deref() else {
+    let Some(url) = connector.url() else {
         return ConnectorObservation::Unknown;
     };
 
     let timeout_duration = Duration::from_millis(
         connector
-            .connection_timeout_ms
+            .connection_timeout_ms()
             .unwrap_or(DEFAULT_MCP_PROBE_TIMEOUT.as_millis() as u64),
     );
     let client = match Client::builder()
@@ -390,9 +388,8 @@ pub async fn probe_external_connector(connector: &Connector) -> ConnectorObserva
     };
     let started_at = Instant::now();
     let request = match connector
-        .transport
-        .as_ref()
-        .unwrap_or(&McpTransport::StreamableHttp)
+        .transport()
+        .unwrap_or(McpTransport::StreamableHttp)
     {
         McpTransport::Sse => client
             .get(url)
@@ -414,9 +411,8 @@ pub async fn probe_external_connector(connector: &Connector) -> ConnectorObserva
     }
     if matches!(
         connector
-            .transport
-            .as_ref()
-            .unwrap_or(&McpTransport::StreamableHttp),
+            .transport()
+            .unwrap_or(McpTransport::StreamableHttp),
         McpTransport::Sse
     ) {
         return ConnectorObservation::Connected;
@@ -447,7 +443,7 @@ pub async fn probe_external_connector(connector: &Connector) -> ConnectorObserva
 
 fn public_headers(connector: &Connector) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
-    if let Some(values) = connector.headers.as_ref() {
+    if let Some(values) = connector.headers() {
         for (name, value) in values {
             let Ok(name) = header::HeaderName::try_from(name) else {
                 continue;
@@ -488,16 +484,17 @@ fn valid_initialize_response(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use environment::connectors::ConnectorInput;
+
     use super::*;
 
     #[test]
     fn observation_does_not_infer_runtime_health_from_connector_configuration() {
-        let connector = serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "remote",
-            "kind": "mcp-http",
-            "url": "https://example.test/mcp"
-        }))
-        .expect("connector fixture");
+        let mut input = ConnectorInput::new("remote".into(), ConnectorKind::McpHttp);
+        input.url = Some("https://example.test/mcp".into());
+        let connector = Connector::new(input);
 
         assert_eq!(
             observe_external_connector(&connector),
@@ -507,14 +504,11 @@ mod tests {
 
     #[test]
     fn enabled_non_http_connectors_are_unsupported_without_a_probe_producer() {
-        let connector = serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "stdio",
-            "kind": "mcp-stdio",
-            "enabled": true,
-            "command": "private-command",
-            "args": ["private-arg"]
-        }))
-        .expect("connector fixture");
+        let mut input = ConnectorInput::new("stdio".into(), ConnectorKind::McpStdio);
+        input.enabled = Some(true);
+        input.command = Some("private-command".into());
+        input.args = Some(vec!["private-arg".into()]);
+        let connector = Connector::new(input);
 
         assert_eq!(
             observe_external_connector(&connector),
@@ -524,16 +518,17 @@ mod tests {
 
     #[tokio::test]
     async fn secret_ref_mcp_connectors_are_unsupported_for_observe_and_probe() {
-        let connector = serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "remote",
-            "kind": "mcp-http",
-            "enabled": true,
-            "url": "https://example.test/mcp",
-            "secretHeaders": {
-                "Authorization": { "kind": "secret-ref", "ref": "credential:v1:opaque" }
-            }
-        }))
-        .expect("connector fixture");
+        let mut input = ConnectorInput::new("remote".into(), ConnectorKind::McpHttp);
+        input.enabled = Some(true);
+        input.url = Some("https://example.test/mcp".into());
+        let connector = Connector::new(input).with_secret_references(
+            None,
+            Some(BTreeMap::from([(
+                "Authorization".into(),
+                "credential:v1:opaque".into(),
+            )])),
+            None,
+        );
 
         assert_eq!(
             observe_external_connector(&connector),

@@ -14,11 +14,8 @@ use tokio::{
 
 use super::{DecodeError, Delivery, Request, read};
 use crate::fleet::handle::FleetHandle;
-use crate::transport::authorization::CapabilityDecisionVerifier;
-use crate::transport::fleet_terminal::ServerDependencies as TerminalServerDependencies;
-
-#[path = "runtime_agent_ingress.rs"]
-pub(crate) mod runtime_agent_ingress;
+use crate::transport::common::authorization::CapabilityDecisionVerifier;
+use crate::transport::fleet::terminal_stream::ServerDependencies as TerminalServerDependencies;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
@@ -73,13 +70,13 @@ async fn serve(
         Err(_) => return write_response(&mut stream, Response::bad_request()).await,
     };
     if let Ok(request) = &request {
-        if request.method == "GET" && request.path == "/api/fleet/terminal" {
+        if is_terminal_route(&request.method, &request.path) {
             let Some(key) = request
                 .websocket_key
                 .as_deref()
                 .filter(|key| !key.is_empty())
             else {
-                return crate::transport::fleet_terminal::write_http_error(
+                return crate::transport::fleet::terminal_stream::write_http_error(
                     &mut stream,
                     400,
                     "invalid terminal websocket upgrade",
@@ -87,14 +84,14 @@ async fn serve(
                 .await;
             };
             if !request.websocket {
-                return crate::transport::fleet_terminal::write_http_error(
+                return crate::transport::fleet::terminal_stream::write_http_error(
                     &mut stream,
                     400,
                     "invalid terminal websocket upgrade",
                 )
                 .await;
             }
-            return crate::transport::fleet_terminal::serve_upgrade(
+            return crate::transport::fleet::terminal_stream::serve_upgrade(
                 stream,
                 request.path.clone(),
                 key.to_owned(),
@@ -117,7 +114,7 @@ async fn handle(
     owner: FleetHandle,
 ) -> Response {
     if request.path == "/api/remote-fleet/runtime-agent/ingress" {
-        return match runtime_agent_ingress::handle(
+        return match super::runtime_agent_ingress::handle(
             &request.method,
             &request.path,
             &request.headers,
@@ -266,7 +263,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Result<HttpRequest, 
         .map(|(_, value)| value.clone());
     // WebSocket upgrades have no HTTP request body and therefore normally omit
     // Content-Length. Keep the upgrade on this same active Fleet listener.
-    if method == "GET" && path == "/api/fleet/terminal" {
+    if is_terminal_route(method, path) {
         if !websocket {
             return Ok(Err(Response::bad_request()));
         }
@@ -341,6 +338,12 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
 
 fn is_fleet_route(method: &str, path: &str) -> bool {
     method == "POST" && path == "/api/fleet"
+}
+
+pub(super) fn is_terminal_route(method: &str, path: &str) -> bool {
+    method == "GET"
+        && (path == crate::transport::fleet::terminal_stream::TERMINAL_WEBSOCKET_PATH
+            || path == crate::transport::fleet::terminal_stream::PRIVATE_TERMINAL_WEBSOCKET_PATH)
 }
 
 fn bearer_authorization(headers: &[(String, String)]) -> Option<&str> {

@@ -62,7 +62,6 @@ pub(crate) enum Outcome {
 pub(crate) enum DeliveryOutcome {
     Progress,
     Connected,
-    Confirmed,
     TargetRejected,
     Unknown,
 }
@@ -101,10 +100,6 @@ impl LoginProgress {
             status,
             qr_data_url,
         }
-    }
-
-    pub(crate) fn is_connected(&self) -> bool {
-        self.status == LoginProgressStatus::Connected
     }
 
     pub(crate) fn delivery_outcome(&self) -> DeliveryOutcome {

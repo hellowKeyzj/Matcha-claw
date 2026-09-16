@@ -13,9 +13,11 @@ use super::config_store::{
 const BROWSER_RELAY_PLUGIN: &str = "browser-relay";
 const DEFAULT_SESSION_IDLE_MINUTES: u64 = 10_080;
 const MAX_PROXY_ENDPOINT_LENGTH: usize = 2048;
+const PROXY_LOOPBACK_MODE: &str = "gateway-only";
 
 /// OpenClaw has no native Settings field for proxy bypass rules.
 /// The Settings owner retains that value as desired-only; this projection never writes it.
+#[cfg(test)]
 const BYPASS_RULES_NATIVE_KEY: Option<&str> = None;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,9 +29,8 @@ pub enum BrowserMode {
 
 /// Projects the OpenClaw-native Settings fields.
 ///
-/// OpenClaw has no native `bypassRules` field in its Browser or Telegram
-/// schemas, so that Settings value intentionally is not represented here and
-/// remains a desired-only owner field.
+/// OpenClaw managed proxy has no native `bypassRules` field, so that Settings
+/// value intentionally is not represented here and remains a desired-only owner field.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SettingsProjection {
     browser_mode: BrowserMode,
@@ -206,7 +207,7 @@ impl SettingsProjection {
         changed |= replace(&mut plugins, "entries", Value::Object(entries));
         changed |= replace_document(document, "plugins", Value::Object(plugins));
 
-        changed |= apply_telegram_proxy(document, self.proxy.as_deref());
+        changed |= apply_native_proxy(document, self.proxy.as_deref());
         changed
     }
 
@@ -236,18 +237,18 @@ impl SettingsProjection {
             return false;
         }
 
-        let channels = object(document.get("channels"));
-        let telegram = object(channels.get("telegram"));
-        let default_account = telegram
-            .get("defaultAccount")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("default");
-        let accounts = object(telegram.get("accounts"));
-        let account = object(accounts.get(default_account));
+        let proxy = object(document.get("proxy"));
         match &self.proxy {
-            Some(proxy) => account.get("proxy") == Some(&Value::String(proxy.clone())),
-            None => !account.contains_key("proxy"),
+            Some(proxy_url) => {
+                proxy.get("proxyUrl") == Some(&Value::String(proxy_url.clone()))
+                    && proxy.get("enabled") == Some(&Value::Bool(true))
+                    && proxy.get("loopbackMode") == Some(&Value::String(PROXY_LOOPBACK_MODE.into()))
+            }
+            None => {
+                proxy.get("enabled") != Some(&Value::Bool(true))
+                    && !proxy.contains_key("proxyUrl")
+                    && !proxy.contains_key("loopbackMode")
+            }
         }
     }
 }
@@ -275,90 +276,37 @@ impl fmt::Display for SettingsProjectionError {
 
 impl std::error::Error for SettingsProjectionError {}
 
-fn apply_telegram_proxy(document: &mut OpenClawConfigDocument, proxy: Option<&str>) -> bool {
+fn apply_native_proxy(document: &mut OpenClawConfigDocument, proxy: Option<&str>) -> bool {
     match proxy {
-        Some(proxy) => apply_telegram_proxy_value(document, proxy),
-        None => remove_telegram_proxy_value(document),
+        Some(proxy) => apply_native_proxy_value(document, proxy),
+        None => disable_native_proxy(document),
     }
 }
 
-fn apply_telegram_proxy_value(document: &mut OpenClawConfigDocument, proxy: &str) -> bool {
-    let mut channels = object(document.get("channels"));
-    let mut telegram = object(channels.get("telegram"));
-    let default_account = telegram
-        .get("defaultAccount")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("default")
-        .to_owned();
-    let mut accounts = object(telegram.get("accounts"));
-    let mut account = object(accounts.get(&default_account));
-    let mut changed = replace(&mut account, "proxy", Value::String(proxy.to_owned()));
-    changed |= replace(&mut accounts, &default_account, Value::Object(account));
-    changed |= replace(&mut telegram, "accounts", Value::Object(accounts));
+fn apply_native_proxy_value(document: &mut OpenClawConfigDocument, proxy_url: &str) -> bool {
+    let mut proxy = object(document.get("proxy"));
+    let mut changed = replace(&mut proxy, "proxyUrl", Value::String(proxy_url.to_owned()));
+    changed |= replace(&mut proxy, "enabled", Value::Bool(true));
     changed |= replace(
-        &mut telegram,
-        "defaultAccount",
-        Value::String(default_account),
+        &mut proxy,
+        "loopbackMode",
+        Value::String(PROXY_LOOPBACK_MODE.into()),
     );
-    changed |= replace(&mut channels, "telegram", Value::Object(telegram));
-    changed |= replace_document(document, "channels", Value::Object(channels));
+    changed |= replace_document(document, "proxy", Value::Object(proxy));
     changed
 }
 
-fn remove_telegram_proxy_value(document: &mut OpenClawConfigDocument) -> bool {
-    let Some(Value::Object(_)) = document.get("channels") else {
-        return false;
-    };
-    let mut channels = object(document.get("channels"));
-    let Some(Value::Object(_)) = channels.get("telegram") else {
-        return false;
-    };
-    let mut telegram = object(channels.get("telegram"));
-    let default_account = telegram
-        .get("defaultAccount")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("default")
-        .to_owned();
-    let mut accounts = object(telegram.get("accounts"));
-    let mut changed = false;
-    if let Some(account) = accounts
-        .get_mut(&default_account)
-        .and_then(Value::as_object_mut)
-    {
-        changed |= account.remove("proxy").is_some();
-        if account.is_empty() {
-            accounts.remove(&default_account);
-            changed = true;
-        }
-    }
-    if !changed {
+fn disable_native_proxy(document: &mut OpenClawConfigDocument) -> bool {
+    if document.get("proxy").is_none() {
         return false;
     }
 
-    if accounts.is_empty() {
-        telegram.remove("accounts");
-        if telegram.get("defaultAccount").and_then(Value::as_str) == Some(default_account.as_str())
-        {
-            telegram.remove("defaultAccount");
-        }
-    } else {
-        if telegram.get("defaultAccount").and_then(Value::as_str) == Some(default_account.as_str())
-            && !accounts.contains_key(&default_account)
-        {
-            let replacement = accounts.keys().next().cloned().unwrap_or_default();
-            telegram.insert("defaultAccount".into(), Value::String(replacement));
-        }
-        telegram.insert("accounts".into(), Value::Object(accounts));
-    }
-
-    if telegram.is_empty() {
-        channels.remove("telegram");
-    } else {
-        channels.insert("telegram".into(), Value::Object(telegram));
-    }
-    replace_document(document, "channels", Value::Object(channels))
+    let mut proxy = object(document.get("proxy"));
+    let mut changed = proxy.remove("proxyUrl").is_some();
+    changed |= proxy.remove("loopbackMode").is_some();
+    changed |= replace(&mut proxy, "enabled", Value::Bool(false));
+    changed |= replace_document(document, "proxy", Value::Object(proxy));
+    changed
 }
 
 fn apply_default_session_idle(document: &mut OpenClawConfigDocument) -> bool {
@@ -598,10 +546,10 @@ mod tests {
             document["session"]["idleMinutes"],
             DEFAULT_SESSION_IDLE_MINUTES
         );
-        assert_eq!(
-            document["channels"]["telegram"]["accounts"]["default"]["proxy"],
-            "http://proxy.internal:8080"
-        );
+        assert_eq!(document["proxy"]["enabled"], true);
+        assert_eq!(document["proxy"]["proxyUrl"], "http://proxy.internal:8080");
+        assert_eq!(document["proxy"]["loopbackMode"], PROXY_LOOPBACK_MODE);
+        assert!(document["channels"].get("telegram").is_none());
         assert!(!document.to_string().contains("credentialReference"));
         assert!(
             !apply_prelaunch_desired(
@@ -711,18 +659,22 @@ mod tests {
                 document["browser"]["profiles"]["custom"]["color"],
                 "#123456"
             );
+            assert_eq!(document["proxy"]["enabled"], true);
+            assert_eq!(document["proxy"]["proxyUrl"], "http://proxy.internal:8080");
+            assert_eq!(document["proxy"]["loopbackMode"], PROXY_LOOPBACK_MODE);
             assert_eq!(document["channels"]["telegram"]["defaultAccount"], "work");
             assert_eq!(
                 document["channels"]["telegram"]["accounts"]["default"]["proxy"],
                 "http://default.proxy:80"
             );
             assert_eq!(
-                document["channels"]["telegram"]["accounts"]["work"]["proxy"],
-                "http://proxy.internal:8080"
-            );
-            assert_eq!(
                 document["channels"]["telegram"]["accounts"]["work"]["label"],
                 "preserve"
+            );
+            assert!(
+                document["channels"]["telegram"]["accounts"]["work"]
+                    .get("proxy")
+                    .is_none()
             );
         }
     }
@@ -750,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_config_patch_for_native_browser_and_telegram_proxy() {
+    fn builds_config_patch_for_native_browser_and_managed_proxy() {
         let current = OpenClawConfigDocument::from_value(serde_json::json!({
             "browser": {
                 "enabled": false,
@@ -793,19 +745,17 @@ mod tests {
                         BROWSER_RELAY_PLUGIN: { "enabled": false }
                     }
                 },
-                "channels": {
-                    "telegram": {
-                        "accounts": {
-                            "work": { "proxy": "http://proxy.internal:8080" }
-                        }
-                    }
+                "proxy": {
+                    "enabled": true,
+                    "proxyUrl": "http://proxy.internal:8080",
+                    "loopbackMode": PROXY_LOOPBACK_MODE
                 }
             })
         );
     }
 
     #[test]
-    fn removes_orphaned_telegram_proxy_account_when_proxy_is_cleared() {
+    fn disabling_managed_proxy_preserves_channel_specific_proxy() {
         let current = OpenClawConfigDocument::from_value(serde_json::json!({
             "browser": {
                 "enabled": true,
@@ -817,11 +767,16 @@ mod tests {
                     BROWSER_RELAY_PLUGIN: { "enabled": false }
                 }
             },
+            "proxy": {
+                "enabled": true,
+                "proxyUrl": "http://proxy.internal:8080",
+                "loopbackMode": PROXY_LOOPBACK_MODE
+            },
             "channels": {
                 "telegram": {
                     "defaultAccount": "default",
                     "accounts": {
-                        "default": { "proxy": "http://proxy.internal:8080" }
+                        "default": { "proxy": "http://channel.proxy:8080" }
                     }
                 }
             }
@@ -833,11 +788,17 @@ mod tests {
             .build_config_patch(&current);
 
         assert!(patch.changed);
-        assert_eq!(patch.patch["channels"]["telegram"], serde_json::json!(null));
+        assert_eq!(patch.patch["proxy"]["enabled"], false);
+        assert_eq!(patch.patch["proxy"]["proxyUrl"], serde_json::json!(null));
+        assert_eq!(
+            patch.patch["proxy"]["loopbackMode"],
+            serde_json::json!(null)
+        );
+        assert!(patch.patch.get("channels").is_none());
     }
 
     #[test]
-    fn builds_config_patch_for_relay_browser_and_telegram_proxy_removal() {
+    fn builds_config_patch_for_relay_browser_and_managed_proxy_disable() {
         let current = OpenClawConfigDocument::from_value(serde_json::json!({
             "browser": {
                 "enabled": true,
@@ -882,13 +843,6 @@ mod tests {
                     "entries": {
                         BROWSER_RELAY_PLUGIN: { "enabled": true }
                     }
-                },
-                "channels": {
-                    "telegram": {
-                        "accounts": {
-                            "work": { "proxy": null }
-                        }
-                    }
                 }
             })
         );
@@ -927,12 +881,10 @@ mod tests {
         assert_eq!(
             patch.patch,
             serde_json::json!({
-                "channels": {
-                    "telegram": {
-                        "accounts": {
-                            "default": { "proxy": "http://proxy.internal:8080" }
-                        }
-                    }
+                "proxy": {
+                    "enabled": true,
+                    "proxyUrl": "http://proxy.internal:8080",
+                    "loopbackMode": PROXY_LOOPBACK_MODE
                 }
             })
         );
@@ -951,11 +903,16 @@ mod tests {
                     BROWSER_RELAY_PLUGIN: { "enabled": true, "custom": true }
                 }
             },
+            "proxy": {
+                "enabled": true,
+                "proxyUrl": "http://proxy.internal:8080",
+                "loopbackMode": PROXY_LOOPBACK_MODE
+            },
             "channels": {
                 "telegram": {
                     "defaultAccount": "work",
                     "accounts": {
-                        "work": { "proxy": "http://proxy.internal:8080" }
+                        "work": { "proxy": "http://channel.proxy:8080" }
                     }
                 }
             }
@@ -1006,11 +963,7 @@ mod tests {
             .unwrap()
             .as_value();
         assert!(document["browser"].get("bypassRules").is_none());
-        assert!(
-            document["channels"]["telegram"]
-                .get("bypassRules")
-                .is_none()
-        );
+        assert!(document["proxy"].get("bypassRules").is_none());
     }
 
     #[test]

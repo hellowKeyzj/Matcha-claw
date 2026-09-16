@@ -1,19 +1,15 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 
-use super::{
-    SettingsCommand, SettingsQuery,
-    desired::{
-        self, Desired, Outcome, PendingDesired, PublicDesiredSnapshot, SettingsSnapshot, Settlement,
-    },
-};
-use crate::{
-    runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::{RuntimeOperationFailure, SettingsProjectionEffect},
-};
+use environment::settings::{self, Desired, Outcome, PendingDesired, Settlement};
 
+use super::{
+    command::SettingsCommand, projection, query::SettingsQuery, read_model::DesiredReadModel,
+};
+use crate::runtime::directory::RuntimeDriverDirectory;
+
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SettingsPartitionKey {
     Global,
@@ -25,8 +21,7 @@ pub(crate) struct SettingsShared {
 }
 
 pub(crate) struct SettingsGlobalState {
-    state: desired::DesiredState,
-    snapshot: Arc<ArcSwap<SettingsSnapshot>>,
+    state: settings::DesiredState,
 }
 
 pub(crate) struct SettingsOwner {
@@ -36,13 +31,12 @@ pub(crate) struct SettingsOwner {
 
 impl SettingsOwner {
     pub(crate) fn new(
-        state: desired::DesiredState,
+        state: settings::DesiredState,
         runtime_directory: Arc<RuntimeDriverDirectory>,
     ) -> Self {
-        let snapshot = Arc::new(ArcSwap::new(Arc::new(state.snapshot())));
         Self {
             shared: SettingsShared { runtime_directory },
-            global: SettingsGlobalState { state, snapshot },
+            global: SettingsGlobalState { state },
         }
     }
 
@@ -52,10 +46,6 @@ impl SettingsOwner {
 }
 
 impl SettingsGlobalState {
-    fn publish_snapshot(&self) {
-        self.snapshot.store(Arc::new(self.state.snapshot()));
-    }
-
     async fn replace(
         &mut self,
         shared: &SettingsShared,
@@ -63,7 +53,6 @@ impl SettingsGlobalState {
         desired: Desired,
     ) -> Settlement {
         let (revision, prior_outcome) = self.state.replace(correlation, desired);
-        self.publish_snapshot();
         if let Some(outcome) = prior_outcome {
             return Settlement { revision, outcome };
         }
@@ -92,7 +81,6 @@ impl SettingsGlobalState {
     ) -> Settlement {
         let outcome = self.apply_desired(shared, pending.desired).await;
         self.state.settle(pending.revision, outcome);
-        self.publish_snapshot();
         Settlement {
             revision: pending.revision,
             outcome,
@@ -100,35 +88,15 @@ impl SettingsGlobalState {
     }
 
     async fn apply_desired(&self, shared: &SettingsShared, desired: Desired) -> Outcome {
-        let Some(driver) = shared.runtime_directory.settings_driver() else {
-            return Outcome::Unknown;
-        };
-        let Some(settings) = driver.settings_ops() else {
-            return Outcome::Unknown;
-        };
-        let (browser_mode, proxy_endpoint) = desired.projection();
-        match settings
-            .apply_settings_projection(browser_mode, proxy_endpoint)
-            .await
-        {
-            Ok(SettingsProjectionEffect::Unchanged | SettingsProjectionEffect::Changed) => {
-                Outcome::Confirmed
-            }
-            Err(RuntimeOperationFailure::TargetRejected) => Outcome::Rejected,
-            Err(_) => Outcome::Unknown,
-        }
+        projection::apply_saved_desired(shared.runtime_directory.as_ref(), desired).await
     }
 
-    fn pending(&self) -> Option<PendingDesired> {
-        self.snapshot.load_full().pending.clone()
-    }
-
-    fn desired_snapshot(&self) -> PublicDesiredSnapshot {
-        self.snapshot.load_full().desired.clone()
+    fn desired_read_model(&self) -> DesiredReadModel {
+        DesiredReadModel::new(self.state.desired_snapshot())
     }
 
     fn gateway_auto_start(&self) -> bool {
-        self.snapshot.load_full().desired.gateway_auto_start
+        self.state.gateway_auto_start()
     }
 }
 
@@ -146,17 +114,17 @@ impl OwnerSpec for SettingsOwner {
 
     fn route_command(command: &Self::Command) -> CommandRoute<Self::Key> {
         match command {
-            SettingsCommand::Replace { .. }
-            | SettingsCommand::RecoverPending { .. }
+            SettingsCommand::ReplaceDesired { .. }
+            | SettingsCommand::RecoverPendingProjection { .. }
             | SettingsCommand::ApplySavedProjection { .. } => CommandRoute::Global,
         }
     }
 
     fn route_query(query: &Self::Query) -> QueryRoute<Self::Key> {
         match query {
-            SettingsQuery::Pending { .. }
-            | SettingsQuery::DesiredSnapshot { .. }
-            | SettingsQuery::GatewayAutoStart { .. } => QueryRoute::Global,
+            SettingsQuery::DesiredReadModel { .. } | SettingsQuery::GatewayAutoStart { .. } => {
+                QueryRoute::Global
+            }
         }
     }
 
@@ -176,15 +144,16 @@ impl OwnerSpec for SettingsOwner {
         command: Self::Command,
     ) {
         match command {
-            SettingsCommand::Replace {
+            SettingsCommand::ReplaceDesired {
                 correlation,
                 desired,
                 reply,
             } => {
                 let _ = reply.send(state.replace(&shared, correlation, desired).await);
             }
-            SettingsCommand::RecoverPending { reply } => {
-                let _ = reply.send(state.recover_pending(&shared).await);
+            SettingsCommand::RecoverPendingProjection { reply } => {
+                let _ = state.recover_pending(&shared).await;
+                let _ = reply.send(());
             }
             SettingsCommand::ApplySavedProjection { reply } => {
                 let _ = reply.send(state.apply_saved_projection(&shared).await);
@@ -208,11 +177,8 @@ impl OwnerSpec for SettingsOwner {
         query: Self::Query,
     ) {
         match query {
-            SettingsQuery::Pending { reply } => {
-                let _ = reply.send(state.pending());
-            }
-            SettingsQuery::DesiredSnapshot { reply } => {
-                let _ = reply.send(state.desired_snapshot());
+            SettingsQuery::DesiredReadModel { reply } => {
+                let _ = reply.send(state.desired_read_model());
             }
             SettingsQuery::GatewayAutoStart { reply } => {
                 let _ = reply.send(state.gateway_auto_start());

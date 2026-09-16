@@ -8,9 +8,7 @@ use serde_json::json;
 
 use super::{
     OpenClawWorkspaceAccess, WorkspaceReadFailure,
-    access::{
-        MAX_BINARY_BYTES, MAX_TEXT_BYTES, WorkspaceEntryKind, WorkspaceFileError, WorkspaceFiles,
-    },
+    access::{MAX_BINARY_BYTES, MAX_TEXT_BYTES, WorkspaceFileError, WorkspaceFiles},
     media::{WorkspaceMedia, WorkspaceMediaFailure, WorkspaceMediaPath},
     selection::OpenClawWorkspaceSelector,
 };
@@ -534,11 +532,11 @@ fn preserves_text_and_binary_bounds_and_file_kind_failures() {
     let files = files(&workspace, root.path());
 
     assert!(matches!(
-        files.read_text("binary.txt"),
+        files.read_text_with_limit("binary.txt", MAX_TEXT_BYTES),
         Err(WorkspaceFileError::Binary)
     ));
     assert!(matches!(
-        files.read_text("too-large.txt"),
+        files.read_text_with_limit("too-large.txt", MAX_TEXT_BYTES),
         Err(WorkspaceFileError::TooLarge)
     ));
     assert!(matches!(
@@ -550,7 +548,7 @@ fn preserves_text_and_binary_bounds_and_file_kind_failures() {
         Err(WorkspaceFileError::NotFile)
     ));
     assert_eq!(
-        files.list_dir("binary.txt"),
+        files.list_dir_with_options("binary.txt", false),
         Err(WorkspaceFileError::NotDirectory)
     );
 }
@@ -644,15 +642,28 @@ fn workspace_media_supports_thumbnail_batches_and_bounded_buffer_staging() {
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     fs::write(workspace.join("artifact.png"), ONE_PIXEL_PNG).unwrap();
-    let media = WorkspaceMedia::new();
-    let files = files(&workspace, root.path());
+    let state_dir =
+        crate::lifecycle::state_dir::CanonicalStateDir::provision(root.path().join("state"))
+            .unwrap();
+    fs::write(
+        state_dir.as_path().join("openclaw.json"),
+        serde_json::to_vec(&json!({
+            "agents": {"list": [{"id": "reviewer", "workspace": workspace}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let access = OpenClawWorkspaceAccess::new(state_dir);
 
     let paths = vec![WorkspaceMediaPath::new(
         "asset-key".into(),
         "artifact.png".into(),
         "image/png".into(),
     )];
-    let thumbnails = media.thumbnails(&files, &paths);
+    let thumbnails = access
+        .thumbnails_media("agent:reviewer:workspace-files", &paths)
+        .unwrap();
+    let media = WorkspaceMedia::new();
     assert_eq!(thumbnails.len(), 1);
     assert_eq!(thumbnails[0].key(), "asset-key");
     assert_eq!(
@@ -833,7 +844,7 @@ fn rejects_traversal_and_does_not_derive_a_root_from_the_current_directory() {
         "C:relative",
     ] {
         assert!(matches!(
-            files.read_text(path),
+            files.read_text_with_limit(path, MAX_TEXT_BYTES),
             Err(WorkspaceFileError::InvalidRelative)
         ));
     }
@@ -862,40 +873,58 @@ fn lists_rooted_directory_receipts_with_legacy_filters() {
     fs::write(folder.join(".hidden.txt"), "hidden").unwrap();
     fs::write(folder.join("zeta.txt"), "z").unwrap();
     fs::write(folder.join("alpha.txt"), "a").unwrap();
-    let files = files(&workspace, root.path());
+    let state_dir =
+        crate::lifecycle::state_dir::CanonicalStateDir::provision(root.path().join("state"))
+            .unwrap();
+    fs::write(
+        state_dir.as_path().join("openclaw.json"),
+        serde_json::to_vec(&json!({
+            "agents": {"list": [{"id": "reviewer", "workspace": workspace}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let access = OpenClawWorkspaceAccess::new(state_dir);
 
-    let entries = files
-        .list_root_dir()
+    let entries = access
+        .list_dir_with_options("agent:reviewer:workspace-files", "", false)
         .expect("workspace root listing must return entries");
     assert_eq!(
         entries
+            .entries()
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.kind, entry.size))
+            .map(|entry| (entry.relative_path(), entry.display(), entry.is_directory(), entry.size()))
             .collect::<Vec<_>>(),
         [
-            ("folder", WorkspaceEntryKind::Directory, 0),
-            ("AGENTS.md", WorkspaceEntryKind::File, 22),
+            ("folder", "folder", true, 0),
+            ("AGENTS.md", "AGENTS.md", false, 22),
         ]
     );
 
-    let entries = files.list_dir("folder").unwrap();
+    let entries = access
+        .list_dir_with_options("agent:reviewer:workspace-files", "folder", false)
+        .unwrap();
     assert_eq!(
         entries
+            .entries()
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.kind, entry.size))
+            .map(|entry| (entry.relative_path(), entry.display(), entry.is_directory(), entry.size()))
             .collect::<Vec<_>>(),
         [
-            ("child-dir", WorkspaceEntryKind::Directory, 0),
-            ("alpha.txt", WorkspaceEntryKind::File, 1),
-            ("zeta.txt", WorkspaceEntryKind::File, 1),
+            ("folder/child-dir", "child-dir", true, 0),
+            ("folder/alpha.txt", "alpha.txt", false, 1),
+            ("folder/zeta.txt", "zeta.txt", false, 1),
         ]
     );
 
-    let entries = files.list_dir_with_options("folder", true).unwrap();
+    let entries = access
+        .list_dir_with_options("agent:reviewer:workspace-files", "folder", true)
+        .unwrap();
     assert_eq!(
         entries
+            .entries()
             .iter()
-            .map(|entry| entry.name.as_str())
+            .map(|entry| entry.display())
             .collect::<Vec<_>>(),
         [
             ".hidden",
@@ -915,13 +944,26 @@ fn does_not_silently_drop_directory_entries_above_the_legacy_transport_bound() {
     for index in 0..300 {
         fs::write(workspace.join(format!("file-{index:03}.txt")), "x").unwrap();
     }
-    let files = files(&workspace, root.path());
+    let state_dir =
+        crate::lifecycle::state_dir::CanonicalStateDir::provision(root.path().join("state"))
+            .unwrap();
+    fs::write(
+        state_dir.as_path().join("openclaw.json"),
+        serde_json::to_vec(&json!({
+            "agents": {"list": [{"id": "reviewer", "workspace": workspace}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let access = OpenClawWorkspaceAccess::new(state_dir);
 
-    let entries = files.list_root_dir().unwrap();
+    let entries = access
+        .list_dir_with_options("agent:reviewer:workspace-files", "", false)
+        .unwrap();
 
-    assert_eq!(entries.len(), 300);
-    assert_eq!(entries.first().unwrap().name, "file-000.txt");
-    assert_eq!(entries.last().unwrap().name, "file-299.txt");
+    assert_eq!(entries.entries().len(), 300);
+    assert_eq!(entries.entries().first().unwrap().display(), "file-000.txt");
+    assert_eq!(entries.entries().last().unwrap().display(), "file-299.txt");
 }
 
 #[test]
@@ -985,10 +1027,10 @@ fn rejects_symlinked_components_and_leaves_without_following_foreign_targets() {
     let files = files(&workspace, root.path());
 
     for result in [
-        files.read_text("linked-dir/private.txt").map(|_| ()),
-        files.read_text("link.txt").map(|_| ()),
+        files.read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES).map(|_| ()),
+        files.read_text_with_limit("link.txt", MAX_TEXT_BYTES).map(|_| ()),
         files.stat("linked-dir/private.txt").map(|_| ()),
-        files.list_dir("linked-dir").map(|_| ()),
+        files.list_dir_with_options("linked-dir", false).map(|_| ()),
     ] {
         assert_eq!(result, Err(WorkspaceFileError::Unavailable));
     }
@@ -1038,9 +1080,9 @@ fn rejects_reparse_point_components_without_following_foreign_targets() {
     let files = files(&workspace, root.path());
 
     for result in [
-        files.read_text("linked-dir/private.txt").map(|_| ()),
+        files.read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES).map(|_| ()),
         files.stat("linked-dir/private.txt").map(|_| ()),
-        files.list_dir("linked-dir").map(|_| ()),
+        files.list_dir_with_options("linked-dir", false).map(|_| ()),
     ] {
         assert_eq!(result, Err(WorkspaceFileError::Unavailable));
     }
@@ -1056,7 +1098,7 @@ fn redacts_the_selected_workspace_from_errors_and_debug_output() {
     let workspace = root.path().join("workspace-secret-canary");
     fs::create_dir(&workspace).unwrap();
     let files = files(&workspace, root.path());
-    let error = files.read_text("missing.txt").unwrap_err();
+    let error = files.read_text_with_limit("missing.txt", MAX_TEXT_BYTES).unwrap_err();
     let output = format!("{files:?} {error:?} {error}");
 
     assert!(!output.contains("workspace-secret-canary"));

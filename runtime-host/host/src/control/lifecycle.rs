@@ -1,8 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openclaw::port::OpenClawControlReadiness;
-use serde::Serialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use crate::{
     RuntimeLifecycle, RuntimeState,
@@ -10,11 +9,10 @@ use crate::{
         PeerHandle, RestartMatchaError, RestartOpenClawError, StartMatchaError, StartOpenClawError,
         StopMatchaError, StopOpenClawError,
     },
-    diagnostics::RuntimeStateProjection,
-    owner::Handle,
+    host_actor::Handle,
 };
 
-use super::wire::CommandOutcome;
+use super::wire::{CommandOutcome, CommandResult};
 
 const RUNTIME_UNAVAILABLE_MESSAGE: &str = "Runtime Host is unavailable.";
 const COMMAND_FAILED_MESSAGE: &str = "Runtime Host command failed.";
@@ -29,9 +27,9 @@ fn observed_at_ms() -> u64 {
 
 pub(crate) async fn host_health(owner: &Handle) -> CommandOutcome {
     let state = owner.state();
-    let safe_matcha = state.matcha().projection();
-    let safe_open_claw = state.open_claw().projection();
-    CommandOutcome::succeeded(json!({
+    let safe_matcha = runtime_state_json(state.matcha());
+    let safe_open_claw = runtime_state_json(state.open_claw());
+    CommandOutcome::succeeded(CommandResult::private(json!({
         "state": {
             "ok": state.ok(),
             "lifecycle": state.lifecycle(),
@@ -44,7 +42,7 @@ pub(crate) async fn host_health(owner: &Handle) -> CommandOutcome {
             "matcha": safe_matcha,
             "openClaw": safe_open_claw,
         },
-    }))
+    })))
 }
 
 pub(crate) async fn runtime_snapshot(owner: &Handle, peer: &PeerHandle) -> CommandOutcome {
@@ -62,9 +60,9 @@ pub(crate) async fn runtime_snapshot(owner: &Handle, peer: &PeerHandle) -> Comma
             "retryable": false,
         }),
     };
-    let safe_matcha = state.matcha().projection();
-    let safe_open_claw = state.open_claw().projection();
-    CommandOutcome::succeeded(json!({
+    let safe_matcha = runtime_state_json(state.matcha());
+    let safe_open_claw = runtime_state_json(state.open_claw());
+    CommandOutcome::succeeded(CommandResult::private(json!({
         "state": {
             "ok": state.ok(),
             "lifecycle": state.lifecycle(),
@@ -80,7 +78,7 @@ pub(crate) async fn runtime_snapshot(owner: &Handle, peer: &PeerHandle) -> Comma
         "gateway": gateway,
         "control": control,
         "observedAtMs": observed_at_ms,
-    }))
+    })))
 }
 
 fn gateway_snapshot_result(lifecycle: RuntimeLifecycle, observed_at_ms: u64) -> serde_json::Value {
@@ -186,7 +184,7 @@ pub(crate) async fn logs(peer: &PeerHandle, input: super::wire::CommandInput) ->
         .into_iter()
         .map(|entry| json!({ "source": entry.source, "line": entry.line }))
         .collect::<Vec<_>>();
-    CommandOutcome::succeeded(json!({
+    CommandOutcome::succeeded(CommandResult::private(json!({
         "result": {
             "entries": entries,
             "cursor": logs.cursor,
@@ -194,12 +192,12 @@ pub(crate) async fn logs(peer: &PeerHandle, input: super::wire::CommandInput) ->
             "truncated": logs.truncated,
             "lifecycleTailEvicted": logs.lifecycle_tail_evicted,
         }
-    }))
+    })))
 }
 
 pub(crate) async fn gateway_health(peer: &PeerHandle) -> CommandOutcome {
     match peer.open_claw_gateway_health(false).await {
-        Ok(Ok(health)) => CommandOutcome::succeeded(json!({
+        Ok(Ok(health)) => CommandOutcome::succeeded(CommandResult::private(json!({
             "result": {
                 "ok": health.ok,
                 "timestampMs": health.timestamp_ms,
@@ -208,27 +206,29 @@ pub(crate) async fn gateway_health(peer: &PeerHandle) -> CommandOutcome {
                 "agentCount": health.agent_count,
                 "sessionCount": health.session_count,
             }
-        })),
+        }))),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
 }
 
 pub(crate) async fn gateway_status(peer: &PeerHandle) -> CommandOutcome {
     match peer.open_claw_gateway_status(true).await {
-        Ok(Ok(status)) => CommandOutcome::succeeded(json!({
+        Ok(Ok(status)) => CommandOutcome::succeeded(CommandResult::private(json!({
             "result": {
                 "sessionCount": status.session_count,
                 "channelCount": status.channel_count,
                 "heartbeatEnabled": status.heartbeat_enabled,
             }
-        })),
+        }))),
         Ok(Err(_)) | Err(_) => unavailable(),
     }
 }
 
 pub(crate) async fn control_ui_url(peer: &PeerHandle) -> CommandOutcome {
     match peer.open_claw_control_ui_url().await {
-        Ok(url) => CommandOutcome::succeeded(json!({ "result": { "url": url } })),
+        Ok(url) => {
+            CommandOutcome::succeeded(CommandResult::private(json!({ "result": { "url": url } })))
+        }
         Err(_) => unavailable(),
     }
 }
@@ -247,11 +247,11 @@ fn control_ready_result(readiness: OpenClawControlReadiness) -> CommandOutcome {
         OpenClawControlReadiness::Starting => (false, "starting", true),
         OpenClawControlReadiness::Unavailable => (false, "unavailable", false),
     };
-    CommandOutcome::succeeded(json!({
+    CommandOutcome::succeeded(CommandResult::private(json!({
         "ready": ready,
         "phase": phase,
         "retryable": retryable,
-    }))
+    })))
 }
 
 pub(crate) async fn start(peer: &PeerHandle) -> CommandOutcome {
@@ -282,30 +282,43 @@ pub(crate) async fn restart(peer: &PeerHandle) -> CommandOutcome {
 }
 
 fn runtime_state_result(state: RuntimeState) -> CommandOutcome {
-    CommandOutcome::succeeded(json!({ "result": state.projection() }))
+    CommandOutcome::succeeded(CommandResult::private(
+        json!({ "result": runtime_state_json(&state) }),
+    ))
 }
 
 fn matcha_status_result(state: RuntimeState) -> CommandOutcome {
-    CommandOutcome::succeeded(json!({
-        "result": MatchaStatusProjection {
-            state: state.projection(),
-            ready: state.lifecycle() == RuntimeLifecycle::Running,
-            observed_at_ms: observed_at_ms(),
-        },
-    }))
+    let mut result = runtime_state_object(&state);
+    result.insert(
+        "ready".into(),
+        json!(state.lifecycle() == RuntimeLifecycle::Running),
+    );
+    result.insert("observedAtMs".into(), json!(observed_at_ms()));
+    CommandOutcome::succeeded(CommandResult::private(
+        json!({ "result": Value::Object(result) }),
+    ))
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MatchaStatusProjection {
-    #[serde(flatten)]
-    state: RuntimeStateProjection,
-    ready: bool,
-    observed_at_ms: u64,
+fn runtime_state_json(state: &RuntimeState) -> Value {
+    Value::Object(runtime_state_object(state))
+}
+
+fn runtime_state_object(state: &RuntimeState) -> Map<String, Value> {
+    let mut result = Map::new();
+    result.insert("lifecycle".into(), json!(state.lifecycle()));
+    if let Some(failure) = state.failure() {
+        result.insert("failure".into(), json!(failure));
+    }
+    if let Some(diagnostic) = state.startup_diagnostic() {
+        result.insert("startupDiagnostic".into(), json!(diagnostic));
+    }
+    result
 }
 
 pub(super) fn matcha_lifecycle_result(lifecycle: crate::RuntimeLifecycle) -> CommandOutcome {
-    CommandOutcome::succeeded(json!({ "result": { "lifecycle": lifecycle } }))
+    CommandOutcome::succeeded(CommandResult::private(
+        json!({ "result": { "lifecycle": lifecycle } }),
+    ))
 }
 
 fn internal_error() -> CommandOutcome {
@@ -461,7 +474,9 @@ mod tests {
         let observed_at_ms = value["result"]["result"]["observedAtMs"]
             .as_u64()
             .expect("matcha status must include an observed timestamp");
-        let serialized = value.to_string();
+        let mut redaction_probe = value.clone();
+        redaction_probe["result"]["result"]["observedAtMs"] = Value::Null;
+        let serialized = redaction_probe.to_string();
         assert_eq!(
             value,
             json!({

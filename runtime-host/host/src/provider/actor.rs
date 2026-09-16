@@ -6,30 +6,32 @@ use environment::{
     ProviderModelCatalog, ProviderRouting,
 };
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
-use openclaw::{
-    port::ProviderNativeConfigurationEffect,
-    projection::provider_models::public_provider_model_identities,
-};
+use openclaw::port::ProviderNativeConfigurationEffect;
 
 use super::{
     ProviderAccountsOwner, ProviderModelOwner, ProviderRoutingOwner,
-    accounts::{ProviderAccountsDesiredOutcome, ProviderAccountsMutation},
+    accounts::{
+        ProviderAccountView, ProviderAccountsDelivery, ProviderAccountsDesiredOutcome,
+        ProviderAccountsMutation,
+    },
     command::{ProviderCommand, ProviderQuery},
     models::{
         ProviderModelDiscoverOutcome, ProviderModelListOutcome, ProviderModelReplaceOutcome,
         ProviderModelSelectableOutcome, ProviderModelView, SelectableProviderModelView,
     },
-    routing::ProviderRoutingListOutcome,
+    native::ProviderNativeConfigurationView,
+    routing::{ProviderRoutingListOutcome, ProviderRoutingView},
+    runtime_identity::provider_runtime_identities,
 };
 use crate::{
-    runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::ProviderNativeConfigurationCommand,
+    runtime::directory::RuntimeDriverDirectory,
+    runtime::driver::ProviderNativeConfigurationCommand,
     sessions::model_selection::{
         MatchaSessionModelRuntimeCommand, NativeEndpoint, ResolvedSessionModelSelection,
         SessionModelSelectionBinding, SessionModelSelectionCommand, SessionModelSelectionOutcome,
         SessionModelSelectionRejection,
     },
-    transport::{provider_accounts::ProviderAccountsDelivery, session_trace},
+    transport::sessions::trace as session_trace,
 };
 
 struct ProviderSnapshot {
@@ -256,7 +258,7 @@ impl ProviderOwner {
     async fn finish_account_mutation(
         &mut self,
         mutation: ProviderAccountsMutation,
-    ) -> crate::transport::provider_accounts::ProviderAccountsDelivery {
+    ) -> ProviderAccountsDelivery {
         eprintln!(
             "[startup-trace] source=provider-owner phase=account-mutation detail=start desired={:?} kind={:?} persisted={:?} commit={:?} private_ok={} account_present={} retired={} required_auth={} auth_refresh={}",
             mutation.desired,
@@ -294,39 +296,32 @@ impl ProviderOwner {
             ProviderNativeConfigurationEffect::Unavailable
         };
         match mutation.desired {
-            ProviderAccountsDesiredOutcome::Stored => {
-                crate::transport::provider_accounts::ProviderAccountsDelivery::Stored {
-                    account: mutation
+            ProviderAccountsDesiredOutcome::Stored => ProviderAccountsDelivery::Stored {
+                account: ProviderAccountView::from_account(
+                    mutation
                         .account
+                        .as_ref()
                         .expect("stored provider account must contain an account"),
-                    persisted: mutation.persisted,
-                    native,
-                    commit: mutation.commit,
-                }
-            }
-            ProviderAccountsDesiredOutcome::Deleted => {
-                crate::transport::provider_accounts::ProviderAccountsDelivery::Deleted {
-                    persisted: mutation.persisted,
-                    native,
-                    commit: mutation.commit,
-                }
-            }
-            ProviderAccountsDesiredOutcome::Rejected => {
-                crate::transport::provider_accounts::ProviderAccountsDelivery::Rejected
-            }
-            ProviderAccountsDesiredOutcome::Unknown => {
-                crate::transport::provider_accounts::ProviderAccountsDelivery::Unknown {
-                    desired: mutation
-                        .kind
-                        .expect("unknown provider account mutation must have a kind"),
-                    persisted: mutation.persisted,
-                    native,
-                    commit: mutation.commit,
-                }
-            }
-            ProviderAccountsDesiredOutcome::Unavailable => {
-                crate::transport::provider_accounts::ProviderAccountsDelivery::Unavailable
-            }
+                ),
+                persisted: mutation.persisted,
+                native: ProviderNativeConfigurationView::from_effect(&native),
+                commit: mutation.commit,
+            },
+            ProviderAccountsDesiredOutcome::Deleted => ProviderAccountsDelivery::Deleted {
+                persisted: mutation.persisted,
+                native: ProviderNativeConfigurationView::from_effect(&native),
+                commit: mutation.commit,
+            },
+            ProviderAccountsDesiredOutcome::Rejected => ProviderAccountsDelivery::Rejected,
+            ProviderAccountsDesiredOutcome::Unknown => ProviderAccountsDelivery::Unknown {
+                desired: mutation
+                    .kind
+                    .expect("unknown provider account mutation must have a kind"),
+                persisted: mutation.persisted,
+                native: ProviderNativeConfigurationView::from_effect(&native),
+                commit: mutation.commit,
+            },
+            ProviderAccountsDesiredOutcome::Unavailable => ProviderAccountsDelivery::Unavailable,
         }
     }
 
@@ -349,7 +344,7 @@ impl ProviderOwner {
             .await;
         super::models::ProviderModelReplaceOutcome::DesiredStored {
             persisted,
-            native,
+            native: ProviderNativeConfigurationView::from_effect(&native),
             commit,
         }
     }
@@ -368,7 +363,7 @@ impl ProviderOwner {
         let native = self.reconcile(&[], &required, false).await;
         super::routing::ProviderRoutingReplaceOutcome::DesiredStored {
             persisted,
-            native,
+            native: ProviderNativeConfigurationView::from_effect(&native),
             commit,
         }
     }
@@ -659,7 +654,13 @@ fn list_provider_accounts_for_snapshot(
     snapshot: &ArcSwap<ProviderSnapshot>,
 ) -> ProviderAccountsDelivery {
     let snapshot = snapshot.load_full();
-    ProviderAccountsDelivery::List(snapshot.accounts.iter().map(account_json).collect())
+    ProviderAccountsDelivery::List(
+        snapshot
+            .accounts
+            .iter()
+            .map(ProviderAccountView::from_account)
+            .collect(),
+    )
 }
 
 fn get_provider_account_for_snapshot(
@@ -668,7 +669,7 @@ fn get_provider_account_for_snapshot(
 ) -> ProviderAccountsDelivery {
     let snapshot = snapshot.load_full();
     account_for_snapshot(&snapshot, id)
-        .map(account_json)
+        .map(ProviderAccountView::from_account)
         .map(ProviderAccountsDelivery::Account)
         .unwrap_or(ProviderAccountsDelivery::Missing)
 }
@@ -692,7 +693,7 @@ fn selectable_provider_models_for_snapshot(
     capability: ProviderModelCapability,
 ) -> ProviderModelSelectableOutcome {
     let snapshot = snapshot.load_full();
-    let Ok(identities) = public_provider_model_identities(&snapshot.accounts) else {
+    let Ok(identities) = provider_runtime_identities(&snapshot.accounts) else {
         return ProviderModelSelectableOutcome::Unavailable;
     };
     ProviderModelSelectableOutcome::Available(
@@ -720,7 +721,12 @@ fn list_provider_routing_for_snapshot(
     snapshot: &ArcSwap<ProviderSnapshot>,
 ) -> ProviderRoutingListOutcome {
     let snapshot = snapshot.load_full();
-    ProviderRoutingListOutcome::Desired(snapshot.routing.clone())
+    ProviderRoutingListOutcome::Desired(
+        snapshot
+            .routing
+            .as_ref()
+            .map(ProviderRoutingView::from_routing),
+    )
 }
 
 fn account_for_snapshot<'a>(
@@ -728,10 +734,6 @@ fn account_for_snapshot<'a>(
     id: &ProviderAccountId,
 ) -> Option<&'a ProviderAccount> {
     snapshot.accounts.iter().find(|account| account.id() == id)
-}
-
-fn account_json(account: &ProviderAccount) -> serde_json::Value {
-    crate::transport::provider_accounts::account_json_for_owner(account)
 }
 
 fn model_view_for_snapshot(
@@ -743,7 +745,12 @@ fn model_view_for_snapshot(
         account_id: account.id().as_str().to_owned(),
         label: account.configuration().label().to_owned(),
         model_id: model.model_id().to_owned(),
-        capabilities: model.capabilities().to_vec(),
+        capabilities: model
+            .capabilities()
+            .iter()
+            .copied()
+            .map(super::models::provider_model_capability_name)
+            .collect(),
         context_window: model.context_window(),
         max_tokens: model.max_tokens(),
         timeout_ms: model.timeout_ms(),

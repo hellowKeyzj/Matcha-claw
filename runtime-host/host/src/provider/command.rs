@@ -6,16 +6,15 @@ use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use tokio::sync::oneshot;
 
 use crate::{
+    provider::{account_draft::ProviderAccountDraft, auth::Resolver},
     sessions::model_selection::{
         MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
         SessionModelSelectionCommand, SessionModelSelectionOutcome,
     },
-    transport::provider_accounts::{
-        AccountDraft, ProviderAccountsDelivery, private_auth::Resolver,
-    },
 };
 
 use super::{
+    accounts::ProviderAccountsDelivery,
     models::{
         ProviderModelDiscoverOutcome, ProviderModelDraft, ProviderModelListOutcome,
         ProviderModelReplaceOutcome, ProviderModelSelectableOutcome,
@@ -29,7 +28,7 @@ pub(crate) enum ProviderCommand {
         reply: oneshot::Sender<()>,
     },
     ReplaceAccount {
-        draft: AccountDraft,
+        draft: ProviderAccountDraft,
         reply: oneshot::Sender<ProviderAccountsDelivery>,
     },
     DeleteAccount {

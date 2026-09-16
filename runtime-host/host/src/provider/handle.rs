@@ -6,16 +6,15 @@ use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use tokio::sync::oneshot;
 
 use crate::{
+    provider::{account_draft::ProviderAccountDraft, auth::Resolver},
     sessions::model_selection::{
         MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
         SessionModelSelectionCommand, SessionModelSelectionOutcome,
     },
-    transport::provider_accounts::{
-        AccountDraft, ProviderAccountsDelivery, private_auth::Resolver,
-    },
 };
 
 use super::{
+    accounts::ProviderAccountsDelivery,
     command::{ProviderCommand, ProviderQuery},
     models::{
         ProviderModelDiscoverOutcome, ProviderModelDraft, ProviderModelListOutcome,
@@ -69,7 +68,7 @@ impl ProviderHandle {
 
     pub(crate) async fn replace_provider_account(
         &self,
-        draft: AccountDraft,
+        draft: ProviderAccountDraft,
     ) -> Result<ProviderAccountsDelivery, ()> {
         let (reply, rx) = oneshot::channel();
         self.owner

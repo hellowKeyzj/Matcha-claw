@@ -503,12 +503,6 @@ impl TaskBoardFacts {
         self.runners.retain(|runner| runner.run_id() != run);
         self.mailbox.retain(|message| message.run_id() != run);
     }
-
-    pub(crate) fn durable_parts(
-        self,
-    ) -> (Vec<TaskRecord>, Vec<AutoRunnerFacts>, Vec<MailboxMessage>) {
-        (self.tasks, self.runners, self.mailbox)
-    }
     pub(crate) fn restore(
         tasks: Vec<TaskRecord>,
         runners: Vec<AutoRunnerFacts>,

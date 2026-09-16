@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::public_string;
+
 const MAX_IDENTITY_CHARACTERS: usize = 128;
 const MAX_VALUES: usize = 64;
 const MAX_VALUE_BYTES: usize = 131_072;
@@ -19,7 +21,11 @@ impl Projection {
         }
         let mut total_bytes = 0;
         for (key, value) in &values {
-            if !valid_identity(key) || sensitive_key(key) || value.len() > MAX_VALUE_BYTES {
+            if !valid_identity(key)
+                || public_string::sensitive_key(key)
+                || value.len() > MAX_VALUE_BYTES
+                || public_string::contains_private_fragment(value)
+            {
                 return Err(());
             }
             total_bytes += value.len();
@@ -51,27 +57,6 @@ pub(crate) fn valid_identity(value: &str) -> bool {
         && value
             .chars()
             .all(|character| !character.is_control() && !character.is_whitespace())
-}
-
-fn sensitive_key(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    [
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "authorization",
-        "accesskey",
-        "privatekey",
-        "apikey",
-        "error",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
 }
 
 #[cfg(test)]
@@ -123,6 +108,13 @@ mod tests {
             Projection::from_source(BTreeMap::from([(
                 "description".into(),
                 "x".repeat(MAX_VALUE_BYTES + 1),
+            )]))
+            .is_err()
+        );
+        assert!(
+            Projection::from_source(BTreeMap::from([(
+                "home".into(),
+                "C:\\Users\\me\\private.txt".into(),
             )]))
             .is_err()
         );

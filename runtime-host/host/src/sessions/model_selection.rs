@@ -2,7 +2,7 @@ use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::{Serialize, Serializer};
 
 use super::state::SessionProvider;
-use crate::runtime_driver::RuntimeDriverIdentity;
+use crate::runtime::driver::RuntimeDriverIdentity;
 
 const MAX_MODEL_SELECTION_ID_BYTES: usize = 4096;
 const MAX_SESSION_KEY_BYTES: usize = 4096;

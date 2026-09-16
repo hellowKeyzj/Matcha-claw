@@ -3,15 +3,14 @@ use tokio::sync::oneshot;
 
 use super::{
     approval::{PendingApprovalsCommand, PendingApprovalsOutcome},
-    command::{OpenClawSessionResult, session_lane_key},
+    command::session_lane_key,
+    openclaw_direct,
     state::SessionView,
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
         ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
     },
 };
-use crate::RuntimeSessionError;
-
 pub(crate) enum SessionQuery {
     ListSessions {
         reply: oneshot::Sender<Vec<SessionView>>,
@@ -32,21 +31,13 @@ pub(crate) enum SessionQuery {
         command: SessionContentCommand,
         reply: oneshot::Sender<SessionContentOutcome>,
     },
-    ListOpenClaw {
-        reply:
-            oneshot::Sender<OpenClawSessionResult<openclaw::session::protocol::SessionsListResult>>,
-    },
-    OpenClawHistory {
-        params: openclaw::session::protocol::ChatHistoryParams,
-        reply:
-            oneshot::Sender<OpenClawSessionResult<openclaw::session::protocol::ChatHistoryResult>>,
-    },
+    OpenClaw(openclaw_direct::Query),
     ListMatcha {
-        reply: oneshot::Sender<crate::matcha_session_catalog::Outcome>,
+        reply: oneshot::Sender<crate::sessions::matcha_session_catalog::Outcome>,
     },
     MatchaHistory {
-        command: crate::matcha_history::Command,
-        reply: oneshot::Sender<crate::matcha_history::Outcome>,
+        command: crate::sessions::matcha_history::Command,
+        reply: oneshot::Sender<crate::sessions::matcha_history::Outcome>,
     },
 }
 
@@ -72,17 +63,12 @@ impl SessionQuery {
                     super::timeline::UnavailableReason::RuntimeUnavailable,
                 ));
             }
-            Self::ListOpenClaw { reply } => {
-                let _ = reply.send(Err(RuntimeSessionError::RuntimeUnavailable));
-            }
-            Self::OpenClawHistory { reply, .. } => {
-                let _ = reply.send(Err(RuntimeSessionError::RuntimeUnavailable));
-            }
+            Self::OpenClaw(query) => query.send_unavailable(),
             Self::ListMatcha { reply } => {
-                let _ = reply.send(crate::matcha_session_catalog::Outcome::Unavailable);
+                let _ = reply.send(crate::sessions::matcha_session_catalog::Outcome::Unavailable);
             }
             Self::MatchaHistory { reply, .. } => {
-                let _ = reply.send(crate::matcha_history::Outcome::Unavailable);
+                let _ = reply.send(crate::sessions::matcha_history::Outcome::Unavailable);
             }
         }
     }
@@ -104,8 +90,8 @@ impl SessionQuery {
                 command.session_provider(),
                 command.session_key(),
             )),
-            Self::OpenClawHistory { .. } | Self::MatchaHistory { .. } => QueryRoute::Global,
-            Self::ListOpenClaw { .. } | Self::ListMatcha { .. } => QueryRoute::Global,
+            Self::OpenClaw(_) | Self::MatchaHistory { .. } => QueryRoute::Global,
+            Self::ListMatcha { .. } => QueryRoute::Global,
         }
     }
 }

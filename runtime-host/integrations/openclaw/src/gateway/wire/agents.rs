@@ -17,8 +17,6 @@ pub(crate) const AGENTS_FILES_GET_METHOD: &str = "agents.files.get";
 pub(crate) const AGENTS_FILES_SET_METHOD: &str = "agents.files.set";
 pub(crate) const AGENTS_WAIT_METHOD: &str = "agent.wait";
 
-pub(crate) const AGENTS_WAIT_METHODS: &[&str] = &[AGENTS_WAIT_METHOD];
-
 pub(crate) fn list_request(request_id: String) -> Result<RpcRequest, WireError> {
     request(
         request_id,
@@ -778,7 +776,8 @@ struct AgentSummaryWire {
     kind: Option<String>,
     created_via: Option<String>,
     creator_agent_id: Option<String>,
-    created_at: Option<u64>,
+    #[serde(rename = "createdAt")]
+    _created_at: Option<u64>,
     workspace_git: Option<Value>,
     agent_runtime: Option<AgentRuntimeWire>,
     thinking_levels: Option<Value>,

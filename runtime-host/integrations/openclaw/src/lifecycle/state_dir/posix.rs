@@ -13,7 +13,9 @@ use std::{
     },
 };
 
-use super::{AgentId, StateDirError, auth_profiles};
+use super::StateDirError;
+#[cfg(test)]
+use super::{AgentId, auth_profiles};
 
 const DIRECTORY_MODE: libc::mode_t = 0o700;
 const TEMPORARY_MODE: libc::mode_t = 0o600;
@@ -60,6 +62,7 @@ impl StateDirHandle {
         Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
     }
 
+    #[cfg(test)]
     pub(crate) fn read_auth_profiles(
         &self,
         agent: &AgentId,

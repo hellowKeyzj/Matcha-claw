@@ -22,7 +22,7 @@
 
 | 资产 | 不能直接推导出的结论 |
 | --- | --- |
-| `host/src/composition/host.rs` | 不能证明 Host 应拥有全部业务事实；它当前是 composition container |
+| `host/src/composition/host/mod.rs` | 不能证明 Host 应拥有全部业务事实；它当前是 composition container |
 | `host/src/owner.rs` | 不能证明全局 actor 等于业务 owner；只是 mutation serialization boundary |
 | `host/src/transport/*` | 不能证明这些 fixed transports 已接入 Electron 当前 Host API |
 | `domains/*` | 不能证明当前 domain 划分就是最终 workspace/crate 划分 |

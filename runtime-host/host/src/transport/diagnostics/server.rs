@@ -18,7 +18,7 @@ use tokio::{
 
 use crate::{
     diagnostics::DiagnosticsArchiveCancellation, facade::DiagnosticsHandle,
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 use super::{

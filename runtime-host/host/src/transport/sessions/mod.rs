@@ -1,20 +1,32 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
 
 use crate::{
-    RuntimeSessionError,
+    sessions::openclaw_direct::SessionCatalog,
     transport::{
-        authorization::CapabilityDecisionVerifier,
-        session_key::{is_cron_session_key, is_main_session_key},
+        common::authorization::CapabilityDecisionVerifier,
+        sessions::key::{is_cron_session_key, is_main_session_key},
     },
 };
 
+pub(crate) mod abort;
+pub(crate) mod approval;
 mod content;
+pub(crate) mod create;
+pub(crate) mod delete;
+pub(crate) mod key;
+pub(crate) mod matcha_catalog;
+pub(crate) mod matcha_history;
+pub(crate) mod model_selection;
+pub(crate) mod permission;
+pub(crate) mod presenter;
 mod rename;
+pub(crate) mod send;
 pub(crate) mod server;
 mod timeline;
+pub(crate) mod trace;
 
 const CAPABILITY_ID: &str = "session.management";
 const OPERATION_ID: &str = "sessions.list";
@@ -107,7 +119,7 @@ struct Input {
     endpoint: Endpoint,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Endpoint {
     kind: String,
@@ -131,7 +143,7 @@ pub(crate) enum SessionListDelivery {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionListResponse {
     sessions: Vec<Session>,
 }
@@ -146,8 +158,9 @@ impl SessionListDelivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Ok(response) => serde_json::to_value(response)
-                .expect("Session list public response is serializable"),
+            Self::Ok(response) => serde_json::json!({
+                "sessions": response.sessions.iter().map(session_value).collect::<Vec<_>>(),
+            }),
             Self::Unavailable => serde_json::json!({
                 "success": false,
                 "error": "Session catalog is unavailable",
@@ -156,24 +169,59 @@ impl SessionListDelivery {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicSessionKind {
     Main,
     Session,
     Automation,
 }
 
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Session {
     key: String,
     agent_id: String,
     session_identity: SessionIdentity,
     kind: PublicSessionKind,
     endpoint_session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<u64>,
+}
+
+fn session_value(session: &Session) -> Value {
+    let mut value = serde_json::json!({
+        "key": &session.key,
+        "agentId": &session.agent_id,
+        "sessionIdentity": session_identity_value(session),
+        "kind": public_session_kind_value(session.kind),
+        "endpointSessionId": &session.endpoint_session_id,
+    });
+    if let Some(updated_at) = session.updated_at {
+        value["updatedAt"] = serde_json::json!(updated_at);
+    }
+    value
+}
+
+fn session_identity_value(session: &Session) -> Value {
+    serde_json::json!({
+        "endpoint": runtime_endpoint_value(session.session_identity.endpoint()),
+        "agentId": &session.agent_id,
+        "sessionKey": &session.key,
+    })
+}
+
+fn runtime_endpoint_value(endpoint: &RuntimeEndpoint) -> Value {
+    serde_json::json!({
+        "kind": "native-runtime",
+        "runtimeAdapterId": endpoint.runtime_adapter_id(),
+        "runtimeInstanceId": endpoint.runtime_instance_id(),
+    })
+}
+
+fn public_session_kind_value(kind: PublicSessionKind) -> &'static str {
+    match kind {
+        PublicSessionKind::Main => "main",
+        PublicSessionKind::Session => "session",
+        PublicSessionKind::Automation => "automation",
+    }
 }
 
 fn public_session_kind(session_key: &str) -> PublicSessionKind {
@@ -186,22 +234,21 @@ fn public_session_kind(session_key: &str) -> PublicSessionKind {
     }
 }
 
-fn project_session(session: openclaw::session::protocol::SessionSummary) -> Option<Session> {
-    let entry = session.agent_scoped_catalog_entry()?;
-    let key = entry.session_key.as_str().to_owned();
-    let agent_id = entry.agent_id.as_str().to_owned();
-    let kind = public_session_kind(&key);
+fn project_session(
+    session: crate::sessions::openclaw_direct::SessionCatalogEntry,
+) -> Option<Session> {
+    let kind = public_session_kind(&session.key);
     Some(Session {
         session_identity: SessionIdentity::try_new(
             openclaw_local_endpoint(),
-            agent_id.clone(),
-            key.clone(),
+            session.agent_id.clone(),
+            session.key.clone(),
         )
         .ok()?,
-        key,
-        agent_id,
+        key: session.key,
+        agent_id: session.agent_id,
         kind,
-        endpoint_session_id: entry.endpoint_session_id,
+        endpoint_session_id: session.endpoint_session_id,
         updated_at: session.updated_at,
     })
 }
@@ -211,8 +258,8 @@ fn openclaw_local_endpoint() -> RuntimeEndpoint {
         .expect("fixed OpenClaw endpoint must be a valid runtime address")
 }
 
-pub(crate) fn map_native_outcome<E>(
-    result: Result<openclaw::session::protocol::SessionsListResult, RuntimeSessionError<E>>,
+pub(crate) fn map_catalog_outcome<E>(
+    result: Result<SessionCatalog, crate::RuntimeSessionError<E>>,
 ) -> SessionListDelivery {
     match result {
         Ok(result) => {
@@ -235,7 +282,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use openclaw::session::protocol::SessionKind;
+    use crate::sessions::openclaw_direct::SessionCatalogEntry;
 
     fn request() -> Value {
         json!({
@@ -309,64 +356,34 @@ mod tests {
         }
     }
 
-    fn summary(
-        key: impl Into<String>,
-        kind: openclaw::session::protocol::SessionKind,
-    ) -> openclaw::session::protocol::SessionSummary {
-        summary_for_agent(key, kind, None)
+    fn catalog_entry(key: impl Into<String>) -> SessionCatalogEntry {
+        catalog_entry_at(key, Some(42))
     }
 
-    fn summary_for_agent(
-        key: impl Into<String>,
-        kind: openclaw::session::protocol::SessionKind,
-        agent_id: Option<&str>,
-    ) -> openclaw::session::protocol::SessionSummary {
-        openclaw::session::protocol::SessionSummary {
-            key: openclaw::session::protocol::SessionKey::try_new(key).unwrap(),
-            kind,
-            agent_id: agent_id
-                .map(|agent_id| openclaw::session::protocol::AgentId::try_new(agent_id).unwrap()),
-            label: Some("private-label".into()),
-            display_name: Some("private-display".into()),
-            derived_title: Some("private-title".into()),
-            updated_at: Some(42),
-            status: Some("idle".into()),
-            has_active_run: Some(true),
-            model: Some("private-model".into()),
-            permission_mode: None,
-            permission_mode_pending: None,
+    fn catalog_entry_at(key: impl Into<String>, updated_at: Option<u64>) -> SessionCatalogEntry {
+        let key = key.into();
+        let (agent_id, endpoint_session_id) = {
+            let (agent_id, endpoint_session_id) = key
+                .strip_prefix("agent:")
+                .and_then(|value| value.split_once(':'))
+                .expect("test catalog entries must be agent-scoped");
+            (agent_id.to_owned(), endpoint_session_id.to_owned())
+        };
+        SessionCatalogEntry {
+            key,
+            agent_id,
+            endpoint_session_id,
+            updated_at,
         }
     }
 
-    fn summary_at(
-        key: impl Into<String>,
-        kind: openclaw::session::protocol::SessionKind,
-        updated_at: Option<u64>,
-    ) -> openclaw::session::protocol::SessionSummary {
-        let mut session = summary(key, kind);
-        session.updated_at = updated_at;
-        session
-    }
-
-    fn native_result(
-        sessions: Vec<openclaw::session::protocol::SessionSummary>,
-    ) -> SessionListDelivery {
-        map_native_outcome::<()>(Ok(openclaw::session::protocol::SessionsListResult {
-            timestamp_ms: 42,
-            count: sessions.len() as u64,
-            total_count: Some(sessions.len() as u64),
-            limit_applied: Some(sessions.len() as u64),
-            has_more: Some(true),
-            sessions,
-        }))
+    fn catalog_result(sessions: Vec<SessionCatalogEntry>) -> SessionListDelivery {
+        map_catalog_outcome::<()>(Ok(SessionCatalog { sessions }))
     }
 
     #[test]
-    fn projects_an_agent_scoped_native_session_without_catalog_metadata() {
-        let response = native_result(vec![summary(
-            "agent:main:direct-session",
-            SessionKind::Direct,
-        )]);
+    fn projects_an_agent_scoped_catalog_session_without_private_metadata() {
+        let response = catalog_result(vec![catalog_entry("agent:main:direct-session")]);
 
         assert_eq!(response.status_code(), 200);
         assert_eq!(
@@ -393,12 +410,10 @@ mod tests {
     }
 
     #[test]
-    fn projects_native_session_ids_when_the_catalog_provides_agent_ownership() {
-        let response = native_result(vec![
-            summary("global", SessionKind::Global),
-            summary("unknown", SessionKind::Unknown),
-            summary_for_agent("main", SessionKind::Direct, Some("main")),
-            summary("agent:worker:direct-session", SessionKind::Direct),
+    fn projects_catalog_session_ids() {
+        let response = catalog_result(vec![
+            catalog_entry("agent:main:main"),
+            catalog_entry("agent:worker:direct-session"),
         ]);
 
         assert_eq!(
@@ -444,9 +459,9 @@ mod tests {
 
     #[test]
     fn projects_multiple_agents_and_protocol_key_shapes() {
-        let response = native_result(vec![
-            summary("agent:main:main", SessionKind::Direct),
-            summary("agent:worker:subagent:run-7", SessionKind::Group),
+        let response = catalog_result(vec![
+            catalog_entry("agent:main:main"),
+            catalog_entry("agent:worker:subagent:run-7"),
         ]);
 
         let sessions = response.body()["sessions"].as_array().unwrap().clone();
@@ -481,10 +496,10 @@ mod tests {
 
     #[test]
     fn projects_cron_session_keys_as_automation_kind() {
-        let response = native_result(vec![
-            summary("agent:worker:cron:daily", SessionKind::Direct),
-            summary("agent:worker:cron:daily:run:run-7", SessionKind::Group),
-            summary_for_agent("cron:nightly", SessionKind::Direct, Some("worker")),
+        let response = catalog_result(vec![
+            catalog_entry("agent:worker:cron:daily"),
+            catalog_entry("agent:worker:cron:daily:run:run-7"),
+            catalog_entry("agent:worker:cron:nightly"),
         ]);
 
         let sessions = response.body()["sessions"].as_array().unwrap().clone();
@@ -496,10 +511,10 @@ mod tests {
 
     #[test]
     fn does_not_project_regular_sessions_as_automation() {
-        let response = native_result(vec![
-            summary("agent:worker:direct-session", SessionKind::Direct),
-            summary("agent:worker:subagent:cron:daily", SessionKind::Group),
-            summary_for_agent("direct:cron:daily", SessionKind::Direct, Some("worker")),
+        let response = catalog_result(vec![
+            catalog_entry("agent:worker:direct-session"),
+            catalog_entry("agent:worker:subagent:cron:daily"),
+            catalog_entry("agent:worker:direct:cron:daily"),
         ]);
 
         let sessions = response.body()["sessions"].as_array().unwrap().clone();
@@ -511,15 +526,12 @@ mod tests {
 
     #[test]
     fn rejects_malformed_cron_session_keys_without_opening_automation_kind() {
-        let response = native_result(vec![
-            summary("agent:worker:cron", SessionKind::Direct),
-            summary("agent:worker:cron:daily:run", SessionKind::Direct),
-            summary(
-                "agent:worker:cron:daily:run:run-7:extra",
-                SessionKind::Direct,
-            ),
-            summary_for_agent("cron", SessionKind::Direct, Some("worker")),
-            summary_for_agent("cron:nightly:extra", SessionKind::Direct, Some("worker")),
+        let response = catalog_result(vec![
+            catalog_entry("agent:worker:cron"),
+            catalog_entry("agent:worker:cron:daily:run"),
+            catalog_entry("agent:worker:cron:daily:run:run-7:extra"),
+            catalog_entry("agent:worker:cron"),
+            catalog_entry("agent:worker:cron:nightly:extra"),
         ]);
 
         let sessions = response.body()["sessions"].as_array().unwrap().clone();
@@ -530,36 +542,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_agent_keys_without_opening_global_or_unknown_scope() {
-        let response = native_result(vec![
-            summary("global", SessionKind::Global),
-            summary("unknown", SessionKind::Unknown),
-            summary("agent", SessionKind::Direct),
-            summary("agent::main", SessionKind::Direct),
-            summary("agent:Main:main", SessionKind::Direct),
-            summary("agent:main:", SessionKind::Direct),
-            summary("agent:main:main::child", SessionKind::Direct),
-            summary("agent:main:main", SessionKind::Direct),
-        ]);
+    fn omits_catalog_entries_with_invalid_public_session_identity() {
+        let mut invalid = catalog_entry("agent:main:main");
+        invalid.agent_id = String::new();
+        let response = catalog_result(vec![invalid, catalog_entry("agent:main:valid")]);
 
         let body = response.body();
         let sessions = body["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0]["key"], "agent:main:main");
+        assert_eq!(sessions[0]["key"], "agent:main:valid");
         assert_eq!(sessions[0]["agentId"], "main");
     }
 
     #[test]
     fn sorts_projected_sessions_by_updated_at_before_applying_bounded_limit() {
         let sessions = vec![
-            summary_at("agent:main:old", SessionKind::Direct, Some(1)),
-            summary_at("global", SessionKind::Global, Some(10_000)),
-            summary_at("agent:worker:new", SessionKind::Direct, Some(30)),
-            summary_at("agent:main:newest", SessionKind::Direct, Some(40)),
-            summary_at("agent:worker:unknown-time", SessionKind::Direct, None),
-            summary_at("agent:main:middle", SessionKind::Direct, Some(20)),
+            catalog_entry_at("agent:main:old", Some(1)),
+            catalog_entry_at("agent:worker:new", Some(30)),
+            catalog_entry_at("agent:main:newest", Some(40)),
+            catalog_entry_at("agent:worker:unknown-time", None),
+            catalog_entry_at("agent:main:middle", Some(20)),
         ];
-        let projected = native_result(sessions).body();
+        let projected = catalog_result(sessions).body();
 
         let sessions = projected["sessions"].as_array().unwrap();
         assert_eq!(
@@ -579,16 +583,12 @@ mod tests {
 
     #[test]
     fn limits_successfully_projected_sessions_after_sorting_and_omitting_unowned_rows() {
-        let sessions = std::iter::once(summary_at("global", SessionKind::Global, Some(100_000)))
-            .chain((0..=MAX_SESSIONS).map(|index| {
-                summary_at(
-                    format!("agent:main:session-{index}"),
-                    SessionKind::Direct,
-                    Some(index as u64),
-                )
-            }))
+        let sessions = (0..=MAX_SESSIONS)
+            .map(|index| {
+                catalog_entry_at(format!("agent:main:session-{index}"), Some(index as u64))
+            })
             .collect();
-        let projected = native_result(sessions).body();
+        let projected = catalog_result(sessions).body();
 
         let sessions = projected["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), MAX_SESSIONS);
@@ -600,10 +600,10 @@ mod tests {
     }
 
     #[test]
-    fn redacts_native_catalog_fields_and_top_level_metadata() {
-        let mut summary = summary("agent:main:direct-session", SessionKind::Direct);
-        summary.updated_at = None;
-        let projected = native_result(vec![summary]).body();
+    fn redacts_non_public_catalog_metadata() {
+        let mut entry = catalog_entry("agent:main:direct-session");
+        entry.updated_at = None;
+        let projected = catalog_result(vec![entry]).body();
         assert!(projected["sessions"][0].get("updatedAt").is_none());
         assert!(projected.get("timestamp").is_none());
         assert!(projected.get("count").is_none());
@@ -630,10 +630,12 @@ mod tests {
     }
 
     #[test]
-    fn native_unavailable_and_failure_have_one_fixed_public_outcome() {
-        let unavailable = map_native_outcome::<()>(Err(RuntimeSessionError::RuntimeUnavailable));
-        let failure =
-            map_native_outcome(Err(RuntimeSessionError::Client("private native failure")));
+    fn catalog_unavailable_and_failure_have_one_fixed_public_outcome() {
+        let unavailable =
+            map_catalog_outcome::<()>(Err(crate::RuntimeSessionError::RuntimeUnavailable));
+        let failure = map_catalog_outcome(Err(crate::RuntimeSessionError::Client(
+            "private catalog failure",
+        )));
 
         let expected = json!({
             "success": false,
@@ -647,7 +649,7 @@ mod tests {
             !failure
                 .body()
                 .to_string()
-                .contains("private native failure")
+                .contains("private catalog failure")
         );
     }
 }

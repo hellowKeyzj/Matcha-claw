@@ -555,30 +555,6 @@ impl OrganizationFacts {
         )
     }
 
-    pub(crate) fn restore_with_materialization_lifecycles(
-        input: MaterializationLifecycleFactsRestoreInput,
-    ) -> Result<Self, OrganizationFactsError> {
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts(
-            input,
-            crate::TeamDecisionLedgerSnapshot {
-                decisions: Vec::new(),
-                events: Vec::new(),
-            },
-            [],
-        )
-    }
-
-    pub(crate) fn restore_with_materialization_lifecycles_and_decisions(
-        input: MaterializationLifecycleFactsRestoreInput,
-        decision_snapshot: crate::TeamDecisionLedgerSnapshot,
-    ) -> Result<Self, OrganizationFactsError> {
-        Self::restore_with_materialization_lifecycles_and_decisions_and_artifacts(
-            input,
-            decision_snapshot,
-            [],
-        )
-    }
-
     pub(crate) fn restore_with_materialization_lifecycles_and_decisions_and_artifacts(
         input: MaterializationLifecycleFactsRestoreInput,
         decision_snapshot: crate::TeamDecisionLedgerSnapshot,

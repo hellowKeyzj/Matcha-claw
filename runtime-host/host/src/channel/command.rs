@@ -1,20 +1,16 @@
 use std::fmt;
 
-use foundation::execution::{CommandRoute, QueryRoute};
+use foundation::execution::CommandRoute;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use super::{
     ChannelKey,
-    catalog::{ChannelCatalogOutcome, ChannelConfigureFormOutcome, ChannelConfigureOutcome},
-    config_read as channel_config_read,
+    catalog::ChannelConfigureOutcome,
     control::{ChannelControlAction, ChannelControlOutcome},
     credentials as channel_credentials, delete as channel_delete,
     login::Outcome as ChannelLoginOutcome,
-    status::{
-        ChannelPairingApprovalOutcome, ChannelPairingOutcome, ChannelSnapshotOutcome,
-        ChannelStatusFailure, ChannelStatusOutcome,
-    },
+    status::ChannelPairingApprovalOutcome,
 };
 
 pub(crate) enum ChannelCommand {
@@ -76,39 +72,6 @@ pub(crate) enum ChannelCommand {
         config: Zeroizing<Vec<u8>>,
         reply: oneshot::Sender<Result<channel_credentials::Outcome, ChannelOwnerUnavailable>>,
     },
-    Shutdown(oneshot::Sender<()>),
-}
-
-pub(crate) enum ChannelQuery {
-    Catalog {
-        trace: super::trace::CommandTrace,
-        reply: oneshot::Sender<ChannelCatalogOutcome>,
-    },
-    ConfigRead {
-        trace: super::trace::CommandTrace,
-        channel_id: String,
-        account_id: Option<String>,
-        reply: oneshot::Sender<channel_config_read::Outcome>,
-    },
-    ConfigureForm {
-        trace: super::trace::CommandTrace,
-        channel_id: String,
-        reply: oneshot::Sender<ChannelConfigureFormOutcome>,
-    },
-    Pairing {
-        trace: super::trace::CommandTrace,
-        channel_id: String,
-        account_id: Option<String>,
-        reply: oneshot::Sender<ChannelPairingOutcome>,
-    },
-    Status {
-        trace: super::trace::CommandTrace,
-        reply: oneshot::Sender<Result<ChannelStatusOutcome, ChannelStatusFailure>>,
-    },
-    Snapshot {
-        trace: super::trace::CommandTrace,
-        reply: oneshot::Sender<Result<ChannelSnapshotOutcome, ChannelStatusFailure>>,
-    },
 }
 
 impl ChannelCommand {
@@ -123,7 +86,6 @@ impl ChannelCommand {
             Self::Control { trace, .. } => Some(trace),
             Self::PairingApprove { trace, .. } => Some(trace),
             Self::ValidateCredentials { trace, .. } => Some(trace),
-            Self::Shutdown(_) => None,
         }
     }
 
@@ -138,31 +100,6 @@ impl ChannelCommand {
             Self::LoginStart { key, .. }
             | Self::LoginWait { key, .. }
             | Self::LoginCancel { key, .. } => CommandRoute::Keyed(key.channel_scope()),
-            Self::Shutdown(_) => CommandRoute::Shutdown,
-        }
-    }
-}
-
-impl ChannelQuery {
-    pub(super) fn trace(&self) -> &super::trace::CommandTrace {
-        match self {
-            Self::Catalog { trace, .. } => trace,
-            Self::ConfigRead { trace, .. } => trace,
-            Self::ConfigureForm { trace, .. } => trace,
-            Self::Pairing { trace, .. } => trace,
-            Self::Status { trace, .. } => trace,
-            Self::Snapshot { trace, .. } => trace,
-        }
-    }
-
-    pub(super) fn route(&self) -> QueryRoute<ChannelKey> {
-        match self {
-            Self::Catalog { .. }
-            | Self::ConfigRead { .. }
-            | Self::ConfigureForm { .. }
-            | Self::Pairing { .. }
-            | Self::Status { .. }
-            | Self::Snapshot { .. } => QueryRoute::Direct,
         }
     }
 }
@@ -211,39 +148,6 @@ impl fmt::Debug for ChannelCommand {
                 .debug_struct("ValidateCredentials")
                 .field("key", key)
                 .finish_non_exhaustive(),
-            Self::Shutdown(_) => formatter.debug_struct("Shutdown").finish_non_exhaustive(),
-        }
-    }
-}
-
-impl fmt::Debug for ChannelQuery {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Catalog { .. } => formatter.debug_struct("Catalog").finish(),
-            Self::ConfigRead {
-                channel_id,
-                account_id,
-                ..
-            } => formatter
-                .debug_struct("ConfigRead")
-                .field("channel_id", channel_id)
-                .field("account_id", account_id)
-                .finish(),
-            Self::ConfigureForm { channel_id, .. } => formatter
-                .debug_struct("ConfigureForm")
-                .field("channel_id", channel_id)
-                .finish(),
-            Self::Pairing {
-                channel_id,
-                account_id,
-                ..
-            } => formatter
-                .debug_struct("Pairing")
-                .field("channel_id", channel_id)
-                .field("account_id", account_id)
-                .finish(),
-            Self::Status { .. } => formatter.debug_struct("Status").finish(),
-            Self::Snapshot { .. } => formatter.debug_struct("Snapshot").finish(),
         }
     }
 }

@@ -19,7 +19,11 @@ use organization::{
     },
 };
 
-use crate::composition::{TeamMaterializationCommandOutcome, TeamRunCommandOutcome};
+use super::team_run::{
+    ArmedTrigger, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
+    TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
+    TeamRunCommandOutcome, TeamRunTriggerOutcome,
+};
 
 pub(crate) enum TeamRuntimeStatus {
     Rejected,
@@ -30,7 +34,7 @@ pub(crate) enum TeamRuntimeStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamNodeEventCommandOutcome {
     NonTerminal(TeamNodeEventOutcome),
-    Terminal(crate::composition::TeamNodeTerminalResult),
+    Terminal(TeamNodeTerminalResult),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,7 +274,7 @@ pub(crate) enum TeamRuntimeCommand {
         role_id: Option<OpaqueId>,
         requested_action: Option<String>,
         idempotency_key: IdempotencyKey,
-        terminal_resolution: Option<crate::composition::team_run_mcp::TeamNodeTerminalResolution>,
+        terminal_resolution: Option<TeamNodeTerminalResolution>,
         output_port: Option<String>,
     },
     RunDiagnostics {
@@ -312,14 +316,14 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     PackageValidate(TeamSkillPackageValidation),
     DependencyPlan(TeamSkillDependencyPlanResult),
     ProvisionAgents(TeamMaterializationCommandOutcome),
-    Delete(Result<crate::composition::TeamDeleteOutcome, StoreFault>),
+    Delete(Result<TeamDeleteOutcome, StoreFault>),
     RunCreate(Result<CreateGraphRunOutcome, TeamRuntimeStatus>),
     RunList(Vec<TeamRunQueryOutcome>),
-    TriggerList(Vec<crate::composition::ArmedTrigger>),
+    TriggerList(Vec<ArmedTrigger>),
     WebhookTriggerFire(Result<TeamTriggerFireOutcome, TeamRuntimeStatus>),
     RunSnapshot {
         snapshot: TeamRunPublicSnapshotQueryOutcome,
-        role_sessions: Option<Vec<organization::RoleSessionReceipt>>,
+        role_sessions: Option<Vec<organization::TeamRoleSessionProjection>>,
     },
     RunSnapshotInvalidInput,
     GraphSave(Result<TeamRunCommandOutcome, StoreFault>),
@@ -327,11 +331,11 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     GraphContext(TeamGraphContextResult),
     GraphExportYaml(Result<String, TeamRuntimeStatus>),
     GraphImportYaml(Result<TeamRunCommandOutcome, StoreFault>),
-    TriggerFire(Result<crate::composition::TeamRunTriggerOutcome, StoreFault>),
+    TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
     RoleMessageSubmit(Result<RoleChatAdmissionOutcome, StoreFault>),
     RoleMessageSubmitForRun(Result<RoleChatAdmissionOutcome, StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
-    NodePromptSettled(Result<crate::composition::TeamNodePromptSettledResult, TeamRuntimeStatus>),
+    NodePromptSettled(Result<TeamNodePromptSettledResult, TeamRuntimeStatus>),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
     RunDecisionSubmit(Result<TeamDecisionReceipt, TeamRuntimeStatus>),

@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 const CAPABILITY_ID: &str = "session.management";
@@ -196,8 +196,13 @@ impl Response {
     fn outcome(outcome: SessionRenameOutcome) -> Self {
         Self {
             status: 200,
-            body: serde_json::to_value(outcome)
-                .expect("Session rename public response is serializable"),
+            body: match outcome {
+                SessionRenameOutcome::Succeeded => serde_json::json!({ "outcome": "succeeded" }),
+                SessionRenameOutcome::TargetRejected => {
+                    serde_json::json!({ "outcome": "target_rejected" })
+                }
+                SessionRenameOutcome::Unknown => serde_json::json!({ "outcome": "unknown" }),
+            },
         }
     }
 

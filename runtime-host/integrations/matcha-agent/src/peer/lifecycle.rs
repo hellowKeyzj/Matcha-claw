@@ -2457,9 +2457,10 @@ mod receipt_tests {
     };
 
     fn watcher() -> TerminalEventWatcher {
-        TerminalEventWatcher::new(
+        TerminalEventWatcher::resume_after(
             SessionId::try_new("watch-session").unwrap(),
             RunId::try_new("watch-run").unwrap(),
+            Sequence::try_new(0).unwrap(),
         )
     }
 

@@ -17,13 +17,20 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
 
-use crate::transport::fleet_terminal::{
+use crate::fleet::terminal::{
     ProviderCommand, ProviderError, ProviderEvent, TerminalContext, TerminalProviderOpen,
 };
 
 const CUSTOM_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
-const CUSTOM_PROTOCOL: &str = "remote-fleet-terminal/v1";
+const CUSTOM_TERMINAL_PROTOCOL: &str = "remote-fleet-terminal/v1";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
+const TERMINAL_CLOSE: &str = "terminal.close";
+const TERMINAL_ERROR: &str = "terminal.error";
+const TERMINAL_EXIT: &str = "terminal.exit";
+const TERMINAL_PING: &str = "terminal.ping";
+const TERMINAL_PONG: &str = "terminal.pong";
+const TERMINAL_READY: &str = "terminal.ready";
+const TERMINAL_RESIZE: &str = "terminal.resize";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CustomEffect {
@@ -106,6 +113,11 @@ pub(crate) fn operation_for(kind: CommandKind) -> Option<CustomEffect> {
     }
 }
 
+pub(crate) fn supports_terminal_protocol(terminal: &fleet::CustomTerminalConfig) -> bool {
+    terminal.transport() == fleet::CustomTerminalTransport::Websocket
+        && terminal.protocol_version() == CUSTOM_TERMINAL_PROTOCOL
+}
+
 pub(crate) async fn open_terminal<R: FleetSecretResolverPort>(
     config: &CustomTargetConfig,
     resolver: &mut R,
@@ -124,9 +136,7 @@ where
     let terminal = config
         .terminal()
         .ok_or_else(|| ProviderError::message("custom terminal configuration is missing"))?;
-    if terminal.transport() != fleet::CustomTerminalTransport::Websocket
-        || terminal.protocol_version() != CUSTOM_PROTOCOL
-    {
+    if !supports_terminal_protocol(terminal) {
         return Err(ProviderError::message(
             "custom terminal protocol is unsupported",
         ));
@@ -165,7 +175,7 @@ where
         .map_err(|_| ProviderError::message("custom terminal endpoint is invalid"))?;
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
-        header::HeaderValue::from_static(CUSTOM_PROTOCOL),
+        header::HeaderValue::from_static(CUSTOM_TERMINAL_PROTOCOL),
     );
     request.headers_mut().insert(
         "X-Remote-Fleet-Terminal-Session-Id",
@@ -264,9 +274,9 @@ async fn run_socket(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(ProviderCommand::Input(data)) if data.len() <= MAX_FRAME_BYTES => { if socket.send(Message::Binary(data.into())).await.is_err() { break; } }
-                Some(ProviderCommand::Resize { rows, cols }) => { if socket.send(Message::Text(serde_json::json!({"type":"terminal.resize","rows":rows,"cols":cols}).to_string().into())).await.is_err() { break; } }
+                Some(ProviderCommand::Resize { rows, cols }) => { if socket.send(TerminalControlFrame::resize(rows, cols).into_message()).await.is_err() { break; } }
                 Some(ProviderCommand::Input(_)) => { let _ = events.send(Err(ProviderError::message("custom terminal input is too large"))).await; break; }
-                None => { let _ = socket.send(Message::Text(serde_json::json!({"type":"terminal.close","reason":"closed by host"}).to_string().into())).await; let _ = socket.close(None).await; break; }
+                None => { let _ = socket.send(TerminalControlFrame::close().into_message()).await; let _ = socket.close(None).await; break; }
             },
             message = socket.next() => match message {
                 Some(Ok(Message::Binary(data))) if data.len() <= MAX_FRAME_BYTES => { if events.send(Ok(ProviderEvent::Output(data.to_vec()))).await.is_err() { break; } }
@@ -277,6 +287,26 @@ async fn run_socket(
                 Some(Err(_)) | None => { let _ = events.send(Err(ProviderError::message("custom terminal websocket failed"))).await; break; }
             }
         }
+    }
+}
+
+struct TerminalControlFrame(serde_json::Value);
+
+impl TerminalControlFrame {
+    fn resize(rows: u16, cols: u16) -> Self {
+        Self(serde_json::json!({"type": TERMINAL_RESIZE, "rows": rows, "cols": cols}))
+    }
+
+    fn close() -> Self {
+        Self(serde_json::json!({"type": TERMINAL_CLOSE, "reason": "closed by host"}))
+    }
+
+    fn pong(nonce: Option<&str>) -> Self {
+        Self(serde_json::json!({"type": TERMINAL_PONG, "nonce": nonce}))
+    }
+
+    fn into_message(self) -> Message {
+        Message::Text(self.0.to_string().into())
     }
 }
 
@@ -298,13 +328,13 @@ async fn parse_control(
         return ControlResult::Exit;
     };
     match value.get("type").and_then(serde_json::Value::as_str) {
-        Some("terminal.error") => {
+        Some(TERMINAL_ERROR) => {
             let _ = events
                 .send(Err(ProviderError::message("custom terminal remote error")))
                 .await;
             ControlResult::Exit
         }
-        Some("terminal.exit") | Some("terminal.close") => {
+        Some(TERMINAL_EXIT) | Some(TERMINAL_CLOSE) => {
             let code = value
                 .get("exitCode")
                 .and_then(serde_json::Value::as_i64)
@@ -312,13 +342,14 @@ async fn parse_control(
             let _ = events.send(Ok(ProviderEvent::Exit { code })).await;
             ControlResult::Exit
         }
-        Some("terminal.ping") => {
+        Some(TERMINAL_PING) => {
             let nonce = value.get("nonce").and_then(serde_json::Value::as_str);
-            let pong = serde_json::json!({"type":"terminal.pong", "nonce":nonce});
-            let _ = socket.send(Message::Text(pong.to_string().into())).await;
+            let _ = socket
+                .send(TerminalControlFrame::pong(nonce).into_message())
+                .await;
             ControlResult::Continue
         }
-        Some("terminal.ready") | Some("terminal.resize") | Some("terminal.pong") => {
+        Some(TERMINAL_READY) | Some(TERMINAL_RESIZE) | Some(TERMINAL_PONG) => {
             ControlResult::Continue
         }
         _ => {

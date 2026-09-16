@@ -19,6 +19,7 @@ use super::{
     },
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     model_selection::{SessionModelSelectionCommand, SessionModelSelectionOutcome},
+    openclaw_direct,
     query::SessionQuery,
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
@@ -29,7 +30,7 @@ use super::{
         ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
     },
 };
-use crate::{RuntimeSessionError, runtime_directory::RuntimeDriverDirectory};
+use crate::{RuntimeSessionError, runtime::directory::RuntimeDriverDirectory};
 use openclaw::{
     port::OpenClawSessionError,
     session::protocol::{
@@ -85,11 +86,6 @@ impl SessionHandle {
             reply,
         })
         .await
-    }
-
-    pub(crate) async fn touch_session(&self, session_key: String) -> Result<(), ()> {
-        self.request_command(|reply| SessionCommand::Touch { session_key, reply })
-            .await
     }
 
     pub(crate) async fn evict_session(
@@ -208,22 +204,23 @@ impl SessionHandle {
     pub(crate) async fn list_openclaw_sessions(
         &self,
     ) -> Result<
-        Result<
-            openclaw::session::protocol::SessionsListResult,
-            crate::RuntimeSessionError<openclaw::port::OpenClawSessionError>,
-        >,
+        Result<openclaw_direct::SessionCatalog, RuntimeSessionError<OpenClawSessionError>>,
         (),
     > {
-        self.request_query(|reply| SessionQuery::ListOpenClaw { reply })
-            .await
+        self.request_query(|reply| {
+            SessionQuery::OpenClaw(openclaw_direct::Query::list_sessions(reply))
+        })
+        .await
     }
 
     pub(crate) async fn openclaw_history(
         &self,
         params: ChatHistoryParams,
     ) -> Result<Result<ChatHistoryResult, RuntimeSessionError<OpenClawSessionError>>, ()> {
-        self.request_query(|reply| SessionQuery::OpenClawHistory { params, reply })
-            .await
+        self.request_query(|reply| {
+            SessionQuery::OpenClaw(openclaw_direct::Query::history(params, reply))
+        })
+        .await
     }
 
     pub(crate) async fn send_openclaw_chat(
@@ -237,7 +234,7 @@ impl SessionHandle {
         (),
     > {
         self.request_command(|reply| SessionCommand::Send {
-            request: SessionSendRequest::OpenClawChat { params, reply },
+            request: SessionSendRequest::OpenClaw(openclaw_direct::SendCommand { params, reply }),
         })
         .await
     }
@@ -253,22 +250,22 @@ impl SessionHandle {
         (),
     > {
         self.request_command(|reply| SessionCommand::Abort {
-            request: SessionAbortRequest::OpenClawChat { params, reply },
+            request: SessionAbortRequest::OpenClaw(openclaw_direct::AbortCommand { params, reply }),
         })
         .await
     }
 
     pub(crate) async fn list_matcha_sessions(
         &self,
-    ) -> Result<crate::matcha_session_catalog::Outcome, ()> {
+    ) -> Result<crate::sessions::matcha_session_catalog::Outcome, ()> {
         self.request_query(|reply| SessionQuery::ListMatcha { reply })
             .await
     }
 
     pub(crate) async fn load_matcha_history(
         &self,
-        command: crate::matcha_history::Command,
-    ) -> Result<crate::matcha_history::Outcome, ()> {
+        command: crate::sessions::matcha_history::Command,
+    ) -> Result<crate::sessions::matcha_history::Outcome, ()> {
         self.request_query(|reply| SessionQuery::MatchaHistory { command, reply })
             .await
     }

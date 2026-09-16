@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{
     sessions::timeline::{ContentCommand, ContentOutcome, ContentOutcome::Complete, Provider},
-    transport::authorization::CapabilityDecisionVerifier,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 const CAPABILITY_ID: &str = "session.management";

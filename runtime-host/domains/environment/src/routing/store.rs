@@ -109,7 +109,7 @@ impl ProviderRoutingStore {
             ));
         }
         drop(file);
-        if let Err(error) = fs::rename(&temporary, &self.path) {
+        if let Err(error) = crate::persistence::replace_file(&temporary, &self.path) {
             self.requires_reopen = true;
             let _ = fs::remove_file(&temporary);
             return Err(ProviderRoutingStoreFault::CommitOutcomeUnknown(

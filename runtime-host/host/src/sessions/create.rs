@@ -331,7 +331,7 @@ mod tests {
     use serde_json::{json, to_value};
 
     use super::*;
-    use crate::runtime_driver::RuntimeDriverIdentity;
+    use crate::runtime::driver::RuntimeDriverIdentity;
 
     fn openclaw_admission() -> SessionAdmission {
         SessionAdmission::agent_scoped(

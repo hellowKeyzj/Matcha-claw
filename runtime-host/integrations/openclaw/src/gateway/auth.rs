@@ -50,7 +50,8 @@ impl GatewaySecret {
         }
     }
 
-    pub(crate) fn json_string_capacity_bound(&self) -> Result<usize, GatewayAuthError> {
+    #[cfg(test)]
+    fn json_string_capacity_bound(&self) -> Result<usize, GatewayAuthError> {
         json_string_capacity_bound(self.value.len())
     }
 
@@ -67,6 +68,7 @@ impl GatewaySecret {
     }
 }
 
+#[cfg(test)]
 fn json_string_capacity_bound(length: usize) -> Result<usize, GatewayAuthError> {
     length
         .checked_mul(6)

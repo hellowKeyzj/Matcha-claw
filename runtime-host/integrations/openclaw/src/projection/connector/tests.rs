@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -6,8 +7,10 @@ use std::{
 };
 
 use environment::{
-    Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretRef, ConnectorSecretResolution,
-    ConnectorSecretResolverPort, ConnectorSecretValue, unavailable_connector_secret_authority,
+    ConnectorCatalog, ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
+    ConnectorSecretValue,
+    connectors::{Connector, ConnectorInput, ConnectorKind, McpTransport},
+    unavailable_connector_secret_authority,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -273,26 +276,8 @@ fn connector_projection_cleans_stale_entries_for_disabled_and_unsupported_connec
 #[test]
 fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
     for connector in [
-        serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "matcha-external.stdio-secret",
-            "kind": "mcp-stdio",
-            "enabled": true,
-            "command": "managed-mcp",
-            "secretEnv": {
-                "MCP_TOKEN": { "kind": "secret-ref", "ref": "credential:v1:opaque" }
-            }
-        }))
-        .expect("stdio secret-ref connector"),
-        serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "matcha-external.http-secret",
-            "kind": "mcp-http",
-            "enabled": true,
-            "url": "https://example.test/mcp",
-            "secretHeaders": {
-                "Authorization": { "kind": "secret-ref", "ref": "credential:v1:opaque" }
-            }
-        }))
-        .expect("http secret-ref connector"),
+        mcp_stdio_secret_connector("matcha-external.stdio-secret", "credential:v1:opaque"),
+        mcp_http_secret_connector("matcha-external.http-secret", "credential:v1:opaque"),
     ] {
         let root = projection_root();
         let state_dir = canonical_state_dir(&root);
@@ -310,7 +295,10 @@ fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
         assert!(report.projected.is_empty());
         assert_eq!(
             report.skipped,
-            vec![(connector.id, ConnectorProjectionSkip::Unsupported)]
+            vec![(
+                connector.id().to_owned(),
+                ConnectorProjectionSkip::Unsupported
+            )]
         );
         assert!(!config_path.exists());
         remove_projection_root(root);
@@ -323,28 +311,8 @@ fn secret_ref_mcp_connectors_project_resolved_private_values_to_openclaw_config(
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
     let catalog = ConnectorCatalog::try_new(vec![
-        serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "matcha-external.stdio-secret",
-            "kind": "mcp-stdio",
-            "enabled": true,
-            "command": "managed-mcp",
-            "env": { "PUBLIC_ENV": "public" },
-            "secretEnv": {
-                "MCP_TOKEN": { "kind": "secret-ref", "ref": "credential:v1:stdio-token" }
-            }
-        }))
-        .expect("stdio secret-ref connector"),
-        serde_json::from_value::<Connector>(serde_json::json!({
-            "id": "matcha-external.http-secret",
-            "kind": "mcp-http",
-            "enabled": true,
-            "url": "https://example.test/mcp",
-            "headers": { "X-Public": "public" },
-            "secretHeaders": {
-                "Authorization": { "kind": "secret-ref", "ref": "credential:v1:http-token" }
-            }
-        }))
-        .expect("http secret-ref connector"),
+        mcp_stdio_secret_connector("matcha-external.stdio-secret", "credential:v1:stdio-token"),
+        mcp_http_secret_connector("matcha-external.http-secret", "credential:v1:http-token"),
     ])
     .unwrap();
     let secrets = MemoryConnectorSecretResolver;
@@ -378,16 +346,8 @@ fn secret_ref_mcp_connectors_fail_closed_when_private_resolver_is_unavailable() 
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
-    let connector = serde_json::from_value::<Connector>(serde_json::json!({
-        "id": "matcha-external.http-secret",
-        "kind": "mcp-http",
-        "enabled": true,
-        "url": "https://example.test/mcp",
-        "secretHeaders": {
-            "Authorization": { "kind": "secret-ref", "ref": "credential:v1:http-token" }
-        }
-    }))
-    .expect("http secret-ref connector");
+    let connector =
+        mcp_http_secret_connector("matcha-external.http-secret", "credential:v1:http-token");
     let catalog = ConnectorCatalog::try_new(vec![connector.clone()]).unwrap();
 
     let (effect, report) = project_external_connectors(
@@ -401,7 +361,10 @@ fn secret_ref_mcp_connectors_fail_closed_when_private_resolver_is_unavailable() 
     assert!(report.projected.is_empty());
     assert_eq!(
         report.skipped,
-        vec![(connector.id, ConnectorProjectionSkip::Unsupported)]
+        vec![(
+            connector.id().to_owned(),
+            ConnectorProjectionSkip::Unsupported
+        )]
     );
     assert!(!config_path.exists());
     remove_projection_root(root);
@@ -435,13 +398,10 @@ async fn connector_observation_matrix_keeps_non_probeable_states_typed() {
         ConnectorObservation::Unsupported
     );
 
-    let unknown = serde_json::from_value::<Connector>(json!({
-        "id": "unknown",
-        "kind": "mcp-http",
-        "enabled": true,
-        "url": "http://127.0.0.1:1/mcp"
-    }))
-    .unwrap();
+    let mut input = ConnectorInput::new("unknown".into(), ConnectorKind::McpHttp);
+    input.enabled = Some(true);
+    input.url = Some("http://127.0.0.1:1/mcp".into());
+    let unknown = Connector::new(input);
     assert_eq!(
         observe_external_connector(&unknown),
         ConnectorObservation::Unknown
@@ -451,16 +411,7 @@ async fn connector_observation_matrix_keeps_non_probeable_states_typed() {
         ConnectorObservation::Unknown
     );
 
-    let secret = serde_json::from_value::<Connector>(json!({
-        "id": "secret",
-        "kind": "mcp-http",
-        "enabled": true,
-        "url": "http://127.0.0.1:1/mcp",
-        "secretHeaders": {
-            "Authorization": { "kind": "secret-ref", "ref": "credential:v1:opaque" }
-        }
-    }))
-    .unwrap();
+    let secret = mcp_http_secret_connector("secret", "credential:v1:opaque");
     assert_eq!(
         observe_external_connector(&secret),
         ConnectorObservation::Unsupported
@@ -618,28 +569,22 @@ async fn connector_probe_maps_a_deadline_timeout_to_disconnected() {
 }
 
 fn unknown_without_url() -> Connector {
-    serde_json::from_value(json!({
-        "id": "missing-url",
-        "kind": "mcp-http",
-        "enabled": true
-    }))
-    .unwrap()
+    let mut input = ConnectorInput::new("missing-url".into(), ConnectorKind::McpHttp);
+    input.enabled = Some(true);
+    Connector::new(input)
 }
 
 fn mcp_http_connector(url: &str, transport: Option<&str>, timeout_ms: Option<u64>) -> Connector {
-    let mut value = json!({
-        "id": "loopback",
-        "kind": "mcp-http",
-        "enabled": true,
-        "url": url
+    let mut input = ConnectorInput::new("loopback".into(), ConnectorKind::McpHttp);
+    input.enabled = Some(true);
+    input.url = Some(url.into());
+    input.transport = transport.map(|transport| match transport {
+        "sse" => McpTransport::Sse,
+        "streamable-http" => McpTransport::StreamableHttp,
+        _ => panic!("unknown transport"),
     });
-    if let Some(transport) = transport {
-        value["transport"] = Value::String(transport.into());
-    }
-    if let Some(timeout_ms) = timeout_ms {
-        value["connectionTimeoutMs"] = Value::from(timeout_ms);
-    }
-    serde_json::from_value(value).unwrap()
+    input.connection_timeout_ms = timeout_ms;
+    Connector::new(input)
 }
 
 #[derive(Clone, Copy)]
@@ -809,31 +754,35 @@ fn connector(
     enabled: Option<bool>,
     command: Option<String>,
 ) -> Connector {
-    let kind_name = match kind {
-        ConnectorKind::McpStdio => "mcp-stdio",
-        ConnectorKind::McpHttp => "mcp-http",
-        ConnectorKind::Cli => "cli",
-        ConnectorKind::Sdk => "sdk",
-        ConnectorKind::Http => "http",
-    };
-    let mut value = serde_json::json!({
-        "id": id,
-        "kind": kind_name,
-        "enabled": enabled,
-        "command": command,
-        "args": ["--serve"]
-    });
-    if let Some(enabled) = enabled {
-        value["enabled"] = serde_json::Value::Bool(enabled);
-    } else {
-        value.as_object_mut().unwrap().remove("enabled");
-    }
-    if let Some(command) = value.get("command")
-        && command.is_null()
-    {
-        value.as_object_mut().unwrap().remove("command");
-    }
-    serde_json::from_value(value).expect("connector fixture")
+    let mut input = ConnectorInput::new(id.into(), kind);
+    input.enabled = enabled;
+    input.command = command;
+    input.args = Some(vec!["--serve".into()]);
+    Connector::new(input)
+}
+
+fn mcp_stdio_secret_connector(id: &str, reference: &str) -> Connector {
+    let mut input = ConnectorInput::new(id.into(), ConnectorKind::McpStdio);
+    input.enabled = Some(true);
+    input.command = Some("managed-mcp".into());
+    input.env = Some(BTreeMap::from([("PUBLIC_ENV".into(), "public".into())]));
+    Connector::new(input).with_secret_references(
+        Some(BTreeMap::from([("MCP_TOKEN".into(), reference.into())])),
+        None,
+        None,
+    )
+}
+
+fn mcp_http_secret_connector(id: &str, reference: &str) -> Connector {
+    let mut input = ConnectorInput::new(id.into(), ConnectorKind::McpHttp);
+    input.enabled = Some(true);
+    input.url = Some("https://example.test/mcp".into());
+    input.headers = Some(BTreeMap::from([("X-Public".into(), "public".into())]));
+    Connector::new(input).with_secret_references(
+        None,
+        Some(BTreeMap::from([("Authorization".into(), reference.into())])),
+        None,
+    )
 }
 
 fn projection_root() -> PathBuf {

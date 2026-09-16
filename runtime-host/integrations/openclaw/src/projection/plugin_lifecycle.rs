@@ -51,16 +51,22 @@ impl PluginLifecycleTransitionState {
     }
 }
 
-pub(crate) fn apply_transition_config(
+pub(crate) fn apply_transition_config<F>(
     store: &OpenClawConfigStore,
     transition: &PluginLifecycleTransitionState,
-) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError> {
+    mut set_plugin_enabled: F,
+) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError>
+where
+    F: FnMut(&mut OpenClawConfigDocument, &str, bool) -> bool,
+{
     store.update_private_document(|document| {
         let mut changed = false;
-        for plugin_id in &transition.newly_enabled_plugin_ids {
+        for plugin_id in &transition.next_enabled_plugin_ids {
+            changed |= set_plugin_enabled(document, plugin_id, true);
             changed |= apply_enable_config(document, plugin_id);
         }
         for plugin_id in &transition.newly_disabled_plugin_ids {
+            changed |= set_plugin_enabled(document, plugin_id, false);
             changed |= apply_disable_config(document, plugin_id);
         }
         if changed {

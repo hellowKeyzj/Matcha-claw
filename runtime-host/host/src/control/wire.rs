@@ -8,10 +8,6 @@ pub(crate) const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MAX_RENDERER_ROUTE_KEY_BYTES: usize = 128;
 const MAX_CRON_EXECUTION_ID_BYTES: usize = 128;
-const MAX_ACTIVITY_ID_BYTES: usize = 128;
-const MAX_ACTIVITY_OPTION_IDS: usize = 32;
-const MAX_ACTIVITY_TEXT_BYTES: usize = 16 * 1024;
-const MAX_ACTIVITY_SUMMARY_BYTES: usize = 256;
 /// Bounds an untrusted parent's command wait and keeps a stuck child command recoverable.
 pub(crate) const MAX_TIMEOUT_MS: u64 = 120_000;
 
@@ -338,21 +334,39 @@ pub(crate) struct CommandRejection {
     message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum CommandOutcome {
-    Succeeded { result: Value },
-    Unknown { result: Value },
+    Succeeded { result: CommandResult },
+    Unknown { result: CommandResult },
     Rejected { error: CommandRejection },
     TimedOut,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum CommandResult {
+    Public(PublicControlJson),
+    Private(PrivateControlJson),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
+#[serde(transparent)]
+pub(crate) struct PublicControlJson(Value);
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
+#[serde(transparent)]
+pub(crate) struct PrivateControlJson(Value);
+
 impl CommandOutcome {
-    pub(crate) fn succeeded(result: Value) -> Self {
+    pub(crate) fn succeeded(result: CommandResult) -> Self {
         Self::Succeeded { result }
     }
 
-    pub(crate) fn unknown(result: Value) -> Self {
+    pub(crate) fn unknown(result: CommandResult) -> Self {
         Self::Unknown { result }
     }
 
@@ -370,13 +384,77 @@ impl CommandOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl CommandResult {
+    pub(crate) fn public(value: impl Into<Value>) -> Self {
+        Self::Public(PublicControlJson::new(value))
+    }
+
+    pub(crate) fn private(value: impl Into<Value>) -> Self {
+        Self::Private(PrivateControlJson::new(value))
+    }
+
+    pub(crate) fn as_value(&self) -> &Value {
+        match self {
+            Self::Public(value) => value.as_value(),
+            Self::Private(value) => value.as_value(),
+        }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
+        match self {
+            Self::Public(value) => value.into_value(),
+            Self::Private(value) => value.into_value(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<'de> Deserialize<'de> for CommandResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::private(Value::deserialize(deserializer)?))
+    }
+}
+
+impl PublicControlJson {
+    pub(crate) fn new(value: impl Into<Value>) -> Self {
+        Self(value.into())
+    }
+
+    fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl PrivateControlJson {
+    pub(crate) fn new(value: impl Into<Value>) -> Self {
+        Self(value.into())
+    }
+
+    fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 enum OutcomeType {
     #[serde(rename = "outcome")]
     Outcome,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Outcome {
     #[serde(deserialize_with = "deserialize_version")]
@@ -530,7 +608,8 @@ impl Event {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(untagged)]
 pub(crate) enum Output {
     Ready(Ready),

@@ -32,6 +32,22 @@ impl Status {
                 .map(ToOwned::to_owned),
         })
     }
+
+    pub fn package_exists(&self) -> bool {
+        self.package_exists
+    }
+
+    pub fn is_built(&self) -> bool {
+        self.is_built
+    }
+
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
 }
 
 fn is_safe_version(value: &&str) -> bool {

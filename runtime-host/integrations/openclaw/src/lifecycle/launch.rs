@@ -46,16 +46,18 @@ const UV_PYTHON_INSTALL_MIRROR_URL: &str =
     "https://registry.npmmirror.com/-/binary/python-build-standalone/";
 const UV_INDEX_URL: &str = "UV_INDEX_URL";
 const UV_INDEX_MIRROR_URL: &str = "https://pypi.tuna.tsinghua.edu.cn/simple/";
-const SETTINGS_DESIRED_FILE: &str = "settings-desired.v1.json";
-const MAX_SETTINGS_DESIRED_BYTES: usize = 64 * 1024;
-const HTTP_PROXY: &str = "HTTP_PROXY";
-const HTTPS_PROXY: &str = "HTTPS_PROXY";
-const ALL_PROXY: &str = "ALL_PROXY";
-const HTTP_PROXY_LOWER: &str = "http_proxy";
-const HTTPS_PROXY_LOWER: &str = "https_proxy";
-const ALL_PROXY_LOWER: &str = "all_proxy";
-const NO_PROXY: &str = "NO_PROXY";
-const NO_PROXY_LOWER: &str = "no_proxy";
+const OPENCLAW_PROXY_URL: &str = "OPENCLAW_PROXY_URL";
+const PROXY_ENV_KEYS: [&str; 9] = [
+    OPENCLAW_PROXY_URL,
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
 const SYSTEMD_SUPERVISOR_ENV_KEYS: [&str; 4] = [
     "OPENCLAW_SYSTEMD_UNIT",
     "INVOCATION_ID",
@@ -184,8 +186,7 @@ impl LaunchFactory {
             gateway_token.clone(),
             OsString::from("--allow-unconfigured"),
         ];
-        let mut public_environment =
-            base_launch_environment(&self.working_directory, &self.state_dir)?;
+        let mut public_environment = base_launch_environment(&self.working_directory)?;
         public_environment.extend([
             (OPENCLAW_GATEWAY_PORT.into(), gateway_port.clone()),
             (OPENCLAW_GATEWAY_TOKEN.into(), gateway_token.clone()),
@@ -235,7 +236,6 @@ fn gateway_token_os_string(secret: &GatewaySecret) -> Result<OsString, LaunchErr
 
 fn base_launch_environment(
     working_directory: &Path,
-    state_dir: &CanonicalStateDir,
 ) -> Result<Vec<(OsString, OsString)>, LaunchError> {
     let mut environment = sanitize_inherited_environment(std::env::vars_os());
     ensure_electron_run_as_node(&mut environment);
@@ -249,7 +249,6 @@ fn base_launch_environment(
         ));
     }
     environment.extend(uv_environment());
-    environment.extend(proxy_environment(state_dir)?);
     Ok(environment)
 }
 
@@ -266,6 +265,7 @@ fn sanitize_inherited_environment(
                 .iter()
                 .any(|denied| key.eq_ignore_ascii_case(OsStr::new(denied)))
             || is_managed_launch_env_key(&key)
+            || is_proxy_env_key(&key)
             || environment
                 .iter()
                 .any(|(existing, _): &(OsString, OsString)| existing.eq_ignore_ascii_case(&key))
@@ -295,17 +295,16 @@ fn is_managed_launch_env_key(key: &OsStr) -> bool {
         CLAWDBOT_SKIP_CHANNELS,
         UV_PYTHON_INSTALL_MIRROR,
         UV_INDEX_URL,
-        HTTP_PROXY,
-        HTTPS_PROXY,
-        ALL_PROXY,
-        HTTP_PROXY_LOWER,
-        HTTPS_PROXY_LOWER,
-        ALL_PROXY_LOWER,
-        NO_PROXY,
-        NO_PROXY_LOWER,
+        OPENCLAW_PROXY_URL,
     ]
     .iter()
     .any(|managed| key.eq_ignore_ascii_case(OsStr::new(managed)))
+}
+
+fn is_proxy_env_key(key: &OsStr) -> bool {
+    PROXY_ENV_KEYS
+        .iter()
+        .any(|proxy_key| key.eq_ignore_ascii_case(OsStr::new(proxy_key)))
 }
 
 fn ensure_electron_run_as_node(environment: &mut Vec<(OsString, OsString)>) {
@@ -330,101 +329,6 @@ fn uv_environment() -> [(OsString, OsString); 2] {
         ),
         (UV_INDEX_URL.into(), UV_INDEX_MIRROR_URL.into()),
     ]
-}
-
-fn proxy_environment(
-    state_dir: &CanonicalStateDir,
-) -> Result<Vec<(OsString, OsString)>, LaunchError> {
-    let settings = read_launch_settings(state_dir)?;
-    let Some(proxy) = settings.and_then(|settings| settings.proxy) else {
-        return Ok(blank_proxy_environment());
-    };
-    if !proxy.enabled {
-        return Ok(blank_proxy_environment());
-    }
-    let server = normalize_proxy_server(&proxy.server);
-    let no_proxy = normalize_no_proxy(&proxy.bypass_rules);
-    Ok(proxy_environment_keys()
-        .into_iter()
-        .map(|key| {
-            let value = if key.eq_ignore_ascii_case(NO_PROXY) {
-                no_proxy.clone()
-            } else {
-                server.clone()
-            };
-            (key.into(), value.into())
-        })
-        .collect())
-}
-
-fn blank_proxy_environment() -> Vec<(OsString, OsString)> {
-    proxy_environment_keys()
-        .into_iter()
-        .map(|key| (key.into(), OsString::new()))
-        .collect()
-}
-
-fn proxy_environment_keys() -> Vec<&'static str> {
-    if cfg!(windows) {
-        vec![HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY]
-    } else {
-        vec![
-            HTTP_PROXY,
-            HTTPS_PROXY,
-            ALL_PROXY,
-            HTTP_PROXY_LOWER,
-            HTTPS_PROXY_LOWER,
-            ALL_PROXY_LOWER,
-            NO_PROXY,
-            NO_PROXY_LOWER,
-        ]
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchSettings {
-    proxy: Option<LaunchProxySettings>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchProxySettings {
-    enabled: bool,
-    server: String,
-    bypass_rules: String,
-}
-
-fn read_launch_settings(
-    state_dir: &CanonicalStateDir,
-) -> Result<Option<LaunchSettings>, LaunchError> {
-    let Some(bytes) = state_dir
-        .read_regular_file_bounded(SETTINGS_DESIRED_FILE, MAX_SETTINGS_DESIRED_BYTES)
-        .map_err(|_| LaunchError::InvalidInput)?
-    else {
-        return Ok(None);
-    };
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| LaunchError::InvalidInput)
-}
-
-fn normalize_proxy_server(value: &str) -> String {
-    let value = value.trim();
-    if value.contains("://") {
-        value.to_owned()
-    } else {
-        format!("http://{value}")
-    }
-}
-
-fn normalize_no_proxy(value: &str) -> String {
-    value
-        .split([',', '\n', ';'])
-        .map(str::trim)
-        .filter(|rule| !rule.is_empty())
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn bundled_bin_path(working_directory: &Path) -> Option<PathBuf> {

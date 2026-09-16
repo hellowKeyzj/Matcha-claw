@@ -59,6 +59,7 @@ impl StdioActivation for OpenClawStdioActivation {
     }
 }
 
+#[cfg(test)]
 fn activate_stdio<I, O, E>(
     stdin: Option<I>,
     stdout: Option<O>,

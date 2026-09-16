@@ -2,7 +2,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zeroize::Zeroizing;
 
 use crate::gateway::config_patch::{
     encode_request as encode_config_patch_request, request_parts_are_valid,
@@ -99,10 +98,6 @@ impl ConfigDocument {
             return Err(WireError::InvalidConfigSetRequest);
         }
         Ok(Self(raw.into_bytes()))
-    }
-
-    pub(crate) fn into_bytes(mut self) -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(std::mem::take(&mut self.0))
     }
 
     fn as_str(&self) -> Result<&str, WireError> {
@@ -281,78 +276,6 @@ pub(crate) fn config_patch_request(
     })
 }
 
-pub(crate) struct ConfigApplyRequest {
-    request_id: String,
-    raw: ConfigDocument,
-    base_hash: Option<ConfigBaseHash>,
-}
-
-impl ConfigApplyRequest {
-    pub(crate) fn request_id(&self) -> &str {
-        &self.request_id
-    }
-
-    pub(crate) fn encode(&self) -> Result<String, WireError> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params<'a> {
-            raw: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            base_hash: Option<&'a str>,
-        }
-        #[derive(Serialize)]
-        struct Frame<'a> {
-            r#type: &'static str,
-            id: &'a str,
-            method: &'static str,
-            params: Params<'a>,
-        }
-
-        let raw = self.raw.as_str()?;
-        let base_hash = self
-            .base_hash
-            .as_ref()
-            .map(ConfigBaseHash::as_str)
-            .transpose()?;
-        serde_json::to_string(&Frame {
-            r#type: "req",
-            id: &self.request_id,
-            method: "config.apply",
-            params: Params { raw, base_hash },
-        })
-        .map_err(|_| WireError::EncodeRequest)
-    }
-}
-
-impl fmt::Debug for ConfigApplyRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ConfigApplyRequest")
-            .field("request_id", &"[REDACTED]")
-            .field("raw", &"[REDACTED]")
-            .field("base_hash", &self.base_hash.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
-}
-
-pub(crate) fn config_apply_request(
-    request_id: String,
-    raw: ConfigDocument,
-    base_hash: Option<ConfigBaseHash>,
-) -> Result<ConfigApplyRequest, WireError> {
-    if !valid_string(&request_id)
-        || raw.is_empty()
-        || base_hash.as_ref().is_some_and(ConfigBaseHash::is_empty)
-    {
-        return Err(WireError::InvalidConfigApplyRequest);
-    }
-    Ok(ConfigApplyRequest {
-        request_id,
-        raw,
-        base_hash,
-    })
-}
-
 pub(crate) struct AgentCreated {
     pub(crate) agent_id: String,
     pub(crate) name: String,
@@ -381,10 +304,6 @@ impl ConfigSnapshot {
 
     pub(crate) fn into_source_config_parts(self) -> (Value, Option<ConfigBaseHash>) {
         (self.source_config, self.base_hash)
-    }
-
-    pub(crate) fn into_config_parts(self) -> (Value, Option<ConfigBaseHash>) {
-        (self.config, self.base_hash)
     }
 
     pub(crate) fn into_source_and_runtime_config_parts(
@@ -590,8 +509,6 @@ pub(crate) struct ConfigSetApplied;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigPatchApplied;
 
-pub(crate) struct ConfigApplyApplied;
-
 pub(crate) struct ConfigPatch {
     raw: ConfigDocument,
     base_hash: Option<ConfigBaseHash>,
@@ -703,18 +620,6 @@ pub(crate) fn decode_config_patch(
         return Err(WireError::InvalidConfigPatch);
     }
     Ok(ConfigPatchApplied)
-}
-
-pub(crate) fn decode_config_apply(
-    response: GatewayResponse,
-) -> Result<ConfigApplyApplied, WireError> {
-    let payload = success_payload(response, WireError::InvalidConfigApply)?;
-    let payload: ConfigSetWire =
-        serde_json::from_value(payload).map_err(|_| WireError::InvalidConfigApply)?;
-    if !payload.is_valid() {
-        return Err(WireError::InvalidConfigApply);
-    }
-    Ok(ConfigApplyApplied)
 }
 
 #[derive(Deserialize)]
@@ -1070,23 +975,6 @@ mod tests {
                 }
             })
         );
-
-        let (_, base_hash) = decode_config_get(response("config-get-3", config_snapshot()))
-            .unwrap()
-            .into_parts();
-        let apply = config_apply_request(
-            "config-apply-1".into(),
-            ConfigDocument::new("{\"models\":{}}".into()).unwrap(),
-            base_hash,
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&apply.encode().unwrap()).unwrap(),
-            json!({
-                "type": "req", "id": "config-apply-1", "method": "config.apply",
-                "params": {"raw": "{\"models\":{}}", "baseHash": "base-hash-canary"}
-            })
-        );
     }
 
     #[test]
@@ -1144,15 +1032,6 @@ mod tests {
             .unwrap_err(),
             WireError::InvalidConfigPatchRequest
         );
-        assert_eq!(
-            config_apply_request(
-                String::new(),
-                ConfigDocument::new("raw".into()).unwrap(),
-                None,
-            )
-            .unwrap_err(),
-            WireError::InvalidConfigApplyRequest
-        );
     }
 
     #[test]
@@ -1174,7 +1053,7 @@ mod tests {
             }),
         ))
         .unwrap();
-        let (config, base_hash) = snapshot.into_config_parts();
+        let (config, base_hash) = snapshot.into_source_config_parts();
         assert_eq!(config, json!({}));
         let patch = config_patch_request(
             "config-patch-null".into(),

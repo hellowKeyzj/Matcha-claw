@@ -84,6 +84,61 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         })
     );
     assert_eq!(
+        tools["result"]["tools"][1],
+        json!({
+            "name": "team_approval_resolve",
+            "description": "Resolve an existing TeamRun approval receipt.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "runId": { "type": "string", "minLength": 1 },
+                    "approvalId": { "type": "string", "minLength": 1 },
+                    "decision": { "enum": ["approve", "deny", "abort"] },
+                    "note": { "type": ["string", "null"], "minLength": 1 },
+                    "idempotencyKey": { "type": "string", "minLength": 1 }
+                },
+                "required": ["runId", "approvalId", "decision", "idempotencyKey"]
+            }
+        })
+    );
+    assert_eq!(
+        tools["result"]["tools"][2]["inputSchema"]["properties"]["operations"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        tools["result"]["tools"][2]["inputSchema"]["required"],
+        json!([
+            "runId",
+            "commandId",
+            "idempotencyKey",
+            "baseGraphId",
+            "baseWorkflowPlanId",
+            "operations"
+        ])
+    );
+    assert_eq!(
+        tools["result"]["tools"][3],
+        json!({
+            "name": "team_graph_context",
+            "description": "Read a redacted TeamRun graph context.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "teamId": { "type": "string", "minLength": 1 },
+                    "runId": { "type": "string", "minLength": 1 },
+                    "view": { "enum": ["current_node", "graph_summary"] },
+                    "nodeExecutionId": { "type": ["string", "null"], "minLength": 1 }
+                },
+                "required": ["teamId", "runId", "view"]
+            }
+        })
+    );
+    assert_eq!(
         tools["result"]["tools"][4],
         json!({
             "name": "team_run_decision_submit",
@@ -137,10 +192,10 @@ fn records_and_replays_a_standard_team_evidence_reference_call() {
         "nodeExecutionId": "start:attempt:1",
         "referenceKind": "artifact",
         "reference": "artifact:one",
-        "label": "build output"
+        "label": "build-output"
     });
     let input = format!(
-        "{}\\n{}\\n",
+        "{}\n{}\n",
         json!({
             "jsonrpc": "2.0", "id": "recorded", "method": "tools/call",
             "params": {
@@ -161,11 +216,13 @@ fn records_and_replays_a_standard_team_evidence_reference_call() {
 
     assert!(output.status.success());
     let responses = decode_responses(&output.stdout);
+    assert_eq!(responses.len(), 2);
     for (response, outcome) in responses.iter().zip(["recorded", "replayed"]) {
-        let result = serde_json::from_str::<Value>(
-            response["result"]["content"][0]["text"].as_str().unwrap(),
-        )
-        .unwrap();
+        assert_eq!(response["id"], outcome);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing tool result text: {response}"));
+        let result = serde_json::from_str::<Value>(text).unwrap();
         assert_eq!(result, json!({ "outcome": outcome }));
     }
 }

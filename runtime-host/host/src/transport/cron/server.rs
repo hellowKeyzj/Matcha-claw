@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{facade::CronHandle, transport::authorization::CapabilityDecisionVerifier};
+use crate::{facade::CronHandle, transport::common::authorization::CapabilityDecisionVerifier};
 
 use super::{
     CREATE_PATH, CronHistoryQuery, CronRequest, DELETE_PATH, DecodeError, LIST_PATH,
@@ -225,13 +225,11 @@ async fn handle(
     let (status, body) = match request {
         CronRequest::List => {
             debug_cron_transport("owner_request_entered");
-            match cron.list().await {
-                Ok(jobs) => list_body(crate::cron::CronListOutcome::Listed(jobs)),
-                Err(failure) => {
-                    debug_cron_transport("owner_request_failed");
-                    list_body(failure.into())
-                }
+            let outcome = cron.list().await;
+            if !matches!(outcome, crate::cron::CronListOutcome::Listed(_)) {
+                debug_cron_transport("owner_request_failed");
             }
+            list_body(outcome)
         }
         CronRequest::Create(command) => job_body(cron.create(command).await),
         CronRequest::Update(command) => job_body(cron.update(command).await),

@@ -4,12 +4,12 @@ use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use tokio::task::JoinSet;
 
-use crate::{
-    composition::{TeamRunActivityError, TeamRunActivityOutcome},
-    runtime_driver::{ActivityExecutionOutcome, OwnedRuntimeFuture},
-};
+use crate::runtime::driver::{ActivityExecutionOutcome, OwnedRuntimeFuture};
 
-use super::coordinator::TeamRunCoordinatorInput;
+use super::{
+    coordinator::TeamRunCoordinatorInput,
+    team_run::{TeamRunActivityError, TeamRunActivityOutcome},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ActivityReceiptStatus {
@@ -273,7 +273,7 @@ fn watch_matcha_terminal(
 ) -> OwnedRuntimeFuture<Option<TerminalRunStatus>> {
     let Some(driver) = input
         .runtime_directory
-        .lookup(&crate::runtime_driver::RuntimeDriverIdentity::matcha_agent().endpoint())
+        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::matcha_agent().endpoint())
     else {
         return Box::pin(async { None });
     };
@@ -287,6 +287,7 @@ fn watch_matcha_terminal(
 mod tests {
     use tokio::sync::oneshot;
 
+    use super::super::team_run::TeamRunCommandOutcome;
     use super::*;
 
     #[test]
@@ -319,13 +320,13 @@ mod tests {
     fn activity_outcome_maps_to_receipt_status() {
         assert_eq!(
             ActivityReceiptStatus::from_activity_outcome(&TeamRunActivityOutcome::Dispatched(
-                crate::composition::TeamRunCommandOutcome::OutcomeUnknown,
+                TeamRunCommandOutcome::OutcomeUnknown,
             )),
             ActivityReceiptStatus::Delivered
         );
         assert_eq!(
             ActivityReceiptStatus::from_activity_outcome(&TeamRunActivityOutcome::AwaitingRetry(
-                crate::composition::TeamRunCommandOutcome::OutcomeUnknown,
+                TeamRunCommandOutcome::OutcomeUnknown,
             )),
             ActivityReceiptStatus::AwaitingRetry
         );

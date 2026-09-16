@@ -17,7 +17,7 @@ use crate::gateway::{
 use super::{
     event_router::EventRouter,
     events::{SessionEvent, send_lifecycle},
-    projection::{CanonicalIngressResult, CanonicalSessionDeltaProducer},
+    projection::{CanonicalIngressResult, CanonicalRecoveryReason},
     protocol::{
         ChatState, SessionEventEnvelope, SessionEventKind, SessionKey, decode_session_event,
     },
@@ -155,9 +155,9 @@ fn message_content_length(
 /// and the canonical-delta sink.
 pub(crate) struct SessionEventIngest {
     ingress: Arc<Ingress>,
+    recovery: mpsc::Sender<IngressRecovery>,
     next_epoch: AtomicU64,
     route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
-    canonical_events: mpsc::Sender<CanonicalIngressResult>,
 }
 
 impl SessionEventIngest {
@@ -166,18 +166,20 @@ impl SessionEventIngest {
         canonical_events: mpsc::Sender<CanonicalIngressResult>,
     ) -> Self {
         let (ingress, receiver) = Ingress::new(NonZeroUsize::new(INGRESS_CAPACITY).unwrap());
+        let (recovery, recoveries) = mpsc::channel(INGRESS_CAPACITY);
         let route_keys = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(project_ingress(
             receiver,
+            recoveries,
             events,
-            canonical_events.clone(),
+            canonical_events,
             Arc::clone(&route_keys),
         ));
         Self {
             ingress: Arc::new(ingress),
+            recovery,
             next_epoch: AtomicU64::new(0),
             route_keys,
-            canonical_events,
         }
     }
 
@@ -247,37 +249,51 @@ impl SessionEventIngest {
         epoch: Option<GatewayEpoch>,
         error: IngressError,
     ) {
-        let route_key = self
-            .route_keys
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&session_key)
-            .cloned();
-        let recovery =
-            CanonicalSessionDeltaProducer::from_ingress_error(session_key, route_key, epoch, error);
         let _ = self
-            .canonical_events
-            .send(CanonicalIngressResult::Produced(recovery))
+            .recovery
+            .send(IngressRecovery {
+                session_key,
+                epoch,
+                reason: CanonicalRecoveryReason::from_ingress_error(error),
+            })
             .await;
     }
 }
 
+struct IngressRecovery {
+    session_key: SessionKey,
+    epoch: Option<GatewayEpoch>,
+    reason: CanonicalRecoveryReason,
+}
+
 async fn project_ingress(
     mut receiver: mpsc::Receiver<IngressEvent>,
+    mut recoveries: mpsc::Receiver<IngressRecovery>,
     events: mpsc::Sender<SessionEvent>,
     canonical_events: mpsc::Sender<CanonicalIngressResult>,
     route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
 ) {
     let mut router = EventRouter::new(canonical_events);
-    while let Some(ingress_event) = receiver.recv().await {
-        let epoch = ingress_event.epoch();
-        let envelope = ingress_event.event();
-        let _ = send_lifecycle(&events, envelope, epoch);
-        let route_key = route_key_for(envelope, &route_keys);
-        trace_decoded_event("runtime.openclaw.ingress.routed", envelope, epoch);
-        router.route(envelope.clone(), epoch, route_key).await;
-        if should_clear_route_key(envelope) {
-            clear_route_key(envelope, &route_keys);
+    loop {
+        tokio::select! {
+            Some(ingress_event) = receiver.recv() => {
+                let epoch = ingress_event.epoch();
+                let envelope = ingress_event.event();
+                let _ = send_lifecycle(&events, envelope, epoch);
+                let route_key = route_key_for(envelope, &route_keys);
+                trace_decoded_event("runtime.openclaw.ingress.routed", envelope, epoch);
+                router.route(envelope.clone(), epoch, route_key).await;
+                if should_clear_route_key(envelope) {
+                    clear_route_key(envelope, &route_keys);
+                }
+            }
+            Some(recovery) = recoveries.recv() => {
+                let route_key = route_key_for_session(&recovery.session_key, &route_keys);
+                router
+                    .recover(recovery.session_key, recovery.epoch, route_key, recovery.reason)
+                    .await;
+            }
+            else => break,
         }
     }
 }
@@ -286,10 +302,17 @@ fn route_key_for(
     envelope: &SessionEventEnvelope,
     route_keys: &Mutex<HashMap<SessionKey, String>>,
 ) -> Option<String> {
+    route_key_for_session(&envelope.session_key, route_keys)
+}
+
+fn route_key_for_session(
+    session_key: &SessionKey,
+    route_keys: &Mutex<HashMap<SessionKey, String>>,
+) -> Option<String> {
     route_keys
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&envelope.session_key)
+        .get(session_key)
         .cloned()
 }
 

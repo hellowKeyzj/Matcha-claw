@@ -229,6 +229,7 @@ function runtimeHostLayout(applicationRoot, platform, targetKey) {
     platform,
     resourcesPath,
     runtimeHostDirectory,
+    bunPath: join(resourcesPath, 'bin', platform === 'win32' ? 'bun.exe' : 'bun'),
     runtimeHostPath: join(runtimeHostDirectory, platform === 'win32' ? 'runtime-host.exe' : 'runtime-host'),
     runtimeHostMcpPath: join(runtimeHostDirectory, platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'),
     guardianPath: join(runtimeHostDirectory, 'runtime-host-guardian'),
@@ -248,6 +249,7 @@ export function inspectRuntimeHostPackageInventory(plan, dependencies = {}) {
   }
 
   return {
+    bun: 'present',
     runtimeHost: 'present',
     runtimeHostMcp: 'present',
     guardian: plan.platform === 'win32' ? 'not-applicable' : 'present',
@@ -274,6 +276,9 @@ function inspectRuntimeHostLayout(layout, dependencies, label) {
   }
   if (!isFile(layout.runtimeHostMcpPath)) {
     throw packageSmokeError(`missing ${label} runtime-host-mcp artifact: ${layout.runtimeHostMcpPath}`);
+  }
+  if (!isFile(layout.bunPath)) {
+    throw packageSmokeError(`missing ${label} Bun artifact: ${layout.bunPath}`);
   }
   if (layout.platform === 'win32') {
     if (isFile(layout.guardianPath)) {
@@ -318,7 +323,7 @@ export function runRuntimeHostPackageSmoke(plan, dependencies = {}) {
     result.localReceiptPath = writeRuntimeHostLocalPackageExecutionReceipt(plan.localReceiptPath, receipt, dependencies);
   }
 
-  const inventoryDetail = `runtime-host=${inventory.runtimeHost}; runtime-host-mcp=${inventory.runtimeHostMcp}; guardian=${inventory.guardian}; package=${inventory.packageArtifact}; installed=${inventory.installedApplication}`;
+  const inventoryDetail = `bun=${inventory.bun}; runtime-host=${inventory.runtimeHost}; runtime-host-mcp=${inventory.runtimeHostMcp}; guardian=${inventory.guardian}; package=${inventory.packageArtifact}; installed=${inventory.installedApplication}`;
   const report = [
     `cell=${plan.platform}-${plan.arch} × ${plan.target}`,
     `inventory=passed-not-execution (${inventoryDetail})`,
@@ -429,7 +434,7 @@ function sha256InventoryFile(absolutePath, dependencies = {}) {
 }
 
 function runtimeHostInventoryPath(layout, artifactPath) {
-  return join('resources', 'bin', basename(layout.runtimeHostDirectory), basename(artifactPath)).replaceAll('\\', '/');
+  return join('resources', relative(layout.resourcesPath, artifactPath)).replaceAll('\\', '/');
 }
 
 function inventoryEntry(role, displayPath, absolutePath, dependencies) {
@@ -447,6 +452,8 @@ function createRuntimeHostPackageInventoryBinding(plan, dependencies) {
     inventoryEntry('installed-runtime-host', runtimeHostInventoryPath(plan.installed, plan.installed.runtimeHostPath), plan.installed.runtimeHostPath, dependencies),
     inventoryEntry('unpacked-runtime-host-mcp', runtimeHostInventoryPath(plan, plan.runtimeHostMcpPath), plan.runtimeHostMcpPath, dependencies),
     inventoryEntry('installed-runtime-host-mcp', runtimeHostInventoryPath(plan.installed, plan.installed.runtimeHostMcpPath), plan.installed.runtimeHostMcpPath, dependencies),
+    inventoryEntry('unpacked-bun', runtimeHostInventoryPath(plan, plan.bunPath), plan.bunPath, dependencies),
+    inventoryEntry('installed-bun', runtimeHostInventoryPath(plan.installed, plan.installed.bunPath), plan.installed.bunPath, dependencies),
   ];
   if (plan.platform !== 'win32') {
     inventory.push(

@@ -59,8 +59,8 @@ impl FleetHandle {
 
     pub async fn terminal_provider_open(
         &self,
-        context: crate::transport::fleet_terminal::TerminalContext,
-    ) -> Result<crate::transport::fleet_terminal::TerminalProviderOpen, ()> {
+        context: crate::fleet::terminal::TerminalContext,
+    ) -> Result<crate::fleet::terminal::TerminalProviderOpen, ()> {
         let target_id = fleet::TargetId::try_from(context.target.as_str()).map_err(|_| ())?;
         let (reply, reply_rx) = oneshot::channel();
         self.owner
@@ -78,10 +78,7 @@ impl FleetHandle {
         &self,
         summary: fleet::terminal::SessionSummary,
     ) -> Result<
-        Result<
-            Option<crate::transport::fleet_terminal::TerminalContext>,
-            fleet::FleetDeliveryError,
-        >,
+        Result<Option<crate::fleet::terminal::TerminalContext>, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
@@ -99,10 +96,7 @@ impl FleetHandle {
         selector: crate::fleet::owner::FleetTerminalTargetSelector,
         summary: fleet::terminal::SessionSummary,
     ) -> Result<
-        Result<
-            Option<crate::transport::fleet_terminal::TerminalContext>,
-            fleet::FleetDeliveryError,
-        >,
+        Result<Option<crate::fleet::terminal::TerminalContext>, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();

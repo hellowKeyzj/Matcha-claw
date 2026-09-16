@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::connector_secrets::{ConnectorSecretRef, ConnectorSecretValue};
+use crate::connectors::{ConnectorSecretRef, ConnectorSecretValue};
 
 /// The private fact source injected by composition or a native secret adapter.
 ///

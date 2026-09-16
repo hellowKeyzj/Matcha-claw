@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use crate::{composition::HostAdmission, runtime_directory::RuntimeDriverDirectory};
+use crate::{composition::HostAdmission, runtime::directory::RuntimeDriverDirectory};
+
+use super::driver_lookup::RuntimeDrivers;
 
 #[derive(Clone)]
 pub(crate) struct AgentsHandle {
     admission: Arc<HostAdmission>,
-    runtime_directory: Arc<RuntimeDriverDirectory>,
+    runtimes: RuntimeDrivers,
     sealed_store: Arc<crate::sealed_resource::SealedAgentStore>,
     sealed_runtime_token: Option<Arc<str>>,
 }
@@ -19,7 +21,7 @@ impl AgentsHandle {
     ) -> Self {
         Self {
             admission,
-            runtime_directory,
+            runtimes: RuntimeDrivers::new(runtime_directory),
             sealed_store,
             sealed_runtime_token,
         }
@@ -61,10 +63,10 @@ impl AgentsHandle {
             }
             command => {
                 let endpoint = command.endpoint().runtime_endpoint();
-                let Some(driver) = self.runtime_directory.lookup(&endpoint) else {
+                let Some(driver) = self.runtimes.driver(&endpoint) else {
                     return Ok(crate::agents::Outcome::Unsupported);
                 };
-                if !driver.lifecycle_ops().is_some_and(|ops| ops.readiness()) {
+                if !RuntimeDrivers::is_ready(driver.as_ref()) {
                     return Ok(crate::agents::Outcome::Unavailable);
                 }
                 let outcome = match driver.subagent_ops() {
@@ -104,14 +106,19 @@ impl AgentsHandle {
         else {
             return outcome;
         };
+        let agent_keys = agents
+            .iter()
+            .filter_map(|agent| crate::sealed_resource::AgentKey::parse(agent.id.clone()).ok())
+            .collect::<Vec<_>>();
+        let sealed_agents = self
+            .sealed_store
+            .contains_agents(&agent_keys)
+            .unwrap_or_default();
         for agent in &mut agents {
             let Ok(agent_key) = crate::sealed_resource::AgentKey::parse(agent.id.clone()) else {
                 continue;
             };
-            agent.sealed = self
-                .sealed_store
-                .contains_agent(&agent_key)
-                .unwrap_or(false);
+            agent.sealed = sealed_agents.contains(&agent_key);
         }
         crate::agents::Outcome::Agents {
             default_id,

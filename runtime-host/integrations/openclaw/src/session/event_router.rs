@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::gateway::ingress::GatewayEpoch;
 
 use super::{
-    projection::CanonicalIngressResult,
+    projection::{CanonicalIngressResult, CanonicalRecoveryReason},
     protocol::{SessionEventEnvelope, SessionKey},
     reducer::SessionReducerActor,
 };
@@ -41,6 +41,21 @@ impl EventRouter {
         if let Some(result) = result {
             let _ = self.canonical_events.send(result).await;
         }
+    }
+
+    pub(crate) async fn recover(
+        &mut self,
+        session_key: SessionKey,
+        epoch: Option<GatewayEpoch>,
+        route_key: Option<String>,
+        reason: CanonicalRecoveryReason,
+    ) {
+        let result = self
+            .actors
+            .entry(session_key.clone())
+            .or_insert_with(|| SessionReducerActor::new(session_key))
+            .recover(epoch, route_key, reason);
+        let _ = self.canonical_events.send(result).await;
     }
 }
 

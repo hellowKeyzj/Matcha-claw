@@ -1,8 +1,13 @@
 use foundation::execution::OwnerRuntimeHandle;
-use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::{HostState, RuntimeState, composition::OpenClawLogSnapshot, peer_directory};
+use crate::{
+    HostState, RuntimeState,
+    composition::{
+        OpenClawBrowserGatewayRequest, OpenClawGatewayPayload, OpenClawLogSnapshot,
+        OpenClawMcpAppGatewayRequest,
+    },
+};
 
 use super::{
     PeerCommand, PeerQuery, RestartMatchaError, RestartOpenClawError, StartMatchaError,
@@ -23,9 +28,11 @@ impl PeerHandle {
         self.request_query(|reply| PeerQuery::State { reply }).await
     }
 
-    pub(crate) async fn runtime_endpoint_directory(&self) -> Result<peer_directory::Directory, ()> {
+    pub(crate) async fn runtime_endpoint_directory(
+        &self,
+    ) -> Result<crate::runtime::peers::Directory, ()> {
         let state = self.state().await?;
-        Ok(peer_directory::Directory::from_host_state(&state))
+        Ok(crate::runtime::peers::Directory::from_host_state(&state))
     }
 
     pub(crate) async fn request_peer_autostart(
@@ -163,28 +170,25 @@ impl PeerHandle {
             .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
-    pub(crate) async fn open_claw_browser_request(
+    pub(crate) async fn open_claw_browser_request<Q, B>(
         &self,
         method: String,
         path: String,
-        query: Option<Value>,
-        body: Option<Value>,
+        query: Option<Q>,
+        body: Option<B>,
         timeout_ms: Option<u64>,
         target: Option<String>,
         node: Option<String>,
-    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawBrowserRequest {
-            method,
-            path,
-            query,
-            body,
-            timeout_ms,
-            target,
-            node,
-            reply,
-        })
-        .await
-        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>
+    where
+        Q: Into<OpenClawGatewayPayload>,
+        B: Into<OpenClawGatewayPayload>,
+    {
+        let request =
+            OpenClawBrowserGatewayRequest::new(method, path, query, body, timeout_ms, target, node);
+        self.request_query(|reply| PeerQuery::OpenClawBrowserRequest { request, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     pub(crate) async fn open_claw_mcp_app_request(
@@ -194,15 +198,11 @@ impl PeerHandle {
         view_id: String,
         standalone: Option<bool>,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest {
-            operation_id,
-            session_key,
-            view_id,
-            standalone,
-            reply,
-        })
-        .await
-        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+        let request =
+            OpenClawMcpAppGatewayRequest::new(operation_id, session_key, view_id, standalone);
+        self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest { request, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     async fn request_command<T>(

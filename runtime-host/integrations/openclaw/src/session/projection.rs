@@ -532,20 +532,6 @@ impl CanonicalSessionDeltaProducer {
         Self::from_native_event(facts.event(), cursor.gateway_epoch(), route_key)
     }
 
-    pub(crate) fn from_ingress_error(
-        session_key: SessionKey,
-        route_key: Option<String>,
-        source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
-        error: crate::gateway::ingress::IngressError,
-    ) -> CanonicalSessionDelta {
-        Self::recovery(
-            session_key,
-            route_key,
-            source_epoch,
-            CanonicalRecoveryReason::from_ingress_error(error),
-        )
-    }
-
     pub(crate) fn from_native_changes(
         event: &SessionEventEnvelope,
         source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
@@ -1757,7 +1743,7 @@ mod tests {
 
     #[test]
     fn ingress_faults_become_source_backed_recovery_deltas() {
-        for (error, reason) in [
+        for (error, expected_reason) in [
             (
                 crate::gateway::ingress::IngressError::EpochNotActive,
                 CanonicalRecoveryReason::EpochChanged,
@@ -1779,18 +1765,20 @@ mod tests {
                 CanonicalRecoveryReason::NativeUnavailable,
             ),
         ] {
-            let recovery = CanonicalSessionDeltaProducer::from_ingress_error(
+            let reason = CanonicalRecoveryReason::from_ingress_error(error);
+            assert_eq!(reason, expected_reason);
+            let recovery = CanonicalSessionDeltaProducer::recovery(
                 SessionKey::try_new("agent:main:session-1").unwrap(),
                 Some("route".into()),
                 Some(GatewayEpoch::try_new(9).unwrap()),
-                error,
+                reason,
             );
             assert_eq!(recovery.source_epoch(), Some(9));
             assert_eq!(recovery.source_cursor(), None);
             assert_eq!(recovery.run_id(), None);
             assert!(matches!(
                 recovery.changes(),
-                [CanonicalSessionChange::RecoveryRequired { reason: actual }] if *actual == reason
+                [CanonicalSessionChange::RecoveryRequired { reason }] if reason == &expected_reason
             ));
         }
     }

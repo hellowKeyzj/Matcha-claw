@@ -193,12 +193,7 @@ function projectPublicResponse(operation: ExternalConnectorOperation, body: unkn
       statuses: (body.statuses as unknown[]).map(projectSessionStatus),
     };
   }
-  if ((operation !== 'externalConnectors.upsert' && operation !== 'externalConnectors.remove') || !isRecord(body)) {
-    return body;
-  }
-  const desired = body.desired;
-  if (!isRecord(desired) || desired.status === undefined) return body;
-  return { ...body, desired: { status: desired.status } };
+  return body;
 }
 
 function isConnectorDraft(value: unknown): boolean {
@@ -233,8 +228,9 @@ function isConnectorDraft(value: unknown): boolean {
 function isPublicConnector(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
-    'mcpServerProgram', 'tags', 'url', 'transport', 'connectionTimeoutMs', 'baseUrl',
-    'provider', 'packageName', 'secretEnv', 'secretHeaders', 'secretConfigRefs',
+    'mcpServerProgram', 'tags', 'command', 'args', 'cwd', 'env', 'url', 'transport',
+    'headers', 'connectionTimeoutMs', 'baseUrl', 'provider', 'packageName', 'config',
+    'secretEnv', 'secretHeaders', 'secretConfigRefs',
   ]) || !isConnectorId(value.id) || !isConnectorKind(value.kind)) return false;
   return optionalText(value.displayName)
     && optionalText(value.description)
@@ -244,17 +240,24 @@ function isPublicConnector(value: unknown): boolean {
     && optionalMcpProgram(value.mcpServerProgram)
     && optionalStringArray(value.tags)
     && optionalSecretReferences(value, value.kind)
+    && optionalText(value.command)
+    && optionalStringArray(value.args)
+    && optionalText(value.cwd)
+    && optionalStringMap(value.env)
     && optionalText(value.url)
     && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse')
+    && optionalStringMap(value.headers)
     && optionalPositive(value.connectionTimeoutMs)
     && optionalText(value.baseUrl)
     && optionalText(value.provider)
-    && optionalText(value.packageName);
+    && optionalText(value.packageName)
+    && optionalRecord(value.config);
 }
 
 function isProgram(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    'id', 'source', 'displayName', 'connectorKinds', 'transport',
+    'id', 'source', 'displayName', 'connectorKinds', 'transport', 'command', 'args', 'url',
+    'rootPath', 'envKeys', 'headerKeys',
   ])) return false;
   return isNonemptyText(value.id)
     && isProgramSource(value.source)
@@ -262,7 +265,13 @@ function isProgram(value: unknown): boolean {
     && Array.isArray(value.connectorKinds)
     && value.connectorKinds.length > 0
     && value.connectorKinds.every((kind) => kind === 'mcp-stdio' || kind === 'mcp-http')
-    && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse');
+    && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse')
+    && optionalText(value.command)
+    && optionalStringArray(value.args)
+    && optionalText(value.url)
+    && optionalText(value.rootPath)
+    && optionalStringArray(value.envKeys)
+    && optionalStringArray(value.headerKeys);
 }
 
 function isStatus(value: unknown): boolean {

@@ -1,32 +1,34 @@
 use std::{path::PathBuf, sync::Arc};
 
-use environment::{Connector, ConnectorKind, ConnectorStore, ConnectorStoreError};
+use environment::{
+    ConnectorStore, ConnectorStoreError,
+    connectors::{Connector, ConnectorCatalog, McpProgramSource, McpServerProgram},
+};
 use foundation::execution::{LaneRetention, OwnerSpec};
 use openclaw::{
-    gateway::wire::McpServerStatusList,
     lifecycle::state_dir::CanonicalStateDir,
     projection::connector::{
-        catalog::discover_external_mcp_programs,
-        config::{OpenClawMcpServerConfig, OpenClawMcpServerKind},
-        external::{
-            ConnectorProjectionEffect, connector_id_for_managed_external_server,
-            managed_external_server_id,
-        },
-        preset::{PRESET_TEAM_RUN_MCP_SERVER_ID, PresetMcpProjection},
+        external::{ConnectorObservation, ConnectorProjectionEffect},
+        preset::PresetMcpProjection,
     },
 };
 
-use super::command::{ConnectorCommand, ConnectorOwnerKey, ConnectorQuery};
-use crate::{
-    external_connectors::{
-        CatalogOutcome, GetOutcome, ListOutcome, MutationOutcome, OpenClawMcpServerSource,
-        OpenClawMcpServerSummary, OpenClawMcpServersOutcome, ProbeOutcome,
-        SessionConnectorResultType, SessionConnectorStatus, SessionConnectorStatusDetails,
-        SessionEndpoint, SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget,
-        SessionStatusOutcome, SessionStatusTarget, StatusOutcome,
+use super::{
+    bootstrap,
+    command::{ConnectorCommand, ConnectorOwnerKey, ConnectorQuery},
+    projection,
+    receipt::{
+        ConnectorCatalogProgram, ConnectorCatalogReceipt, ConnectorGetReceipt,
+        ConnectorListReceipt, ConnectorMutationReceipt, ConnectorObservationReceipt,
+        ConnectorProbeReceipt, ConnectorProjectionReceipt, ConnectorRecord,
+        ConnectorSessionEndpoint, ConnectorSessionMcpServerEnabledReceipt,
+        ConnectorSessionMcpServerEnabledTarget, ConnectorSessionStatusReceipt,
+        ConnectorSessionTarget, ConnectorStatusReceipt, OpenClawMcpServersReceipt,
+        RuntimeMcpServerSource, RuntimeMcpServerSummary,
     },
-    runtime_directory::RuntimeDriverDirectory,
+    store_open,
 };
+use crate::runtime::directory::RuntimeDriverDirectory;
 
 pub(crate) struct ConnectorOwnerInput {
     pub(crate) state_dir: CanonicalStateDir,
@@ -44,7 +46,7 @@ pub(crate) struct ConnectorShared {
 
 pub(crate) struct ConnectorGlobalState {
     store: ConnectorStore,
-    private_resolver: crate::transport::provider_accounts::private_auth::Resolver,
+    private_resolver: crate::provider::auth::Resolver,
 }
 
 pub(crate) struct ConnectorLaneState;
@@ -56,14 +58,7 @@ pub(crate) struct ConnectorOwner {
 
 impl ConnectorOwner {
     pub(crate) fn new(input: ConnectorOwnerInput) -> Result<Self, ()> {
-        let store = ConnectorStore::open(
-            input
-                .state_dir
-                .as_path()
-                .join("external-connectors")
-                .join("connectors.json"),
-        )
-        .map_err(|_| ())?;
+        let store = store_open::open(&input.state_dir).map_err(|_| ())?;
 
         Ok(Self {
             shared: ConnectorShared {
@@ -73,8 +68,7 @@ impl ConnectorOwner {
             },
             global: ConnectorGlobalState {
                 store,
-                private_resolver:
-                    crate::transport::provider_accounts::private_auth::Resolver::disabled(),
+                private_resolver: crate::provider::auth::Resolver::disabled(),
             },
         })
     }
@@ -132,7 +126,7 @@ impl OwnerSpec for ConnectorOwner {
             }
             ConnectorCommand::ConfigurePrivateResolver { resolver, reply } => {
                 global.private_resolver = resolver;
-                let _ = apply_connector_projection(&shared, global).await;
+                let _ = reconcile_connector_projection(&shared, global).await;
                 let _ = reply.send(());
             }
             ConnectorCommand::SetSessionMcpServerEnabled { target, reply } => {
@@ -176,28 +170,29 @@ async fn handle_connector_query(
 ) {
     match query {
         ConnectorQuery::List { reply } => {
-            let _ = reply.send(ListOutcome::Available(connectors(global)));
+            let connectors = bootstrap::connector_list(&catalog(global))
+                .into_iter()
+                .map(ConnectorRecord::from_domain)
+                .collect();
+            let _ = reply.send(ConnectorListReceipt::Available(connectors));
         }
         ConnectorQuery::Catalog { reply } => {
-            let programs = discover_external_mcp_programs(&catalog(global));
-            let _ = reply.send(CatalogOutcome::Available(programs));
+            let programs = catalog_programs(&catalog(global));
+            let _ = reply.send(ConnectorCatalogReceipt::Available(programs));
         }
         ConnectorQuery::Status { reply } => {
-            let connectors = connectors(global)
-                .into_iter()
-                .filter(|connector| !is_private_system_runtime_connector(connector))
-                .collect::<Vec<_>>();
-            let outcome = status(&shared, connectors).await;
+            let outcome = status(&shared, bootstrap::user_connectors(&catalog(global))).await;
             let _ = reply.send(outcome);
         }
         ConnectorQuery::Get { id, reply } => {
-            let outcome = get(global, &id)
-                .map(|connector| GetOutcome::Found(Box::new(connector)))
-                .unwrap_or(GetOutcome::Missing);
+            let outcome = bootstrap::connector(&catalog(global), &id)
+                .map(ConnectorRecord::from_domain)
+                .map(|connector| ConnectorGetReceipt::Found(Box::new(connector)))
+                .unwrap_or(ConnectorGetReceipt::Missing);
             let _ = reply.send(outcome);
         }
         ConnectorQuery::Probe { id, reply } => {
-            let connector = get(global, &id);
+            let connector = bootstrap::connector(&catalog(global), &id);
             let outcome = probe(&shared, connector).await;
             let _ = reply.send(outcome);
         }
@@ -212,38 +207,17 @@ async fn handle_connector_query(
     }
 }
 
-fn catalog(global: &ConnectorGlobalState) -> environment::ConnectorCatalog {
+fn catalog(global: &ConnectorGlobalState) -> ConnectorCatalog {
     global.store.catalog().clone()
-}
-
-fn connectors(global: &ConnectorGlobalState) -> Vec<Connector> {
-    let mut connectors = catalog(global)
-        .connectors()
-        .iter()
-        .filter(|connector| connector.id != "matcha")
-        .cloned()
-        .collect::<Vec<_>>();
-    connectors.push(Connector::system_runtime());
-    connectors.sort_by(|left, right| left.id.cmp(&right.id));
-    connectors
-}
-
-fn get(global: &ConnectorGlobalState, id: &str) -> Option<Connector> {
-    if id == "matcha" {
-        return Some(Connector::system_runtime());
-    }
-    connectors(global)
-        .into_iter()
-        .find(|connector| connector.id == id)
 }
 
 async fn upsert(
     shared: &ConnectorShared,
     global: &mut ConnectorGlobalState,
     connector: Connector,
-) -> MutationOutcome {
-    if is_private_system_runtime_connector(&connector) {
-        return MutationOutcome::Rejected;
+) -> ConnectorMutationReceipt {
+    if bootstrap::is_system_runtime_connector(&connector) {
+        return ConnectorMutationReceipt::Rejected;
     }
 
     let mutation = match global.store.upsert(connector.clone()) {
@@ -251,29 +225,29 @@ async fn upsert(
         Err(error) => return mutation_error(error),
     };
 
-    let configuration = apply_connector_projection(shared, global).await;
+    let configuration = reconcile_connector_projection(shared, global).await;
 
     if matches!(configuration, ConnectorProjectionEffect::Written { .. }) {
         match global
             .store
-            .record_applied(&connector.id, mutation.revision)
+            .record_applied(connector.id(), mutation.revision)
         {
             Ok(()) => {}
             Err(
                 ConnectorStoreError::CommitOutcomeUnknown(_)
                 | ConnectorStoreError::RecoveryRequired,
             ) => {
-                return MutationOutcome::Unknown;
+                return ConnectorMutationReceipt::Unknown;
             }
-            Err(_) => return MutationOutcome::Unavailable,
+            Err(_) => return ConnectorMutationReceipt::Unavailable,
         }
     }
 
-    MutationOutcome::Stored {
-        connector: Box::new(connector),
+    ConnectorMutationReceipt::Stored {
+        connector: Box::new(ConnectorRecord::from_domain(connector)),
         created: mutation.created,
         revision: mutation.revision,
-        configuration,
+        configuration: map_projection_effect(configuration),
     }
 }
 
@@ -281,11 +255,11 @@ async fn remove(
     shared: &ConnectorShared,
     global: &mut ConnectorGlobalState,
     id: &str,
-) -> MutationOutcome {
+) -> ConnectorMutationReceipt {
     match global.store.remove(id) {
-        Ok(None) => MutationOutcome::Missing,
+        Ok(None) => ConnectorMutationReceipt::Missing,
         Ok(Some(revision)) => {
-            let configuration = apply_connector_projection(shared, global).await;
+            let configuration = reconcile_connector_projection(shared, global).await;
 
             if matches!(configuration, ConnectorProjectionEffect::Written { .. }) {
                 match global.store.record_applied(id, revision) {
@@ -294,19 +268,26 @@ async fn remove(
                         ConnectorStoreError::CommitOutcomeUnknown(_)
                         | ConnectorStoreError::RecoveryRequired,
                     ) => {
-                        return MutationOutcome::Unknown;
+                        return ConnectorMutationReceipt::Unknown;
                     }
-                    Err(_) => return MutationOutcome::Unavailable,
+                    Err(_) => return ConnectorMutationReceipt::Unavailable,
                 }
             }
 
-            MutationOutcome::Removed {
+            ConnectorMutationReceipt::Removed {
                 revision,
-                configuration,
+                configuration: map_projection_effect(configuration),
             }
         }
         Err(error) => mutation_error(error),
     }
+}
+
+async fn reconcile_connector_projection(
+    shared: &ConnectorShared,
+    global: &ConnectorGlobalState,
+) -> ConnectorProjectionEffect {
+    apply_connector_projection(shared, global).await
 }
 
 async fn apply_connector_projection(
@@ -333,211 +314,113 @@ async fn apply_connector_projection(
 async fn set_session_mcp_server_enabled(
     shared: &ConnectorShared,
     global: &ConnectorGlobalState,
-    target: SessionMcpServerEnabledTarget,
-) -> SessionMcpServerEnabledOutcome {
+    target: ConnectorSessionMcpServerEnabledTarget,
+) -> ConnectorSessionMcpServerEnabledReceipt {
     if !runtime_mcp_servers(global).into_iter().any(|server| {
-        server.source == OpenClawMcpServerSource::External && server.server_id == target.server_id
+        server.source == RuntimeMcpServerSource::External && server.server_id == target.server_id
     }) {
-        return SessionMcpServerEnabledOutcome::Unavailable;
+        return ConnectorSessionMcpServerEnabledReceipt::Unavailable;
     }
-    let SessionEndpoint::Native {
+    let ConnectorSessionEndpoint::Native {
         runtime_adapter_id,
         runtime_instance_id,
-    } = &target.session_identity.endpoint
+    } = &target.session.endpoint
     else {
-        return SessionMcpServerEnabledOutcome::Unavailable;
+        return ConnectorSessionMcpServerEnabledReceipt::Unavailable;
     };
     let Ok(endpoint) = platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
         runtime_adapter_id.clone(),
         runtime_instance_id.clone(),
     ) else {
-        return SessionMcpServerEnabledOutcome::Unavailable;
+        return ConnectorSessionMcpServerEnabledReceipt::Unavailable;
     };
     let Some(driver) = shared.runtime_directory.lookup(&endpoint) else {
-        return SessionMcpServerEnabledOutcome::Unavailable;
+        return ConnectorSessionMcpServerEnabledReceipt::Unavailable;
     };
     let Some(ops) = driver.connector_ops() else {
-        return SessionMcpServerEnabledOutcome::Unavailable;
+        return ConnectorSessionMcpServerEnabledReceipt::Unavailable;
     };
     match ops
         .set_mcp_session_server_enabled(
-            target.session_identity.session_key,
+            target.session.session_key,
             target.server_id,
             target.enabled,
         )
         .await
     {
-        Ok(()) => SessionMcpServerEnabledOutcome::Applied,
-        Err(_) => SessionMcpServerEnabledOutcome::Unavailable,
+        Ok(()) => ConnectorSessionMcpServerEnabledReceipt::Applied,
+        Err(_) => ConnectorSessionMcpServerEnabledReceipt::Unavailable,
     }
 }
 
 async fn openclaw_mcp_servers(
     shared: &ConnectorShared,
     global: &ConnectorGlobalState,
-) -> OpenClawMcpServersOutcome {
+) -> OpenClawMcpServersReceipt {
     let Some(driver) = shared.runtime_directory.connector_driver() else {
-        return OpenClawMcpServersOutcome::Unavailable;
+        return OpenClawMcpServersReceipt::Unavailable;
     };
     let Some(ops) = driver.connector_ops() else {
-        return OpenClawMcpServersOutcome::Unavailable;
+        return OpenClawMcpServersReceipt::Unavailable;
     };
     let Ok(servers) = ops.list_mcp_servers().await else {
-        return OpenClawMcpServersOutcome::Unavailable;
+        return OpenClawMcpServersReceipt::Unavailable;
     };
-    OpenClawMcpServersOutcome::Available(project_openclaw_mcp_servers(servers, &catalog(global)))
+    OpenClawMcpServersReceipt::Available(projection::openclaw_mcp_servers(
+        servers,
+        &catalog(global),
+    ))
 }
 
-fn project_openclaw_mcp_servers(
-    servers: Vec<OpenClawMcpServerConfig>,
-    catalog: &environment::ConnectorCatalog,
-) -> Vec<OpenClawMcpServerSummary> {
-    servers
-        .into_iter()
-        .map(|server| project_openclaw_mcp_server(server, catalog))
-        .collect()
+fn runtime_mcp_servers(global: &ConnectorGlobalState) -> Vec<RuntimeMcpServerSummary> {
+    projection::runtime_mcp_servers(&catalog(global))
 }
 
-fn runtime_mcp_servers(global: &ConnectorGlobalState) -> Vec<OpenClawMcpServerSummary> {
-    let mut servers = vec![OpenClawMcpServerSummary {
-        server_id: PRESET_TEAM_RUN_MCP_SERVER_ID.into(),
-        connector_id: None,
-        display_name: "Matcha TeamRun MCP".into(),
-        description: None,
-        kind: OpenClawMcpServerKind::McpStdio,
-        source: OpenClawMcpServerSource::Preset,
-        enabled: true,
-        managed: true,
-        editable: false,
-        removable: false,
-    }];
-    servers.extend(catalog(global).connectors().iter().filter_map(|connector| {
-        let kind = match connector.kind {
-            ConnectorKind::McpStdio => OpenClawMcpServerKind::McpStdio,
-            ConnectorKind::McpHttp => OpenClawMcpServerKind::McpHttp,
-            ConnectorKind::Cli | ConnectorKind::Sdk | ConnectorKind::Http => return None,
-        };
-        Some(OpenClawMcpServerSummary {
-            server_id: managed_external_server_id(&connector.id),
-            connector_id: Some(connector.id.clone()),
-            display_name: connector
-                .display_name
-                .clone()
-                .unwrap_or_else(|| connector.id.clone()),
-            description: connector.description.clone(),
-            kind,
-            source: OpenClawMcpServerSource::External,
-            enabled: connector.enabled(),
-            managed: true,
-            editable: true,
-            removable: true,
-        })
-    }));
-    servers.sort_by(|left, right| left.server_id.cmp(&right.server_id));
-    servers
-}
-
-fn project_openclaw_mcp_server(
-    server: OpenClawMcpServerConfig,
-    catalog: &environment::ConnectorCatalog,
-) -> OpenClawMcpServerSummary {
-    if server.server_id == PRESET_TEAM_RUN_MCP_SERVER_ID {
-        return OpenClawMcpServerSummary {
-            server_id: server.server_id,
-            connector_id: None,
-            display_name: "Matcha TeamRun MCP".into(),
-            description: None,
-            kind: server.kind,
-            source: OpenClawMcpServerSource::Preset,
-            enabled: server.enabled,
-            managed: true,
-            editable: false,
-            removable: false,
-        };
-    }
-
-    if let Some(connector_id) = connector_id_for_managed_external_server(&server.server_id) {
-        let connector_id = connector_id.to_owned();
-        let connector = catalog
-            .connectors()
-            .iter()
-            .find(|connector| connector.id == connector_id);
-        return OpenClawMcpServerSummary {
-            server_id: server.server_id,
-            connector_id: Some(connector_id.clone()),
-            display_name: connector
-                .and_then(|connector| connector.display_name.clone())
-                .unwrap_or_else(|| connector_id.clone()),
-            description: connector.and_then(|connector| connector.description.clone()),
-            kind: server.kind,
-            source: OpenClawMcpServerSource::External,
-            enabled: server.enabled,
-            managed: true,
-            editable: true,
-            removable: true,
-        };
-    }
-
-    OpenClawMcpServerSummary {
-        display_name: server.server_id.clone(),
-        server_id: server.server_id,
-        connector_id: None,
-        description: None,
-        kind: server.kind,
-        source: OpenClawMcpServerSource::Openclaw,
-        enabled: server.enabled,
-        managed: false,
-        editable: false,
-        removable: false,
-    }
-}
-
-async fn status(shared: &ConnectorShared, connectors: Vec<Connector>) -> StatusOutcome {
+async fn status(shared: &ConnectorShared, connectors: Vec<Connector>) -> ConnectorStatusReceipt {
     let Some(driver) = shared.runtime_directory.connector_driver() else {
-        return StatusOutcome::Unavailable;
+        return ConnectorStatusReceipt::Unavailable;
     };
     let Some(ops) = driver.connector_ops() else {
-        return StatusOutcome::Unavailable;
+        return ConnectorStatusReceipt::Unavailable;
     };
     let statuses = futures_util::future::join_all(connectors.into_iter().map(|connector| {
-        let id = connector.id.clone();
-        async move { (id, ops.probe_external_connector(connector).await) }
+        let id = connector.id().to_owned();
+        async move {
+            (
+                id,
+                map_observation(ops.probe_external_connector(connector).await),
+            )
+        }
     }))
     .await;
-    StatusOutcome::Available(statuses)
+    ConnectorStatusReceipt::Available(statuses)
 }
 
-async fn probe(shared: &ConnectorShared, connector: Option<Connector>) -> ProbeOutcome {
+async fn probe(shared: &ConnectorShared, connector: Option<Connector>) -> ConnectorProbeReceipt {
     let Some(connector) = connector else {
-        return ProbeOutcome::Missing;
+        return ConnectorProbeReceipt::Missing;
     };
-    if is_private_system_runtime_connector(&connector) {
-        return ProbeOutcome::Missing;
+    if bootstrap::is_system_runtime_connector(&connector) {
+        return ConnectorProbeReceipt::Missing;
     }
     let Some(driver) = shared.runtime_directory.connector_driver() else {
-        return ProbeOutcome::Unavailable;
+        return ConnectorProbeReceipt::Unavailable;
     };
     let Some(ops) = driver.connector_ops() else {
-        return ProbeOutcome::Unavailable;
+        return ConnectorProbeReceipt::Unavailable;
     };
-    ProbeOutcome::Observed(ops.probe_external_connector(connector).await)
+    ConnectorProbeReceipt::Observed(map_observation(
+        ops.probe_external_connector(connector).await,
+    ))
 }
 
 async fn session_connector_status(
     shared: &ConnectorShared,
     global: &ConnectorGlobalState,
-    target: SessionStatusTarget,
-) -> SessionStatusOutcome {
-    if !target.is_valid() {
-        return SessionStatusOutcome::Unavailable;
-    }
-    let SessionStatusTarget {
-        session_identity: identity,
-        ..
-    } = target;
-
-    let target_endpoint = match &identity.endpoint {
-        SessionEndpoint::Native {
+    target: ConnectorSessionTarget,
+) -> ConnectorSessionStatusReceipt {
+    let target_endpoint = match &target.endpoint {
+        ConnectorSessionEndpoint::Native {
             runtime_adapter_id,
             runtime_instance_id,
         } => platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
@@ -545,16 +428,16 @@ async fn session_connector_status(
             runtime_instance_id,
         )
         .ok(),
-        SessionEndpoint::ProtocolConnector { .. } => None,
+        ConnectorSessionEndpoint::ProtocolConnector => None,
     };
 
     let Some(endpoint) = target_endpoint else {
-        return SessionStatusOutcome::Available(Vec::new());
+        return ConnectorSessionStatusReceipt::Available(Vec::new());
     };
 
     let driver = shared.runtime_directory.lookup(&endpoint);
     let Some(driver) = driver.filter(|driver| driver.connector_ops().is_some()) else {
-        return SessionStatusOutcome::Available(Vec::new());
+        return ConnectorSessionStatusReceipt::Available(Vec::new());
     };
     let ops = driver
         .connector_ops()
@@ -562,29 +445,131 @@ async fn session_connector_status(
 
     let servers = runtime_mcp_servers(global);
     let statuses = ops
-        .observe_mcp_server_status(identity.session_key.clone())
+        .observe_mcp_server_status(target.session_key.clone())
         .await;
 
     match statuses {
-        Ok(statuses) => SessionStatusOutcome::Available(
+        Ok(statuses) => ConnectorSessionStatusReceipt::Available(
             servers
                 .into_iter()
-                .map(|server| mcp_server_session_status(server, Some(&statuses)))
+                .map(|server| projection::session_status(server, Some(&statuses)))
                 .collect(),
         ),
-        Err(_) => SessionStatusOutcome::Available(
+        Err(_) => ConnectorSessionStatusReceipt::Available(
             servers
                 .into_iter()
-                .map(|server| mcp_server_session_status(server, None))
+                .map(|server| projection::session_status(server, None))
                 .collect(),
         ),
     }
 }
 
-fn mutation_error(error: ConnectorStoreError) -> MutationOutcome {
+fn catalog_programs(catalog: &ConnectorCatalog) -> Vec<ConnectorCatalogProgram> {
+    let mut programs = catalog
+        .connectors()
+        .iter()
+        .filter_map(|connector| match connector.kind() {
+            environment::connectors::ConnectorKind::McpStdio => Some(ConnectorCatalogProgram {
+                id: program_id(connector),
+                source: program_source(connector),
+                display_name: display_name(connector),
+                connector_kinds: vec![crate::runtime::external_connectors::ConnectorKind::McpStdio],
+                transport: None,
+                command: connector.command().map(str::to_owned),
+                args: connector.args().map(<[_]>::to_vec),
+                url: None,
+                root_path: connector.cwd().map(str::to_owned),
+                env_keys: string_map_keys(connector.env()),
+                header_keys: None,
+            }),
+            environment::connectors::ConnectorKind::McpHttp => Some(ConnectorCatalogProgram {
+                id: program_id(connector),
+                source: program_source(connector),
+                display_name: display_name(connector),
+                connector_kinds: vec![crate::runtime::external_connectors::ConnectorKind::McpHttp],
+                transport: connector.transport().map(map_mcp_transport),
+                command: None,
+                args: None,
+                url: connector.url().map(str::to_owned),
+                root_path: None,
+                env_keys: None,
+                header_keys: string_map_keys(connector.headers()),
+            }),
+            environment::connectors::ConnectorKind::Cli
+            | environment::connectors::ConnectorKind::Sdk
+            | environment::connectors::ConnectorKind::Http => None,
+        })
+        .collect::<Vec<_>>();
+    programs.sort_by(|left, right| left.id.cmp(&right.id));
+    programs.dedup_by(|left, right| left.id == right.id);
+    programs
+}
+
+fn program_id(connector: &Connector) -> String {
+    connector
+        .mcp_server_program()
+        .and_then(|program| program.program_id().map(str::to_owned))
+        .unwrap_or_else(|| format!("managed-local:{}", connector.id()))
+}
+
+fn program_source(connector: &Connector) -> McpProgramSource {
+    connector
+        .mcp_server_program()
+        .map(McpServerProgram::source)
+        .unwrap_or(McpProgramSource::ManagedLocal)
+}
+
+fn display_name(connector: &Connector) -> String {
+    connector
+        .display_name()
+        .map(str::to_owned)
+        .unwrap_or_else(|| connector.id().to_owned())
+}
+
+fn string_map_keys(
+    map: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<Vec<String>> {
+    let keys = map.map(|map| map.keys().cloned().collect::<Vec<_>>())?;
+    (!keys.is_empty()).then_some(keys)
+}
+
+fn map_mcp_transport(
+    transport: environment::connectors::McpTransport,
+) -> crate::runtime::external_connectors::McpTransport {
+    match transport {
+        environment::connectors::McpTransport::StreamableHttp => {
+            crate::runtime::external_connectors::McpTransport::StreamableHttp
+        }
+        environment::connectors::McpTransport::Sse => {
+            crate::runtime::external_connectors::McpTransport::Sse
+        }
+    }
+}
+
+fn map_projection_effect(effect: ConnectorProjectionEffect) -> ConnectorProjectionReceipt {
+    match effect {
+        ConnectorProjectionEffect::Written { changed } => {
+            ConnectorProjectionReceipt::Written { changed }
+        }
+        ConnectorProjectionEffect::Unknown => ConnectorProjectionReceipt::Unknown,
+        ConnectorProjectionEffect::Unavailable => ConnectorProjectionReceipt::Unavailable,
+    }
+}
+
+fn map_observation(observation: ConnectorObservation) -> ConnectorObservationReceipt {
+    match observation {
+        ConnectorObservation::Connected => ConnectorObservationReceipt::Connected,
+        ConnectorObservation::Disconnected => ConnectorObservationReceipt::Disconnected,
+        ConnectorObservation::Disabled => ConnectorObservationReceipt::Disabled,
+        ConnectorObservation::Unsupported => ConnectorObservationReceipt::Unsupported,
+        ConnectorObservation::Unknown => ConnectorObservationReceipt::Unknown,
+    }
+}
+
+fn mutation_error(error: ConnectorStoreError) -> ConnectorMutationReceipt {
     match error {
         ConnectorStoreError::CommitOutcomeUnknown(_) | ConnectorStoreError::RecoveryRequired => {
-            MutationOutcome::Unknown
+            ConnectorMutationReceipt::Unknown
         }
         ConnectorStoreError::Connector(_)
         | ConnectorStoreError::Commit(_)
@@ -593,108 +578,6 @@ fn mutation_error(error: ConnectorStoreError) -> MutationOutcome {
         | ConnectorStoreError::RecordTooLarge
         | ConnectorStoreError::RevisionMismatch
         | ConnectorStoreError::RevisionOverflow
-        | ConnectorStoreError::WriterBusy => MutationOutcome::Rejected,
-    }
-}
-
-fn is_private_system_runtime_connector(connector: &Connector) -> bool {
-    connector
-        .mcp_server_program
-        .as_ref()
-        .is_some_and(|program| {
-            matches!(program.source, environment::McpProgramSource::SystemRuntime)
-        })
-}
-
-fn mcp_server_session_status(
-    server: OpenClawMcpServerSummary,
-    statuses: Option<&McpServerStatusList>,
-) -> SessionConnectorStatus {
-    let status = statuses.and_then(|statuses| {
-        statuses
-            .servers
-            .iter()
-            .find(|status| status.name == server.server_id)
-    });
-    let enabled_next_run = status
-        .and_then(|status| status.enabled)
-        .unwrap_or(server.enabled);
-    let configurable = server.source == OpenClawMcpServerSource::External;
-    let details = SessionConnectorStatusDetails {
-        server_id: Some(server.server_id.clone()),
-        session_key: None,
-        tool_count: status.and_then(|status| status.tool_count),
-        launch_summary: status.and_then(|status| status.launch_summary.clone()),
-        enabled_next_run: Some(enabled_next_run),
-        enabled_configurable: Some(configurable),
-    };
-
-    if !server.enabled {
-        return SessionConnectorStatus {
-            connector_id: server
-                .connector_id
-                .unwrap_or_else(|| server.server_id.clone()),
-            display_name: Some(server.display_name),
-            adapter_id: "openclaw".into(),
-            target_kind: "session",
-            result_type: SessionConnectorResultType::Disabled,
-            reason: Some("OpenClaw MCP server is disabled".into()),
-            details: Some(details),
-        };
-    }
-
-    let Some(status) = status else {
-        return SessionConnectorStatus {
-            connector_id: server
-                .connector_id
-                .unwrap_or_else(|| server.server_id.clone()),
-            display_name: Some(server.display_name),
-            adapter_id: "openclaw".into(),
-            target_kind: "session",
-            result_type: if statuses.is_some() {
-                SessionConnectorResultType::Disconnected
-            } else {
-                SessionConnectorResultType::Unknown
-            },
-            reason: Some(if statuses.is_some() {
-                "OpenClaw MCP status did not include this server".into()
-            } else {
-                "OpenClaw MCP status is unavailable for this session".into()
-            }),
-            details: Some(details),
-        };
-    };
-
-    let result_type = match status.state.as_deref() {
-        Some("disabled") => SessionConnectorResultType::Disabled,
-        Some("not-connected") | Some("listing-tools") | Some("stale-config") => {
-            SessionConnectorResultType::Pending
-        }
-        Some("connected") => SessionConnectorResultType::Connected,
-        Some("disconnected") | Some("error") => SessionConnectorResultType::Disconnected,
-        _ if status.enabled == Some(false) => SessionConnectorResultType::Disabled,
-        _ if status.available.unwrap_or(false) => SessionConnectorResultType::Connected,
-        _ => SessionConnectorResultType::Pending,
-    };
-    let reason = match status.state.as_deref() {
-        Some("disabled") => "OpenClaw MCP server is disabled for this session",
-        Some("not-connected") => "OpenClaw MCP server is configured but not connected for this session yet",
-        Some("listing-tools") => "OpenClaw MCP server is connected but has not finished listing tools yet",
-        Some("stale-config") => "OpenClaw MCP server configuration changed; the next run will refresh it",
-        Some("connected") => "OpenClaw MCP server is connected for this session",
-        Some("disconnected") => "OpenClaw MCP server is disconnected for this session",
-        Some("error") => "OpenClaw MCP server reported an error for this session",
-        _ => "OpenClaw MCP status is pending for this session",
-    };
-    SessionConnectorStatus {
-        connector_id: server
-            .connector_id
-            .unwrap_or_else(|| server.server_id.clone()),
-        display_name: Some(server.display_name),
-        adapter_id: "openclaw".into(),
-        target_kind: "session",
-        result_type,
-        reason: Some(reason.into()),
-        details: Some(details),
+        | ConnectorStoreError::WriterBusy => ConnectorMutationReceipt::Rejected,
     }
 }

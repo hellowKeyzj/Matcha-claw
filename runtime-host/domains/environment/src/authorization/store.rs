@@ -105,7 +105,8 @@ pub(super) fn commit_state(path: &Path, state: &AuthorityState) -> Result<(), Au
         file.sync_all()
             .map_err(|error| AuthorityStoreFault::Commit(error.kind()))?;
         drop(file);
-        fs::rename(&temporary, path).map_err(|error| AuthorityStoreFault::Commit(error.kind()))
+        crate::persistence::replace_file(&temporary, path)
+            .map_err(|error| AuthorityStoreFault::Commit(error.kind()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

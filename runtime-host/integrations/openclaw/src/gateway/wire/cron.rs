@@ -50,12 +50,21 @@ pub fn update_request(
     request_id: String,
     job_id: String,
     patch: CronJobPatch,
+    expected_config_revision: Option<String>,
 ) -> Result<RpcRequest, WireError> {
-    if !valid_string(&request_id) || !valid_string(&job_id) || !patch.is_valid() {
+    if !valid_string(&request_id)
+        || !valid_string(&job_id)
+        || !valid_optional_string(&expected_config_revision)
+        || !patch.is_valid()
+    {
         return Err(WireError::InvalidCronUpdateRequest);
     }
-    let params = serde_json::to_value(CronUpdateParams { id: job_id, patch })
-        .map_err(|_| WireError::InvalidCronUpdateRequest)?;
+    let params = serde_json::to_value(CronUpdateParams {
+        id: job_id,
+        patch,
+        expected_config_revision,
+    })
+    .map_err(|_| WireError::InvalidCronUpdateRequest)?;
     rpc_request(request_id, CRON_UPDATE_METHOD, Some(params))
         .map_err(|_| WireError::InvalidCronUpdateRequest)
 }
@@ -878,9 +887,12 @@ struct CronIdParams {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CronUpdateParams {
     id: String,
     patch: CronJobPatch,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_config_revision: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2261,8 +2273,8 @@ struct CronRemoveWire {
 struct CronEventWire {
     action: String,
     job_id: String,
-    #[serde(default)]
-    job: Option<Value>,
+    #[serde(default, rename = "job")]
+    _job: Option<Value>,
     #[serde(default)]
     run_at_ms: Option<u64>,
     #[serde(default)]
@@ -2275,20 +2287,20 @@ struct CronEventWire {
     error: Option<String>,
     #[serde(default)]
     summary: Option<String>,
-    #[serde(default)]
-    diagnostics: Option<Value>,
-    #[serde(default)]
-    delivered: Option<bool>,
+    #[serde(default, rename = "diagnostics")]
+    _diagnostics: Option<Value>,
+    #[serde(default, rename = "delivered")]
+    _delivered: Option<bool>,
     #[serde(default)]
     delivery_status: Option<String>,
     #[serde(default)]
     delivery_error: Option<String>,
     #[serde(default)]
     delivery_suppression_reason: Option<String>,
-    #[serde(default)]
-    failure_notification_delivery: Option<Value>,
-    #[serde(default)]
-    delivery: Option<Value>,
+    #[serde(default, rename = "failureNotificationDelivery")]
+    _failure_notification_delivery: Option<Value>,
+    #[serde(default, rename = "delivery")]
+    _delivery: Option<Value>,
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -2297,14 +2309,14 @@ struct CronEventWire {
     run_id: Option<String>,
     #[serde(default)]
     next_run_at_ms: Option<u64>,
-    #[serde(default)]
-    trigger_fired: Option<bool>,
+    #[serde(default, rename = "triggerFired")]
+    _trigger_fired: Option<bool>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     provider: Option<String>,
-    #[serde(default)]
-    usage: Option<Value>,
+    #[serde(default, rename = "usage")]
+    _usage: Option<Value>,
 }
 
 impl CronEventWire {
@@ -2588,7 +2600,7 @@ fn valid_job_log_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     use super::*;
 
@@ -2743,25 +2755,47 @@ mod tests {
             })
         );
 
-        let patch = CronJobPatch::update(
-            CronJobUpdate::new(
-                Some("new-name".into()),
-                Some("other-agent".into()),
-                Some("new-message".into()),
-                None,
-                Some(CronSchedule::cron("30 8 * * *".into()).unwrap()),
-                Some(true),
+        let patch = || {
+            CronJobPatch::update(
+                CronJobUpdate::new(
+                    Some("new-name".into()),
+                    Some("other-agent".into()),
+                    Some("new-message".into()),
+                    None,
+                    Some(CronSchedule::cron("30 8 * * *".into()).unwrap()),
+                    Some(true),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        );
-        let request =
-            update_request("cron-update-ui-1".into(), "cron-job-1".into(), patch).unwrap();
+        };
+        let request = update_request(
+            "cron-update-ui-1".into(),
+            "cron-job-1".into(),
+            patch(),
+            None,
+        )
+        .unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap()["params"]["patch"],
+            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap()["params"],
             json!({
-                "name": "new-name", "agentId": "other-agent", "payload": {"kind": "agentTurn", "message": "new-message"},
-                "schedule": {"kind": "cron", "expr": "30 8 * * *"}, "enabled": true
+                "id": "cron-job-1",
+                "patch": {
+                    "name": "new-name", "agentId": "other-agent", "payload": {"kind": "agentTurn", "message": "new-message"},
+                    "schedule": {"kind": "cron", "expr": "30 8 * * *"}, "enabled": true
+                }
             })
+        );
+        let request = update_request(
+            "cron-update-ui-cas-1".into(),
+            "cron-job-1".into(),
+            patch(),
+            Some("rev-1".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap()["params"]
+                ["expectedConfigRevision"],
+            json!("rev-1")
         );
     }
 

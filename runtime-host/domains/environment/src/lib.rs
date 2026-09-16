@@ -1,23 +1,18 @@
 mod authorization;
 mod command;
-mod connector_secrets;
-mod connector_store;
-mod connector_store_persistence;
-mod connectors;
+pub mod connectors;
 mod consumer;
 mod definition;
 mod event;
 mod ingress;
+mod persistence;
 mod ports;
-mod provider_account;
-mod provider_account_store;
-mod provider_cascade;
-mod provider_migration;
-mod provider_model;
-mod provider_model_store;
+mod provider;
 mod query;
 mod reconcile;
 mod routing;
+mod security;
+pub mod settings;
 mod store;
 
 pub use authorization::{
@@ -25,15 +20,13 @@ pub use authorization::{
     PolicyVersion,
 };
 pub use command::{EnvironmentCommand, InvalidEnvironmentCommand};
-pub use connector_secrets::{
-    ConnectorSecretAuthority, ConnectorSecretRef, ConnectorSecretValue, InvalidConnectorSecretRef,
-    InvalidConnectorSecretValue, UnavailableConnectorSecretAuthority,
-    unavailable_connector_secret_authority,
-};
-pub use connector_store::{ConnectorStore, ConnectorStoreError};
 pub use connectors::{
-    Connector, ConnectorCatalog, ConnectorError, ConnectorKind, ConnectorPublicInput,
-    McpProgramSource, McpServerProgram, McpTransport,
+    Connector, ConnectorCatalog, ConnectorConfig, ConnectorConfigValue, ConnectorError,
+    ConnectorInput, ConnectorKind, ConnectorPublicInput, ConnectorSecretAuthority,
+    ConnectorSecretRef, ConnectorSecretValue, ConnectorStore, ConnectorStoreError,
+    InvalidConnectorConfig, InvalidConnectorSecretRef, InvalidConnectorSecretValue,
+    McpProgramSource, McpServerProgram, McpTransport, UnavailableConnectorSecretAuthority,
+    unavailable_connector_secret_authority,
 };
 pub use consumer::{
     EnvironmentAppliedConsumer, EnvironmentAppliedFailure, EnvironmentAppliedReceipt,
@@ -70,21 +63,18 @@ pub use ports::{
     InvalidRuntimeObservationScope, ObservationFreshness, OperationalObservation,
     RuntimeObservationScope, SecurityObservation, SecurityRuntimeStatus,
 };
-pub use provider_account::{
+pub use provider::{
     InvalidProviderAccountConfiguration, InvalidProviderAccountId, InvalidProviderAccountRevision,
-    InvalidProviderEndpoint, ProviderAccount, ProviderAccountAuthMode,
+    InvalidProviderEndpoint, InvalidProviderModel, ProviderAccount, ProviderAccountAuthMode,
     ProviderAccountConfiguration, ProviderAccountConfigurationInput, ProviderAccountId,
-    ProviderAccountKind, ProviderAccountRevision, ProviderAccountSelection, ProviderApiProtocol,
-    ProviderEndpoint, ProviderMediaApiProtocol,
+    ProviderAccountKind, ProviderAccountRevision, ProviderAccountSelection, ProviderAccountStore,
+    ProviderAccountStoreFault, ProviderApiProtocol, ProviderCascade, ProviderCascadeFault,
+    ProviderEndpoint, ProviderMediaApiProtocol, ProviderMigrationFault, ProviderModel,
+    ProviderModelCapability, ProviderModelCatalog, ProviderModelCatalogFault, ProviderModelStore,
+    ProviderModelStoreFault, migrate_provider_legacy_stores,
+    provider_model_matches_routing_reference, provider_routing_account_ids,
+    provider_routing_is_admissible, provider_routing_model_capability,
 };
-pub use provider_account_store::{ProviderAccountStore, ProviderAccountStoreFault};
-pub use provider_cascade::{ProviderCascade, ProviderCascadeFault};
-pub use provider_migration::{ProviderMigrationFault, migrate_provider_legacy_stores};
-pub use provider_model::{
-    InvalidProviderModel, ProviderModel, ProviderModelCapability, ProviderModelCatalog,
-    ProviderModelCatalogFault,
-};
-pub use provider_model_store::{ProviderModelStore, ProviderModelStoreFault};
 pub use query::{
     AppliedEvidenceState, EnvironmentListPage, EnvironmentPageSize, EnvironmentProjection,
     EnvironmentQuery, InvalidEnvironmentListPage, InvalidEnvironmentPageSize, ListEnvironments,
@@ -100,6 +90,11 @@ pub use routing::{
     InvalidProviderRoutingRevision, ProviderModelReference, ProviderRoute, ProviderRouting,
     ProviderRoutingCapability, ProviderRoutingRevision, ProviderRoutingStore,
     ProviderRoutingStoreFault,
+};
+pub use security::{
+    SecurityOperationOutcome, SecurityOperationReceiptStore, SecurityPolicyDeliveryOutcome,
+    SecurityPolicyDeliverySettlement, SecurityPolicyDeliveryStore, SecurityPolicyDesired,
+    security_policy_emergency_lockdown,
 };
 pub use store::{
     AppliedEvidence, ApplyEvidenceFault, DecodeFault, DesiredWriteFault, EnvironmentFacts,

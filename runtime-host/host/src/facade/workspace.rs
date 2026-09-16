@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use openclaw::workspace::{
-    TrustedWorkspaceDirectory, WorkspaceBinaryFailure, WorkspaceBinaryReceipt,
-    WorkspaceDirectoryFailure, WorkspaceDirectoryReceipt, WorkspaceListFailure,
-    WorkspaceReadFailure, WorkspaceStatFailure, WorkspaceStatReceipt, WorkspaceTextReceipt,
-    WorkspaceWriteFailure,
-    media::{
-        ResolvedWorkspaceMedia, WorkspaceMediaFailure, WorkspaceMediaPath, WorkspaceMediaReceipt,
-        WorkspaceMediaThumbnail, WorkspaceMediaThumbnailEntry,
-    },
-};
-
 use crate::{
-    composition::HostAdmission, runtime_directory::RuntimeDriverDirectory,
-    runtime_driver::RuntimeDriverIdentity,
+    composition::HostAdmission,
+    runtime::{
+        directory::RuntimeDriverDirectory,
+        driver::{
+            ResolvedWorkspaceMedia, RuntimeDriverIdentity, WorkspaceBinaryFailure,
+            WorkspaceBinaryReceipt, WorkspaceDirectoryFailure, WorkspaceDirectoryReceipt,
+            WorkspaceDirectoryRoot, WorkspaceListFailure, WorkspaceMediaFailure,
+            WorkspaceMediaPath, WorkspaceMediaReceipt, WorkspaceMediaThumbnail,
+            WorkspaceMediaThumbnailEntry, WorkspaceReadFailure, WorkspaceStatFailure,
+            WorkspaceStatReceipt, WorkspaceTextReceipt, WorkspaceWriteFailure,
+            WorkspaceWriteReceipt,
+        },
+    },
 };
 
 #[derive(Clone)]
@@ -36,7 +36,7 @@ impl WorkspaceHandle {
     pub(crate) fn trusted_workspace_directory(
         &self,
         session_key: &str,
-    ) -> Result<TrustedWorkspaceDirectory, WorkspaceDirectoryFailure> {
+    ) -> Result<WorkspaceDirectoryRoot, WorkspaceDirectoryFailure> {
         self.with_workspace_ops(WorkspaceDirectoryFailure::Unavailable, |ops| {
             ops.trusted_workspace_directory(session_key)
         })
@@ -90,7 +90,7 @@ impl WorkspaceHandle {
         session_key: &str,
         relative_path: &str,
         content: &str,
-    ) -> Result<WorkspaceTextReceipt, WorkspaceWriteFailure> {
+    ) -> Result<WorkspaceWriteReceipt, WorkspaceWriteFailure> {
         self.with_workspace_ops(WorkspaceWriteFailure::Unavailable, |ops| {
             ops.write_text(session_key, relative_path, content)
         })
@@ -175,7 +175,7 @@ impl WorkspaceHandle {
     fn with_workspace_ops<T, E: Copy>(
         &self,
         unavailable: E,
-        read: impl FnOnce(&dyn crate::runtime_driver::WorkspaceOps) -> Result<T, E>,
+        read: impl FnOnce(&dyn crate::runtime::driver::WorkspaceOps) -> Result<T, E>,
     ) -> Result<T, E> {
         if self.admission.admit_request().is_err() {
             return Err(unavailable);
@@ -186,9 +186,6 @@ impl WorkspaceHandle {
         else {
             return Err(unavailable);
         };
-        if !driver.lifecycle_ops().is_some_and(|ops| ops.readiness()) {
-            return Err(unavailable);
-        }
         let Some(ops) = driver.workspace_ops() else {
             return Err(unavailable);
         };

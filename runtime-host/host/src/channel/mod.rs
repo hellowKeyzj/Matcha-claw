@@ -8,6 +8,8 @@ pub(crate) mod delete;
 mod handle;
 pub(crate) mod login;
 mod operations;
+mod query;
+#[allow(dead_code)]
 pub(crate) mod status;
 pub(crate) mod trace;
 

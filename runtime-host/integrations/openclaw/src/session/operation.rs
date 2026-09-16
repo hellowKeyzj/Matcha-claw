@@ -36,7 +36,7 @@ impl SessionOperation {
         &self,
         params: SessionsListParams,
     ) -> Result<SessionsListResult, OperationError> {
-        let request_id = next_request_id("sessions-list");
+        let request_id = next_request_id("sessions-list")?;
         let request = request(&request_id, protocol::SESSIONS_LIST_METHOD, params)?;
         let response = self
             .gateway
@@ -51,7 +51,7 @@ impl SessionOperation {
         params: ChatHistoryParams,
     ) -> Result<ChatHistoryResult, OperationError> {
         let limit = params.limit();
-        let request_id = next_request_id("chat-history");
+        let request_id = next_request_id("chat-history")?;
         let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
         let response = self
             .gateway
@@ -66,7 +66,7 @@ impl SessionOperation {
         &self,
         params: ChatHistoryParams,
     ) -> Result<Value, OperationError> {
-        let request_id = next_request_id("chat-history");
+        let request_id = next_request_id("chat-history")?;
         let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
         let response = self
             .gateway
@@ -80,7 +80,7 @@ impl SessionOperation {
         &self,
         session_key: &protocol::SessionKey,
     ) -> Result<(), OperationError> {
-        let request_id = next_request_id("sessions-messages-subscribe");
+        let request_id = next_request_id("sessions-messages-subscribe")?;
         let request = wire::sessions_messages_subscribe_request(
             request_id.clone(),
             session_key.as_str().to_owned(),
@@ -97,7 +97,7 @@ impl SessionOperation {
         &self,
         params: ChatSendParams,
     ) -> Result<InvocationOutcome<ChatSendResult, OperationError>, OperationError> {
-        let request_id = next_request_id("chat-send");
+        let request_id = next_request_id("chat-send")?;
         let request = request(&request_id, protocol::CHAT_SEND_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -110,7 +110,7 @@ impl SessionOperation {
         &self,
         params: ChatAbortParams,
     ) -> Result<InvocationOutcome<ChatAbortResult, OperationError>, OperationError> {
-        let request_id = next_request_id("chat-abort");
+        let request_id = next_request_id("chat-abort")?;
         let request = request(&request_id, protocol::CHAT_ABORT_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -124,7 +124,7 @@ impl SessionOperation {
         params: SessionModelPatchParams,
     ) -> Result<InvocationOutcome<SessionModelPatchResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
-        let request_id = next_request_id("sessions-patch-model");
+        let request_id = next_request_id("sessions-patch-model")?;
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -138,7 +138,7 @@ impl SessionOperation {
         params: SessionLabelPatchParams,
     ) -> Result<InvocationOutcome<SessionLabelPatchResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
-        let request_id = next_request_id("sessions-patch-label");
+        let request_id = next_request_id("sessions-patch-label")?;
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -160,7 +160,7 @@ impl SessionOperation {
     ) -> Result<InvocationOutcome<SessionPermissionProjection, OperationError>, OperationError>
     {
         let expected_key = params.key().clone();
-        let request_id = next_request_id("sessions-patch-permission");
+        let request_id = next_request_id("sessions-patch-permission")?;
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
         match self
             .mutate(request, |response| {
@@ -189,7 +189,7 @@ impl SessionOperation {
         params: SessionCreateParams,
     ) -> Result<InvocationOutcome<SessionCreateResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
-        let request_id = next_request_id("sessions-create");
+        let request_id = next_request_id("sessions-create")?;
         let request = request(&request_id, protocol::SESSIONS_CREATE_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -203,7 +203,7 @@ impl SessionOperation {
         params: SessionDeleteParams,
     ) -> Result<InvocationOutcome<SessionDeleteResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
-        let request_id = next_request_id("sessions-delete");
+        let request_id = next_request_id("sessions-delete")?;
         let request = request(&request_id, protocol::SESSIONS_DELETE_METHOD, params)?;
         Ok(self
             .mutate(request, |response| {
@@ -305,7 +305,11 @@ pub(crate) enum OperationError {
     Transport,
     Protocol,
     Rejected,
-    GatewayRejected { code: String, message: String },
+    GatewayRejected {
+        code: String,
+        message: String,
+        retryable: Option<bool>,
+    },
 }
 
 impl OperationError {
@@ -313,12 +317,13 @@ impl OperationError {
         Self::GatewayRejected {
             code: error.code().to_owned(),
             message: error.message().to_owned(),
+            retryable: error.retryable(),
         }
     }
 
     pub(crate) fn gateway_rejection(&self) -> Option<(&str, &str)> {
         match self {
-            Self::GatewayRejected { code, message } => Some((code, message)),
+            Self::GatewayRejected { code, message, .. } => Some((code, message)),
             _ => None,
         }
     }
@@ -409,9 +414,15 @@ fn payload(request_id: &str, response: GatewayResponse) -> Result<Value, Operati
     }
 }
 
-fn next_request_id(operation: &str) -> String {
-    let sequence = NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("matcha-session-{operation}-{sequence}")
+fn next_request_id(operation: &str) -> Result<String, OperationError> {
+    let sequence = NEXT_REQUEST_ID
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_add(1),
+        )
+        .map_err(|_| OperationError::RequestIdExhausted)?;
+    Ok(format!("matcha-session-{operation}-{sequence}"))
 }
 
 #[cfg(test)]

@@ -3,34 +3,26 @@ use std::path::PathBuf;
 use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
-    GraphDefinition, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, ResumeOutcome,
-    RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault, TeamDecisionCommand,
-    TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
-    TeamNodeEventOutcome, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
-    TombstoneOutcome, TriggerFireRequest,
-    package::{
-        TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionError,
-        TeamSkillSelectionId,
-    },
+    GraphDefinition, GraphRunId, IdempotencyKey, RoleChatAdmission, RoleChatAdmissionOutcome,
+    RunCommand, StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamId, TeamNodeEvent,
+    TeamNodeEventOutcome, TeamTriggerFireOutcome, TombstoneOutcome, TriggerFireRequest,
+    package::{TeamSkillSelectionError, TeamSkillSelectionId},
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         event::OpaqueId,
-        public_projection::{TeamPublicQueryOutcome, TeamRunPublicSnapshotQueryOutcome},
-        scheduler::NodePromptRetryDueQueryOutcome,
-        task_board::TaskBoardFacts,
     },
 };
 use tokio::sync::oneshot;
 
-use crate::{
-    composition::{
-        ManualTeamCreateOutcome, TeamDeleteOutcome, TeamNodePromptSettledResult,
-        TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunTriggerOutcome,
+use super::{
+    team_run::{
+        ManualTeamCreateOutcome, MatchaTerminalObservationError, MatchaTerminalObservationOutcome,
+        TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamNodePromptSettledResult,
+        TeamNodeTerminalResolution, TeamNodeTerminalResult, TeamRunActivityError,
+        TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome, TeamRunTriggerOutcome,
     },
-    transport::team_task_board,
+    team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
 };
-
-use super::team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus};
 
 pub enum OrganizationCommand {
     TeamSkillAuthorize {
@@ -41,7 +33,7 @@ pub enum OrganizationCommand {
         selection_id: TeamSkillSelectionId,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
-        reply: oneshot::Sender<crate::composition::TeamMaterializationCommandOutcome>,
+        reply: oneshot::Sender<TeamMaterializationCommandOutcome>,
     },
     ManualTeamMaterialize {
         team_id: TeamId,
@@ -49,7 +41,7 @@ pub enum OrganizationCommand {
         endpoint: organization::RuntimeEndpointReference,
         roles: Vec<organization::ManualTeamRoleBinding>,
         idempotency_key: IdempotencyKey,
-        reply: oneshot::Sender<crate::composition::TeamMaterializationCommandOutcome>,
+        reply: oneshot::Sender<TeamMaterializationCommandOutcome>,
     },
     ManualTeamCreate {
         team_id: TeamId,
@@ -154,7 +146,7 @@ pub enum OrganizationCommand {
         run_id: GraphRunId,
         node_execution_id: OpaqueId,
         event: String,
-        terminal: Option<crate::composition::team_run_mcp::TeamNodeTerminalResolution>,
+        terminal: Option<TeamNodeTerminalResolution>,
         summary: String,
         output_port: Option<String>,
         idempotency_key: String,
@@ -172,8 +164,8 @@ pub enum OrganizationCommand {
     TaskBoardMutate {
         team_id: TeamId,
         run_id: GraphRunId,
-        operation: team_task_board::Operation,
-        reply: oneshot::Sender<Result<team_task_board::MutationResult, StoreFault>>,
+        operation: super::task_board::TaskBoardMutation,
+        reply: oneshot::Sender<Result<super::task_board::MutationResult, StoreFault>>,
     },
     ScheduleReadyNodes {
         run_id: GraphRunId,
@@ -184,23 +176,13 @@ pub enum OrganizationCommand {
         run_id: GraphRunId,
         activity_id: ActivityId,
         claimed_at: u64,
-        reply: oneshot::Sender<
-            Result<
-                crate::composition::TeamRunActivityStart,
-                crate::composition::TeamRunActivityError,
-            >,
-        >,
+        reply: oneshot::Sender<Result<TeamRunActivityStart, TeamRunActivityError>>,
     },
     SettleActivity {
         run_id: GraphRunId,
         claim: ActivityClaim,
-        outcome: crate::runtime_driver::ActivityExecutionOutcome,
-        reply: oneshot::Sender<
-            Result<
-                crate::composition::TeamRunActivityOutcome,
-                crate::composition::TeamRunActivityError,
-            >,
-        >,
+        outcome: crate::runtime::driver::ActivityExecutionOutcome,
+        reply: oneshot::Sender<Result<TeamRunActivityOutcome, TeamRunActivityError>>,
     },
     ObserveMatchaTerminal {
         run_id: GraphRunId,
@@ -208,114 +190,10 @@ pub enum OrganizationCommand {
         status: TerminalRunStatus,
         observed_at: u64,
         reply: oneshot::Sender<
-            Result<
-                crate::composition::MatchaTerminalObservationOutcome,
-                crate::composition::MatchaTerminalObservationError,
-            >,
+            Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError>,
         >,
     },
     RecoverMaterializationReceipts {
         reply: oneshot::Sender<()>,
-    },
-}
-
-pub enum OrganizationQuery {
-    TeamSkillValidate {
-        package_root: PathBuf,
-        reply: oneshot::Sender<TeamSkillPackageValidation>,
-    },
-    TeamSkillDependencyPlan {
-        package_root: PathBuf,
-        reply: oneshot::Sender<TeamSkillDependencyPlanResult>,
-    },
-    TeamSkillSelectionValidate {
-        selection_id: TeamSkillSelectionId,
-        reply: oneshot::Sender<TeamSkillPackageValidation>,
-    },
-    TeamSkillSelectionDependencyPlan {
-        selection_id: TeamSkillSelectionId,
-        reply: oneshot::Sender<TeamSkillDependencyPlanResult>,
-    },
-    RunList {
-        team_id: TeamId,
-        reply: oneshot::Sender<Vec<TeamRunQueryOutcome>>,
-    },
-    RunSnapshot {
-        query: TeamRunQuery,
-        reply: oneshot::Sender<TeamRunQueryOutcome>,
-    },
-    TeamRunPublicProjection {
-        team_id: TeamId,
-        run_id: GraphRunId,
-        reply: oneshot::Sender<TeamPublicQueryOutcome>,
-    },
-    TeamRunPublicSnapshot {
-        team_id: Option<TeamId>,
-        run_id: GraphRunId,
-        event_cursor: Option<u64>,
-        event_limit: Option<u64>,
-        reply: oneshot::Sender<Option<TeamRunPublicSnapshotQueryOutcome>>,
-    },
-    TeamRunDiagnostics {
-        run_id: GraphRunId,
-        reply: oneshot::Sender<organization::TeamRunDiagnosticsQueryOutcome>,
-    },
-    RoleSessions {
-        team_id: TeamId,
-        reply: oneshot::Sender<organization::TeamRoleSessionQueryOutcome>,
-    },
-    TriggerList {
-        team_id: Option<TeamId>,
-        reply: oneshot::Sender<Vec<crate::composition::ArmedTrigger>>,
-    },
-    GraphContext {
-        query: TeamGraphContextQuery,
-        reply: oneshot::Sender<TeamGraphContextResult>,
-    },
-    GraphDefinition {
-        team_id: TeamId,
-        run_id: GraphRunId,
-        reply: oneshot::Sender<Option<GraphDefinition>>,
-    },
-    GraphYaml {
-        run_id: GraphRunId,
-        reply: oneshot::Sender<Option<String>>,
-    },
-    TaskBoardRead {
-        team_id: TeamId,
-        run_id: GraphRunId,
-        reply: oneshot::Sender<TaskBoardFacts>,
-    },
-    PendingApprovals {
-        team_id: TeamId,
-        run_id: GraphRunId,
-        reply: oneshot::Sender<organization::run::TeamPendingApprovalsQueryOutcome>,
-    },
-    NodePromptRetryDue {
-        run_id: GraphRunId,
-        reply: oneshot::Sender<NodePromptRetryDueQueryOutcome>,
-    },
-    Resume {
-        team_id: TeamId,
-        reply: oneshot::Sender<Vec<ResumeOutcome>>,
-    },
-    PendingRunActivityIds {
-        run_id: GraphRunId,
-        now: u64,
-        reply: oneshot::Sender<Vec<ActivityId>>,
-    },
-    TerminalObservationDeliveries {
-        reply: oneshot::Sender<Vec<DeliveryId>>,
-    },
-    ActiveRunIds {
-        reply: oneshot::Sender<Vec<GraphRunId>>,
-    },
-    ActivityTarget {
-        activity_id: ActivityId,
-        reply: oneshot::Sender<Option<crate::composition::TeamRunActivityTarget>>,
-    },
-    MatchaTerminalTarget {
-        delivery_id: DeliveryId,
-        reply: oneshot::Sender<Option<MatchaTerminalReceiptTarget>>,
     },
 }

@@ -1,15 +1,15 @@
 use tokio::sync::oneshot;
 
-use super::desired::{Desired, Outcome, Settlement};
+use environment::settings::{Desired, Outcome, Settlement};
 
 pub(crate) enum SettingsCommand {
-    Replace {
+    ReplaceDesired {
         correlation: String,
         desired: Desired,
         reply: oneshot::Sender<Settlement>,
     },
-    RecoverPending {
-        reply: oneshot::Sender<Option<Settlement>>,
+    RecoverPendingProjection {
+        reply: oneshot::Sender<()>,
     },
     ApplySavedProjection {
         reply: oneshot::Sender<Outcome>,

@@ -86,6 +86,7 @@ let queuedLoadAgentsTask: Promise<void> | null = null;
 let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let availableModelsLoaded = false;
 let inflightAvailableModelsTask: Promise<void> | null = null;
+let latestAvailableModelsRequestId = 0;
 
 function buildSubagentScope(scope: AgentScope, agentId: string): AgentScope {
   return agentScope(scope.endpoint, agentId);
@@ -221,7 +222,7 @@ interface SubagentsState {
   selectedAgentId: string | null;
   loadAgents: (options?: LoadAgentsOptions) => Promise<void>;
   loadCloudPackages: () => Promise<void>;
-  loadAvailableModels: () => Promise<void>;
+  loadAvailableModels: (options?: { force?: boolean }) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
   loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
@@ -1080,6 +1081,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   inflightLoadAgentsTask = null;
   availableModelsLoaded = false;
   inflightAvailableModelsTask = null;
+  latestAvailableModelsRequestId = 0;
 }
 
 function normalizeAgentIdForComparison(agentId: string): string {
@@ -1375,20 +1377,31 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     await task;
   },
 
-  loadAvailableModels: async () => {
-    if (availableModelsLoaded) {
+  loadAvailableModels: async (options) => {
+    const force = options?.force === true;
+    if (!force && availableModelsLoaded) {
       return;
     }
-    if (inflightAvailableModelsTask) {
+    if (!force && inflightAvailableModelsTask) {
       await inflightAvailableModelsTask;
       return;
     }
 
-    set({ modelsLoading: true });
+    if (force) {
+      availableModelsLoaded = false;
+    }
+    const requestId = ++latestAvailableModelsRequestId;
+    set({
+      ...(force ? { availableModels: [] } : {}),
+      modelsLoading: true,
+    });
     let currentTask: Promise<void> | null = null;
     const task = (async () => {
       try {
         const normalizedModels = await fetchSelectableProviderModels();
+        if (requestId !== latestAvailableModelsRequestId) {
+          return;
+        }
         availableModelsLoaded = true;
         set({
           availableModels: normalizedModels,
@@ -1396,6 +1409,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           error: null,
         });
       } catch (error) {
+        if (requestId !== latestAvailableModelsRequestId) {
+          return;
+        }
         set({
           modelsLoading: false,
           error: getErrorMessage(error) || 'Failed to load models',

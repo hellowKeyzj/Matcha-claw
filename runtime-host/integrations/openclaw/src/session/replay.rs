@@ -347,8 +347,7 @@ pub fn materialize_session_replay_rows(
                 ingress_results.push(result);
             }
             SessionReplaySourceRow::Recovery { source_sequence } => {
-                ingress_results.push(CanonicalIngressResult::from_replay_recovery(
-                    session_key.clone(),
+                ingress_results.push(reducer.recover_replay(
                     source_epoch,
                     source_sequence,
                     route_key.clone(),

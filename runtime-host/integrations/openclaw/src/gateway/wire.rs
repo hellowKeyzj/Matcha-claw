@@ -41,17 +41,10 @@ pub const GATEWAY_SESSION_SCOPES: &[&str] = &["operator.read", "operator.write",
 pub(crate) const GATEWAY_TEAM_READ_SCOPE: &str = "operator.read";
 #[cfg(test)]
 pub(crate) const GATEWAY_TEAM_WRITE_SCOPE: &str = "operator.write";
-#[cfg(test)]
-pub(crate) const GATEWAY_CRON_READ_SCOPE: &str = "operator.read";
 pub(crate) const GATEWAY_CRON_ADMIN_SCOPE: &str = "operator.admin";
 #[cfg(test)]
-pub(crate) const GATEWAY_SKILL_ADMIN_SCOPE: &str = "operator.admin";
-#[cfg(test)]
-pub(crate) const GATEWAY_SKILL_READ_SCOPE: &str = "operator.read";
 pub const SESSIONS_SUBSCRIBE_METHOD: &str = "sessions.subscribe";
 pub(crate) const SESSIONS_MESSAGES_SUBSCRIBE_METHOD: &str = "sessions.messages.subscribe";
-#[cfg(test)]
-pub(crate) const GATEWAY_OPERATIONS_SCOPE: &str = "operator.write";
 #[cfg(test)]
 pub(crate) const OPENCLAW_GATEWAY_VERSION: &str = "2026.9.3";
 
@@ -418,6 +411,7 @@ pub fn gateway_logs_tail_request(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn sessions_subscribe_request(request_id: String) -> Result<RpcRequest, WireError> {
     rpc_request(
         request_id,
@@ -620,6 +614,10 @@ impl GatewayError {
 
     pub(crate) fn restart_required(&self) -> bool {
         self.restart_required
+    }
+
+    pub(crate) const fn retryable(&self) -> Option<bool> {
+        self.retryable
     }
 }
 
@@ -1032,6 +1030,7 @@ pub struct GatewayLogsTail {
     pub reset: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn decode_sessions_subscribe(response: GatewayResponse) -> Result<(), WireError> {
     let payload = success_payload(response, WireError::InvalidSessionSubscription)?;
     let payload: SessionSubscriptionWire =
@@ -1097,7 +1096,6 @@ pub enum WireError {
     InvalidConfigGetRequest,
     InvalidConfigSetRequest,
     InvalidConfigPatchRequest,
-    InvalidConfigApplyRequest,
     InvalidCronListRequest,
     InvalidCronAddRequest,
     InvalidCronUpdateRequest,
@@ -1115,7 +1113,6 @@ pub enum WireError {
     InvalidConfigGet,
     InvalidConfigSet,
     InvalidConfigPatch,
-    InvalidConfigApply,
     InvalidCronList,
     InvalidCronAdd,
     InvalidCronUpdate,
@@ -1158,7 +1155,6 @@ impl fmt::Display for WireError {
             Self::InvalidConfigGetRequest => "config get request is invalid",
             Self::InvalidConfigSetRequest => "config set request is invalid",
             Self::InvalidConfigPatchRequest => "config patch request is invalid",
-            Self::InvalidConfigApplyRequest => "config apply request is invalid",
             Self::InvalidCronListRequest => "cron list request is invalid",
             Self::InvalidCronAddRequest => "cron add request is invalid",
             Self::InvalidCronUpdateRequest => "cron update request is invalid",
@@ -1176,7 +1172,6 @@ impl fmt::Display for WireError {
             Self::InvalidConfigGet => "config get response is invalid",
             Self::InvalidConfigSet => "config set response is invalid",
             Self::InvalidConfigPatch => "config patch response is invalid",
-            Self::InvalidConfigApply => "config apply response is invalid",
             Self::InvalidCronList => "cron list response is invalid",
             Self::InvalidCronAdd => "cron add response is invalid",
             Self::InvalidCronUpdate => "cron update response is invalid",
@@ -1841,6 +1836,7 @@ impl McpServerStatusEntryWire {
     }
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 struct SessionSubscriptionWire {
     subscribed: bool,
@@ -2232,9 +2228,23 @@ mod tests {
                 }
             })
         );
-        assert!(mcp_session_servers_update_request("id".into(), " ".into(), "remote".into(), true).is_err());
-        assert!(mcp_session_servers_update_request("id".into(), "agent:main:session-1".into(), " ".into(), true).is_err());
-        assert_eq!(decode_mcp_session_servers_update(response("mcp-update-1", json!({ "success": true }))), Ok(()));
+        assert!(
+            mcp_session_servers_update_request("id".into(), " ".into(), "remote".into(), true)
+                .is_err()
+        );
+        assert!(
+            mcp_session_servers_update_request(
+                "id".into(),
+                "agent:main:session-1".into(),
+                " ".into(),
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(
+            decode_mcp_session_servers_update(response("mcp-update-1", json!({ "success": true }))),
+            Ok(())
+        );
 
         for payload in [
             json!({ "data": [], "nextCursor": " " }),
