@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isNonEmptyBoundedText, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/team/skill';
 const UNAVAILABLE = {
   success: false,
   error: 'TeamSkill selection is unavailable',
@@ -66,10 +67,9 @@ export interface TeamSkillTransport {
 
 export function createTeamSkillTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamSkillTransport {
-  const url = `http://127.0.0.1:${port}/api/team/skill`;
   return {
     authorize: async (packageRoot) => request(
       'team.skill.authorize',
@@ -99,28 +99,21 @@ export function createTeamSkillTransport(
     isResponse: (value: unknown) => value is T,
   ): Promise<TeamSkillTransportResponse<T>> {
     if (!isRequest(body)) return { status: 503, body: UNAVAILABLE };
-    try {
-      const response = await fetcher(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${issuer.signDecision({
-            principal: 'electron-main-local',
-            endpoint: '/api/team/skill',
-            scope: 'team:write',
-            capability,
-            subject: 'team-skill-selection',
-            expiresAt: Date.now() + DECISION_TTL_MS,
-            revision: '1',
-          })}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-      const result: unknown = await response.json();
-      if (response.status === 200 && isResponse(result)) return { status: 200, body: result };
-    } catch {
-      // Native transport details do not cross the Electron delivery boundary.
-    }
+    const response = await sendLoopbackJson({
+      port: runtimeHostTransportPort,
+      path: ROUTE_PATH,
+      issuer,
+      decision: {
+        endpoint: ROUTE_PATH,
+        scope: 'team:write',
+        capability,
+        subject: 'team-skill-selection',
+      },
+      method: 'POST',
+      fetcher,
+      body,
+    });
+    if (response?.status === 200 && isResponse(response.body)) return { status: 200, body: response.body };
     return { status: 503, body: UNAVAILABLE };
   }
 }
@@ -157,8 +150,8 @@ function isPackage(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['selectionId', 'name', 'version', 'kind', 'description'])
     && isSelectionId(value.selectionId)
-    && isText(value.name)
-    && isText(value.version)
+    && isNonEmptyBoundedText(value.name)
+    && isNonEmptyBoundedText(value.version)
     && value.kind === 'team-skill'
     && typeof value.description === 'string';
 }
@@ -181,8 +174,8 @@ function isPlan(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['selectionId', 'packageName', 'packageVersion', 'items', 'canProceed'])
     && isSelectionId(value.selectionId)
-    && isText(value.packageName)
-    && isText(value.packageVersion)
+    && isNonEmptyBoundedText(value.packageName)
+    && isNonEmptyBoundedText(value.packageVersion)
     && Array.isArray(value.items)
     && value.items.every(isPlanItem)
     && typeof value.canProceed === 'boolean';
@@ -192,7 +185,7 @@ function isPlanItem(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'name', 'required', 'purpose', 'status', 'severity', 'installable'])
     && (value.kind === 'skill' || value.kind === 'tool')
-    && isText(value.name)
+    && isNonEmptyBoundedText(value.name)
     && typeof value.required === 'boolean'
     && typeof value.purpose === 'string'
     && (value.status === 'available' || value.status === 'missing')
@@ -209,18 +202,5 @@ function isOpaqueId(value: unknown): value is string {
 }
 
 function isLocalRoot(value: unknown): value is string {
-  return isText(value) && !value.includes('\n') && !value.includes('\r');
-}
-
-function isText(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+  return isNonEmptyBoundedText(value) && !value.includes('\n') && !value.includes('\r');
 }

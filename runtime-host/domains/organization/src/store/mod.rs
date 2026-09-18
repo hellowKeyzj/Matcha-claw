@@ -7,12 +7,14 @@ mod terminal_observation;
 pub use durable::OrganizationStore;
 pub use facts::TeamRunFactsRestoreInput;
 pub use facts::{
-    ApprovalResolutionInput, ApprovalResolutionOutcome, GraphRunFacts, OrganizationFacts,
-    OrganizationFactsError, PendingWorkflowPlanAdmission, TeamFacts, TeamTombstoneOutcome,
-    WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome, WorkflowTemplateFacts,
+    ApprovalResolutionInput, ApprovalResolutionOutcome, ConfirmRunStartOutcome,
+    ContinueRunDiscussionOutcome, GraphRunFacts, OrganizationFacts, OrganizationFactsError,
+    PendingWorkflowPlanAdmission, RunStartGate, SetRunStartProposalOutcome, TeamFacts,
+    TeamTombstoneOutcome, WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome,
+    WorkflowTemplateFacts,
 };
 pub use fault::StoreFault;
-pub use terminal_observation::MatchaTerminalReceiptTarget;
+pub use terminal_observation::NativeTerminalReceiptTarget;
 
 #[cfg(test)]
 mod tests;

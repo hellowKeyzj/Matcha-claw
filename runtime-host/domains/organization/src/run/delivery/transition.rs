@@ -1,6 +1,6 @@
 use crate::{
     ports::{
-        DeliveryReference, DeliveryRejection, ExternalSessionReference, IdempotencyKey,
+        DeliveryReference, DeliveryRejection, EndpointSessionId, IdempotencyKey,
         PromptDeliveryOutcome, PromptDeliveryPort, PromptDeliveryRequest, PromptDispatchPayload,
         RoleSessionReceipt,
     },
@@ -10,14 +10,14 @@ use crate::{
 use super::{
     AuthorizedGraphOutcome, AuthorizedGraphResolution, Delivery, DeliveryClaim, DeliveryFailure,
     DeliveryId, DeliveryPhase, DeliveryReceipt, DeliveryRequest, DeliveryRequestError,
-    MatchaDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus,
-    TerminalObservation, TerminalObservationResolution, delivery_retry_at,
+    NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
+    TeamNodeOutputError, TerminalObservation, TerminalObservationResolution, delivery_retry_at,
 };
 
 struct TerminalObservationInput<'a> {
     delivery: &'a Delivery,
-    correlation: &'a MatchaDeliveryCorrelation,
-    observed_session: ExternalSessionReference,
+    correlation: &'a NativeDeliveryCorrelation,
+    observed_session: EndpointSessionId,
     fence: ExecutionFence,
     delivered_receipt: crate::DeliveryReceiptReference,
     native_run_receipt: NativeRunReceiptReference,
@@ -76,6 +76,13 @@ pub enum AuthorizedGraphResolutionError {
     GraphStateMismatch,
     OutputPortDoesNotMatchEdge,
     ConflictingResolution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeRunOutputResolutionError {
+    InvalidOutput,
+    NativeTerminalNotResolvable,
+    AuthorizedResolution(AuthorizedGraphResolutionError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,10 +176,10 @@ pub fn settle_delivery(
     match receipt {
         DeliveryReceipt::Accepted {
             receipt,
-            matcha_correlation,
+            native_correlation,
             accepted_at,
         } => {
-            delivery.mark_delivered(receipt, matcha_correlation, accepted_at);
+            delivery.mark_delivered(receipt, native_correlation, accepted_at);
             Ok(DeliveryResolution::Delivered)
         }
         DeliveryReceipt::Rejected {
@@ -200,14 +207,14 @@ pub fn settle_delivery(
     }
 }
 
-/// Records only a terminal fact already classified by the Matcha native-edge consumer.
+/// Records only a terminal fact already classified by a runtime-native terminal consumer.
 ///
-/// This is crate-private until a verified Matcha adapter is composed. Organization deliberately
+/// This is crate-private until a verified runtime adapter is composed. Organization deliberately
 /// has no public transport or generic native-receipt writer that could forge this source fact.
-pub(crate) fn observe_matcha_terminal(
+pub(crate) fn observe_native_terminal(
     delivery: &mut Delivery,
     graph: &mut GraphState,
-    observed_session: ExternalSessionReference,
+    observed_session: EndpointSessionId,
     native_run_receipt: NativeRunReceiptReference,
     native_terminal: NativeTerminalStatus,
     observed_at: u64,
@@ -215,7 +222,7 @@ pub(crate) fn observe_matcha_terminal(
     let (delivered_receipt, correlation, existing_observation) = match delivery.phase() {
         DeliveryPhase::Delivered {
             receipt,
-            matcha_correlation: Some(correlation),
+            native_correlation: Some(correlation),
             ..
         } => (receipt.clone(), correlation.clone(), None),
         DeliveryPhase::Delivered { .. } => {
@@ -349,9 +356,65 @@ fn terminal_observation_matches_graph(
     }
 }
 
+pub(crate) fn resolve_native_run_output(
+    delivery: &mut Delivery,
+    graph: &mut GraphState,
+    receipt: crate::AuthorizedGraphResolutionReceipt,
+    final_assistant_text: String,
+    resolved_at: u64,
+) -> Result<AuthorizedGraphResolutionOutcome, NativeRunOutputResolutionError> {
+    let output = TeamNodeOutput::parse(final_assistant_text).map_err(|error| match error {
+        TeamNodeOutputError::MissingEnvelope
+        | TeamNodeOutputError::InvalidJson
+        | TeamNodeOutputError::MissingField(_)
+        | TeamNodeOutputError::UnexpectedField(_)
+        | TeamNodeOutputError::InvalidField(_)
+        | TeamNodeOutputError::InvalidSummary
+        | TeamNodeOutputError::UnsafeOutputPort => NativeRunOutputResolutionError::InvalidOutput,
+    })?;
+    let observation = match delivery.phase() {
+        DeliveryPhase::TerminalObserved { observation } => observation.clone(),
+        _ => {
+            return Err(NativeRunOutputResolutionError::AuthorizedResolution(
+                AuthorizedGraphResolutionError::DeliveryNotAwaitingAuthorizedResolution,
+            ));
+        }
+    };
+    let outcome = match observation.native_terminal() {
+        NativeTerminalStatus::Completed => AuthorizedGraphOutcome::Completed,
+        NativeTerminalStatus::Failed | NativeTerminalStatus::Interrupted => {
+            AuthorizedGraphOutcome::Failed
+        }
+        NativeTerminalStatus::Cancelled => {
+            return Err(NativeRunOutputResolutionError::NativeTerminalNotResolvable);
+        }
+    };
+    let resolution = AuthorizedGraphResolution::new(
+        receipt,
+        observation.delivery_id().clone(),
+        observation.graph_run_id(),
+        observation.fence().clone(),
+        outcome,
+        output.output_port(),
+        resolved_at,
+    )
+    .map_err(|_| NativeRunOutputResolutionError::InvalidOutput)?;
+    resolve_authorized_graph_outcome_with_output(delivery, graph, Some(output), resolution)
+        .map_err(NativeRunOutputResolutionError::AuthorizedResolution)
+}
+
 pub(crate) fn resolve_authorized_graph_outcome(
     delivery: &mut Delivery,
     graph: &mut GraphState,
+    resolution: AuthorizedGraphResolution,
+) -> Result<AuthorizedGraphResolutionOutcome, AuthorizedGraphResolutionError> {
+    resolve_authorized_graph_outcome_with_output(delivery, graph, None, resolution)
+}
+
+fn resolve_authorized_graph_outcome_with_output(
+    delivery: &mut Delivery,
+    graph: &mut GraphState,
+    output: Option<TeamNodeOutput>,
     resolution: AuthorizedGraphResolution,
 ) -> Result<AuthorizedGraphResolutionOutcome, AuthorizedGraphResolutionError> {
     let observation = match delivery.phase() {
@@ -384,7 +447,11 @@ pub(crate) fn resolve_authorized_graph_outcome(
         .ok_or(AuthorizedGraphResolutionError::StaleFence)?;
     match observation.resolution() {
         TerminalObservationResolution::GraphResolved(existing) => {
-            if existing != &resolution {
+            if existing != &resolution
+                || output
+                    .as_ref()
+                    .is_some_and(|output| Some(output) != observation.output())
+            {
                 return Err(AuthorizedGraphResolutionError::ConflictingResolution);
             }
             return graph_matches_resolution(attempt, &resolution)
@@ -434,7 +501,7 @@ pub(crate) fn resolve_authorized_graph_outcome(
     let DeliveryPhase::TerminalObserved { observation } = &mut delivery.phase else {
         unreachable!("delivery phase was matched before graph reduction")
     };
-    observation.resolve_graph(resolution);
+    observation.resolve_graph(output, resolution);
     *graph = reduced;
     Ok(AuthorizedGraphResolutionOutcome::Recorded)
 }
@@ -470,7 +537,7 @@ fn graph_matches_resolution(
 fn terminal_observation(
     input: TerminalObservationInput<'_>,
 ) -> Result<TerminalObservation, TerminalObservationError> {
-    if input.correlation.external_session() != &input.observed_session {
+    if input.correlation.endpoint_session_id() != &input.observed_session {
         return Err(TerminalObservationError::SessionMismatch);
     }
     if input.correlation.native_run_receipt() != &input.native_run_receipt {
@@ -539,7 +606,7 @@ pub fn dispatch_delivery<P: PromptDeliveryPort>(
     let receipt = match port.deliver(request) {
         Ok(PromptDeliveryOutcome::Delivered { receipt }) => DeliveryReceipt::Accepted {
             receipt,
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: observed_at,
         },
         Ok(PromptDeliveryOutcome::Rejected {

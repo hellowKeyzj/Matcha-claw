@@ -44,6 +44,14 @@ impl RuntimeDriverDirectory {
         }
     }
 
+    pub(crate) fn lookup_reference(
+        &self,
+        endpoint: &organization::RuntimeEndpointReference,
+    ) -> Option<Arc<dyn RuntimeDriver>> {
+        self.all_drivers()
+            .find(|driver| driver.identity().runtime_endpoint_reference() == endpoint.as_str())
+    }
+
     pub(crate) fn all_drivers(&self) -> impl Iterator<Item = Arc<dyn RuntimeDriver>> + '_ {
         [self.open_claw.as_ref(), self.matcha_agent.as_ref()]
             .into_iter()

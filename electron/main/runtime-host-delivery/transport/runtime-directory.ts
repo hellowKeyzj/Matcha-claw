@@ -4,9 +4,8 @@ import type {
   RuntimeConnectorSummary,
   RuntimeEndpointSummary,
 } from '../../../../src/types/runtime-topology';
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from './client';
 const UNAVAILABLE = {
   success: false,
   error: 'Runtime endpoint directory is unavailable',
@@ -66,35 +65,27 @@ export interface RuntimeEndpointDirectoryTransport {
 
 export function createRuntimeEndpointDirectoryTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): RuntimeEndpointDirectoryTransport {
-  const directoryUrl = `http://127.0.0.1:${sessionTransportPort}${RUNTIME_ENDPOINT_DIRECTORY_PATH}`;
-  const platformToolsUrl = `http://127.0.0.1:${sessionTransportPort}${PLATFORM_TOOLS_PATH}`;
   return {
     async list(): Promise<RuntimeEndpointDirectoryResponse> {
-      try {
-        const response = await fetcher(directoryUrl, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: RUNTIME_ENDPOINT_DIRECTORY_PATH,
-              scope: 'runtime:endpoints:read',
-              capability: 'runtime.endpoints.directory',
-              subject: 'runtime-endpoint-directory',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Length': '0',
-          },
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isResponse(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: RUNTIME_ENDPOINT_DIRECTORY_PATH,
+        issuer,
+        decision: {
+          endpoint: RUNTIME_ENDPOINT_DIRECTORY_PATH,
+          scope: 'runtime:endpoints:read',
+          capability: 'runtime.endpoints.directory',
+          subject: 'runtime-endpoint-directory',
+        },
+        method: 'GET',
+        fetcher,
+        emptyContentLength: true,
+      });
+      if (response?.status === 200 && isResponse(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -122,28 +113,22 @@ export function createRuntimeEndpointDirectoryTransport(
     },
 
     async listPlatformTools(): Promise<PlatformToolsResponse> {
-      try {
-        const response = await fetcher(platformToolsUrl, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: PLATFORM_TOOLS_PATH,
-              scope: 'platform:tools:read',
-              capability: 'platform.tools.list',
-              subject: 'platform-tools',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Length': '0',
-          },
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPlatformToolsResponse(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PLATFORM_TOOLS_PATH,
+        issuer,
+        decision: {
+          endpoint: PLATFORM_TOOLS_PATH,
+          scope: 'platform:tools:read',
+          capability: 'platform.tools.list',
+          subject: 'platform-tools',
+        },
+        method: 'GET',
+        fetcher,
+        emptyContentLength: true,
+      });
+      if (response?.status === 200 && isPlatformToolsResponse(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: PLATFORM_TOOLS_UNAVAILABLE };
     },
@@ -364,13 +349,4 @@ function isControlState(value: unknown, lifecycle: unknown): boolean {
     && hasExactKeys(value.readiness, ['ready', 'phase'])
     && value.readiness.ready === readiness.ready
     && value.readiness.phase === readiness.phase;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

@@ -163,6 +163,7 @@ pub(crate) enum ActivityExecutionRequestError {
 pub(crate) enum ActivityExecutionOutcome {
     Accepted {
         receipt: organization::DeliveryReceiptReference,
+        correlation: organization::NativeDeliveryCorrelation,
     },
     Rejected {
         rejection: organization::DeliveryRejection,
@@ -208,6 +209,7 @@ impl AgentTaskActivity {
             task_id,
             role_id,
             prompt,
+            ..
         } = &activity.activity_kind
         else {
             return Err(ActivityExecutionRequestError::InvalidPromptPayload);
@@ -221,6 +223,7 @@ impl AgentTaskActivity {
             node_execution_id: activity.node_execution_id.as_str().to_owned(),
             task_id: task_id.clone(),
             role_id: role_id.clone(),
+            session_ref: binding.session_ref().as_str().to_owned(),
             idempotency_key: activity.idempotency_key.clone(),
             message: prompt.clone(),
             requested_at: activity.created_at,
@@ -262,24 +265,36 @@ impl AgentTaskActivity {
     }
 }
 
-impl From<organization::PromptDeliveryOutcome> for ActivityExecutionOutcome {
-    fn from(outcome: organization::PromptDeliveryOutcome) -> Self {
-        match outcome {
-            organization::PromptDeliveryOutcome::Delivered { receipt } => {
-                Self::Accepted { receipt }
+fn activity_delivery_outcome(
+    binding: &organization::RoleSessionReceipt,
+    outcome: organization::PromptDeliveryOutcome,
+) -> ActivityExecutionOutcome {
+    match outcome {
+        organization::PromptDeliveryOutcome::Delivered { receipt } => {
+            let Ok(native_run_receipt) =
+                organization::NativeRunReceiptReference::try_new(receipt.as_str().to_owned())
+            else {
+                return ActivityExecutionOutcome::Unknown;
+            };
+            ActivityExecutionOutcome::Accepted {
+                receipt,
+                correlation: organization::NativeDeliveryCorrelation::new(
+                    binding.endpoint_session_id().clone(),
+                    native_run_receipt,
+                ),
             }
-            organization::PromptDeliveryOutcome::Rejected { rejection } => {
-                Self::Rejected { rejection }
-            }
-            organization::PromptDeliveryOutcome::OutcomeUnknown => Self::Unknown,
         }
+        organization::PromptDeliveryOutcome::Rejected { rejection } => {
+            ActivityExecutionOutcome::Rejected { rejection }
+        }
+        organization::PromptDeliveryOutcome::OutcomeUnknown => ActivityExecutionOutcome::Unknown,
     }
 }
 
 impl From<ActivityExecutionOutcome> for organization::PromptDeliveryOutcome {
     fn from(outcome: ActivityExecutionOutcome) -> Self {
         match outcome {
-            ActivityExecutionOutcome::Accepted { receipt } => Self::Delivered { receipt },
+            ActivityExecutionOutcome::Accepted { receipt, .. } => Self::Delivered { receipt },
             ActivityExecutionOutcome::Rejected { rejection } => Self::Rejected { rejection },
             ActivityExecutionOutcome::Unknown => Self::OutcomeUnknown,
         }
@@ -409,6 +424,14 @@ pub(crate) trait SessionOps: Send + Sync {
         command: SessionSendCommand,
     ) -> SessionFuture<'a, SessionSendOutcome>;
 
+    fn wait_session_native_run<'a>(
+        &'a self,
+        _endpoint_session_id: Option<String>,
+        _native_run_id: String,
+    ) -> SessionFuture<'a, Option<NativeRunSettled>> {
+        Box::pin(async { None })
+    }
+
     fn abort_open_claw_chat<'a>(
         &'a self,
         _params: ChatAbortParams,
@@ -472,10 +495,11 @@ pub(crate) trait TeamOps: Send + Sync {
         &self,
         request: ActivityExecutionRequest,
     ) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
+        let binding = request.binding().clone();
         match request.into_prompt_delivery() {
             Ok(delivery) => {
                 let delivery = self.deliver_prompt(delivery);
-                Box::pin(async move { ActivityExecutionOutcome::from(delivery.await) })
+                Box::pin(async move { activity_delivery_outcome(&binding, delivery.await) })
             }
             Err(_) => Box::pin(async {
                 ActivityExecutionOutcome::Rejected {
@@ -502,11 +526,17 @@ pub(crate) trait TeamOps: Send + Sync {
         abort_first: bool,
     ) -> OwnedRuntimeFuture<NativeDeletionEvidence>;
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeRunSettled {
+    pub(crate) status: organization::NativeTerminalStatus,
+    pub(crate) final_assistant_text: Option<String>,
+}
+
 pub(crate) trait TeamTerminalOps: Send + Sync {
     fn watch_terminal(
         &self,
-        target: organization::MatchaTerminalReceiptTarget,
-    ) -> OwnedRuntimeFuture<Option<matcha_agent::session::receipt::TerminalRunStatus>>;
+        target: organization::NativeTerminalReceiptTarget,
+    ) -> OwnedRuntimeFuture<Option<NativeRunSettled>>;
 }
 pub(crate) trait CronOps: Send + Sync {
     fn list_cron_jobs<'a>(&'a self) -> SessionFuture<'a, CronListOutcome>;

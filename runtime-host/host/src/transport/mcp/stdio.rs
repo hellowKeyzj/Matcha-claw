@@ -648,7 +648,7 @@ fn graph_context_tool() -> Value {
 fn node_event_tool() -> Value {
     json!({
         "name": "team_node_event",
-        "description": "Record a TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
+        "description": "Record a legacy/manual TeamRun node event. Terminal complete/reject events are accepted only as non-scheduler evidence; runtime terminal settle remains the completion path.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -759,12 +759,12 @@ fn node_event_outcome(outcome: TeamNodeEventOutcome) -> Value {
         TeamNodeEventOutcomeKind::Progressed => json!({ "outcome": "progressed" }),
         TeamNodeEventOutcomeKind::WaitingForInput => json!({ "outcome": "waiting_for_input" }),
         TeamNodeEventOutcomeKind::ApprovalRequested => json!({ "outcome": "approval_requested" }),
-        TeamNodeEventOutcomeKind::TerminalResolved {
-            outcome,
+        TeamNodeEventOutcomeKind::LegacyTerminalEvidence {
             summary,
             output_port,
         } => json!({
-            "outcome": outcome,
+            "outcome": "legacy_terminal_evidence",
+            "completionPath": "runtime_terminal_settle",
             "summary": summary,
             "outputPort": output_port,
         }),

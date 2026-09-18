@@ -7,7 +7,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "session.prompt";
 const OPERATION_ID: &str = "sessions.create";

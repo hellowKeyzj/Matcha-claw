@@ -3,7 +3,6 @@ mod fleet;
 mod host;
 mod plugins;
 mod runtime;
-mod sessions;
 mod skills;
 mod team;
 
@@ -14,7 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     RuntimeSessionError,
     composition::PeerHandle,
-    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
+    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     fleet::handle::FleetHandle,
     host_actor::Handle,
     runtime::driver::RuntimeDriverIdentity,
@@ -33,11 +32,9 @@ pub(super) struct InvalidPayload;
 use plugins::is_plugin_target;
 #[cfg(test)]
 use runtime::{
-    ToolPermissionModeRequest, decode_browser_request, decode_manual_cron_trigger,
-    decode_mcp_app_request, openclaw_gateway_request_outcome,
+    ToolPermissionModeRequest, decode_browser_request, decode_mcp_app_request,
+    openclaw_gateway_request_outcome,
 };
-#[cfg(test)]
-use sessions::{decode_abort, decode_send};
 #[cfg(test)]
 use skills::{decode_skill_bundles, is_skill_capability_request};
 #[cfg(test)]
@@ -48,12 +45,10 @@ pub(crate) async fn execute(
     organization: &crate::organization::OrganizationHandle,
     peer: &PeerHandle,
     fleet: &FleetHandle,
-    session: &crate::sessions::SessionHandle,
     platform_runtime: &PlatformRuntimeHandle,
     toolchain: &ToolchainHandle,
     plugins: &PluginsHandle,
     skills: &SkillsHandle,
-    cron: &CronHandle,
     command: Command,
 ) -> CommandOutcome {
     match command {
@@ -110,17 +105,12 @@ pub(crate) async fn execute(
         Command::OpenClawGatewayHealth {} => runtime::gateway_health(peer).await,
         Command::OpenClawGatewayStatus {} => runtime::gateway_status(peer).await,
         Command::OpenClawControlUiUrl {} => runtime::control_ui_url(peer).await,
-        Command::OpenClawManualCronTrigger { input } => {
-            runtime::manually_trigger_openclaw_cron(cron, input).await
-        }
         Command::OpenClawBrowserRequest { input } => {
             runtime::openclaw_browser_request(peer, input).await
         }
         Command::OpenClawMcpAppRequest { input } => {
             runtime::openclaw_mcp_app_request(peer, input).await
         }
-        Command::OpenClawChatSend { input } => sessions::send_openclaw_chat(session, input).await,
-        Command::OpenClawChatAbort { input } => sessions::abort_openclaw_chat(session, input).await,
         Command::FleetCredentialsWrite { input } => {
             fleet::fleet_credentials_write(fleet, input).await
         }

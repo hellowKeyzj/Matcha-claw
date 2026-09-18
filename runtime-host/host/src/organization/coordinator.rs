@@ -33,7 +33,7 @@ pub(super) enum TeamRunCoordinatorRequest {
 }
 
 impl TeamRunCoordinatorHandle {
-    pub(crate) async fn cancel_matcha_terminal_watches(&self) {
+    pub(crate) async fn cancel_native_terminal_watches(&self) {
         let (reply, reply_rx) = oneshot::channel();
         if self
             .requests

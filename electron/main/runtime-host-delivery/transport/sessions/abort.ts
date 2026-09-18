@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE = '/api/sessions/abort';
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_RUN_ID_BYTES = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES = 4096;
@@ -44,38 +45,30 @@ export interface SessionAbortTransport {
 
 export function createSessionAbortTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionAbortTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionAbortTransport {
-  const url = `http://127.0.0.1:${sessionAbortTransportPort}/api/sessions/abort`;
   return {
     async abort(request: unknown): Promise<SessionAbortTransportResponse> {
       if (!isSessionAbortRequest(request)) {
         return unknownOutcome();
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/sessions/abort',
-              scope: 'sessions:write',
-              capability: 'sessions.abort',
-              subject: 'session-abort',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSessionAbortResponse(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // An interrupted native mutation never gives the renderer a terminal fact.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE,
+        issuer,
+        decision: {
+          endpoint: ROUTE,
+          scope: 'sessions:write',
+          capability: 'sessions.abort',
+          subject: 'session-abort',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSessionAbortResponse(response.body)) {
+        return { status: 200, body: response.body };
       }
       return unknownOutcome();
     },
@@ -101,23 +94,13 @@ function isSessionAbortRequest(value: unknown): value is SessionAbortRequest {
     || !isRecord(value.target)
     || !hasExactKeys(value.target, ['kind'])
     || value.target.kind !== 'session'
-    || !isRecord(value.input)
-    || !hasAllowedKeys(value.input, ['endpoint', 'sessionKey'], ['endpointSessionId', 'runId', 'approvalIds'])
-    || !isEndpoint(value.input.endpoint)
+    || !isSessionAbortInput(value.input)
     || value.scope.endpoint.runtimeAdapterId !== value.input.endpoint.runtimeAdapterId
     || value.scope.endpoint.runtimeInstanceId !== value.input.endpoint.runtimeInstanceId
-    || value.scope.sessionKey !== value.input.sessionKey
-    || !isIdentity(value.input.sessionKey, MAX_SESSION_KEY_BYTES)
-    || (value.input.endpointSessionId !== undefined
-      && !isIdentity(value.input.endpointSessionId, MAX_ENDPOINT_SESSION_ID_BYTES))
-    || (value.input.runId !== undefined && !isIdentity(value.input.runId, MAX_RUN_ID_BYTES))
-    || (value.input.approvalIds !== undefined
-      && (!Array.isArray(value.input.approvalIds)
-        || value.input.approvalIds.length > MAX_APPROVAL_IDS
-        || value.input.approvalIds.some((approvalId) => !isApprovalId(approvalId))))) {
+    || value.scope.sessionKey !== value.input.sessionKey) {
     return false;
   }
-  return isEndpoint(value.scope.endpoint);
+  return true;
 }
 
 function isSessionScope(value: unknown): value is SessionAbortRequest['scope'] {
@@ -127,6 +110,22 @@ function isSessionScope(value: unknown): value is SessionAbortRequest['scope'] {
     && isEndpoint(value.endpoint)
     && typeof value.sessionKey === 'string'
     && value.sessionKey.length > 0;
+}
+
+function isSessionAbortInput(value: unknown): value is SessionAbortRequest['input'] {
+  return isRecord(value)
+    && Object.hasOwn(value, 'endpoint')
+    && Object.hasOwn(value, 'sessionKey')
+    && Object.keys(value).every((key) => ['endpoint', 'sessionKey', 'endpointSessionId', 'runId', 'approvalIds'].includes(key))
+    && isEndpoint(value.endpoint)
+    && isIdentity(value.sessionKey, MAX_SESSION_KEY_BYTES)
+    && (value.endpointSessionId === undefined
+      || isIdentity(value.endpointSessionId, MAX_ENDPOINT_SESSION_ID_BYTES))
+    && (value.runId === undefined || isIdentity(value.runId, MAX_RUN_ID_BYTES))
+    && (value.approvalIds === undefined
+      || (Array.isArray(value.approvalIds)
+        && value.approvalIds.length <= MAX_APPROVAL_IDS
+        && value.approvalIds.every(isApprovalId)));
 }
 
 function isApprovalId(value: unknown): value is string {
@@ -150,23 +149,4 @@ function isEndpoint(value: unknown): value is Endpoint {
     && value.kind === 'native-runtime'
     && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
     && value.runtimeInstanceId === 'local';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasAllowedKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  return required.every((key) => Object.hasOwn(value, key))
-    && Object.keys(value).every((key) => allowed.has(key));
 }

@@ -1,16 +1,15 @@
 import { logger } from '../../../../utils/logger';
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import {
   decodeProviderMutationCommittedResponse,
   decodeProviderMutationCommitUnknownResponse,
-  ProviderMutationReceiptUnavailableError,
   type ProviderMutationCommittedResponse,
   type ProviderMutationCommitUnknownResponse,
 } from './mutation-receipt';
 
-const DECISION_TTL_MS = 30_000;
-const ENDPOINT = '/api/provider-models';
-const SELECTABLE_ENDPOINT = '/api/provider-models/selectable';
+const PROVIDER_MODELS_PATH = '/api/provider-models';
+const SELECTABLE_PROVIDER_MODELS_PATH = '/api/provider-models/selectable';
 const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
 const UNAVAILABLE = {
@@ -99,39 +98,37 @@ export interface ProviderModelsTransport {
   execute(request: unknown): Promise<ProviderModelsTransportResponse>;
 }
 
+const PROVIDER_MODEL_KEYS: readonly string[] = [
+  'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality',
+];
+const SELECTABLE_PROVIDER_MODEL_KEYS: readonly string[] = [
+  'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality', 'selectionId', 'modelReferences',
+];
+const MODEL_DRAFT_KEYS: readonly string[] = ['modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality'];
+
 export function createProviderModelsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  providerModelsTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ProviderModelsTransport {
-  const url = `http://127.0.0.1:${providerModelsTransportPort}${ENDPOINT}`;
-  const selectableUrl = `http://127.0.0.1:${providerModelsTransportPort}${SELECTABLE_ENDPOINT}`;
   return {
     async read(): Promise<ProviderModelsTransportResponse> {
-      try {
-        const response = await fetcher(url, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'providers:models',
-              capability: 'providerModels.list',
-              subject: 'provider-models',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-          },
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isListResponse(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 422) return { status: 422, body: REJECTED };
-      } catch {
-        // Public delivery deliberately redacts loopback and host failures.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PROVIDER_MODELS_PATH,
+        issuer,
+        decision: {
+          endpoint: PROVIDER_MODELS_PATH,
+          scope: 'providers:models',
+          capability: 'providerModels.list',
+          subject: 'provider-models',
+        },
+        method: 'GET',
+        fetcher,
+      });
+      if (response?.status === 200 && isListResponse(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
 
@@ -145,127 +142,97 @@ export function createProviderModelsTransport(
       };
       if (!isDiscoverRequest(request)) return { status: 400, body: INVALID_REQUEST };
       const startedAt = Date.now();
-      let stage: 'request' | 'response-json' | 'response-validation' = 'request';
-      let status: number | null = null;
+      const status = { value: null as number | null };
       logger.info('[ProviderModels] discover start');
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'providers:models',
-              capability: 'providerModels.discover',
-              subject: 'provider-models',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        status = response.status;
-        stage = 'response-json';
-        const body: unknown = await response.json();
-        stage = 'response-validation';
-        if (response.status === 200 && isDiscoverResponse(body)) {
-          logger.info('[ProviderModels] discover result', { status, elapsedMs: Date.now() - startedAt });
-          return { status: 200, body };
-        }
-        logger.warn('[ProviderModels] discover result', {
-          stage,
-          status,
-          elapsedMs: Date.now() - startedAt,
-          reason: response.status === 200 ? 'invalid-response' : 'http-error',
-        });
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 422) return { status: 422, body: REJECTED };
-      } catch {
-        logger.warn('[ProviderModels] discover error', { stage, status, elapsedMs: Date.now() - startedAt });
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PROVIDER_MODELS_PATH,
+        issuer,
+        decision: {
+          endpoint: PROVIDER_MODELS_PATH,
+          scope: 'providers:models',
+          capability: 'providerModels.discover',
+          subject: 'provider-models',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      status.value = response?.status ?? null;
+      if (response?.status === 200 && isDiscoverResponse(response.body)) {
+        logger.info('[ProviderModels] discover result', { status: status.value, elapsedMs: Date.now() - startedAt });
+        return { status: 200, body: response.body };
       }
+      logger.warn('[ProviderModels] discover result', {
+        stage: response === null ? 'request' : 'response-validation',
+        status: status.value,
+        elapsedMs: Date.now() - startedAt,
+        reason: response?.status === 200 ? 'invalid-response' : 'http-error',
+      });
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
 
     async readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse> {
       if (!isProviderModelCapability(capability)) return { status: 400, body: INVALID_REQUEST };
-      try {
-        const response = await fetcher(`${selectableUrl}?capability=${encodeURIComponent(capability)}`, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: SELECTABLE_ENDPOINT,
-              scope: 'providers:models',
-              capability: 'providerModels.listSelectable',
-              subject: 'provider-models',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-          },
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSelectableResponse(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 422) return { status: 422, body: REJECTED };
-      } catch {
-        // Public delivery deliberately redacts loopback and host failures.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: SELECTABLE_PROVIDER_MODELS_PATH,
+        issuer,
+        decision: {
+          endpoint: SELECTABLE_PROVIDER_MODELS_PATH,
+          scope: 'providers:models',
+          capability: 'providerModels.listSelectable',
+          subject: 'provider-models',
+        },
+        method: 'GET',
+        fetcher,
+        query: new URLSearchParams({ capability }),
+      });
+      if (response?.status === 200 && isSelectableResponse(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
 
     async execute(request: unknown): Promise<ProviderModelsTransportResponse> {
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'providers:models',
-              capability: request.operationId,
-              subject: 'provider-models',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PROVIDER_MODELS_PATH,
+        issuer,
+        decision: {
+          endpoint: PROVIDER_MODELS_PATH,
+          scope: 'providers:models',
+          capability: request.operationId,
+          subject: 'provider-models',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200) {
+        const decoded = decodeProviderMutationCommittedResponse(response.body, {
+          desiredStatus: 'stored',
+          desiredRevision: 'forbidden',
+          unknownError: MUTATION_UNKNOWN_ERROR,
         });
-        let body: unknown;
-        try {
-          body = await response.json();
-        } catch {
-          if (response.status === 200) throw new ProviderMutationReceiptUnavailableError();
-          return { status: 503, body: UNAVAILABLE };
-        }
-        if (response.status === 200) {
-          return {
-            status: 200,
-            body: decodeProviderMutationCommittedResponse(body, {
-              desiredStatus: 'stored',
-              desiredRevision: 'forbidden',
-              unknownError: MUTATION_UNKNOWN_ERROR,
-            }),
-          };
-        }
-        if (response.status === 409) {
-          const unknown = decodeProviderMutationCommitUnknownResponse(body, {
-            desiredRevision: 'forbidden',
-            unknownError: MUTATION_UNKNOWN_ERROR,
-          });
-          return unknown
-            ? { status: 409, body: unknown }
-            : { status: 503, body: UNAVAILABLE };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 422) return { status: 422, body: REJECTED };
-      } catch {
-        // Public delivery deliberately redacts malformed loopback and host failures.
+        return decoded
+          ? { status: 200, body: decoded }
+          : { status: 503, body: UNAVAILABLE };
       }
+      if (response?.status === 409) {
+        const unknown = decodeProviderMutationCommitUnknownResponse(response.body, {
+          desiredRevision: 'forbidden',
+          unknownError: MUTATION_UNKNOWN_ERROR,
+        });
+        return unknown
+          ? { status: 409, body: unknown }
+          : { status: 503, body: UNAVAILABLE };
+      }
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -334,9 +301,7 @@ function isSelectableResponse(value: unknown): value is SelectableResponse {
 }
 
 function isProviderModel(value: unknown): value is ProviderModel {
-  if (!isRecord(value) || !hasOnlyKeys(value, [
-    'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality',
-  ])) return false;
+  if (!isRecord(value) || !Object.keys(value).every((key) => PROVIDER_MODEL_KEYS.includes(key))) return false;
   return isIdentifier(value.accountId)
     && isBoundedText(value.label, 256)
     && isModelId(value.modelId)
@@ -354,9 +319,7 @@ function isProviderModel(value: unknown): value is ProviderModel {
 function isSelectableProviderModel(value: unknown): value is SelectableProviderModel {
   if (!isRecord(value)
     || !Object.hasOwn(value, 'selectionId')
-    || !hasOnlyKeys(value, [
-      'accountId', 'label', 'modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality', 'selectionId', 'modelReferences',
-    ])
+    || !Object.keys(value).every((key) => SELECTABLE_PROVIDER_MODEL_KEYS.includes(key))
     || !isBoundedText(value.selectionId, 2048)
     || !Array.isArray(value.modelReferences)
     || value.modelReferences.length === 0
@@ -377,7 +340,7 @@ function isSelectableProviderModel(value: unknown): value is SelectableProviderM
 
 function isModelDraft(value: unknown): value is ModelDraft {
   return isRecord(value)
-    && hasOnlyKeys(value, ['modelId', 'capabilities', 'contextWindow', 'maxTokens', 'timeoutMs', 'aspectRatio', 'resolution', 'quality'])
+    && Object.keys(value).every((key) => MODEL_DRAFT_KEYS.includes(key))
     && isModelId(value.modelId)
     && Array.isArray(value.capabilities)
     && value.capabilities.length > 0
@@ -405,7 +368,7 @@ export function isProviderModelCapability(value: unknown): value is ProviderMode
 }
 
 function optionalPositive(value: unknown): boolean {
-  return value === undefined || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
+  return value === undefined || (isSafeNonNegativeInteger(value) && value > 0);
 }
 
 function optionalText(value: unknown): boolean {
@@ -425,17 +388,4 @@ function isBoundedText(value: unknown, maxLength: number): value is string {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

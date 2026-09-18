@@ -103,10 +103,7 @@ describe('runtime-host framed control client', () => {
     client.onSafeEvent(event);
 
     const outcome = client.command(
-      {
-        name: 'openclaw.chat.send',
-        input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-      },
+      { name: 'host.health' },
       { timeoutMs: 25 },
     );
     const outbound = outboundCommand(streams.writes[0]);
@@ -114,13 +111,10 @@ describe('runtime-host framed control client', () => {
       version: 1,
       type: 'command',
       timeoutMs: 25,
-      command: {
-        name: 'openclaw.chat.send',
-        input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-      },
+      command: { name: 'host.health' },
     });
     expect(Object.keys(outbound).sort()).toEqual(['command', 'id', 'timeoutMs', 'type', 'version']);
-    expect(Object.keys(outbound.command as Record<string, unknown>).sort()).toEqual(['input', 'name']);
+    expect(Object.keys(outbound.command as Record<string, unknown>).sort()).toEqual(['name']);
     expect(outbound.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(outbound)).not.toContain('method');
     expect(JSON.stringify(outbound)).not.toContain('route');
@@ -372,6 +366,36 @@ describe('runtime-host framed control client', () => {
       expect(event).not.toHaveBeenCalled();
       client.close();
     }
+  });
+
+  it('rejects session.delta on the safe event control wire', async () => {
+    const { client, streams } = createClient();
+    const event = vi.fn();
+    client.onSafeEvent(event);
+    const command = client.command({ name: 'host.health' });
+
+    streams.output.emit('data', readyFrame());
+    streams.output.emit('data', frame({
+      version: 1,
+      type: 'event',
+      event: {
+        type: 'session.delta',
+        delta: {
+          sessionKey: 'session-1',
+          routeKey: 'renderer-route:bound',
+          epoch: 1,
+          seq: 1,
+          cursor: 1,
+          changes: [{ kind: 'runPhaseChanged', runId: 'run-1', phase: 'started' }],
+        },
+      },
+    }));
+
+    expect(event).not.toHaveBeenCalled();
+    await expect(command).rejects.toMatchObject({
+      kind: 'protocol-invalid',
+      delivery: 'not-delivered',
+    } satisfies Partial<RuntimeHostControlError>);
   });
 
   it('accepts all Cron terminal statuses while preserving only opaque correlation', async () => {
@@ -808,28 +832,6 @@ describe('runtime-host framed control client', () => {
     } satisfies Partial<RuntimeHostControlError>);
   });
 
-  it('encodes an exact Cron manual-trigger command as a mutation', async () => {
-    const { client, streams } = createClient();
-    const command = client.command({
-      name: 'openclaw.cron.manual-trigger',
-      input: { jobId: 'cron-job-1' },
-    });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect(outbound.command).toEqual({
-      name: 'openclaw.cron.manual-trigger',
-      input: { jobId: 'cron-job-1' },
-    });
-    expect(Object.keys(outbound.command as Record<string, unknown>).sort()).toEqual(['input', 'name']);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { result: { outcome: 'succeeded' } }));
-    await expect(command).resolves.toEqual({
-      kind: 'succeeded',
-      result: { result: { outcome: 'succeeded' } },
-    });
-  });
-
   it('encodes OpenClaw control readiness as an exact name-only command', async () => {
     const { client, streams } = createClient();
     const command = client.command({ name: 'openclaw.control.ready' });
@@ -887,12 +889,12 @@ describe('runtime-host framed control client', () => {
 
   it('requires the Rust-ready frame before dispatching outcomes or safe events', async () => {
     const outcome = createClient();
-    const outcomeCommand = outcome.client.command({ name: 'openclaw.chat.send', input: {} });
+    const outcomeCommand = outcome.client.command({ name: 'host.health' });
     const outcomeId = outboundCommand(outcome.streams.writes[0]).id;
     outcome.streams.output.emit('data', succeededOutcome(outcomeId, {}));
     await expect(outcomeCommand).rejects.toMatchObject({
       kind: 'protocol-invalid',
-      delivery: 'unknown-delivery',
+      delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
 
     const event = createClient();
@@ -981,57 +983,45 @@ describe('runtime-host framed control client', () => {
 
     for (const invalidMessage of invalidMessages) {
       const { client, streams } = createClient();
-      const command = client.command({
-        name: 'openclaw.chat.send',
-        input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-      });
+      const command = client.command({ name: 'host.health' });
       streams.output.emit('data', frame(invalidMessage));
 
       await expect(command).rejects.toMatchObject({
         kind: 'protocol-invalid',
-        delivery: 'unknown-delivery',
+        delivery: 'not-delivered',
       } satisfies Partial<RuntimeHostControlError>);
     }
   });
 
   it('rejects outcome IDs that the Rust control wire cannot decode', async () => {
     const { client, streams } = createClient();
-    const command = client.command({
-      name: 'openclaw.chat.send',
-      input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-    });
+    const command = client.command({ name: 'host.health' });
     streams.output.emit('data', readyFrame());
     streams.output.emit('data', succeededOutcome('中'.repeat(65), {}));
 
     await expect(command).rejects.toMatchObject({
       kind: 'protocol-invalid',
-      delivery: 'unknown-delivery',
+      delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
   });
 
   it('rejects malformed and oversized framing before buffering unbounded stdout', async () => {
     const malformed = createClient();
-    const malformedCommand = malformed.client.command({
-      name: 'openclaw.chat.send',
-      input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-    });
+    const malformedCommand = malformed.client.command({ name: 'host.health' });
     malformed.streams.output.emit('data', Buffer.from([0, 0, 0, 1, 0xff]));
     await expect(malformedCommand).rejects.toMatchObject({
       kind: 'protocol-invalid',
-      delivery: 'unknown-delivery',
+      delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
 
     const oversized = createClient();
-    const oversizedCommand = oversized.client.command({
-      name: 'openclaw.chat.send',
-      input: { sessionKey: 'session-1', message: 'hello', runId: 'run-1' },
-    });
+    const oversizedCommand = oversized.client.command({ name: 'host.health' });
     const oversizedHeader = Buffer.alloc(4);
     oversizedHeader.writeUInt32BE(MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES + 1);
     oversized.streams.output.emit('data', oversizedHeader);
     await expect(oversizedCommand).rejects.toMatchObject({
       kind: 'protocol-invalid',
-      delivery: 'unknown-delivery',
+      delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
   });
 
@@ -1250,38 +1240,6 @@ describe('runtime-host framed control client', () => {
     }
   });
 
-  it('classifies manual Cron trigger timeout and disconnect as unknown delivery', async () => {
-    vi.useFakeTimers();
-    try {
-      const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const command = timedOut.client.command({
-        name: 'openclaw.cron.manual-trigger',
-        input: { jobId: 'cron-job-1' },
-      });
-      const assertion = expect(command).rejects.toMatchObject({
-        kind: 'timeout-exceeded',
-        delivery: 'unknown-delivery',
-        retryable: false,
-      } satisfies Partial<RuntimeHostControlError>);
-      await vi.advanceTimersByTimeAsync(10);
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
-
-    const disconnected = createClient();
-    const command = disconnected.client.command({
-      name: 'openclaw.cron.manual-trigger',
-      input: { jobId: 'cron-job-1' },
-    });
-    disconnected.streams.output.emit('close');
-    await expect(command).rejects.toMatchObject({
-      kind: 'disconnected',
-      delivery: 'unknown-delivery',
-      retryable: false,
-    } satisfies Partial<RuntimeHostControlError>);
-  });
-
   it('classifies non-mutating disconnect as not delivered and never forwards secret event fields', async () => {
     const { client, streams } = createClient();
     const command = client.command({ name: 'host.health' });
@@ -1317,12 +1275,8 @@ describe('runtime-host framed control client', () => {
   it('enforces the one MiB outbound frame limit before writing', async () => {
     const { client, streams } = createClient();
     const command = client.command({
-      name: 'openclaw.chat.send',
-      input: {
-        sessionKey: 'session-1',
-        message: 'a'.repeat(MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES),
-        runId: 'run-1',
-      },
+      name: 'openclaw.skills.execute',
+      input: { payload: 'a'.repeat(MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES) },
     });
 
     await expect(command).rejects.toMatchObject({

@@ -11,7 +11,7 @@ pub use delivery::{
 };
 pub use fleet::{InvalidRunRuntimeReceipt, RunRuntimeReceipt};
 pub use identity::{
-    DeliveryReceiptReference, DeliveryReference, ExternalSessionReference, IdempotencyKey,
+    DeliveryReceiptReference, DeliveryReference, EndpointSessionId, IdempotencyKey,
     InvalidOrganizationReference, LeaseReference, ManagedAgentReference, RuntimeEndpointReference,
     SessionWindowReference,
 };
@@ -30,8 +30,8 @@ pub use native_effects::{
     RoleSessionReadbackReceipt, TeamNativeEffectsPort,
 };
 pub use session::{
-    InvalidLocalSessionReference, LocalSessionReference, RoleSessionPort, RoleSessionReceipt,
-    RoleSessionWindow,
+    InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionPort, RoleSessionReceipt,
+    RoleSessionRef, RoleSessionSlot, RoleSessionWindow,
 };
 
 #[cfg(test)]

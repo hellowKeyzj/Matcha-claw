@@ -217,7 +217,7 @@ export async function handleDiagnosticsRoutes(
     const abort = () => controller.abort();
     res.once('close', abort);
     try {
-      const response = await ctx.diagnosticsArchiveTransport.archive(controller.signal);
+      const response = await ctx.runtimeHostTransports.diagnosticsArchiveTransport.archive(controller.signal);
       if (!controller.signal.aborted) sendJson(res, response.status, response.body);
     } finally {
       res.off('close', abort);
@@ -240,7 +240,7 @@ export async function handleDiagnosticsRoutes(
       });
       return true;
     }
-    const response = await ctx.diagnosticsArchiveTransport.download(archiveId);
+    const response = await ctx.runtimeHostTransports.diagnosticsArchiveTransport.download(archiveId);
     if (response.status !== 200) {
       sendJson(res, response.status, response.body);
       return true;

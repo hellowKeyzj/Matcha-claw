@@ -127,20 +127,20 @@ pub(crate) fn canonical_provider_keys(
     retired: &[ProviderAccount],
 ) -> Result<BTreeSet<String>, ProviderModelProjectionError> {
     let mut active = BTreeMap::new();
-    for account in accounts
-        .iter()
-        .filter(|account| account.configuration().enabled())
-    {
-        active.insert(account.id().as_str().to_owned(), account);
+    let mut owned = BTreeMap::new();
+    for account in accounts {
+        owned.insert(account.id().as_str().to_owned(), account);
+        if account.configuration().enabled() {
+            active.insert(account.id().as_str().to_owned(), account);
+        }
     }
-    let mut all = active.clone();
     for account in retired {
-        all.insert(account.id().as_str().to_owned(), account);
+        owned.insert(account.id().as_str().to_owned(), account);
     }
     let mut keys = projection_keys(&active, true)?
         .into_values()
         .collect::<BTreeSet<_>>();
-    keys.extend(projection_keys(&all, false)?.into_values());
+    keys.extend(projection_keys(&owned, false)?.into_values());
     Ok(keys)
 }
 
@@ -236,7 +236,7 @@ struct ProjectionPlan<'a> {
     empty_text: Vec<agent_models::ProviderId>,
     empty_transport: Vec<ProviderKey>,
     media: media_models::MediaProviderCatalog,
-    model_allowlist_providers: BTreeSet<String>,
+    owned_model_providers: BTreeSet<String>,
     valid_model_references: BTreeSet<String>,
     has_custom_chat_models: bool,
 }
@@ -255,7 +255,7 @@ impl<'a> ProjectionPlan<'a> {
             all_accounts.insert(account.id().as_str().to_owned(), account);
         }
         let keys = projection_keys(&all_accounts, true)?;
-        let accounts = all_accounts.clone();
+        let projected_accounts = all_accounts.clone();
         let keys = keys
             .into_iter()
             .map(|(account_id, key)| {
@@ -280,7 +280,7 @@ impl<'a> ProjectionPlan<'a> {
         let mut empty_text = Vec::new();
         let mut empty_transport = Vec::new();
         let mut media = Vec::new();
-        let mut model_allowlist_providers = BTreeSet::new();
+        let owned_model_providers = canonical_provider_keys(accounts, retired)?;
         let mut valid_model_references = BTreeSet::new();
         let mut has_custom_chat_models = false;
         for (account_id, account) in &all_accounts {
@@ -300,7 +300,6 @@ impl<'a> ProjectionPlan<'a> {
                                 .map_err(|_| ProviderModelProjectionError::AccountConfiguration)?,
                         );
                         if account.provider().as_str() == "provider:custom" {
-                            model_allowlist_providers.insert(key.as_str().to_owned());
                             empty_transport.push(key.clone());
                         }
                     }
@@ -314,7 +313,6 @@ impl<'a> ProjectionPlan<'a> {
                     let context = TextModelProjectionContext { custom_provider };
                     let (provider, projected_models) = text_models(key.as_str(), &models, context)?;
                     has_custom_chat_models |= custom_provider;
-                    model_allowlist_providers.insert(key.as_str().to_owned());
                     for model in &models {
                         valid_model_references.insert(format!(
                             "{}/{}",
@@ -349,7 +347,7 @@ impl<'a> ProjectionPlan<'a> {
         }
 
         Ok(Self {
-            accounts,
+            accounts: projected_accounts,
             keys,
             removed_transport,
             provider_plugins,
@@ -358,7 +356,7 @@ impl<'a> ProjectionPlan<'a> {
             empty_transport,
             media: media_models::MediaProviderCatalog::try_new(media)
                 .map_err(provider_model_error_from_media_catalog)?,
-            model_allowlist_providers,
+            owned_model_providers,
             valid_model_references,
             has_custom_chat_models,
         })
@@ -395,7 +393,7 @@ impl<'a> ProjectionPlan<'a> {
         changed |= self.media.apply_to_document(document);
         changed |= apply_model_allowlist(
             document,
-            &self.model_allowlist_providers,
+            &self.owned_model_providers,
             &self.valid_model_references,
         );
         if self.has_custom_chat_models {
@@ -481,13 +479,39 @@ fn remove_keyless_auth_profile(key: &ProviderKey, document: &mut OpenClawConfigD
     if let Some(Value::Object(order)) = auth.get_mut("order") {
         if let Some(Value::Array(profiles)) = order.get_mut(key.as_str()) {
             profiles.retain(|profile| profile.as_str() != Some(profile_id.as_str()));
+            if profiles.is_empty() {
+                order.remove(key.as_str());
+            }
         }
     }
+    remove_empty_object(&mut auth, "profiles");
+    remove_empty_object(&mut auth, "order");
     if auth == before {
         return false;
     }
-    document.insert("auth".into(), Value::Object(auth));
+    if auth.is_empty() {
+        remove_document_key(document, "auth");
+    } else {
+        document.insert("auth".into(), Value::Object(auth));
+    }
     true
+}
+
+fn remove_empty_object(object: &mut Map<String, Value>, key: &str) {
+    if object
+        .get(key)
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
+        object.remove(key);
+    }
+}
+
+fn remove_document_key(document: &mut OpenClawConfigDocument, key: &str) {
+    let mut root = object(Some(&document.as_value()));
+    root.remove(key);
+    *document = OpenClawConfigDocument::from_value(Value::Object(root))
+        .expect("object root remains a valid OpenClaw config document");
 }
 
 fn apply_model_allowlist(
@@ -496,9 +520,9 @@ fn apply_model_allowlist(
     model_references: &BTreeSet<String>,
 ) -> bool {
     let mut agents = object(document.get("agents"));
+    let before = agents.clone();
     let mut defaults = object(agents.get("defaults"));
     let mut models = object(defaults.get("models"));
-    let before = models.clone();
     models.retain(|reference, _| {
         !provider_keys
             .iter()
@@ -510,16 +534,24 @@ fn apply_model_allowlist(
             .entry(reference.clone())
             .or_insert_with(|| Value::Object(Map::new()));
     }
-    if models == before {
-        return false;
-    }
     if models.is_empty() {
         defaults.remove("models");
     } else {
         defaults.insert("models".into(), Value::Object(models));
     }
-    agents.insert("defaults".into(), Value::Object(defaults));
-    document.insert("agents".into(), Value::Object(agents));
+    if defaults.is_empty() {
+        agents.remove("defaults");
+    } else {
+        agents.insert("defaults".into(), Value::Object(defaults));
+    }
+    if agents == before {
+        return false;
+    }
+    if agents.is_empty() {
+        remove_document_key(document, "agents");
+    } else {
+        document.insert("agents".into(), Value::Object(agents));
+    }
     true
 }
 
@@ -2027,8 +2059,51 @@ mod tests {
                     "models": {
                         "anthropic/claude-fable-5": { "alias": "fable" },
                         "openai/gpt-5.6": {}
-                    }                }
+                    }
+                }
             }))
+        );
+    }
+
+    #[test]
+    fn removed_model_drops_owned_default_allowlist_entry_and_keeps_valid_sibling() {
+        let account = account(
+            "openai-main",
+            "openai",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog =
+            ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
+        let accounts = [account];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "models": {
+                        "openai/gpt-5.6": { "alias": "valid" },
+                        "openai/deleted": { "alias": "deleted" },
+                        "unmanaged/model": { "alias": "unmanaged" }
+                    }
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(
+            value.pointer("/agents/defaults/models/openai~1gpt-5.6/alias"),
+            Some(&json!("valid"))
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/models/openai~1deleted"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/agents/defaults/models/unmanaged~1model/alias"),
+            Some(&json!("unmanaged"))
         );
     }
 
@@ -2154,7 +2229,8 @@ mod tests {
                 "defaults": {
                     "models": {
                         "anthropic/claude-fable-5": {}
-                    }                }
+                    }
+                }
             }))
         );
         assert_eq!(
@@ -2167,6 +2243,95 @@ mod tests {
                     "custom-12345678": ["custom-12345678:manual"]
                 }
             }))
+        );
+    }
+
+    #[test]
+    fn disabled_provider_removes_owned_model_allowlist_container_when_empty() {
+        let disabled = account(
+            "openai-main",
+            "openai",
+            ProviderAccountAuthMode::ApiKey,
+            false,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
+        let accounts = [disabled];
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "models": {
+                        "openai/old": { "alias": "old" }
+                    }
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(value.pointer("/agents/defaults/models"), None);
+        assert_eq!(value.pointer("/agents/defaults"), None);
+        assert_eq!(value.pointer("/agents"), None);
+    }
+
+    #[test]
+    fn retired_provider_removes_owned_private_projection() {
+        let retired = account(
+            "openai-main",
+            "openai",
+            ProviderAccountAuthMode::ApiKey,
+            true,
+        );
+        let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
+        let retired = [retired];
+        let plan = ProjectionPlan::build(&[], &catalog, &retired).expect("plan");
+        let mut document = OpenClawConfigDocument::empty();
+        document.insert(
+            "models".into(),
+            json!({
+                "providers": {
+                    "openai": { "baseUrl": "https://api.example.com/v1" },
+                    "unmanaged": { "baseUrl": "https://unmanaged.example.com/v1" }
+                }
+            }),
+        );
+        document.insert(
+            "auth".into(),
+            json!({
+                "profiles": {
+                    "openai:default": { "provider": "openai", "mode": "api_key" }
+                },
+                "order": {
+                    "openai": ["openai:default"]
+                }
+            }),
+        );
+        document.insert(
+            "agents".into(),
+            json!({
+                "defaults": {
+                    "models": {
+                        "openai/old": { "alias": "old" },
+                        "unmanaged/model": { "alias": "unmanaged" }
+                    }
+                }
+            }),
+        );
+
+        assert!(plan.apply_to_document(&mut document));
+        let value = document.as_value();
+        assert_eq!(value.pointer("/models/providers/openai"), None);
+        assert_eq!(
+            value.pointer("/models/providers/unmanaged/baseUrl"),
+            Some(&json!("https://unmanaged.example.com/v1"))
+        );
+        assert_eq!(value.pointer("/auth"), None);
+        assert_eq!(value.pointer("/agents/defaults/models/openai~1old"), None);
+        assert_eq!(
+            value.pointer("/agents/defaults/models/unmanaged~1model/alias"),
+            Some(&json!("unmanaged"))
         );
     }
 

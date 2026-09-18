@@ -3,7 +3,8 @@ use std::sync::Arc;
 use openclaw::{
     port::{OpenClawGateway, OpenClawSessionError},
     session::protocol::{
-        AgentId, AgentScopedSessionKey, EndpointSessionId, SessionCreateParams, SessionsListParams,
+        AgentId, AgentScopedSessionKey, EndpointSessionId, RunId, SessionCreateParams,
+        SessionsListParams,
     },
 };
 use organization::{
@@ -15,8 +16,11 @@ use platform::exchange::InvocationOutcome;
 use super::super::OpenClawInstance;
 use crate::{
     organization::RuntimeReceiptOutcome,
-    runtime::driver::{OwnedRuntimeFuture, TeamOps},
+    runtime::driver::{NativeRunSettled, OwnedRuntimeFuture, TeamOps, TeamTerminalOps},
 };
+
+pub(super) const TEAM_TERMINAL_WAIT_SLICE_MS: u64 = 30_000;
+pub(super) const TEAM_TERMINAL_RPC_TIMEOUT_BUFFER_MS: u64 = 10_000;
 
 async fn confirm_runtime_receipt_native(
     gateway: &tokio::sync::Mutex<OpenClawGateway>,
@@ -29,7 +33,7 @@ async fn confirm_runtime_receipt_native(
             Err(_) => return RuntimeReceiptOutcome::Rejected,
         };
         let endpoint_session_id =
-            match EndpointSessionId::try_new(binding.external_session().as_str().to_owned()) {
+            match EndpointSessionId::try_new(binding.endpoint_session_id().as_str().to_owned()) {
                 Ok(session) => session,
                 Err(_) => return RuntimeReceiptOutcome::Unavailable,
             };
@@ -135,14 +139,14 @@ fn agent_scoped_session_key(
 ) -> Option<AgentScopedSessionKey> {
     let agent = AgentId::try_new(binding.agent().as_str().to_owned()).ok()?;
     let session =
-        EndpointSessionId::try_new(binding.external_session().as_str().to_owned()).ok()?;
+        EndpointSessionId::try_new(binding.endpoint_session_id().as_str().to_owned()).ok()?;
     AgentScopedSessionKey::try_new(agent, session).ok()
 }
 
 #[cfg(test)]
 mod native_receipt_tests {
     use organization::{
-        ExternalSessionReference, GraphRunId, LocalSessionReference, ManagedAgentReference, RoleId,
+        EndpointSessionId, GraphRunId, ManagedAgentReference, RoleId, RoleSessionRef,
         RuntimeEndpointReference, TeamId,
     };
 
@@ -150,12 +154,12 @@ mod native_receipt_tests {
 
     #[test]
     fn role_abort_and_session_cleanup_use_an_agent_scoped_native_key() {
-        let binding = organization::RoleSessionReceipt::new(
+        let binding = organization::RoleSessionReceipt::with_endpoint_session_id(
             TeamId::try_new("team:one").unwrap(),
             GraphRunId::new("run:one"),
             RoleId::try_new("leader").unwrap(),
-            LocalSessionReference::try_new("local-session").unwrap(),
-            ExternalSessionReference::try_new("endpoint-session").unwrap(),
+            RoleSessionRef::try_new("rs0").unwrap(),
+            EndpointSessionId::try_new("endpoint-session").unwrap(),
             ManagedAgentReference::try_new("selected-agent").unwrap(),
             RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         );
@@ -164,6 +168,65 @@ mod native_receipt_tests {
             agent_scoped_session_key(&binding).unwrap().as_str(),
             "agent:selected-agent:endpoint-session"
         );
+    }
+}
+
+impl TeamTerminalOps for OpenClawInstance {
+    fn watch_terminal(
+        &self,
+        target: organization::NativeTerminalReceiptTarget,
+    ) -> OwnedRuntimeFuture<Option<NativeRunSettled>> {
+        let gateway = Arc::clone(&self.gateway);
+        let native_run_id = target
+            .correlation()
+            .native_run_receipt()
+            .as_str()
+            .to_owned();
+        Box::pin(async move { wait_openclaw_native_run(&gateway, native_run_id).await })
+    }
+}
+
+pub(super) async fn wait_openclaw_native_run(
+    gateway: &tokio::sync::Mutex<OpenClawGateway>,
+    native_run_id: String,
+) -> Option<NativeRunSettled> {
+    let run_id = RunId::try_new(native_run_id).ok()?;
+    let waiter = gateway.lock().await.team_native_run_waiter();
+    loop {
+        let input = openclaw::agents::AgentWait::try_new(
+            run_id.as_str().to_owned(),
+            TEAM_TERMINAL_WAIT_SLICE_MS,
+            TEAM_TERMINAL_RPC_TIMEOUT_BUFFER_MS,
+        )
+        .ok()?;
+        match waiter.wait(input).await {
+            openclaw::team::NativeRunSettledOutcome::Observed(settled) => {
+                let Some(status) = match_openclaw_terminal_status(&settled) else {
+                    continue;
+                };
+                return Some(NativeRunSettled {
+                    status,
+                    final_assistant_text: settled.final_assistant_text().map(ToOwned::to_owned),
+                });
+            }
+            openclaw::team::NativeRunSettledOutcome::Rejected
+            | openclaw::team::NativeRunSettledOutcome::OutcomeUnknown => return None,
+        }
+    }
+}
+
+pub(super) fn match_openclaw_terminal_status(
+    settled: &openclaw::team::NativeRunSettled,
+) -> Option<organization::NativeTerminalStatus> {
+    match settled.status() {
+        openclaw::team::NativeRunStatus::Completed => {
+            Some(organization::NativeTerminalStatus::Completed)
+        }
+        openclaw::team::NativeRunStatus::Failed => Some(organization::NativeTerminalStatus::Failed),
+        openclaw::team::NativeRunStatus::Timeout if settled.is_hard_timeout() => {
+            Some(organization::NativeTerminalStatus::Interrupted)
+        }
+        openclaw::team::NativeRunStatus::Timeout | openclaw::team::NativeRunStatus::Pending => None,
     }
 }
 

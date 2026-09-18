@@ -371,6 +371,7 @@ mod tests {
                 sequence: 1,
                 state,
                 status_phase: None,
+                status_retry: None,
                 delta_text: Some("delta".to_owned()),
                 replace: false,
                 message_text: None,

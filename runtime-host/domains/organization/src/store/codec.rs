@@ -3,21 +3,23 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
+use serde_json::Value;
+
 use crate::{
     ActivityClaimSnapshot, ActivityDispatchSnapshot, ActivityFailure, ActivityId, ActivityKind,
     ActivityLedgerSnapshot, ActivityPhaseSnapshot, ActivityRequest, ActivitySnapshot,
     ActivityTarget, ControlAuthority, ControlNodeResolution, DeliveryClaimSnapshot,
     DeliveryFailure, DeliveryId, DeliveryLedgerSnapshot, DeliveryPhaseSnapshot, DeliveryRequest,
-    DeliverySnapshot, EdgeAction, EvidenceId, EvidenceRecord, EvidenceReference,
+    DeliverySnapshot, EdgeAction, EndpointSessionId, EvidenceId, EvidenceRecord, EvidenceReference,
     EvidenceReferenceKind, ExecutionFence, GraphRunId, GraphState, IdempotencyKey,
-    LocalSessionReference, ManagedAgentReference, MatchaDeliveryCorrelation,
-    MaterializationReceipt, MaterializationRejection, MaterializationSource, MemberId,
-    NodeDefinition, NodeId, NodeKind, RoleAgentMaterialization, RoleAssignment, RoleId, RoleKind,
-    RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
-    RuntimeEndpointReference, StartTrigger, TeamDefinition, TeamId, TeamMaterializationCleanup,
-    TeamMaterializationIntent, TeamMaterializationLifecycle, TeamMaterializationRemoval,
-    TeamMaterializationRequest, TeamMember, TeamRevision, TeamRole, TombstonedMaterialization,
-    TriggerFireRequest, TriggerSource, WorkAssignment,
+    ManagedAgentReference, MaterializationReceipt, MaterializationRejection, MaterializationSource,
+    MemberId, NativeDeliveryCorrelation, NodeDefinition, NodeId, NodeKind,
+    RoleAgentMaterialization, RoleAssignment, RoleId, RoleKind, RoleMaterializationAgent,
+    RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference,
+    StartTrigger, TeamDefinition, TeamId, TeamMaterializationCleanup, TeamMaterializationIntent,
+    TeamMaterializationLifecycle, TeamMaterializationRemoval, TeamMaterializationRequest,
+    TeamMember, TeamRevision, TeamRole, TombstonedMaterialization, TriggerFireRequest,
+    TriggerSource, WorkAssignment,
     run::task_board::{
         AutoRunnerFacts, MailboxKind, MailboxMessage, RunnerStatus, TaskBoardFacts, TaskId,
         TaskRecord, TaskRestoreInput, TaskStatus,
@@ -36,8 +38,9 @@ use crate::{
         },
         delivery::{
             AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
-            NativeRunReceiptReference, NativeTerminalStatus, TerminalObservationResolution,
-            TerminalObservationSnapshot, TerminalObservationSnapshotInput,
+            NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
+            TerminalObservationResolution, TerminalObservationSnapshot,
+            TerminalObservationSnapshotInput,
         },
         event::{
             ApprovalAction, ApprovalCommand, CommandPayload, CommandRecord, CommandRejection,
@@ -57,14 +60,14 @@ use crate::{
 
 use super::facts::{
     MaterializationLifecycleFactsRestoreInput, PendingWorkflowPlanAdmission, PurgedRunMarker,
-    WorkflowTemplateFacts,
+    RunStartGate, WorkflowTemplateFacts,
 };
 use super::{GraphRunFacts, OrganizationFacts, StoreFault, TeamFacts};
 
 pub(super) const HEADER_LEN: usize = 17;
 pub(super) const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_MAGIC: [u8; 8] = *b"MORGDU01";
-const CURRENT_SCHEMA_VERSION: u8 = 20;
+const CURRENT_SCHEMA_VERSION: u8 = 23;
 const FRAME_MARKER: u8 = 0xA1;
 const FRAME_METADATA_LEN: usize = 16;
 const MAX_FACTS_BYTES: usize = 1024 * 1024;
@@ -240,6 +243,7 @@ fn encode_facts(facts: &OrganizationFacts) -> Result<Vec<u8>, StoreFault> {
         encode_graph(&mut output, &run.durable_snapshot())?;
         push_optional_runtime(&mut output, run.runtime())?;
         encode_lifecycle(&mut output, run.lifecycle())?;
+        encode_start_gate(&mut output, run.start_gate())?;
     }
     push_count(&mut output, facts.templates().count())?;
     for template in facts.templates() {
@@ -303,8 +307,11 @@ fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
                 .map_err(|_| StoreFault::InvalidFacts)?;
             let runtime = reader.optional_runtime()?;
             let lifecycle = reader.lifecycle()?;
-            GraphRunFacts::with_lifecycle(team, revision, graph, runtime, lifecycle)
-                .map_err(|_| StoreFault::InvalidFacts)
+            let start_gate = reader.start_gate()?;
+            GraphRunFacts::with_lifecycle_and_start_gate(
+                team, revision, graph, runtime, lifecycle, start_gate,
+            )
+            .map_err(|_| StoreFault::InvalidFacts)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let templates = (0..reader.count()?)
@@ -598,6 +605,7 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
                 push_string(output, &work.task_id)?;
                 push_string(output, &work.prompt)?;
                 push_string(output, &work.role_id)?;
+                push_string(output, &work.session_ref)?;
                 push_optional_string(output, work.output_artifact_kind.as_deref())?;
                 push_optional_string(output, work.group_id.as_deref())?;
             }
@@ -607,6 +615,7 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
             Some(review) => {
                 output.push(1);
                 push_string(output, &review.role_id)?;
+                push_string(output, &review.session_ref)?;
                 push_string(output, &review.prompt)?;
             }
         }
@@ -707,6 +716,7 @@ fn encode_deliveries(
         push_string(output, &facts.node_execution_id)?;
         push_string(output, &facts.task_id)?;
         push_string(output, &facts.role_id)?;
+        push_string(output, &facts.session_ref)?;
         push_string(output, &facts.idempotency_key)?;
         push_string(output, &facts.message)?;
         output.extend_from_slice(&facts.requested_at.to_le_bytes());
@@ -739,16 +749,16 @@ fn encode_delivery_phase(
         DeliveryPhaseSnapshot::Delivered {
             receipt,
             accepted_at,
-            matcha_correlation,
+            native_correlation,
         } => {
             output.push(3);
             push_string(output, receipt.as_str())?;
             output.extend_from_slice(&accepted_at.to_le_bytes());
-            match matcha_correlation {
+            match native_correlation {
                 None => output.push(0),
                 Some(correlation) => {
                     output.push(1);
-                    push_string(output, correlation.external_session().as_str())?;
+                    push_string(output, correlation.endpoint_session_id().as_str())?;
                     push_string(output, correlation.native_run_receipt().as_str())?;
                 }
             }
@@ -790,12 +800,33 @@ fn encode_terminal_observation(
     )?;
     push_string(output, observation.role_id())?;
     let correlation = observation.correlation();
-    push_string(output, correlation.external_session().as_str())?;
+    push_string(output, correlation.endpoint_session_id().as_str())?;
     push_string(output, observation.delivered_receipt().as_str())?;
     push_string(output, correlation.native_run_receipt().as_str())?;
     output.push(native_terminal_tag(observation.native_terminal()));
     output.extend_from_slice(&observation.observed_at().to_le_bytes());
+    match observation.output() {
+        None => output.push(0),
+        Some(team_output) => {
+            output.push(1);
+            encode_team_node_output(output, team_output)?;
+        }
+    }
     encode_terminal_resolution(output, observation.resolution())
+}
+
+fn encode_team_node_output(
+    output: &mut Vec<u8>,
+    team_output: &TeamNodeOutput,
+) -> Result<(), StoreFault> {
+    push_string(output, team_output.final_assistant_text())?;
+    push_string(output, team_output.summary())?;
+    push_string(output, team_output.output_port())?;
+    let payload =
+        serde_json::to_string(team_output.payload()).map_err(|_| StoreFault::InvalidFacts)?;
+    push_string(output, &payload)?;
+    push_optional_string(output, team_output.outcome())?;
+    push_optional_string(output, team_output.status())
 }
 
 fn encode_activities(
@@ -833,11 +864,13 @@ fn encode_activity_kind(output: &mut Vec<u8>, kind: &ActivityKind) -> Result<(),
         ActivityKind::AgentTask {
             task_id,
             role_id,
+            session_ref,
             prompt,
         } => {
             output.push(0);
             push_string(output, task_id)?;
             push_string(output, role_id)?;
+            push_string(output, session_ref)?;
             push_string(output, prompt)?;
         }
         ActivityKind::Control { action } => {
@@ -1191,6 +1224,7 @@ fn encode_graph_definition(
                 push_string(output, work.task_id())?;
                 push_string(output, work.prompt())?;
                 push_string(output, work.role_id())?;
+                push_string(output, work.session_ref().as_str())?;
                 push_optional_string(output, work.output_artifact_kind())?;
                 push_optional_string(output, work.group_id().map(crate::GroupId::as_str))?;
             }
@@ -1200,6 +1234,7 @@ fn encode_graph_definition(
             Some(review) => {
                 output.push(1);
                 push_string(output, review.role_id())?;
+                push_string(output, review.session_ref().as_str())?;
                 push_string(output, review.prompt())?;
             }
         }
@@ -1475,6 +1510,24 @@ fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
     }
 }
 
+fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<(), StoreFault> {
+    match start_gate {
+        RunStartGate::Intake => output.push(0),
+        RunStartGate::ProposalPending {
+            proposal_id,
+            summary,
+            source_delivery_id,
+        } => {
+            output.push(1);
+            push_string(output, proposal_id)?;
+            push_string(output, summary)?;
+            push_string(output, source_delivery_id)?;
+        }
+        RunStartGate::Started => output.push(2),
+    }
+    Ok(())
+}
+
 fn encode_lifecycle(output: &mut Vec<u8>, lifecycle: &GraphRunLifecycle) -> Result<(), StoreFault> {
     push_string(output, lifecycle.creation_idempotency_key())?;
     match lifecycle.state() {
@@ -1530,8 +1583,8 @@ fn push_optional_runtime(
         push_string(output, binding.team().as_str())?;
         push_string(output, binding.team_run().as_str())?;
         push_string(output, binding.role().as_str())?;
-        push_string(output, binding.local_session().as_str())?;
-        push_string(output, binding.external_session().as_str())?;
+        push_string(output, binding.session_ref().as_str())?;
+        push_string(output, binding.endpoint_session_id().as_str())?;
         push_string(output, binding.agent().as_str())?;
         push_string(output, binding.endpoint().as_str())?;
     }
@@ -1823,6 +1876,7 @@ impl<'a> Reader<'a> {
                         task_id: self.string()?,
                         prompt: self.string()?,
                         role_id: self.string()?,
+                        session_ref: self.string()?,
                         output_artifact_kind: self.optional_string()?,
                         group_id: self.optional_string()?,
                     }),
@@ -1832,6 +1886,7 @@ impl<'a> Reader<'a> {
                     0 => None,
                     1 => Some(DurableReviewAssignment {
                         role_id: self.string()?,
+                        session_ref: self.string()?,
                         prompt: self.string()?,
                     }),
                     _ => return Err(StoreFault::CorruptRecord),
@@ -2001,6 +2056,7 @@ impl<'a> Reader<'a> {
                     node_execution_id: self.string()?,
                     task_id: self.string()?,
                     role_id: self.string()?,
+                    session_ref: self.string()?,
                     idempotency_key: self.string()?,
                     message: self.string()?,
                     requested_at: self.u64()?,
@@ -2039,10 +2095,10 @@ impl<'a> Reader<'a> {
                 let receipt = crate::DeliveryReceiptReference::try_new(self.string()?)
                     .map_err(|_| StoreFault::InvalidFacts)?;
                 let accepted_at = self.u64()?;
-                let matcha_correlation = match self.byte()? {
+                let native_correlation = match self.byte()? {
                     0 => None,
-                    1 => Some(MatchaDeliveryCorrelation::new(
-                        crate::ExternalSessionReference::try_new(self.string()?)
+                    1 => Some(NativeDeliveryCorrelation::new(
+                        EndpointSessionId::try_new(self.string()?)
                             .map_err(|_| StoreFault::InvalidFacts)?,
                         NativeRunReceiptReference::try_new(self.string()?)
                             .map_err(|_| StoreFault::InvalidFacts)?,
@@ -2052,7 +2108,7 @@ impl<'a> Reader<'a> {
                 Ok(DeliveryPhaseSnapshot::Delivered {
                     receipt,
                     accepted_at,
-                    matcha_correlation,
+                    native_correlation,
                 })
             }
             4 => Ok(DeliveryPhaseSnapshot::Failed {
@@ -2113,6 +2169,7 @@ impl<'a> Reader<'a> {
             0 => Ok(ActivityKind::AgentTask {
                 task_id: self.string()?,
                 role_id: self.string()?,
+                session_ref: self.string()?,
                 prompt: self.string()?,
             }),
             1 => Ok(ActivityKind::Control {
@@ -2177,17 +2234,22 @@ impl<'a> Reader<'a> {
         let node_id = self.string()?;
         let fence = self.fence()?;
         let role_id = self.string()?;
-        let external_session = crate::ExternalSessionReference::try_new(self.string()?)
-            .map_err(|_| StoreFault::InvalidFacts)?;
+        let endpoint_session_id =
+            EndpointSessionId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
         let delivered_receipt = crate::DeliveryReceiptReference::try_new(self.string()?)
             .map_err(|_| StoreFault::InvalidFacts)?;
-        let correlation = MatchaDeliveryCorrelation::new(
-            external_session,
+        let correlation = NativeDeliveryCorrelation::new(
+            endpoint_session_id,
             NativeRunReceiptReference::try_new(self.string()?)
                 .map_err(|_| StoreFault::InvalidFacts)?,
         );
         let native_terminal = self.native_terminal()?;
         let observed_at = self.u64()?;
+        let output = match self.byte()? {
+            0 => None,
+            1 => Some(self.team_node_output()?),
+            _ => return Err(StoreFault::CorruptRecord),
+        };
         let resolution = self.terminal_resolution()?;
         Ok(TerminalObservationSnapshot::new(
             TerminalObservationSnapshotInput {
@@ -2200,9 +2262,29 @@ impl<'a> Reader<'a> {
                 delivered_receipt,
                 native_terminal,
                 observed_at,
+                output,
                 resolution,
             },
         ))
+    }
+
+    fn team_node_output(&mut self) -> Result<TeamNodeOutput, StoreFault> {
+        let final_assistant_text = self.string()?;
+        let summary = self.string()?;
+        let output_port = self.string()?;
+        let payload =
+            serde_json::from_str::<Value>(&self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
+        let outcome = self.optional_string()?;
+        let status = self.optional_string()?;
+        TeamNodeOutput::restore(
+            final_assistant_text,
+            summary,
+            output_port,
+            payload,
+            outcome,
+            status,
+        )
+        .map_err(|_| StoreFault::InvalidFacts)
     }
 
     fn task_board(&mut self) -> Result<TaskBoardFacts, StoreFault> {
@@ -2326,6 +2408,16 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn start_gate(&mut self) -> Result<RunStartGate, StoreFault> {
+        match self.byte()? {
+            0 => Ok(RunStartGate::Intake),
+            1 => RunStartGate::proposal_pending(self.string()?, self.string()?, self.string()?)
+                .map_err(|_| StoreFault::InvalidFacts),
+            2 => Ok(RunStartGate::Started),
+            _ => Err(StoreFault::InvalidFacts),
+        }
+    }
+
     fn lifecycle(&mut self) -> Result<GraphRunLifecycle, StoreFault> {
         let creation_idempotency_key = self.string()?;
         let state = match self.byte()? {
@@ -2359,15 +2451,15 @@ impl<'a> Reader<'a> {
                 let team_run = GraphRunId::new(self.string()?);
                 let bindings = (0..self.count()?)
                     .map(|_| {
-                        Ok(RoleSessionReceipt::new(
+                        Ok(RoleSessionReceipt::with_endpoint_session_id(
                             TeamId::try_new(self.string()?)
                                 .map_err(|_| StoreFault::InvalidFacts)?,
                             GraphRunId::new(self.string()?),
                             RoleId::try_new(self.string()?)
                                 .map_err(|_| StoreFault::InvalidFacts)?,
-                            LocalSessionReference::try_new(self.string()?)
+                            crate::RoleSessionRef::try_new(self.string()?)
                                 .map_err(|_| StoreFault::InvalidFacts)?,
-                            crate::ExternalSessionReference::try_new(self.string()?)
+                            EndpointSessionId::try_new(self.string()?)
                                 .map_err(|_| StoreFault::InvalidFacts)?,
                             ManagedAgentReference::try_new(self.string()?)
                                 .map_err(|_| StoreFault::InvalidFacts)?,
@@ -2672,7 +2764,11 @@ impl<'a> Reader<'a> {
                     1 => Some(WorkAssignment::typed(
                         self.string()?,
                         self.string()?,
-                        crate::ExecutorPolicy::team_role(self.string()?),
+                        crate::ExecutorPolicy::team_role_session(
+                            self.string()?,
+                            crate::RoleSessionRef::try_new(self.string()?)
+                                .map_err(|_| StoreFault::InvalidFacts)?,
+                        ),
                         self.optional_string()?,
                         self.optional_string()?.map(crate::GroupId::new),
                     )),
@@ -2680,7 +2776,14 @@ impl<'a> Reader<'a> {
                 };
                 let review = match self.byte()? {
                     0 => None,
-                    1 => Some(crate::ReviewAssignment::new(self.string()?, self.string()?)),
+                    1 => Some(crate::ReviewAssignment::with_executor(
+                        crate::ExecutorPolicy::team_role_session(
+                            self.string()?,
+                            crate::RoleSessionRef::try_new(self.string()?)
+                                .map_err(|_| StoreFault::InvalidFacts)?,
+                        ),
+                        self.string()?,
+                    )),
                     _ => return Err(StoreFault::CorruptRecord),
                 };
                 let group = match self.byte()? {

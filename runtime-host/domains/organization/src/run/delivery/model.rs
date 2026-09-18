@@ -1,7 +1,9 @@
 use std::fmt;
 
+use serde_json::Value;
+
 use crate::{
-    ports::{DeliveryReceiptReference, ExternalSessionReference},
+    ports::{DeliveryReceiptReference, EndpointSessionId},
     run::graph::ExecutionFence,
 };
 
@@ -51,6 +53,7 @@ pub struct DeliveryRequest {
     pub node_execution_id: String,
     pub task_id: String,
     pub role_id: String,
+    pub session_ref: String,
     pub idempotency_key: String,
     /// Opaque role-chat content owned solely by the private delivery fact.
     pub message: String,
@@ -66,6 +69,7 @@ pub enum DeliveryRequestError {
     BlankNodeExecutionId,
     BlankTaskId,
     BlankRoleId,
+    InvalidSessionRef,
     BlankIdempotencyKey,
     BlankMessage,
     ZeroMaxAttempts,
@@ -82,6 +86,7 @@ impl fmt::Debug for DeliveryRequest {
             .field("node_execution_id", &"<redacted>")
             .field("task_id", &"<redacted>")
             .field("role_id", &"<redacted>")
+            .field("session_ref", &"<redacted>")
             .field("idempotency_key", &"<redacted>")
             .field("message", &"<redacted>")
             .field("requested_at", &self.requested_at)
@@ -109,6 +114,9 @@ impl DeliveryRequest {
         }
         if self.role_id.trim().is_empty() {
             return Err(DeliveryRequestError::BlankRoleId);
+        }
+        if crate::RoleSessionRef::try_new(self.session_ref.clone()).is_err() {
+            return Err(DeliveryRequestError::InvalidSessionRef);
         }
         if self.idempotency_key.trim().is_empty() {
             return Err(DeliveryRequestError::BlankIdempotencyKey);
@@ -141,7 +149,7 @@ pub enum DeliveryPhase {
     },
     Delivered {
         receipt: DeliveryReceiptReference,
-        matcha_correlation: Option<MatchaDeliveryCorrelation>,
+        native_correlation: Option<NativeDeliveryCorrelation>,
         accepted_at: u64,
     },
     TerminalObserved {
@@ -194,24 +202,24 @@ impl fmt::Debug for NativeRunReceiptReference {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct MatchaDeliveryCorrelation {
-    external_session: ExternalSessionReference,
+pub struct NativeDeliveryCorrelation {
+    endpoint_session_id: EndpointSessionId,
     native_run_receipt: NativeRunReceiptReference,
 }
 
-impl MatchaDeliveryCorrelation {
+impl NativeDeliveryCorrelation {
     pub fn new(
-        external_session: ExternalSessionReference,
+        endpoint_session_id: EndpointSessionId,
         native_run_receipt: NativeRunReceiptReference,
     ) -> Self {
         Self {
-            external_session,
+            endpoint_session_id,
             native_run_receipt,
         }
     }
 
-    pub fn external_session(&self) -> &ExternalSessionReference {
-        &self.external_session
+    pub fn endpoint_session_id(&self) -> &EndpointSessionId {
+        &self.endpoint_session_id
     }
 
     pub fn native_run_receipt(&self) -> &NativeRunReceiptReference {
@@ -219,9 +227,9 @@ impl MatchaDeliveryCorrelation {
     }
 }
 
-impl fmt::Debug for MatchaDeliveryCorrelation {
+impl fmt::Debug for NativeDeliveryCorrelation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("MatchaDeliveryCorrelation(<redacted>)")
+        formatter.write_str("NativeDeliveryCorrelation(<redacted>)")
     }
 }
 
@@ -367,6 +375,195 @@ impl fmt::Debug for AuthorizedGraphResolution {
     }
 }
 
+const TEAM_MESSAGE_OPEN: &str = "<team_message>";
+const TEAM_MESSAGE_CLOSE: &str = "</team_message>";
+const MAX_TEAM_MESSAGE_SUMMARY_BYTES: usize = 512;
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct TeamNodeOutput {
+    final_assistant_text: String,
+    summary: String,
+    output_port: String,
+    payload: Value,
+    outcome: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeamNodeOutputError {
+    MissingEnvelope,
+    InvalidJson,
+    MissingField(&'static str),
+    UnexpectedField(String),
+    InvalidField(&'static str),
+    InvalidSummary,
+    UnsafeOutputPort,
+}
+
+impl TeamNodeOutput {
+    pub fn parse(final_assistant_text: impl Into<String>) -> Result<Self, TeamNodeOutputError> {
+        let final_assistant_text = final_assistant_text.into();
+        let json = extract_last_team_message(&final_assistant_text)?;
+        let value = serde_json::from_str::<Value>(json.trim())
+            .map_err(|_| TeamNodeOutputError::InvalidJson)?;
+        Self::from_value(final_assistant_text, value)
+    }
+
+    pub fn restore(
+        final_assistant_text: impl Into<String>,
+        summary: impl Into<String>,
+        output_port: impl Into<String>,
+        payload: Value,
+        outcome: Option<String>,
+        status: Option<String>,
+    ) -> Result<Self, TeamNodeOutputError> {
+        let final_assistant_text = final_assistant_text.into();
+        if final_assistant_text.trim().is_empty() {
+            return Err(TeamNodeOutputError::MissingEnvelope);
+        }
+        let summary = validate_summary(summary.into())?;
+        let output_port = validate_output_port(output_port.into())?;
+        let outcome = outcome.map(validate_optional_message_string).transpose()?;
+        let status = status.map(validate_optional_message_string).transpose()?;
+        Ok(Self {
+            final_assistant_text,
+            summary,
+            output_port,
+            payload,
+            outcome,
+            status,
+        })
+    }
+
+    fn from_value(final_assistant_text: String, value: Value) -> Result<Self, TeamNodeOutputError> {
+        let Some(object) = value.as_object() else {
+            return Err(TeamNodeOutputError::InvalidField("root"));
+        };
+        for field in object.keys() {
+            if !matches!(
+                field.as_str(),
+                "summary" | "output_port" | "payload" | "outcome" | "status"
+            ) {
+                return Err(TeamNodeOutputError::UnexpectedField(field.clone()));
+            }
+        }
+        let summary = required_message_string(object, "summary")?;
+        let output_port = required_message_string(object, "output_port")?;
+        let payload = object
+            .get("payload")
+            .cloned()
+            .ok_or(TeamNodeOutputError::MissingField("payload"))?;
+        let outcome = optional_message_string(object, "outcome")?;
+        let status = optional_message_string(object, "status")?;
+        Self::restore(
+            final_assistant_text,
+            summary,
+            output_port,
+            payload,
+            outcome,
+            status,
+        )
+    }
+
+    pub fn final_assistant_text(&self) -> &str {
+        &self.final_assistant_text
+    }
+
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    pub fn output_port(&self) -> &str {
+        &self.output_port
+    }
+
+    pub fn payload(&self) -> &Value {
+        &self.payload
+    }
+
+    pub fn outcome(&self) -> Option<&str> {
+        self.outcome.as_deref()
+    }
+
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+}
+
+impl fmt::Debug for TeamNodeOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TeamNodeOutput")
+            .field("final_assistant_text", &"<redacted>")
+            .field("summary", &"<redacted>")
+            .field("output_port", &"<redacted>")
+            .field("payload", &"<redacted>")
+            .field("outcome", &self.outcome.as_ref().map(|_| "<redacted>"))
+            .field("status", &self.status.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+fn extract_last_team_message(text: &str) -> Result<&str, TeamNodeOutputError> {
+    let close = text
+        .rfind(TEAM_MESSAGE_CLOSE)
+        .ok_or(TeamNodeOutputError::MissingEnvelope)?;
+    let before_close = &text[..close];
+    let open = before_close
+        .rfind(TEAM_MESSAGE_OPEN)
+        .ok_or(TeamNodeOutputError::MissingEnvelope)?;
+    Ok(&before_close[open + TEAM_MESSAGE_OPEN.len()..])
+}
+
+fn required_message_string(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<String, TeamNodeOutputError> {
+    match object.get(field) {
+        Some(Value::String(value)) => Ok(value.to_owned()),
+        Some(_) => Err(TeamNodeOutputError::InvalidField(field)),
+        None => Err(TeamNodeOutputError::MissingField(field)),
+    }
+}
+
+fn optional_message_string(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<String>, TeamNodeOutputError> {
+    match object.get(field) {
+        Some(Value::String(value)) => Ok(Some(validate_optional_message_string(value.to_owned())?)),
+        Some(_) => Err(TeamNodeOutputError::InvalidField(field)),
+        None => Ok(None),
+    }
+}
+
+fn validate_summary(summary: String) -> Result<String, TeamNodeOutputError> {
+    if summary.trim().is_empty()
+        || summary.len() > MAX_TEAM_MESSAGE_SUMMARY_BYTES
+        || summary.chars().any(char::is_control)
+    {
+        return Err(TeamNodeOutputError::InvalidSummary);
+    }
+    Ok(summary)
+}
+
+fn validate_output_port(output_port: String) -> Result<String, TeamNodeOutputError> {
+    if output_port.trim().is_empty() || !is_safe_output_port(&output_port) {
+        return Err(TeamNodeOutputError::UnsafeOutputPort);
+    }
+    Ok(output_port)
+}
+
+fn validate_optional_message_string(value: String) -> Result<String, TeamNodeOutputError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_TEAM_MESSAGE_SUMMARY_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(TeamNodeOutputError::InvalidField("message"));
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalObservationResolution {
     AwaitingAuthorizedGraphResolution,
@@ -386,10 +583,11 @@ pub(super) struct TerminalObservationPayload {
     pub(super) node_id: String,
     pub(super) fence: ExecutionFence,
     pub(super) role_id: String,
-    pub(super) correlation: MatchaDeliveryCorrelation,
+    pub(super) correlation: NativeDeliveryCorrelation,
     pub(super) delivered_receipt: DeliveryReceiptReference,
     pub(super) native_terminal: NativeTerminalStatus,
     pub(super) observed_at: u64,
+    pub(super) output: Option<TeamNodeOutput>,
     pub(super) resolution: TerminalObservationResolution,
 }
 
@@ -397,7 +595,7 @@ impl TerminalObservation {
     pub(crate) fn new(
         facts: &DeliveryRequest,
         fence: ExecutionFence,
-        correlation: &MatchaDeliveryCorrelation,
+        correlation: &NativeDeliveryCorrelation,
         delivered_receipt: DeliveryReceiptReference,
         native_terminal: NativeTerminalStatus,
         observed_at: u64,
@@ -414,6 +612,7 @@ impl TerminalObservation {
                 delivered_receipt,
                 native_terminal,
                 observed_at,
+                output: None,
                 resolution,
             }),
         }
@@ -445,12 +644,12 @@ impl TerminalObservation {
         &self.payload.role_id
     }
 
-    pub fn correlation(&self) -> &MatchaDeliveryCorrelation {
+    pub fn correlation(&self) -> &NativeDeliveryCorrelation {
         &self.payload.correlation
     }
 
-    pub fn external_session(&self) -> &ExternalSessionReference {
-        self.payload.correlation.external_session()
+    pub fn endpoint_session_id(&self) -> &EndpointSessionId {
+        self.payload.correlation.endpoint_session_id()
     }
 
     pub fn delivered_receipt(&self) -> &DeliveryReceiptReference {
@@ -469,11 +668,22 @@ impl TerminalObservation {
         self.payload.observed_at
     }
 
+    pub fn output(&self) -> Option<&TeamNodeOutput> {
+        self.payload.output.as_ref()
+    }
+
     pub fn resolution(&self) -> &TerminalObservationResolution {
         &self.payload.resolution
     }
 
-    pub(crate) fn resolve_graph(&mut self, resolution: AuthorizedGraphResolution) {
+    pub(crate) fn resolve_graph(
+        &mut self,
+        output: Option<TeamNodeOutput>,
+        resolution: AuthorizedGraphResolution,
+    ) {
+        if let Some(output) = output {
+            self.payload.output = Some(output);
+        }
         self.payload.resolution = TerminalObservationResolution::GraphResolved(resolution);
     }
 
@@ -499,11 +709,12 @@ impl fmt::Debug for TerminalObservation {
             .field("node_id", &"<redacted>")
             .field("fence", &"<redacted>")
             .field("role_id", &"<redacted>")
-            .field("external_session", &"<redacted>")
+            .field("endpoint_session_id", &"<redacted>")
             .field("delivered_receipt", &"<redacted>")
             .field("native_run_receipt", &"<redacted>")
             .field("native_terminal", &self.payload.native_terminal)
             .field("observed_at", &self.payload.observed_at)
+            .field("has_output", &self.payload.output.is_some())
             .field("resolution", &self.payload.resolution)
             .finish()
     }
@@ -530,7 +741,7 @@ impl DeliveryFailure {
 pub enum DeliveryReceipt {
     Accepted {
         receipt: DeliveryReceiptReference,
-        matcha_correlation: Option<MatchaDeliveryCorrelation>,
+        native_correlation: Option<NativeDeliveryCorrelation>,
         accepted_at: u64,
     },
     Rejected {
@@ -703,13 +914,13 @@ impl Delivery {
     pub(crate) fn mark_delivered(
         &mut self,
         receipt: DeliveryReceiptReference,
-        matcha_correlation: Option<MatchaDeliveryCorrelation>,
+        native_correlation: Option<NativeDeliveryCorrelation>,
         accepted_at: u64,
     ) {
         self.completed_attempts += 1;
         self.phase = DeliveryPhase::Delivered {
             receipt,
-            matcha_correlation,
+            native_correlation,
             accepted_at,
         };
     }

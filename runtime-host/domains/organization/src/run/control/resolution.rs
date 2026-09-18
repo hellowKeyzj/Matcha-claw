@@ -7,7 +7,7 @@ use crate::run::{
 /// The producer channel that decided a control node outcome.
 ///
 /// Control nodes are never dispatched to an agent runtime, so their outcome carries no delivery
-/// and never reaches the Matcha native-edge terminal observation path.
+/// and never reaches the runtime-native terminal observation path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlAuthority {
     HumanDecision,

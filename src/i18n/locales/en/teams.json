@@ -293,6 +293,13 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
+    "proposalPending": {
+      "title": "Proposal ready",
+      "emptySummary": "The leader has prepared a proposal.",
+      "confirm": "Confirm and start",
+      "discuss": "Continue discussion",
+      "cancel": "Cancel"
+    },
     "dependencyMissing": {
       "title": "Dependencies required before this run can continue",
       "description": "Required dependencies cannot be bypassed. Install missing skills or configure missing tools, then retry the dependency check.",

@@ -304,7 +304,7 @@ fn valid_local_root(value: &str) -> bool {
         && PathBuf::from(value).is_absolute()
 }
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 #[cfg(test)]
 mod tests {

@@ -16,6 +16,7 @@ vi.mock('react-i18next', () => ({
         'approval.allowAlways': 'Always allow',
         'approval.deny': 'Deny',
         'runtimeStatus.providerFallback': 'Provider fallback applied',
+        'runtimeStatus.runtimeError': 'Runtime error',
         'runtimeStatus.guardian.warning': 'Guardian warning',
       }[key] ?? key;
     },
@@ -95,6 +96,7 @@ describe('chat floating overlays layout', () => {
       <ChatRuntimeStatusDock
         compacting={false}
         errorDetail={{
+          kind: 'fallback',
           failoverReason: 'rate_limit',
           providerRuntimeFailureKind: null,
           providerErrorType: 'overloaded',
@@ -106,6 +108,26 @@ describe('chat floating overlays layout', () => {
 
     expect(screen.getByText('Provider fallback applied')).toBeInTheDocument();
     expect(screen.getByText('rate_limit · overloaded · raw upstream text · HTTP 429')).toBeInTheDocument();
+  });
+
+  it('runtime status dock shows runtime errors without fallback title', () => {
+    render(
+      <ChatRuntimeStatusDock
+        compacting={false}
+        errorDetail={{
+          kind: 'error',
+          failoverReason: null,
+          providerRuntimeFailureKind: null,
+          providerErrorType: 'unknown_model',
+          providerErrorMessagePreview: 'unknown model',
+          httpStatus: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Runtime error')).toBeInTheDocument();
+    expect(screen.queryByText('Provider fallback applied')).not.toBeInTheDocument();
+    expect(screen.getByText('unknown_model · unknown model')).toBeInTheDocument();
   });
 
   it('runtime status dock shows guardian notices', () => {

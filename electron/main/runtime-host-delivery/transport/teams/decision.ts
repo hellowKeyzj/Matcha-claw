@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const ENDPOINT = '/api/team/decision';
 const SCOPE = 'team:write';
 const CAPABILITY = 'team.decision.resolve';
@@ -53,36 +53,29 @@ export interface TeamHumanDecisionTransport {
 
 export function createTeamHumanDecisionTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamHumanDecisionTransport {
-  const url = `http://127.0.0.1:${port}${ENDPOINT}`;
   return {
     async resolve(request): Promise<TeamHumanDecisionTransportResponse> {
       if (!isRequest(request)) return { status: 400, body: INVALID };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: SCOPE,
-              capability: CAPABILITY,
-              subject: SUBJECT,
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSuccess(body)) return { status: 200, body };
-        if (response.status === 409 && (isUnknown(body) || isRejected(body))) return { status: 409, body };
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: SCOPE,
+          capability: CAPABILITY,
+          subject: SUBJECT,
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response === null) return { status: 503, body: UNAVAILABLE };
+      if (response.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
+      if (response.status === 409 && (isUnknown(response.body) || isRejected(response.body))) return { status: 409, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -132,13 +125,4 @@ function isOpaqueId(value: unknown): value is string {
 
 function isNote(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 256;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

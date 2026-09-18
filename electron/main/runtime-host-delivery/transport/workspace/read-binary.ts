@@ -1,7 +1,15 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import {
+  hasExactKeys,
+  isNonEmptyBoundedText,
+  isRecord,
+  isSafeInteger,
+  isSafeNonNegativeInteger,
+  sendLoopbackJson,
+} from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
+const ROUTE_PATH = '/api/workspace/files/binary';
 const UNAVAILABLE = {
   success: false,
   error: 'Workspace binary is unavailable',
@@ -41,42 +49,34 @@ export interface WorkspaceBinaryTransport {
 
 export function createWorkspaceBinaryTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): WorkspaceBinaryTransport {
-  const url = `http://127.0.0.1:${port}/api/workspace/files/binary`;
   return {
     async execute(request: unknown): Promise<WorkspaceBinaryTransportResponse> {
       if (!isWorkspaceBinaryRequest(request)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const forwardedRequest = withBoundedMaxBytes(request);
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/workspace/files/binary',
-              scope: 'workspace-files:binary',
-              capability: request.operationId,
-              subject: 'workspace-binary',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(forwardedRequest),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isWorkspaceBinaryResponse(body, request.operationId)) {
-          return { status: 200, body };
-        }
-        if (response.status === 422 && isPublicFailure(body)) {
-          return { status: 422, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const forwardedRequest = withBoundedMaxBytes(request);
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'workspace-files:binary',
+          capability: request.operationId,
+          subject: 'workspace-binary',
+        },
+        method: 'POST',
+        fetcher,
+        body: forwardedRequest,
+      });
+      if (response?.status === 200 && isWorkspaceBinaryResponse(response.body, request.operationId)) {
+        return { status: 200, body: response.body };
+      }
+      if (response?.status === 422 && isPublicFailure(response.body)) {
+        return { status: 422, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -99,7 +99,7 @@ function isScope(value: unknown): value is WorkspaceBinaryRequest['scope'] {
     && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
     && value.kind === 'session'
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey);
+    && isNonEmptyBoundedText(value.sessionKey);
 }
 
 function isTarget(value: unknown): boolean {
@@ -132,13 +132,13 @@ function isInput(
     : hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath']);
   return hasRequiredFields
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey)
+    && isNonEmptyBoundedText(value.sessionKey)
     && isRelativePath(value.relativePath)
     && (operationId === 'files.stat' || value.maxBytes === undefined || isSafeInteger(value.maxBytes));
 }
 
 function isRelativePath(value: unknown): value is string {
-  return isNonEmptyString(value)
+  return isNonEmptyBoundedText(value)
     && !value.startsWith('/')
     && !value.startsWith('\\')
     && !value.includes(':')
@@ -160,12 +160,12 @@ function isWorkspaceBinaryResponse(
   return operationId === 'files.readBinary'
     ? isRecord(value)
       && hasExactKeys(value, ['name', 'data', 'size'])
-      && isNonEmptyString(value.name)
+      && isNonEmptyBoundedText(value.name)
       && typeof value.data === 'string'
       && isSafeNonNegativeInteger(value.size)
     : isRecord(value)
       && hasExactKeys(value, ['name', 'isDirectory', 'size', 'mtimeMs'])
-      && isNonEmptyString(value.name)
+      && isNonEmptyBoundedText(value.name)
       && typeof value.isDirectory === 'boolean'
       && isSafeNonNegativeInteger(value.size)
       && isSafeNonNegativeInteger(value.mtimeMs);
@@ -180,25 +180,4 @@ function isPublicFailure(value: unknown): boolean {
       'Workspace binary target is not a file',
       'Workspace binary target exceeds the limit',
     ].includes(value.error as string);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value);
-}
-
-function isSafeNonNegativeInteger(value: unknown): boolean {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

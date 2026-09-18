@@ -19,29 +19,17 @@ impl RunRuntimeReceipt {
             return Err(InvalidRunRuntimeReceipt::EmptyBindings);
         }
 
-        let mut roles = BTreeSet::new();
-        let mut local_sessions = BTreeSet::new();
-        let mut external_sessions = BTreeSet::new();
-        let mut agents = BTreeSet::new();
-        let endpoint = bindings[0].endpoint();
+        let mut slots = BTreeSet::new();
+        let mut endpoint_sessions = BTreeSet::new();
         for binding in &bindings {
             if binding.team_run() != &team_run {
                 return Err(InvalidRunRuntimeReceipt::BindingRunMismatch);
             }
-            if binding.endpoint() != endpoint {
-                return Err(InvalidRunRuntimeReceipt::BindingEndpointMismatch);
+            if !slots.insert((binding.role().as_str(), binding.session_ref().as_str())) {
+                return Err(InvalidRunRuntimeReceipt::DuplicateRoleSessionBinding);
             }
-            if !roles.insert(binding.role().as_str()) {
-                return Err(InvalidRunRuntimeReceipt::DuplicateRoleBinding);
-            }
-            if !local_sessions.insert(binding.local_session().as_str()) {
-                return Err(InvalidRunRuntimeReceipt::DuplicateLocalSessionBinding);
-            }
-            if !external_sessions.insert(binding.external_session().as_str()) {
-                return Err(InvalidRunRuntimeReceipt::DuplicateExternalSessionBinding);
-            }
-            if !agents.insert(binding.agent().as_str()) {
-                return Err(InvalidRunRuntimeReceipt::DuplicateAgentBinding);
+            if !endpoint_sessions.insert(binding.endpoint_session_id().as_str()) {
+                return Err(InvalidRunRuntimeReceipt::DuplicateEndpointSessionBinding);
             }
         }
 
@@ -61,9 +49,6 @@ impl RunRuntimeReceipt {
 pub enum InvalidRunRuntimeReceipt {
     EmptyBindings,
     BindingRunMismatch,
-    BindingEndpointMismatch,
-    DuplicateRoleBinding,
-    DuplicateLocalSessionBinding,
-    DuplicateExternalSessionBinding,
-    DuplicateAgentBinding,
+    DuplicateRoleSessionBinding,
+    DuplicateEndpointSessionBinding,
 }

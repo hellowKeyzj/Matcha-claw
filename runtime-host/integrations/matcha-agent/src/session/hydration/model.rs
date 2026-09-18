@@ -369,7 +369,6 @@ impl HydratedMessage {
         self
     }
 
-
     pub(crate) fn try_from_parts(
         id: Option<String>,
         parent_id: Option<String>,

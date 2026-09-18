@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::{
     client::{AppServerClient, AppServerClientError},
     model::{RunId, RunStatus, SessionId},
@@ -86,6 +88,52 @@ pub enum TerminalRunStatus {
     Interrupted,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeRunSettled {
+    native_run_id: RunId,
+    status: TerminalRunStatus,
+    final_assistant_text: Option<String>,
+}
+
+impl NativeRunSettled {
+    pub fn new(
+        native_run_id: RunId,
+        status: TerminalRunStatus,
+        final_assistant_text: Option<String>,
+    ) -> Self {
+        Self {
+            native_run_id,
+            status,
+            final_assistant_text,
+        }
+    }
+
+    pub fn native_run_id(&self) -> &RunId {
+        &self.native_run_id
+    }
+
+    pub const fn status(&self) -> TerminalRunStatus {
+        self.status
+    }
+
+    pub fn final_assistant_text(&self) -> Option<&str> {
+        self.final_assistant_text.as_deref()
+    }
+}
+
+impl fmt::Debug for NativeRunSettled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeRunSettled")
+            .field("status", &self.status)
+            .field(
+                "final_assistant_text_bytes",
+                &self.final_assistant_text.as_ref().map_or(0, String::len),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -158,5 +206,22 @@ mod tests {
         ] {
             assert!(!debug.contains(canary));
         }
+    }
+
+    #[test]
+    fn settled_debug_redacts_run_id_and_final_text() {
+        let settled = NativeRunSettled::new(
+            RunId::try_new("run-canary").unwrap(),
+            TerminalRunStatus::Completed,
+            Some("assistant final canary".to_owned()),
+        );
+        assert_eq!(settled.native_run_id().as_str(), "run-canary");
+        assert_eq!(
+            settled.final_assistant_text(),
+            Some("assistant final canary")
+        );
+        let debug = format!("{settled:?}");
+        assert!(!debug.contains("run-canary"));
+        assert!(!debug.contains("assistant final canary"));
     }
 }

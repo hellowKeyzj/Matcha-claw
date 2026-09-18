@@ -137,19 +137,36 @@ impl WorkGroup {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutorPolicy {
-    TeamRole { role_id: String },
+    TeamRole {
+        role_id: String,
+        session_ref: crate::RoleSessionRef,
+    },
 }
 
 impl ExecutorPolicy {
     pub fn team_role(role_id: impl Into<String>) -> Self {
+        Self::team_role_session(role_id, crate::RoleSessionRef::initial())
+    }
+
+    pub fn team_role_session(
+        role_id: impl Into<String>,
+        session_ref: crate::RoleSessionRef,
+    ) -> Self {
         Self::TeamRole {
             role_id: role_id.into(),
+            session_ref,
         }
     }
 
     pub fn role_id(&self) -> &str {
         match self {
-            Self::TeamRole { role_id } => role_id,
+            Self::TeamRole { role_id, .. } => role_id,
+        }
+    }
+
+    pub fn session_ref(&self) -> &crate::RoleSessionRef {
+        match self {
+            Self::TeamRole { session_ref, .. } => session_ref,
         }
     }
 }
@@ -206,6 +223,10 @@ impl WorkAssignment {
         self.executor.role_id()
     }
 
+    pub fn session_ref(&self) -> &crate::RoleSessionRef {
+        self.executor.session_ref()
+    }
+
     pub fn output_artifact_kind(&self) -> Option<&str> {
         self.output_artifact_kind.as_deref()
     }
@@ -217,20 +238,32 @@ impl WorkAssignment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewAssignment {
-    role_id: String,
+    executor: ExecutorPolicy,
     prompt: String,
 }
 
 impl ReviewAssignment {
     pub fn new(role_id: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self::with_executor(ExecutorPolicy::team_role(role_id), prompt)
+    }
+
+    pub fn with_executor(executor: ExecutorPolicy, prompt: impl Into<String>) -> Self {
         Self {
-            role_id: role_id.into(),
+            executor,
             prompt: prompt.into(),
         }
     }
 
+    pub fn executor(&self) -> &ExecutorPolicy {
+        &self.executor
+    }
+
     pub fn role_id(&self) -> &str {
-        &self.role_id
+        self.executor.role_id()
+    }
+
+    pub fn session_ref(&self) -> &crate::RoleSessionRef {
+        self.executor.session_ref()
     }
 
     pub fn prompt(&self) -> &str {
@@ -648,7 +681,7 @@ impl GraphDefinition {
                 }
                 (NodeKind::Review, None, None) => {}
                 (NodeKind::Review, None, Some(review))
-                    if !review.role_id.trim().is_empty() && !review.prompt.trim().is_empty() => {}
+                    if !review.role_id().trim().is_empty() && !review.prompt.trim().is_empty() => {}
                 (NodeKind::Review, None, Some(_)) => {
                     return Err(DefinitionError::InvalidReviewAssignment(node.id.clone()));
                 }

@@ -2,7 +2,7 @@ use super::{
     events::{EventActivity, EventProjectionResult, RunLifecycle, SessionEventProjector},
     model::{RunId, Sequence, SessionId},
     protocol_event::EventEnvelope,
-    receipt::TerminalRunStatus,
+    receipt::{NativeRunSettled, TerminalRunStatus},
 };
 
 pub(crate) struct TerminalEventWatcher {
@@ -11,7 +11,7 @@ pub(crate) struct TerminalEventWatcher {
 
 pub(crate) enum TerminalWatchStep {
     Pending,
-    Terminal(TerminalRunStatus),
+    Terminal(NativeRunSettled),
     Stop,
 }
 
@@ -26,17 +26,18 @@ impl TerminalEventWatcher {
         match self.projector.project(envelope) {
             EventProjectionResult::Projected(event) => match event.activity() {
                 EventActivity::Run(RunLifecycle::Cancelled) => {
-                    TerminalWatchStep::Terminal(TerminalRunStatus::Cancelled)
+                    self.terminal(event.turn().run_id().clone(), TerminalRunStatus::Cancelled)
                 }
                 EventActivity::Run(RunLifecycle::Completed) => {
-                    TerminalWatchStep::Terminal(TerminalRunStatus::Completed)
+                    self.terminal(event.turn().run_id().clone(), TerminalRunStatus::Completed)
                 }
                 EventActivity::Run(RunLifecycle::Failed) => {
-                    TerminalWatchStep::Terminal(TerminalRunStatus::Failed)
+                    self.terminal(event.turn().run_id().clone(), TerminalRunStatus::Failed)
                 }
-                EventActivity::Run(RunLifecycle::Interrupted) => {
-                    TerminalWatchStep::Terminal(TerminalRunStatus::Interrupted)
-                }
+                EventActivity::Run(RunLifecycle::Interrupted) => self.terminal(
+                    event.turn().run_id().clone(),
+                    TerminalRunStatus::Interrupted,
+                ),
                 EventActivity::Run(_)
                 | EventActivity::Message(_)
                 | EventActivity::Tool(_)
@@ -51,6 +52,14 @@ impl TerminalEventWatcher {
             | EventProjectionResult::Stale { .. }
             | EventProjectionResult::OutOfSession { .. } => TerminalWatchStep::Stop,
         }
+    }
+
+    fn terminal(&self, run_id: RunId, status: TerminalRunStatus) -> TerminalWatchStep {
+        TerminalWatchStep::Terminal(NativeRunSettled::new(
+            run_id,
+            status,
+            self.projector.final_assistant_text().map(ToOwned::to_owned),
+        ))
     }
 }
 
@@ -115,6 +124,20 @@ mod tests {
         )
     }
 
+    fn message_event(
+        seq: u64,
+        run_id: &str,
+        message_id: &str,
+        event_type: &str,
+        text: Option<&str>,
+    ) -> EventEnvelope {
+        let mut event = json!({"type":event_type,"messageId":message_id});
+        if let Some(text) = text {
+            event["delta"] = json!(text);
+        }
+        envelope(seq, "session-1", run_id, event)
+    }
+
     #[test]
     fn accepts_only_valid_terminal_lifecycles_for_the_bound_identity() {
         for (lifecycle, expected) in [
@@ -126,7 +149,7 @@ mod tests {
             let mut watcher = watcher();
             assert!(matches!(
                 watcher.observe(run_event(1, lifecycle)),
-                TerminalWatchStep::Terminal(status) if status == expected
+                TerminalWatchStep::Terminal(settled) if settled.status() == expected
             ));
         }
     }
@@ -156,7 +179,7 @@ mod tests {
         ));
         assert!(matches!(
             wrong_run.observe(run_event(2, "completed")),
-            TerminalWatchStep::Terminal(TerminalRunStatus::Completed)
+            TerminalWatchStep::Terminal(settled) if settled.status() == TerminalRunStatus::Completed
         ));
     }
 
@@ -177,6 +200,49 @@ mod tests {
                 json!({"type":"run.unknown","runId":"run-1"}),
             )),
             TerminalWatchStep::Stop
+        ));
+    }
+
+    #[test]
+    fn captures_only_the_bound_run_final_text() {
+        let mut watcher = watcher();
+        assert!(matches!(
+            watcher.observe(message_event(
+                1,
+                "run-1",
+                "message-1",
+                "message.delta",
+                Some("run-a final"),
+            )),
+            TerminalWatchStep::Pending
+        ));
+        assert!(matches!(
+            watcher.observe(message_event(
+                2,
+                "run-2",
+                "message-2",
+                "message.delta",
+                Some("run-b later"),
+            )),
+            TerminalWatchStep::Pending
+        ));
+        assert!(matches!(
+            watcher.observe(run_event(3, "completed")),
+            TerminalWatchStep::Terminal(settled)
+                if settled.native_run_id().as_str() == "run-1"
+                    && settled.status() == TerminalRunStatus::Completed
+                    && settled.final_assistant_text() == Some("run-a final")
+        ));
+    }
+
+    #[test]
+    fn missing_final_text_remains_none_on_terminal_run() {
+        let mut watcher = watcher();
+        assert!(matches!(
+            watcher.observe(run_event(1, "completed")),
+            TerminalWatchStep::Terminal(settled)
+                if settled.status() == TerminalRunStatus::Completed
+                    && settled.final_assistant_text().is_none()
         ));
     }
 

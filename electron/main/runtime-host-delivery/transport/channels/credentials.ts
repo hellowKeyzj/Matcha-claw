@@ -1,7 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './catalog';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { beginChannelTrace, channelTraceHeaders } from './trace';
 
-const DECISION_TTL_MS = 30_000;
 const MAX_CONFIG_KEYS = 64;
 const MAX_CONFIG_VALUE_LENGTH = 131_072;
 const MAX_CONFIG_TOTAL_LENGTH = 262_144;
@@ -51,49 +51,46 @@ export interface ChannelCredentialsTransport {
 
 export function createChannelCredentialsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelCredentialsTransport {
-  const url = `http://127.0.0.1:${port}${ENDPOINT}`;
   return {
     async validate(input, traceId): Promise<ChannelCredentialsTransportResponse> {
       if (!isChannelCredentialsRequest(input)) return { status: 503, body: UNAVAILABLE };
       const finish = beginChannelTrace('transport.credentials.validate', traceId);
       let status = 503;
       let body: unknown;
-      let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'channels:write',
-              capability: 'channels.credentials.validate',
-              subject: 'channel-credentials',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...channelTraceHeaders(traceId),
-          },
-          body: JSON.stringify(input),
-        });
+      let errorCode: 'UNAVAILABLE' | 'INVALID_RESPONSE' | undefined;
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: 'channels:write',
+          capability: 'channels.credentials.validate',
+          subject: 'channel-credentials',
+        },
+        method: 'POST',
+        fetcher,
+        headers: channelTraceHeaders(traceId),
+        body: input,
+      });
+      if (response === null) {
+        body = UNAVAILABLE;
+        errorCode = 'UNAVAILABLE';
+      } else {
         status = response.status;
-        body = await response.json();
+        body = response.body;
         if ((response.status === 200 || response.status === 400)
           && isChannelCredentialsValidation(body, input.config)) {
+          finish(status, body);
           return { status: response.status, body };
         }
         body = UNAVAILABLE;
         errorCode = 'INVALID_RESPONSE';
-      } catch (error) {
-        body = UNAVAILABLE;
-        errorCode = channelTraceError(error);
-      } finally {
-        finish(status, body, errorCode);
       }
+      finish(status, body, errorCode);
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -185,15 +182,6 @@ function isIdentity(value: unknown): value is string {
       const code = character.charCodeAt(0);
       return !/\s/.test(character) && code >= 32 && code !== 127;
     });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {

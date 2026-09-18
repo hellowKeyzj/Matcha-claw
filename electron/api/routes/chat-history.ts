@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { MatchaAgentHistoryTransport } from '../../main/runtime-host-delivery/transport/sessions/matcha-history';
+import type { RuntimeHostTransportContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const UNAVAILABLE = {
@@ -7,9 +7,7 @@ const UNAVAILABLE = {
   error: 'Matcha Agent chat history is unavailable',
 } as const;
 
-type ChatHistoryRouteDeps = Readonly<{
-  matchaAgentHistoryTransport: MatchaAgentHistoryTransport;
-}>;
+type ChatHistoryRouteDeps = RuntimeHostTransportContext<'matchaAgentHistoryTransport'>;
 
 export async function handleChatHistoryRoutes(
   req: IncomingMessage,
@@ -20,7 +18,7 @@ export async function handleChatHistoryRoutes(
   if (req.method !== 'POST') return false;
 
   if (url.pathname !== '/api/matcha-agent/chat/history') return false;
-  const transport = deps.matchaAgentHistoryTransport;
+  const transport = deps.runtimeHostTransports.matchaAgentHistoryTransport;
 
   let request: unknown;
   try {

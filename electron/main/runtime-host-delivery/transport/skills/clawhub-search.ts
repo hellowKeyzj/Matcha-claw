@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const ENDPOINT = '/api/clawhub/search';
 const SEARCH_SCOPE = 'skills:search';
 const SEARCH_CAPABILITY = 'clawhubSkill.search';
@@ -48,7 +48,7 @@ export interface ClawHubSkillSearchTransport {
 
 export function createClawHubSkillSearchTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ClawHubSkillSearchTransport {
   return {
@@ -57,36 +57,29 @@ export function createClawHubSkillSearchTransport(
         return { status: 400, body: { success: false, error: INVALID_REQUEST } };
       }
 
-      try {
-        const response = await fetcher(`http://127.0.0.1:${port}${ENDPOINT}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: SEARCH_SCOPE,
-              capability: SEARCH_CAPABILITY,
-              subject: SEARCH_SUBJECT,
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSearchSuccess(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 400
-          && (isSearchFailure(body, INVALID_REQUEST) || isSearchFailure(body, REJECTED))) {
-          return { status: 400, body };
-        }
-        if (response.status === 503 && isSearchFailure(body, UNAVAILABLE)) {
-          return { status: 503, body };
-        }
-      } catch {
-        // Public delivery deliberately redacts loopback and host failures.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: SEARCH_SCOPE,
+          capability: SEARCH_CAPABILITY,
+          subject: SEARCH_SUBJECT,
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSearchSuccess(response.body)) {
+        return { status: 200, body: response.body };
+      }
+      if (response?.status === 400
+        && (isSearchFailure(response.body, INVALID_REQUEST) || isSearchFailure(response.body, REJECTED))) {
+        return { status: 400, body: response.body };
+      }
+      if (response?.status === 503 && isSearchFailure(response.body, UNAVAILABLE)) {
+        return { status: 503, body: response.body };
       }
 
       return { status: 503, body: { success: false, error: UNAVAILABLE } };
@@ -142,7 +135,7 @@ function isSlug(value: unknown): value is string {
 }
 
 function isOptionalCount(value: unknown): value is number {
-  return Number.isSafeInteger(value) && value >= 0;
+  return isSafeNonNegativeInteger(value);
 }
 
 function isBoundedText(value: unknown, maxBytes: number, allowEmpty: boolean): value is string {
@@ -150,15 +143,6 @@ function isBoundedText(value: unknown, maxBytes: number, allowEmpty: boolean): v
     && Buffer.byteLength(value, 'utf8') <= maxBytes
     && !value.includes('\0')
     && (allowEmpty || value.trim().length > 0);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {

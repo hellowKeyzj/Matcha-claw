@@ -3,10 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useProviderModelCatalogStore } from '@/stores/provider-model-catalog';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
+const providerSnapshotRefreshMock = vi.hoisted(() => vi.fn());
 const capabilityRefreshMock = vi.hoisted(() => vi.fn());
+const subagentsLoadAvailableModelsMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: hostApiFetchMock,
+}));
+
+vi.mock('@/stores/providers', () => ({
+  useProviderStore: {
+    getState: () => ({
+      refreshProviderSnapshot: providerSnapshotRefreshMock,
+    }),
+  },
 }));
 
 vi.mock('@/stores/capability-routing', () => ({
@@ -16,6 +26,22 @@ vi.mock('@/stores/capability-routing', () => ({
     }),
   },
 }));
+
+vi.mock('@/stores/subagents', () => ({
+  useSubagentsStore: {
+    getState: () => ({
+      loadAvailableModels: subagentsLoadAvailableModelsMock,
+    }),
+  },
+}));
+
+const storedProviderModelsResponse = {
+  success: true,
+  desired: { status: 'stored' },
+  persisted: { status: 'confirmed' },
+  native: { changed: true, applied: { status: 'confirmed' }, observed: { status: 'matches' } },
+  commit: 'committed',
+};
 
 describe('provider model catalog store', () => {
   beforeEach(() => {
@@ -51,7 +77,32 @@ describe('provider model catalog store', () => {
         models: [{ modelId: 'gpt-5.4', capabilities: ['chat'] }],
       },
     });
+    expect(providerSnapshotRefreshMock).not.toHaveBeenCalled();
     expect(capabilityRefreshMock).not.toHaveBeenCalled();
+    expect(subagentsLoadAvailableModelsMock).not.toHaveBeenCalled();
+  });
+
+  it('refreshes dependent provider projections after provider model replacement succeeds', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce(storedProviderModelsResponse)
+      .mockResolvedValueOnce({ models: [{ accountId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }] });
+
+    await useProviderModelCatalogStore.getState().replaceAccountModels('custom-1', [
+      { modelId: 'gpt-5.4', capabilities: ['chat'] },
+    ]);
+
+    expect(useProviderModelCatalogStore.getState()).toMatchObject({
+      saving: false,
+      ready: true,
+      error: null,
+      models: [{ accountId: 'custom-1', modelId: 'gpt-5.4', capabilities: ['chat'] }],
+    });
+    expect(providerSnapshotRefreshMock).toHaveBeenCalledWith({
+      trigger: 'reconcile',
+      reason: 'provider_post_mutation',
+    });
+    expect(capabilityRefreshMock).toHaveBeenCalledTimes(1);
+    expect(subagentsLoadAvailableModelsMock).toHaveBeenCalledWith({ force: true });
   });
 
   it('dedupes concurrent refresh requests through one provider model fetch', async () => {

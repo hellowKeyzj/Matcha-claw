@@ -141,7 +141,21 @@ export interface ChatSessionImageGenerationRuntimeState {
   pendingTaskIds: ReadonlyArray<string>;
 }
 
+export type ChatSessionRunStartupPhase =
+  | 'preparing_workspace'
+  | 'naming_worktree'
+  | 'creating_worktree'
+  | 'running_setup'
+  | 'provisioning_environment'
+  | 'preparing_context'
+  | 'starting_model';
+
+export type ChatSessionRunProgress =
+  | { kind: 'startup'; phase: ChatSessionRunStartupPhase }
+  | { kind: 'retrying'; attempt: number; maxAttempts: number };
+
 export interface ChatSessionRuntimeErrorDetail {
+  kind: 'fallback' | 'error';
   failoverReason: string | null;
   providerRuntimeFailureKind: string | null;
   providerErrorType: string | null;
@@ -164,6 +178,7 @@ export interface ChatSessionRuntimeState {
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
+  runProgress: ChatSessionRunProgress | null;
   runtimeActivity: 'compacting' | null;
   errorDetail: ChatSessionRuntimeErrorDetail | null;
   runtimeNotice: ChatSessionRuntimeNotice | null;

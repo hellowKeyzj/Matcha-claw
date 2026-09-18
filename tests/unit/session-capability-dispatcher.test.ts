@@ -81,7 +81,9 @@ function sessionContentRequest() {
 function workspaceDeps(execute: ReturnType<typeof vi.fn>) {
   return {
     deps: {
-      workspaceMediaTransport: { execute },
+      runtimeHostTransports: {
+        workspaceMediaTransport: { execute },
+      },
     } as never,
   };
 }
@@ -94,7 +96,9 @@ function routeDeps(send: ReturnType<typeof vi.fn>, isMatchaRoute = false) {
   };
   return {
     deps: {
-      sessionSendTransport: { send },
+      runtimeHostTransports: {
+        sessionSendTransport: { send },
+      },
       rendererEventRoutes,
     } as never,
     rendererEventRoutes,
@@ -240,9 +244,11 @@ describe('session capability dispatcher', () => {
     const request = sessionContentRequest();
 
     const response = await dispatchSessionCapability(request, {
-      sessionContentTransport: { load },
-      sessionTimelineTransport: { load: timelineLoad, window },
-      matchaSessionListTransport: { list },
+      runtimeHostTransports: {
+        sessionContentTransport: { load },
+        sessionTimelineTransport: { load: timelineLoad, window },
+        matchaSessionListTransport: { list },
+      },
     } as never);
 
     expect(response).toEqual({ status: 200, body: {
@@ -277,8 +283,10 @@ describe('session capability dispatcher', () => {
         target: { kind: 'session', identity },
         input,
       }, {
-        sessionTimelineTransport: { load, window },
-        matchaSessionListTransport: { list },
+        runtimeHostTransports: {
+          sessionTimelineTransport: { load, window },
+          matchaSessionListTransport: { list },
+        },
       } as never);
 
       expect(response).toEqual({ status: 200, body: { sessionKey: identity.sessionKey } });
@@ -461,11 +469,11 @@ describe('session capability dispatcher', () => {
       input: { sessionKey: identity.sessionKey, sessionIdentity: identity, permissionMode: 'full' },
     };
 
-    await expect(dispatchSessionCapability(getRequest, { sessionPermissionTransport: { get, set } } as never)).resolves.toEqual({
+    await expect(dispatchSessionCapability(getRequest, { runtimeHostTransports: { sessionPermissionTransport: { get, set } } } as never)).resolves.toEqual({
       status: 200,
       body: getProjection,
     });
-    await expect(dispatchSessionCapability(setRequest, { sessionPermissionTransport: { get, set } } as never)).resolves.toEqual({
+    await expect(dispatchSessionCapability(setRequest, { runtimeHostTransports: { sessionPermissionTransport: { get, set } } } as never)).resolves.toEqual({
       status: 200,
       body: setProjection,
     });
@@ -489,7 +497,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: { ...identity, agentId: 'other' },
         permissionMode: 'full',
       },
-    }, { sessionPermissionTransport: { get, set } } as never)).rejects.toThrow('Session permission request is invalid');
+    }, { runtimeHostTransports: { sessionPermissionTransport: { get, set } } } as never)).rejects.toThrow('Session permission request is invalid');
     expect(get).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
   });
@@ -508,7 +516,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: identity,
         modelSelectionId: 'anthropic/claude-opus-4-6',
       },
-    }, { sessionModelSelectionTransport: { select } } as never);
+    }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never);
 
     expect(response).toEqual({ status: 200, body: { outcome: 'succeeded' } });
     expect(select).toHaveBeenCalledWith({
@@ -539,7 +547,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: identity,
         modelSelectionId: 'openai/gpt-5.4',
       },
-    }, { sessionModelSelectionTransport: { select } } as never)).resolves.toEqual({
+    }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).resolves.toEqual({
       status: 200,
       body: { outcome: 'succeeded' },
     });
@@ -572,7 +580,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: identity,
         modelSelectionId: 'openai/gpt-5.4',
       },
-    }, { sessionModelSelectionTransport: { select } } as never)).rejects.toThrow('Session model selection request is invalid');
+    }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).rejects.toThrow('Session model selection request is invalid');
     expect(select).not.toHaveBeenCalled();
   });
 
@@ -591,7 +599,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: identity,
         modelSelectionId: 'openai/gpt-5.4',
       },
-    }, { sessionModelSelectionTransport: { select } } as never)).resolves.toEqual({
+    }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).resolves.toEqual({
       status: 200,
       body: { outcome: 'succeeded' },
     });
@@ -624,7 +632,7 @@ describe('session capability dispatcher', () => {
         sessionIdentity: identity,
         modelSelectionId: 'openai/gpt-5.4',
       },
-    }, { sessionModelSelectionTransport: { select } } as never)).rejects.toThrow('Session model selection request is invalid');
+    }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).rejects.toThrow('Session model selection request is invalid');
     expect(select).not.toHaveBeenCalled();
   });
 });

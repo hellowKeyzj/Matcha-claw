@@ -52,7 +52,7 @@ describe('packages host API route', () => {
       incoming({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' }) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/packages/install'),
-      { cloudAccountService, agentsTransport, sealedSkillsTransport } as never,
+      { cloudAccountService, runtimeHostTransports: { agentsTransport, sealedSkillsTransport } } as never,
     )).resolves.toBe(true);
 
     expect(cloudAccountService.downloadPackage).toHaveBeenCalledWith({

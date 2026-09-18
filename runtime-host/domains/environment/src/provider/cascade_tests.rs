@@ -9,7 +9,8 @@ use crate::{
     CredentialReference, ProviderAccountAuthMode, ProviderAccountConfiguration,
     ProviderAccountConfigurationInput, ProviderAccountKind, ProviderApiProtocol, ProviderEndpoint,
     ProviderModel, ProviderModelCapability, ProviderModelReference, ProviderReference,
-    ProviderRoute, ProviderRoutingCapability,
+    ProviderRoute, ProviderRoutingCapability, ProviderRoutingRevision,
+    provider_routing_is_admissible,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -53,21 +54,50 @@ fn credential(value: &str) -> CredentialReference {
 }
 
 fn account(id: &str, credential: CredentialReference) -> ProviderAccount {
-    account_with_updated_at(id, credential, "2026-07-30T10:00:00Z")
+    account_with_enabled(id, credential, true)
+}
+
+fn disabled_account(id: &str, credential: CredentialReference) -> ProviderAccount {
+    account_with_enabled(id, credential, false)
+}
+
+fn account_with_enabled(
+    id: &str,
+    credential: CredentialReference,
+    enabled: bool,
+) -> ProviderAccount {
+    account_with_updated_at(id, credential, enabled, "2026-07-30T10:00:00Z")
 }
 
 fn account_with_updated_at(
     id: &str,
     credential: CredentialReference,
+    enabled: bool,
+    updated_at: &str,
+) -> ProviderAccount {
+    account_with_revision(
+        id,
+        credential,
+        ProviderAccountRevision::try_new(1).unwrap(),
+        enabled,
+        updated_at,
+    )
+}
+
+fn account_with_revision(
+    id: &str,
+    credential: CredentialReference,
+    revision: ProviderAccountRevision,
+    enabled: bool,
     updated_at: &str,
 ) -> ProviderAccount {
     ProviderAccount::new(
         ProviderAccountId::try_new(id).unwrap(),
         ProviderReference::try_new("provider:openai").unwrap(),
-        ProviderAccountRevision::try_new(1).unwrap(),
+        revision,
         ProviderAccountConfiguration::try_new(ProviderAccountConfigurationInput {
             label: "Primary".to_owned(),
-            enabled: true,
+            enabled,
             kind: ProviderAccountKind::Chat,
             endpoint: Some(ProviderEndpoint::try_new("https://api.example.com/v1").unwrap()),
             protocol: Some(ProviderApiProtocol::OpenAiResponses),
@@ -103,10 +133,18 @@ fn local_account(id: &str) -> ProviderAccount {
 }
 
 fn model(account_id: ProviderAccountId, model_id: &str) -> ProviderModel {
+    model_with_capabilities(account_id, model_id, vec![ProviderModelCapability::Chat])
+}
+
+fn model_with_capabilities(
+    account_id: ProviderAccountId,
+    model_id: &str,
+    capabilities: Vec<ProviderModelCapability>,
+) -> ProviderModel {
     ProviderModel::try_new(
         account_id,
         model_id,
-        vec![ProviderModelCapability::Chat],
+        capabilities,
         None,
         None,
         None,
@@ -378,6 +416,496 @@ fn local_account_deletion_cascades_models_and_routes_by_account_identity() {
     assert!(cascade.catalog().models().is_empty());
     assert!(cascade.routing().unwrap().routes().is_empty());
     assert!(!paths.journal.exists());
+    paths.remove();
+}
+
+#[test]
+fn disabling_primary_account_promotes_valid_fallback() {
+    let paths = Paths::new("disable-primary-promote-fallback");
+    let primary_id = ProviderAccountId::try_new("primary").unwrap();
+    let fallback_id = ProviderAccountId::try_new("fallback").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .persist_account(account("fallback", credential("fallback")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &primary_id,
+            vec![model(primary_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &fallback_id,
+            vec![model(fallback_id.clone(), "fallback-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(primary_id.clone(), "primary-model"),
+                        vec![reference(fallback_id.clone(), "fallback-model")],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade
+        .persist_account(account_with_revision(
+            "primary",
+            credential("primary"),
+            ProviderAccountRevision::try_new(2).unwrap(),
+            false,
+            "2026-07-30T10:01:00Z",
+        ))
+        .unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    let route = routing.route(ProviderRoutingCapability::Chat).unwrap();
+    assert_eq!(route.primary().account_id(), &fallback_id);
+    assert_eq!(route.primary().model_id(), "fallback-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    paths.remove();
+}
+
+#[test]
+fn replacing_models_promotes_first_valid_fallback_when_primary_model_is_removed() {
+    let paths = Paths::new("replace-promote-fallback");
+    let primary_id = ProviderAccountId::try_new("primary").unwrap();
+    let fallback_id = ProviderAccountId::try_new("fallback").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .persist_account(account("fallback", credential("fallback")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &primary_id,
+            vec![model(primary_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &fallback_id,
+            vec![model(fallback_id.clone(), "fallback-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(primary_id.clone(), "primary-model"),
+                        vec![reference(fallback_id.clone(), "fallback-model")],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade.replace_models(&primary_id, Vec::new()).unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    let route = routing.route(ProviderRoutingCapability::Chat).unwrap();
+    assert_eq!(route.primary().account_id(), &fallback_id);
+    assert_eq!(route.primary().model_id(), "fallback-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    paths.remove();
+}
+
+#[test]
+fn replacing_models_drops_removed_fallback_without_changing_primary() {
+    let paths = Paths::new("replace-drop-fallback");
+    let primary_id = ProviderAccountId::try_new("primary").unwrap();
+    let fallback_id = ProviderAccountId::try_new("fallback").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .persist_account(account("fallback", credential("fallback")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &primary_id,
+            vec![model(primary_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &fallback_id,
+            vec![model(fallback_id.clone(), "fallback-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(primary_id.clone(), "primary-model"),
+                        vec![reference(fallback_id.clone(), "fallback-model")],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade.replace_models(&fallback_id, Vec::new()).unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    let route = routing.route(ProviderRoutingCapability::Chat).unwrap();
+    assert_eq!(route.primary().account_id(), &primary_id);
+    assert_eq!(route.primary().model_id(), "primary-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    paths.remove();
+}
+
+#[test]
+fn replacing_models_with_empty_catalog_drops_route_without_valid_fallback() {
+    let paths = Paths::new("replace-empty-drops-route");
+    let account_id = ProviderAccountId::try_new("primary").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &account_id,
+            vec![model(account_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(account_id.clone(), "primary-model"),
+                        Vec::new(),
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade.replace_models(&account_id, Vec::new()).unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    assert!(routing.route(ProviderRoutingCapability::Chat).is_none());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    paths.remove();
+}
+
+#[test]
+fn opening_prunes_routing_left_stale_after_interrupted_model_replace() {
+    let paths = Paths::new("open-prunes-stale-routing");
+    let removed_id = ProviderAccountId::try_new("removed").unwrap();
+    let fallback_id = ProviderAccountId::try_new("fallback").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("removed", credential("removed")))
+        .unwrap();
+    cascade
+        .persist_account(account("fallback", credential("fallback")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &removed_id,
+            vec![model(removed_id.clone(), "removed-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &fallback_id,
+            vec![model(fallback_id.clone(), "fallback-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(removed_id.clone(), "removed-model"),
+                        vec![reference(fallback_id.clone(), "fallback-model")],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    cascade.models.replace(&removed_id, Vec::new()).unwrap();
+    drop(cascade);
+
+    let reopened = open_cascade(&paths);
+
+    let routing = reopened.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    let route = routing.route(ProviderRoutingCapability::Chat).unwrap();
+    assert_eq!(route.primary().account_id(), &fallback_id);
+    assert_eq!(route.primary().model_id(), "fallback-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(provider_routing_is_admissible(
+        routing,
+        reopened.accounts(),
+        reopened.catalog()
+    ));
+    drop(reopened);
+
+    let reopened = open_cascade(&paths);
+    assert_eq!(reopened.routing().unwrap().revision().get(), 2);
+    paths.remove();
+}
+
+#[test]
+fn reload_prunes_routing_left_stale_after_external_model_replace() {
+    let paths = Paths::new("reload-prunes-stale-routing");
+    let account_id = ProviderAccountId::try_new("primary").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("primary", credential("primary")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &account_id,
+            vec![model(account_id.clone(), "primary-model")],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(account_id.clone(), "primary-model"),
+                        Vec::new(),
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut other = open_cascade(&paths);
+    other.models.replace(&account_id, Vec::new()).unwrap();
+    drop(other);
+
+    cascade.reload().unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    assert!(routing.route(ProviderRoutingCapability::Chat).is_none());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    cascade.reload().unwrap();
+    assert_eq!(cascade.routing().unwrap().revision().get(), 2);
+    paths.remove();
+}
+
+#[test]
+fn pruning_current_catalog_removes_disabled_account_and_unsupported_capability() {
+    let paths = Paths::new("prune-disabled-unsupported");
+    let disabled_id = ProviderAccountId::try_new("disabled").unwrap();
+    let fallback_id = ProviderAccountId::try_new("fallback").unwrap();
+    let image_only_id = ProviderAccountId::try_new("image-only").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(disabled_account("disabled", credential("disabled")))
+        .unwrap();
+    cascade
+        .persist_account(account("fallback", credential("fallback")))
+        .unwrap();
+    cascade
+        .persist_account(account("image-only", credential("image-only")))
+        .unwrap();
+    cascade
+        .replace_models(
+            &disabled_id,
+            vec![model(disabled_id.clone(), "disabled-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &fallback_id,
+            vec![model(fallback_id.clone(), "fallback-model")],
+        )
+        .unwrap();
+    cascade
+        .replace_models(
+            &image_only_id,
+            vec![model_with_capabilities(
+                image_only_id.clone(),
+                "image-model",
+                vec![ProviderModelCapability::ImageGenerate],
+            )],
+        )
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(disabled_id.clone(), "disabled-model"),
+                        vec![
+                            reference(image_only_id.clone(), "image-model"),
+                            reference(fallback_id.clone(), "fallback-model"),
+                        ],
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    cascade.prune_routing_to_current_catalog().unwrap();
+
+    let routing = cascade.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    let route = routing.route(ProviderRoutingCapability::Chat).unwrap();
+    assert_eq!(route.primary().account_id(), &fallback_id);
+    assert_eq!(route.primary().model_id(), "fallback-model");
+    assert!(route.fallbacks().is_empty());
+    assert!(provider_routing_is_admissible(
+        routing,
+        cascade.accounts(),
+        cascade.catalog()
+    ));
+    paths.remove();
+}
+
+#[test]
+fn opening_recovers_pending_deletion_then_prunes_unrelated_stale_routing() {
+    let paths = Paths::new("recover-then-prune-stale-routing");
+    let removed_id = ProviderAccountId::try_new("removed").unwrap();
+    let stale_id = ProviderAccountId::try_new("stale").unwrap();
+    let mut cascade = open_cascade(&paths);
+    cascade
+        .persist_account(account("removed", credential("removed")))
+        .unwrap();
+    cascade
+        .persist_account(account("stale", credential("stale")))
+        .unwrap();
+    cascade
+        .models
+        .replace(
+            &removed_id,
+            vec![model(removed_id.clone(), "removed-model")],
+        )
+        .unwrap();
+    cascade
+        .models
+        .replace(&stale_id, vec![model(stale_id.clone(), "stale-model")])
+        .unwrap();
+    cascade
+        .routing
+        .replace(
+            ProviderRouting::try_new(
+                ProviderRoutingRevision::try_new(1).unwrap(),
+                vec![(
+                    ProviderRoutingCapability::Chat,
+                    ProviderRoute::try_new(
+                        reference(stale_id.clone(), "stale-model"),
+                        Vec::new(),
+                        None,
+                    )
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    cascade.models.replace(&stale_id, Vec::new()).unwrap();
+    cascade
+        .journal
+        .prepare(&AccountDeletion {
+            account_id: "removed".to_owned(),
+            revision: 1,
+            routing_revision: None,
+        })
+        .unwrap();
+    drop(cascade);
+
+    let reopened = open_cascade(&paths);
+
+    assert!(reopened.account(&removed_id).is_none());
+    assert!(!paths.journal.exists());
+    let routing = reopened.routing().unwrap();
+    assert_eq!(routing.revision().get(), 2);
+    assert!(routing.route(ProviderRoutingCapability::Chat).is_none());
+    assert!(provider_routing_is_admissible(
+        routing,
+        reopened.accounts(),
+        reopened.catalog()
+    ));
     paths.remove();
 }
 

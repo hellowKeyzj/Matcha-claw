@@ -159,7 +159,7 @@ use crate::{
         Task, TaskCreate, TaskCreateReceipt, TaskManagerOperation, TaskMutationOutcome,
         TaskReadFailure, TaskScope, TaskSnapshot, TaskUpdate, Todo, TodoSnapshot,
     },
-    team::{PromptDelivery, PromptDeliveryOutcome, TeamProvider},
+    team::{NativeRunSettledOutcome, PromptDelivery, PromptDeliveryOutcome, TeamProvider},
 };
 use organization::{
     MaterializationOperationOutcome, TeamMaterializationRemoval, TeamMaterializationRequest,
@@ -201,9 +201,23 @@ pub struct OpenClawGateway {
 }
 
 #[derive(Clone)]
+pub struct TeamNativeRunWaiter {
+    client: Arc<GatewayClient>,
+}
+
+#[derive(Clone)]
 pub struct OpenClawSessionGateway {
     client: Arc<GatewayClient>,
     state_dir: Option<CanonicalStateDir>,
+}
+
+impl TeamNativeRunWaiter {
+    pub async fn wait(&self, input: AgentWait) -> NativeRunSettledOutcome {
+        OpenClawAgents::new(Arc::clone(&self.client))
+            .wait(input)
+            .await
+            .into()
+    }
 }
 
 impl OpenClawGateway {
@@ -783,6 +797,12 @@ impl OpenClawGateway {
             .await
     }
 
+    pub fn team_native_run_waiter(&self) -> TeamNativeRunWaiter {
+        TeamNativeRunWaiter {
+            client: Arc::clone(&self.client),
+        }
+    }
+
     pub async fn list_agent_files(
         &self,
         agent_id: String,
@@ -1173,6 +1193,10 @@ impl OpenClawGateway {
         }
     }
 
+    pub async fn wait_team_native_run(&self, input: AgentWait) -> NativeRunSettledOutcome {
+        self.wait_agent(input).await.into()
+    }
+
     /// Materializes a durable TeamSkill intent through native OpenClaw agent and
     /// config effects. Workspace paths, canonical configuration, and Gateway
     /// transport stay inside this integration.
@@ -1472,6 +1496,13 @@ impl OpenClawSessionGateway {
             .await
             .map(port_outcome)
             .map_err(Into::into)
+    }
+
+    pub async fn wait_team_native_run(&self, input: AgentWait) -> NativeRunSettledOutcome {
+        OpenClawAgents::new(Arc::clone(&self.client))
+            .wait(input)
+            .await
+            .into()
     }
 
     pub async fn abort_chat(

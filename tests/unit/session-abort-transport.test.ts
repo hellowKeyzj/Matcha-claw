@@ -15,6 +15,8 @@ const request = {
   input: { endpoint, sessionKey: 'agent:main:demo', runId: 'run-1' },
 } as const;
 
+const runtimeHostTransportPort = 34_101;
+
 describe('Electron Main session-abort transport', () => {
   it('signs only the fixed local abort request', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
@@ -22,7 +24,7 @@ describe('Electron Main session-abort transport', () => {
       status: 200,
       json: async () => ({ outcome: 'succeeded' }),
     });
-    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, 34_103, fetcher);
+    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.abort(request)).resolves.toEqual({
       status: 200,
@@ -34,7 +36,7 @@ describe('Electron Main session-abort transport', () => {
       capability: 'sessions.abort',
       subject: 'session-abort',
     }));
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34103/api/sessions/abort', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34101/api/sessions/abort', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
       body: JSON.stringify(request),
@@ -48,7 +50,7 @@ describe('Electron Main session-abort transport', () => {
   ])('maps malformed requests to OutcomeUnknown before signing', async (invalid) => {
     const signDecision = vi.fn();
     const fetcher = vi.fn();
-    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, 34_103, fetcher);
+    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.abort(invalid)).resolves.toEqual({
       status: 200,
@@ -64,7 +66,7 @@ describe('Electron Main session-abort transport', () => {
       status: 200,
       json: async () => ({ outcome: 'unknown' }),
     });
-    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, 34_103, fetcher);
+    const transport = createSessionAbortTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
     const approvalRequest = {
       ...request,
       input: { ...request.input, approvalIds: ['approval-1'] },
@@ -81,7 +83,7 @@ describe('Electron Main session-abort transport', () => {
   it('maps nonterminal delivery responses and failures to OutcomeUnknown', async () => {
     const transport = createSessionAbortTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
-      34_103,
+      34_101,
       vi.fn().mockResolvedValue({ status: 503, json: async () => ({ private: 'native detail' }) }),
     );
 

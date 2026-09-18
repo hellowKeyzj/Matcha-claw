@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 import { createSessionTimelineTransport } from '../../electron/main/runtime-host-delivery/transport/sessions/timeline';
 import {
   assistantItem,
@@ -54,18 +54,20 @@ function canonicalView(options: Parameters<typeof sessionView>[1] = {}) {
   return sessionView(identity.sessionKey, { identity, ...options });
 }
 
+const runtimeHostTransportPort = 32_111;
+
 describe('SessionTimelineTransport', () => {
   it('binds each operation to its fixed endpoint and sealed decision', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(sealedUnavailableResponse())
       .mockResolvedValueOnce(sealedUnavailableResponse());
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
     await expect(transport.window(request('sessions.window'))).resolves.toEqual(unavailableResponse());
 
-    expect(fetcher.mock.calls[0]![0]).toBe('http://127.0.0.1:19420/api/sessions/load');
-    expect(fetcher.mock.calls[1]![0]).toBe('http://127.0.0.1:19420/api/sessions/window');
+    expect(fetcher.mock.calls[0]![0]).toBe('http://127.0.0.1:32111/api/sessions/load');
+    expect(fetcher.mock.calls[1]![0]).toBe('http://127.0.0.1:32111/api/sessions/window');
     expect(decodeDecision(fetcher.mock.calls[0]![1].headers.Authorization).endpoint).toBe('/api/sessions/load');
     expect(decodeDecision(fetcher.mock.calls[0]![1].headers.Authorization).capability).toBe('session.management');
     expect(decodeDecision(fetcher.mock.calls[1]![1].headers.Authorization).endpoint).toBe('/api/sessions/window');
@@ -74,7 +76,7 @@ describe('SessionTimelineTransport', () => {
 
   it('rejects identity and sessionKey mismatches before delivery', async () => {
     const fetcher = vi.fn();
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
     const scopeMismatch = {
       ...request('sessions.load'),
       scope: {
@@ -109,7 +111,7 @@ describe('SessionTimelineTransport', () => {
       window: completeFact(windowView(1)),
     });
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load'))).resolves.toEqual({ status: 200, body: view });
   });
@@ -124,7 +126,7 @@ describe('SessionTimelineTransport', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(identityMismatch), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(sessionKeyMismatch), { status: 200 }));
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
     await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
@@ -139,14 +141,14 @@ describe('SessionTimelineTransport', () => {
     })],
   ])('accepts canonical SessionView with %s', async (_name, view) => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load'))).resolves.toEqual({ status: 200, body: view });
   });
 
   it('rejects malformed requests and private response payloads with sealed unavailable', async () => {
     const fetcher = vi.fn();
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.window({
       ...request('sessions.window'),
@@ -164,7 +166,7 @@ describe('SessionTimelineTransport', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load', { endpointSessionId: 'main' })))
       .resolves.toEqual({ status: 200, body: view });
@@ -186,7 +188,7 @@ describe('SessionTimelineTransport', () => {
       window: completeFact({ ...windowView(1), windowEndOffset: 2 }),
     });
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
-    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
   });

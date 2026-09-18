@@ -14,7 +14,7 @@ impl RoleSessionDeletionConfirmation {
         binding: RoleSessionReceipt,
         receipt: RoleSessionDeleteReceipt,
     ) -> Result<Self, NativeDeletionProofError> {
-        if binding.external_session() != receipt.session() {
+        if binding.endpoint_session_id() != receipt.session() {
             return Err(NativeDeletionProofError::ReceiptSessionMismatch);
         }
         Ok(Self { binding, receipt })

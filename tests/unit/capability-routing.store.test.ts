@@ -3,11 +3,38 @@ import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 
 const fetchCapabilityRoutingMock = vi.hoisted(() => vi.fn());
 const persistCapabilityRoutingMock = vi.hoisted(() => vi.fn());
+const providerSnapshotRefreshMock = vi.hoisted(() => vi.fn());
+const providerModelCatalogRefreshMock = vi.hoisted(() => vi.fn());
+const subagentsLoadAvailableModelsMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/capability-routing', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/lib/capability-routing')>(),
   fetchCapabilityRouting: fetchCapabilityRoutingMock,
   persistCapabilityRouting: persistCapabilityRoutingMock,
+}));
+
+vi.mock('@/stores/providers', () => ({
+  useProviderStore: {
+    getState: () => ({
+      refreshProviderSnapshot: providerSnapshotRefreshMock,
+    }),
+  },
+}));
+
+vi.mock('@/stores/provider-model-catalog', () => ({
+  useProviderModelCatalogStore: {
+    getState: () => ({
+      refresh: providerModelCatalogRefreshMock,
+    }),
+  },
+}));
+
+vi.mock('@/stores/subagents', () => ({
+  useSubagentsStore: {
+    getState: () => ({
+      loadAvailableModels: subagentsLoadAvailableModelsMock,
+    }),
+  },
 }));
 
 const currentRouting = {
@@ -60,6 +87,12 @@ describe('capability routing store', () => {
       saving: false,
       error: null,
     });
+    expect(providerSnapshotRefreshMock).toHaveBeenCalledWith({
+      trigger: 'reconcile',
+      reason: 'provider_post_mutation',
+    });
+    expect(providerModelCatalogRefreshMock).toHaveBeenCalledTimes(1);
+    expect(subagentsLoadAvailableModelsMock).toHaveBeenCalledWith({ force: true });
   });
 
   it('writes the current revision and commits only the returned routing snapshot', async () => {

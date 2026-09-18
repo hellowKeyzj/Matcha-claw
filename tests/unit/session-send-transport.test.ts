@@ -26,6 +26,8 @@ const request = {
   },
 } as const;
 
+const runtimeHostTransportPort = 34_101;
+
 describe('Electron Main session-send transport', () => {
   it('preserves the OpenClaw local queue admission without claiming peer delivery', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
@@ -33,7 +35,7 @@ describe('Electron Main session-send transport', () => {
       status: 202,
       json: async () => ({ outcome: 'queued', runId: 'run-1' }),
     });
-    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, 34_102, fetcher);
+    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.send(request)).resolves.toEqual({
       status: 202,
@@ -45,7 +47,7 @@ describe('Electron Main session-send transport', () => {
       capability: 'session.prompt',
       subject: 'session-send',
     }));
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34102/api/sessions/send', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34101/api/sessions/send', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
       body: JSON.stringify(request),
@@ -58,7 +60,7 @@ describe('Electron Main session-send transport', () => {
       status: 200,
       json: async () => ({ outcome: 'succeeded', runId: 'run-1', status: 'started' }),
     });
-    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, 34_102, fetcher);
+    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.send(request)).resolves.toEqual({
       status: 200,
@@ -73,13 +75,13 @@ describe('Electron Main session-send transport', () => {
       status: 202,
       json: async () => ({ outcome: 'queued', runId: 'run-1' }),
     });
-    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, 34_102, fetcher);
+    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.send(textRequest)).resolves.toEqual({
       status: 202,
       body: { outcome: 'queued', runId: 'run-1' },
     });
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34102/api/sessions/send', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34101/api/sessions/send', expect.objectContaining({
       body: JSON.stringify(textRequest),
     }));
   });
@@ -101,13 +103,13 @@ describe('Electron Main session-send transport', () => {
       status: 200,
       json: async () => ({ outcome: 'succeeded', runId: 'run-1', status: 'started' }),
     });
-    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, 34_102, fetcher);
+    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.send(matchaRequest)).resolves.toEqual({
       status: 200,
       body: { outcome: 'succeeded', runId: 'run-1', status: 'started' },
     });
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34102/api/sessions/send', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34101/api/sessions/send', expect.objectContaining({
       body: JSON.stringify(matchaRequest),
     }));
   });
@@ -133,7 +135,7 @@ describe('Electron Main session-send transport', () => {
   ])('fails closed before signing a malformed request', async (invalid) => {
     const signDecision = vi.fn();
     const fetcher = vi.fn();
-    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, 34_102, fetcher);
+    const transport = createSessionSendTransport({ verificationKey: 'public', signDecision }, runtimeHostTransportPort, fetcher);
 
     await expect(transport.send(invalid)).resolves.toEqual({
       status: 503,
@@ -146,7 +148,7 @@ describe('Electron Main session-send transport', () => {
   it('projects the fixed invalid-request response from Rust', async () => {
     const transport = createSessionSendTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
-      34_102,
+      34_101,
       vi.fn().mockResolvedValue({ status: 400, json: async () => ({ private: 'native detail' }) }),
     );
 
@@ -159,7 +161,7 @@ describe('Electron Main session-send transport', () => {
   it('redacts invalid Rust responses and transport failures', async () => {
     const transport = createSessionSendTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
-      34_102,
+      34_101,
       vi.fn().mockRejectedValue(new Error('private native path')),
     );
 

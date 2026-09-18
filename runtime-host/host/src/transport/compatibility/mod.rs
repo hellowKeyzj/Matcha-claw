@@ -1,5 +1,2 @@
-mod dispatch;
-mod server;
-mod wire;
-
-pub(crate) use server::Server;
+pub(crate) mod dispatch;
+pub(crate) mod wire;

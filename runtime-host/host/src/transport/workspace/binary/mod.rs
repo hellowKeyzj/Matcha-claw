@@ -8,7 +8,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "workspace.file";
 const READ_OPERATION_ID: &str = "files.readBinary";

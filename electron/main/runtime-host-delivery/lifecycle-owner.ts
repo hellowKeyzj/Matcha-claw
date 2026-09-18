@@ -157,7 +157,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       this.replacingEpoch = previousRuntimeHost.epoch;
       this.replacementExit = undefined;
       try {
-        await stopOrForceKill(previousRuntimeHost.host);
+        await stopOrForceKillRuntimeHost(previousRuntimeHost.host);
       } catch (error) {
         const observedExit = this.replacementExit;
         this.replacingEpoch = undefined;
@@ -281,7 +281,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
   }
 }
 
-async function stopOrForceKill(runtimeHost: DirectRuntimeHost): Promise<void> {
+export async function stopOrForceKillRuntimeHost(runtimeHost: DirectRuntimeHost): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const stopped = await Promise.race([
     Promise.resolve().then(() => runtimeHost.stop()).then(

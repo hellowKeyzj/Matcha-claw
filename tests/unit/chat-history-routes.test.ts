@@ -11,7 +11,7 @@ vi.mock('../../electron/api/route-utils', () => ({
 
 describe('peer chat history routes', () => {
   const matchaAgentHistoryTransport = { read: vi.fn() };
-  const deps = { matchaAgentHistoryTransport };
+  const deps = { runtimeHostTransports: { matchaAgentHistoryTransport } };
 
   beforeEach(() => {
     vi.clearAllMocks();

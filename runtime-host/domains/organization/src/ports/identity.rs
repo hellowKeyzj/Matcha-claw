@@ -36,7 +36,7 @@ macro_rules! reference {
 
 reference!(ManagedAgentReference, "managed agent");
 reference!(RuntimeEndpointReference, "runtime endpoint");
-reference!(ExternalSessionReference, "external session");
+reference!(EndpointSessionId, "endpoint session");
 reference!(SessionWindowReference, "session window");
 reference!(DeliveryReference, "delivery");
 reference!(IdempotencyKey, "idempotency key");

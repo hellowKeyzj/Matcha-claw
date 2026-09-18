@@ -16,6 +16,8 @@ pub(crate) mod approval;
 mod content;
 pub(crate) mod create;
 pub(crate) mod delete;
+pub(crate) mod events;
+pub(crate) mod handler;
 pub(crate) mod key;
 pub(crate) mod matcha_catalog;
 pub(crate) mod matcha_history;
@@ -24,7 +26,6 @@ pub(crate) mod permission;
 pub(crate) mod presenter;
 mod rename;
 pub(crate) mod send;
-pub(crate) mod server;
 mod timeline;
 pub(crate) mod trace;
 

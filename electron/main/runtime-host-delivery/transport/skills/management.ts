@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 
 export const SKILLS_ENDPOINTS = Object.freeze({
   status: '/api/skills/status',
@@ -210,33 +209,33 @@ export interface SkillsManagementTransport {
 
 export function createSkillsManagementTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SkillsManagementTransport {
   return {
-    readStatus: () => readStatus(issuer, port, fetcher),
-    detail: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
-    mutateConfig: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
-    installClawHub: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.clawHubInstall, request, 'skills:install', 'skills.install', 'skills-clawhub-install', isClawHubSkillInstallRequest, isSkillsMutationResult),
-    updateClawHub: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.clawHubUpdate, request, 'skills:update', 'skills.update', 'skills-clawhub-update', isClawHubSkillUpdateRequest, isSkillsMutationResult),
-    beginUpload: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.uploadBegin, request, 'skills:upload', 'skills.upload.begin', 'skills-upload-begin', isSkillsUploadBeginRequest, isSkillsUploadBeginResult),
-    appendUploadChunk: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.uploadChunk, request, 'skills:upload', 'skills.upload.chunk', 'skills-upload-chunk', isSkillsUploadChunkRequest, isSkillsUploadChunkResult),
-    commitUpload: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.uploadCommit, request, 'skills:upload', 'skills.upload.commit', 'skills-upload-commit', isSkillsUploadCommitRequest, isSkillsUploadCommitResult),
-    uninstall: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.uninstall, request, 'skills:uninstall', 'skills.uninstall', 'skills-uninstall', isSkillsUninstallRequest, isSkillsUninstallResult),
-    importMarkdown: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.importMarkdown, request, 'skills:import', 'skills.import.markdown', 'skills-import-markdown', isSkillsImportMarkdownRequest, isSkillsMutationResult),
-    importBundle: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.importBundle, request, 'skills:import', 'skills.import.bundle', 'skills-import-bundle', isSkillsImportBundleRequest, isSkillsMutationResult),
-    readme: (request) => post(issuer, port, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, isSkillsReadmeResult),
+    readStatus: () => readStatus(issuer, runtimeHostTransportPort, fetcher),
+    detail: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
+    mutateConfig: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
+    installClawHub: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.clawHubInstall, request, 'skills:install', 'skills.install', 'skills-clawhub-install', isClawHubSkillInstallRequest, isSkillsMutationResult),
+    updateClawHub: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.clawHubUpdate, request, 'skills:update', 'skills.update', 'skills-clawhub-update', isClawHubSkillUpdateRequest, isSkillsMutationResult),
+    beginUpload: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.uploadBegin, request, 'skills:upload', 'skills.upload.begin', 'skills-upload-begin', isSkillsUploadBeginRequest, isSkillsUploadBeginResult),
+    appendUploadChunk: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.uploadChunk, request, 'skills:upload', 'skills.upload.chunk', 'skills-upload-chunk', isSkillsUploadChunkRequest, isSkillsUploadChunkResult),
+    commitUpload: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.uploadCommit, request, 'skills:upload', 'skills.upload.commit', 'skills-upload-commit', isSkillsUploadCommitRequest, isSkillsUploadCommitResult),
+    uninstall: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.uninstall, request, 'skills:uninstall', 'skills.uninstall', 'skills-uninstall', isSkillsUninstallRequest, isSkillsUninstallResult),
+    importMarkdown: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importMarkdown, request, 'skills:import', 'skills.import.markdown', 'skills-import-markdown', isSkillsImportMarkdownRequest, isSkillsMutationResult),
+    importBundle: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importBundle, request, 'skills:import', 'skills.import.bundle', 'skills-import-bundle', isSkillsImportBundleRequest, isSkillsMutationResult),
+    readme: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, isSkillsReadmeResult),
   };
 }
 
 async function readStatus(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
 ): Promise<SkillsStatusTransportResponse> {
   const response = await get<NativeSkillsStatusResult>(
     issuer,
-    port,
+    runtimeHostTransportPort,
     fetcher,
     SKILLS_ENDPOINTS.status,
     'skills:read',
@@ -400,7 +399,7 @@ function isSkillMissingCategory(value: unknown): value is SkillMissingCategory {
 
 async function get<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SkillsEndpoint,
   scope: string,
@@ -408,12 +407,12 @@ async function get<T>(
   subject: string,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SkillsTransportResponse<T>> {
-  return send(issuer, port, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
 }
 
 async function post<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SkillsEndpoint,
   request: unknown,
@@ -424,12 +423,12 @@ async function post<T>(
   isSuccess: (value: unknown) => value is T,
 ): Promise<SkillsTransportResponse<T>> {
   if (!isRequest(request)) return rejectedResponse();
-  return send(issuer, port, fetcher, endpoint, 'POST', request, scope, capability, subject, isSuccess);
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'POST', request, scope, capability, subject, isSuccess);
 }
 
 async function send<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SkillsEndpoint,
   method: 'GET' | 'POST',
@@ -439,32 +438,20 @@ async function send<T>(
   subject: string,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SkillsTransportResponse<T>> {
-  try {
-    const response = await fetcher(`http://127.0.0.1:${port}${endpoint}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint,
-          scope,
-          capability,
-          subject,
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(method === 'POST' ? { body: JSON.stringify(request) } : {}),
-    });
-    const body: unknown = await response.json();
-    if (response.status === 200 && isSuccess(body)) return { status: 200, body };
-    if (endpoint === SKILLS_ENDPOINTS.uninstall && response.status === 404 && isSkillsUninstallNotFoundResult(body)) {
-      return { status: 404, body };
-    }
-    if (response.status === 400 && isRejectedResult(body)) return { status: 400, body };
-  } catch {
-    // Public Delivery never exposes loopback errors, native errors, secrets, or paths.
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: endpoint,
+    issuer,
+    decision: { endpoint, scope, capability, subject },
+    method,
+    fetcher,
+    ...(method === 'POST' ? { body: request } : {}),
+  });
+  if (response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
+  if (endpoint === SKILLS_ENDPOINTS.uninstall && response?.status === 404 && isSkillsUninstallNotFoundResult(response.body)) {
+    return { status: 404, body: response.body };
   }
+  if (response?.status === 400 && isRejectedResult(response.body)) return { status: 400, body: response.body };
   return unknownResponse();
 }
 
@@ -477,7 +464,7 @@ function unknownResponse<T>(): SkillsTransportResponse<T> {
 }
 
 function isSkillsDetailRequest(value: unknown): value is SkillsDetailRequest {
-  return hasExactKeys(value, ['slug']) && isSlug(value.slug);
+  return isRecord(value) && hasExactKeys(value, ['slug']) && isSlug(value.slug);
 }
 
 function isSkillsDetailResult(value: unknown): value is SkillsDetailResult {
@@ -556,7 +543,8 @@ function isSkillsUploadBeginRequest(value: unknown): value is SkillsUploadBeginR
 }
 
 function isSkillsUploadChunkRequest(value: unknown): value is SkillsUploadChunkRequest {
-  return hasExactKeys(value, ['uploadId', 'offset', 'dataBase64'])
+  return isRecord(value)
+    && hasExactKeys(value, ['uploadId', 'offset', 'dataBase64'])
     && isIdentifier(value.uploadId)
     && isBoundedInteger(value.offset, 0, 100 * 1024 * 1024)
     && isBase64(value.dataBase64, 1024 * 1024);
@@ -577,11 +565,11 @@ function isSkillsUninstallRequest(value: unknown): value is SkillsUninstallReque
 }
 
 function isSkillsImportMarkdownRequest(value: unknown): value is SkillsImportMarkdownRequest {
-  return hasExactKeys(value, ['content']) && isText(value.content, 48 * 1024);
+  return isRecord(value) && hasExactKeys(value, ['content']) && isText(value.content, 48 * 1024);
 }
 
 function isSkillsImportBundleRequest(value: unknown): value is SkillsImportBundleRequest {
-  return hasExactKeys(value, ['skillKey', 'files']) && isOpenClawSkillKey(value.skillKey)
+  return isRecord(value) && hasExactKeys(value, ['skillKey', 'files']) && isOpenClawSkillKey(value.skillKey)
     && Array.isArray(value.files) && value.files.length > 0 && value.files.length <= 256
     && value.files.every((file) => isRecord(file) && hasExactKeys(file, ['path', 'content']) && isText(file.path, 240) && isText(file.content, 48 * 1024));
 }
@@ -596,7 +584,8 @@ function isSkillsReadmeRequest(value: unknown): value is SkillsReadmeRequest {
 }
 
 function isSkillsReadmeResult(value: unknown): value is SkillsReadmeResult {
-  return hasExactKeys(value, ['success', 'content', 'filePath'])
+  return isRecord(value)
+    && hasExactKeys(value, ['success', 'content', 'filePath'])
     && value.success === true
     && isBoundedText(value.content, 48 * 1024)
     && isAbsolutePath(value.filePath, 4 * 1024)
@@ -604,20 +593,23 @@ function isSkillsReadmeResult(value: unknown): value is SkillsReadmeResult {
 }
 
 function isSkillsUninstallResult(value: unknown): value is SkillsUninstallResult {
-  return hasExactKeys(value, ['outcome']) && (value.outcome === 'removed' || value.outcome === 'notFound' || value.outcome === 'rejected' || value.outcome === 'unknown');
+  return isRecord(value)
+    && hasExactKeys(value, ['outcome'])
+    && (value.outcome === 'removed' || value.outcome === 'notFound' || value.outcome === 'rejected' || value.outcome === 'unknown');
 }
 
 function isSkillsUninstallNotFoundResult(value: unknown): value is Readonly<{ outcome: 'notFound' }> {
-  return hasExactKeys(value, ['outcome']) && value.outcome === 'notFound';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'notFound';
 }
 
 function isSkillsMutationResult(value: unknown): value is SkillsMutationResult {
-  return hasExactKeys(value, ['outcome'])
+  return isRecord(value)
+    && hasExactKeys(value, ['outcome'])
     && (value.outcome === 'accepted' || value.outcome === 'rejected' || value.outcome === 'unknown');
 }
 
 function isRejectedResult(value: unknown): value is SkillsTransportFailure {
-  return hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
 }
 
 function isSkillsUploadBeginResult(value: unknown): value is SkillsUploadBeginResult {
@@ -629,14 +621,16 @@ function isSkillsUploadChunkResult(value: unknown): value is SkillsUploadChunkRe
 }
 
 function isSkillsUploadProgressResult(value: unknown): boolean {
-  return hasExactKeys(value, ['uploadId', 'receivedBytes', 'expiresAt'])
+  return isRecord(value)
+    && hasExactKeys(value, ['uploadId', 'receivedBytes', 'expiresAt'])
     && isIdentifier(value.uploadId)
     && isBoundedInteger(value.receivedBytes, 0, 100 * 1024 * 1024)
     && isTimestamp(value.expiresAt);
 }
 
 function isSkillsUploadCommitResult(value: unknown): value is SkillsUploadCommitResult {
-  return hasExactKeys(value, ['uploadId', 'receivedBytes', 'sha256', 'expiresAt'])
+  return isRecord(value)
+    && hasExactKeys(value, ['uploadId', 'receivedBytes', 'sha256', 'expiresAt'])
     && isIdentifier(value.uploadId)
     && isBoundedInteger(value.receivedBytes, 0, 100 * 1024 * 1024)
     && isSha256(value.sha256)
@@ -670,14 +664,6 @@ function isText(value: unknown, maxLength: number): value is string {
   return isBoundedText(value, maxLength) && value.length > 0;
 }
 
-function isBoundedText(value: unknown, maxLength: number): value is string {
-  return typeof value === 'string' && value.length <= maxLength && !value.includes('\0');
-}
-
-function isTimestamp(value: unknown): value is number {
-  return Number.isSafeInteger(value) && value >= 0;
-}
-
 function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
@@ -702,20 +688,10 @@ function isStringRecord(value: unknown, keyMaxLength: number, valueMaxLength: nu
     && Object.keys(value).every((key) => isText(key, keyMaxLength) && isText(value[key], valueMaxLength));
 }
 
-function hasExactKeys(value: unknown, expected: readonly string[]): value is Record<string, unknown> {
-  return isRecord(value)
-    && Object.keys(value).length === expected.length
-    && expected.every((key) => Object.hasOwn(value, key));
-}
-
 function hasOnlyKeys(value: unknown, allowed: readonly string[]): value is Record<string, unknown> {
   return isRecord(value) && Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function hasRequiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
   return required.every((key) => Object.hasOwn(value, key));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

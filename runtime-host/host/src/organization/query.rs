@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use organization::{
-    ActivityId, DeliveryId, GraphDefinition, GraphRunId, MatchaTerminalReceiptTarget,
+    ActivityId, DeliveryId, GraphDefinition, GraphRunId, NativeTerminalReceiptTarget,
     ResumeOutcome, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamRunQuery,
     TeamRunQueryOutcome,
     package::{TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionId},
@@ -13,7 +13,10 @@ use organization::{
 };
 use tokio::sync::oneshot;
 
-use super::team_run::{ArmedTrigger, TeamRunActivityTarget};
+use super::{
+    start_gate_control::{StartGateBinding, StartGateSessionLookup},
+    team_run::{ArmedTrigger, TeamRunActivityTarget},
+};
 
 pub enum OrganizationQuery {
     TeamSkillValidate {
@@ -59,6 +62,10 @@ pub enum OrganizationQuery {
     RoleSessions {
         team_id: TeamId,
         reply: oneshot::Sender<organization::TeamRoleSessionQueryOutcome>,
+    },
+    StartGateSessionBinding {
+        lookup: StartGateSessionLookup,
+        reply: oneshot::Sender<Option<StartGateBinding>>,
     },
     TriggerList {
         team_id: Option<TeamId>,
@@ -112,6 +119,6 @@ pub enum OrganizationQuery {
     },
     MatchaTerminalTarget {
         delivery_id: DeliveryId,
-        reply: oneshot::Sender<Option<MatchaTerminalReceiptTarget>>,
+        reply: oneshot::Sender<Option<NativeTerminalReceiptTarget>>,
     },
 }

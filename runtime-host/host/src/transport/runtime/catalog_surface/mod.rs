@@ -1,4 +1,4 @@
-pub(crate) mod server;
+pub(crate) mod handler;
 
 mod clawhub;
 mod connectors;

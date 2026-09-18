@@ -4,8 +4,8 @@ use crate::{ports::DeliveryReceiptReference, run::graph::ExecutionFence};
 
 use super::{
     Delivery, DeliveryClaim, DeliveryFailure, DeliveryId, DeliveryPhase, DeliveryRequest,
-    DeliveryRequestError, MatchaDeliveryCorrelation, NativeTerminalStatus, TerminalObservation,
-    TerminalObservationResolution,
+    DeliveryRequestError, NativeDeliveryCorrelation, NativeTerminalStatus, TeamNodeOutput,
+    TerminalObservation, TerminalObservationResolution,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -70,7 +70,7 @@ pub enum DeliveryPhaseSnapshot {
     },
     Delivered {
         receipt: DeliveryReceiptReference,
-        matcha_correlation: Option<MatchaDeliveryCorrelation>,
+        native_correlation: Option<NativeDeliveryCorrelation>,
         accepted_at: u64,
     },
     TerminalObserved {
@@ -100,10 +100,11 @@ pub struct TerminalObservationSnapshotInput {
     pub node_id: String,
     pub fence: ExecutionFence,
     pub role_id: String,
-    pub correlation: MatchaDeliveryCorrelation,
+    pub correlation: NativeDeliveryCorrelation,
     pub delivered_receipt: DeliveryReceiptReference,
     pub native_terminal: NativeTerminalStatus,
     pub observed_at: u64,
+    pub output: Option<TeamNodeOutput>,
     pub resolution: TerminalObservationResolution,
 }
 
@@ -114,10 +115,11 @@ struct TerminalObservationSnapshotPayload {
     node_id: String,
     fence: ExecutionFence,
     role_id: String,
-    correlation: MatchaDeliveryCorrelation,
+    correlation: NativeDeliveryCorrelation,
     delivered_receipt: DeliveryReceiptReference,
     native_terminal: NativeTerminalStatus,
     observed_at: u64,
+    output: Option<TeamNodeOutput>,
     resolution: TerminalObservationResolution,
 }
 
@@ -177,6 +179,7 @@ impl TerminalObservationSnapshot {
             delivered_receipt,
             native_terminal,
             observed_at,
+            output,
             resolution,
         } = input;
         Self {
@@ -190,6 +193,7 @@ impl TerminalObservationSnapshot {
                 delivered_receipt,
                 native_terminal,
                 observed_at,
+                output,
                 resolution,
             }),
         }
@@ -215,12 +219,12 @@ impl TerminalObservationSnapshot {
         &self.payload.role_id
     }
 
-    pub fn correlation(&self) -> &MatchaDeliveryCorrelation {
+    pub fn correlation(&self) -> &NativeDeliveryCorrelation {
         &self.payload.correlation
     }
 
-    pub fn external_session(&self) -> &crate::ExternalSessionReference {
-        self.payload.correlation.external_session()
+    pub fn endpoint_session_id(&self) -> &crate::EndpointSessionId {
+        self.payload.correlation.endpoint_session_id()
     }
 
     pub fn delivered_receipt(&self) -> &DeliveryReceiptReference {
@@ -239,6 +243,10 @@ impl TerminalObservationSnapshot {
         self.payload.observed_at
     }
 
+    pub fn output(&self) -> Option<&TeamNodeOutput> {
+        self.payload.output.as_ref()
+    }
+
     pub fn resolution(&self) -> &TerminalObservationResolution {
         &self.payload.resolution
     }
@@ -253,11 +261,12 @@ impl fmt::Debug for TerminalObservationSnapshot {
             .field("node_id", &"<redacted>")
             .field("fence", &"<redacted>")
             .field("role_id", &"<redacted>")
-            .field("external_session", &"<redacted>")
+            .field("endpoint_session_id", &"<redacted>")
             .field("delivered_receipt", &"<redacted>")
             .field("native_run_receipt", &"<redacted>")
             .field("native_terminal", &self.payload.native_terminal)
             .field("observed_at", &self.payload.observed_at)
+            .field("has_output", &self.payload.output.is_some())
             .field("resolution", &self.payload.resolution)
             .finish()
     }
@@ -373,11 +382,11 @@ impl DeliveryPhaseSnapshot {
             },
             DeliveryPhase::Delivered {
                 receipt,
-                matcha_correlation,
+                native_correlation,
                 accepted_at,
             } => Self::Delivered {
                 receipt: receipt.clone(),
-                matcha_correlation: matcha_correlation.clone(),
+                native_correlation: native_correlation.clone(),
                 accepted_at: *accepted_at,
             },
             DeliveryPhase::TerminalObserved { observation } => Self::TerminalObserved {
@@ -405,11 +414,11 @@ impl DeliveryPhaseSnapshot {
             }
             Self::Delivered {
                 receipt,
-                matcha_correlation,
+                native_correlation,
                 accepted_at,
             } => DeliveryPhase::Delivered {
                 receipt,
-                matcha_correlation,
+                native_correlation,
                 accepted_at,
             },
             Self::TerminalObserved { observation } => DeliveryPhase::TerminalObserved {
@@ -434,6 +443,7 @@ impl TerminalObservationSnapshot {
             delivered_receipt: observation.delivered_receipt().clone(),
             native_terminal: observation.native_terminal(),
             observed_at: observation.observed_at(),
+            output: observation.output().cloned(),
             resolution: observation.resolution().clone(),
         })
     }
@@ -450,6 +460,7 @@ impl TerminalObservationSnapshot {
             delivered_receipt,
             native_terminal,
             observed_at,
+            output,
             resolution,
         } = *payload;
         TerminalObservation::restore(super::model::TerminalObservationPayload {
@@ -462,6 +473,7 @@ impl TerminalObservationSnapshot {
             delivered_receipt,
             native_terminal,
             observed_at,
+            output,
             resolution,
         })
     }
@@ -595,14 +607,21 @@ fn validate_terminal_observation(
             | NativeTerminalStatus::Failed
             | NativeTerminalStatus::Interrupted,
             TerminalObservationResolution::AwaitingAuthorizedGraphResolution,
-        )
-        | (NativeTerminalStatus::Cancelled, TerminalObservationResolution::NodeCancelled) => Ok(()),
+        ) if observation.output().is_none() => Ok(()),
+        (NativeTerminalStatus::Cancelled, TerminalObservationResolution::NodeCancelled)
+            if observation.output().is_none() =>
+        {
+            Ok(())
+        }
         (
             NativeTerminalStatus::Completed
             | NativeTerminalStatus::Failed
             | NativeTerminalStatus::Interrupted,
             TerminalObservationResolution::GraphResolved(resolution),
-        ) if resolution.delivery_id() == observation.delivery_id()
+        ) if observation
+            .output()
+            .is_none_or(|output| output.output_port() == resolution.output_port())
+            && resolution.delivery_id() == observation.delivery_id()
             && resolution.graph_run_id() == observation.graph_run_id()
             && resolution.fence() == observation.fence()
             && resolution.resolved_at() >= observation.observed_at() =>

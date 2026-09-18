@@ -1,10 +1,10 @@
 use serde_json::{Value, json};
 
 use crate::sessions::state::{
-    ApprovalPhase, ApprovalView, ItemStatus, MissingFact, OmissionReason, RunPhase,
-    RuntimeActivity, RuntimeErrorDetail, RuntimeIssue, RuntimeView, SessionCompleteness,
-    SessionContent, SessionFact, SessionItem, SessionProvider, SessionView, SessionWindow,
-    ToolPhase, ToolView, public_media_reference,
+    ApprovalPhase, ApprovalView, ItemStatus, MissingFact, OmissionReason, RunPhase, RunProgress,
+    RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeIssue,
+    RuntimeView, SessionCompleteness, SessionContent, SessionFact, SessionItem, SessionProvider,
+    SessionView, SessionWindow, ToolPhase, ToolView, public_media_reference,
 };
 
 pub(crate) fn session_view(view: &SessionView) -> Value {
@@ -171,6 +171,7 @@ fn runtime_value(runtime: &RuntimeView) -> Value {
         "phase": run_phase(runtime.phase),
         "activeRunId": &runtime.active_run_id,
         "issue": runtime.issue.map(runtime_issue),
+        "runProgress": runtime.run_progress.map(run_progress),
         "runtimeActivity": runtime.runtime_activity.map(runtime_activity),
         "errorDetail": runtime.error_detail.as_ref().map(runtime_error_detail),
     })
@@ -178,6 +179,7 @@ fn runtime_value(runtime: &RuntimeView) -> Value {
 
 fn runtime_error_detail(detail: &RuntimeErrorDetail) -> Value {
     json!({
+        "kind": runtime_error_kind(detail.kind),
         "failoverReason": &detail.failover_reason,
         "providerRuntimeFailureKind": &detail.provider_runtime_failure_kind,
         "providerErrorType": &detail.provider_error_type,
@@ -279,9 +281,45 @@ fn runtime_issue(issue: RuntimeIssue) -> &'static str {
     }
 }
 
+fn run_progress(progress: RunProgress) -> Value {
+    match progress {
+        RunProgress::Startup { phase } => json!({
+            "kind": "startup",
+            "phase": run_startup_phase(phase),
+        }),
+        RunProgress::Retrying {
+            attempt,
+            max_attempts,
+        } => json!({
+            "kind": "retrying",
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+        }),
+    }
+}
+
+fn run_startup_phase(phase: RunStartupPhase) -> &'static str {
+    match phase {
+        RunStartupPhase::PreparingWorkspace => "preparing_workspace",
+        RunStartupPhase::NamingWorktree => "naming_worktree",
+        RunStartupPhase::CreatingWorktree => "creating_worktree",
+        RunStartupPhase::RunningSetup => "running_setup",
+        RunStartupPhase::ProvisioningEnvironment => "provisioning_environment",
+        RunStartupPhase::PreparingContext => "preparing_context",
+        RunStartupPhase::StartingModel => "starting_model",
+    }
+}
+
 fn runtime_activity(activity: RuntimeActivity) -> &'static str {
     match activity {
         RuntimeActivity::Compacting => "compacting",
+    }
+}
+
+fn runtime_error_kind(kind: RuntimeErrorKind) -> &'static str {
+    match kind {
+        RuntimeErrorKind::Fallback => "fallback",
+        RuntimeErrorKind::Error => "error",
     }
 }
 
@@ -357,6 +395,7 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             }),

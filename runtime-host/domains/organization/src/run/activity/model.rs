@@ -63,6 +63,7 @@ pub enum ActivityKind {
     AgentTask {
         task_id: String,
         role_id: String,
+        session_ref: String,
         prompt: String,
     },
     Control {
@@ -110,6 +111,7 @@ pub enum ActivityRequestError {
     FenceMismatch,
     BlankTaskId,
     BlankRoleId,
+    InvalidSessionRef,
     BlankPrompt,
     BlankControlAction,
     BlankIdempotencyKey,
@@ -169,6 +171,7 @@ fn validate_kind(kind: &ActivityKind) -> Result<(), ActivityRequestError> {
         ActivityKind::AgentTask {
             task_id,
             role_id,
+            session_ref,
             prompt,
         } => {
             if task_id.trim().is_empty() {
@@ -176,6 +179,9 @@ fn validate_kind(kind: &ActivityKind) -> Result<(), ActivityRequestError> {
             }
             if role_id.trim().is_empty() {
                 return Err(ActivityRequestError::BlankRoleId);
+            }
+            if crate::RoleSessionRef::try_new(session_ref.clone()).is_err() {
+                return Err(ActivityRequestError::InvalidSessionRef);
             }
             if prompt.trim().is_empty() {
                 return Err(ActivityRequestError::BlankPrompt);

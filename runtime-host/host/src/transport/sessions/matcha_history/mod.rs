@@ -6,7 +6,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "matcha-agent.chat.history";
 const OPERATION_ID: &str = "matcha-agent.chat.history";

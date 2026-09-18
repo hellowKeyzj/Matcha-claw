@@ -273,6 +273,7 @@ fn delivery_request(
         node_execution_id: node_execution_id.to_owned(),
         task_id: task_id.to_owned(),
         role_id: admission.role_id().as_str().to_owned(),
+        session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
         idempotency_key: admission.idempotency_key().to_owned(),
         message: admission.message().to_owned(),
         requested_at: admission.requested_at(),

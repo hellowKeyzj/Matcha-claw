@@ -49,7 +49,7 @@ impl TeamOps for MatchaRuntimeDriver {
         Box::pin(async move {
             for binding in bindings {
                 let session = match ::matcha_agent::session::role::RoleSessionId::try_new(
-                    binding.external_session().as_str().to_owned(),
+                    binding.endpoint_session_id().as_str().to_owned(),
                 ) {
                     Ok(session) => session,
                     Err(_) => return organization::RoleAbortOutcome::OutcomeUnknown,
@@ -78,7 +78,7 @@ impl TeamOps for MatchaRuntimeDriver {
             if abort_first {
                 for binding in &bindings {
                     let session = match ::matcha_agent::session::role::RoleSessionId::try_new(
-                        binding.external_session().as_str().to_owned(),
+                        binding.endpoint_session_id().as_str().to_owned(),
                     ) {
                         Ok(session) => session,
                         Err(_) => return organization::NativeDeletionEvidence::OutcomeUnknown,
@@ -96,7 +96,7 @@ impl TeamOps for MatchaRuntimeDriver {
             let mut confirmations = Vec::with_capacity(bindings.len());
             for binding in bindings {
                 let session = match ::matcha_agent::session::role::RoleSessionId::try_new(
-                    binding.external_session().as_str().to_owned(),
+                    binding.endpoint_session_id().as_str().to_owned(),
                 ) {
                     Ok(session) => session,
                     Err(_) => return organization::NativeDeletionEvidence::Rejected,
@@ -104,7 +104,7 @@ impl TeamOps for MatchaRuntimeDriver {
                 match native.close_role_session(session).await {
                     InvocationOutcome::Succeeded(()) => {
                         let receipt = organization::RoleSessionDeleteReceipt::new(
-                            binding.external_session().clone(),
+                            binding.endpoint_session_id().clone(),
                         );
                         let Ok(confirmation) =
                             organization::RoleSessionDeletionConfirmation::try_new(

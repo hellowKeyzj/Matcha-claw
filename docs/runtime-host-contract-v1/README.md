@@ -24,7 +24,7 @@
 Renderer / page / store
   → preload IPC
   → Electron Host API
-  → DirectRuntimeHost control 或 signed loopback product transport
+  → DirectRuntimeHost control 或 signed loopback product route
   → Rust Owner actor
   → Rust 内部 owner
 
@@ -52,6 +52,7 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 
 - Electron `DirectRuntimeHost` 通过 stdio 长度帧写入一次 bootstrap，并等待 Rust private control ready；Renderer 不直接接触该 private control。
 - private control command timeout 上限为 **30s**，frame 上限为 **1MiB**；命令 vocabulary 是固定枚举，不是 HTTP route 透传。
+- Host-owned localhost transports 已收敛为一个 Rust loopback server；业务模块保留各自 handler，SSE/WS 是 route outcome，不是独立 Host-owned listener。OpenClaw gateway、Matcha app-server、MCP stdio 不属于此 server。
 - Capability Directory 与 Runtime Endpoint Directory 已由 Rust 投影 fixed OpenClaw/Matcha local peer surface；availability 可随 readiness 降级，不代表 owner cutover。
 - Electron 主进程 → legacy child `/dispatch` 默认超时采用源码实际值 **30s**；旧 transport 文档的 15s 已修正。
 - `PAYLOAD_TOO_LARGE` 是 legacy child 对超大 dispatch body 的真实 413 响应；Renderer 不需要感知新 API。

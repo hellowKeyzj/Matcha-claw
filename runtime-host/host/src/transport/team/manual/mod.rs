@@ -1,4 +1,4 @@
-pub(crate) mod server;
+pub(crate) mod handler;
 
 use serde_json::{Value, json};
 

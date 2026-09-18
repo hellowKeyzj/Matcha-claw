@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const PUBLIC_STATUS_ERROR = 'Channel status reported an error';
 const UNAVAILABLE = {
   success: false,
@@ -65,63 +65,48 @@ export interface ChannelStatusTransport {
 
 export function createChannelStatusTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelStatusTransport {
-  const url = `http://127.0.0.1:${port}/api/channels/status`;
   return {
     async read(): Promise<ChannelStatusTransportResponse> {
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/status',
-              scope: 'channels:read',
-              capability: 'channels.status.read',
-              subject: 'channel-status',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: '{}',
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isChannelStatus(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/channels/status',
+        issuer,
+        decision: {
+          endpoint: '/api/channels/status',
+          scope: 'channels:read',
+          capability: 'channels.status.read',
+          subject: 'channel-status',
+        },
+        method: 'POST',
+        fetcher,
+        body: {},
+      });
+      if (response?.status === 200 && isChannelStatus(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
 
     async readSnapshot(): Promise<ChannelSnapshotTransportResponse> {
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/status',
-              scope: 'channels:read',
-              capability: 'channels.snapshot.read',
-              subject: 'channel-status',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: '{"operation":"snapshot"}',
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isChannelSnapshot(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/channels/status',
+        issuer,
+        decision: {
+          endpoint: '/api/channels/status',
+          scope: 'channels:read',
+          capability: 'channels.snapshot.read',
+          subject: 'channel-status',
+        },
+        method: 'POST',
+        fetcher,
+        body: { operation: 'snapshot' },
+      });
+      if (response?.status === 200 && isChannelSnapshot(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -255,16 +240,7 @@ function isText(value: unknown): value is string {
 }
 
 function isSafeTimestamp(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+  return isSafeNonNegativeInteger(value);
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {

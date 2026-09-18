@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/matcha/sessions';
 const UNAVAILABLE = {
   success: false,
   error: 'Matcha session catalog is unavailable',
@@ -66,38 +67,30 @@ export interface MatchaSessionListTransport {
 
 export function createMatchaSessionListTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): MatchaSessionListTransport {
-  const url = `http://127.0.0.1:${sessionTransportPort}/api/matcha/sessions`;
   return {
     async list(request: unknown): Promise<MatchaSessionListTransportResponse> {
       if (!isMatchaSessionListRequest(request)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/matcha/sessions',
-              scope: 'sessions:read',
-              capability: 'sessions.list',
-              subject: 'matcha-session-catalog',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isMatchaSessionListResponse(body)) {
-          return { status: 200, body: projectMatchaSessionList(body) };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'sessions:read',
+          capability: 'sessions.list',
+          subject: 'matcha-session-catalog',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isMatchaSessionListResponse(response.body)) {
+        return { status: 200, body: projectMatchaSessionList(response.body) };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -177,13 +170,4 @@ function isMatchaEndpoint(value: unknown): value is typeof MATCHA_ENDPOINT {
     && value.kind === MATCHA_ENDPOINT.kind
     && value.runtimeAdapterId === MATCHA_ENDPOINT.runtimeAdapterId
     && value.runtimeInstanceId === MATCHA_ENDPOINT.runtimeInstanceId;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

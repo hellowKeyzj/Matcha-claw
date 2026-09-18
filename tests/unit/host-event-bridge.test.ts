@@ -43,7 +43,7 @@ function createSessionDelta(overrides: Record<string, unknown> = {}) {
     seq: 1,
     cursor: 1,
     changes: [{ kind: 'runtimeChanged', runtime: {
-      phase: 'started', activeRunId: null, issue: null,
+      phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null,
     } }],
     ...overrides,
   };
@@ -53,6 +53,21 @@ async function flushBridge(): Promise<void> {
   for (let i = 0; i < 8; i += 1) {
     await Promise.resolve();
   }
+}
+
+function createSessionEvents() {
+  let deltaHandler: ((delta: unknown) => void) | null = null;
+  return {
+    onDelta: vi.fn((handler: (delta: unknown) => void) => {
+      deltaHandler = handler;
+      return () => {
+        deltaHandler = null;
+      };
+    }),
+    emitDelta(delta: unknown) {
+      deltaHandler?.(delta);
+    },
+  };
 }
 
 function createRuntimeHost(input: {
@@ -411,8 +426,9 @@ describe('host event bridge', () => {
     expect(JSON.stringify(eventBus.emit.mock.calls)).not.toContain('openclaw.runtime');
   });
 
-  it('只通过现有 route binding 投影唯一 session.delta wire，并保留原始 delta 形状', async () => {
+  it('从 session event stream 通过现有 route binding 投影唯一 session.delta wire，并保留原始 delta 形状', async () => {
     const runtimeHost = createRuntimeHost({});
+    const sessionEvents = createSessionEvents();
     const eventBus = createEventBus();
     const send = vi.fn();
     const routes = new RendererEventRouteRegistry();
@@ -432,9 +448,10 @@ describe('host event bridge', () => {
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: routes,
+      sessionEvents,
     });
     const delta = createSessionDelta({ routeKey });
-    runtimeHost.emitSafeEvent({ type: 'session.delta', delta });
+    sessionEvents.emitDelta(delta);
 
     expect(eventBus.emit).toHaveBeenCalledWith('session.delta', delta);
     expect(send).toHaveBeenCalledWith('host:event', {
@@ -484,6 +501,7 @@ describe('host event bridge', () => {
 
   it('对严格 decode 失败、未绑定、已释放和 stale session.delta fail closed', async () => {
     const runtimeHost = createRuntimeHost({});
+    const sessionEvents = createSessionEvents();
     const eventBus = createEventBus();
     const routes = new RendererEventRouteRegistry();
     const routeKey = routes.issue({
@@ -502,31 +520,21 @@ describe('host event bridge', () => {
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
+      sessionEvents,
     });
 
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({ routeKey: 'renderer-route:missing' }),
-    });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({ routeKey, sessionKey: 'session-stale' }),
-    });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: { ...createSessionDelta({ routeKey }), extra: true },
-    });
+    sessionEvents.emitDelta(createSessionDelta({ routeKey: 'renderer-route:missing' }));
+    sessionEvents.emitDelta(createSessionDelta({ routeKey, sessionKey: 'session-stale' }));
+    sessionEvents.emitDelta({ ...createSessionDelta({ routeKey }), extra: true });
     routes.release(routeKey);
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({ routeKey }),
-    });
+    sessionEvents.emitDelta(createSessionDelta({ routeKey }));
 
     expect(eventBus.emit).not.toHaveBeenCalledWith('session.delta', expect.anything());
   });
 
   it('在唯一 session.delta 的 run terminal 后释放 route，并拒绝后续 stale delta', async () => {
     const runtimeHost = createRuntimeHost({});
+    const sessionEvents = createSessionEvents();
     const eventBus = createEventBus();
     const routes = new RendererEventRouteRegistry();
     const routeKey = routes.issue({
@@ -545,25 +553,20 @@ describe('host event bridge', () => {
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
+      sessionEvents,
     });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({
-        routeKey,
-        changes: [{ kind: 'runPhaseChanged', runId: 'run-1', phase: 'completed' }],
-      }),
-    });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({
-        routeKey,
-        seq: 2,
-        cursor: 2,
-        changes: [{ kind: 'runtimeChanged', runtime: {
-          phase: 'started', activeRunId: null, issue: null,
-        } }],
-      }),
-    });
+    sessionEvents.emitDelta(createSessionDelta({
+      routeKey,
+      changes: [{ kind: 'runPhaseChanged', runId: 'run-1', phase: 'completed' }],
+    }));
+    sessionEvents.emitDelta(createSessionDelta({
+      routeKey,
+      seq: 2,
+      cursor: 2,
+      changes: [{ kind: 'runtimeChanged', runtime: {
+        phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null,
+      } }],
+    }));
 
     expect(eventBus.emit).toHaveBeenCalledTimes(1);
     expect(eventBus.emit).toHaveBeenCalledWith('session.delta', expect.objectContaining({ routeKey }));
@@ -572,6 +575,7 @@ describe('host event bridge', () => {
 
   it('在 terminal runtimeChanged 后释放 route，并拒绝后续 stale delta', async () => {
     const runtimeHost = createRuntimeHost({});
+    const sessionEvents = createSessionEvents();
     const eventBus = createEventBus();
     const routes = new RendererEventRouteRegistry();
     const routeKey = routes.issue({
@@ -590,20 +594,15 @@ describe('host event bridge', () => {
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
+      sessionEvents,
     });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({
-        routeKey,
-        changes: [{ kind: 'runtimeChanged', runtime: {
-          phase: 'failed', activeRunId: null, issue: 'unavailable',
-        } }],
-      }),
-    });
-    runtimeHost.emitSafeEvent({
-      type: 'session.delta',
-      delta: createSessionDelta({ routeKey, seq: 2, cursor: 2 }),
-    });
+    sessionEvents.emitDelta(createSessionDelta({
+      routeKey,
+      changes: [{ kind: 'runtimeChanged', runtime: {
+        phase: 'failed', activeRunId: null, issue: 'unavailable', runProgress: null, runtimeActivity: null, errorDetail: null,
+      } }],
+    }));
+    sessionEvents.emitDelta(createSessionDelta({ routeKey, seq: 2, cursor: 2 }));
 
     expect(eventBus.emit).toHaveBeenCalledTimes(1);
     expect(eventBus.emit).toHaveBeenCalledWith('session.delta', expect.objectContaining({ routeKey }));

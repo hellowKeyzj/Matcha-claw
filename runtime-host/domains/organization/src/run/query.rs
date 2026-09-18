@@ -188,7 +188,7 @@ mod tests {
     };
 
     use crate::run::delivery::{
-        NativeRunReceiptReference, NativeTerminalStatus, observe_matcha_terminal,
+        NativeRunReceiptReference, NativeTerminalStatus, observe_native_terminal,
     };
 
     use super::*;
@@ -223,6 +223,7 @@ mod tests {
             node_execution_id: "start:attempt:1".into(),
             task_id: "task:one".into(),
             role_id: "leader".into(),
+            session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
             idempotency_key: "delivery:one".into(),
             message: "private prompt".into(),
             requested_at: 1,
@@ -328,10 +329,10 @@ mod tests {
         )
         .unwrap();
         let binding = runtime().bindings()[0].clone();
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
-            binding.external_session().clone(),
+            binding.endpoint_session_id().clone(),
             NativeRunReceiptReference::try_new("receipt:one").unwrap(),
             NativeTerminalStatus::Completed,
             3,
@@ -398,6 +399,7 @@ mod tests {
             node_execution_id: "start:attempt:1".into(),
             task_id: "task:one".into(),
             role_id: "leader".into(),
+            session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
             idempotency_key: "delivery:one".into(),
             message: "private prompt".into(),
             requested_at: 1,
@@ -414,8 +416,8 @@ mod tests {
             DeliveryReceipt::Accepted {
                 receipt: crate::DeliveryReceiptReference::try_new("receipt:one").unwrap(),
                 accepted_at: 2,
-                matcha_correlation: Some(crate::MatchaDeliveryCorrelation::new(
-                    crate::ExternalSessionReference::try_new("external-session").unwrap(),
+                native_correlation: Some(crate::NativeDeliveryCorrelation::new(
+                    crate::EndpointSessionId::try_new("tr-one-leader-rs0").unwrap(),
                     NativeRunReceiptReference::try_new("receipt:one").unwrap(),
                 )),
             },
@@ -494,12 +496,12 @@ mod tests {
 
     fn runtime() -> RunRuntimeReceipt {
         let endpoint = RuntimeEndpointReference::try_new(PRIVATE_ENDPOINT).unwrap();
-        let binding = RoleSessionReceipt::new(
+        let binding = RoleSessionReceipt::with_endpoint_session_id(
             TeamId::try_new("team:one").unwrap(),
             GraphRunId::new("run:one"),
             RoleId::try_new("leader").unwrap(),
-            crate::LocalSessionReference::try_new("local-session").unwrap(),
-            crate::ExternalSessionReference::try_new("external-session").unwrap(),
+            crate::RoleSessionRef::initial(),
+            crate::EndpointSessionId::try_new("tr-one-leader-rs0").unwrap(),
             ManagedAgentReference::try_new(PRIVATE_AGENT).unwrap(),
             endpoint,
         );

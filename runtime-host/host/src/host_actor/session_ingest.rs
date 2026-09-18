@@ -8,7 +8,7 @@ use crate::{
     Host,
     composition::HostEvent,
     sessions::{
-        command::{SessionEvent, SessionIngestOutcome},
+        command::SessionEvent,
         matcha::matcha_event_changes,
         openclaw::openclaw_canonical_changes,
         state::{
@@ -83,7 +83,7 @@ async fn ingest_openclaw_canonical(
         cursor,
         changes,
     };
-    publish_applied_delta(host, host.sessions().ingest_event(identity, event).await);
+    let _ = host.sessions().ingest_event(identity, event).await;
     SessionIngestAction::Continue
 }
 
@@ -109,7 +109,7 @@ async fn ingest_matcha_event(host: &Host, event: &RendererEventEnvelope) -> Sess
         cursor: Some(cursor),
         changes,
     };
-    publish_applied_delta(host, host.sessions().ingest_event(identity, event).await);
+    let _ = host.sessions().ingest_event(identity, event).await;
     SessionIngestAction::Continue
 }
 
@@ -141,14 +141,8 @@ async fn ingest_matcha_recovery(
             reason: matcha_recovery_reason(recovery.reason()),
         }],
     };
-    publish_applied_delta(host, host.sessions().ingest_event(identity, event).await);
+    let _ = host.sessions().ingest_event(identity, event).await;
     SessionIngestAction::Continue
-}
-
-fn publish_applied_delta(host: &Host, outcome: Result<SessionIngestOutcome, ()>) {
-    if let Ok(SessionIngestOutcome::Applied(delta)) = outcome {
-        let _ = host.publish_session_delta(delta);
-    }
 }
 
 fn matcha_recovery_reason(reason: &MatchaRecoveryReason) -> RecoveryReason {

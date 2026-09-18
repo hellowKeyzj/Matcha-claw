@@ -11,14 +11,12 @@ use openclaw::{port::CronExecutionStatus, session::events::SessionEvent};
 use crate::{
     HostEvent, RuntimeLifecycle, RuntimeState,
     control::{CronExecutionId, SafeCronExecutionStatus, SafeEvent, SafeRuntimeLifecycle},
-    sessions::state::SessionDelta,
 };
 
 const OPENCLAW_LIFECYCLE_EVENT: &str = "openclaw.lifecycle";
 const OPENCLAW_CANONICAL_EVENT: &str = "openclaw.canonical";
 const OPENCLAW_RUNTIME_EVENT: &str = "openclaw.runtime";
 const OPENCLAW_CRON_EXECUTION_EVENT: &str = "openclaw.cron.execution";
-const SESSION_DELTA_EVENT: &str = "session.delta";
 const MATCHA_SESSION_EVENT: &str = "matcha.session";
 const MATCHA_LIFECYCLE_EVENT: &str = "matcha.lifecycle";
 
@@ -39,45 +37,11 @@ pub(crate) fn project_observed(
             OPENCLAW_RUNTIME_EVENT,
             SafeEvent::OpenClawRuntime,
         ),
-        HostEvent::SessionDelta(delta) => project_session_delta_observed(delta, observation),
         HostEvent::Matcha(_) => drop_unsupported(observation, MATCHA_SESSION_EVENT),
         HostEvent::MatchaLifecycle(snapshot) => {
             project_matcha_lifecycle_observed(snapshot, observation)
         }
     }
-}
-
-fn project_session_delta_observed(
-    delta: SessionDelta,
-    observation: &ObservationSink,
-) -> Option<SafeEvent> {
-    if !crate::control::validate_session_delta(&delta) {
-        observe_event(
-            observation,
-            SESSION_DELTA_EVENT,
-            EventStage::Validate,
-            EventReason::ValidationRejected,
-        );
-        observe_event(
-            observation,
-            SESSION_DELTA_EVENT,
-            EventStage::Drop,
-            EventReason::ValidationRejected,
-        );
-        return None;
-    }
-
-    observe_event(
-        observation,
-        SESSION_DELTA_EVENT,
-        EventStage::Validate,
-        EventReason::Accepted,
-    );
-    project_accepted(
-        observation,
-        SESSION_DELTA_EVENT,
-        SafeEvent::SessionDelta { delta },
-    )
 }
 
 fn project_openclaw_observed(

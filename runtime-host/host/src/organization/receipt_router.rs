@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 
-use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use tokio::task::JoinSet;
 
-use crate::runtime::driver::{ActivityExecutionOutcome, OwnedRuntimeFuture};
+use crate::runtime::driver::{ActivityExecutionOutcome, NativeRunSettled, OwnedRuntimeFuture};
 
 use super::{
     coordinator::TeamRunCoordinatorInput,
@@ -129,7 +128,7 @@ impl TeamRunReceiptRouter {
         self.terminal_watches.join_next().await
     }
 
-    pub(super) async fn cancel_matcha_terminal_watches(&mut self) {
+    pub(super) async fn cancel_native_terminal_watches(&mut self) {
         self.terminal_watches.cancel().await;
     }
 
@@ -169,9 +168,9 @@ struct ActivityReceiptObservation {
     status: ActivityReceiptStatus,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum TerminalWatchCompletion {
-    Terminal(TerminalRunStatus),
+    Terminal(NativeRunSettled),
     OutcomeUnknown,
 }
 
@@ -184,7 +183,7 @@ struct TerminalWatches {
 pub(super) struct TerminalWatchObservation {
     pub(super) run_id: GraphRunId,
     pub(super) delivery_id: DeliveryId,
-    pub(super) status: TerminalRunStatus,
+    pub(super) settled: NativeRunSettled,
 }
 
 impl TerminalWatches {
@@ -206,7 +205,7 @@ impl TerminalWatches {
         for delivery_id in delivery_ids {
             let Ok(Some(target)) = input
                 .organization
-                .matcha_terminal_target(delivery_id.clone())
+                .native_terminal_target(delivery_id.clone())
                 .await
             else {
                 continue;
@@ -224,7 +223,7 @@ impl TerminalWatches {
     ) {
         let Ok(Some(target)) = input
             .organization
-            .matcha_terminal_target(delivery_id.clone())
+            .native_terminal_target(delivery_id.clone())
             .await
         else {
             return;
@@ -232,7 +231,7 @@ impl TerminalWatches {
         if target.graph_run_id() != &run_id {
             return;
         }
-        let watch = watch_matcha_terminal(input, target);
+        let watch = watch_native_terminal(input, target);
         if !self.watched_delivery_ids.insert(delivery_id.clone()) {
             return;
         }
@@ -251,10 +250,10 @@ impl TerminalWatches {
             return None;
         };
         match completion {
-            TerminalWatchCompletion::Terminal(status) => Some(TerminalWatchObservation {
+            TerminalWatchCompletion::Terminal(settled) => Some(TerminalWatchObservation {
                 run_id,
                 delivery_id,
-                status,
+                settled,
             }),
             TerminalWatchCompletion::OutcomeUnknown => None,
         }
@@ -267,14 +266,11 @@ impl TerminalWatches {
     }
 }
 
-fn watch_matcha_terminal(
+fn watch_native_terminal(
     input: &TeamRunCoordinatorInput,
-    target: organization::MatchaTerminalReceiptTarget,
-) -> OwnedRuntimeFuture<Option<TerminalRunStatus>> {
-    let Some(driver) = input
-        .runtime_directory
-        .lookup(&crate::runtime::driver::RuntimeDriverIdentity::matcha_agent().endpoint())
-    else {
+    target: organization::NativeTerminalReceiptTarget,
+) -> OwnedRuntimeFuture<Option<NativeRunSettled>> {
+    let Some(driver) = input.runtime_directory.lookup_reference(target.endpoint()) else {
         return Box::pin(async { None });
     };
     match driver.team_terminal_ops() {
@@ -369,7 +365,10 @@ mod tests {
                 (
                     run_id,
                     delivery_id,
-                    TerminalWatchCompletion::Terminal(TerminalRunStatus::Completed),
+                    TerminalWatchCompletion::Terminal(NativeRunSettled {
+                        status: organization::NativeTerminalStatus::Completed,
+                        final_assistant_text: Some("<team_message>ok</team_message>".to_owned()),
+                    }),
                 )
             }
         });
@@ -379,7 +378,10 @@ mod tests {
             Some(TerminalWatchObservation {
                 run_id,
                 delivery_id: delivery_id.clone(),
-                status: TerminalRunStatus::Completed,
+                settled: NativeRunSettled {
+                    status: organization::NativeTerminalStatus::Completed,
+                    final_assistant_text: Some("<team_message>ok</team_message>".to_owned()),
+                },
             })
         );
         assert!(watches.watched_delivery_ids.contains(&delivery_id));

@@ -1,7 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
-
-const DECISION_TTL_MS = 30_000;
 const ENDPOINT = '/api/sessions/permission';
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_AGENT_ID_BYTES = 256;
@@ -79,7 +78,7 @@ export interface SessionPermissionTransport {
 
 export function createSessionPermissionTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionPermissionTransport {
   const execute = async (
@@ -101,43 +100,41 @@ export function createSessionPermissionTransport(
         ? request.input.permissionMode
         : null,
     });
-    try {
-      const response = await fetcher(`http://127.0.0.1:${sessionTransportPort}${ENDPOINT}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${issuer.signDecision({
-            principal: 'electron-main-local',
-            endpoint: ENDPOINT,
-            scope: operationId === 'sessions.permission.get' ? 'sessions:read' : 'sessions:write',
-            capability: 'session.management',
-            subject: 'session-permission',
-            expiresAt: Date.now() + DECISION_TTL_MS,
-            revision: '1',
-          })}`,
-          'Content-Type': 'application/json',
-          ...traceHeader(traceId),
-        },
-        body: JSON.stringify(request),
-      });
-      const body: unknown = await response.json();
-      const projection = response.status === 200 ? decodeSessionPermissionProjection(body) : null;
-      logSessionTrace('electron.permission.response', traceId, {
-        operationId,
-        status: response.status,
-        contract: projection ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
-        elapsedMs: Date.now() - startedAt,
-      });
-      if (response.status === 200 && projection) {
-        return { status: 200, body: projection };
-      }
-      if (response.status === 503 && isUnavailable(body)) {
-        return { status: 503, body: UNAVAILABLE };
-      }
-    } catch {
+    const response = await sendLoopbackJson({
+      port: runtimeHostTransportPort,
+      path: ENDPOINT,
+      issuer,
+      decision: {
+        endpoint: ENDPOINT,
+        scope: operationId === 'sessions.permission.get' ? 'sessions:read' : 'sessions:write',
+        capability: 'session.management',
+        subject: 'session-permission',
+      },
+      method: 'POST',
+      fetcher,
+      body: request,
+      headers: traceHeader(traceId),
+    });
+    if (response === null) {
       logSessionTrace('electron.permission.failure', traceId, {
         operationId,
         elapsedMs: Date.now() - startedAt,
       });
+      return { status: 503, body: UNAVAILABLE };
+    }
+    const body = response.body;
+    const projection = response.status === 200 ? decodeSessionPermissionProjection(body) : null;
+    logSessionTrace('electron.permission.response', traceId, {
+      operationId,
+      status: response.status,
+      contract: projection ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
+      elapsedMs: Date.now() - startedAt,
+    });
+    if (response.status === 200 && projection) {
+      return { status: 200, body: projection };
+    }
+    if (response.status === 503 && isUnavailable(body)) {
+      return { status: 503, body: UNAVAILABLE };
     }
     return { status: 503, body: UNAVAILABLE };
   };
@@ -277,15 +274,6 @@ function hasControlCharacter(value: string): boolean {
 function isUnavailable(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['success', 'error'])
     && value.success === false && value.error === UNAVAILABLE.error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasAllowedKeys(

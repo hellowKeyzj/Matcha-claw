@@ -221,6 +221,7 @@ describe('cron run-scoped session delta projection', () => {
           activeRunId: 'run-2',
           runtimeActivity: 'compacting',
           errorDetail: {
+            kind: 'fallback',
             failoverReason: 'rate_limit',
             providerRuntimeFailureKind: null,
             providerErrorType: 'overloaded',
@@ -237,6 +238,7 @@ describe('cron run-scoped session delta projection', () => {
       runPhase: 'error',
       runtimeActivity: 'compacting',
       errorDetail: {
+        kind: 'fallback',
         failoverReason: 'rate_limit',
         providerErrorType: 'overloaded',
         providerErrorMessagePreview: 'raw preview',

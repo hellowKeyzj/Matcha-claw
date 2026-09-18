@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderModel, ProviderModelCapability,
     ProviderModelCatalog, ProviderModelReference, ProviderRoute, ProviderRouting,
-    ProviderRoutingCapability,
+    ProviderRoutingCapability, ProviderRoutingRevision,
 };
 
 pub fn provider_routing_account_ids(routing: &ProviderRouting) -> BTreeSet<ProviderAccountId> {
@@ -51,6 +51,58 @@ fn provider_reference_is_admissible(
             .models()
             .iter()
             .any(|model| provider_model_matches_routing_reference(model, capability, reference))
+}
+
+fn prune_provider_route_to_admissible(
+    capability: ProviderRoutingCapability,
+    route: &ProviderRoute,
+    accounts: &[ProviderAccount],
+    catalog: &ProviderModelCatalog,
+) -> Option<ProviderRoute> {
+    let mut fallbacks = route
+        .fallbacks()
+        .iter()
+        .filter(|reference| {
+            provider_reference_is_admissible(capability, reference, accounts, catalog)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if provider_reference_is_admissible(capability, route.primary(), accounts, catalog) {
+        return ProviderRoute::try_new(route.primary().clone(), fallbacks, route.timeout_ms()).ok();
+    }
+    let primary = fallbacks.first().cloned()?;
+    fallbacks.remove(0);
+    ProviderRoute::try_new(primary, fallbacks, route.timeout_ms()).ok()
+}
+
+pub fn prune_provider_routing_to_admissible(
+    routing: &ProviderRouting,
+    accounts: &[ProviderAccount],
+    catalog: &ProviderModelCatalog,
+) -> Result<Option<ProviderRouting>, ()> {
+    let routes = routing
+        .routes()
+        .iter()
+        .filter_map(|(capability, route)| {
+            prune_provider_route_to_admissible(*capability, route, accounts, catalog)
+                .map(|route| (*capability, route))
+        })
+        .collect::<Vec<_>>();
+    if routes.len() == routing.routes().len()
+        && routes
+            .iter()
+            .zip(routing.routes())
+            .all(|(left, right)| left == right)
+    {
+        return Ok(None);
+    }
+    let revision = routing.revision().get().checked_add(1).ok_or(())?;
+    ProviderRouting::try_new(
+        ProviderRoutingRevision::try_new(revision).map_err(|_| ())?,
+        routes,
+    )
+    .map(Some)
+    .map_err(|_| ())
 }
 
 pub fn provider_model_matches_routing_reference(

@@ -350,6 +350,7 @@ export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   images: ReadonlyArray<SessionRenderImage>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   pendingState?: 'typing' | 'activity' | 'compacting' | null;
+  pendingLabel?: string | null;
 }
 
 export type SessionRenderItem =

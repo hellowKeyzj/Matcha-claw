@@ -76,7 +76,7 @@ export function ChatRuntimeStatusDock({
     return null;
   }
 
-  const title = compacting ? t('pending.compacting') : guardian ? guardianTitle(guardian, t) : t('runtimeStatus.providerFallback');
+  const title = compacting ? t('pending.compacting') : guardian ? guardianTitle(guardian, t) : t(errorDetail?.kind === 'fallback' ? 'runtimeStatus.providerFallback' : 'runtimeStatus.runtimeError');
   const detail = compacting ? null : guardian ? guardianDetail(guardian) : detailParts.join(' · ');
 
   return (

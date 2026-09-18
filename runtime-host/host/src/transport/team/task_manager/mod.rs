@@ -6,7 +6,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 pub(crate) const LIST_PATH: &str = "/api/tasks/list";
 pub(crate) const GET_PATH: &str = "/api/tasks/get";

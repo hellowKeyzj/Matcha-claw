@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::{
-    DeliveryPhase, GraphRunId, GraphState, OrganizationFacts, TeamId,
+    DeliveryPhase, GraphRunId, GraphState, OrganizationFacts, RunStartGate, TeamId,
     run::{
         approval::{ApprovalDecision, ApprovalResolutionCause, ApprovalStatus},
         decision::TeamDecisionType,
@@ -32,6 +32,10 @@ pub struct TeamPublicProjection {
     run_id: String,
     team_revision: u64,
     runtime: TeamRuntimeState,
+    start_gate: TeamRunPublicStartGate,
+    proposal_id: Option<String>,
+    proposal_summary: Option<String>,
+    proposal_source_delivery_id: Option<String>,
     graph: TeamPublicGraph,
 }
 
@@ -50,6 +54,22 @@ impl TeamPublicProjection {
 
     pub const fn runtime(&self) -> TeamRuntimeState {
         self.runtime
+    }
+
+    pub const fn start_gate(&self) -> TeamRunPublicStartGate {
+        self.start_gate
+    }
+
+    pub fn proposal_id(&self) -> Option<&str> {
+        self.proposal_id.as_deref()
+    }
+
+    pub fn proposal_summary(&self) -> Option<&str> {
+        self.proposal_summary.as_deref()
+    }
+
+    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
+        self.proposal_source_delivery_id.as_deref()
     }
 
     pub fn graph(&self) -> &TeamPublicGraph {
@@ -355,6 +375,10 @@ pub struct TeamRunPublicRun {
     team_revision: u64,
     runtime: TeamRuntimeState,
     lifecycle: TeamRunPublicLifecycle,
+    start_gate: TeamRunPublicStartGate,
+    proposal_id: Option<String>,
+    proposal_summary: Option<String>,
+    proposal_source_delivery_id: Option<String>,
 }
 
 impl TeamRunPublicRun {
@@ -377,6 +401,30 @@ impl TeamRunPublicRun {
     pub const fn lifecycle(&self) -> TeamRunPublicLifecycle {
         self.lifecycle
     }
+
+    pub const fn start_gate(&self) -> TeamRunPublicStartGate {
+        self.start_gate
+    }
+
+    pub fn proposal_id(&self) -> Option<&str> {
+        self.proposal_id.as_deref()
+    }
+
+    pub fn proposal_summary(&self) -> Option<&str> {
+        self.proposal_summary.as_deref()
+    }
+
+    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
+        self.proposal_source_delivery_id.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamRunPublicStartGate {
+    Intake,
+    ProposalPending,
+    Started,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1136,6 +1184,13 @@ fn build_public_snapshot(
             team_revision: run.frozen_team_revision().get(),
             runtime,
             lifecycle: lifecycle_status(run.lifecycle().state()),
+            start_gate: start_gate_status(run.start_gate()),
+            proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
+            proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
+            proposal_source_delivery_id: run
+                .start_gate()
+                .source_delivery_id()
+                .map(ToOwned::to_owned),
         },
         graph,
         attempts,
@@ -1348,6 +1403,14 @@ pub fn project_team_run_public_event(event: &crate::run::event::TeamEvent) -> Te
     projection
 }
 
+fn start_gate_status(start_gate: &RunStartGate) -> TeamRunPublicStartGate {
+    match start_gate {
+        RunStartGate::Intake => TeamRunPublicStartGate::Intake,
+        RunStartGate::ProposalPending { .. } => TeamRunPublicStartGate::ProposalPending,
+        RunStartGate::Started => TeamRunPublicStartGate::Started,
+    }
+}
+
 fn lifecycle_status(state: &GraphRunLifecycleState) -> TeamRunPublicLifecycle {
     match state {
         GraphRunLifecycleState::Active => TeamRunPublicLifecycle::Active,
@@ -1516,6 +1579,10 @@ pub fn query_team_public_projection(
         run_id: run_id.as_str().to_owned(),
         team_revision: team.revision().get(),
         runtime: runtime_state(facts, run_id, run.runtime().is_some()),
+        start_gate: start_gate_status(run.start_gate()),
+        proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
+        proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
+        proposal_source_delivery_id: run.start_gate().source_delivery_id().map(ToOwned::to_owned),
         graph: graph_projection(run.graph()),
     })
 }
@@ -1700,8 +1767,18 @@ mod tests {
         let json = serde_json::to_string(&projection).unwrap();
         let document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object().unwrap();
-        assert_eq!(object.len(), 5);
-        for field in ["teamId", "runId", "teamRevision", "runtime", "graph"] {
+        assert_eq!(object.len(), 9);
+        for field in [
+            "teamId",
+            "runId",
+            "teamRevision",
+            "runtime",
+            "startGate",
+            "proposalId",
+            "proposalSummary",
+            "proposalSourceDeliveryId",
+            "graph",
+        ] {
             assert!(object.contains_key(field));
         }
         for omitted in [
@@ -1747,6 +1824,7 @@ mod tests {
             node_execution_id: "start:attempt:1".into(),
             task_id: "task:one".into(),
             role_id: "writer".into(),
+            session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
             idempotency_key: "delivery:one".into(),
             message: "private prompt".into(),
             requested_at: 1,
@@ -1936,17 +2014,17 @@ mod tests {
     }
 
     fn runtime() -> RunRuntimeReceipt {
-        use crate::{ExternalSessionReference, LocalSessionReference, RoleSessionReceipt};
+        use crate::RoleSessionReceipt;
 
         let endpoint = RuntimeEndpointReference::try_new(PRIVATE_ENDPOINT).unwrap();
         RunRuntimeReceipt::try_new(
             GraphRunId::new("run:one"),
-            vec![RoleSessionReceipt::new(
+            vec![RoleSessionReceipt::with_endpoint_session_id(
                 team(),
                 GraphRunId::new("run:one"),
                 RoleId::try_new("writer").unwrap(),
-                LocalSessionReference::try_new("local-session").unwrap(),
-                ExternalSessionReference::try_new("external-session").unwrap(),
+                crate::RoleSessionRef::initial(),
+                crate::EndpointSessionId::try_new("tr-one-writer-rs0").unwrap(),
                 crate::ManagedAgentReference::try_new(PRIVATE_AGENT).unwrap(),
                 endpoint,
             )],

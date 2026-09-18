@@ -1,6 +1,13 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import {
+  hasExactKeys,
+  isNonEmptyBoundedText,
+  isRecord,
+  isSafeNonNegativeInteger,
+  sendLoopbackJson,
+} from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ENDPOINT = '/api/team/public';
 const UNAVAILABLE = {
   success: false,
   error: 'Team public projection is unavailable',
@@ -58,36 +65,29 @@ export interface TeamPublicTransport {
 
 export function createTeamPublicTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamPublicTransport {
-  const url = `http://127.0.0.1:${port}/api/team/public`;
   return {
     async read(request): Promise<TeamPublicTransportResponse> {
       if (!isRequest(request)) return { status: 503, body: UNAVAILABLE };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/team/public',
-              scope: 'team:read',
-              capability: 'team.public.read',
-              subject: 'team-public-projection',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isProjection(body)) return { status: 200, body };
-        if (response.status === 404 && isUnavailable(body)) return { status: 404, body };
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: 'team:read',
+          capability: 'team.public.read',
+          subject: 'team-public-projection',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response === null) return { status: 503, body: UNAVAILABLE };
+      if (response.status === 200 && isProjection(response.body)) return { status: 200, body: response.body };
+      if (response.status === 404 && isUnavailable(response.body)) return { status: 404, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -96,15 +96,15 @@ export function createTeamPublicTransport(
 function isRequest(value: unknown): value is Readonly<{ teamId: string; runId: string }> {
   return isRecord(value)
     && hasExactKeys(value, ['teamId', 'runId'])
-    && isIdentifier(value.teamId)
-    && isIdentifier(value.runId);
+    && isNonEmptyBoundedText(value.teamId)
+    && isNonEmptyBoundedText(value.runId);
 }
 
 function isProjection(value: unknown): value is TeamPublicProjection {
   if (!isRecord(value) || !hasExactKeys(value, ['teamId', 'runId', 'teamRevision', 'runtime', 'graph'])) return false;
-  return isIdentifier(value.teamId)
-    && isIdentifier(value.runId)
-    && isCounter(value.teamRevision)
+  return isNonEmptyBoundedText(value.teamId)
+    && isNonEmptyBoundedText(value.runId)
+    && isSafeNonNegativeInteger(value.teamRevision)
     && (value.runtime === 'confirmed' || value.runtime === 'unknown')
     && isGraph(value.graph);
 }
@@ -112,8 +112,8 @@ function isProjection(value: unknown): value is TeamPublicProjection {
 function isGraph(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['graphId', 'workflowPlanId', 'title', 'status', 'nodes', 'edges'])
-    && isIdentifier(value.graphId)
-    && isIdentifier(value.workflowPlanId)
+    && isNonEmptyBoundedText(value.graphId)
+    && isNonEmptyBoundedText(value.workflowPlanId)
     && typeof value.title === 'string'
     && isGraphStatus(value.status)
     && Array.isArray(value.nodes)
@@ -125,12 +125,12 @@ function isGraph(value: unknown): boolean {
 function isNode(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'maxAttempts', 'trigger', 'attempt'])
-    && isIdentifier(value.nodeId)
+    && isNonEmptyBoundedText(value.nodeId)
     && ['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'].includes(value.kind as string)
     && typeof value.title === 'string'
-    && (value.roleId === null || isIdentifier(value.roleId))
-    && (value.taskId === null || isIdentifier(value.taskId))
-    && isCounter(value.maxAttempts)
+    && (value.roleId === null || isNonEmptyBoundedText(value.roleId))
+    && (value.taskId === null || isNonEmptyBoundedText(value.taskId))
+    && isSafeNonNegativeInteger(value.maxAttempts)
     && isStartTrigger(value.trigger)
     && isAttempt(value.attempt);
 }
@@ -145,18 +145,18 @@ function isStartTrigger(value: unknown): value is TeamWebhookTrigger | TeamCronT
 function isAttempt(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['number', 'status', 'updatedAt'])
-    && isCounter(value.number)
+    && isSafeNonNegativeInteger(value.number)
     && isGraphStatus(value.status)
-    && isCounter(value.updatedAt);
+    && isSafeNonNegativeInteger(value.updatedAt);
 }
 
 function isEdge(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['edgeId', 'sourceNodeId', 'sourcePort', 'targetNodeId', 'targetPort', 'action', 'status'])
-    && isIdentifier(value.edgeId)
-    && isIdentifier(value.sourceNodeId)
+    && isNonEmptyBoundedText(value.edgeId)
+    && isNonEmptyBoundedText(value.sourceNodeId)
     && typeof value.sourcePort === 'string'
-    && isIdentifier(value.targetNodeId)
+    && isNonEmptyBoundedText(value.targetNodeId)
     && typeof value.targetPort === 'string'
     && ['activate', 'rework', 'gate', 'finish'].includes(value.action as string)
     && (value.status === 'waiting' || value.status === 'satisfied');
@@ -171,21 +171,4 @@ function isUnavailable(value: unknown): value is typeof UNAVAILABLE {
 
 function isGraphStatus(value: unknown): value is TeamGraphStatus {
   return ['pending', 'ready', 'running', 'waiting', 'completed', 'failed', 'cancelled'].includes(value as string);
-}
-
-function isCounter(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isIdentifier(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

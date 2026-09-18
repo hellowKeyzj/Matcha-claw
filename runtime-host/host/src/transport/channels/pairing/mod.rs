@@ -6,7 +6,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const LIST_OPERATION_ID: &str = "channels.pairing.list";
 const APPROVE_OPERATION_ID: &str = "channels.pairing.approve";

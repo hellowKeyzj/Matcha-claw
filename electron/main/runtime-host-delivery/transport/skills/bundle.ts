@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const EXPORT_ENDPOINT = '/api/subagents/skill-bundles/export';
 const IMPORT_ENDPOINT = '/api/subagents/skill-bundles/import';
 
@@ -26,14 +26,14 @@ export interface SkillBundleTransport {
 
 export function createSkillBundleTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SkillBundleTransport {
   return {
     exportBundles: async (request) => transfer(
       issuer,
       fetcher,
-      port,
+      runtimeHostTransportPort,
       EXPORT_ENDPOINT,
       'export',
       request,
@@ -41,7 +41,7 @@ export function createSkillBundleTransport(
     importBundles: async (request) => transfer(
       issuer,
       fetcher,
-      port,
+      runtimeHostTransportPort,
       IMPORT_ENDPOINT,
       'import',
       request,
@@ -52,37 +52,30 @@ export function createSkillBundleTransport(
 async function transfer(
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
-  port: number,
+  runtimeHostTransportPort: number,
   endpoint: string,
   operation: 'export' | 'import',
   request: unknown,
 ): Promise<SkillBundleTransportResponse> {
   if (!isRequest(operation, request)) return rejectedResponse();
 
-  try {
-    const response = await fetcher(`http://127.0.0.1:${port}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint,
-          scope: 'subagents:skill-bundles',
-          capability: 'subagentSkillBundles.transfer',
-          subject: 'subagent-skill-bundles',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-    const body: unknown = await response.json();
-    if (response.status === 200 && isResult(operation, body)) return { status: 200, body };
-    if (response.status === 400 && isRejectedResult(body)) return { status: 400, body };
-    if (response.status === 401 && isUnknownResult(body)) return { status: 401, body };
-  } catch {
-    // Public delivery deliberately redacts loopback and host failures.
-  }
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: endpoint,
+    issuer,
+    decision: {
+      endpoint,
+      scope: 'subagents:skill-bundles',
+      capability: 'subagentSkillBundles.transfer',
+      subject: 'subagent-skill-bundles',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  if (response?.status === 200 && isResult(operation, response.body)) return { status: 200, body: response.body };
+  if (response?.status === 400 && isRejectedResult(response.body)) return { status: 400, body: response.body };
+  if (response?.status === 401 && isUnknownResult(response.body)) return { status: 401, body: response.body };
 
   return { status: 503, body: { outcome: 'unknown' } };
 }
@@ -144,13 +137,4 @@ function isOutcome(value: unknown): value is SkillBundleTransferResult['outcome'
 
 function rejectedResponse(): SkillBundleTransportResponse {
   return { status: 400, body: { outcome: 'rejected' } };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

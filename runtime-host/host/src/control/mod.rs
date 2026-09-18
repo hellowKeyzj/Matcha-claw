@@ -1,14 +1,11 @@
-mod delivery;
 mod dispatch;
 mod frame;
 mod lifecycle;
 mod wire;
 
-pub use delivery::{DeliveryTransportInput, run_delivery_transports};
-
 pub(crate) use wire::{
     CommandInput, CommandOutcome, CommandResult, CronExecutionId, RejectionCode,
-    SafeCronExecutionStatus, SafeEvent, SafeRuntimeLifecycle, validate_session_delta,
+    SafeCronExecutionStatus, SafeEvent, SafeRuntimeLifecycle,
 };
 
 use std::{
@@ -33,10 +30,9 @@ use crate::{
     Host, HostEvent, HostInput,
     composition::PeerHandle,
     diagnostics::event_output,
-    facade::{CronHandle, PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
+    facade::{PlatformRuntimeHandle, PluginsHandle, SkillsHandle, ToolchainHandle},
     fleet::handle::FleetHandle,
     host_actor,
-    sessions::SessionHandle,
 };
 
 const INPUT_CAPACITY: usize = 32;
@@ -63,13 +59,11 @@ where
         host_actor::Owner::spawn(host, events),
         handles.organization.clone(),
         handles.peer.clone(),
-        handles.session.clone(),
         handles.fleet.clone(),
         handles.platform_runtime.clone(),
         handles.toolchain.clone(),
         handles.plugins.clone(),
         handles.skills.clone(),
-        handles.cron.clone(),
         handles.observation.clone(),
         gateway_auto_start,
         control_input,
@@ -78,17 +72,15 @@ where
     .await
 }
 
-async fn run_owner<R, W>(
+pub(crate) async fn run_owner<R, W>(
     mut owner: host_actor::Owner,
     organization: crate::organization::OrganizationHandle,
     peer: PeerHandle,
-    session: SessionHandle,
     fleet: FleetHandle,
     platform_runtime: PlatformRuntimeHandle,
     toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
-    cron: CronHandle,
     observation: ObservationSink,
     gateway_auto_start: bool,
     control_input: R,
@@ -161,13 +153,11 @@ where
                                 handle.clone(),
                                 organization.clone(),
                                 peer.clone(),
-                                session.clone(),
                                 fleet.clone(),
                                 platform_runtime.clone(),
                                 toolchain.clone(),
                                 plugins.clone(),
                                 skills.clone(),
-                                cron.clone(),
                                 output_sender.clone(),
                                 observation.clone(),
                                 trace,
@@ -230,7 +220,7 @@ where
                         );
                         break Err(ControlError::OutputClosed);
                     }
-                }
+                },
                 None => events_open = false,
             },
             completed = commands.join_next(), if !commands.is_empty() => {
@@ -259,13 +249,11 @@ fn spawn_command(
     owner: host_actor::Handle,
     organization: crate::organization::OrganizationHandle,
     peer: PeerHandle,
-    session: SessionHandle,
     fleet: FleetHandle,
     platform_runtime: PlatformRuntimeHandle,
     toolchain: ToolchainHandle,
     plugins: PluginsHandle,
     skills: SkillsHandle,
-    cron: CronHandle,
     output: mpsc::Sender<wire::Output>,
     observation: ObservationSink,
     trace: TraceContext,
@@ -322,12 +310,10 @@ fn spawn_command(
                 &organization,
                 &peer,
                 &fleet,
-                &session,
                 &platform_runtime,
                 &toolchain,
                 &plugins,
                 &skills,
-                &cron,
                 command.command,
             ),
         )
@@ -416,11 +402,8 @@ fn command_kind(command: &wire::Command) -> &'static str {
         wire::Command::OpenClawGatewayHealth {} => "openclaw.gateway.health",
         wire::Command::OpenClawGatewayStatus {} => "openclaw.gateway.status",
         wire::Command::OpenClawControlUiUrl {} => "openclaw.control-ui.url",
-        wire::Command::OpenClawManualCronTrigger { .. } => "openclaw.cron.manual-trigger",
         wire::Command::OpenClawBrowserRequest { .. } => "openclaw.browser.request",
         wire::Command::OpenClawMcpAppRequest { .. } => "openclaw.mcp-app.request",
-        wire::Command::OpenClawChatSend { .. } => "openclaw.chat.send",
-        wire::Command::OpenClawChatAbort { .. } => "openclaw.chat.abort",
         wire::Command::FleetCredentialsWrite { .. } => "fleet.credentials.write",
     }
 }
@@ -463,7 +446,7 @@ fn project_event(event: HostEvent, observation: &ObservationSink) -> Option<wire
         .map(|event| wire::Output::Event(wire::Event::new(event)))
 }
 
-async fn shutdown_host(owner: &mut host_actor::Owner) -> Result<(), ControlError> {
+pub(crate) async fn shutdown_host(owner: &mut host_actor::Owner) -> Result<(), ControlError> {
     loop {
         let attempt = owner
             .handle()

@@ -102,6 +102,7 @@ pub(crate) struct SessionSendCommand {
     pub(crate) attachments: Vec<Attachment>,
     /// Host-private transport correlation; it is never serialized or projected to a peer.
     pub(crate) trace_id: Option<String>,
+    pub(crate) system_provenance_receipt: Option<String>,
 }
 
 impl SessionSendCommand {
@@ -147,6 +148,7 @@ impl SessionSendCommand {
             deliver,
             attachments,
             trace_id,
+            system_provenance_receipt: None,
         })
     }
 
@@ -170,6 +172,17 @@ impl SessionSendCommand {
             return Err(InvalidCommand);
         }
         self.endpoint_session_id = Some(session_id);
+        Ok(self)
+    }
+
+    pub(crate) fn with_system_provenance_receipt(
+        mut self,
+        receipt: String,
+    ) -> Result<Self, InvalidCommand> {
+        if receipt.is_empty() || receipt.len() > MAX_MESSAGE_BYTES {
+            return Err(InvalidCommand);
+        }
+        self.system_provenance_receipt = Some(receipt);
         Ok(self)
     }
 

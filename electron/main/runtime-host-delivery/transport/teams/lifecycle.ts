@@ -1,4 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
 export type WorkflowPlan = Readonly<{
   workflowPlanId: string;
@@ -23,7 +24,7 @@ export type WorkflowPlan = Readonly<{
   createdAt: number;
 }>;
 
-const DECISION_TTL_MS = 30_000;
+const ENDPOINT = '/api/team/lifecycle';
 const UNAVAILABLE = { success: false, error: 'Team lifecycle is unavailable' } as const;
 const REJECTED = { success: false, error: 'Team lifecycle request was rejected' } as const;
 
@@ -78,21 +79,20 @@ export interface TeamLifecycleTransport {
 
 export function createTeamLifecycleTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamLifecycleTransport {
-  const url = `http://127.0.0.1:${port}/api/team/lifecycle`;
   return {
-    list: (request) => send(url, issuer, fetcher, 'team.lifecycle.list', { action: 'list', ...request }),
-    create: (request) => send(url, issuer, fetcher, 'team.lifecycle.create', { action: 'create', ...request }, 'create'),
-    delete: (request) => send(url, issuer, fetcher, 'team.lifecycle.delete', { action: 'delete', ...request }),
-    resume: (request) => send(url, issuer, fetcher, 'team.lifecycle.resume', { action: 'resume', ...request }),
-    cancel: (request) => send(url, issuer, fetcher, 'team.lifecycle.cancel', { action: 'cancel', ...request }),
+    list: (request) => send(runtimeHostTransportPort, issuer, fetcher, 'team.lifecycle.list', { action: 'list', ...request }),
+    create: (request) => send(runtimeHostTransportPort, issuer, fetcher, 'team.lifecycle.create', { action: 'create', ...request }, 'create'),
+    delete: (request) => send(runtimeHostTransportPort, issuer, fetcher, 'team.lifecycle.delete', { action: 'delete', ...request }),
+    resume: (request) => send(runtimeHostTransportPort, issuer, fetcher, 'team.lifecycle.resume', { action: 'resume', ...request }),
+    cancel: (request) => send(runtimeHostTransportPort, issuer, fetcher, 'team.lifecycle.cancel', { action: 'cancel', ...request }),
   };
 }
 
 async function send(
-  url: string,
+  runtimeHostTransportPort: number,
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
   capability: 'team.lifecycle.list' | 'team.lifecycle.create' | 'team.lifecycle.delete' | 'team.lifecycle.resume' | 'team.lifecycle.cancel',
@@ -100,31 +100,26 @@ async function send(
   expectedAction?: 'create',
 ): Promise<LifecycleResponse> {
   if (!isRequest(body)) return { status: 503, body: UNAVAILABLE };
-  try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: '/api/team/lifecycle',
-          scope: 'team:write',
-          capability,
-          subject: 'team-lifecycle',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    const result: unknown = await response.json();
-    if (response.status === 200 && isSuccess(result) && (expectedAction === undefined || result.action === expectedAction)) {
-      return { status: 200, body: result };
-    }
-    if (response.status === 409 && (isUnknown(result) || isRejected(result))) return { status: 409, body: result };
-  } catch {
-    // Native transport details do not cross the Electron delivery boundary.
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: ENDPOINT,
+    issuer,
+    decision: {
+      endpoint: ENDPOINT,
+      scope: 'team:write',
+      capability,
+      subject: 'team-lifecycle',
+    },
+    method: 'POST',
+    fetcher,
+    body,
+  });
+  if (response === null) return { status: 503, body: UNAVAILABLE };
+  const result = response.body;
+  if (response.status === 200 && isSuccess(result) && (expectedAction === undefined || result.action === expectedAction)) {
+    return { status: 200, body: result };
   }
+  if (response.status === 409 && (isUnknown(result) || isRejected(result))) return { status: 409, body: result };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -146,8 +141,7 @@ function isRequest(value: Record<string, unknown>): boolean {
       && isOpaque(value.idempotencyKey)
       && isWorkflowPlan(value.workflowPlan)
       && isIdentifier(value.sourceIdentity)
-      && Number.isSafeInteger(value.templateRevision)
-      && value.templateRevision >= 0;
+      && isSafeNonNegativeInteger(value.templateRevision);
   }
   if (value.action === 'delete') {
     const isTeamDelete = hasExactKeys(value, ['action', 'teamId', 'idempotencyKey'])
@@ -167,8 +161,8 @@ function isRequest(value: Record<string, unknown>): boolean {
 function isWorkflowPlan(value: unknown): value is WorkflowPlan {
   if (!isRecord(value) || !hasExactKeys(value, ['workflowPlanId', 'runId', 'title', 'status', 'groups', 'tasks', 'idempotencyKey', 'createdAt'])) return false;
   return isIdentifier(value.workflowPlanId) && isIdentifier(value.runId) && isIdentifier(value.title)
-    && isIdentifier(value.status) && isOpaque(value.idempotencyKey) && Number.isSafeInteger(value.createdAt)
-    && value.createdAt >= 0 && Array.isArray(value.groups) && value.groups.every(isWorkflowGroup)
+    && isIdentifier(value.status) && isOpaque(value.idempotencyKey) && isSafeNonNegativeInteger(value.createdAt)
+    && Array.isArray(value.groups) && value.groups.every(isWorkflowGroup)
     && Array.isArray(value.tasks) && value.tasks.every(isWorkflowTask);
 }
 function isWorkflowGroup(value: unknown): boolean {
@@ -178,7 +172,7 @@ function isWorkflowGroup(value: unknown): boolean {
     && value.taskIds.every(isIdentifier) && isRecord(join)
     && hasExactKeys(join, ['requireCompleted', 'allowFailed', 'retryLimit'])
     && typeof join.requireCompleted === 'boolean' && typeof join.allowFailed === 'boolean'
-    && Number.isSafeInteger(join.retryLimit) && join.retryLimit >= 0;
+    && isSafeNonNegativeInteger(join.retryLimit);
 }
 function isWorkflowTask(value: unknown): boolean {
   if (!isRecord(value) || !hasExactKeys(value, ['taskId', 'roleId', 'title', 'prompt', 'dependsOnTaskIds', 'outputArtifactKind'])) return false;
@@ -266,13 +260,4 @@ function isIdentifier(value: unknown): value is string {
 
 function isOpaque(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

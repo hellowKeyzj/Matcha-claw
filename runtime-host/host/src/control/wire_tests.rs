@@ -1,7 +1,5 @@
 use serde_json::{Value, json};
 
-use crate::sessions::state::{RecoveryReason, SessionChange, SessionDelta};
-
 use super::*;
 
 fn command(name: &str, input: Option<Value>) -> Value {
@@ -18,38 +16,10 @@ fn command(name: &str, input: Option<Value>) -> Value {
     })
 }
 
-fn session_delta() -> SessionDelta {
-    SessionDelta {
-        session_key: "session-1".to_owned(),
-        route_key: Some("renderer-route:test".to_owned()),
-        epoch: 1,
-        seq: 1,
-        cursor: 1,
-        run_id: None,
-        changes: vec![SessionChange::RecoveryRequired {
-            reason: RecoveryReason::EventOverflow,
-        }],
-    }
-}
-
 #[test]
 fn command_round_trip_is_strict_and_has_no_http_shape() {
     let health =
         decode_command_request(command("host.health", None).to_string().as_bytes()).unwrap();
-    let send = decode_command_request(
-        command(
-            "openclaw.chat.send",
-            Some(json!({
-                "sessionKey": "session-1",
-                "message": "private input",
-                "runId": "run-1",
-            })),
-        )
-        .to_string()
-        .as_bytes(),
-    )
-    .unwrap();
-
     let lifecycle = [
         ("matcha.lifecycle.status", Command::MatchaStatus {}),
         ("matcha.lifecycle.start", Command::MatchaStart {}),
@@ -140,7 +110,6 @@ fn command_round_trip_is_strict_and_has_no_http_shape() {
             })),
         )
     );
-    assert!(matches!(send.command, Command::OpenClawChatSend { .. }));
     for (name, expected) in lifecycle {
         let decoded = decode_command_request(command(name, None).to_string().as_bytes()).unwrap();
         assert_eq!(decoded.command, expected);
@@ -154,28 +123,6 @@ fn command_round_trip_is_strict_and_has_no_http_shape() {
         command("host.health", None)
     );
 
-    let trigger = decode_command_request(
-        command(
-            "openclaw.cron.manual-trigger",
-            Some(json!({ "jobId": "cron-job-1" })),
-        )
-        .to_string()
-        .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(
-        trigger.command,
-        Command::OpenClawManualCronTrigger {
-            input: CommandInput(json!({ "jobId": "cron-job-1" })),
-        }
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&encode_command_request(&trigger).unwrap()).unwrap(),
-        command(
-            "openclaw.cron.manual-trigger",
-            Some(json!({ "jobId": "cron-job-1" })),
-        )
-    );
     let permission = decode_command_request(
         command(
             "openclaw.tool-permission.set",
@@ -468,21 +415,21 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": { "name": "openclaw.chat.send", "input": null },
+            "command": { "name": "openclaw.skills.execute", "input": null },
         }),
         json!({
             "version": 1,
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": { "name": "openclaw.chat.send", "input": [], "method": "POST" },
+            "command": { "name": "openclaw.skills.execute", "input": [], "method": "POST" },
         }),
         json!({
             "version": 1,
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": { "name": "openclaw.chat.send", "input": {}, "route": "/api/openclaw/chat/send" },
+            "command": { "name": "openclaw.skills.execute", "input": {}, "route": "/api/openclaw/chat/send" },
         }),
         json!({
             "version": 1,
@@ -609,9 +556,6 @@ fn output_round_trips_with_semantic_outcomes_and_typed_events() {
             run_id: CronExecutionId::try_new("cron-run-5".to_owned()).unwrap(),
             status: SafeCronExecutionStatus::OutcomeUnknown,
         })),
-        Output::Event(Event::new(SafeEvent::SessionDelta {
-            delta: session_delta(),
-        })),
     ];
 
     let encoded: Vec<Value> = outputs
@@ -722,24 +666,6 @@ fn output_round_trips_with_semantic_outcomes_and_typed_events() {
                     "status": "outcome-unknown",
                 },
             }),
-            json!({
-                "version": 1,
-                "type": "event",
-                "event": {
-                    "type": "session.delta",
-                    "delta": {
-                        "sessionKey": "session-1",
-                        "routeKey": "renderer-route:test",
-                        "epoch": 1,
-                        "seq": 1,
-                        "cursor": 1,
-                        "changes": [{
-                            "kind": "recoveryRequired",
-                            "reason": "event_overflow",
-                        }],
-                    },
-                },
-            }),
         ]
     );
 
@@ -759,71 +685,6 @@ fn projects_event_sequences_to_the_electron_safe_integer_range() {
 
     let encoded: Value = serde_json::from_slice(&encode(&event).unwrap()).unwrap();
     assert_eq!(encoded["event"]["sequence"], MAX_SAFE_SEQUENCE);
-}
-
-#[test]
-fn session_delta_is_canonical_and_strict() {
-    let event = Output::Event(Event::new(SafeEvent::SessionDelta {
-        delta: session_delta(),
-    }));
-    let encoded: Value = serde_json::from_slice(&encode(&event).unwrap()).unwrap();
-    assert_eq!(
-        encoded["event"],
-        json!({
-            "type": "session.delta",
-            "delta": {
-                "sessionKey": "session-1",
-                "routeKey": "renderer-route:test",
-                "epoch": 1,
-                "seq": 1,
-                "cursor": 1,
-                "changes": [{
-                    "kind": "recoveryRequired",
-                    "reason": "event_overflow",
-                }],
-            },
-        })
-    );
-    assert_eq!(decode_output(&encode(&event).unwrap()).unwrap(), event);
-
-    for value in [
-        json!({
-            "version": 1,
-            "type": "event",
-            "event": {
-                "type": "session.delta",
-                "delta": {
-                    "sessionKey": "session-1",
-                    "routeKey": "renderer-route:test",
-                    "epoch": 1,
-                    "seq": 1,
-                    "cursor": 1,
-                    "changes": [],
-                },
-            },
-        }),
-        json!({
-            "version": 1,
-            "type": "event",
-            "event": {
-                "type": "session.delta",
-                "delta": {
-                    "sessionKey": "session-1",
-                    "routeKey": "renderer-route:test",
-                    "epoch": 1,
-                    "seq": 1,
-                    "cursor": 1,
-                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
-                    "unexpected": true,
-                },
-            },
-        }),
-    ] {
-        assert_eq!(
-            decode_output(value.to_string().as_bytes()),
-            Err(WireError::InvalidOutput)
-        );
-    }
 }
 
 #[test]
@@ -847,37 +708,6 @@ fn rejects_unknown_fields_and_safe_event_secret_channels() {
                 "hasRun": true,
                 "hasMessage": false,
                 "hasSessionActivity": false,
-            },
-        }),
-        json!({
-            "version": 1,
-            "type": "event",
-            "event": {
-                "type": "session.delta",
-                "delta": {
-                    "sessionKey": "session-1",
-                    "routeKey": "renderer-route:test/invalid",
-                    "epoch": 1,
-                    "seq": 1,
-                    "cursor": 1,
-                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
-                },
-            },
-        }),
-        json!({
-            "version": 1,
-            "type": "event",
-            "event": {
-                "type": "session.delta",
-                "delta": {
-                    "sessionKey": "session-1",
-                    "routeKey": "renderer-route:test",
-                    "epoch": 1,
-                    "seq": 1,
-                    "cursor": 1,
-                    "changes": [{"kind": "recoveryRequired", "reason": "event_overflow"}],
-                    "sessionKeyNative": "must-be-absent",
-                },
             },
         }),
         json!({
@@ -978,24 +808,6 @@ fn rejects_unknown_fields_and_safe_event_secret_channels() {
             Err(WireError::InvalidOutput)
         );
     }
-
-    let output = String::from_utf8(
-        encode(&Output::Event(Event::new(SafeEvent::SessionDelta {
-            delta: session_delta(),
-        })))
-        .unwrap(),
-    )
-    .unwrap();
-    for legacy in [
-        "openclaw.session.update",
-        "openclaw.session.activity",
-        "matcha.session.activity",
-        "rawPayload",
-        "native-session-identity",
-        "token",
-    ] {
-        assert!(!output.contains(legacy));
-    }
 }
 
 #[test]
@@ -1062,8 +874,6 @@ fn session_handle_separates_query_and_mutation_mailboxes() {
         "pub(crate) async fn rename_session",
         "pub(crate) async fn respond_to_approval",
         "pub(crate) async fn select_model",
-        "pub(crate) async fn send_openclaw_chat",
-        "pub(crate) async fn abort_openclaw_chat",
     ] {
         assert!(
             method_body(handle, method).contains("request_command"),

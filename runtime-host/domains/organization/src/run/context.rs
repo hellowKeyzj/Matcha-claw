@@ -321,11 +321,10 @@ mod tests {
     use std::num::NonZeroU32;
 
     use crate::{
-        GraphDefinition, GraphRunFacts, GraphState, LocalSessionReference, ManagedAgentReference,
-        MaterializationReceipt, MemberId, NodeDefinition, NodeId, OrganizationFacts,
-        RoleAssignment, RoleId, RoleKind, RoleMaterializationReceipt, RoleSessionReceipt,
-        RunRuntimeReceipt, RuntimeEndpointReference, TeamDefinition, TeamFacts, TeamMember,
-        TeamRevision, TeamRole,
+        GraphDefinition, GraphRunFacts, GraphState, ManagedAgentReference, MaterializationReceipt,
+        MemberId, NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind,
+        RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
+        RuntimeEndpointReference, TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole,
     };
 
     use super::*;
@@ -375,12 +374,12 @@ mod tests {
         .unwrap();
         let runtime = RunRuntimeReceipt::try_new(
             run.clone(),
-            vec![RoleSessionReceipt::new(
+            vec![RoleSessionReceipt::with_endpoint_session_id(
                 team.clone(),
                 run.clone(),
                 role,
-                LocalSessionReference::try_new("local-session").unwrap(),
-                crate::ExternalSessionReference::try_new("external-session").unwrap(),
+                crate::RoleSessionRef::initial(),
+                crate::EndpointSessionId::try_new("tr-one-leader-rs0").unwrap(),
                 agent,
                 endpoint,
             )],

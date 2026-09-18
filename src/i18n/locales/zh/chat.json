@@ -83,10 +83,21 @@
     "pending": {
         "typing": "正在思考",
         "activity": "正在调用工具",
-        "compacting": "正在压缩上下文，完成后会继续回复"
+        "compacting": "正在压缩上下文，完成后会继续回复",
+        "startup": {
+            "preparing_workspace": "准备工作区",
+            "naming_worktree": "命名工作区",
+            "creating_worktree": "创建工作区",
+            "running_setup": "运行初始化",
+            "provisioning_environment": "准备运行环境",
+            "preparing_context": "准备上下文",
+            "starting_model": "启动模型"
+        },
+        "retrying": "模型限流，正在重试 {{attempt}}/{{maxAttempts}}"
     },
     "runtimeStatus": {
         "providerFallback": "已切换备用 Provider",
+        "runtimeError": "运行时错误",
         "guardian": {
             "reviewing": "Guardian 正在审核操作",
             "approved": "Guardian 已放行操作",

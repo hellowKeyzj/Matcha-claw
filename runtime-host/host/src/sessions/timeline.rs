@@ -1,8 +1,8 @@
 use crate::sessions::state::{
     ApprovalPhase, ApprovalView, ItemStatus, MAX_CONTENT_REF_BYTES, MissingFact, OmissionReason,
-    RunPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeView, SessionCompleteness,
-    SessionContent, SessionFact, SessionIdentity, SessionItem, SessionProvider, SessionView,
-    SessionWindow, ToolPhase, ToolView, public_media_reference,
+    RunPhase, RunProgress, RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind,
+    RuntimeView, SessionCompleteness, SessionContent, SessionFact, SessionIdentity, SessionItem,
+    SessionProvider, SessionView, SessionWindow, ToolPhase, ToolView, public_media_reference,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -878,6 +878,7 @@ fn project_matcha_view(
         phase,
         active_run_id,
         issue: None,
+        run_progress: None,
         runtime_activity: None,
         error_detail: None,
     };
@@ -1054,6 +1055,7 @@ impl OpenClawReplayProjection {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             },
@@ -1131,6 +1133,10 @@ impl OpenClawReplayProjection {
                     self.apply_runtime_activity(run_id.as_str(), None)
                 }
             }
+            openclaw::session::projection::CanonicalSessionChange::RunProgress {
+                run_id,
+                progress,
+            } => self.apply_run_progress(run_id.as_str(), Some(*progress)),
             openclaw::session::projection::CanonicalSessionChange::RuntimeFallback {
                 detail,
                 ..
@@ -1330,6 +1336,7 @@ impl OpenClawReplayProjection {
         status: openclaw::session::projection::AssistantTurnStatus,
     ) {
         self.runtime.phase = openclaw_assistant_turn_run_phase(status);
+        self.runtime.run_progress = None;
         self.runtime.active_run_id = match status {
             openclaw::session::projection::AssistantTurnStatus::Final
             | openclaw::session::projection::AssistantTurnStatus::Aborted
@@ -1364,6 +1371,7 @@ impl OpenClawReplayProjection {
         };
         self.runtime.phase = RunPhase::Started;
         self.runtime.active_run_id = Some(activity.run_id.to_owned());
+        self.runtime.run_progress = None;
         Some(())
     }
 
@@ -1393,6 +1401,7 @@ impl OpenClawReplayProjection {
         if phase == ApprovalPhase::Requested {
             self.runtime.phase = RunPhase::WaitingForApproval;
             self.runtime.active_run_id = run_id.map(str::to_owned);
+            self.runtime.run_progress = None;
         }
         Some(())
     }
@@ -1404,6 +1413,7 @@ impl OpenClawReplayProjection {
     ) -> Option<()> {
         self.runtime.phase = RunPhase::Started;
         self.runtime.active_run_id = Some(run_id.to_owned());
+        self.runtime.run_progress = None;
         self.runtime.runtime_activity = activity.map(|activity| match activity {
             openclaw::session::projection::CanonicalRuntimeActivity::Compacting => {
                 RuntimeActivity::Compacting
@@ -1413,11 +1423,26 @@ impl OpenClawReplayProjection {
         Some(())
     }
 
+    fn apply_run_progress(
+        &mut self,
+        run_id: &str,
+        progress: Option<openclaw::session::projection::CanonicalRunProgress>,
+    ) -> Option<()> {
+        self.runtime.phase = RunPhase::Started;
+        self.runtime.active_run_id = Some(run_id.to_owned());
+        self.runtime.run_progress = progress.map(openclaw_run_progress);
+        self.runtime.runtime_activity = None;
+        self.runtime.error_detail = None;
+        Some(())
+    }
+
     fn apply_runtime_fallback(
         &mut self,
         detail: &openclaw::session::protocol::RuntimeFallbackDetail,
     ) -> Option<()> {
+        self.runtime.run_progress = None;
         self.runtime.error_detail = Some(RuntimeErrorDetail {
+            kind: RuntimeErrorKind::Fallback,
             failover_reason: detail.failover_reason.clone(),
             provider_runtime_failure_kind: detail.provider_runtime_failure_kind.clone(),
             provider_error_type: detail.provider_error_type.clone(),
@@ -1448,6 +1473,7 @@ impl OpenClawReplayProjection {
         let phase = openclaw_terminal_run_phase(outcome);
         self.runtime.phase = phase;
         self.runtime.active_run_id = None;
+        self.runtime.run_progress = None;
         self.runtime.runtime_activity = None;
         self.runtime.error_detail = matches!(outcome, openclaw::port::TerminalOutcome::Error)
             .then(|| {
@@ -2058,6 +2084,51 @@ const fn openclaw_replay_tool_phase(
     }
 }
 
+const fn openclaw_run_progress(
+    progress: openclaw::session::projection::CanonicalRunProgress,
+) -> RunProgress {
+    match progress {
+        openclaw::session::projection::CanonicalRunProgress::Startup { phase } => {
+            RunProgress::Startup {
+                phase: openclaw_run_startup_phase(phase),
+            }
+        }
+        openclaw::session::projection::CanonicalRunProgress::Retrying {
+            attempt,
+            max_attempts,
+        } => RunProgress::Retrying {
+            attempt,
+            max_attempts,
+        },
+    }
+}
+
+const fn openclaw_run_startup_phase(
+    phase: openclaw::session::protocol::ChatStatusPhase,
+) -> RunStartupPhase {
+    match phase {
+        openclaw::session::protocol::ChatStatusPhase::PreparingWorkspace => {
+            RunStartupPhase::PreparingWorkspace
+        }
+        openclaw::session::protocol::ChatStatusPhase::NamingWorktree => {
+            RunStartupPhase::NamingWorktree
+        }
+        openclaw::session::protocol::ChatStatusPhase::CreatingWorktree => {
+            RunStartupPhase::CreatingWorktree
+        }
+        openclaw::session::protocol::ChatStatusPhase::RunningSetup => RunStartupPhase::RunningSetup,
+        openclaw::session::protocol::ChatStatusPhase::ProvisioningEnvironment => {
+            RunStartupPhase::ProvisioningEnvironment
+        }
+        openclaw::session::protocol::ChatStatusPhase::PreparingContext => {
+            RunStartupPhase::PreparingContext
+        }
+        openclaw::session::protocol::ChatStatusPhase::StartingModel => {
+            RunStartupPhase::StartingModel
+        }
+    }
+}
+
 const fn openclaw_terminal_run_phase(outcome: openclaw::port::TerminalOutcome) -> RunPhase {
     match outcome {
         openclaw::port::TerminalOutcome::Completed => RunPhase::Completed,
@@ -2099,6 +2170,7 @@ fn project_matcha_hydration_view(
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             },
@@ -3037,6 +3109,7 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             },

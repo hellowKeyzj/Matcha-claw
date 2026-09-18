@@ -6,6 +6,7 @@ import {
   type CapabilityRouting,
   type ModelRoute,
 } from '@/lib/capability-routing';
+import { refreshProviderPostMutationProjections } from '@/stores/provider-post-mutation-refresh';
 
 interface CapabilityRoutingState {
   routing: CapabilityRouting;
@@ -69,6 +70,9 @@ export const useCapabilityRoutingStore = create<CapabilityRoutingState>((set, ge
         return;
       }
       set({ routing: next, revision: persistedRevision, saving: false, ready: true, error: null, warning: warning ?? null });
+      await refreshProviderPostMutationProjections({
+        refreshCapabilityRouting: false,
+      });
     } catch (error) {
       set({ saving: false, error: String(error) });
     }

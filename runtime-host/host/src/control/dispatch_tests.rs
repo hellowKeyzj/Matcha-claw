@@ -1,9 +1,9 @@
 use serde_json::{Value, json, to_value};
 
 use super::*;
-use crate::organization::{TeamRuntimeCommand, TeamRuntimeCommandOutcome};
-
-use sessions::{ChatAbortResponse, ChatSendResponse};
+use crate::organization::{
+    TeamNodePromptSettledResult, TeamRuntimeCommand, TeamRuntimeCommandOutcome,
+};
 
 const TEST_UNKNOWN_CAPABILITY_MESSAGE: &str = "Capability descriptor is not available.";
 const TEST_INVALID_SCOPE_MESSAGE: &str = "Capability scope is invalid.";
@@ -60,60 +60,7 @@ fn team_runtime_facade_accepts_peer_runtime_scopes_without_changing_other_native
 }
 
 #[test]
-fn control_payload_decoders_keep_the_fixed_product_dtos() {
-    assert_eq!(
-        to_value(
-            decode_send(CommandInput(json!({
-                "sessionKey": "session-1",
-                "message": "private-input",
-                "runId": "run-1",
-            })))
-            .unwrap()
-        )
-        .unwrap(),
-        json!({
-            "sessionKey": "session-1",
-            "message": "private-input",
-            "idempotencyKey": "run-1",
-        })
-    );
-    assert_eq!(
-        to_value(decode_abort(CommandInput(json!({ "sessionKey": "session-1" }))).unwrap())
-            .unwrap(),
-        json!({ "sessionKey": "session-1" })
-    );
-    assert_eq!(
-        decode_manual_cron_trigger(CommandInput(json!({ "jobId": "cron-job-1" })))
-            .unwrap()
-            .job_id,
-        "cron-job-1"
-    );
-    for payload in [
-        CommandInput(serde_json::Value::Null),
-        CommandInput(json!({
-            "sessionKey": "session-1",
-            "message": "message",
-            "runId": "run-1",
-            "attachments": [],
-        })),
-        CommandInput(json!({
-            "sessionKey": " ",
-            "message": "message",
-            "runId": "run-1",
-        })),
-    ] {
-        assert_eq!(decode_send(payload), Err(InvalidPayload));
-    }
-    for payload in [
-        CommandInput(serde_json::Value::Null),
-        CommandInput(json!({ "jobId": "" })),
-        CommandInput(json!({ "jobId": "cron-job-1", "extra": true })),
-    ] {
-        assert!(matches!(
-            decode_manual_cron_trigger(payload),
-            Err(InvalidPayload)
-        ));
-    }
+fn control_payload_decoders_keep_private_lifecycle_dtos() {
     for payload in [
         CommandInput(serde_json::Value::Null),
         CommandInput(json!({})),
@@ -374,6 +321,29 @@ fn node_prompt_settled_decode_requires_null_target_and_preserves_prompt_identity
             .is_err()
         );
     }
+}
+
+#[test]
+fn node_prompt_settled_outcome_advances_without_node_event_completion() {
+    let outcome = team_runtime_outcome(
+        TeamRuntimeCommandOutcome::NodePromptSettled(Ok(TeamNodePromptSettledResult::Recorded(
+            organization::GraphRunId::new("run:one"),
+        ))),
+        None,
+        Some("run:one"),
+    );
+
+    assert_eq!(
+        to_value(outcome).unwrap(),
+        json!({
+            "kind": "succeeded",
+            "result": {
+                "settled": true,
+                "runId": "run:one",
+                "snapshot": null,
+            },
+        })
+    );
 }
 
 #[test]
@@ -885,12 +855,12 @@ fn team_legacy_placeholder_paths_are_fixed_empty_values() {
 
 #[test]
 fn team_role_binding_projection_redacts_session_identity() {
-    let binding = organization::RoleSessionReceipt::new(
+    let binding = organization::RoleSessionReceipt::with_endpoint_session_id(
         organization::TeamId::try_new("team:one").unwrap(),
         organization::GraphRunId::new("run:one"),
         organization::RoleId::try_new("leader").unwrap(),
-        organization::LocalSessionReference::try_new("local:secret").unwrap(),
-        organization::ExternalSessionReference::try_new("native-session:secret").unwrap(),
+        organization::RoleSessionRef::try_new("rs0").unwrap(),
+        organization::EndpointSessionId::try_new("native-session:secret").unwrap(),
         organization::ManagedAgentReference::try_new("agent:leader").unwrap(),
         organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
     );
@@ -902,7 +872,7 @@ fn team_role_binding_projection_redacts_session_identity() {
             "teamId": "team:one",
             "runId": "run:one",
             "roleId": "leader",
-            "sessionRef": "local:secret",
+            "sessionRef": "rs0",
             "status": "available",
         })
     );
@@ -968,7 +938,7 @@ fn team_run_snapshot_roles_use_safe_session_projection() {
             "teamId": "team:one",
             "runId": "run:one",
             "roleId": "writer",
-            "sessionRef": "local-session-secret",
+            "sessionRef": "rs0",
             "status": "available",
         }])
     );
@@ -1108,12 +1078,12 @@ fn team_snapshot_runtime() -> organization::RunRuntimeReceipt {
         organization::RuntimeEndpointReference::try_new("private-runtime-endpoint").unwrap();
     organization::RunRuntimeReceipt::try_new(
         organization::GraphRunId::new("run:one"),
-        vec![organization::RoleSessionReceipt::new(
+        vec![organization::RoleSessionReceipt::with_endpoint_session_id(
             organization::TeamId::try_new("team:one").unwrap(),
             organization::GraphRunId::new("run:one"),
             organization::RoleId::try_new("writer").unwrap(),
-            organization::LocalSessionReference::try_new("local-session-secret").unwrap(),
-            organization::ExternalSessionReference::try_new("external-session-secret").unwrap(),
+            organization::RoleSessionRef::try_new("rs0").unwrap(),
+            organization::EndpointSessionId::try_new("external-session-secret").unwrap(),
             organization::ManagedAgentReference::try_new("private-agent-secret").unwrap(),
             endpoint,
         )],
@@ -1208,28 +1178,6 @@ fn openclaw_gateway_request_outcomes_preserve_native_payloads() {
         .unwrap(),
         json!({ "kind": "unknown", "result": { "outcome": "unknown" } })
     );
-}
-
-#[test]
-fn unknown_mutation_outcomes_remain_safe_and_distinguishable() {
-    let send = CommandOutcome::succeeded(CommandResult::private(json!({
-        "result": ChatSendResponse::from(platform::exchange::InvocationOutcome::<
-            openclaw::session::protocol::ChatSendResult,
-            (),
-        >::Unknown),
-    })));
-    let abort = CommandOutcome::succeeded(CommandResult::private(json!({
-        "result": ChatAbortResponse::from(platform::exchange::InvocationOutcome::<
-            openclaw::session::protocol::ChatAbortResult,
-            (),
-        >::Unknown),
-    })));
-    for outcome in [send, abort] {
-        assert_eq!(
-            to_value(outcome).unwrap(),
-            json!({ "kind": "succeeded", "result": { "result": { "outcome": "unknown" } } })
-        );
-    }
 }
 
 #[test]

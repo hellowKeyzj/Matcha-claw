@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ENDPOINT = '/api/team/manual-materialize-and-create';
 const UNAVAILABLE = { success: false, error: 'Manual Team materialization is unavailable' } as const;
 
 type ManualTeamRole = Readonly<{
@@ -28,35 +29,27 @@ export interface ManualTeamTransport {
 
 export function createManualTeamTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ManualTeamTransport {
-  const url = `http://127.0.0.1:${port}/api/team/manual-materialize-and-create`;
   return {
     async materializeAndCreate(request): Promise<ManualTeamTransportResponse> {
       if (!isRequest(request)) return { status: 503, body: UNAVAILABLE };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/team/manual-materialize-and-create',
-              scope: 'team:write',
-              capability: 'team.manual.materialize-and-create',
-              subject: 'team-manual-materialize-and-create',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const result: unknown = await response.json();
-        if (response.status === 200 && isOutcome(result)) return { status: 200, body: result };
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: 'team:write',
+          capability: 'team.manual.materialize-and-create',
+          subject: 'team-manual-materialize-and-create',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isOutcome(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -96,13 +89,4 @@ function isText(value: unknown): value is string {
 
 function isOpaque(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

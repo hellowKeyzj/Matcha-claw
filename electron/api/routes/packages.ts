@@ -5,7 +5,7 @@ import type { CloudPackageDownloadRequest, CloudPackageDownloadRecordRequest, Cl
 
 class InvalidPackageRequestError extends Error {}
 
-type PackageApiContext = Pick<HostApiContext, 'agentsTransport' | 'cloudAccountService' | 'sealedSkillsTransport'>;
+type PackageApiContext = Pick<HostApiContext, 'cloudAccountService' | 'runtimeHostTransports'>;
 
 type PackageUploadRequest = Readonly<{
   packagePath?: unknown;
@@ -52,11 +52,11 @@ export async function handlePackageRoutes(
       const body = await parsePackageDownloadRequest(req);
       const download = await ctx.cloudAccountService.downloadPackage(body);
       if (download.packagePath.endsWith('.matcha-agentpkg')) {
-        const install = await ctx.agentsTransport.execute(agentPackageInstallRequest(download.packagePath));
+        const install = await ctx.runtimeHostTransports.agentsTransport.execute(agentPackageInstallRequest(download.packagePath));
         sendJson(res, install.status, { ...download, install: agentInstallResult(install.body) });
         return true;
       }
-      const install = await ctx.sealedSkillsTransport.install({ packagePath: download.packagePath });
+      const install = await ctx.runtimeHostTransports.sealedSkillsTransport.install({ packagePath: download.packagePath });
       sendJson(res, install.status, { ...download, install: skillInstallResult(install.body) });
       return true;
     }

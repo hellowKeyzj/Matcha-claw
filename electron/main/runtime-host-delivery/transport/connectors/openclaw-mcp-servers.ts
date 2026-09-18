@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const ENDPOINT = '/api/openclaw/mcp-servers';
 const UNAVAILABLE = {
   success: false,
@@ -32,38 +32,30 @@ export interface OpenClawMcpServersTransport {
 
 export function createOpenClawMcpServersTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  providerModelsTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): OpenClawMcpServersTransport {
-  const url = `http://127.0.0.1:${providerModelsTransportPort}${ENDPOINT}`;
   return {
     async execute(request: unknown): Promise<OpenClawMcpServersTransportResponse> {
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'openclaw:mcp-servers',
-              capability: request.operationId,
-              subject: 'openclaw-mcp-servers',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSuccessResponse(request.operationId, body)) {
-          return { status: 200, body: projectPublicResponse(request.operationId, body) };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-      } catch {
-        // Native transport details never cross the Electron Main public boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: 'openclaw:mcp-servers',
+          capability: request.operationId,
+          subject: 'openclaw-mcp-servers',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSuccessResponse(request.operationId, response.body)) {
+        return { status: 200, body: projectPublicResponse(request.operationId, response.body) };
       }
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -150,15 +142,6 @@ function isSafeText(value: unknown, maxBytes = 16 * 1024): value is string {
     && value.trim().length > 0
     && Buffer.byteLength(value, 'utf8') <= maxBytes
     && !/\p{Cc}/u.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasExpectedKeys(

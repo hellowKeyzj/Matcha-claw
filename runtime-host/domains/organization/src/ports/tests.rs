@@ -42,12 +42,12 @@ fn agent() -> ManagedAgentReference {
     ManagedAgentReference::try_new("agent-reviewer").unwrap()
 }
 
-fn local_session() -> LocalSessionReference {
-    LocalSessionReference::try_new("local-session-reviewer").unwrap()
+fn session_ref() -> RoleSessionRef {
+    RoleSessionRef::initial()
 }
 
-fn external_session() -> ExternalSessionReference {
-    ExternalSessionReference::try_new("session-native-opaque").unwrap()
+fn other_session_ref() -> RoleSessionRef {
+    RoleSessionRef::try_new("rs1").unwrap()
 }
 
 fn idempotency_key() -> IdempotencyKey {
@@ -55,15 +55,7 @@ fn idempotency_key() -> IdempotencyKey {
 }
 
 fn binding() -> RoleSessionReceipt {
-    RoleSessionReceipt::new(
-        team(),
-        run(),
-        role(),
-        local_session(),
-        external_session(),
-        agent(),
-        endpoint(),
-    )
+    RoleSessionReceipt::new(team(), run(), role(), session_ref(), agent(), endpoint())
 }
 
 fn materialized_role(
@@ -80,8 +72,8 @@ fn materialized_role(
 
 #[test]
 fn rejects_blank_opaque_references_at_the_port_boundary() {
-    assert!(ExternalSessionReference::try_new("").is_err());
-    assert!(LocalSessionReference::try_new("\n").is_err());
+    assert!(EndpointSessionId::try_new("").is_err());
+    assert!(RoleSessionRef::try_new("\n").is_err());
     assert!(DeliveryReceiptReference::try_new("\n").is_err());
 }
 
@@ -366,7 +358,7 @@ fn timeout_close_and_invalid_provider_reply_are_outcome_unknown() {
 }
 
 #[test]
-fn role_session_receipt_preserves_local_and_external_identity() {
+fn role_session_receipt_preserves_slot_and_endpoint_session_identity() {
     let receipt = binding();
 
     assert_eq!(receipt.team(), &team());
@@ -374,19 +366,20 @@ fn role_session_receipt_preserves_local_and_external_identity() {
     assert_eq!(receipt.role(), &role());
     assert_eq!(receipt.agent(), &agent());
     assert_eq!(receipt.endpoint(), &endpoint());
-    assert_ne!(
-        receipt.local_session().as_str(),
-        receipt.external_session().as_str()
+    assert_eq!(receipt.session_ref(), &session_ref());
+    assert_eq!(
+        receipt.endpoint_session_id().as_str(),
+        "tr-run-42-reviewer-rs0"
     );
 }
 
 #[test]
 fn pending_hydration_is_not_an_empty_or_unavailable_session_window() {
     let pending = RoleSessionWindow::PendingHydration {
-        session: binding().external_session().clone(),
+        session: binding().endpoint_session_id().clone(),
     };
     let unavailable = RoleSessionWindow::Unavailable {
-        session: binding().external_session().clone(),
+        session: binding().endpoint_session_id().clone(),
     };
 
     assert_ne!(pending, unavailable);
@@ -397,7 +390,7 @@ fn pending_hydration_is_not_an_empty_or_unavailable_session_window() {
 }
 
 #[test]
-fn run_runtime_receipt_rejects_mismatched_or_duplicate_role_bindings() {
+fn run_runtime_receipt_rejects_mismatched_or_duplicate_role_session_bindings() {
     assert_eq!(
         RunRuntimeReceipt::try_new(
             run(),
@@ -405,8 +398,7 @@ fn run_runtime_receipt_rejects_mismatched_or_duplicate_role_bindings() {
                 team(),
                 GraphRunId::new("run-other"),
                 role(),
-                local_session(),
-                external_session(),
+                session_ref(),
                 agent(),
                 endpoint(),
             )],
@@ -414,58 +406,41 @@ fn run_runtime_receipt_rejects_mismatched_or_duplicate_role_bindings() {
         Err(InvalidRunRuntimeReceipt::BindingRunMismatch),
     );
     assert_eq!(
-        RunRuntimeReceipt::try_new(
-            run(),
-            vec![
-                binding(),
-                RoleSessionReceipt::new(
-                    team(),
-                    run(),
-                    other_role(),
-                    LocalSessionReference::try_new("local-session-approver").unwrap(),
-                    ExternalSessionReference::try_new("session-native-approver").unwrap(),
-                    ManagedAgentReference::try_new("agent-approver").unwrap(),
-                    other_endpoint(),
-                ),
-            ],
-        ),
-        Err(InvalidRunRuntimeReceipt::BindingEndpointMismatch),
-    );
-    assert_eq!(
         RunRuntimeReceipt::try_new(run(), vec![binding(), binding()],),
-        Err(InvalidRunRuntimeReceipt::DuplicateRoleBinding),
+        Err(InvalidRunRuntimeReceipt::DuplicateRoleSessionBinding),
     );
 }
 
 #[test]
-fn run_runtime_receipt_rejects_reused_local_or_native_session_across_roles() {
-    let first = binding();
-    let same_local = RoleSessionReceipt::new(
+fn run_runtime_receipt_allows_same_role_across_distinct_session_refs_and_endpoints() {
+    let second = RoleSessionReceipt::new(
         team(),
         run(),
-        other_role(),
-        first.local_session().clone(),
-        ExternalSessionReference::try_new("session-native-approver").unwrap(),
+        role(),
+        other_session_ref(),
         ManagedAgentReference::try_new("agent-approver").unwrap(),
-        endpoint(),
+        other_endpoint(),
     );
-    assert_eq!(
-        RunRuntimeReceipt::try_new(run(), vec![first.clone(), same_local],),
-        Err(InvalidRunRuntimeReceipt::DuplicateLocalSessionBinding),
-    );
+    let receipt = RunRuntimeReceipt::try_new(run(), vec![binding(), second]).unwrap();
 
-    let same_native = RoleSessionReceipt::new(
+    assert_eq!(receipt.bindings().len(), 2);
+}
+
+#[test]
+fn run_runtime_receipt_rejects_reused_endpoint_session_id() {
+    let first = binding();
+    let reused_endpoint_session = RoleSessionReceipt::with_endpoint_session_id(
         team(),
         run(),
         other_role(),
-        LocalSessionReference::try_new("local-session-approver").unwrap(),
-        first.external_session().clone(),
+        other_session_ref(),
+        first.endpoint_session_id().clone(),
         ManagedAgentReference::try_new("agent-approver").unwrap(),
-        endpoint(),
+        other_endpoint(),
     );
     assert_eq!(
-        RunRuntimeReceipt::try_new(run(), vec![first, same_native],),
-        Err(InvalidRunRuntimeReceipt::DuplicateExternalSessionBinding),
+        RunRuntimeReceipt::try_new(run(), vec![first, reused_endpoint_session],),
+        Err(InvalidRunRuntimeReceipt::DuplicateEndpointSessionBinding),
     );
 }
 

@@ -1,7 +1,8 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/sessions/send';
 const MAX_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_DECODED_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_DECODED_BYTES = 20 * 1024 * 1024;
@@ -132,10 +133,9 @@ export interface SessionSendTransport {
 
 export function createSessionSendTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionSendTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionSendTransport {
-  const url = `http://127.0.0.1:${sessionSendTransportPort}/api/sessions/send`;
   return {
     async send(request: unknown, traceId?: string | null): Promise<SessionSendTransportResponse> {
       if (!isSessionSendRequest(request)) {
@@ -152,71 +152,68 @@ export function createSessionSendTransport(
         idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
         attachmentCount: request.input.attachments.length,
       });
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/sessions/send',
-              scope: 'sessions:write',
-              capability: 'session.prompt',
-              subject: 'session-send',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...traceHeader(traceId),
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        publishE2ESessionSendBoundary({
-          stage: 'http-response',
-          status: response.status,
-          elapsedMs: Date.now() - startedAt,
-          contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
-          attachmentShape: e2eAttachmentShape(request),
-        });
-        logSessionTrace('electron.send.response', traceId, {
-          status: response.status,
-          contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
-          outcome: isRustSessionSendResponse(body) ? body.outcome : null,
-          elapsedMs: Date.now() - startedAt,
-        });
-        if (response.status === 202
-          && request.scope.endpoint.runtimeAdapterId === 'openclaw'
-          && isRustSessionSendResponse(body)
-          && body.outcome === 'queued') {
-          return {
-            status: 202,
-            body: { outcome: 'queued', runId: body.runId },
-          };
-        }
-        if (response.status === 200 && isRustSessionSendResponse(body)) {
-          if (body.outcome === 'succeeded') {
-            return {
-              status: 200,
-              body: {
-                outcome: 'succeeded',
-                runId: body.runId,
-                status: body.status,
-              },
-            };
-          }
-          if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown') {
-            return { status: 200, body };
-          }
-        }
-        if (response.status === 400) {
-          return { status: 400, body: INVALID_REQUEST };
-        }
-      } catch {
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'sessions:write',
+          capability: 'session.prompt',
+          subject: 'session-send',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+        headers: traceHeader(traceId),
+      });
+      if (response === null) {
         publishE2ESessionSendBoundary({ stage: 'transport-failure' });
         logSessionTrace('electron.send.failure', traceId, {
           elapsedMs: Date.now() - startedAt,
         });
-        // The public contract deliberately suppresses transport details.
+        return { status: 503, body: UNAVAILABLE };
+      }
+      const body = response.body;
+      publishE2ESessionSendBoundary({
+        stage: 'http-response',
+        status: response.status,
+        elapsedMs: Date.now() - startedAt,
+        contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
+        attachmentShape: e2eAttachmentShape(request),
+      });
+      logSessionTrace('electron.send.response', traceId, {
+        status: response.status,
+        contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
+        outcome: isRustSessionSendResponse(body) ? body.outcome : null,
+        elapsedMs: Date.now() - startedAt,
+      });
+      if (response.status === 202
+        && request.scope.endpoint.runtimeAdapterId === 'openclaw'
+        && isRustSessionSendResponse(body)
+        && body.outcome === 'queued') {
+        return {
+          status: 202,
+          body: { outcome: 'queued', runId: body.runId },
+        };
+      }
+      if (response.status === 200 && isRustSessionSendResponse(body)) {
+        if (body.outcome === 'succeeded') {
+          return {
+            status: 200,
+            body: {
+              outcome: 'succeeded',
+              runId: body.runId,
+              status: body.status,
+            },
+          };
+        }
+        if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown') {
+          return { status: 200, body };
+        }
+      }
+      if (response.status === 400) {
+        return { status: 400, body: INVALID_REQUEST };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -350,15 +347,6 @@ function base64Value(codePoint: number): number {
   if (codePoint >= 97 && codePoint <= 122) return codePoint - 97 + 26;
   if (codePoint >= 48 && codePoint <= 57) return codePoint - 48 + 52;
   return codePoint === 43 ? 62 : 63;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasAllowedKeys(

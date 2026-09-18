@@ -83,10 +83,21 @@
     "pending": {
         "typing": "Thinking",
         "activity": "Working",
-        "compacting": "Compressing context, then the reply will continue"
+        "compacting": "Compressing context, then the reply will continue",
+        "startup": {
+            "preparing_workspace": "Preparing workspace",
+            "naming_worktree": "Naming workspace",
+            "creating_worktree": "Creating workspace",
+            "running_setup": "Running setup",
+            "provisioning_environment": "Preparing run environment",
+            "preparing_context": "Preparing context",
+            "starting_model": "Starting model"
+        },
+        "retrying": "Model rate-limited, retrying {{attempt}}/{{maxAttempts}}"
     },
     "runtimeStatus": {
         "providerFallback": "Provider fallback applied",
+        "runtimeError": "Runtime error",
         "guardian": {
             "reviewing": "Guardian is reviewing the action",
             "approved": "Guardian approved the action",

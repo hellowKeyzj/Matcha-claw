@@ -286,6 +286,7 @@ function appendOptimisticSendItems(params: {
           runPhase: 'submitted',
           pendingTurnKey: assistantItemKey,
           pendingTurnLaneKey: 'main',
+          runProgress: null,
           imageGeneration: undefined,
           lastUserMessageAt: createdAt,
           lastError: null,
@@ -356,6 +357,7 @@ function confirmOptimisticSendItems(params: {
           activeTurnItemKey: null,
           pendingTurnKey: runAssistantKey,
           pendingTurnLaneKey: 'main',
+          runProgress: null,
           imageGeneration: undefined,
           lastUserMessageAt,
           lastError: null,
@@ -383,6 +385,7 @@ function clearOptimisticRuntimeState(
     activeTurnItemKey: ownsActiveTurn ? null : runtime.activeTurnItemKey,
     pendingTurnKey: ownsPendingTurn ? null : runtime.pendingTurnKey,
     pendingTurnLaneKey: ownsPendingTurn ? null : runtime.pendingTurnLaneKey,
+    runProgress: null,
     imageGeneration: undefined,
     updatedAt: Date.now(),
   };

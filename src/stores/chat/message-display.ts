@@ -218,11 +218,15 @@ function isInternalAssistantLine(line: string): boolean {
     || isImageGenerationStatusNarration(value);
 }
 
+function stripTrailingTeamControlBlock(text: string): string {
+  return text.replace(/\s*<team_control\b[\s\S]*?<\/team_control>\s*$/i, '').trimEnd();
+}
+
 function stripInternalAssistantArtifactLines(text: string): string {
   if (!text) {
     return text;
   }
-  return stripInternalDeliveryPlanning(text)
+  return stripTrailingTeamControlBlock(stripInternalDeliveryPlanning(text))
     .split('\n')
     .filter((line) => !isInternalAssistantLine(line))
     .join('\n')

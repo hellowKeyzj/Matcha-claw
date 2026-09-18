@@ -14,6 +14,7 @@ pub(super) struct HostHandleInput {
     pub(super) diagnostics: crate::diagnostics::DiagnosticsArchiveProducer,
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) runtime_observation: crate::diagnostics::RuntimeFlightRecorder,
+    pub(super) session_delta_source: crate::sessions::events::SessionDeltaSource,
 }
 
 pub(super) fn build_handles(
@@ -32,6 +33,7 @@ pub(super) fn build_handles(
         diagnostics,
         clawhub_registry,
         runtime_observation,
+        session_delta_source,
     } = input;
     let platform_runtime_handle =
         crate::facade::PlatformRuntimeHandle::new(Arc::clone(&admission), Arc::clone(&open_claw));
@@ -101,5 +103,6 @@ pub(super) fn build_handles(
         diagnostics: diagnostics_handle,
         observation: runtime_observation.sink(),
         channel_endpoint: owners.channel_endpoint.clone(),
+        session_delta_source,
     }
 }

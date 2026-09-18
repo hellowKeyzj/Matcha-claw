@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const CHANNEL_CONTROL_PATH = '/api/channels/control';
 const UNAVAILABLE = {
   success: false,
   error: 'Channel control is unavailable',
@@ -24,38 +25,30 @@ export interface ChannelControlTransport {
 
 export function createChannelControlTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelControlTransport {
-  const url = `http://127.0.0.1:${port}/api/channels/control`;
   return {
     async control(input): Promise<ChannelControlTransportResponse> {
       if (!isIdentity(input.channel) || !isIdentity(input.accountId)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/control',
-              scope: 'channels:write',
-              capability: 'channels.runtime.control',
-              subject: 'channel-control',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(input),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isChannelControl(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: CHANNEL_CONTROL_PATH,
+        issuer,
+        decision: {
+          endpoint: CHANNEL_CONTROL_PATH,
+          scope: 'channels:write',
+          capability: 'channels.runtime.control',
+          subject: 'channel-control',
+        },
+        method: 'POST',
+        fetcher,
+        body: input,
+      });
+      if (response?.status === 200 && isChannelControl(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -67,8 +60,7 @@ function isIdentity(value: string): boolean {
 }
 
 function isChannelControl(value: unknown): value is Readonly<{ outcome: ChannelControlOutcome }> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const body = value as Record<string, unknown>;
-  return Object.keys(body).length === 1
-    && (body.outcome === 'confirmed' || body.outcome === 'target_rejected' || body.outcome === 'unknown');
+  return isRecord(value)
+    && hasExactKeys(value, ['outcome'])
+    && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }

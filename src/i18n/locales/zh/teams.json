@@ -293,6 +293,13 @@
     "notePlaceholder": "可选备注",
     "waitingDecision": "等待运行决策",
     "submitDecision": "提交决策",
+    "proposalPending": {
+      "title": "方案待确认",
+      "emptySummary": "Leader 已准备好任务方案。",
+      "confirm": "确认并开始",
+      "discuss": "继续讨论",
+      "cancel": "取消"
+    },
     "dependencyMissing": {
       "title": "继续运行前需要处理依赖",
       "description": "必需依赖不能降级绕过。请安装缺失 Skill 或配置缺失 Tool，然后重试依赖检查。",

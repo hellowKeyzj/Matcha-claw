@@ -1,7 +1,15 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import {
+  hasExactKeys,
+  isNonEmptyBoundedText,
+  isRecord,
+  isSafeInteger,
+  isSafeNonNegativeInteger,
+  sendLoopbackJson,
+} from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const ROUTE_PATH = '/api/workspace/files/read-text';
 const UNAVAILABLE = {
   success: false,
   error: 'Workspace text is unavailable',
@@ -43,42 +51,34 @@ export interface WorkspaceTextTransport {
 
 export function createWorkspaceTextTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): WorkspaceTextTransport {
-  const url = `http://127.0.0.1:${port}/api/workspace/files/read-text`;
   return {
     async read(request: unknown): Promise<WorkspaceTextTransportResponse> {
       if (!isWorkspaceTextRequest(request)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const forwardedRequest = withBoundedMaxBytes(request);
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/workspace/files/read-text',
-              scope: 'workspace-files:read',
-              capability: 'files.readText',
-              subject: 'workspace-text',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(forwardedRequest),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isWorkspaceTextResponse(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 422 && isPublicFailure(body)) {
-          return { status: 422, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const forwardedRequest = withBoundedMaxBytes(request);
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'workspace-files:read',
+          capability: 'files.readText',
+          subject: 'workspace-text',
+        },
+        method: 'POST',
+        fetcher,
+        body: forwardedRequest,
+      });
+      if (response?.status === 200 && isWorkspaceTextResponse(response.body)) {
+        return { status: 200, body: response.body };
+      }
+      if (response?.status === 422 && isPublicFailure(response.body)) {
+        return { status: 422, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -101,7 +101,7 @@ function isScope(value: unknown): value is WorkspaceTextRequest['scope'] {
     && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
     && value.kind === 'session'
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey);
+    && isNonEmptyBoundedText(value.sessionKey);
 }
 
 function isTarget(value: unknown): boolean {
@@ -129,13 +129,13 @@ function isInput(value: unknown): value is WorkspaceTextRequest['input'] {
     || hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'maxBytes']);
   return hasRequiredFields
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey)
+    && isNonEmptyBoundedText(value.sessionKey)
     && isRelativePath(value.relativePath)
     && (value.maxBytes === undefined || isSafeInteger(value.maxBytes));
 }
 
 function isRelativePath(value: unknown): value is string {
-  return isNonEmptyString(value)
+  return isNonEmptyBoundedText(value)
     && !value.startsWith('/')
     && !value.startsWith('\\')
     && !value.includes(':')
@@ -153,7 +153,7 @@ function isEndpoint(value: unknown): boolean {
 function isWorkspaceTextResponse(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['name', 'content', 'size'])
-    && isNonEmptyString(value.name)
+    && isNonEmptyBoundedText(value.name)
     && typeof value.content === 'string'
     && isSafeNonNegativeInteger(value.size);
 }
@@ -168,25 +168,4 @@ function isPublicFailure(value: unknown): boolean {
       'Workspace text target exceeds the limit',
       'Workspace text target is binary',
     ].includes(value.error as string);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value);
-}
-
-function isSafeNonNegativeInteger(value: unknown): boolean {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

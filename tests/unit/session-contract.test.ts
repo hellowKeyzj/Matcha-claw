@@ -15,6 +15,7 @@ import {
   sessionDelta,
   sessionView,
   toolUseContent,
+  runtimeView,
   toolView,
   userItem,
   windowView,
@@ -159,6 +160,66 @@ describe('strict SessionView and SessionDelta contract fixtures', () => {
     expect(isSessionView(viewWithTool)).toBe(true);
     expect(decodeSessionView(viewWithTool)).toEqual(viewWithTool);
     expect(decodeLegacySessionUpdateDelta({ kind: 'delta', delta })).toEqual(delta);
+  });
+
+  it('requires explicit runtime error detail kind', () => {
+    const fallbackDelta = sessionDelta(sessionKey, {
+      seq: 1,
+      cursor: 1,
+      changes: [{
+        kind: 'runtimeChanged',
+        runtime: runtimeView({
+          phase: 'failed',
+          errorDetail: {
+            kind: 'fallback',
+            failoverReason: 'rate_limit',
+            providerRuntimeFailureKind: null,
+            providerErrorType: 'overloaded',
+            providerErrorMessagePreview: 'raw preview',
+            httpStatus: 429,
+          },
+        }),
+      }],
+    });
+    const errorDelta = sessionDelta(sessionKey, {
+      seq: 2,
+      cursor: 2,
+      changes: [{
+        kind: 'runtimeChanged',
+        runtime: runtimeView({
+          phase: 'failed',
+          errorDetail: {
+            kind: 'error',
+            failoverReason: null,
+            providerRuntimeFailureKind: null,
+            providerErrorType: 'unknown_model',
+            providerErrorMessagePreview: 'unknown model',
+            httpStatus: null,
+          },
+        }),
+      }],
+    });
+    const missingKindDelta = sessionDelta(sessionKey, {
+      seq: 3,
+      cursor: 3,
+      changes: [{
+        kind: 'runtimeChanged',
+        runtime: runtimeView({
+          phase: 'failed',
+          errorDetail: {
+            failoverReason: 'rate_limit',
+            providerRuntimeFailureKind: null,
+            providerErrorType: 'overloaded',
+            providerErrorMessagePreview: 'raw preview',
+            httpStatus: 429,
+          } as never,
+        }),
+      }],
+    });
+
+    expect(decodeSessionDelta(fallbackDelta)).toEqual(fallbackDelta);
+    expect(decodeSessionDelta(errorDelta)).toEqual(errorDelta);
+    expect(decodeSessionDelta(missingKindDelta)).toBeNull();
   });
 
   it('rejects legacy snapshot fields and malformed typed facts instead of projecting them', () => {

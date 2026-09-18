@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createRuntimeHostDeliveryIssuer,
-} from '../../electron/main/runtime-host-delivery/bootstrap';
+} from '../../electron/main/runtime-host-delivery/issuer';
 
 describe('RuntimeHostDeliveryIssuer', () => {
   it('signs a short-lived fixed decision without exposing its private key', () => {

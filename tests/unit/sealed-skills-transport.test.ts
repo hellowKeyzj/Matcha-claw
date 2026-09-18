@@ -4,7 +4,7 @@ import {
   createSealedSkillsTransport,
   SEALED_SKILLS_ENDPOINTS,
 } from '../../electron/main/runtime-host-delivery/transport/skills/sealed';
-import type { RuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 
 const issuer: RuntimeHostDeliveryIssuer = {
   verificationKey: 'public',

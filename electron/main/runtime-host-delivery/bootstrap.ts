@@ -1,4 +1,3 @@
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 
 const RUNTIME_HOST_BOOTSTRAP_VERSION = 1;
@@ -12,7 +11,6 @@ export interface RuntimeHostBootstrapMatchaInput {
   readonly workingDirectory: string;
   readonly storageRoot: string;
   readonly port: number;
-  readonly privateSecretRoot: string;
 }
 
 export interface RuntimeHostBootstrapOpenClawInput {
@@ -42,87 +40,12 @@ interface RuntimeHostBootstrapBaseInput {
   }>;
   /** Electron Main's per-host verification key; its matching private key never leaves Main. */
   readonly deliveryVerificationKey: string;
-  /** Dedicated Cron broker verification key; its matching private key stays in app-server private storage. */
-  readonly cronBrokerVerificationKey: string;
   /** Loopback callback receiver URL for Rust-to-Main event delivery. */
   readonly parentCallbackBaseUrl: string;
   /** Per-runtime opaque token for the Rust-to-Main callback receiver. */
   readonly parentCallbackDispatchToken: string;
-  /** Fixed loopback public session-list transport port. */
-  readonly sessionTransportPort: number;
-  /** Fixed loopback public Fleet transport port. */
-  readonly fleetTransportPort: number;
-  /** Fixed loopback public diagnostics archive transport port. */
-  readonly diagnosticsTransportPort: number;
-  /** Fixed loopback public workspace text transport port. */
-  readonly workspaceTextTransportPort: number;
-  /** Fixed loopback public workspace binary/stat transport port. */
-  readonly workspaceBinaryTransportPort: number;
-  /** Fixed loopback public workspace directory transport port. */
-  readonly workspaceDirectoryTransportPort: number;
-  /** Fixed loopback public workspace write transport port. */
-  readonly workspaceWriteTransportPort: number;
-  /** Fixed loopback public workspace media transport port. */
-  readonly workspaceMediaTransportPort: number;
-  /** Fixed loopback public session send transport port. */
-  readonly sessionSendTransportPort: number;
-  /** Fixed loopback public session abort transport port. */
-  readonly sessionAbortTransportPort: number;
-  /** Fixed loopback public security emergency transport port. */
-  readonly securityEmergencyTransportPort: number;
-  /** Fixed loopback public channel account status transport port. */
-  readonly channelStatusTransportPort: number;
-  /** Fixed loopback public channel catalog transport port. */
-  readonly channelCatalogTransportPort: number;
-  /** Fixed loopback public channel runtime control transport port. */
-  readonly channelControlTransportPort: number;
-  /** Fixed loopback public channel pairing-list transport port. */
-  readonly channelPairingTransportPort: number;
-  /** Fixed loopback Settings desired-state transport port. */
-  readonly settingsDesiredTransportPort: number;
-  /** Fixed loopback Security policy transport port. */
-  readonly securityPolicyTransportPort: number;
-  /** Fixed loopback public session approval transport port. */
-  readonly sessionApprovalTransportPort: number;
-  /** Fixed loopback public Matcha Agent chat history transport port. */
-  readonly matchaHistoryTransportPort: number;
-  /** Fixed loopback public OpenClaw usage history transport port. */
-  readonly usageTransportPort: number;
-  /** Fixed loopback public session model selection transport port. */
-  readonly sessionModelSelectionTransportPort: number;
-  /** Fixed loopback public cron CRUD/list transport port. */
-  readonly cronTransportPort: number;
-  /** Dedicated loopback Cron broker transport port. */
-  readonly cronBrokerTransportPort: number;
-  /** Fixed loopback public Task Manager transport port. */
-  readonly taskManagerTransportPort: number;
-  /** Fixed loopback public subagent management transport port. */
-  readonly agentsTransportPort: number;
-  /** Fixed loopback public Team projection transport port. */
-  readonly teamPublicTransportPort: number;
-  readonly teamTaskBoardTransportPort: number;
-  /** Fixed loopback public Team role-session projection transport port. */
-  readonly teamRoleSessionsTransportPort: number;
-  /** Fixed loopback public Team pending approvals transport port. */
-  readonly teamApprovalsTransportPort: number;
-  /** Fixed loopback public Team human decision transport port. */
-  readonly teamDecisionTransportPort: number;
-  /** Fixed loopback public Team role-chat transport port. */
-  readonly teamRoleChatTransportPort: number;
-  /** Fixed loopback public Team graph YAML transport port. */
-  readonly teamGraphTransportPort: number;
-  /** Fixed loopback public provider model catalog transport port. */
-  readonly providerModelsTransportPort: number;
-  /** Fixed loopback public provider account catalog transport port. */
-  readonly providerAccountsTransportPort: number;
-  /** Fixed loopback public TeamSkill selection transport port. */
-  readonly teamSkillTransportPort: number;
-  /** Fixed loopback public Team trigger transport port. */
-  readonly teamTriggerTransportPort: number;
-  /** Fixed loopback public Team lifecycle transport port. */
-  readonly teamLifecycleTransportPort: number;
-  /** Fixed loopback public Manual Team materialize-and-create transport port. */
-  readonly manualTeamTransportPort: number;
+  /** Fixed loopback runtime-host compatibility transport port. */
+  readonly runtimeHostTransportPort: number;
   readonly matcha: RuntimeHostBootstrapMatchaInput;
   readonly openClaw: RuntimeHostBootstrapOpenClawInput;
 }
@@ -158,7 +81,6 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
     workingDirectory: input.matcha.workingDirectory,
     storageRoot: input.matcha.storageRoot,
     port: input.matcha.port,
-    privateSecretRoot: input.matcha.privateSecretRoot,
     ...(input.platform === 'win32' ? { gitBash: input.matcha.gitBash } : {}),
   };
   const payload = {
@@ -176,47 +98,9 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
         }
       : {}),
     deliveryVerificationKey: input.deliveryVerificationKey,
-    cronBrokerVerificationKey: input.cronBrokerVerificationKey,
     parentCallbackBaseUrl: input.parentCallbackBaseUrl,
     parentCallbackDispatchToken: input.parentCallbackDispatchToken,
-    sessionTransportPort: input.sessionTransportPort,
-    fleetTransportPort: input.fleetTransportPort,
-    diagnosticsTransportPort: input.diagnosticsTransportPort,
-    workspaceTextTransportPort: input.workspaceTextTransportPort,
-    workspaceBinaryTransportPort: input.workspaceBinaryTransportPort,
-    workspaceDirectoryTransportPort: input.workspaceDirectoryTransportPort,
-    workspaceWriteTransportPort: input.workspaceWriteTransportPort,
-    workspaceMediaTransportPort: input.workspaceMediaTransportPort,
-    sessionSendTransportPort: input.sessionSendTransportPort,
-    sessionAbortTransportPort: input.sessionAbortTransportPort,
-    securityEmergencyTransportPort: input.securityEmergencyTransportPort,
-    channelStatusTransportPort: input.channelStatusTransportPort,
-    channelCatalogTransportPort: input.channelCatalogTransportPort,
-    channelControlTransportPort: input.channelControlTransportPort,
-    channelPairingTransportPort: input.channelPairingTransportPort,
-    settingsDesiredTransportPort: input.settingsDesiredTransportPort,
-    securityPolicyTransportPort: input.securityPolicyTransportPort,
-    sessionApprovalTransportPort: input.sessionApprovalTransportPort,
-    matchaHistoryTransportPort: input.matchaHistoryTransportPort,
-    usageTransportPort: input.usageTransportPort,
-    sessionModelSelectionTransportPort: input.sessionModelSelectionTransportPort,
-    cronTransportPort: input.cronTransportPort,
-    cronBrokerTransportPort: input.cronBrokerTransportPort,
-    taskManagerTransportPort: input.taskManagerTransportPort,
-    agentsTransportPort: input.agentsTransportPort,
-    teamPublicTransportPort: input.teamPublicTransportPort,
-    teamTaskBoardTransportPort: input.teamTaskBoardTransportPort,
-    teamRoleSessionsTransportPort: input.teamRoleSessionsTransportPort,
-    teamApprovalsTransportPort: input.teamApprovalsTransportPort,
-    teamDecisionTransportPort: input.teamDecisionTransportPort,
-    teamRoleChatTransportPort: input.teamRoleChatTransportPort,
-    teamGraphTransportPort: input.teamGraphTransportPort,
-    providerModelsTransportPort: input.providerModelsTransportPort,
-    providerAccountsTransportPort: input.providerAccountsTransportPort,
-    teamSkillTransportPort: input.teamSkillTransportPort,
-    teamTriggerTransportPort: input.teamTriggerTransportPort,
-    teamLifecycleTransportPort: input.teamLifecycleTransportPort,
-    manualTeamTransportPort: input.manualTeamTransportPort,
+    runtimeHostTransportPort: input.runtimeHostTransportPort,
     matcha,
     openClaw: {
       electronImage: input.openClaw.electronImage,
@@ -244,135 +128,16 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
   }
   validateAbsolutePath(input.appLogDir, 'appLogDir', input.platform);
   validateDeliveryVerificationKey(input.deliveryVerificationKey);
-  validateCronBrokerVerificationKey(input.cronBrokerVerificationKey);
   validateAbsolutePath(input.runtimeHostStateDir, 'runtimeHostStateDir', input.platform);
   validateAbsolutePath(input.runtimeHostMcpExecutable, 'runtimeHostMcpExecutable', input.platform);
   validateParentCallbackBaseUrl(input.parentCallbackBaseUrl);
   validateParentCallbackDispatchToken(input.parentCallbackDispatchToken);
   validatePrivateResolver(input.providerCredentialResolver, 'providerCredentialResolver', '/resolve');
-  validatePort(input.sessionTransportPort, 'sessionTransportPort');
-  validatePort(input.fleetTransportPort, 'fleetTransportPort');
-  validatePort(input.diagnosticsTransportPort, 'diagnosticsTransportPort');
-  validatePort(input.workspaceTextTransportPort, 'workspaceTextTransportPort');
-  validatePort(input.workspaceBinaryTransportPort, 'workspaceBinaryTransportPort');
-  validatePort(input.workspaceDirectoryTransportPort, 'workspaceDirectoryTransportPort');
-  validatePort(input.workspaceWriteTransportPort, 'workspaceWriteTransportPort');
-  validatePort(input.workspaceMediaTransportPort, 'workspaceMediaTransportPort');
-  validatePort(input.sessionSendTransportPort, 'sessionSendTransportPort');
-  validatePort(input.sessionAbortTransportPort, 'sessionAbortTransportPort');
-  validatePort(input.securityEmergencyTransportPort, 'securityEmergencyTransportPort');
-  validatePort(input.channelStatusTransportPort, 'channelStatusTransportPort');
-  validatePort(input.channelCatalogTransportPort, 'channelCatalogTransportPort');
-  validatePort(input.channelControlTransportPort, 'channelControlTransportPort');
-  validatePort(input.channelPairingTransportPort, 'channelPairingTransportPort');
-  validatePort(input.settingsDesiredTransportPort, 'settingsDesiredTransportPort');
-  validatePort(input.securityPolicyTransportPort, 'securityPolicyTransportPort');
-  validatePort(input.sessionApprovalTransportPort, 'sessionApprovalTransportPort');
-  validatePort(input.matchaHistoryTransportPort, 'matchaHistoryTransportPort');
-  validatePort(input.usageTransportPort, 'usageTransportPort');
-  validatePort(input.sessionModelSelectionTransportPort, 'sessionModelSelectionTransportPort');
-  validatePort(input.cronTransportPort, 'cronTransportPort');
-  validatePort(input.cronBrokerTransportPort, 'cronBrokerTransportPort');
-  validatePort(input.taskManagerTransportPort, 'taskManagerTransportPort');
-  validatePort(input.agentsTransportPort, 'agentsTransportPort');
-  validatePort(input.teamPublicTransportPort, 'teamPublicTransportPort');
-  validatePort(input.teamTaskBoardTransportPort, 'teamTaskBoardTransportPort');
-  validatePort(input.teamRoleSessionsTransportPort, 'teamRoleSessionsTransportPort');
-  validatePort(input.teamApprovalsTransportPort, 'teamApprovalsTransportPort');
-  validatePort(input.teamDecisionTransportPort, 'teamDecisionTransportPort');
-  validatePort(input.teamRoleChatTransportPort, 'teamRoleChatTransportPort');
-  validatePort(input.teamGraphTransportPort, 'teamGraphTransportPort');
-  validatePort(input.providerModelsTransportPort, 'providerModelsTransportPort');
-  validatePort(input.providerAccountsTransportPort, 'providerAccountsTransportPort');
-  validatePort(input.teamSkillTransportPort, 'teamSkillTransportPort');
-  validatePort(input.teamTriggerTransportPort, 'teamTriggerTransportPort');
-  validatePort(input.teamLifecycleTransportPort, 'teamLifecycleTransportPort');
-  validatePort(input.manualTeamTransportPort, 'manualTeamTransportPort');
-  if (
-    new Set([
-      input.sessionTransportPort,
-      input.fleetTransportPort,
-      input.diagnosticsTransportPort,
-      input.workspaceTextTransportPort,
-      input.workspaceBinaryTransportPort,
-      input.workspaceDirectoryTransportPort,
-      input.workspaceWriteTransportPort,
-      input.workspaceMediaTransportPort,
-      input.sessionSendTransportPort,
-      input.sessionAbortTransportPort,
-      input.securityEmergencyTransportPort,
-      input.channelStatusTransportPort,
-      input.channelCatalogTransportPort,
-      input.channelControlTransportPort,
-      input.channelPairingTransportPort,
-      input.settingsDesiredTransportPort,
-      input.securityPolicyTransportPort,
-      input.sessionApprovalTransportPort,
-      input.matchaHistoryTransportPort,
-      input.usageTransportPort,
-      input.sessionModelSelectionTransportPort,
-      input.cronTransportPort,
-      input.cronBrokerTransportPort,
-      input.taskManagerTransportPort,
-      input.agentsTransportPort,
-      input.teamPublicTransportPort,
-      input.teamTaskBoardTransportPort,
-      input.teamRoleSessionsTransportPort,
-      input.teamApprovalsTransportPort,
-      input.teamDecisionTransportPort,
-      input.teamRoleChatTransportPort,
-      input.teamGraphTransportPort,
-      input.providerModelsTransportPort,
-      input.providerAccountsTransportPort,
-      input.teamSkillTransportPort,
-      input.teamTriggerTransportPort,
-      input.teamLifecycleTransportPort,
-      input.manualTeamTransportPort,
-    ]).size !== 38
-  ) {
-    throw new RuntimeHostBootstrapValidationError('transportPorts');
-  }
-
+  validatePort(input.runtimeHostTransportPort, 'runtimeHostTransportPort');
   validateMatchaInput(input.matcha, input.platform);
   validateOpenClawInput(input.openClaw, input.platform);
   const ports = [
-    input.sessionTransportPort,
-    input.fleetTransportPort,
-    input.diagnosticsTransportPort,
-    input.workspaceTextTransportPort,
-    input.workspaceBinaryTransportPort,
-    input.workspaceDirectoryTransportPort,
-    input.workspaceWriteTransportPort,
-    input.workspaceMediaTransportPort,
-    input.sessionSendTransportPort,
-    input.sessionAbortTransportPort,
-    input.securityEmergencyTransportPort,
-    input.channelStatusTransportPort,
-    input.channelControlTransportPort,
-    input.channelPairingTransportPort,
-    input.settingsDesiredTransportPort,
-    input.securityPolicyTransportPort,
-    input.sessionApprovalTransportPort,
-    input.matchaHistoryTransportPort,
-    input.usageTransportPort,
-    input.sessionModelSelectionTransportPort,
-    input.cronTransportPort,
-    input.cronBrokerTransportPort,
-    input.taskManagerTransportPort,
-    input.agentsTransportPort,
-    input.teamPublicTransportPort,
-    input.teamTaskBoardTransportPort,
-    input.teamRoleSessionsTransportPort,
-    input.teamApprovalsTransportPort,
-    input.teamDecisionTransportPort,
-    input.teamRoleChatTransportPort,
-    input.teamGraphTransportPort,
-    input.providerModelsTransportPort,
-    input.providerAccountsTransportPort,
-    input.teamSkillTransportPort,
-    input.teamTriggerTransportPort,
-    input.teamLifecycleTransportPort,
-    input.manualTeamTransportPort,
+    input.runtimeHostTransportPort,
     input.matcha.port,
     input.openClaw.port,
   ];
@@ -390,12 +155,6 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
 function validateDeliveryVerificationKey(value: string): void {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{59}$/.test(value)) {
     throw new RuntimeHostBootstrapValidationError('deliveryVerificationKey');
-  }
-}
-
-function validateCronBrokerVerificationKey(value: string): void {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{59}$/.test(value)) {
-    throw new RuntimeHostBootstrapValidationError('cronBrokerVerificationKey');
   }
 }
 
@@ -441,69 +200,6 @@ function validatePrivateResolver(
   }
 }
 
-export function createRuntimeHostDeliveryIssuer(): RuntimeHostDeliveryIssuer {
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  return {
-    verificationKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
-    signDecision: (input) => {
-      validateDecisionInput(input);
-      const payload = Buffer.from(
-        JSON.stringify({
-          version: 1,
-          principal: input.principal,
-          endpoint: input.endpoint,
-          scope: input.scope,
-          capability: input.capability,
-          subject: input.subject,
-          expiresAt: input.expiresAt,
-          correlation: input.correlation ?? `corr:${randomUUID()}`,
-          revision: input.revision,
-        })
-      ).toString('base64url');
-      const signed = `capability-decision.v1.${payload}`;
-      return `${signed}.${sign(null, Buffer.from(signed), privateKey).toString('base64url')}`;
-    },
-  };
-}
-
-export interface RuntimeHostDeliveryDecisionInput {
-  readonly principal: string;
-  readonly endpoint: string;
-  readonly scope: string;
-  readonly capability: string;
-  readonly subject: string;
-  readonly expiresAt: number;
-  readonly revision: string;
-  readonly correlation?: string;
-}
-
-export interface RuntimeHostDeliveryIssuer {
-  readonly verificationKey: string;
-  readonly signDecision: (input: RuntimeHostDeliveryDecisionInput) => string;
-}
-
-function validateDecisionInput(input: RuntimeHostDeliveryDecisionInput): void {
-  const values = [
-    input.principal,
-    input.endpoint,
-    input.scope,
-    input.capability,
-    input.subject,
-    input.revision,
-    input.correlation,
-  ];
-  if (
-    values.some(
-      (value) =>
-        value !== undefined &&
-        (typeof value !== 'string' || !value || value.length > 256 || value.includes('\0'))
-    ) ||
-    !Number.isSafeInteger(input.expiresAt) ||
-    input.expiresAt <= Date.now()
-  ) {
-    throw new RangeError('Runtime-host capability decision input is invalid.');
-  }
-}
 
 function validateMatchaInput(
   input: RuntimeHostBootstrapMatchaInput,
@@ -514,7 +210,6 @@ function validateMatchaInput(
   validateAbsolutePath(input.workingDirectory, 'matcha.workingDirectory', platform);
   validateAbsolutePath(input.storageRoot, 'matcha.storageRoot', platform);
   validatePort(input.port, 'matcha.port');
-  validateAbsolutePath(input.privateSecretRoot, 'matcha.privateSecretRoot', platform);
 }
 
 function validateOpenClawInput(

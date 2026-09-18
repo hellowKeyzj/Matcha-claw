@@ -2600,7 +2600,7 @@ fn valid_job_log_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -2793,8 +2793,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap()["params"]
-                ["expectedConfigRevision"],
+            serde_json::from_str::<Value>(&request.encode().unwrap()).unwrap()["params"]["expectedConfigRevision"],
             json!("rev-1")
         );
     }

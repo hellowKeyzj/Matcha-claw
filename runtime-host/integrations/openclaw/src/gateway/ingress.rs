@@ -18,7 +18,6 @@ impl GatewayEpoch {
         }
         Ok(Self(value))
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +65,6 @@ impl Ingress {
         }
         Ok(())
     }
-
 
     pub(crate) fn try_ingest(
         &self,

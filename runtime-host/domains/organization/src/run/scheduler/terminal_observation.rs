@@ -20,7 +20,7 @@ pub fn plan_terminal_observations(snapshot: &DeliveryLedgerSnapshot) -> Terminal
                 matches!(
                     delivery.phase(),
                     DeliveryPhaseSnapshot::Delivered {
-                        matcha_correlation: Some(_),
+                        native_correlation: Some(_),
                         ..
                     }
                 )
@@ -37,8 +37,7 @@ mod tests {
     use super::*;
     use crate::{
         AttemptId, DeliveryClaimSnapshot, DeliveryFailure, DeliveryRequest, DeliverySnapshot,
-        ExecutionFence, ExternalSessionReference, MatchaDeliveryCorrelation, NodeExecutionId,
-        NodeId,
+        EndpointSessionId, ExecutionFence, NativeDeliveryCorrelation, NodeExecutionId, NodeId,
         ports::DeliveryReceiptReference,
         run::delivery::{
             NativeRunReceiptReference, NativeTerminalStatus, TerminalObservationResolution,
@@ -46,9 +45,9 @@ mod tests {
         },
     };
 
-    fn correlation() -> MatchaDeliveryCorrelation {
-        MatchaDeliveryCorrelation::new(
-            ExternalSessionReference::try_new("terminal-session-correlation-canary").unwrap(),
+    fn correlation() -> NativeDeliveryCorrelation {
+        NativeDeliveryCorrelation::new(
+            EndpointSessionId::try_new("terminal-session-correlation-canary").unwrap(),
             NativeRunReceiptReference::try_new("terminal-run-correlation-canary").unwrap(),
         )
     }
@@ -67,6 +66,7 @@ mod tests {
                 node_execution_id: "node-terminal-observation:attempt:1".to_owned(),
                 task_id: "task-terminal-observation".to_owned(),
                 role_id: "role-terminal-observation".to_owned(),
+                session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
                 idempotency_key: format!("terminal-observation:{delivery_id}"),
                 message: "private prompt".to_owned(),
                 requested_at: 1,
@@ -95,6 +95,7 @@ mod tests {
             delivered_receipt: receipt(),
             native_terminal: NativeTerminalStatus::Completed,
             observed_at: 2,
+            output: None,
             resolution: TerminalObservationResolution::AwaitingAuthorizedGraphResolution,
         })
     }
@@ -106,7 +107,7 @@ mod tests {
                 "delivery-z",
                 DeliveryPhaseSnapshot::Delivered {
                     receipt: receipt(),
-                    matcha_correlation: Some(correlation()),
+                    native_correlation: Some(correlation()),
                     accepted_at: 1,
                 },
             ),
@@ -131,7 +132,7 @@ mod tests {
                 "delivery-without-correlation",
                 DeliveryPhaseSnapshot::Delivered {
                     receipt: receipt(),
-                    matcha_correlation: None,
+                    native_correlation: None,
                     accepted_at: 1,
                 },
             ),
@@ -139,7 +140,7 @@ mod tests {
                 "delivery-a",
                 DeliveryPhaseSnapshot::Delivered {
                     receipt: receipt(),
-                    matcha_correlation: Some(correlation()),
+                    native_correlation: Some(correlation()),
                     accepted_at: 1,
                 },
             ),
@@ -183,7 +184,7 @@ mod tests {
             "delivery-correlation-bound",
             DeliveryPhaseSnapshot::Delivered {
                 receipt: receipt(),
-                matcha_correlation: Some(correlation()),
+                native_correlation: Some(correlation()),
                 accepted_at: 1,
             },
         )]);

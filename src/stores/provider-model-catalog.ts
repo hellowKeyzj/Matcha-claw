@@ -5,6 +5,7 @@ import {
   type ProviderModel,
   type ProviderModelDraft,
 } from '@/lib/provider-model-catalog';
+import { refreshProviderPostMutationProjections } from '@/stores/provider-post-mutation-refresh';
 
 let inflightRefreshTask: Promise<void> | null = null;
 
@@ -59,6 +60,9 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
       } catch (refreshError) {
         set({ saving: false, ready: true, error: String(refreshError), warning: result.warning ?? null });
       }
+      await refreshProviderPostMutationProjections({
+        refreshProviderModelCatalog: false,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ saving: false, error: message });

@@ -1,3 +1,6 @@
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+
 const UNAVAILABLE = {
   success: false,
   error: 'Security rule catalog is unavailable',
@@ -53,23 +56,30 @@ export interface SecurityRuleCatalogTransport {
 }
 
 export function createSecurityRuleCatalogTransport(
-  port: number,
+  issuer: RuntimeHostDeliveryIssuer,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SecurityRuleCatalogTransport {
-  const baseUrl = `http://127.0.0.1:${port}`;
   return {
     async read(platform?: string | null): Promise<SecurityRuleCatalogTransportResponse> {
-      const query = platform === undefined || platform === null
-        ? ''
-        : `?platform=${encodeURIComponent(platform)}`;
-      try {
-        const response = await fetcher(`${baseUrl}${CATALOG_PATH}${query}`);
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSecurityRuleCatalogResponse(body)) {
-          return { status: 200, body: projectSecurityRuleCatalog(body) };
-        }
-      } catch {
-        // Native details stay behind the Main boundary.
+      const path = platform === undefined || platform === null
+        ? CATALOG_PATH
+        : `${CATALOG_PATH}?platform=${encodeURIComponent(platform)}`;
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path,
+        issuer,
+        decision: {
+          endpoint: CATALOG_PATH,
+          scope: 'security:read',
+          capability: 'security.rule-catalog.read',
+          subject: 'security-rule-catalog',
+        },
+        method: 'GET',
+        fetcher,
+      });
+      if (response?.status === 200 && isSecurityRuleCatalogResponse(response.body)) {
+        return { status: 200, body: projectSecurityRuleCatalog(response.body) };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -149,13 +159,4 @@ function isSecurityCatalogText(value: unknown): value is string {
 
 function isSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }

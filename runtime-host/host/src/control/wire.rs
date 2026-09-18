@@ -1,12 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-use crate::sessions::state::SessionDelta as SessionDeltaDto;
-
 pub(crate) const CONTROL_VERSION: u8 = 1;
 pub(crate) const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
-const MAX_RENDERER_ROUTE_KEY_BYTES: usize = 128;
 const MAX_CRON_EXECUTION_ID_BYTES: usize = 128;
 /// Bounds an untrusted parent's command wait and keeps a stuck child command recoverable.
 pub(crate) const MAX_TIMEOUT_MS: u64 = 120_000;
@@ -51,55 +48,6 @@ where
     (value <= MAX_SAFE_SEQUENCE)
         .then_some(value)
         .ok_or_else(|| D::Error::custom("control event timestamp exceeds the safe integer range"))
-}
-
-fn deserialize_session_delta<'de, D>(deserializer: D) -> Result<SessionDeltaDto, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let delta = SessionDeltaDto::deserialize(deserializer)?;
-    validate_session_delta(&delta)
-        .then_some(delta)
-        .ok_or_else(|| D::Error::custom("invalid session delta wire contract"))
-}
-
-pub(crate) fn validate_session_delta(delta: &SessionDeltaDto) -> bool {
-    valid_session_key(&delta.session_key)
-        && (1..=MAX_SAFE_SEQUENCE).contains(&delta.epoch)
-        && (1..=MAX_SAFE_SEQUENCE).contains(&delta.seq)
-        && (1..=MAX_SAFE_SEQUENCE).contains(&delta.cursor)
-        && delta
-            .route_key
-            .as_deref()
-            .is_none_or(valid_renderer_route_key)
-        && delta.run_id.as_deref().is_none_or(valid_session_id)
-        && delta.validate().is_ok()
-}
-
-pub(crate) fn valid_session_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 4096
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-}
-
-fn valid_session_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
-}
-
-fn valid_renderer_route_key(value: &str) -> bool {
-    let Some(suffix) = value.strip_prefix("renderer-route:") else {
-        return false;
-    };
-    !suffix.is_empty()
-        && value.len() <= MAX_RENDERER_ROUTE_KEY_BYTES
-        && suffix
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
 }
 
 fn deserialize_cron_execution_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -261,16 +209,10 @@ pub(crate) enum Command {
     OpenClawGatewayStatus {},
     #[serde(rename = "openclaw.control-ui.url")]
     OpenClawControlUiUrl {},
-    #[serde(rename = "openclaw.cron.manual-trigger")]
-    OpenClawManualCronTrigger { input: CommandInput },
     #[serde(rename = "openclaw.browser.request")]
     OpenClawBrowserRequest { input: CommandInput },
     #[serde(rename = "openclaw.mcp-app.request")]
     OpenClawMcpAppRequest { input: CommandInput },
-    #[serde(rename = "openclaw.chat.send")]
-    OpenClawChatSend { input: CommandInput },
-    #[serde(rename = "openclaw.chat.abort")]
-    OpenClawChatAbort { input: CommandInput },
     #[serde(rename = "fleet.credentials.write")]
     FleetCredentialsWrite { input: CommandInput },
 }
@@ -508,11 +450,6 @@ pub(crate) enum SafeEvent {
         job_id: CronExecutionId,
         run_id: CronExecutionId,
         status: SafeCronExecutionStatus,
-    },
-    #[serde(rename = "session.delta", rename_all = "camelCase")]
-    SessionDelta {
-        #[serde(deserialize_with = "deserialize_session_delta")]
-        delta: SessionDeltaDto,
     },
 }
 

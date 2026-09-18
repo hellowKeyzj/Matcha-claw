@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { decodeSessionDelta, type SessionDelta } from './transport/sessions/session-contract';
 
 export const RUNTIME_HOST_CONTROL_VERSION = 1;
 export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
@@ -101,13 +100,7 @@ export type RuntimeHostControlCommand =
         readonly standalone?: boolean;
       };
     }
-  | {
-      readonly name: 'openclaw.cron.manual-trigger';
-      readonly input: { readonly jobId: string };
-    }
   | { readonly name: 'openclaw.sessions.patch-model'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'openclaw.chat.send'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'openclaw.chat.abort'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'openclaw.skills.execute'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'openclaw.plugins.execute'; readonly input: RuntimeHostJsonObject }
   | { readonly name: 'fleet.credentials.write'; readonly input: RuntimeHostJsonObject };
@@ -179,10 +172,6 @@ export type RuntimeHostSafeEvent =
       readonly terminal?: 'completed' | 'aborted' | 'error';
       readonly errorKind?: 'refusal' | 'timeout' | 'rate_limit' | 'context_length' | 'unknown';
       readonly stopReason?: string;
-    }
-  | {
-      readonly type: 'session.delta';
-      readonly delta: SessionDelta;
     };
 
 type OpenClawSessionActivity =
@@ -585,10 +574,6 @@ function decodeEvent(raw: Record<string, unknown>): IncomingMessage | undefined 
 }
 
 function normalizeSafeEvent(event: RuntimeHostSafeEvent): RuntimeHostSafeEvent {
-  if (event.type === 'session.delta') {
-    const delta = decodeSessionDelta(event.delta);
-    return delta ? { type: 'session.delta', delta } : event;
-  }
   if (event.type !== 'openclaw.session.update') return event;
   return { ...event, replace: event.replace ?? false };
 }
@@ -629,8 +614,6 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
       return isOpenClawLogsCommand(value);
     case 'openclaw.control.ready':
       return isOpenClawControlReadyCommand(value);
-    case 'openclaw.cron.manual-trigger':
-      return isOpenClawManualCronTriggerCommand(value);
     case 'openclaw.tool-permission.set':
       return isOpenClawToolPermissionSetCommand(value);
     case 'host.toolchain.status':
@@ -639,8 +622,6 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
     case 'openclaw.subagent-templates.get':
       return isSubagentTemplateCommand(value);
     case 'openclaw.sessions.patch-model':
-    case 'openclaw.chat.send':
-    case 'openclaw.chat.abort':
     case 'openclaw.skills.execute':
     case 'openclaw.plugins.execute':
       return hasExactKeys(value, ['name', 'input']) && isJsonObject(value.input);
@@ -755,15 +736,6 @@ function isBoundedCommandText(value: unknown): value is string {
     && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
 }
 
-function isOpenClawManualCronTriggerCommand(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['name', 'input'])
-    && value.name === 'openclaw.cron.manual-trigger'
-    && isRecord(value.input)
-    && hasExactKeys(value.input, ['jobId'])
-    && typeof value.input.jobId === 'string'
-    && value.input.jobId.trim().length > 0;
-}
-
 function isOpenClawToolPermissionSetCommand(value: Record<string, unknown>): boolean {
   return hasExactKeys(value, ['name', 'input'])
     && value.name === 'openclaw.tool-permission.set'
@@ -793,11 +765,8 @@ function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
     || command.name === 'host.toolchain.prepare'
     || command.name === 'openclaw.browser.request'
     || command.name === 'openclaw.mcp-app.request'
-    || command.name === 'openclaw.cron.manual-trigger'
     || command.name === 'openclaw.sessions.patch-model'
     || command.name === 'team.runtime.execute'
-    || command.name === 'openclaw.chat.send'
-    || command.name === 'openclaw.chat.abort'
     || command.name === 'openclaw.skills.execute'
     || command.name === 'openclaw.plugins.execute'
     || command.name === 'fleet.credentials.write';
@@ -830,8 +799,6 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
       return isOpenClawSessionActivity(value);
     case 'openclaw.session.update':
       return isOpenClawSessionUpdate(value);
-    case 'session.delta':
-      return hasExactKeys(value, ['type', 'delta']) && decodeSessionDelta(value.delta) !== null;
     default:
       return false;
   }

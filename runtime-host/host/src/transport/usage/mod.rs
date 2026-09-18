@@ -8,7 +8,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 pub(crate) const AUTHORIZATION_ENDPOINT: &str = "/api/usage/recent";
 pub(super) const SESSION_TIMESERIES_ENDPOINT: &str = "/api/usage/session-timeseries";

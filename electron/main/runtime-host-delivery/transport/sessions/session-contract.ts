@@ -52,7 +52,20 @@ export type ToolView = Readonly<{
 }>;
 export type ApprovalView = Readonly<{ approvalId: string; runId?: string | null; phase: string }>;
 export type RuntimeActivity = 'compacting';
+export type RuntimeStartupPhase =
+  | 'preparing_workspace'
+  | 'naming_worktree'
+  | 'creating_worktree'
+  | 'running_setup'
+  | 'provisioning_environment'
+  | 'preparing_context'
+  | 'starting_model';
+export type RuntimeRunProgress = Readonly<
+  | { kind: 'startup'; phase: RuntimeStartupPhase }
+  | { kind: 'retrying'; attempt: number; maxAttempts: number }
+>;
 export type RuntimeErrorDetail = Readonly<{
+  kind: 'fallback' | 'error';
   failoverReason: string | null;
   providerRuntimeFailureKind: string | null;
   providerErrorType: string | null;
@@ -71,6 +84,7 @@ export type RuntimeView = Readonly<{
   phase: SessionRunPhase;
   activeRunId: string | null;
   issue: RuntimeIssue | null;
+  runProgress: RuntimeRunProgress | null;
   runtimeActivity: RuntimeActivity | null;
   errorDetail: RuntimeErrorDetail | null;
 }>;
@@ -397,17 +411,43 @@ function isRuntimeNotice(value: unknown): boolean {
 
 function isRuntime(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runtimeActivity', 'errorDetail'])
+    && hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runProgress', 'runtimeActivity', 'errorDetail'])
     && isRunPhase(value.phase)
     && isNullableId(value.activeRunId)
     && (value.issue === null || isRuntimeIssue(value.issue))
+    && (value.runProgress === null || isRunProgress(value.runProgress))
     && (value.runtimeActivity === null || value.runtimeActivity === 'compacting')
     && (value.errorDetail === null || isRuntimeErrorDetail(value.errorDetail));
 }
 
+function isRunProgress(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  if (value.kind === 'startup') {
+    return hasExactKeys(value, ['kind', 'phase']) && isRunStartupPhase(value.phase);
+  }
+  return value.kind === 'retrying'
+    && hasExactKeys(value, ['kind', 'attempt', 'maxAttempts'])
+    && isSafeNonNegativeInteger(value.attempt)
+    && isSafeNonNegativeInteger(value.maxAttempts)
+    && value.attempt >= 1
+    && value.maxAttempts <= 10
+    && value.attempt <= value.maxAttempts;
+}
+
+function isRunStartupPhase(value: unknown): boolean {
+  return value === 'preparing_workspace'
+    || value === 'naming_worktree'
+    || value === 'creating_worktree'
+    || value === 'running_setup'
+    || value === 'provisioning_environment'
+    || value === 'preparing_context'
+    || value === 'starting_model';
+}
+
 function isRuntimeErrorDetail(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+    && hasExactKeys(value, ['kind', 'failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+    && (value.kind === 'fallback' || value.kind === 'error')
     && isNullableShortText(value.failoverReason)
     && isNullableShortText(value.providerRuntimeFailureKind)
     && isNullableShortText(value.providerErrorType)

@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { hasExactKeys, isNonEmptyBoundedText as isString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from './client';
 const UNAVAILABLE = { success: false, error: 'Task manager is unavailable' } as const;
 
 type Operation =
@@ -38,32 +37,29 @@ const details: Record<Operation, Readonly<{ path: string; scope: string; capabil
 
 export function createTaskManagerTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TaskManagerTransport {
   const send = async (operation: Operation, request: unknown): Promise<TaskManagerTransportResponse> => {
     if (!isRequest(request, operation)) return { status: 503, body: UNAVAILABLE };
     const detail = details[operation];
-    try {
-      const response = await fetcher(`http://127.0.0.1:${port}${detail.path}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${issuer.signDecision({
-            principal: 'electron-main-local', endpoint: detail.path, scope: detail.scope,
-            capability: detail.capability, subject: detail.subject,
-            expiresAt: Date.now() + DECISION_TTL_MS, revision: '1',
-          })}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(request),
-      });
-      const body: unknown = await response.json();
-      if (response.status === 200 && isSuccess(body, operation)) return { status: 200, body };
-      if (response.status === 409 && isPublicFailure(body)) return { status: 409, body };
-      if (response.status === 503 && isUnavailable(body)) return { status: 503, body: UNAVAILABLE };
-    } catch {
-      // Do not project loopback errors across the sealed public boundary.
-    }
+    const response = await sendLoopbackJson({
+      port: runtimeHostTransportPort,
+      path: detail.path,
+      issuer,
+      decision: {
+        endpoint: detail.path,
+        scope: detail.scope,
+        capability: detail.capability,
+        subject: detail.subject,
+      },
+      method: 'POST',
+      fetcher,
+      body: request,
+    });
+    if (response?.status === 200 && isSuccess(response.body, operation)) return { status: 200, body: response.body };
+    if (response?.status === 409 && isPublicFailure(response.body)) return { status: 409, body: response.body };
+    if (response?.status === 503 && isUnavailable(response.body)) return { status: 503, body: UNAVAILABLE };
     return { status: 503, body: UNAVAILABLE };
   };
   return {
@@ -181,8 +177,4 @@ function isEndpoint(value: unknown): value is Endpoint {
 function sameIdentity(left: Identity, right: Identity): boolean { return left.agentId === right.agentId && left.sessionKey === right.sessionKey && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId; }
 function isUnavailable(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && value.error === UNAVAILABLE.error; }
 function isPublicFailure(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && typeof value.error === 'string'; }
-function isTimestamp(value: unknown): boolean { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
-function isString(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0'); }
 function isStringArray(value: unknown): boolean { return Array.isArray(value) && value.every(isString); }
-function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean { const keys = Object.keys(value); return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key)); }

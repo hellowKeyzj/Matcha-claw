@@ -1,6 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from './client';
 
-const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = { success: false, error: 'OpenClaw usage history is unavailable' } as const;
 
 export type UsageHistoryEntry = Readonly<{
@@ -29,17 +29,17 @@ export interface UsageTransport {
 
 export function createUsageTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  usageTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): UsageTransport {
-  const baseUrl = `http://127.0.0.1:${usageTransportPort}`;
   return {
     async read(limit?: number): Promise<UsageTransportResponse> {
       if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1000)) {
         return { status: 400, body: UNAVAILABLE };
       }
-      const query = limit === undefined ? '' : `?limit=${String(limit)}`;
-      return readUsageTransport(fetcher, issuer, `${baseUrl}/api/usage/recent${query}`);
+      const query = new URLSearchParams();
+      if (limit !== undefined) query.set('limit', String(limit));
+      return readUsageTransport(fetcher, issuer, runtimeHostTransportPort, '/api/usage/recent', query);
     },
 
     async readSessionTimeseries(input): Promise<UsageTransportResponse> {
@@ -50,7 +50,7 @@ export function createUsageTransport(
         sessionId: input.sessionId,
         agentId: input.agentId,
       });
-      return readUsageTransport(fetcher, issuer, `${baseUrl}/api/usage/session-timeseries?${query.toString()}`);
+      return readUsageTransport(fetcher, issuer, runtimeHostTransportPort, '/api/usage/session-timeseries', query);
     },
   };
 }
@@ -58,28 +58,25 @@ export function createUsageTransport(
 async function readUsageTransport(
   fetcher: typeof fetch,
   issuer: RuntimeHostDeliveryIssuer,
-  url: string,
+  port: number,
+  path: string,
+  query: URLSearchParams,
 ): Promise<UsageTransportResponse> {
-  try {
-    const response = await fetcher(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: '/api/usage/recent',
-          scope: 'openclaw:usage-history:read',
-          capability: 'openclaw.usage.history',
-          subject: 'openclaw-usage-history',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-      },
-    });
-    const body: unknown = await response.json();
-    if (response.status === 200 && isResponse(body)) return { status: 200, body };
-  } catch {
-    // The public contract deliberately suppresses transport details.
-  }
+  const response = await sendLoopbackJson({
+    port,
+    path,
+    issuer,
+    decision: {
+      endpoint: '/api/usage/recent',
+      scope: 'openclaw:usage-history:read',
+      capability: 'openclaw.usage.history',
+      subject: 'openclaw-usage-history',
+    },
+    method: 'GET',
+    fetcher,
+    query,
+  });
+  if (response?.status === 200 && isResponse(response.body)) return { status: 200, body: response.body };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -100,14 +97,10 @@ function isEntry(value: unknown): value is UsageHistoryEntry {
     && isSafeAgentId(value.agentId)
     && typeof value.timestamp === 'string'
     && Number.isFinite(Date.parse(value.timestamp))
-    && ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'].every((key) => Number.isSafeInteger(value[key]) && Number(value[key]) >= 0)
+    && ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'].every((key) => isSafeNonNegativeInteger(value[key]))
     && (value.model === undefined || typeof value.model === 'string')
     && (value.provider === undefined || typeof value.provider === 'string')
     && (value.costUsd === undefined || (typeof value.costUsd === 'number' && Number.isFinite(value.costUsd) && value.costUsd >= 0));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function isSafeSessionId(value: unknown): value is string {
@@ -118,9 +111,4 @@ function isSafeSessionId(value: unknown): value is string {
 
 function isSafeAgentId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

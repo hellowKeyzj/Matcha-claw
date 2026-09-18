@@ -339,9 +339,9 @@ impl ProviderOwner {
         let Some(account_id) = account_id else {
             return outcome;
         };
-        let native = self
-            .reconcile(&[], &BTreeSet::from([account_id]), false)
-            .await;
+        let mut required = self.routing.route_account_ids(&self.cascade);
+        required.insert(account_id);
+        let native = self.reconcile(&[], &required, false).await;
         super::models::ProviderModelReplaceOutcome::DesiredStored {
             persisted,
             native: ProviderNativeConfigurationView::from_effect(&native),

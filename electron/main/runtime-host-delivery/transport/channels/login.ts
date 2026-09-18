@@ -1,7 +1,8 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './catalog';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
+import { beginChannelTrace, channelTraceHeaders } from './trace';
 
-const DECISION_TTL_MS = 30_000;
+const LOGIN_PATH = '/api/channels/login';
 const MAX_TIMEOUT_MS = 300_000;
 const MAX_CONFIG_BYTES = 16_384;
 const MAX_CONFIG_DEPTH = 8;
@@ -48,10 +49,9 @@ export interface ChannelLoginTransport {
 
 export function createChannelLoginTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelLoginTransport {
-  const url = `http://127.0.0.1:${port}/api/channels/login`;
   const pending = new Map<string, AbortController>();
 
   return {
@@ -60,7 +60,7 @@ export function createChannelLoginTransport(
       const finish = beginChannelTrace(`transport.login.${input.action}`, traceId);
       let status = 503;
       let outcome: unknown;
-      let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
+      let errorCode: 'UNAVAILABLE' | 'ABORTED' | 'INVALID_RESPONSE' | undefined;
       const key = JSON.stringify([input.channel, input.accountId ?? '']);
       if (input.action === 'cancel') {
         pending.get(key)?.abort();
@@ -73,26 +73,29 @@ export function createChannelLoginTransport(
         pending.set(key, controller);
       }
       try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/login',
-              scope: 'channels:write',
-              capability: 'channels.login',
-              subject: 'channel-login',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...channelTraceHeaders(traceId),
+        const response = await sendLoopbackJson({
+          port: runtimeHostTransportPort,
+          path: LOGIN_PATH,
+          issuer,
+          decision: {
+            endpoint: LOGIN_PATH,
+            scope: 'channels:write',
+            capability: 'channels.login',
+            subject: 'channel-login',
           },
-          body: JSON.stringify(input),
+          method: 'POST',
+          fetcher,
+          body: input,
+          headers: channelTraceHeaders(traceId),
+          signal: controller.signal,
         });
+        if (response === null) {
+          outcome = UNKNOWN;
+          errorCode = controller.signal.aborted ? 'ABORTED' : 'UNAVAILABLE';
+          return { status: 503, body: UNKNOWN };
+        }
         status = response.status;
-        const body: unknown = await response.json();
+        const body = response.body;
         outcome = body;
         if (response.status === 400 && isRejected(body)) return { status: 400, body };
         if (response.status === 503 && isUnknown(body)) return { status: 503, body };
@@ -101,9 +104,6 @@ export function createChannelLoginTransport(
         }
         outcome = UNKNOWN;
         errorCode = 'INVALID_RESPONSE';
-      } catch (error) {
-        outcome = UNKNOWN;
-        errorCode = channelTraceError(error);
       } finally {
         finish(status, outcome, errorCode);
         if (pending.get(key) === controller) pending.delete(key);
@@ -145,7 +145,7 @@ function isExpectedResponse(value: unknown, input: ChannelLoginRequest): value i
 
 function isProgress(value: unknown): value is LoginProgress {
   if (!isRecord(value)
-    || !hasOnlyKeys(value, ['outcome', 'channel', 'accountId', 'qrDataUrl', 'sessionKey'])
+    || Object.keys(value).some((key) => !['outcome', 'channel', 'accountId', 'qrDataUrl', 'sessionKey'].includes(key))
     || !Object.hasOwn(value, 'outcome')
     || !Object.hasOwn(value, 'channel')
     || (value.outcome !== 'progress'
@@ -159,29 +159,21 @@ function isProgress(value: unknown): value is LoginProgress {
 }
 
 function isCancelled(value: unknown): value is CancelledOutcome {
-  return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'cancelled';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'cancelled';
 }
 
 function isUnknown(value: unknown): value is typeof UNKNOWN {
-  return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'unknown';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'unknown';
 }
 
 function isLogoutOutcome(value: unknown): value is LogoutOutcome {
   return isRecord(value)
-    && Object.keys(value).length === 1
+    && hasExactKeys(value, ['outcome'])
     && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }
 
 function isRejected(value: unknown): value is RejectedResponse {
-  return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'rejected';
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
 }
 
 function optionalIdentity(value: unknown): boolean {
@@ -193,7 +185,7 @@ function isIdentity(value: unknown): value is string {
 }
 
 function isTimeout(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= MAX_TIMEOUT_MS;
+  return isSafeNonNegativeInteger(value) && value > 0 && value <= MAX_TIMEOUT_MS;
 }
 
 function isConfig(value: unknown): value is Record<string, unknown> {

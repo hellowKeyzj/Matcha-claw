@@ -321,8 +321,7 @@ describe('Electron Main cron transport', () => {
       vi.fn(),
     );
 
-    expect(Object.keys(transport)).toEqual(['list', 'create', 'update', 'remove', 'toggle', 'history']);
-    expect('trigger' in transport).toBe(false);
+    expect(Object.keys(transport)).toEqual(['list', 'create', 'update', 'remove', 'toggle', 'trigger', 'history']);
     expect('fire' in transport).toBe(false);
     expect('repairDelivery' in transport).toBe(false);
   });

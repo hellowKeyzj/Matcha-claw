@@ -193,9 +193,26 @@ impl ProviderAccountsOwner {
         let Ok(account) = draft.materialize(existing.as_ref(), current_timestamp()) else {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         };
+        let previous_provider_key = existing
+            .as_ref()
+            .filter(|previous| previous.configuration().enabled())
+            .and_then(|previous| provider_key_for_account(cascade.accounts(), previous.id()));
         if cascade.persist_account(account.clone()).is_err() {
             return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Stored);
         }
+        let retired = existing
+            .as_ref()
+            .filter(|previous| {
+                account_replace_retires_existing_projection(
+                    previous,
+                    &account,
+                    previous_provider_key.as_deref(),
+                    cascade.accounts(),
+                )
+            })
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>();
         let (private, auth_state_refresh_required) = match account.configuration().auth_mode() {
             ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse => {
                 let previous = existing.as_ref().and_then(|previous| {
@@ -256,11 +273,8 @@ impl ProviderAccountsOwner {
                 }
             }
         };
-        let retired = (!account.configuration().enabled())
-            .then_some(account.clone())
-            .into_iter()
-            .collect::<Vec<_>>();
-        let required_auth_accounts = BTreeSet::from([account.id().clone()]);
+        let required_auth_accounts =
+            required_auth_accounts_after_account_replace(cascade, &account);
         let account = cascade.account(account.id()).cloned();
         ProviderAccountsMutation {
             desired: account
@@ -437,6 +451,51 @@ fn provider_account_auth_mode_name(value: ProviderAccountAuthMode) -> &'static s
         ProviderAccountAuthMode::OAuthDevice => "oauthDevice",
         ProviderAccountAuthMode::Local => "local",
     }
+}
+
+fn required_auth_accounts_after_account_replace(
+    cascade: &ProviderCascade,
+    account: &ProviderAccount,
+) -> BTreeSet<ProviderAccountId> {
+    let mut required = cascade
+        .routing()
+        .map(provider_routing_account_ids)
+        .unwrap_or_default();
+    if account.configuration().enabled() && account_uses_private_auth_mode(account) {
+        required.insert(account.id().clone());
+    }
+    required
+}
+
+fn account_replace_retires_existing_projection(
+    previous: &ProviderAccount,
+    account: &ProviderAccount,
+    previous_provider_key: Option<&str>,
+    accounts: &[ProviderAccount],
+) -> bool {
+    if !previous.configuration().enabled() {
+        return false;
+    }
+    if !account.configuration().enabled() {
+        return true;
+    }
+    if previous.configuration().kind() != account.configuration().kind() {
+        return true;
+    }
+    provider_key_for_account(accounts, account.id()).as_deref() != previous_provider_key
+}
+
+fn provider_key_for_account(
+    accounts: &[ProviderAccount],
+    account_id: &ProviderAccountId,
+) -> Option<String> {
+    provider_runtime_identities(accounts)
+        .ok()
+        .and_then(|identities| {
+            identities
+                .get(account_id.as_str())
+                .map(|identity| identity.provider_key().to_owned())
+        })
 }
 
 fn account_has_private_auth_profile(account: &ProviderAccount) -> bool {

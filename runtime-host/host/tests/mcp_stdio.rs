@@ -60,7 +60,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         tools["result"]["tools"][0],
         json!({
             "name": "team_node_event",
-            "description": "Record a TeamRun node event. Terminal complete/reject events require the exact delivery, receipt, node attempt, summary, and routed output port.",
+            "description": "Record a legacy/manual TeamRun node event. Terminal complete/reject events are accepted only as non-scheduler evidence; runtime terminal settle remains the completion path.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -340,6 +340,50 @@ fn rejects_terminal_event_without_resolution_fields() {
     assert!(output.status.success());
     let response = decode_responses(&output.stdout).remove(0);
     assert_eq!(response["error"]["code"], -32602);
+}
+
+#[test]
+fn terminal_node_event_is_legacy_evidence_not_completion() {
+    let home = Home::new();
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "team_node_event",
+            "arguments": {
+                "runId": "run:one",
+                "commandId": "terminal-command",
+                "idempotencyKey": "terminal-key",
+                "nodeExecutionId": "node:attempt:1",
+                "event": "complete",
+                "deliveryId": "delivery:one",
+                "receipt": "receipt:one",
+                "nodeId": "node:one",
+                "attemptNumber": 1,
+                "summary": "manual evidence only",
+                "outputPort": "out"
+            }
+        }
+    });
+
+    let output = run(&home, format!("{request}\n").as_bytes());
+
+    assert!(output.status.success());
+    let response = decode_responses(&output.stdout).remove(0);
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing tool result text: {response}"));
+    let result = serde_json::from_str::<Value>(text).unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "outcome": "legacy_terminal_evidence",
+            "completionPath": "runtime_terminal_settle",
+            "summary": "manual evidence only",
+            "outputPort": "out"
+        })
+    );
 }
 
 struct Home(PathBuf);

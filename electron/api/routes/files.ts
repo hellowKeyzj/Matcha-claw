@@ -139,6 +139,7 @@ function getWorkspaceTransports(
   deps: FileApiContext | WorkspaceFileRouteDeps | undefined,
 ): WorkspaceFileRouteDeps | null {
   if (!deps || !isRecord(deps)) return null;
+  if ('runtimeHostTransports' in deps) return deps.runtimeHostTransports;
   return deps as WorkspaceFileRouteDeps;
 }
 

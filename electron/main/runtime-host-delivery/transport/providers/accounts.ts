@@ -1,15 +1,15 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import {
   decodeProviderMutationCommittedAccountResponse,
   decodeProviderMutationCommittedResponse,
   decodeProviderMutationCommitUnknownResponse,
-  ProviderMutationReceiptUnavailableError,
   type ProviderMutationCommittedAccountResponse,
   type ProviderMutationCommittedResponse,
   type ProviderMutationCommitUnknownResponse,
 } from './mutation-receipt';
 
-const DECISION_TTL_MS = 30_000;
+const PROVIDER_ACCOUNTS_PATH = '/api/provider-accounts';
 const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
 const UNAVAILABLE = {
@@ -94,6 +94,10 @@ type ReplaceResponse = ProviderMutationCommittedAccountResponse | ProviderMutati
 
 type DeleteResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
 
+const PROVIDER_ACCOUNT_KEYS: readonly string[] = [
+  'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
+];
+
 function providerAccountsTransportTrace(phase: string, payload: Record<string, unknown> = {}): void {
   console.info(JSON.stringify({
     prefix: '[startup-trace]',
@@ -134,15 +138,12 @@ function requestTrace(request: Request): Record<string, unknown> {
 }
 
 function receiptTrace(body: unknown): Record<string, unknown> {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return { receipt: false };
-  const value = body as Record<string, unknown>;
-  const receipt = 'receipt' in value && value.receipt && typeof value.receipt === 'object'
-    ? value.receipt as Record<string, unknown>
-    : value;
-  const native = receipt.native && typeof receipt.native === 'object' ? receipt.native as Record<string, unknown> : undefined;
-  const applied = native?.applied && typeof native.applied === 'object' ? native.applied as Record<string, unknown> : undefined;
-  const observed = native?.observed && typeof native.observed === 'object' ? native.observed as Record<string, unknown> : undefined;
-  const diagnostic = native?.diagnostic && typeof native.diagnostic === 'object' ? native.diagnostic as Record<string, unknown> : undefined;
+  if (!isRecord(body)) return { receipt: false };
+  const receipt = isRecord(body.receipt) ? body.receipt : body;
+  const native = isRecord(receipt.native) ? receipt.native : undefined;
+  const applied = isRecord(native?.applied) ? native.applied : undefined;
+  const observed = isRecord(native?.observed) ? native.observed : undefined;
+  const diagnostic = isRecord(native?.diagnostic) ? native.diagnostic : undefined;
   return {
     receipt: Boolean(native),
     nativeChanged: typeof native?.changed === 'boolean' ? native.changed : undefined,
@@ -169,116 +170,106 @@ export interface ProviderAccountsTransport {
 
 export function createProviderAccountsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  providerAccountsTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ProviderAccountsTransport {
-  const url = `http://127.0.0.1:${providerAccountsTransportPort}/api/provider-accounts`;
   return {
     async execute(request: unknown): Promise<ProviderAccountsTransportResponse> {
       if (!isRequest(request)) {
         providerAccountsTransportTrace('request.rejected', { detail: 'invalid-request' });
         return { status: 400, body: INVALID_REQUEST };
       }
-      const trace = requestTrace(request);
-      providerAccountsTransportTrace('request.start', trace);
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/provider-accounts',
-              scope: 'providers:accounts',
-              capability: request.operationId,
-              subject: 'provider-accounts',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        providerAccountsTransportTrace('response.http', { ...trace, httpStatus: response.status });
-        let body: unknown;
-        try {
-          body = await response.json();
-        } catch {
-          providerAccountsTransportTrace('response.decode-failed', { ...trace, httpStatus: response.status });
-          if (response.status === 200) throw new ProviderMutationReceiptUnavailableError();
-          return { status: 503, body: UNAVAILABLE };
-        }
-        if (response.status === 200) {
-          if (request.operationId === 'providerAccounts.replace') {
-            const decoded = decodeProviderMutationCommittedAccountResponse(body, {
-              desiredStatus: 'stored',
-              desiredRevision: 'optional',
-              unknownError: MUTATION_UNKNOWN_ERROR,
-            });
-            providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
-            return {
-              status: 200,
-              body: decoded,
-            };
-          }
-          if (request.operationId === 'providerAccounts.delete') {
-            const decoded = decodeProviderMutationCommittedResponse(body, {
-              desiredStatus: 'deleted',
-              desiredRevision: 'optional',
-              unknownError: MUTATION_UNKNOWN_ERROR,
-            });
-            providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
-            return {
-              status: 200,
-              body: decoded,
-            };
-          }
-          if (isListResponse(body) || isAccountResponse(body)) {
-            providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, receipt: false });
-            return { status: 200, body };
-          }
-        }
-        if (response.status === 409
-          && (request.operationId === 'providerAccounts.replace' || request.operationId === 'providerAccounts.delete')) {
-          const unknown = decodeProviderMutationCommitUnknownResponse(body, {
-            desiredRevision: 'optional',
-            unknownError: MUTATION_UNKNOWN_ERROR,
-          });
-          providerAccountsTransportTrace('response.decoded', { ...trace, status: unknown ? 409 : 503, ...receiptTrace(unknown) });
-          return unknown
-            ? { status: 409, body: unknown }
-            : { status: 503, body: UNAVAILABLE };
-        }
-        if (response.status === 400) {
-          providerAccountsTransportTrace('response.rejected', { ...trace, status: 400 });
-          return { status: 400, body: INVALID_REQUEST };
-        }
-        if (response.status === 404) {
-          const status = request.operationId === 'providerAccounts.get' ? 404 : 503;
-          providerAccountsTransportTrace('response.rejected', { ...trace, status });
-          return request.operationId === 'providerAccounts.get'
-            ? { status: 404, body: MISSING }
-            : { status: 503, body: UNAVAILABLE };
-        }
-        if (response.status === 422) {
-          providerAccountsTransportTrace('response.rejected', { ...trace, status: 422 });
-          return { status: 422, body: REJECTED };
-        }
-        if (response.status === 503) {
-          providerAccountsTransportTrace('response.rejected', { ...trace, status: 503 });
-          return { status: 503, body: UNAVAILABLE };
-        }
-      } catch (error) {
-        providerAccountsTransportTrace('request.failed', {
-          ...trace,
-          errorName: error instanceof Error ? error.name : typeof error,
-          message: idShape(error instanceof Error ? error.message : String(error)),
-        });
-        // Public delivery deliberately redacts malformed loopback and host failures.
-      }
-      providerAccountsTransportTrace('response.rejected', { ...trace, status: 503, detail: 'fallback-unavailable' });
-      return { status: 503, body: UNAVAILABLE };
+      return executeRequest(request, issuer, runtimeHostTransportPort, fetcher);
     },
   };
+}
+
+async function executeRequest(
+  request: Request,
+  issuer: RuntimeHostDeliveryIssuer,
+  port: number,
+  fetcher: typeof fetch,
+): Promise<ProviderAccountsTransportResponse> {
+  const trace = requestTrace(request);
+  providerAccountsTransportTrace('request.start', trace);
+  const response = await sendLoopbackJson({
+    port,
+    path: PROVIDER_ACCOUNTS_PATH,
+    issuer,
+    decision: {
+      endpoint: PROVIDER_ACCOUNTS_PATH,
+      scope: 'providers:accounts',
+      capability: request.operationId,
+      subject: 'provider-accounts',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  if (response === null) {
+    providerAccountsTransportTrace('response.rejected', { ...trace, status: 503, detail: 'loopback-unavailable' });
+    return { status: 503, body: UNAVAILABLE };
+  }
+  providerAccountsTransportTrace('response.http', { ...trace, httpStatus: response.status });
+  const body = response.body;
+  if (response.status === 200) {
+    if (request.operationId === 'providerAccounts.replace') {
+      const decoded = decodeProviderMutationCommittedAccountResponse(body, {
+        desiredStatus: 'stored',
+        desiredRevision: 'optional',
+        unknownError: MUTATION_UNKNOWN_ERROR,
+      });
+      if (decoded) {
+        providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
+        return { status: 200, body: decoded };
+      }
+    } else if (request.operationId === 'providerAccounts.delete') {
+      const decoded = decodeProviderMutationCommittedResponse(body, {
+        desiredStatus: 'deleted',
+        desiredRevision: 'optional',
+        unknownError: MUTATION_UNKNOWN_ERROR,
+      });
+      if (decoded) {
+        providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
+        return { status: 200, body: decoded };
+      }
+    } else if (isListResponse(body) || isAccountResponse(body)) {
+      providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, receipt: false });
+      return { status: 200, body };
+    }
+  }
+  if (response.status === 409
+    && (request.operationId === 'providerAccounts.replace' || request.operationId === 'providerAccounts.delete')) {
+    const unknown = decodeProviderMutationCommitUnknownResponse(body, {
+      desiredRevision: 'optional',
+      unknownError: MUTATION_UNKNOWN_ERROR,
+    });
+    providerAccountsTransportTrace('response.decoded', { ...trace, status: unknown ? 409 : 503, ...receiptTrace(unknown) });
+    return unknown
+      ? { status: 409, body: unknown }
+      : { status: 503, body: UNAVAILABLE };
+  }
+  if (response.status === 400) {
+    providerAccountsTransportTrace('response.rejected', { ...trace, status: 400 });
+    return { status: 400, body: INVALID_REQUEST };
+  }
+  if (response.status === 404) {
+    const status = request.operationId === 'providerAccounts.get' ? 404 : 503;
+    providerAccountsTransportTrace('response.rejected', { ...trace, status });
+    return request.operationId === 'providerAccounts.get'
+      ? { status: 404, body: MISSING }
+      : { status: 503, body: UNAVAILABLE };
+  }
+  if (response.status === 422) {
+    providerAccountsTransportTrace('response.rejected', { ...trace, status: 422 });
+    return { status: 422, body: REJECTED };
+  }
+  if (response.status === 503) {
+    providerAccountsTransportTrace('response.rejected', { ...trace, status: 503 });
+    return { status: 503, body: UNAVAILABLE };
+  }
+  providerAccountsTransportTrace('response.rejected', { ...trace, status: 503, detail: 'fallback-unavailable' });
+  return { status: 503, body: UNAVAILABLE };
 }
 
 function isRequest(value: unknown): value is Request {
@@ -317,9 +308,7 @@ function isAccountResponse(value: unknown): value is AccountResponse {
 }
 
 function isProviderAccount(value: unknown): value is ProviderAccount {
-  if (!isRecord(value) || !hasOnlyKeys(value, [
-    'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
-  ])) return false;
+  if (!isRecord(value) || !Object.keys(value).every((key) => PROVIDER_ACCOUNT_KEYS.includes(key))) return false;
   const kind = value.kind ?? 'chat';
   const media = kind === 'media';
   return isIdentifier(value.id)
@@ -335,7 +324,7 @@ function isProviderAccount(value: unknown): value is ProviderAccount {
 }
 
 function isRevision(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  return isSafeNonNegativeInteger(value) && value > 0;
 }
 
 function isAccountKind(value: unknown): value is AccountKind {
@@ -365,17 +354,4 @@ export function isProviderAccountIdentifier(value: unknown): value is string {
 
 function isIdentifier(value: unknown): value is string {
   return isProviderAccountIdentifier(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

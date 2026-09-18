@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use matcha_agent::session::receipt::TerminalRunStatus;
+use crate::runtime::driver::NativeRunSettled;
+
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
     GraphDefinition, GraphRunId, IdempotencyKey, RoleChatAdmission, RoleChatAdmissionOutcome,
@@ -16,10 +17,10 @@ use tokio::sync::oneshot;
 
 use super::{
     team_run::{
-        ManualTeamCreateOutcome, MatchaTerminalObservationError, MatchaTerminalObservationOutcome,
-        TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamNodePromptSettledResult,
-        TeamNodeTerminalResolution, TeamNodeTerminalResult, TeamRunActivityError,
-        TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome, TeamRunTriggerOutcome,
+        ManualTeamCreateOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
+        TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
+        TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome,
+        TeamRunTriggerOutcome,
     },
     team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
 };
@@ -130,6 +131,23 @@ pub enum OrganizationCommand {
         requested_at: u64,
         reply: oneshot::Sender<Result<RoleChatAdmissionOutcome, StoreFault>>,
     },
+    RunStartProposalSet {
+        run_id: GraphRunId,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+        reply: oneshot::Sender<Result<organization::SetRunStartProposalOutcome, StoreFault>>,
+    },
+    RunStartConfirm {
+        run_id: GraphRunId,
+        proposal_id: String,
+        reply: oneshot::Sender<Result<organization::ConfirmRunStartOutcome, StoreFault>>,
+    },
+    RunStartContinue {
+        run_id: GraphRunId,
+        proposal_id: String,
+        reply: oneshot::Sender<Result<organization::ContinueRunDiscussionOutcome, StoreFault>>,
+    },
     NodeEvent {
         command: RunCommand,
         event: TeamNodeEvent,
@@ -184,14 +202,12 @@ pub enum OrganizationCommand {
         outcome: crate::runtime::driver::ActivityExecutionOutcome,
         reply: oneshot::Sender<Result<TeamRunActivityOutcome, TeamRunActivityError>>,
     },
-    ObserveMatchaTerminal {
+    NativeRunSettled {
         run_id: GraphRunId,
         delivery_id: DeliveryId,
-        status: TerminalRunStatus,
-        observed_at: u64,
-        reply: oneshot::Sender<
-            Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError>,
-        >,
+        settled: NativeRunSettled,
+        settled_at: u64,
+        reply: oneshot::Sender<Result<TeamNodeTerminalResult, StoreFault>>,
     },
     RecoverMaterializationReceipts {
         reply: oneshot::Sender<()>,

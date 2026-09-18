@@ -4,7 +4,7 @@ import type {
 } from '../../main/runtime-host-delivery/transport/channels/credentials';
 import { isChannelCredentialsRequest } from '../../main/runtime-host-delivery/transport/channels/credentials';
 import { parseJsonBody, sendJson } from '../route-utils';
-import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = {
   success: false,

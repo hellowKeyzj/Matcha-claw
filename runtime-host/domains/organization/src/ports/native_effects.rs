@@ -1,7 +1,7 @@
 use std::{fmt, future::Future, pin::Pin};
 
 use super::{
-    DeliveryReceiptReference, ExternalSessionReference, MaterializationOperationOutcome,
+    DeliveryReceiptReference, EndpointSessionId, MaterializationOperationOutcome,
     PromptDeliveryOutcome, PromptDeliveryRequest, RoleSessionReceipt, SessionWindowReference,
     TeamMaterializationRemoval, TeamMaterializationRequest,
 };
@@ -16,15 +16,15 @@ pub enum NativeEffectFailure {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RoleSessionAbortReceipt {
-    session: ExternalSessionReference,
+    session: EndpointSessionId,
 }
 
 impl RoleSessionAbortReceipt {
-    pub fn new(session: ExternalSessionReference) -> Self {
+    pub fn new(session: EndpointSessionId) -> Self {
         Self { session }
     }
 
-    pub fn session(&self) -> &ExternalSessionReference {
+    pub fn session(&self) -> &EndpointSessionId {
         &self.session
     }
 }
@@ -44,15 +44,15 @@ pub enum RoleSessionAbortOutcome {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RoleSessionDeleteReceipt {
-    session: ExternalSessionReference,
+    session: EndpointSessionId,
 }
 
 impl RoleSessionDeleteReceipt {
-    pub fn new(session: ExternalSessionReference) -> Self {
+    pub fn new(session: EndpointSessionId) -> Self {
         Self { session }
     }
 
-    pub fn session(&self) -> &ExternalSessionReference {
+    pub fn session(&self) -> &EndpointSessionId {
         &self.session
     }
 }
@@ -72,16 +72,16 @@ pub enum RoleSessionDeleteOutcome {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RoleSessionReadbackReceipt {
-    session: ExternalSessionReference,
+    session: EndpointSessionId,
     window: SessionWindowReference,
 }
 
 impl RoleSessionReadbackReceipt {
-    pub fn new(session: ExternalSessionReference, window: SessionWindowReference) -> Self {
+    pub fn new(session: EndpointSessionId, window: SessionWindowReference) -> Self {
         Self { session, window }
     }
 
-    pub fn session(&self) -> &ExternalSessionReference {
+    pub fn session(&self) -> &EndpointSessionId {
         &self.session
     }
 
@@ -143,6 +143,6 @@ pub trait TeamNativeEffectsPort {
 #[allow(dead_code)]
 fn _opaque_receipt_types_are_publicly_safe(
     _delivery: DeliveryReceiptReference,
-    _session: ExternalSessionReference,
+    _session: EndpointSessionId,
 ) {
 }

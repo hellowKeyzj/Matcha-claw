@@ -1,11 +1,15 @@
 use std::fmt;
 
-use crate::{DeliveryId, ExecutionFence, GraphRunId, MatchaDeliveryCorrelation, NodeId, RoleId};
+use crate::{
+    DeliveryId, ExecutionFence, GraphRunId, NativeDeliveryCorrelation, NodeId, RoleId,
+    RuntimeEndpointReference,
+};
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct MatchaTerminalReceiptTarget {
+pub struct NativeTerminalReceiptTarget {
     delivery_id: DeliveryId,
-    correlation: MatchaDeliveryCorrelation,
+    endpoint: RuntimeEndpointReference,
+    correlation: NativeDeliveryCorrelation,
     proof: TerminalObservationProof,
 }
 
@@ -17,17 +21,19 @@ struct TerminalObservationProof {
     role_id: RoleId,
 }
 
-impl MatchaTerminalReceiptTarget {
+impl NativeTerminalReceiptTarget {
     pub(super) fn new(
         delivery_id: DeliveryId,
         graph_run_id: GraphRunId,
         node_id: NodeId,
         fence: ExecutionFence,
         role_id: RoleId,
-        correlation: MatchaDeliveryCorrelation,
+        endpoint: RuntimeEndpointReference,
+        correlation: NativeDeliveryCorrelation,
     ) -> Self {
         Self {
             delivery_id,
+            endpoint,
             correlation,
             proof: TerminalObservationProof {
                 graph_run_id,
@@ -38,7 +44,11 @@ impl MatchaTerminalReceiptTarget {
         }
     }
 
-    pub fn correlation(&self) -> &MatchaDeliveryCorrelation {
+    pub fn endpoint(&self) -> &RuntimeEndpointReference {
+        &self.endpoint
+    }
+
+    pub fn correlation(&self) -> &NativeDeliveryCorrelation {
         &self.correlation
     }
 
@@ -51,10 +61,10 @@ impl MatchaTerminalReceiptTarget {
     }
 }
 
-impl fmt::Debug for MatchaTerminalReceiptTarget {
+impl fmt::Debug for NativeTerminalReceiptTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("MatchaTerminalReceiptTarget")
+            .debug_struct("NativeTerminalReceiptTarget")
             .field("delivery_id", &"<redacted>")
             .field("correlation", &"<redacted>")
             .field("proof", &"<redacted>")

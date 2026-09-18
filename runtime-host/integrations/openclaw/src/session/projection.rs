@@ -8,10 +8,10 @@ use super::{
         SessionIdentityFacts, SessionRuntimeFacts,
     },
     protocol::{
-        ApprovalId, ApprovalOptionId, ChatState, MessageActivityLifecycle, MessageId, RunId,
-        RuntimeActivityPhase, RuntimeFallbackDetail, RuntimeGuardianNotice, SessionActivityKind,
-        SessionErrorKind, SessionEventEnvelope, SessionEventKind, SessionKey, SessionSummary,
-        ToolActivityPhase, ToolId,
+        ApprovalId, ApprovalOptionId, ChatState, ChatStatusPhase, MessageActivityLifecycle,
+        MessageId, RunId, RuntimeActivityPhase, RuntimeFallbackDetail, RuntimeGuardianNotice,
+        SessionActivityKind, SessionErrorKind, SessionEventEnvelope, SessionEventKind, SessionKey,
+        SessionSummary, ToolActivityPhase, ToolId,
     },
 };
 use crate::session_window::Message;
@@ -279,6 +279,22 @@ impl AssistantTurnSnapshot {
         }
         Self::new(run_id, message_id, segments, text, thinking, status)
     }
+
+    pub fn final_text_for_run<'snapshot>(
+        snapshots: impl IntoIterator<Item = &'snapshot Self>,
+        run_id: &RunId,
+    ) -> Option<&'snapshot str> {
+        let mut final_text = None;
+        for snapshot in snapshots {
+            if snapshot.run_id == *run_id
+                && snapshot.status == AssistantTurnStatus::Final
+                && !snapshot.text.is_empty()
+            {
+                final_text = Some(snapshot.text.as_str());
+            }
+        }
+        final_text
+    }
 }
 
 impl fmt::Debug for AssistantTurnSnapshot {
@@ -343,6 +359,10 @@ pub enum CanonicalSessionChange {
         activity: CanonicalRuntimeActivity,
         retrying_cleanup: bool,
     },
+    RunProgress {
+        run_id: RunId,
+        progress: CanonicalRunProgress,
+    },
     RuntimeFallback {
         run_id: RunId,
         detail: RuntimeFallbackDetail,
@@ -374,6 +394,12 @@ pub enum CanonicalSessionChange {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CanonicalRuntimeActivity {
     Compacting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanonicalRunProgress {
+    Startup { phase: ChatStatusPhase },
+    Retrying { attempt: u8, max_attempts: u8 },
 }
 
 impl fmt::Debug for CanonicalSessionChange {
@@ -437,6 +463,10 @@ impl fmt::Debug for CanonicalSessionChange {
             Self::RuntimeActivityCleared { activity, .. } => formatter
                 .debug_struct("RuntimeActivityCleared")
                 .field("activity", activity)
+                .finish(),
+            Self::RunProgress { progress, .. } => formatter
+                .debug_struct("RunProgress")
+                .field("progress", progress)
                 .finish(),
             Self::RuntimeFallback { detail, .. } => formatter
                 .debug_struct("RuntimeFallback")
@@ -570,7 +600,7 @@ impl CanonicalSessionDeltaProducer {
                     return None;
                 }
                 match chat.state {
-                    ChatState::Status => return None,
+                    ChatState::Status => chat_status_change(chat)?,
                     ChatState::Delta => {
                         if chat.message_text.is_some() || chat.message_thinking.is_some() {
                             return Self::from_native_changes(
@@ -580,14 +610,19 @@ impl CanonicalSessionDeltaProducer {
                                 chat_snapshot_chunks(event, chat),
                             );
                         }
-                        CanonicalSessionChange::AssistantTurnChunk {
-                            run_id: chat.run_id.clone(),
-                            message_id: native_message_id(event),
-                            kind: AssistantTurnChunkKind::Text,
-                            text: chat.delta_text.clone()?,
-                            replace: chat.replace,
-                            status: AssistantTurnStatus::Streaming,
-                        }
+                        return Self::from_native_changes(
+                            event,
+                            source_epoch,
+                            route_key,
+                            vec![CanonicalSessionChange::AssistantTurnChunk {
+                                run_id: chat.run_id.clone(),
+                                message_id: native_message_id(event),
+                                kind: AssistantTurnChunkKind::Text,
+                                text: chat.delta_text.clone()?,
+                                replace: chat.replace,
+                                status: AssistantTurnStatus::Streaming,
+                            }],
+                        );
                     }
                     state => {
                         let terminal = CanonicalSessionChange::Terminal {
@@ -599,17 +634,14 @@ impl CanonicalSessionDeltaProducer {
                             stop_reason: chat.stop_reason.clone(),
                             error_detail: chat.error_detail.clone(),
                         };
-                        if chat.message_text.is_some() || chat.message_thinking.is_some() {
-                            let mut changes = chat_snapshot_chunks(event, chat);
-                            changes.push(terminal);
-                            return Self::from_native_changes(
-                                event,
-                                source_epoch,
-                                route_key,
-                                changes,
-                            );
-                        }
-                        terminal
+                        let mut changes =
+                            if chat.message_text.is_some() || chat.message_thinking.is_some() {
+                                chat_snapshot_chunks(event, chat)
+                            } else {
+                                Vec::new()
+                            };
+                        changes.push(terminal);
+                        return Self::from_native_changes(event, source_epoch, route_key, changes);
                     }
                 }
             }
@@ -769,6 +801,23 @@ fn terminal_outcome(state: ChatState) -> Option<TerminalOutcome> {
         ChatState::Error => Some(TerminalOutcome::Error),
         ChatState::Status | ChatState::Delta => None,
     }
+}
+
+fn chat_status_change(chat: &super::protocol::ChatEvent) -> Option<CanonicalSessionChange> {
+    let progress = if let Some(retry) = chat.status_retry {
+        CanonicalRunProgress::Retrying {
+            attempt: retry.attempt,
+            max_attempts: retry.max_attempts,
+        }
+    } else {
+        CanonicalRunProgress::Startup {
+            phase: chat.status_phase?,
+        }
+    };
+    Some(CanonicalSessionChange::RunProgress {
+        run_id: chat.run_id.clone(),
+        progress,
+    })
 }
 
 fn chat_snapshot_chunks(
@@ -1700,6 +1749,51 @@ mod tests {
         ] {
             assert!(!debug.contains(private_value));
         }
+    }
+
+    #[test]
+    fn assistant_turn_final_text_filters_by_run_id() {
+        let run_1 = RunId::try_new("run-1").unwrap();
+        let run_2 = RunId::try_new("run-2").unwrap();
+        let snapshots = [
+            AssistantTurnSnapshot::from_text_parts(
+                run_2.clone(),
+                None,
+                "other final",
+                None,
+                AssistantTurnStatus::Final,
+            ),
+            AssistantTurnSnapshot::from_text_parts(
+                run_1.clone(),
+                None,
+                "streaming text",
+                None,
+                AssistantTurnStatus::Streaming,
+            ),
+            AssistantTurnSnapshot::from_text_parts(
+                run_1.clone(),
+                None,
+                "canonical final",
+                None,
+                AssistantTurnStatus::Final,
+            ),
+        ];
+
+        assert_eq!(
+            AssistantTurnSnapshot::final_text_for_run(snapshots.iter(), &run_1),
+            Some("canonical final")
+        );
+        assert_eq!(
+            AssistantTurnSnapshot::final_text_for_run(snapshots.iter(), &run_2),
+            Some("other final")
+        );
+        assert_eq!(
+            AssistantTurnSnapshot::final_text_for_run(
+                snapshots.iter(),
+                &RunId::try_new("missing-run").unwrap()
+            ),
+            None
+        );
     }
 
     #[test]

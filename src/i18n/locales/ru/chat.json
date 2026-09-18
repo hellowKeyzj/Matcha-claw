@@ -67,10 +67,21 @@
   "pending": {
     "typing": "Thinking",
     "activity": "Working",
-    "compacting": "Compressing context, then the reply will continue"
+    "compacting": "Compressing context, then the reply will continue",
+    "startup": {
+      "preparing_workspace": "Подготовка рабочей области",
+      "naming_worktree": "Именование рабочей области",
+      "creating_worktree": "Создание рабочей области",
+      "running_setup": "Запуск инициализации",
+      "provisioning_environment": "Подготовка среды выполнения",
+      "preparing_context": "Подготовка контекста",
+      "starting_model": "Запуск модели"
+    },
+    "retrying": "Модель ограничена по частоте, повтор {{attempt}}/{{maxAttempts}}"
   },
   "runtimeStatus": {
     "providerFallback": "Provider fallback applied",
+    "runtimeError": "Runtime error",
     "guardian": {
       "reviewing": "Guardian is reviewing the action",
       "approved": "Guardian approved the action",

@@ -14,9 +14,7 @@ import {
   hostProviderDeleteAccount,
   hostProviderUpdateAccount,
 } from '@/lib/provider-projection';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
-import { useProviderModelCatalogStore } from '@/stores/provider-model-catalog';
-import { useSubagentsStore } from '@/stores/subagents';
+import { refreshProviderPostMutationProjections } from '@/stores/provider-post-mutation-refresh';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
 import type { ProviderMutationReceipt } from '@/lib/host-api-transport-contract';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
@@ -355,9 +353,12 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to create provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-      await get().refreshProviderSnapshot({
-        trigger: 'reconcile',
-        reason: 'mutation_create',
+      await refreshProviderPostMutationProjections({
+        providerSnapshotReason: 'mutation_create',
+        refreshProviderSnapshot: () => get().refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'mutation_create',
+        }),
       });
     } catch (error) {
       console.error('Failed to add account:', error);
@@ -401,9 +402,12 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to update provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-      await get().refreshProviderSnapshot({
-        trigger: 'reconcile',
-        reason: 'mutation_update',
+      await refreshProviderPostMutationProjections({
+        providerSnapshotReason: 'mutation_update',
+        refreshProviderSnapshot: () => get().refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'mutation_update',
+        }),
       });
     } catch (error) {
       console.error('Failed to update account:', error);
@@ -439,15 +443,13 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to delete provider account');
       }
       set({ lastMutationReceipt: result.receipt ?? null, warning: result.warning ?? providerNativeWarning(result.receipt) });
-      await Promise.all([
-        get().refreshProviderSnapshot({
+      await refreshProviderPostMutationProjections({
+        providerSnapshotReason: 'mutation_remove',
+        refreshProviderSnapshot: () => get().refreshProviderSnapshot({
           trigger: 'reconcile',
           reason: 'mutation_remove',
         }),
-        useProviderModelCatalogStore.getState().refresh(),
-        useCapabilityRoutingStore.getState().refresh(),
-        useSubagentsStore.getState().loadAvailableModels({ force: true }),
-      ]);
+      });
     } catch (error) {
       console.error('Failed to delete account:', error);
       throw error;

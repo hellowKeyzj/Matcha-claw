@@ -251,7 +251,7 @@ mod tests {
     }
 }
 
-pub(crate) mod server {
+pub(crate) mod handler {
     use super::{AUTHORIZATION_HEADER, BEARER_PREFIX, Delivery};
     use crate::{
         composition::PeerHandle, transport::common::authorization::CapabilityDecisionVerifier,

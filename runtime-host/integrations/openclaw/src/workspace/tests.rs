@@ -893,7 +893,12 @@ fn lists_rooted_directory_receipts_with_legacy_filters() {
         entries
             .entries()
             .iter()
-            .map(|entry| (entry.relative_path(), entry.display(), entry.is_directory(), entry.size()))
+            .map(|entry| (
+                entry.relative_path(),
+                entry.display(),
+                entry.is_directory(),
+                entry.size()
+            ))
             .collect::<Vec<_>>(),
         [
             ("folder", "folder", true, 0),
@@ -908,7 +913,12 @@ fn lists_rooted_directory_receipts_with_legacy_filters() {
         entries
             .entries()
             .iter()
-            .map(|entry| (entry.relative_path(), entry.display(), entry.is_directory(), entry.size()))
+            .map(|entry| (
+                entry.relative_path(),
+                entry.display(),
+                entry.is_directory(),
+                entry.size()
+            ))
             .collect::<Vec<_>>(),
         [
             ("folder/child-dir", "child-dir", true, 0),
@@ -1027,8 +1037,12 @@ fn rejects_symlinked_components_and_leaves_without_following_foreign_targets() {
     let files = files(&workspace, root.path());
 
     for result in [
-        files.read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES).map(|_| ()),
-        files.read_text_with_limit("link.txt", MAX_TEXT_BYTES).map(|_| ()),
+        files
+            .read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES)
+            .map(|_| ()),
+        files
+            .read_text_with_limit("link.txt", MAX_TEXT_BYTES)
+            .map(|_| ()),
         files.stat("linked-dir/private.txt").map(|_| ()),
         files.list_dir_with_options("linked-dir", false).map(|_| ()),
     ] {
@@ -1080,7 +1094,9 @@ fn rejects_reparse_point_components_without_following_foreign_targets() {
     let files = files(&workspace, root.path());
 
     for result in [
-        files.read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES).map(|_| ()),
+        files
+            .read_text_with_limit("linked-dir/private.txt", MAX_TEXT_BYTES)
+            .map(|_| ()),
         files.stat("linked-dir/private.txt").map(|_| ()),
         files.list_dir_with_options("linked-dir", false).map(|_| ()),
     ] {
@@ -1098,7 +1114,9 @@ fn redacts_the_selected_workspace_from_errors_and_debug_output() {
     let workspace = root.path().join("workspace-secret-canary");
     fs::create_dir(&workspace).unwrap();
     let files = files(&workspace, root.path());
-    let error = files.read_text_with_limit("missing.txt", MAX_TEXT_BYTES).unwrap_err();
+    let error = files
+        .read_text_with_limit("missing.txt", MAX_TEXT_BYTES)
+        .unwrap_err();
     let output = format!("{files:?} {error:?} {error}");
 
     assert!(!output.contains("workspace-secret-canary"));

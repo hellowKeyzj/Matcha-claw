@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntimeHostDeliveryIssuer,
-} from '../../electron/main/runtime-host-delivery/bootstrap';
+} from '../../electron/main/runtime-host-delivery/issuer';
 import {
   createSessionApprovalTransport,
 } from '../../electron/main/runtime-host-delivery/transport/sessions/approvals';
@@ -41,6 +41,8 @@ const respondRequest = {
   },
 };
 
+const runtimeHostTransportPort = 32_111;
+
 describe('session approval delivery transport', () => {
   it('binds separate Matcha approval capabilities to fixed localhost endpoints', async () => {
     const fetcher = vi.fn()
@@ -56,7 +58,7 @@ describe('session approval delivery transport', () => {
       });
     const transport = createSessionApprovalTransport(
       createRuntimeHostDeliveryIssuer(),
-      32_021,
+      runtimeHostTransportPort,
       fetcher,
     );
 
@@ -71,12 +73,12 @@ describe('session approval delivery transport', () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      'http://127.0.0.1:32021/api/sessions/approvals/list',
+      'http://127.0.0.1:32111/api/sessions/approvals/list',
       expect.objectContaining({ method: 'POST', body: JSON.stringify(listRequest) }),
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
-      'http://127.0.0.1:32021/api/sessions/approvals/respond',
+      'http://127.0.0.1:32111/api/sessions/approvals/respond',
       expect.objectContaining({ method: 'POST', body: JSON.stringify(respondRequest) }),
     );
     expect(decision(fetcher.mock.calls[0]?.[1]?.headers.Authorization)).toMatchObject({
@@ -97,7 +99,7 @@ describe('session approval delivery transport', () => {
     const fetcher = vi.fn();
     const transport = createSessionApprovalTransport(
       createRuntimeHostDeliveryIssuer(),
-      32_021,
+      runtimeHostTransportPort,
       fetcher,
     );
 
@@ -128,7 +130,7 @@ describe('session approval delivery transport', () => {
   it('projects only the fixed unsupported delivery response', async () => {
     const transport = createSessionApprovalTransport(
       createRuntimeHostDeliveryIssuer(),
-      32_021,
+      runtimeHostTransportPort,
       vi.fn().mockResolvedValue({
         status: 422,
         json: async () => ({
@@ -147,7 +149,7 @@ describe('session approval delivery transport', () => {
   it('does not project broker terminal payloads from malformed responses', async () => {
     const transport = createSessionApprovalTransport(
       createRuntimeHostDeliveryIssuer(),
-      32_021,
+      runtimeHostTransportPort,
       vi.fn().mockResolvedValue({
         status: 200,
         json: async () => ({

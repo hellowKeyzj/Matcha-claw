@@ -1,8 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import { decodeSessionContentLoadResponse } from './session-contract';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
-
-const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = { success: false, error: 'Session content is unavailable' } as const;
 const ENDPOINT = '/api/sessions/content';
 const MAX_CONTENT_REF_BYTES = 512;
@@ -38,7 +37,7 @@ type Identity = Readonly<{ endpoint: Endpoint; agentId: string; sessionKey: stri
 
 export function createSessionContentTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionContentTransport {
   return {
@@ -56,41 +55,39 @@ export function createSessionContentTransport(
         offset: request.input.offset,
         limit: request.input.limit ?? null,
       });
-      try {
-        const response = await fetcher(`http://127.0.0.1:${sessionTransportPort}${ENDPOINT}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: ENDPOINT,
-              scope: 'sessions:read',
-              capability: 'session.management',
-              subject: 'session-content',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...traceHeader(traceId),
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        const loaded = response.status === 200 ? decodeSessionContentLoadResponse(body) : null;
-        logSessionTrace('electron.content.response', traceId, {
-          status: response.status,
-          contract: loaded ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
-          elapsedMs: Date.now() - startedAt,
-        });
-        if (response.status === 200
-          && loaded
-          && loaded.contentRef === request.input.contentRef
-          && loaded.offset === request.input.offset) {
-          return { status: 200, body: loaded };
-        }
-        if (response.status === 503 && isUnavailable(body)) return { status: 503, body: UNAVAILABLE };
-      } catch {
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: ENDPOINT,
+          scope: 'sessions:read',
+          capability: 'session.management',
+          subject: 'session-content',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+        headers: traceHeader(traceId),
+      });
+      if (response === null) {
         logSessionTrace('electron.content.failure', traceId, { elapsedMs: Date.now() - startedAt });
+        return { status: 503, body: UNAVAILABLE };
       }
+      const body = response.body;
+      const loaded = response.status === 200 ? decodeSessionContentLoadResponse(body) : null;
+      logSessionTrace('electron.content.response', traceId, {
+        status: response.status,
+        contract: loaded ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
+        elapsedMs: Date.now() - startedAt,
+      });
+      if (response.status === 200
+        && loaded
+        && loaded.contentRef === request.input.contentRef
+        && loaded.offset === request.input.offset) {
+        return { status: 200, body: loaded };
+      }
+      if (response.status === 503 && isUnavailable(body)) return { status: 503, body: UNAVAILABLE };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -153,10 +150,6 @@ function isContentLimit(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 64 * 1024;
 }
 
-function isSafeNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
 function isBoundedId(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0
@@ -176,15 +169,6 @@ function isContentRef(value: unknown): value is string {
 function isUnavailable(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['success', 'error'])
     && value.success === false && value.error === UNAVAILABLE.error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasAllowedKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[]): boolean {

@@ -4,17 +4,15 @@ use serde_json::{Map, Value, json};
 use crate::{
     composition::PeerHandle,
     facade::{
-        CronHandle, InstallationStatus, PlatformRuntimeError, PlatformRuntimeHandle,
-        SubagentTemplate, SubagentTemplateCatalog, SubagentTemplateCategory,
-        SubagentTemplateDetail, SubagentTemplateError, SubagentTemplateSummary,
-        ToolPermissionEffect, ToolPermissionMode,
+        InstallationStatus, PlatformRuntimeError, PlatformRuntimeHandle, SubagentTemplate,
+        SubagentTemplateCatalog, SubagentTemplateCategory, SubagentTemplateDetail,
+        SubagentTemplateError, SubagentTemplateSummary, ToolPermissionEffect, ToolPermissionMode,
     },
 };
 
 use super::{
     COMMAND_FAILED_MESSAGE, CommandInput, CommandOutcome, CommandResult, INVALID_INPUT_MESSAGE,
-    InvalidPayload, RUNTIME_UNAVAILABLE_MESSAGE, RejectionCode, decode, internal_error,
-    invalid_input, unavailable,
+    InvalidPayload, RejectionCode, decode, internal_error, invalid_input, unavailable,
 };
 
 pub(super) async fn matcha_status(peer: &PeerHandle) -> CommandOutcome {
@@ -260,37 +258,6 @@ fn subagent_template_json(template: &SubagentTemplate) -> Value {
     Value::Object(object)
 }
 
-pub(super) async fn manually_trigger_openclaw_cron(
-    cron: &CronHandle,
-    input: CommandInput,
-) -> CommandOutcome {
-    let request = match decode_manual_cron_trigger(input) {
-        Ok(request) => request,
-        Err(_) => return invalid_input(),
-    };
-    match cron.trigger(request.job_id).await {
-        Ok(crate::cron::CronTriggerResult::Accepted) => CommandOutcome::succeeded(
-            CommandResult::private(json!({ "result": { "outcome": "accepted" } })),
-        ),
-        Ok(crate::cron::CronTriggerResult::Skipped(disposition)) => {
-            let reason = match disposition {
-                crate::cron::CronTriggerSkipReason::AlreadyRunning => "already-running",
-                crate::cron::CronTriggerSkipReason::NotDue => "not-due",
-                crate::cron::CronTriggerSkipReason::InvalidSpec => "invalid-spec",
-                crate::cron::CronTriggerSkipReason::Disabled => "disabled",
-                crate::cron::CronTriggerSkipReason::Stopped => "stopped",
-            };
-            CommandOutcome::succeeded(CommandResult::private(
-                json!({ "result": { "outcome": "skipped", "reason": reason } }),
-            ))
-        }
-        Ok(crate::cron::CronTriggerResult::OutcomeUnknown) => CommandOutcome::unknown(
-            CommandResult::private(json!({ "result": { "outcome": "outcome-unknown" } })),
-        ),
-        Err(_) => CommandOutcome::rejected(RejectionCode::Unavailable, RUNTIME_UNAVAILABLE_MESSAGE),
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct OpenClawBrowserRequest {
     pub(super) method: String,
@@ -474,19 +441,4 @@ fn bounded_gateway_text(value: Option<&Value>) -> Result<String, InvalidPayload>
         return Err(InvalidPayload);
     }
     Ok(value.to_owned())
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct ManualCronTriggerRequest {
-    pub(super) job_id: String,
-}
-
-pub(super) fn decode_manual_cron_trigger(
-    input: CommandInput,
-) -> Result<ManualCronTriggerRequest, InvalidPayload> {
-    let request: ManualCronTriggerRequest = decode(input)?;
-    (!request.job_id.trim().is_empty())
-        .then_some(request)
-        .ok_or(InvalidPayload)
 }

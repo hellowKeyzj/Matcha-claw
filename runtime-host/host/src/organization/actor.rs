@@ -5,12 +5,11 @@ use std::{
 };
 
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
-use matcha_agent::session::receipt::TerminalRunStatus;
 use organization::{
     ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId, GraphRunId,
-    GraphRunLifecycleState, IdempotencyKey, MatchaTerminalReceiptTarget,
-    MaterializationRecordOutcome, NativeDeletionEvidence, NativeTerminalStatus, OrganizationStore,
-    RoleAbortOutcome, RuntimeEndpointReference, StoreFault, TeamId,
+    GraphRunLifecycleState, IdempotencyKey, MaterializationRecordOutcome, NativeDeletionEvidence,
+    NativeTerminalReceiptTarget, NativeTerminalStatus, OrganizationStore, RoleAbortOutcome,
+    RuntimeEndpointReference, StoreFault, TeamId,
     package::{
         TeamSkillDependencyCatalog, TeamSkillDependencyPlanResult, TeamSkillPackageValidation,
         TeamSkillSelectionError, TeamSkillSelectionId, TeamSkillSelectionResolver,
@@ -30,11 +29,11 @@ use crate::{
 use super::{
     OrganizationCommand, OrganizationQuery,
     team_run::{
-        ManualTeamCreateOutcome, ManualTeamMaterializationInput, MatchaTerminalObservationError,
-        MatchaTerminalObservationOutcome, RuntimeReceiptOutcome, TeamDeleteOutcome,
-        TeamMaterializationCommandOutcome, TeamRunActivityError, TeamRunActivityOutcome,
-        TeamRunActivityStart, TeamRunActivityTarget, TeamRunOwner, TeamTriggerFireResolution,
-        install_prepared_runtime_receipt, prepare_runtime_receipt, settle_public_cancellation,
+        ManualTeamCreateOutcome, ManualTeamMaterializationInput, RuntimeReceiptOutcome,
+        TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamRunActivityError,
+        TeamRunActivityOutcome, TeamRunActivityStart, TeamRunActivityTarget, TeamRunOwner,
+        TeamTriggerFireResolution, install_prepared_runtime_receipt, prepare_runtime_receipt,
+        settle_public_cancellation,
     },
     team_runtime::TeamRuntimeStatus,
 };
@@ -77,7 +76,7 @@ impl OrganizationOwner {
         Self {
             shared: OrganizationShared {
                 runtime_directory: input.runtime_directory,
-                store_path,
+                store_path: store_path.clone(),
             },
             global: OrganizationGlobalState {
                 store: input.store,
@@ -933,33 +932,12 @@ impl OrganizationGlobalState {
             .settle_agent_activity_dispatch(&mut self.store, claim, outcome)
     }
 
-    fn matcha_terminal_target(
+    fn native_terminal_target(
         &self,
         delivery_id: &DeliveryId,
-    ) -> Option<MatchaTerminalReceiptTarget> {
+    ) -> Option<NativeTerminalReceiptTarget> {
         self.team_run
-            .matcha_terminal_target(&self.store, delivery_id)
-    }
-
-    fn observe_matcha_terminal(
-        &mut self,
-        delivery_id: DeliveryId,
-        status: TerminalRunStatus,
-        observed_at: u64,
-    ) -> Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError> {
-        let Some(target) = self.matcha_terminal_target(&delivery_id) else {
-            return Ok(MatchaTerminalObservationOutcome::NotFound);
-        };
-        let native_terminal = match status {
-            TerminalRunStatus::Completed => NativeTerminalStatus::Completed,
-            TerminalRunStatus::Cancelled => NativeTerminalStatus::Cancelled,
-            TerminalRunStatus::Failed => NativeTerminalStatus::Failed,
-            TerminalRunStatus::Interrupted => NativeTerminalStatus::Interrupted,
-        };
-        self.team_run
-            .observe_matcha_terminal(&mut self.store, target, native_terminal, observed_at)
-            .map(MatchaTerminalObservationOutcome::Observed)
-            .map_err(MatchaTerminalObservationError::Store)
+            .native_terminal_target(&self.store, delivery_id)
     }
 
     async fn recover_materialization_receipts(&mut self, shared: &OrganizationShared) {
@@ -1017,12 +995,15 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunCreateFromTeamTemplate { run_id, .. }
             | OrganizationCommand::RunCancel { run_id, .. }
             | OrganizationCommand::RunDelete { run_id, .. }
+            | OrganizationCommand::RunStartProposalSet { run_id, .. }
+            | OrganizationCommand::RunStartConfirm { run_id, .. }
+            | OrganizationCommand::RunStartContinue { run_id, .. }
             | OrganizationCommand::NodeTerminalResolve { run_id, .. }
             | OrganizationCommand::TaskBoardMutate { run_id, .. }
             | OrganizationCommand::ScheduleReadyNodes { run_id, .. }
             | OrganizationCommand::ClaimActivity { run_id, .. }
             | OrganizationCommand::SettleActivity { run_id, .. }
-            | OrganizationCommand::ObserveMatchaTerminal { run_id, .. } => {
+            | OrganizationCommand::NativeRunSettled { run_id, .. } => {
                 CommandRoute::Keyed(run_id.clone())
             }
             OrganizationCommand::TriggerFire { request, .. } => {
@@ -1080,6 +1061,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TeamSkillSelectionDependencyPlan { .. }
             | OrganizationQuery::RunList { .. }
             | OrganizationQuery::RoleSessions { .. }
+            | OrganizationQuery::StartGateSessionBinding { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
             | OrganizationQuery::PendingRunActivityIds { .. }
@@ -1254,6 +1236,38 @@ impl OwnerSpec for OrganizationOwner {
                         .team_run
                         .tombstone(&mut store, &run_id, &idempotency_key, tombstoned_at)
                 });
+                let _ = reply.send(outcome);
+            }
+            OrganizationCommand::RunStartProposalSet {
+                run_id,
+                proposal_id,
+                summary,
+                source_delivery_id,
+                reply,
+            } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    store.set_run_start_proposal(&run_id, proposal_id, summary, source_delivery_id)
+                });
+                let _ = reply.send(outcome);
+            }
+            OrganizationCommand::RunStartConfirm {
+                run_id,
+                proposal_id,
+                reply,
+            } => {
+                let outcome = state
+                    .open_store()
+                    .and_then(|mut store| store.confirm_run_start(&run_id, &proposal_id));
+                let _ = reply.send(outcome);
+            }
+            OrganizationCommand::RunStartContinue {
+                run_id,
+                proposal_id,
+                reply,
+            } => {
+                let outcome = state
+                    .open_store()
+                    .and_then(|mut store| store.continue_run_discussion(&run_id, &proposal_id));
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::TriggerFire {
@@ -1431,42 +1445,37 @@ impl OwnerSpec for OrganizationOwner {
                     });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::ObserveMatchaTerminal {
+            OrganizationCommand::NativeRunSettled {
                 run_id,
                 delivery_id,
-                status,
-                observed_at,
+                settled,
+                settled_at,
                 reply,
             } => {
-                let outcome = state
-                    .open_store()
-                    .map_err(MatchaTerminalObservationError::Store)
-                    .and_then(|mut store| {
-                        let Some(target) =
-                            state.team_run.matcha_terminal_target(&store, &delivery_id)
-                        else {
-                            return Ok(MatchaTerminalObservationOutcome::NotFound);
-                        };
-                        if target.graph_run_id() != &run_id {
-                            return Err(MatchaTerminalObservationError::Correlation);
-                        }
-                        let native_terminal = match status {
-                            TerminalRunStatus::Completed => NativeTerminalStatus::Completed,
-                            TerminalRunStatus::Cancelled => NativeTerminalStatus::Cancelled,
-                            TerminalRunStatus::Failed => NativeTerminalStatus::Failed,
-                            TerminalRunStatus::Interrupted => NativeTerminalStatus::Interrupted,
-                        };
-                        state
-                            .team_run
-                            .observe_matcha_terminal(
-                                &mut store,
-                                target,
-                                native_terminal,
-                                observed_at,
-                            )
-                            .map(MatchaTerminalObservationOutcome::Observed)
-                            .map_err(MatchaTerminalObservationError::Store)
-                    });
+                let outcome = state.open_store().and_then(|mut store| {
+                    let Some(target) = state.team_run.native_terminal_target(&store, &delivery_id)
+                    else {
+                        return Err(StoreFault::InvalidFacts);
+                    };
+                    if target.graph_run_id() != &run_id {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                    let native_terminal = settled.status;
+                    state.team_run.observe_native_terminal(
+                        &mut store,
+                        target,
+                        native_terminal,
+                        settled_at,
+                    )?;
+                    super::team_run::resolve_native_settled_output(
+                        &mut store,
+                        &state.team_run,
+                        &run_id,
+                        &delivery_id,
+                        settled,
+                        settled_at,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::TeamSkillAuthorize { .. }
@@ -1679,6 +1688,9 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunCreateFromTeamTemplate { .. }
             | OrganizationCommand::RunCancel { .. }
             | OrganizationCommand::RunDelete { .. }
+            | OrganizationCommand::RunStartProposalSet { .. }
+            | OrganizationCommand::RunStartConfirm { .. }
+            | OrganizationCommand::RunStartContinue { .. }
             | OrganizationCommand::TriggerFire { .. }
             | OrganizationCommand::GraphSave { .. }
             | OrganizationCommand::GraphPatch { .. }
@@ -1692,7 +1704,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::ScheduleReadyNodes { .. }
             | OrganizationCommand::ClaimActivity { .. }
             | OrganizationCommand::SettleActivity { .. }
-            | OrganizationCommand::ObserveMatchaTerminal { .. } => {
+            | OrganizationCommand::NativeRunSettled { .. } => {
                 unreachable!("organization command routed to global lane")
             }
         }
@@ -1843,6 +1855,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TeamSkillSelectionDependencyPlan { .. }
             | OrganizationQuery::RunList { .. }
             | OrganizationQuery::RoleSessions { .. }
+            | OrganizationQuery::StartGateSessionBinding { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
             | OrganizationQuery::PendingRunActivityIds { .. }
@@ -1902,6 +1915,15 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome);
             }
+            OrganizationQuery::StartGateSessionBinding { lookup, reply } => {
+                let outcome = match state.refresh() {
+                    Ok(()) => {
+                        super::start_gate_control::resolve_binding(state.store.facts(), &lookup)
+                    }
+                    Err(_) => None,
+                };
+                let _ = reply.send(outcome);
+            }
             OrganizationQuery::TriggerList { team_id, reply } => {
                 let outcome = match state.refresh() {
                     Ok(()) => state
@@ -1948,7 +1970,7 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationQuery::MatchaTerminalTarget { delivery_id, reply } => {
                 let outcome = match state.refresh() {
-                    Ok(()) => state.matcha_terminal_target(&delivery_id),
+                    Ok(()) => state.native_terminal_target(&delivery_id),
                     Err(_) => None,
                 };
                 let _ = reply.send(outcome);
@@ -2047,12 +2069,11 @@ mod tests {
 
     use organization::{
         ActivityFailure, ActivityPhase, DeliveryLedgerSnapshot, EdgeAction, EdgeDefinition, EdgeId,
-        ExecutorPolicy, ExternalSessionReference, GraphDefinition, GraphEvent, GraphRunFacts,
-        GraphState, LocalSessionReference, ManagedAgentReference, MaterializationReceipt, MemberId,
-        NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind,
-        RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
-        RuntimeEndpointReference, TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole,
-        WorkAssignment, reduce,
+        ExecutorPolicy, GraphDefinition, GraphEvent, GraphRunFacts, GraphState,
+        ManagedAgentReference, MaterializationReceipt, MemberId, NodeDefinition, NodeId,
+        OrganizationFacts, RoleAssignment, RoleId, RoleKind, RoleMaterializationReceipt,
+        RoleSessionReceipt, RoleSessionRef, RunRuntimeReceipt, RuntimeEndpointReference,
+        TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole, WorkAssignment, reduce,
     };
 
     #[test]
@@ -2124,6 +2145,110 @@ mod tests {
             *review_fence.node_execution_id()
         );
         assert!(matches!(activity.phase(), ActivityPhase::Pending));
+    }
+
+    #[test]
+    fn scheduler_reuses_the_same_role_binding_after_terminal_activity() {
+        let graph = same_role_work_graph(GraphRunId::new("run:one"));
+        let (_temp_dir, mut store) = store_with_graph(graph);
+        let first = schedule_ready_nodes(
+            &TeamRunOwner::new(),
+            &mut store,
+            GraphRunId::new("run:one"),
+            3,
+        )
+        .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            store
+                .facts()
+                .activities()
+                .activity(&first[0])
+                .unwrap()
+                .facts()
+                .node_id
+                .as_str(),
+            "node-a"
+        );
+        let organization::ActivityClaimOutcome::Claimed(claim) =
+            store.claim_activity(&first[0], 4).unwrap()
+        else {
+            panic!("first activity must be claimable");
+        };
+        store.dispatch_activity(&claim, 4).unwrap();
+        store
+            .settle_activity(
+                &claim,
+                organization::ActivitySettlement::Completed { completed_at: 5 },
+            )
+            .unwrap();
+        let fence = store
+            .facts()
+            .run(&GraphRunId::new("run:one"))
+            .unwrap()
+            .graph()
+            .current_attempt(&NodeId::new("node-a"))
+            .unwrap()
+            .fence()
+            .clone();
+        store
+            .apply_graph_event(
+                &GraphRunId::new("run:one"),
+                GraphEvent::NodeCompleted {
+                    node_id: NodeId::new("node-a"),
+                    fence,
+                    output_port: "completed".to_owned(),
+                    completed_at: 5,
+                },
+            )
+            .unwrap();
+
+        let second = schedule_ready_nodes(
+            &TeamRunOwner::new(),
+            &mut store,
+            GraphRunId::new("run:one"),
+            6,
+        )
+        .unwrap();
+
+        assert_eq!(second.len(), 1);
+        let activity = store.facts().activities().activity(&second[0]).unwrap();
+        assert_eq!(activity.facts().node_id.as_str(), "node-c");
+        assert_eq!(activity.facts().target.as_str(), "rs0");
+    }
+
+    #[test]
+    fn scheduler_allows_different_role_bindings_in_the_same_wave() {
+        let graph = leader_and_reviewer_graph(GraphRunId::new("run:one"));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut store =
+            OrganizationStore::open(temp_dir.path().join("organization-facts.log")).unwrap();
+        store
+            .replace_facts(two_role_facts(vec![(
+                graph,
+                two_role_runtime_receipt(GraphRunId::new("run:one")),
+            )]))
+            .unwrap();
+        let activity_ids = schedule_ready_nodes(
+            &TeamRunOwner::new(),
+            &mut store,
+            GraphRunId::new("run:one"),
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(activity_ids.len(), 2);
+        let mut activities = store.facts().activities().activities().collect::<Vec<_>>();
+        activities.sort_by(|left, right| left.facts().node_id.cmp(&right.facts().node_id));
+        assert_eq!(activities[0].facts().node_id.as_str(), "leader-work");
+        assert_eq!(activities[0].facts().target.as_str(), "rs0");
+        assert_eq!(activities[1].facts().node_id.as_str(), "reviewer-work");
+        assert_eq!(activities[1].facts().target.as_str(), "rs0");
+        assert!(
+            activities
+                .iter()
+                .all(|activity| matches!(activity.phase(), ActivityPhase::Pending))
+        );
     }
 
     #[test]
@@ -2549,6 +2674,60 @@ mod tests {
         )
     }
 
+    fn same_role_work_graph(run_id: GraphRunId) -> GraphState {
+        GraphState::initialize(
+            GraphDefinition::new(
+                format!("graph:{}", run_id.as_str()),
+                "plan:same-role-work",
+                run_id,
+                "same role work",
+                vec![
+                    work_node("node-a", "task:a", "a prompt"),
+                    work_node("node-c", "task:c", "c prompt"),
+                ],
+                vec![EdgeDefinition::new(
+                    EdgeId::new("edge:a-c"),
+                    NodeId::new("node-a"),
+                    "completed",
+                    NodeId::new("node-c"),
+                    "input",
+                    EdgeAction::Activate,
+                )],
+            )
+            .unwrap(),
+            1,
+        )
+    }
+
+    fn leader_and_reviewer_graph(run_id: GraphRunId) -> GraphState {
+        GraphState::initialize(
+            GraphDefinition::new(
+                format!("graph:{}", run_id.as_str()),
+                "plan:two-role-work",
+                run_id,
+                "two role work",
+                vec![
+                    work_node("leader-work", "task:leader", "leader prompt"),
+                    NodeDefinition::work(
+                        NodeId::new("reviewer-work"),
+                        "reviewer-work",
+                        NonZeroU32::new(1).unwrap(),
+                        WorkAssignment::typed(
+                            "task:reviewer",
+                            "reviewer prompt",
+                            ExecutorPolicy::team_role("reviewer"),
+                            None,
+                            None,
+                        ),
+                    ),
+                ],
+                Vec::new(),
+            )
+            .unwrap(),
+            1,
+        )
+    }
+
     fn reworkable_review_graph(run_id: GraphRunId) -> GraphState {
         GraphState::initialize(
             GraphDefinition::new(
@@ -2739,6 +2918,25 @@ mod tests {
         .unwrap()
     }
 
+    fn two_role_facts(runs: Vec<(GraphState, RunRuntimeReceipt)>) -> OrganizationFacts {
+        OrganizationFacts::restore(
+            [TeamFacts::new(
+                two_role_team_definition(),
+                TeamRevision::initial(),
+                false,
+            )],
+            [two_role_materialization_receipt()],
+            runs.into_iter()
+                .map(|(graph, runtime)| {
+                    GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, Some(runtime))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            DeliveryLedgerSnapshot::new(Vec::new()),
+        )
+        .unwrap()
+    }
+
     fn team_definition() -> TeamDefinition {
         let member_id = MemberId::try_new("member:leader").unwrap();
         let role_id = RoleId::try_new("leader").unwrap();
@@ -2748,6 +2946,30 @@ mod tests {
             vec![TeamMember::try_new(member_id.clone(), "Leader").unwrap()],
             vec![TeamRole::try_new(role_id.clone(), "Leader", RoleKind::Leader).unwrap()],
             vec![RoleAssignment::new(member_id, role_id)],
+        )
+        .unwrap()
+    }
+
+    fn two_role_team_definition() -> TeamDefinition {
+        let leader_member = MemberId::try_new("member:leader").unwrap();
+        let reviewer_member = MemberId::try_new("member:reviewer").unwrap();
+        let leader_role = RoleId::try_new("leader").unwrap();
+        let reviewer_role = RoleId::try_new("reviewer").unwrap();
+        TeamDefinition::try_new(
+            team_id(),
+            "Team",
+            vec![
+                TeamMember::try_new(leader_member.clone(), "Leader").unwrap(),
+                TeamMember::try_new(reviewer_member.clone(), "Reviewer").unwrap(),
+            ],
+            vec![
+                TeamRole::try_new(leader_role.clone(), "Leader", RoleKind::Leader).unwrap(),
+                TeamRole::try_new(reviewer_role.clone(), "Reviewer", RoleKind::Member).unwrap(),
+            ],
+            vec![
+                RoleAssignment::new(leader_member, leader_role),
+                RoleAssignment::new(reviewer_member, reviewer_role),
+            ],
         )
         .unwrap()
     }
@@ -2774,6 +2996,26 @@ mod tests {
                 ManagedAgentReference::try_new("agent:leader").unwrap(),
                 RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
             )],
+        )
+        .unwrap()
+    }
+
+    fn two_role_materialization_receipt() -> MaterializationReceipt {
+        MaterializationReceipt::try_new(
+            team_id(),
+            RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+            vec![
+                RoleMaterializationReceipt::new(
+                    RoleId::try_new("leader").unwrap(),
+                    ManagedAgentReference::try_new("agent:leader").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+                ),
+                RoleMaterializationReceipt::new(
+                    RoleId::try_new("reviewer").unwrap(),
+                    ManagedAgentReference::try_new("agent:reviewer").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+                ),
+            ],
         )
         .unwrap()
     }
@@ -2933,7 +3175,7 @@ mod tests {
     fn confirmed_deletion_evidence_for(run_id: GraphRunId) -> NativeDeletionEvidence {
         let binding = openclaw_runtime_receipt(run_id.clone()).bindings()[0].clone();
         let receipt =
-            organization::RoleSessionDeleteReceipt::new(binding.external_session().clone());
+            organization::RoleSessionDeleteReceipt::new(binding.endpoint_session_id().clone());
         let confirmation =
             organization::RoleSessionDeletionConfirmation::try_new(binding, receipt).unwrap();
         NativeDeletionEvidence::Confirmed(
@@ -2952,11 +3194,35 @@ mod tests {
                 team_id(),
                 run_id,
                 RoleId::try_new("leader").unwrap(),
-                LocalSessionReference::try_new("local:shared").unwrap(),
-                ExternalSessionReference::try_new("native-session:leader").unwrap(),
+                RoleSessionRef::try_new("rs0").unwrap(),
                 ManagedAgentReference::try_new("agent:leader").unwrap(),
                 RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
             )],
+        )
+        .unwrap()
+    }
+
+    fn two_role_runtime_receipt(run_id: GraphRunId) -> RunRuntimeReceipt {
+        RunRuntimeReceipt::try_new(
+            run_id.clone(),
+            vec![
+                RoleSessionReceipt::new(
+                    team_id(),
+                    run_id.clone(),
+                    RoleId::try_new("leader").unwrap(),
+                    RoleSessionRef::try_new("rs0").unwrap(),
+                    ManagedAgentReference::try_new("agent:leader").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+                ),
+                RoleSessionReceipt::new(
+                    team_id(),
+                    run_id,
+                    RoleId::try_new("reviewer").unwrap(),
+                    RoleSessionRef::try_new("rs0").unwrap(),
+                    ManagedAgentReference::try_new("agent:reviewer").unwrap(),
+                    RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+                ),
+            ],
         )
         .unwrap()
     }
@@ -2968,8 +3234,7 @@ mod tests {
                 team_id(),
                 run_id,
                 RoleId::try_new("leader").unwrap(),
-                LocalSessionReference::try_new("local:shared").unwrap(),
-                ExternalSessionReference::try_new("native-session:leader").unwrap(),
+                RoleSessionRef::try_new("rs0").unwrap(),
                 ManagedAgentReference::try_new("agent:leader").unwrap(),
                 RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
             )],

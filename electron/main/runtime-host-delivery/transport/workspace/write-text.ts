@@ -1,7 +1,14 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import {
+  hasExactKeys,
+  isNonEmptyBoundedText,
+  isRecord,
+  isSafeNonNegativeInteger,
+  sendLoopbackJson,
+} from '../client';
 
-const DECISION_TTL_MS = 30_000;
 const MAX_CONTENT_BYTES = 2 * 1024 * 1024;
+const ROUTE_PATH = '/api/workspace/files/write-text';
 const UNAVAILABLE = {
   success: false,
   error: 'Workspace write is unavailable',
@@ -41,41 +48,33 @@ export interface WorkspaceWriteTransport {
 
 export function createWorkspaceWriteTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): WorkspaceWriteTransport {
-  const url = `http://127.0.0.1:${port}/api/workspace/files/write-text`;
   return {
     async write(request: unknown): Promise<WorkspaceWriteTransportResponse> {
       if (!isWorkspaceWriteRequest(request)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/workspace/files/write-text',
-              scope: 'workspace-files:write',
-              capability: 'files.writeText',
-              subject: 'workspace-write',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isWorkspaceWriteResponse(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 422 && isPublicFailure(body)) {
-          return { status: 422, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'workspace-files:write',
+          capability: 'files.writeText',
+          subject: 'workspace-write',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isWorkspaceWriteResponse(response.body)) {
+        return { status: 200, body: response.body };
+      }
+      if (response?.status === 422 && isPublicFailure(response.body)) {
+        return { status: 422, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -98,7 +97,7 @@ function isScope(value: unknown): value is WorkspaceWriteRequest['scope'] {
     && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
     && value.kind === 'session'
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey);
+    && isNonEmptyBoundedText(value.sessionKey);
 }
 
 function isTarget(value: unknown): boolean {
@@ -109,14 +108,14 @@ function isInput(value: unknown): value is WorkspaceWriteRequest['input'] {
   return isRecord(value)
     && hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'content'])
     && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey)
+    && isNonEmptyBoundedText(value.sessionKey)
     && isFileRelativePath(value.relativePath)
     && typeof value.content === 'string'
     && Buffer.byteLength(value.content, 'utf8') <= MAX_CONTENT_BYTES;
 }
 
 function isFileRelativePath(value: unknown): value is string {
-  return isNonEmptyString(value)
+  return isNonEmptyBoundedText(value)
     && !value.startsWith('/')
     && !value.startsWith('\\')
     && !value.includes(':')
@@ -134,7 +133,7 @@ function isEndpoint(value: unknown): value is Endpoint {
 function isWorkspaceWriteResponse(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['name', 'size'])
-    && isNonEmptyString(value.name)
+    && isNonEmptyBoundedText(value.name)
     && isSafeNonNegativeInteger(value.size);
 }
 
@@ -148,21 +147,4 @@ function isPublicFailure(value: unknown): boolean {
       'Workspace write content exceeds the limit',
       'Workspace write outcome is unknown',
     ].includes(value.error as string);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isSafeNonNegativeInteger(value: unknown): boolean {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

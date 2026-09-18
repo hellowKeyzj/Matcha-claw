@@ -71,13 +71,6 @@ impl Host {
         observe_shutdown_start(&observation, "ownerRuntimeTasks");
         self.owner_runtime_tasks.cancel_and_join().await;
         observe_shutdown_settle(&observation, "ownerRuntimeTasks", ShutdownReason::Completed);
-        observe_shutdown_start(&observation, "sessionDeltaSinkClose");
-        self.event_sinks.close_session_delta();
-        observe_shutdown_settle(
-            &observation,
-            "sessionDeltaSinkClose",
-            ShutdownReason::Completed,
-        );
         shutdown_open_claw_session(self, &observation).await;
         shutdown_open_claw(self, &observation).await;
         shutdown_matcha(self, &observation).await;

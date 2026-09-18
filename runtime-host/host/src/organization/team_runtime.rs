@@ -258,6 +258,14 @@ pub(crate) enum TeamRuntimeCommand {
         idempotency_key: String,
         requested_at: u64,
     },
+    RunStartConfirm {
+        run_id: GraphRunId,
+        proposal_id: String,
+    },
+    RunStartContinue {
+        run_id: GraphRunId,
+        proposal_id: String,
+    },
     NodePromptRetryDue {
         run_id: GraphRunId,
     },
@@ -334,6 +342,8 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
     RoleMessageSubmit(Result<RoleChatAdmissionOutcome, StoreFault>),
     RoleMessageSubmitForRun(Result<RoleChatAdmissionOutcome, StoreFault>),
+    RunStartConfirm(Result<organization::ConfirmRunStartOutcome, StoreFault>),
+    RunStartContinue(Result<organization::ContinueRunDiscussionOutcome, StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
     NodePromptSettled(Result<TeamNodePromptSettledResult, TeamRuntimeStatus>),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),

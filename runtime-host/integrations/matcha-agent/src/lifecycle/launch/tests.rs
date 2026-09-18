@@ -373,13 +373,7 @@ fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path, sealed_target: Opti
         );
     }
     assert_eq!(spec.stdio(), APP_SERVER_STDIO);
-    for unsupported_option in [
-        "--auth-token-file",
-        "--tls-cert-file",
-        "--tls-key-file",
-        "--cron-broker-endpoint",
-        "--cron-broker-private-key-path",
-    ] {
+    for unsupported_option in ["--auth-token-file", "--tls-cert-file", "--tls-key-file"] {
         assert!(
             !spec
                 .arguments()

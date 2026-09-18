@@ -2,15 +2,15 @@ use openclaw::session::{
     events::TerminalOutcome,
     projection::{
         AssistantTurnChunkKind, AssistantTurnSegment, AssistantTurnSnapshot, AssistantTurnStatus,
-        CanonicalRuntimeActivity, CanonicalSessionChange,
+        CanonicalRunProgress, CanonicalRuntimeActivity, CanonicalSessionChange,
     },
-    protocol::{RuntimeFallbackDetail, RuntimeGuardianNotice, ToolActivityPhase},
+    protocol::{ChatStatusPhase, RuntimeFallbackDetail, RuntimeGuardianNotice, ToolActivityPhase},
 };
 
 use super::state::{
-    ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RuntimeActivity,
-    RuntimeErrorDetail, RuntimeView, SessionChange, SessionContent, SessionItem, ToolPhase,
-    ToolView,
+    ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RunProgress,
+    RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeView,
+    SessionChange, SessionContent, SessionItem, ToolPhase, ToolView,
 };
 
 pub(crate) fn openclaw_canonical_changes(
@@ -123,6 +123,7 @@ pub(crate) fn openclaw_canonical_changes(
                         phase: RunPhase::Started,
                         active_run_id: Some(run_id.as_str().to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: Some(runtime_activity(*activity)),
                         error_detail: None,
                     },
@@ -138,6 +139,19 @@ pub(crate) fn openclaw_canonical_changes(
                         phase: RunPhase::Started,
                         active_run_id: Some(run_id.as_str().to_owned()),
                         issue: None,
+                        run_progress: None,
+                        runtime_activity: None,
+                        error_detail: None,
+                    },
+                });
+            }
+            CanonicalSessionChange::RunProgress { run_id, progress } => {
+                projected.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Started,
+                        active_run_id: Some(run_id.as_str().to_owned()),
+                        issue: None,
+                        run_progress: Some(run_progress(*progress)),
                         runtime_activity: None,
                         error_detail: None,
                     },
@@ -153,6 +167,7 @@ pub(crate) fn openclaw_canonical_changes(
                         phase: RunPhase::Started,
                         active_run_id: Some(run_id.as_str().to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: Some(runtime_fallback_detail(detail)),
                     },
@@ -168,6 +183,7 @@ pub(crate) fn openclaw_canonical_changes(
                         phase: RunPhase::Started,
                         active_run_id: Some(run_id.as_str().to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: None,
                     },
@@ -212,6 +228,7 @@ pub(crate) fn openclaw_canonical_changes(
                             phase,
                             active_run_id: None,
                             issue: None,
+                            run_progress: None,
                             runtime_activity: None,
                             error_detail: Some(error_detail),
                         },
@@ -288,8 +305,36 @@ fn runtime_activity(activity: CanonicalRuntimeActivity) -> RuntimeActivity {
     }
 }
 
+fn run_progress(progress: CanonicalRunProgress) -> RunProgress {
+    match progress {
+        CanonicalRunProgress::Startup { phase } => RunProgress::Startup {
+            phase: run_startup_phase(phase),
+        },
+        CanonicalRunProgress::Retrying {
+            attempt,
+            max_attempts,
+        } => RunProgress::Retrying {
+            attempt,
+            max_attempts,
+        },
+    }
+}
+
+fn run_startup_phase(phase: ChatStatusPhase) -> RunStartupPhase {
+    match phase {
+        ChatStatusPhase::PreparingWorkspace => RunStartupPhase::PreparingWorkspace,
+        ChatStatusPhase::NamingWorktree => RunStartupPhase::NamingWorktree,
+        ChatStatusPhase::CreatingWorktree => RunStartupPhase::CreatingWorktree,
+        ChatStatusPhase::RunningSetup => RunStartupPhase::RunningSetup,
+        ChatStatusPhase::ProvisioningEnvironment => RunStartupPhase::ProvisioningEnvironment,
+        ChatStatusPhase::PreparingContext => RunStartupPhase::PreparingContext,
+        ChatStatusPhase::StartingModel => RunStartupPhase::StartingModel,
+    }
+}
+
 fn runtime_fallback_detail(detail: &RuntimeFallbackDetail) -> RuntimeErrorDetail {
     RuntimeErrorDetail {
+        kind: RuntimeErrorKind::Fallback,
         failover_reason: detail.failover_reason.clone(),
         provider_runtime_failure_kind: detail.provider_runtime_failure_kind.clone(),
         provider_error_type: detail.provider_error_type.clone(),
@@ -352,6 +397,7 @@ pub(crate) fn terminal_runtime_error_detail(
 
 fn empty_runtime_error_detail() -> RuntimeErrorDetail {
     RuntimeErrorDetail {
+        kind: RuntimeErrorKind::Error,
         failover_reason: None,
         provider_runtime_failure_kind: None,
         provider_error_type: None,
@@ -363,6 +409,7 @@ fn empty_runtime_error_detail() -> RuntimeErrorDetail {
 fn runtime_error_detail(value: &serde_json::Value) -> Option<RuntimeErrorDetail> {
     let object = value.as_object()?;
     runtime_error_detail_if_present(RuntimeErrorDetail {
+        kind: RuntimeErrorKind::Error,
         failover_reason: object
             .get("failoverReason")
             .and_then(serde_json::Value::as_str)
@@ -764,6 +811,7 @@ mod tests {
                         phase: RunPhase::Started,
                         active_run_id: Some("run-1".to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: Some(RuntimeActivity::Compacting),
                         error_detail: None,
                     },
@@ -842,7 +890,8 @@ mod tests {
             ] if run_id == "run-1"
                 && runtime.phase == RunPhase::Failed
                 && runtime.active_run_id.is_none()
-                && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("gateway_error")
+                && runtime.error_detail.as_ref().is_some_and(|detail| detail.kind == RuntimeErrorKind::Error
+                    && detail.failover_reason.as_deref() == Some("gateway_error")
                     && detail.provider_error_type.as_deref() == Some("rate_limit")
                     && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
                     && detail.http_status.is_none())
@@ -875,7 +924,8 @@ mod tests {
             ] if run_id == "run-1"
                 && runtime.phase == RunPhase::Failed
                 && runtime.active_run_id.is_none()
-                && runtime.error_detail.as_ref().is_some_and(|detail| detail.failover_reason.as_deref() == Some("rate_limit")
+                && runtime.error_detail.as_ref().is_some_and(|detail| detail.kind == RuntimeErrorKind::Error
+                    && detail.failover_reason.as_deref() == Some("rate_limit")
                     && detail.provider_error_type.as_deref() == Some("rate_limit")
                     && detail.provider_error_message_preview.as_deref() == Some("provider overloaded")
                     && detail.http_status == Some(429))

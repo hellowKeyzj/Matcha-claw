@@ -15,8 +15,12 @@ mod receipt_router;
 mod review;
 mod run_actor;
 mod run_scheduler;
+mod start_gate_control;
+mod start_gate_send_hook;
 mod supervisor;
 pub(crate) mod task_board;
+#[allow(dead_code)]
+pub(crate) mod team_message;
 #[allow(dead_code)]
 pub(crate) mod team_run;
 #[allow(dead_code)]
@@ -34,6 +38,7 @@ pub use decision::{
 };
 pub(crate) use handle::OrganizationHandle;
 pub(crate) use query::OrganizationQuery;
+pub(crate) use start_gate_send_hook::StartGateSendHook;
 pub(crate) use team_run::{
     ArmedTrigger, ManualTeamCreateOutcome, RuntimeReceiptOutcome, TeamDeleteOutcome,
     TeamMaterializationCommandOutcome, TeamNodePromptSettledResult, TeamNodeTerminalResolution,

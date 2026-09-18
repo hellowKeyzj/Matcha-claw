@@ -43,6 +43,10 @@ type RuntimeHostBridge = Pick<
   'command' | 'onExit' | 'onRestart' | 'onSafeEvent'
 >;
 
+type SessionEventsTransport = Readonly<{
+  onDelta: (handler: (delta: unknown) => void) => () => void;
+}>;
+
 export function emitHostEvent(
   eventBus: HostEventBus,
   mainWindow: BrowserWindow | null,
@@ -66,6 +70,7 @@ export function registerHostEventBridge(deps: {
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
   rendererEventRoutes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>;
+  sessionEvents?: SessionEventsTransport;
 }): void {
   const emit: EmitHostEvent = (eventName, payload) => {
     emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
@@ -90,6 +95,10 @@ export function registerHostEventBridge(deps: {
 
   deps.hostEventBus.on('session:update', (payload) => {
     publishSessionDelta(decodeLegacySessionUpdateDelta(payload), emit, deps.rendererEventRoutes);
+  });
+
+  deps.sessionEvents?.onDelta((delta) => {
+    publishSessionDelta(decodeSessionDelta(delta), emit, deps.rendererEventRoutes);
   });
 
   for (const eventName of [
@@ -142,9 +151,6 @@ export function registerHostEventBridge(deps: {
       case 'matcha.session.activity':
       case 'openclaw.session.activity':
       case 'openclaw.session.update':
-        return;
-      case 'session.delta':
-        publishSessionDelta(decodeSessionDelta(event.delta), emit, deps.rendererEventRoutes);
         return;
     }
   });

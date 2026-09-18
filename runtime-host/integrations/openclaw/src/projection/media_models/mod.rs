@@ -29,10 +29,7 @@ impl MediaProviderCatalog {
             .map_err(|_| MediaCatalogError::ConfigPersist)
     }
 
-    pub(crate) fn apply_to_document(
-        &self,
-        document: &mut OpenClawConfigDocument,
-    ) -> bool {
+    pub(crate) fn apply_to_document(&self, document: &mut OpenClawConfigDocument) -> bool {
         plugin_config::apply(self, document)
     }
 }

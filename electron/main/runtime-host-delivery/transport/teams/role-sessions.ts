@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/team/role-sessions';
 const UNAVAILABLE = { success: false, error: 'Team role sessions are unavailable' } as const;
 
 type TeamRoleSession = Readonly<{
@@ -22,35 +23,27 @@ export interface TeamRoleSessionsTransport {
 
 export function createTeamRoleSessionsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamRoleSessionsTransport {
-  const url = `http://127.0.0.1:${port}/api/team/role-sessions`;
   return {
     list: async (request) => {
       if (!isTeamRequest(request)) return { status: 503, body: UNAVAILABLE };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/team/role-sessions',
-              scope: 'team:read',
-              capability: 'team.role-sessions.list',
-              subject: 'team-role-session-projection',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const result: unknown = await response.json();
-        if (response.status === 200 && isSuccess(result)) return { status: 200, body: result };
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'team:read',
+          capability: 'team.role-sessions.list',
+          subject: 'team-role-session-projection',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -80,13 +73,4 @@ function isTeamRoleSession(value: unknown): value is TeamRoleSession {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\0\p{Cc}]/u.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

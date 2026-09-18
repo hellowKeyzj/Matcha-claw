@@ -9,7 +9,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "session.modelSelection";
 const OPERATION_ID: &str = "sessions.patchModel";

@@ -8,7 +8,7 @@ import {
   isMainOwnedRoute,
 } from '../../electron/api/route-boundary';
 import { handleProviderModelsRoutes } from '../../electron/api/routes/provider-models';
-import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 import { createProviderModelsTransport } from '../../electron/main/runtime-host-delivery/transport/providers/models';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());

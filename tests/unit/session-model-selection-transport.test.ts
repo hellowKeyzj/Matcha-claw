@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntimeHostDeliveryIssuer,
-} from '../../electron/main/runtime-host-delivery/bootstrap';
+} from '../../electron/main/runtime-host-delivery/issuer';
 import {
   createSessionModelSelectionTransport,
 } from '../../electron/main/runtime-host-delivery/transport/sessions/model-selection';
@@ -31,6 +31,8 @@ const request = {
   },
 };
 
+const runtimeHostTransportPort = 32_111;
+
 describe('session model selection delivery transport', () => {
   it('binds a model-only capability decision to the fixed localhost endpoint', async () => {
     const fetcher = vi.fn().mockResolvedValue({
@@ -39,7 +41,7 @@ describe('session model selection delivery transport', () => {
     });
     const transport = createSessionModelSelectionTransport(
       createRuntimeHostDeliveryIssuer(),
-      3220,
+      runtimeHostTransportPort,
       fetcher,
     );
 
@@ -47,7 +49,7 @@ describe('session model selection delivery transport', () => {
       status: 200,
       body: { outcome: 'succeeded' },
     });
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3220/api/sessions/model', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:32111/api/sessions/model', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(request),
     }));
@@ -65,7 +67,7 @@ describe('session model selection delivery transport', () => {
     const timeoutError = new DOMException('The operation timed out.', 'TimeoutError');
     const transport = createSessionModelSelectionTransport(
       createRuntimeHostDeliveryIssuer(),
-      3220,
+      runtimeHostTransportPort,
       vi.fn().mockRejectedValue(timeoutError),
     );
 
@@ -77,13 +79,13 @@ describe('session model selection delivery transport', () => {
 
   it('projects malformed, rejected and unknown native responses without delivery details', async () => {
     const issuer = createRuntimeHostDeliveryIssuer();
-    const invalid = createSessionModelSelectionTransport(issuer, 3220, vi.fn());
+    const invalid = createSessionModelSelectionTransport(issuer, runtimeHostTransportPort, vi.fn());
     await expect(invalid.select({ ...request, input: { ...request.input, modelSelectionId: ' ' } })).resolves.toEqual({
       status: 503,
       body: { success: false, error: 'Session model selection is unavailable' },
     });
 
-    const rejected = createSessionModelSelectionTransport(issuer, 3220, vi.fn().mockResolvedValue({
+    const rejected = createSessionModelSelectionTransport(issuer, runtimeHostTransportPort, vi.fn().mockResolvedValue({
       status: 200,
       json: async () => ({ outcome: 'target_rejected' }),
     }));
@@ -92,7 +94,7 @@ describe('session model selection delivery transport', () => {
       body: { outcome: 'target_rejected' },
     });
 
-    const unknown = createSessionModelSelectionTransport(issuer, 3220, vi.fn().mockResolvedValue({
+    const unknown = createSessionModelSelectionTransport(issuer, runtimeHostTransportPort, vi.fn().mockResolvedValue({
       status: 200,
       json: async () => ({ outcome: 'outcome_unknown' }),
     }));

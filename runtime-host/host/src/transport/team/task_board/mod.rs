@@ -1,4 +1,4 @@
-pub(crate) mod server;
+pub(crate) mod handler;
 
 use crate::{
     organization::OrganizationHandle, transport::common::authorization::CapabilityDecisionVerifier,

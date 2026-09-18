@@ -4,27 +4,20 @@ import {
   stageWorkspaceMediaAttachment,
 } from '../../main/ipc/dialog-attachment-staging';
 import type { RendererEventRouteRegistry } from '../../main/renderer-event-routes';
-import type { MatchaSessionListTransport } from '../../main/runtime-host-delivery/transport/sessions/matcha-list';
-import type { SessionAbortRequest, SessionAbortTransport } from '../../main/runtime-host-delivery/transport/sessions/abort';
+import type { RuntimeHostTransportContext } from '../context';
+import type { SessionAbortRequest } from '../../main/runtime-host-delivery/transport/sessions/abort';
 import type {
   SessionApprovalListRequest,
   SessionApprovalListTransportResponse,
   SessionApprovalRespondRequest,
-  SessionApprovalTransport,
 } from '../../main/runtime-host-delivery/transport/sessions/approvals';
-import type { SessionCreateTransport } from '../../main/runtime-host-delivery/transport/sessions/create';
-import type { SessionDeleteTransport } from '../../main/runtime-host-delivery/transport/sessions/delete';
-import type { SessionContentLoadRequest, SessionContentTransport } from '../../main/runtime-host-delivery/transport/sessions/content';
-import type { SessionListTransport } from '../../main/runtime-host-delivery/transport/sessions/list';
-import type { SessionModelSelectionRequest, SessionModelSelectionTransport } from '../../main/runtime-host-delivery/transport/sessions/model-selection';
+import type { SessionContentLoadRequest } from '../../main/runtime-host-delivery/transport/sessions/content';
+import type { SessionModelSelectionRequest } from '../../main/runtime-host-delivery/transport/sessions/model-selection';
 import type {
   SessionPermissionOperationId,
   SessionPermissionRequest,
-  SessionPermissionTransport,
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
-import type { SessionRenameTransport } from '../../main/runtime-host-delivery/transport/sessions/rename';
-import type { SessionSendRequest, SessionSendTransport } from '../../main/runtime-host-delivery/transport/sessions/send';
-import type { SessionTimelineTransport } from '../../main/runtime-host-delivery/transport/sessions/timeline';
+import type { SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
   logSessionTrace,
@@ -41,21 +34,22 @@ const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 const MAX_CONTENT_REF_BYTES = 512;
 
-export type SessionCapabilityRouteDeps = Readonly<{
-  sessionListTransport: SessionListTransport;
-  sessionTimelineTransport: SessionTimelineTransport;
-  sessionContentTransport: SessionContentTransport;
-  matchaSessionListTransport: MatchaSessionListTransport;
-  sessionAbortTransport: SessionAbortTransport;
-  sessionCreateTransport: SessionCreateTransport;
-  sessionDeleteTransport: SessionDeleteTransport;
-  sessionRenameTransport: SessionRenameTransport;
-  sessionApprovalTransport: SessionApprovalTransport;
-  sessionSendTransport: SessionSendTransport;
-  sessionModelSelectionTransport: SessionModelSelectionTransport;
-  sessionPermissionTransport: SessionPermissionTransport;
+export type SessionCapabilityRouteDeps = RuntimeHostTransportContext<
+  | 'sessionListTransport'
+  | 'sessionTimelineTransport'
+  | 'sessionContentTransport'
+  | 'matchaSessionListTransport'
+  | 'sessionAbortTransport'
+  | 'sessionCreateTransport'
+  | 'sessionDeleteTransport'
+  | 'sessionRenameTransport'
+  | 'sessionApprovalTransport'
+  | 'sessionSendTransport'
+  | 'sessionModelSelectionTransport'
+  | 'sessionPermissionTransport'
+  | 'workspaceMediaTransport'
+> & Readonly<{
   rendererEventRoutes: Pick<RendererEventRouteRegistry, 'issue' | 'isMatchaRoute' | 'release'>;
-  workspaceMediaTransport?: WorkspaceMediaTransport;
 }>;
 
 type PublicTransportResponse = Readonly<{
@@ -87,7 +81,7 @@ export async function dispatchSessionCapability(
   });
 
   if (body.id === 'session.prompt' && body.operationId === 'sessions.create') {
-    return await deps.sessionCreateTransport.create(adaptSessionCreateRequest(body), traceId);
+    return await deps.runtimeHostTransports.sessionCreateTransport.create(adaptSessionCreateRequest(body), traceId);
   }
   if ((body.id === 'session.prompt' || body.id === 'session.management')
     && body.operationId === 'sessions.load') {
@@ -100,10 +94,10 @@ export async function dispatchSessionCapability(
     return await dispatchSessionContent(deps, adaptSessionContentLoadRequest(body, traceId), traceId);
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.delete') {
-    return await deps.sessionDeleteTransport.delete(adaptSessionDeleteRequest(body));
+    return await deps.runtimeHostTransports.sessionDeleteTransport.delete(adaptSessionDeleteRequest(body));
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.rename') {
-    return await deps.sessionRenameTransport.rename(adaptSessionRenameRequest(body));
+    return await deps.runtimeHostTransports.sessionRenameTransport.rename(adaptSessionRenameRequest(body));
   }
   if (body.id === 'session.management'
     && (body.operationId === 'sessions.permission.get' || body.operationId === 'sessions.permission.set')) {
@@ -118,34 +112,34 @@ export async function dispatchSessionCapability(
     const request = adaptSessionListRequest(body);
     const transport = isRecord(request.scope) && isRuntimeEndpoint(request.scope.endpoint)
       && request.scope.endpoint.runtimeAdapterId === 'openclaw'
-      ? deps.sessionListTransport
-      : deps.matchaSessionListTransport;
+      ? deps.runtimeHostTransports.sessionListTransport
+      : deps.runtimeHostTransports.matchaSessionListTransport;
     return await transport.list(request);
   }
   if ((body.id === 'session.prompt' || body.id === 'session.abort')
     && body.operationId === 'sessions.abort') {
-    return await deps.sessionAbortTransport.abort(adaptSessionAbortRequest(body));
+    return await deps.runtimeHostTransports.sessionAbortTransport.abort(adaptSessionAbortRequest(body));
   }
   if (body.id === 'session.approval' && body.operationId === 'approvals.list') {
     const request = adaptSessionApprovalListRequest(body);
-    const response = await deps.sessionApprovalTransport.list(request.native);
+    const response = await deps.runtimeHostTransports.sessionApprovalTransport.list(request.native);
     return projectSessionApprovalListResponse(response, request);
   }
   if (body.id === 'session.approval' && body.operationId === 'approvals.resolve') {
-    return await deps.sessionApprovalTransport.respond(adaptSessionApprovalRespondRequest(body));
+    return await deps.runtimeHostTransports.sessionApprovalTransport.respond(adaptSessionApprovalRespondRequest(body));
   }
   if (body.id === 'session.modelSelection' && body.operationId === 'sessions.patchModel') {
     const request = adaptSessionModelSelectionRequest(body, traceId);
     return traceId === undefined
-      ? await deps.sessionModelSelectionTransport.select(request)
-      : await deps.sessionModelSelectionTransport.select(request, traceId);
+      ? await deps.runtimeHostTransports.sessionModelSelectionTransport.select(request)
+      : await deps.runtimeHostTransports.sessionModelSelectionTransport.select(request, traceId);
   }
   if (body.id === 'session.prompt'
     && (body.operationId === 'sessions.prompt' || body.operationId === 'sessions.sendWithMedia')) {
     return await dispatchSessionSend(body, deps, traceId);
   }
   if (body.id === 'workspace.media') {
-    return await dispatchWorkspaceMedia(body, deps.workspaceMediaTransport);
+    return await dispatchWorkspaceMedia(body, deps.runtimeHostTransports.workspaceMediaTransport);
   }
 
   return null;
@@ -165,8 +159,8 @@ async function dispatchSessionTimeline(
     case 'openclaw':
     case 'matcha-agent':
       return traceId === undefined
-        ? await deps.sessionTimelineTransport[operation](request)
-        : await deps.sessionTimelineTransport[operation](request, traceId);
+        ? await deps.runtimeHostTransports.sessionTimelineTransport[operation](request)
+        : await deps.runtimeHostTransports.sessionTimelineTransport[operation](request, traceId);
   }
 }
 
@@ -176,8 +170,8 @@ async function dispatchSessionContent(
   traceId?: string | null,
 ): Promise<PublicTransportResponse> {
   return traceId === undefined
-    ? await deps.sessionContentTransport.load(request)
-    : await deps.sessionContentTransport.load(request, traceId);
+    ? await deps.runtimeHostTransports.sessionContentTransport.load(request)
+    : await deps.runtimeHostTransports.sessionContentTransport.load(request, traceId);
 }
 
 async function dispatchSessionPermission(
@@ -188,8 +182,8 @@ async function dispatchSessionPermission(
 ): Promise<PublicTransportResponse> {
   const method = operationId === 'sessions.permission.get' ? 'get' : 'set';
   return traceId === undefined
-    ? await deps.sessionPermissionTransport[method](request)
-    : await deps.sessionPermissionTransport[method](request, traceId);
+    ? await deps.runtimeHostTransports.sessionPermissionTransport[method](request)
+    : await deps.runtimeHostTransports.sessionPermissionTransport[method](request, traceId);
 }
 
 async function dispatchSessionSend(
@@ -208,8 +202,8 @@ async function dispatchSessionSend(
       attachmentCount: request.input.attachments.length,
     });
     const response = traceId === undefined
-      ? await deps.sessionSendTransport.send(request)
-      : await deps.sessionSendTransport.send(request, traceId);
+      ? await deps.runtimeHostTransports.sessionSendTransport.send(request)
+      : await deps.runtimeHostTransports.sessionSendTransport.send(request, traceId);
     const projected = projectSessionSendResponse(response, request);
     const retainsRoute = projected !== null && retainsSessionRoute(projected, request);
     logSessionTrace('capability.send.response', traceId, {

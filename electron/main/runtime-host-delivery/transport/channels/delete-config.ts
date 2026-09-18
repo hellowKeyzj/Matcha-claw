@@ -1,7 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './catalog';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { beginChannelTrace, channelTraceHeaders } from './trace';
 
-const DECISION_TTL_MS = 30_000;
 type Rejected = Readonly<{ outcome: 'rejected' }>;
 const UNKNOWN = { outcome: 'unknown' } as const;
 
@@ -26,45 +26,38 @@ export interface ChannelDeleteConfigTransport {
 
 export function createChannelDeleteConfigTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelDeleteConfigTransport {
-  const url = `http://127.0.0.1:${port}/api/channels/delete-config`;
   return {
     async deleteConfig(input, traceId): Promise<ChannelDeleteConfigTransportResponse> {
       if (!isRequest(input)) return { status: 503, body: UNKNOWN };
       const finish = beginChannelTrace('transport.delete', traceId);
       let status = 503;
       let outcome: unknown;
-      let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
+      let errorCode: 'INVALID_RESPONSE' | 'UNAVAILABLE' | undefined;
       try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/delete-config',
-              scope: 'channels:write',
-              capability: 'channels.config.delete',
-              subject: 'channel-config-delete',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...channelTraceHeaders(traceId),
+        const response = await sendLoopbackJson({
+          port: runtimeHostTransportPort,
+          path: '/api/channels/delete-config',
+          issuer,
+          decision: {
+            endpoint: '/api/channels/delete-config',
+            scope: 'channels:write',
+            capability: 'channels.config.delete',
+            subject: 'channel-config-delete',
           },
-          body: JSON.stringify(input),
+          method: 'POST',
+          fetcher,
+          body: input,
+          headers: channelTraceHeaders(traceId),
         });
-        status = response.status;
-        const body: unknown = await response.json();
-        outcome = body;
-        if (response.status === 400 && isRejected(body)) return { status: 400, body };
-        if (response.status === 200 && isOutcome(body)) return { status: 200, body };
+        status = response?.status ?? 503;
+        outcome = response?.body ?? UNKNOWN;
+        if (response?.status === 400 && isRejected(response.body)) return { status: 400, body: response.body };
+        if (response?.status === 200 && isOutcome(response.body)) return { status: 200, body: response.body };
         outcome = UNKNOWN;
-        errorCode = 'INVALID_RESPONSE';
-      } catch (error) {
-        outcome = UNKNOWN;
-        errorCode = channelTraceError(error);
+        errorCode = response === null ? 'UNAVAILABLE' : 'INVALID_RESPONSE';
       } finally {
         finish(status, outcome, errorCode);
       }
@@ -82,16 +75,12 @@ function isRequest(value: ChannelDeleteConfigRequest): boolean {
 
 function isOutcome(value: unknown): value is Readonly<{ outcome: ChannelDeleteConfigOutcome }> {
   return isRecord(value)
-    && Object.keys(value).length === 1
+    && hasExactKeys(value, ['outcome'])
     && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }
 
 function isRejected(value: unknown): value is Rejected {
-  return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'rejected';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
 }
 
 function isIdentity(value: unknown): value is string {

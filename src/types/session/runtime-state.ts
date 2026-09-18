@@ -27,8 +27,20 @@ export type SessionRunPhase =
   | 'aborted';
 
 export type SessionRuntimeActivity = 'compacting';
+export type SessionRunStartupPhase =
+  | 'preparing_workspace'
+  | 'naming_worktree'
+  | 'creating_worktree'
+  | 'running_setup'
+  | 'provisioning_environment'
+  | 'preparing_context'
+  | 'starting_model';
+export type SessionRunProgress =
+  | { kind: 'startup'; phase: SessionRunStartupPhase }
+  | { kind: 'retrying'; attempt: number; maxAttempts: number };
 
 export interface SessionRuntimeErrorDetail {
+  kind: 'fallback' | 'error';
   failoverReason: string | null;
   providerRuntimeFailureKind: string | null;
   providerErrorType: string | null;
@@ -51,6 +63,7 @@ export interface SessionRuntimeStateSnapshot {
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
+  runProgress: SessionRunProgress | null;
   runtimeActivity: SessionRuntimeActivity | null;
   errorDetail: SessionRuntimeErrorDetail | null;
   runtimeNotice?: SessionRuntimeNotice | null;

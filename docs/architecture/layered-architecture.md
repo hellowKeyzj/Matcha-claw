@@ -41,7 +41,7 @@ flowchart TB
   Preload["Preload\nrestricted IPC contract"]
   Electron["Electron Delivery\nHost API · capability decision · DirectRuntimeHost"]
   Control["private framed control\nstdin / stdout"]
-  PublicTransport["signed loopback transports\nfixed product DTO"]
+  PublicTransport["unified localhost server\nsigned fixed product routes"]
 
   Host["runtime-host composition\nHost::new · shutdown order"]
   Root["Root owner actor\nlifecycle · state · safe events · shutdown"]
@@ -118,14 +118,14 @@ Renderer 通过 `hostApiFetch` 和 preload 暴露的受限 IPC 调用 Electron H
 Electron 使用 `DirectRuntimeHost` 启动一个 Rust binary，写入一次 bootstrap frame，并保留两个不同的调用 seam：
 
 1. **private framed control**：Electron Main 通过 stdin/stdout 长度帧发出 private control command；lifecycle/health/safe event 走 Root owner，产品命令走注入的 typed handle/facade。
-2. **signed loopback transport**：Electron 在已授权的公开产品操作上签发固定 capability decision，并调用 Rust loopback server 的固定 DTO transport；transport Adapter 不经 Root owner 分派产品行为。
+2. **signed loopback route**：Electron 在已授权的公开产品操作上签发固定 capability decision，并调用 Rust 统一 localhost server 上的固定 DTO route；业务 Adapter 不经 Root owner 分派产品行为。
 
 ```mermaid
 sequenceDiagram
   participant R as Renderer
   participant E as Electron Delivery
   participant C as DirectRuntimeHost control
-  participant T as Rust loopback transport
+  participant T as Rust localhost server route
   participant Root as Root owner handle
   participant I as typed owner/facade interface
 
@@ -143,7 +143,7 @@ sequenceDiagram
   E-->>R: Host API response
 ```
 
-`DirectRuntimeHost` 位于 `electron/main/runtime-host-delivery/direct-host.ts`。它是 Electron 的 Rust child process adapter，不是旧 TypeScript `RuntimeHostManager`、`runtime-host-client` 或 `electron/main/process-runtime/**` 的兼容替代。private control 与 signed loopback transport 都是 Adapter Module：它们只 decode/verify fixed DTO，然后调用注入的 typed Interface；`owner::Handle` 仅覆盖 Host health/state/shutdown 等 Root lifecycle seam。
+`DirectRuntimeHost` 位于 `electron/main/runtime-host-delivery/direct-host.ts`。它是 Electron 的 Rust child process adapter，不是旧 TypeScript `RuntimeHostManager`、`runtime-host-client` 或 `electron/main/process-runtime/**` 的兼容替代。private control 与 unified localhost server route 都是 Adapter Module：它们只 decode/verify fixed DTO，然后调用注入的 typed Interface；`owner::Handle` 仅覆盖 Host health/state/shutdown 等 Root lifecycle seam。
 
 ### 3.3 Rust 到 Renderer 的事件方向
 
@@ -207,7 +207,7 @@ flowchart LR
   HostNew --> RootOwner["Root owner actor\nlifecycle · events · shutdown"]
 
   Control["control\nframed private protocol"] --> Dispatch["control dispatch\nmulti-handle adapter"]
-  Transport["transport\nfixed loopback servers"] --> Adapters["route adapters\ndecode · authorize · project"]
+  Transport["transport\nunified localhost server"] --> Adapters["route adapters\ndecode · authorize · project"]
   Dispatch --> RootHandle["owner::Handle\nstate/shutdown only"]
   Dispatch --> TypedHandles["typed owner/facade handles"]
   Adapters --> RootHandle
@@ -232,7 +232,7 @@ flowchart LR
 | typed facades | admission-aware runtime capability Interface；隐藏 readiness、`RuntimeDriverDirectory` lookup、bounded operation state 或 fixed projection，不保存 durable Domain facts | `host/src/facade/**` |
 | runtime surface | fixed OpenClaw/Matcha peer identity、RuntimeDriver ops surface、Capability Directory 与 Runtime Endpoint Directory public projection | `host/src/runtime_driver.rs`, `host/src/runtime_directory.rs`, `host/src/capability_directory.rs`, `host/src/peer_directory.rs` |
 | control | private framed stdin/stdout command、ready signal、SafeEvent 与 multi-handle dispatch | `host/src/control/**` |
-| transport | 固定 loopback server、authorization decision 验证、sealed request/response DTO；每个 Adapter 只持有自身需要的 typed Interface | `host/src/transport/**` |
+| transport | 统一 localhost server、authorization decision 验证、sealed request/response DTO；每个业务 Adapter 只持有自身需要的 typed Interface | `host/src/transport/**`, `host/src/transport/localhost/**` |
 
 ### 5.1 Root owner 与 typed Interface 的不变量
 
@@ -351,7 +351,7 @@ flowchart BT
 
 ### 8.1 Bootstrap 与启动
 
-Electron `bootstrapMainApplication()` 创建 `DirectRuntimeHost`，将一次性 bootstrap bytes 写入 Rust stdin。Rust `host/src/main.rs` 只完成三件事：读取 bootstrap、拆出 typed input/ports/verifier、调用 `run_delivery_transports()`。
+Electron `bootstrapMainApplication()` 创建 `DirectRuntimeHost`，将一次性 bootstrap bytes 写入 Rust stdin。Rust `host/src/main.rs` 只完成三件事：读取 bootstrap、拆出 typed input/runtime-host transport port/verifier、调用 `run_delivery_transports()`。
 
 `run_delivery_transports()` 的顺序是：
 
@@ -366,16 +366,16 @@ bootstrap typed inputs
 → read settings auto-start through SettingsHandle
 → host.start_admission_only()
 → owner::Owner::spawn(host, events)
-→ bind fixed loopback transports with injected typed handles/facades
+→ bind one Host-owned localhost server with injected typed handles/facades
 → run private framed control with owner::Handle plus typed handles
 → request peer autostart through PeerHandle
 ```
 
-loopback servers 不共享单一 Root owner Interface。每个 transport Adapter 只绑定自身需要的 typed owner/facade handle；`owner::Handle` 只保留给 Root lifecycle projection/shutdown 路径，例如 compatibility health/snapshot/stop。Host capabilities 来自 Rust Capability Directory，Runtime Endpoint Directory 只投影 fixed local OpenClaw/Matcha peer 与 readiness，不暴露 PID、token、path 或 raw peer state。因此 HTTP/control 请求不能绕过自己的 typed Interface 直接访问 `Host`，也不会为每条 route 创建第二个 Host 或第二份 peer lifecycle state。对应实现为 `runtime-host/host/src/main.rs`、`runtime-host/host/src/control/**`、`runtime-host/host/src/owner.rs`、`runtime-host/host/src/composition/host/mod.rs`、`runtime-host/host/src/runtime_driver.rs`、`runtime-host/host/src/runtime_directory.rs`、`runtime-host/host/src/capability_directory.rs`、`runtime-host/host/src/peer_directory.rs` 与 `runtime-host/host/src/transport/**`。
+Host-owned localhost transport 已收敛为一个 loopback port/listener，但不会共享单一 Root owner Interface。每个业务 Adapter 仍只绑定自身需要的 typed owner/facade handle；`owner::Handle` 只保留给 Root lifecycle projection/shutdown 路径，例如 compatibility health/snapshot/stop。SSE/WS 是统一 server 的 route outcome，不是独立 Host-owned listener；OpenClaw gateway、Matcha app-server、MCP stdio 仍是 peer/native 边界。Host capabilities 来自 Rust Capability Directory，Runtime Endpoint Directory 只投影 fixed local OpenClaw/Matcha peer 与 readiness，不暴露 PID、token、path 或 raw peer state。因此 HTTP/control 请求不能绕过自己的 typed Interface 直接访问 `Host`，也不会为每条 route 创建第二个 Host 或第二份 peer lifecycle state。对应实现为 `runtime-host/host/src/main.rs`、`runtime-host/host/src/control/**`、`runtime-host/host/src/owner.rs`、`runtime-host/host/src/composition/host/mod.rs`、`runtime-host/host/src/runtime_driver.rs`、`runtime-host/host/src/runtime_directory.rs`、`runtime-host/host/src/capability_directory.rs`、`runtime-host/host/src/peer_directory.rs`、`runtime-host/host/src/transport/localhost/**` 与 `runtime-host/host/src/transport/**`。
 
 ### 8.2 Transport family 与职责
 
-`transport/**` 按产品语义拆分 server，而不是按 HTTP resource 机械聚合。它们共享的 Interface 是：严格解码固定 DTO、验证 capability decision、调用注入的 typed handle/facade、投影封闭成功/拒绝/unknown outcome。`owner::Handle` 不是 transport-wide Interface。
+`transport/**` 按产品语义拆分 handler/adapter，而不是按 HTTP resource 机械聚合。它们共享的 Interface 是：严格解码固定 DTO、验证 capability decision、调用注入的 typed handle/facade、投影封闭成功/拒绝/unknown outcome。统一 localhost server 只收敛 listener 和 HTTP/SSE/WS outcome 写回；`owner::Handle` 不是 transport-wide Interface。
 
 | Transport family | Target Interface / Module | 典型路径 |
 |---|---|---|
@@ -420,15 +420,15 @@ begin Host shutdown admission
 sequenceDiagram
   participant UI as Renderer session UI
   participant Main as Electron session transport
-  participant Server as Rust session server
+  participant Route as Rust localhost route handler
   participant Session as SessionHandle / SessionOwner
   participant Directory as RuntimeDriverDirectory
   participant Peer as RuntimeDriver SessionOps
   participant Native as Native Runtime Edge
 
   UI->>Main: signed session capability request
-  Main->>Server: fixed loopback DTO
-  Server->>Session: typed session command/query
+  Main->>Route: fixed localhost route DTO
+  Route->>Session: typed session command/query
   Session->>Directory: endpoint lookup
   Directory-->>Session: OpenClaw or matcha-agent driver
   Session->>Peer: SessionOps request
@@ -480,7 +480,7 @@ An accepted immediate receipt does not mean agent execution succeeded. Only `Cro
 
 ### 9.4 Security：Delivery decision 与 desired/effect owner 分离
 
-Security policy and emergency transports verify an Electron-issued decision, then call a dedicated Rust desired/effect owner. Electron bearer access, Rust private control, Gateway scope and a public capability decision are not interchangeable authority. Public results stay sealed; native config, token, raw evidence, peer error and filesystem detail do not leave the private implementation.
+Security policy and emergency routes verify an Electron-issued decision, then call a dedicated Rust desired/effect owner. Electron bearer access, Rust private control, Gateway scope and a public capability decision are not interchangeable authority. Public results stay sealed; native config, token, raw evidence, peer error and filesystem detail do not leave the private implementation.
 
 ## 10. 当前 active path 与迁移状态的分离
 

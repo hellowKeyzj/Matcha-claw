@@ -15,7 +15,6 @@ use crate::{
 };
 
 pub(crate) mod projection;
-pub(crate) mod server;
 
 use projection::capability_for;
 

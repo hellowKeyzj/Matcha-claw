@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createSecurityRuleCatalogTransport } from '../../electron/main/runtime-host-delivery/transport/security/rule-catalog';
 
+const issuer = {
+  verificationKey: 'public-key',
+  signDecision: vi.fn(() => 'signed-token'),
+};
+
 const catalog = {
   success: true,
   total: 3,
@@ -33,21 +38,32 @@ const catalog = {
 describe('security rule catalog transport', () => {
   it('reads the fixed native path and optional platform query', async () => {
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => catalog });
-    const transport = createSecurityRuleCatalogTransport(3227, fetcher);
+    const transport = createSecurityRuleCatalogTransport(issuer, 3227, fetcher);
 
     await expect(transport.read('windows')).resolves.toEqual({ status: 200, body: catalog });
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:3227/api/security/destructive-rule-catalog/current?platform=windows',
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer signed-token' }),
+        method: 'GET',
+      }),
     );
+    expect(issuer.signDecision).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: '/api/security/destructive-rule-catalog/current',
+      scope: 'security:read',
+      capability: 'security.rule-catalog.read',
+      subject: 'security-rule-catalog',
+    }));
   });
 
   it('reads the unfiltered catalog without fabricating query parameters', async () => {
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => catalog });
-    const transport = createSecurityRuleCatalogTransport(3227, fetcher);
+    const transport = createSecurityRuleCatalogTransport(issuer, 3227, fetcher);
 
     await expect(transport.read()).resolves.toEqual({ status: 200, body: catalog });
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:3227/api/security/destructive-rule-catalog/current',
+      expect.objectContaining({ method: 'GET' }),
     );
   });
 
@@ -69,7 +85,7 @@ describe('security rule catalog transport', () => {
       revision: 7,
     };
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
-    const transport = createSecurityRuleCatalogTransport(3227, fetcher);
+    const transport = createSecurityRuleCatalogTransport(issuer, 3227, fetcher);
 
     await expect(transport.read('PowerShell')).resolves.toEqual({
       status: 503,
@@ -77,6 +93,7 @@ describe('security rule catalog transport', () => {
     });
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:3227/api/security/destructive-rule-catalog/current?platform=PowerShell',
+      expect.objectContaining({ method: 'GET' }),
     );
   });
 
@@ -95,7 +112,7 @@ describe('security rule catalog transport', () => {
         }],
       }),
     });
-    const transport = createSecurityRuleCatalogTransport(3227, fetcher);
+    const transport = createSecurityRuleCatalogTransport(issuer, 3227, fetcher);
 
     await expect(transport.read()).resolves.toEqual({
       status: 503,
@@ -107,7 +124,7 @@ describe('security rule catalog transport', () => {
     const fetcher = vi.fn()
       .mockRejectedValueOnce(new Error('private native path'))
       .mockResolvedValueOnce({ status: 500, json: async () => ({ error: 'private detail' }) });
-    const transport = createSecurityRuleCatalogTransport(3227, fetcher);
+    const transport = createSecurityRuleCatalogTransport(issuer, 3227, fetcher);
 
     await expect(transport.read()).resolves.toEqual({
       status: 503,

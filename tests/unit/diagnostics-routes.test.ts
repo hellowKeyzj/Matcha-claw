@@ -32,7 +32,7 @@ describe('diagnostics routes', () => {
     archive: hoisted.archiveMock,
     download: hoisted.downloadMock,
   };
-  const diagnosticsContext = { diagnosticsArchiveTransport } as never;
+  const diagnosticsContext = { runtimeHostTransports: { diagnosticsArchiveTransport } } as never;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -62,7 +62,7 @@ describe('diagnostics routes', () => {
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, diagnosticsArchiveTransport } as never,
+      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
     );
 
     expect(handled).toBe(true);
@@ -92,7 +92,7 @@ describe('diagnostics routes', () => {
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, diagnosticsArchiveTransport } as never,
+      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
     );
 
     expect(command).toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
@@ -124,7 +124,7 @@ describe('diagnostics routes', () => {
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, diagnosticsArchiveTransport } as never,
+      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
     );
 
     expect(hoisted.sendJsonMock).toHaveBeenCalledWith(

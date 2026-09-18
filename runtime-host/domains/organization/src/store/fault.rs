@@ -3,7 +3,7 @@ use std::{fmt, io};
 use crate::{
     ActivityTransitionError, AgentNodeEventResolutionError, AuthorizedGraphResolutionError,
     ControlNodeResolutionError, DeliveryReceiptError, DeliveryRequestError,
-    TerminalObservationError, TriggerFireError,
+    NativeRunOutputResolutionError, TerminalObservationError, TriggerFireError,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +28,7 @@ pub enum StoreFault {
     DeliveryReceipt(Box<DeliveryReceiptError>),
     TriggerFire(TriggerFireError),
     TerminalObservation(TerminalObservationError),
+    NativeRunOutputResolution(NativeRunOutputResolutionError),
     AuthorizedGraphResolution(AuthorizedGraphResolutionError),
     AgentNodeEventResolution(AgentNodeEventResolutionError),
     GraphPatch(crate::GraphPatchError),
@@ -87,6 +88,8 @@ impl fmt::Display for StoreFault {
             }
             Self::TerminalObservation(_) => formatter
                 .write_str("organization terminal observation violates TeamRun durable invariants"),
+            Self::NativeRunOutputResolution(_) => formatter
+                .write_str("organization native run output violates TeamRun durable invariants"),
             Self::AuthorizedGraphResolution(_) => formatter.write_str(
                 "organization authorized graph resolution violates TeamRun durable invariants",
             ),

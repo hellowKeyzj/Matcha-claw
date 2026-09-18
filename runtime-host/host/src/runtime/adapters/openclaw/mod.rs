@@ -53,7 +53,7 @@ use crate::{
         ProviderNativeConfigurationCommand, RuntimeCapabilitySurface, RuntimeDriver,
         RuntimeDriverIdentity, RuntimeLifecycleFailure, RuntimeStartFailure, SecurityOps,
         SessionFuture, SessionOps, SettingsOps, SettingsProjectionEffect, SkillOps, SubagentOps,
-        TaskOps, TeamOps, WorkspaceOps,
+        TaskOps, TeamOps, TeamTerminalOps, WorkspaceOps,
     },
     sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
     sessions::create::{

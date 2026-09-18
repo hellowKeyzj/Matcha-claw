@@ -48,6 +48,7 @@ pub struct DurableWorkAssignment {
     pub task_id: String,
     pub prompt: String,
     pub role_id: String,
+    pub session_ref: String,
     pub output_artifact_kind: Option<String>,
     pub group_id: Option<String>,
 }
@@ -55,6 +56,7 @@ pub struct DurableWorkAssignment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableReviewAssignment {
     pub role_id: String,
+    pub session_ref: String,
     pub prompt: String,
 }
 
@@ -211,6 +213,7 @@ impl GraphState {
                         task_id: work.task_id().to_owned(),
                         prompt: work.prompt().to_owned(),
                         role_id: work.role_id().to_owned(),
+                        session_ref: work.session_ref().as_str().to_owned(),
                         output_artifact_kind: work.output_artifact_kind().map(ToOwned::to_owned),
                         group_id: work.group_id().map(|id| id.as_str().to_owned()),
                     }),
@@ -218,6 +221,7 @@ impl GraphState {
                         .review_assignment()
                         .map(|review| DurableReviewAssignment {
                             role_id: review.role_id().to_owned(),
+                            session_ref: review.session_ref().as_str().to_owned(),
                             prompt: review.prompt().to_owned(),
                         }),
                     group: node.work_group().map(|group| DurableWorkGroup {
@@ -385,7 +389,14 @@ fn restore_definition(
                     WorkAssignment::typed(
                         work.task_id.clone(),
                         work.prompt.clone(),
-                        ExecutorPolicy::team_role(work.role_id.clone()),
+                        ExecutorPolicy::team_role_session(
+                            work.role_id.clone(),
+                            crate::RoleSessionRef::try_new(work.session_ref.clone()).map_err(
+                                |_| DurableRestoreError::InvalidNodeSnapshot {
+                                    node_id: node.id.clone(),
+                                },
+                            )?,
+                        ),
                         work.output_artifact_kind.clone(),
                         work.group_id.clone().map(GroupId::new),
                     ),
@@ -395,7 +406,16 @@ fn restore_definition(
                         id,
                         node.title.clone(),
                         max_attempts,
-                        ReviewAssignment::new(review.role_id.clone(), review.prompt.clone()),
+                        ReviewAssignment::with_executor(
+                            ExecutorPolicy::team_role_session(
+                                review.role_id.clone(),
+                                crate::RoleSessionRef::try_new(review.session_ref.clone())
+                                    .map_err(|_| DurableRestoreError::InvalidNodeSnapshot {
+                                        node_id: node.id.clone(),
+                                    })?,
+                            ),
+                            review.prompt.clone(),
+                        ),
                     ))
                 }
                 (NodeKind::Join, false, None, None, None, Some(group)) => Ok(NodeDefinition::join(

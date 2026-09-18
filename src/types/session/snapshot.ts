@@ -202,8 +202,20 @@ export type SessionWireApproval = {
 };
 
 export type SessionWireRuntimeActivity = 'compacting';
+export type SessionWireRunStartupPhase =
+  | 'preparing_workspace'
+  | 'naming_worktree'
+  | 'creating_worktree'
+  | 'running_setup'
+  | 'provisioning_environment'
+  | 'preparing_context'
+  | 'starting_model';
+export type SessionWireRunProgress =
+  | { kind: 'startup'; phase: SessionWireRunStartupPhase }
+  | { kind: 'retrying'; attempt: number; maxAttempts: number };
 
 export type SessionWireRuntimeErrorDetail = {
+  kind: 'fallback' | 'error';
   failoverReason: string | null;
   providerRuntimeFailureKind: string | null;
   providerErrorType: string | null;
@@ -237,6 +249,7 @@ export type SessionWireRuntime = {
     | 'interrupted';
   activeRunId: string | null;
   issue: 'unknown' | 'unavailable' | 'timeout' | 'rejected' | null;
+  runProgress: SessionWireRunProgress | null;
   runtimeActivity: SessionWireRuntimeActivity | null;
   errorDetail: SessionWireRuntimeErrorDetail | null;
 };
@@ -629,10 +642,11 @@ function isRuntimeNoticeKind(value: unknown): value is SessionWireRuntimeNotice[
 
 function decodeRuntime(value: unknown): SessionWireRuntime | null {
   if (!isRecord(value)
-    || !hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runtimeActivity', 'errorDetail'])
+    || !hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runProgress', 'runtimeActivity', 'errorDetail'])
     || !isRuntimePhase(value.phase)
     || (value.activeRunId !== null && !isNonEmptyIdentifier(value.activeRunId))
     || (value.issue !== null && value.issue !== 'unknown' && value.issue !== 'unavailable' && value.issue !== 'timeout' && value.issue !== 'rejected')
+    || (value.runProgress !== null && !isRunProgress(value.runProgress))
     || (value.runtimeActivity !== null && value.runtimeActivity !== 'compacting')) {
     return null;
   }
@@ -644,22 +658,49 @@ function decodeRuntime(value: unknown): SessionWireRuntime | null {
     phase: value.phase,
     activeRunId: value.activeRunId,
     issue: value.issue,
+    runProgress: value.runProgress,
     runtimeActivity: value.runtimeActivity,
     errorDetail,
   };
+}
+
+function isRunProgress(value: unknown): value is SessionWireRunProgress {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  if (value.kind === 'startup') {
+    return hasExactKeys(value, ['kind', 'phase']) && isRunStartupPhase(value.phase);
+  }
+  return value.kind === 'retrying'
+    && hasExactKeys(value, ['kind', 'attempt', 'maxAttempts'])
+    && isSafeInteger(value.attempt)
+    && isSafeInteger(value.maxAttempts)
+    && value.attempt >= 1
+    && value.maxAttempts <= 10
+    && value.attempt <= value.maxAttempts;
+}
+
+function isRunStartupPhase(value: unknown): value is SessionWireRunStartupPhase {
+  return value === 'preparing_workspace'
+    || value === 'naming_worktree'
+    || value === 'creating_worktree'
+    || value === 'running_setup'
+    || value === 'provisioning_environment'
+    || value === 'preparing_context'
+    || value === 'starting_model';
 }
 
 function decodeRuntimeErrorDetail(value: unknown): SessionWireRuntimeErrorDetail | null {
   return value === null
     ? null
     : isRecord(value)
-      && hasExactKeys(value, ['failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+      && hasExactKeys(value, ['kind', 'failoverReason', 'providerRuntimeFailureKind', 'providerErrorType', 'providerErrorMessagePreview', 'httpStatus'])
+      && (value.kind === 'fallback' || value.kind === 'error')
       && isNullableShortText(value.failoverReason)
       && isNullableShortText(value.providerRuntimeFailureKind)
       && isNullableShortText(value.providerErrorType)
       && isNullableShortText(value.providerErrorMessagePreview)
       && (value.httpStatus === null || (isSafeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599))
       ? {
+        kind: value.kind,
         failoverReason: value.failoverReason,
         providerRuntimeFailureKind: value.providerRuntimeFailureKind,
         providerErrorType: value.providerErrorType,

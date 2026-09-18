@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
 const CATALOG_UNAVAILABLE = {
   success: false,
@@ -100,104 +99,83 @@ export interface PluginsTransport {
 
 export function createPluginsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): PluginsTransport {
-  const catalogUrl = `http://127.0.0.1:${port}/api/plugins/catalog`;
-  const runtimeUrl = `http://127.0.0.1:${port}/api/plugins/runtime`;
-  const configurationUrl = `http://127.0.0.1:${port}/api/plugins/configuration`;
-  const operationUrl = `http://127.0.0.1:${port}/api/plugins/operation`;
   return {
     async catalog(): Promise<PluginCatalogTransportResponse> {
-      try {
-        const response = await fetcher(catalogUrl, getOptions(issuer, '/api/plugins/catalog', 'plugins:read', 'plugins.catalog.read', 'plugin-catalog'));
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPluginCatalog(body)) return { status: 200, body };
-      } catch {
-        // Loopback and native details do not cross this public boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/plugins/catalog',
+        issuer,
+        decision: {
+          endpoint: '/api/plugins/catalog',
+          scope: 'plugins:read',
+          capability: 'plugins.catalog.read',
+          subject: 'plugin-catalog',
+        },
+        method: 'GET',
+        fetcher,
+      });
+      if (response?.status === 200 && isPluginCatalog(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: CATALOG_UNAVAILABLE };
     },
     async runtime(): Promise<PluginRuntimeTransportResponse> {
-      try {
-        const response = await fetcher(runtimeUrl, getOptions(issuer, '/api/plugins/runtime', 'plugins:read', 'plugins.runtime.read', 'plugin-runtime'));
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPluginRuntime(body)) return { status: 200, body };
-      } catch {
-        // Loopback and native details do not cross this public boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/plugins/runtime',
+        issuer,
+        decision: {
+          endpoint: '/api/plugins/runtime',
+          scope: 'plugins:read',
+          capability: 'plugins.runtime.read',
+          subject: 'plugin-runtime',
+        },
+        method: 'GET',
+        fetcher,
+      });
+      if (response?.status === 200 && isPluginRuntime(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: RUNTIME_UNAVAILABLE };
     },
     async configuration(input): Promise<PluginConfigurationOutcome> {
       if (!isPluginConfigurationInput(input)) return { outcome: 'unknown' };
-      try {
-        const response = await fetcher(configurationUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${decision(issuer, '/api/plugins/configuration', 'plugins:write', 'plugins.configuration', 'plugin-configuration')}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(input),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPluginConfigurationOutcome(body)) return body;
-      } catch {
-        // Loopback and native details do not cross this public boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/plugins/configuration',
+        issuer,
+        decision: {
+          endpoint: '/api/plugins/configuration',
+          scope: 'plugins:write',
+          capability: 'plugins.configuration',
+          subject: 'plugin-configuration',
+        },
+        method: 'POST',
+        fetcher,
+        body: input,
+      });
+      if (response?.status === 200 && isPluginConfigurationOutcome(response.body)) return response.body;
       return { outcome: 'unknown' };
     },
     async operation(input): Promise<PluginOperationOutcome> {
       if (!isPluginOperationInput(input)) return { outcome: 'unknown' };
-      try {
-        const response = await fetcher(operationUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${decision(issuer, '/api/plugins/operation', 'plugins:write', 'plugins:operation', 'plugin-operation')}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(input),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPluginOperationOutcome(body)) return body;
-      } catch {
-        // Loopback and native details do not cross this public boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/plugins/operation',
+        issuer,
+        decision: {
+          endpoint: '/api/plugins/operation',
+          scope: 'plugins:write',
+          capability: 'plugins:operation',
+          subject: 'plugin-operation',
+        },
+        method: 'POST',
+        fetcher,
+        body: input,
+      });
+      if (response?.status === 200 && isPluginOperationOutcome(response.body)) return response.body;
       return { outcome: 'unknown' };
     },
   };
-}
-
-function getOptions(
-  issuer: RuntimeHostDeliveryIssuer,
-  endpoint: string,
-  scope: string,
-  capability: string,
-  subject: string,
-): RequestInit {
-  return {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${decision(issuer, endpoint, scope, capability, subject)}`,
-    },
-  };
-}
-
-function decision(
-  issuer: RuntimeHostDeliveryIssuer,
-  endpoint: string,
-  scope: string,
-  capability: string,
-  subject: string,
-): string {
-  return issuer.signDecision({
-    principal: 'electron-main-local',
-    endpoint,
-    scope,
-    capability,
-    subject,
-    expiresAt: Date.now() + DECISION_TTL_MS,
-    revision: '1',
-  });
 }
 
 function isPluginCatalog(value: unknown): value is PluginCatalog {
@@ -320,15 +298,6 @@ function isIdentity(value: unknown): value is string {
 
 function isNonblankText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasOwnKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

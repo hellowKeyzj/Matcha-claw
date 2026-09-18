@@ -82,6 +82,7 @@ pub(crate) struct HostHandles {
     pub diagnostics: crate::facade::DiagnosticsHandle,
     pub(crate) observation: ObservationSink,
     pub channel_endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    pub session_delta_source: crate::sessions::events::SessionDeltaSource,
 }
 
 pub struct Host {
@@ -154,6 +155,7 @@ impl Host {
         let provisioned = provisioning::provision_runtime_stores(sealed)?;
         let mut matcha = MatchaAgentInstance::new(matcha);
         let (event_sinks, events) = events::channels();
+        let session_delta_source = crate::sessions::events::SessionDeltaSource::new(256);
         matcha.set_renderer_events(event_sinks.matcha());
         let peer_matcha_lifecycle_sink = event_sinks.matcha_lifecycle();
         let open_claw_event_sink = event_sinks
@@ -190,7 +192,7 @@ impl Host {
             open_claw: Arc::clone(&open_claw),
             matcha_driver: matcha_runtime_driver.clone(),
             admission: Arc::clone(&admission),
-            session_delta: event_sinks.session_delta(),
+            session_delta: Some(session_delta_source.clone()),
             open_claw_runtime: event_sinks.open_claw_runtime(),
         })?;
         let open_claw_runtime_readiness = open_claw.control_readiness();
@@ -223,6 +225,7 @@ impl Host {
                 diagnostics: provisioned.diagnostics,
                 clawhub_registry: provisioned.clawhub_registry,
                 runtime_observation: provisioned.runtime_observation.clone(),
+                session_delta_source: session_delta_source.clone(),
             },
             &owners,
             &event_sinks,
@@ -268,15 +271,6 @@ impl Host {
 
     pub(crate) fn sessions(&self) -> &SessionHandle {
         &self.session_handle
-    }
-
-    pub(crate) fn publish_session_delta(
-        &self,
-        delta: crate::sessions::state::SessionDelta,
-    ) -> bool {
-        self.event_sinks
-            .session_delta()
-            .is_some_and(|sink| sink.try_send(delta).is_ok())
     }
 
     pub async fn start(&mut self) -> Result<(), HostTransitionError> {

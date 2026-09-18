@@ -121,4 +121,4 @@ fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
 }
 
-pub(crate) mod server;
+pub(crate) mod handler;

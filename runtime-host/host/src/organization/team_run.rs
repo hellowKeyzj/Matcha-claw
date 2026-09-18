@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::review;
 
@@ -7,23 +7,22 @@ use organization::{
     ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     ArmedCronTrigger, BeginCancellationOutcome, CreateGraphRunOutcome, CronScheduleError,
     CronTriggerScheduleError, DeliveryId, DeliveryPhase, DeliveryReceipt, DeliveryRejection,
-    DueCronTriggerPlan, ExternalSessionReference, GraphDefinition, GraphRunFacts, GraphRunId,
-    GraphRunPurgeOutcome, GraphState, IdempotencyKey, LocalSessionReference,
-    MatchaDeliveryCorrelation, MatchaTerminalReceiptTarget, NativeRunReceiptReference,
-    NativeTerminalStatus, NodeDefinition, NodeId, OrganizationStore, ResumeOutcome,
-    RoleAbortOutcome, RoleId, RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference,
-    SettleCancellationOutcome, StartTrigger, StoreFault, TeamDecisionCommand, TeamDecisionReceipt,
-    TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome,
-    TeamRunProjection, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
-    TeamTriggerFireRequest, TeamTriggerFireRequestError, TerminalObservationOutcome,
-    TombstoneOutcome, TriggerFireRequest, TriggerRegistration, TriggerSource, next_cron_slot_after,
-    plan_due_cron_trigger, plan_terminal_observations, query_team_run,
+    DueCronTriggerPlan, GraphDefinition, GraphRunFacts, GraphRunId, GraphRunPurgeOutcome,
+    GraphState, IdempotencyKey, NativeTerminalReceiptTarget, NativeTerminalStatus, NodeDefinition,
+    NodeId, OrganizationStore, ResumeOutcome, RoleAbortOutcome, RoleSessionReceipt, RoleSessionRef,
+    RunRuntimeReceipt, RuntimeEndpointReference, SettleCancellationOutcome, StartTrigger,
+    StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
+    TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunProjection,
+    TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome, TeamTriggerFireRequest,
+    TeamTriggerFireRequestError, TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
+    TriggerRegistration, TriggerSource, next_cron_slot_after, plan_due_cron_trigger,
+    plan_terminal_observations, query_team_run,
     run::lifecycle::GraphRunLifecycleState,
     run::scheduler::{NodePromptRetryDueQuery, NodePromptRetryDueQueryOutcome},
 };
 
 use crate::runtime::driver::{
-    ActivityExecutionRequest, ActivityExecutionRequestError, AgentTaskActivity,
+    ActivityExecutionRequest, ActivityExecutionRequestError, AgentTaskActivity, NativeRunSettled,
 };
 
 /// Organization-owned TeamRun semantic seam over the durable facts store.
@@ -102,19 +101,6 @@ pub(crate) enum TeamRunActivityOutcome {
     AwaitingRetry(TeamRunCommandOutcome),
     Terminal(TeamRunCommandOutcome),
     OutcomeUnknown(TeamRunCommandOutcome),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchaTerminalObservationError {
-    Correlation,
-    Store(StoreFault),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchaTerminalObservationOutcome {
-    Pending,
-    NotFound,
-    Observed(TeamRunTerminalObservationOutcome),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,26 +261,40 @@ pub(crate) fn prepare_runtime_receipt(
     if store.facts().run(run_id).is_none() {
         return Err(RuntimeReceiptOutcome::Unavailable);
     }
-    let mut bindings = Vec::with_capacity(materialization.roles().len());
+    let run = store
+        .facts()
+        .run(run_id)
+        .ok_or(RuntimeReceiptOutcome::Unavailable)?;
+    let mut slots = BTreeSet::new();
     for role in materialization.roles() {
-        let local_session = LocalSessionReference::try_new(format!(
-            "team-role-session-{}-{}",
-            run_id.as_str(),
-            role.role().as_str()
-        ))
-        .map_err(|_| RuntimeReceiptOutcome::Unavailable)?;
-        let external_session = ExternalSessionReference::try_new(format!(
-            "team-endpoint-session-{}-{}",
-            run_id.as_str(),
-            role.role().as_str()
-        ))
-        .map_err(|_| RuntimeReceiptOutcome::Unavailable)?;
+        slots.insert((role.role().as_str().to_owned(), RoleSessionRef::initial()));
+    }
+    for node in run.graph().definition().nodes() {
+        if let Some(assignment) = node.work_assignment() {
+            slots.insert((
+                assignment.role_id().to_owned(),
+                assignment.session_ref().clone(),
+            ));
+        }
+        if let Some(assignment) = node.review_assignment() {
+            slots.insert((
+                assignment.role_id().to_owned(),
+                assignment.session_ref().clone(),
+            ));
+        }
+    }
+    let mut bindings = Vec::with_capacity(slots.len());
+    for (role_id, session_ref) in slots {
+        let role = materialization
+            .roles()
+            .iter()
+            .find(|role| role.role().as_str() == role_id)
+            .ok_or(RuntimeReceiptOutcome::Unavailable)?;
         bindings.push(RoleSessionReceipt::new(
             team.clone(),
             run_id.clone(),
             role.role().clone(),
-            local_session,
-            external_session,
+            session_ref,
             role.agent().clone(),
             role.endpoint().clone(),
         ));
@@ -596,6 +596,11 @@ impl TeamRunOwner {
         store: &mut OrganizationStore,
         admission: organization::RoleChatAdmission,
     ) -> Result<organization::RoleChatAdmissionOutcome, StoreFault> {
+        if role_chat_conflicts_active_team_run(store, &admission) {
+            return Ok(organization::RoleChatAdmissionOutcome::Rejected(
+                organization::RoleChatRejection::StaleFence,
+            ));
+        }
         store.admit_role_chat(admission)
     }
 
@@ -859,10 +864,13 @@ impl TeamRunOwner {
         let activity_id = claim.activity_id().clone();
         let observed_at = claim.claimed_at();
         let (delivery_receipt, activity_settlement) = match outcome {
-            crate::runtime::driver::ActivityExecutionOutcome::Accepted { receipt } => (
+            crate::runtime::driver::ActivityExecutionOutcome::Accepted {
+                receipt,
+                correlation,
+            } => (
                 DeliveryReceipt::Accepted {
                     receipt,
-                    matcha_correlation: matcha_activity_correlation(store, &activity_id),
+                    native_correlation: Some(correlation),
                     accepted_at: observed_at,
                 },
                 None,
@@ -941,12 +949,12 @@ impl TeamRunOwner {
             .to_vec()
     }
 
-    pub(crate) fn matcha_terminal_target(
+    pub(crate) fn native_terminal_target(
         &self,
         store: &OrganizationStore,
         delivery_id: &DeliveryId,
-    ) -> Option<MatchaTerminalReceiptTarget> {
-        store.matcha_terminal_target(delivery_id)
+    ) -> Option<NativeTerminalReceiptTarget> {
+        store.native_terminal_target(delivery_id)
     }
 
     pub(crate) fn settle_node_prompt(
@@ -964,7 +972,7 @@ impl TeamRunOwner {
             .filter_map(|delivery| {
                 let correlation = match delivery.phase() {
                     DeliveryPhase::Delivered {
-                        matcha_correlation: Some(correlation),
+                        native_correlation: Some(correlation),
                         ..
                     } => correlation,
                     DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
@@ -972,12 +980,11 @@ impl TeamRunOwner {
                 };
                 let run_id = GraphRunId::new(delivery.facts().run_id.clone());
                 let run = store.facts().run(&run_id)?;
-                let binding = run
-                    .runtime()?
-                    .bindings()
-                    .iter()
-                    .find(|binding| binding.role().as_str() == delivery.facts().role_id)?;
-                (binding.local_session().as_str() == session_key
+                let binding = run.runtime()?.bindings().iter().find(|binding| {
+                    binding.role().as_str() == delivery.facts().role_id
+                        && binding.session_ref().as_str() == delivery.facts().session_ref
+                })?;
+                (binding.session_ref().as_str() == session_key
                     && correlation.native_run_receipt().as_str() == prompt_run_id)
                     .then_some(delivery)
             })
@@ -998,9 +1005,9 @@ impl TeamRunOwner {
         let delivery_id = DeliveryId::new(delivery.facts().delivery_id.as_str().to_owned())
             .map_err(|_| StoreFault::InvalidFacts)?;
         let target = store
-            .matcha_terminal_target(&delivery_id)
+            .native_terminal_target(&delivery_id)
             .ok_or(StoreFault::InvalidFacts)?;
-        let outcome = store.observe_matcha_terminal(target, phase, settled_at)?;
+        let outcome = store.observe_native_terminal(target, phase, settled_at)?;
         Ok(match outcome {
             TerminalObservationOutcome::Replayed => TeamNodePromptSettledResult::Replayed(run_id),
             TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution
@@ -1168,15 +1175,15 @@ impl TeamRunOwner {
         Ok(self.recover(store, TeamRunQuery::get(team, run_id)))
     }
 
-    pub(crate) fn observe_matcha_terminal(
+    pub(crate) fn observe_native_terminal(
         &self,
         store: &mut OrganizationStore,
-        target: MatchaTerminalReceiptTarget,
+        target: NativeTerminalReceiptTarget,
         native_terminal: NativeTerminalStatus,
         observed_at: u64,
     ) -> Result<TeamRunTerminalObservationOutcome, StoreFault> {
         let run_id = target.graph_run_id().clone();
-        let observation = store.observe_matcha_terminal(target, native_terminal, observed_at)?;
+        let observation = store.observe_native_terminal(target, native_terminal, observed_at)?;
         let team = store
             .facts()
             .run(&run_id)
@@ -1202,6 +1209,51 @@ pub(crate) struct TeamRunTerminalObservationOutcome {
     pub(crate) run: TeamRunCommandOutcome,
 }
 
+fn parse_native_settled_team_message(
+    settled: &NativeRunSettled,
+) -> Result<super::team_message::TeamMessage, StoreFault> {
+    let Some(final_assistant_text) = settled.final_assistant_text.as_deref() else {
+        return Err(StoreFault::InvalidFacts);
+    };
+    super::team_message::parse_team_message(final_assistant_text)
+        .map_err(|_| StoreFault::InvalidFacts)
+}
+
+pub(crate) fn resolve_native_settled_output(
+    store: &mut OrganizationStore,
+    team_run: &TeamRunOwner,
+    run_id: &GraphRunId,
+    delivery_id: &DeliveryId,
+    settled: NativeRunSettled,
+    resolved_at: u64,
+) -> Result<TeamNodeTerminalResult, StoreFault> {
+    let message = parse_native_settled_team_message(&settled)?;
+    let delivery = store
+        .facts()
+        .deliveries()
+        .delivery(delivery_id)
+        .ok_or(StoreFault::InvalidFacts)?;
+    let node_execution_id =
+        organization::run::event::OpaqueId::try_new(delivery.facts().node_execution_id.clone())
+            .map_err(|_| StoreFault::InvalidFacts)?;
+    let event = if settled.status == NativeTerminalStatus::Completed {
+        "complete"
+    } else {
+        "reject"
+    };
+    team_run.resolve_node_terminal(
+        store,
+        run_id,
+        &node_execution_id,
+        event,
+        None,
+        message.summary(),
+        Some(message.output_port()),
+        &format!("native-settled:{}", delivery_id.as_str()),
+        resolved_at,
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TeamRunCommandOutcome {
     Available(TeamRunProjection),
@@ -1219,6 +1271,30 @@ impl TeamRunCommandOutcome {
     }
 }
 
+fn role_chat_conflicts_active_team_run(
+    store: &OrganizationStore,
+    admission: &organization::RoleChatAdmission,
+) -> bool {
+    store
+        .facts()
+        .activities()
+        .activities()
+        .filter(|activity| activity.facts().run_id == *admission.run_id())
+        .filter(|activity| {
+            matches!(
+                activity.phase(),
+                ActivityPhase::Pending
+                    | ActivityPhase::RetryScheduled { .. }
+                    | ActivityPhase::Claimed(_)
+                    | ActivityPhase::Dispatched(_)
+            )
+        })
+        .any(|activity| match &activity.facts().activity_kind {
+            ActivityKind::AgentTask { role_id, .. } => role_id == admission.role_id().as_str(),
+            _ => false,
+        })
+}
+
 fn agent_task_execution_request(
     store: &OrganizationStore,
     activity: &ActivityRequest,
@@ -1230,23 +1306,19 @@ fn agent_task_execution_request(
     let ActivityKind::AgentTask { role_id, .. } = &activity.activity_kind else {
         return Err(TeamRunActivityError::InvalidPrompt);
     };
-    let role =
-        RoleId::try_new(role_id.clone()).map_err(|_| TeamRunActivityError::SessionMismatch)?;
     let binding = run
         .runtime()
         .and_then(|runtime| {
-            runtime
-                .bindings()
-                .iter()
-                .find(|binding| binding.role() == &role)
+            super::run_scheduler::binding_for_activity_target(
+                runtime.bindings(),
+                role_id,
+                &activity.target,
+            )
         })
         .cloned()
         .ok_or(TeamRunActivityError::SessionMismatch)?;
-    if binding.local_session().as_str() != activity.target.as_str() {
-        return Err(TeamRunActivityError::SessionMismatch);
-    }
     if binding.agent().as_str().trim().is_empty()
-        || binding.external_session().as_str().trim().is_empty()
+        || binding.endpoint_session_id().as_str().trim().is_empty()
     {
         return Err(TeamRunActivityError::InvalidBinding);
     }
@@ -1254,33 +1326,6 @@ fn agent_task_execution_request(
         AgentTaskActivity::from_activity_request(run.team(), activity, binding)
             .map_err(team_run_activity_error)?,
     ))
-}
-
-fn matcha_activity_correlation(
-    store: &OrganizationStore,
-    activity_id: &ActivityId,
-) -> Option<MatchaDeliveryCorrelation> {
-    let activity = store.facts().activities().activity(activity_id)?;
-    let run = store.facts().run(&activity.facts().run_id)?;
-    let ActivityKind::AgentTask { role_id, .. } = &activity.facts().activity_kind else {
-        return None;
-    };
-    let role = RoleId::try_new(role_id.clone()).ok()?;
-    let binding = run
-        .runtime()?
-        .bindings()
-        .iter()
-        .find(|binding| binding.role() == &role)?;
-    (binding.endpoint().as_str()
-        == crate::runtime::driver::RuntimeDriverIdentity::matcha_agent()
-            .runtime_endpoint_reference())
-    .then(|| {
-        MatchaDeliveryCorrelation::new(
-            binding.external_session().clone(),
-            NativeRunReceiptReference::try_new(activity.facts().idempotency_key.clone())
-                .expect("validated Matcha activity idempotency key must be a native run receipt"),
-        )
-    })
 }
 
 fn team_run_activity_error(error: ActivityExecutionRequestError) -> TeamRunActivityError {
@@ -1501,6 +1546,35 @@ mod tests {
         assert!(!source.contains(concat!("RoleSession", "Request")));
         assert!(!source.contains(concat!("create_role_", "session")));
         assert!(!source.contains(concat!("start_role_", "session")));
+    }
+
+    #[test]
+    fn native_settled_missing_final_text_is_invalid_without_parsing_empty_text() {
+        let settled = NativeRunSettled {
+            status: NativeTerminalStatus::Completed,
+            final_assistant_text: None,
+        };
+
+        assert_eq!(
+            parse_native_settled_team_message(&settled),
+            Err(StoreFault::InvalidFacts)
+        );
+    }
+
+    #[test]
+    fn native_settled_uses_last_team_message() {
+        let settled = NativeRunSettled {
+            status: NativeTerminalStatus::Completed,
+            final_assistant_text: Some(
+                "<team_message>{\"summary\":\"old\",\"output_port\":\"old\",\"payload\":{}}</team_message><team_message>{\"summary\":\"new\",\"output_port\":\"done\",\"payload\":{}}</team_message>"
+                    .to_owned(),
+            ),
+        };
+
+        let message = parse_native_settled_team_message(&settled).unwrap();
+
+        assert_eq!(message.summary(), "new");
+        assert_eq!(message.output_port(), "done");
     }
 
     fn facts(materialization: Option<MaterializationReceipt>) -> OrganizationFacts {

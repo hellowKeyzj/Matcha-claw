@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{
-    MatchaTerminalReceiptTarget, OrganizationFacts, StoreFault,
+    NativeTerminalReceiptTarget, OrganizationFacts, StoreFault,
     codec::{HEADER_LEN, MAX_LOG_BYTES, RecoveredFacts, encode_frame, initialize_log, recover_log},
     facts::{
         ApprovalResolutionInput, PendingWorkflowPlanAdmission, WorkflowPlanAdmissionOutcome,
@@ -17,11 +17,12 @@ use crate::{
     ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
     ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     AgentNodeEventResolution, AuthorizedGraphResolution, AuthorizedGraphResolutionOutcome,
-    ControlExecutionStep, ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim,
-    DeliveryId, DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord,
-    GraphDefinition, GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey,
-    NativeTerminalStatus, RecordOutcome, TeamId, TerminalObservationOutcome, TriggerFireRequest,
-    TriggerRegistration,
+    ConfirmRunStartOutcome, ContinueRunDiscussionOutcome, ControlExecutionStep,
+    ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim, DeliveryId,
+    DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord, GraphDefinition,
+    GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey, NativeTerminalStatus,
+    RecordOutcome, SetRunStartProposalOutcome, TeamId, TerminalObservationOutcome,
+    TriggerFireRequest, TriggerRegistration,
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         artifact::{ArtifactRecord, ArtifactRecordOutcome},
@@ -324,6 +325,71 @@ impl OrganizationStore {
             )
             .map_err(|_| StoreFault::InvalidFacts)?;
         if matches!(outcome, CreateGraphRunOutcome::Created(_)) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn set_run_start_proposal(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    ) -> Result<SetRunStartProposalOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .set_run_start_proposal(run_id, proposal_id, summary, source_delivery_id)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(outcome, SetRunStartProposalOutcome::Recorded) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn confirm_run_start(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: &str,
+    ) -> Result<ConfirmRunStartOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .confirm_run_start(run_id, proposal_id)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(outcome, ConfirmRunStartOutcome::Started) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn continue_run_discussion(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: &str,
+    ) -> Result<ContinueRunDiscussionOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .continue_run_discussion(run_id, proposal_id)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
             candidate
                 .validate_transition_from(&self.facts)
                 .map_err(|_| StoreFault::InvalidFacts)?;
@@ -870,23 +936,23 @@ impl OrganizationStore {
         Ok(registration)
     }
 
-    pub fn matcha_terminal_target(
+    pub fn native_terminal_target(
         &self,
         delivery_id: &DeliveryId,
-    ) -> Option<MatchaTerminalReceiptTarget> {
-        self.facts.matcha_terminal_target(delivery_id)
+    ) -> Option<NativeTerminalReceiptTarget> {
+        self.facts.native_terminal_target(delivery_id)
     }
 
-    pub fn observe_matcha_terminal(
+    pub fn observe_native_terminal(
         &mut self,
-        target: MatchaTerminalReceiptTarget,
+        target: NativeTerminalReceiptTarget,
         native_terminal: NativeTerminalStatus,
         observed_at: u64,
     ) -> Result<TerminalObservationOutcome, StoreFault> {
         self.ensure_writable()?;
         let lock = WriterLock::acquire(&self.lock_path)?;
         self.refresh_locked()?;
-        let Some(current) = self.facts.matcha_terminal_target(target.delivery_id()) else {
+        let Some(current) = self.facts.native_terminal_target(target.delivery_id()) else {
             return Err(StoreFault::TerminalObservation(
                 crate::TerminalObservationError::DeliveryNotAccepted,
             ));
@@ -898,9 +964,51 @@ impl OrganizationStore {
         }
         let mut candidate = self.facts.clone();
         let outcome = candidate
-            .observe_matcha_terminal(target.delivery_id(), native_terminal, observed_at)
+            .observe_native_terminal(target.delivery_id(), native_terminal, observed_at)
             .map_err(StoreFault::TerminalObservation)?;
         if !matches!(outcome, TerminalObservationOutcome::Replayed) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(outcome)
+    }
+
+    pub fn resolve_native_run_output(
+        &mut self,
+        target: NativeTerminalReceiptTarget,
+        receipt: crate::AuthorizedGraphResolutionReceipt,
+        final_assistant_text: String,
+        resolved_at: u64,
+    ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let Some(current) = self.facts.native_terminal_target(target.delivery_id()) else {
+            return Err(StoreFault::NativeRunOutputResolution(
+                crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                    crate::AuthorizedGraphResolutionError::DeliveryNotAwaitingAuthorizedResolution,
+                ),
+            ));
+        };
+        if current != target {
+            return Err(StoreFault::NativeRunOutputResolution(
+                crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                    crate::AuthorizedGraphResolutionError::StaleFence,
+                ),
+            ));
+        }
+        let mut candidate = self.facts.clone();
+        let outcome = candidate
+            .resolve_native_run_output(
+                target.delivery_id(),
+                receipt,
+                final_assistant_text,
+                resolved_at,
+            )
+            .map_err(StoreFault::NativeRunOutputResolution)?;
+        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
             candidate
                 .validate_transition_from(&self.facts)
                 .map_err(|_| StoreFault::InvalidFacts)?;

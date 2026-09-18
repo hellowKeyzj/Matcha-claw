@@ -29,46 +29,7 @@ pub(crate) struct Bootstrap {
     matcha: MatchaConfig,
     open_claw: OpenClawConfig,
     delivery_verification_key: String,
-    cron_broker_verification_key: String,
-    compatibility_transport_port: u16,
-    session_transport_port: u16,
-    task_manager_transport_port: u16,
-    session_send_transport_port: u16,
-    session_abort_transport_port: u16,
-    session_approval_transport_port: u16,
-    security_emergency_transport_port: u16,
-    channel_status_transport_port: u16,
-    channel_catalog_transport_port: u16,
-    channel_control_transport_port: u16,
-    channel_pairing_transport_port: u16,
-    session_model_selection_transport_port: u16,
-    matcha_history_transport_port: u16,
-    usage_transport_port: u16,
-    diagnostics_transport_port: u16,
-    workspace_text_transport_port: u16,
-    workspace_binary_transport_port: u16,
-    workspace_directory_transport_port: u16,
-    workspace_write_transport_port: u16,
-    workspace_media_transport_port: u16,
-    cron_transport_port: u16,
-    cron_broker_transport_port: u16,
-    agents_transport_port: u16,
-    team_public_transport_port: u16,
-    team_task_board_transport_port: u16,
-    fleet_transport_port: u16,
-    team_role_sessions_transport_port: u16,
-    team_approvals_transport_port: u16,
-    team_decision_transport_port: u16,
-    team_role_chat_transport_port: u16,
-    team_graph_transport_port: u16,
-    provider_models_transport_port: u16,
-    provider_accounts_transport_port: u16,
-    team_skill_transport_port: u16,
-    team_trigger_transport_port: u16,
-    team_lifecycle_transport_port: u16,
-    manual_team_transport_port: u16,
-    settings_desired_transport_port: u16,
-    security_policy_transport_port: u16,
+    runtime_host_transport_port: u16,
     #[cfg(unix)]
     guardian_executable: PathBuf,
 }
@@ -76,48 +37,9 @@ pub(crate) struct Bootstrap {
 pub(crate) struct BootstrapParts {
     pub(crate) host: HostInput,
     pub(crate) verifier: CapabilityDecisionVerifier,
-    pub(crate) cron_broker_verifier: CapabilityDecisionVerifier,
     pub(crate) provider_credential_resolver: Option<runtime_host::ProviderCredentialResolver>,
     pub(crate) webhook_token: WebhookToken,
-    pub(crate) compatibility_transport_port: u16,
-    pub(crate) session_transport_port: u16,
-    pub(crate) task_manager_transport_port: u16,
-    pub(crate) session_send_transport_port: u16,
-    pub(crate) session_abort_transport_port: u16,
-    pub(crate) session_approval_transport_port: u16,
-    pub(crate) security_emergency_transport_port: u16,
-    pub(crate) channel_status_transport_port: u16,
-    pub(crate) channel_catalog_transport_port: u16,
-    pub(crate) channel_control_transport_port: u16,
-    pub(crate) channel_pairing_transport_port: u16,
-    pub(crate) session_model_selection_transport_port: u16,
-    pub(crate) matcha_history_transport_port: u16,
-    pub(crate) usage_transport_port: u16,
-    pub(crate) diagnostics_transport_port: u16,
-    pub(crate) workspace_text_transport_port: u16,
-    pub(crate) workspace_binary_transport_port: u16,
-    pub(crate) workspace_directory_transport_port: u16,
-    pub(crate) workspace_write_transport_port: u16,
-    pub(crate) workspace_media_transport_port: u16,
-    pub(crate) cron_transport_port: u16,
-    pub(crate) cron_broker_transport_port: u16,
-    pub(crate) agents_transport_port: u16,
-    pub(crate) team_public_transport_port: u16,
-    pub(crate) team_task_board_transport_port: u16,
-    pub(crate) fleet_transport_port: u16,
-    pub(crate) team_role_sessions_transport_port: u16,
-    pub(crate) team_approvals_transport_port: u16,
-    pub(crate) team_decision_transport_port: u16,
-    pub(crate) team_role_chat_transport_port: u16,
-    pub(crate) team_graph_transport_port: u16,
-    pub(crate) provider_models_transport_port: u16,
-    pub(crate) provider_accounts_transport_port: u16,
-    pub(crate) team_skill_transport_port: u16,
-    pub(crate) team_trigger_transport_port: u16,
-    pub(crate) team_lifecycle_transport_port: u16,
-    pub(crate) manual_team_transport_port: u16,
-    pub(crate) settings_desired_transport_port: u16,
-    pub(crate) security_policy_transport_port: u16,
+    pub(crate) runtime_host_transport_port: u16,
 }
 
 impl Bootstrap {
@@ -138,51 +60,10 @@ impl Bootstrap {
 
         let verifier = CapabilityDecisionVerifier::try_new(&self.delivery_verification_key)
             .map_err(|_| BootstrapError)?;
-        let cron_broker_verifier =
-            CapabilityDecisionVerifier::try_new(&self.cron_broker_verification_key)
-                .map_err(|_| BootstrapError)?;
-        let session_transport_port = self.session_transport_port;
-        let task_manager_transport_port = self.task_manager_transport_port;
-        let session_send_transport_port = self.session_send_transport_port;
-        let session_abort_transport_port = self.session_abort_transport_port;
-        let session_approval_transport_port = self.session_approval_transport_port;
-        let security_emergency_transport_port = self.security_emergency_transport_port;
-        let channel_status_transport_port = self.channel_status_transport_port;
-        let channel_catalog_transport_port = self.channel_catalog_transport_port;
-        let channel_control_transport_port = self.channel_control_transport_port;
-        let channel_pairing_transport_port = self.channel_pairing_transport_port;
-        let session_model_selection_transport_port = self.session_model_selection_transport_port;
-        let matcha_history_transport_port = self.matcha_history_transport_port;
-        let usage_transport_port = self.usage_transport_port;
-        let diagnostics_transport_port = self.diagnostics_transport_port;
-        let workspace_text_transport_port = self.workspace_text_transport_port;
-        let workspace_binary_transport_port = self.workspace_binary_transport_port;
-        let workspace_directory_transport_port = self.workspace_directory_transport_port;
-        let workspace_write_transport_port = self.workspace_write_transport_port;
-        let workspace_media_transport_port = self.workspace_media_transport_port;
-        let cron_transport_port = self.cron_transport_port;
-        let agents_transport_port = self.agents_transport_port;
-        let team_public_transport_port = self.team_public_transport_port;
-        let team_task_board_transport_port = self.team_task_board_transport_port;
-        let fleet_transport_port = self.fleet_transport_port;
-        let team_role_sessions_transport_port = self.team_role_sessions_transport_port;
-        let team_approvals_transport_port = self.team_approvals_transport_port;
-        let team_decision_transport_port = self.team_decision_transport_port;
-        let team_role_chat_transport_port = self.team_role_chat_transport_port;
-        let team_graph_transport_port = self.team_graph_transport_port;
-        let provider_models_transport_port = self.provider_models_transport_port;
+        let runtime_host_transport_port = self.runtime_host_transport_port;
         let sealed_runtime_token = runtime_secret()?;
-        let sealed_endpoint = format!("http://127.0.0.1:{provider_models_transport_port}");
-        let provider_accounts_transport_port = self.provider_accounts_transport_port;
-        let team_skill_transport_port = self.team_skill_transport_port;
-        let team_trigger_transport_port = self.team_trigger_transport_port;
-        let team_lifecycle_transport_port = self.team_lifecycle_transport_port;
-        let manual_team_transport_port = self.manual_team_transport_port;
-        let settings_desired_transport_port = self.settings_desired_transport_port;
-        let security_policy_transport_port = self.security_policy_transport_port;
-        let compatibility_transport_port = self.compatibility_transport_port;
+        let sealed_endpoint = format!("http://127.0.0.1:{runtime_host_transport_port}");
         Ok(BootstrapParts {
-            compatibility_transport_port,
             host: HostInput {
                 matcha: MatchaAgentInput {
                     bun_executable: self.matcha.bun_executable,
@@ -221,51 +102,13 @@ impl Bootstrap {
                 app_log_dir: self.app_log_dir,
                 parent_callback_base_url: self.parent_callback_base_url,
                 parent_callback_dispatch_token: self.parent_callback_dispatch_token,
-                cron_transport_port,
+                cron_transport_port: runtime_host_transport_port,
                 runtime_observation: self.runtime_observation,
             },
             verifier,
-            cron_broker_verifier,
             provider_credential_resolver: self.provider_credential_resolver,
             webhook_token,
-            session_transport_port,
-            task_manager_transport_port,
-            session_send_transport_port,
-            session_abort_transport_port,
-            session_approval_transport_port,
-            security_emergency_transport_port,
-            channel_status_transport_port,
-            channel_catalog_transport_port,
-            channel_control_transport_port,
-            channel_pairing_transport_port,
-            session_model_selection_transport_port,
-            matcha_history_transport_port,
-            usage_transport_port,
-            diagnostics_transport_port,
-            workspace_text_transport_port,
-            workspace_binary_transport_port,
-            workspace_directory_transport_port,
-            workspace_write_transport_port,
-            workspace_media_transport_port,
-            cron_transport_port,
-            cron_broker_transport_port: self.cron_broker_transport_port,
-            agents_transport_port,
-            team_public_transport_port,
-            team_task_board_transport_port,
-            fleet_transport_port,
-            team_role_sessions_transport_port,
-            team_approvals_transport_port,
-            team_decision_transport_port,
-            team_role_chat_transport_port,
-            team_graph_transport_port,
-            provider_models_transport_port,
-            provider_accounts_transport_port,
-            team_skill_transport_port,
-            team_trigger_transport_port,
-            team_lifecycle_transport_port,
-            manual_team_transport_port,
-            settings_desired_transport_port,
-            security_policy_transport_port,
+            runtime_host_transport_port,
         })
     }
 }
@@ -284,7 +127,6 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
     let parent_callback_base_url = non_empty(wire.parent_callback_base_url)?;
     let parent_callback_dispatch_token = non_empty(wire.parent_callback_dispatch_token)?;
     let delivery_verification_key = non_empty(wire.delivery_verification_key)?;
-    let cron_broker_verification_key = non_empty(wire.cron_broker_verification_key)?;
     let provider_credential_resolver = wire
         .provider_credential_resolver
         .map(|value| {
@@ -293,45 +135,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         .transpose()
         .map_err(|_| BootstrapError)?;
     let runtime_observation = runtime_observation(wire.runtime_observation)?;
-    let compatibility_transport_port = compatibility_port();
-    let session_transport_port = port(wire.session_transport_port)?;
-    let task_manager_transport_port = port(wire.task_manager_transport_port)?;
-    let session_send_transport_port = port(wire.session_send_transport_port)?;
-    let session_abort_transport_port = port(wire.session_abort_transport_port)?;
-    let session_approval_transport_port = port(wire.session_approval_transport_port)?;
-    let security_emergency_transport_port = port(wire.security_emergency_transport_port)?;
-    let channel_status_transport_port = port(wire.channel_status_transport_port)?;
-    let channel_catalog_transport_port = port(wire.channel_catalog_transport_port)?;
-    let channel_control_transport_port = port(wire.channel_control_transport_port)?;
-    let channel_pairing_transport_port = port(wire.channel_pairing_transport_port)?;
-    let session_model_selection_transport_port = port(wire.session_model_selection_transport_port)?;
-    let matcha_history_transport_port = port(wire.matcha_history_transport_port)?;
-    let usage_transport_port = port(wire.usage_transport_port)?;
-    let diagnostics_transport_port = port(wire.diagnostics_transport_port)?;
-    let workspace_text_transport_port = port(wire.workspace_text_transport_port)?;
-    let workspace_binary_transport_port = port(wire.workspace_binary_transport_port)?;
-    let workspace_directory_transport_port = port(wire.workspace_directory_transport_port)?;
-    let workspace_write_transport_port = port(wire.workspace_write_transport_port)?;
-    let workspace_media_transport_port = port(wire.workspace_media_transport_port)?;
-    let cron_transport_port = port(wire.cron_transport_port)?;
-    let cron_broker_transport_port = port(wire.cron_broker_transport_port)?;
-    let agents_transport_port = port(wire.agents_transport_port)?;
-    let team_public_transport_port = port(wire.team_public_transport_port)?;
-    let team_task_board_transport_port = port(wire.team_task_board_transport_port)?;
-    let fleet_transport_port = port(wire.fleet_transport_port)?;
-    let team_role_sessions_transport_port = port(wire.team_role_sessions_transport_port)?;
-    let team_approvals_transport_port = port(wire.team_approvals_transport_port)?;
-    let team_decision_transport_port = port(wire.team_decision_transport_port)?;
-    let team_role_chat_transport_port = port(wire.team_role_chat_transport_port)?;
-    let team_graph_transport_port = port(wire.team_graph_transport_port)?;
-    let provider_models_transport_port = port(wire.provider_models_transport_port)?;
-    let provider_accounts_transport_port = port(wire.provider_accounts_transport_port)?;
-    let team_skill_transport_port = port(wire.team_skill_transport_port)?;
-    let team_trigger_transport_port = port(wire.team_trigger_transport_port)?;
-    let team_lifecycle_transport_port = port(wire.team_lifecycle_transport_port)?;
-    let manual_team_transport_port = port(wire.manual_team_transport_port)?;
-    let settings_desired_transport_port = port(wire.settings_desired_transport_port)?;
-    let security_policy_transport_port = port(wire.security_policy_transport_port)?;
+    let runtime_host_transport_port = port(wire.runtime_host_transport_port)?;
     let matcha = MatchaConfig {
         bun_executable: absolute(wire.matcha.bun_executable)?,
         entry: absolute(wire.matcha.entry)?,
@@ -341,7 +145,6 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         #[cfg(windows)]
         git_bash: absolute(wire.matcha.git_bash)?,
     };
-    absolute(wire.matcha.private_secret_root)?;
     let open_claw = OpenClawConfig {
         electron_image: absolute(wire.open_claw.electron_image)?,
         working_directory: absolute(wire.open_claw.working_directory)?,
@@ -353,54 +156,11 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         state_dir: absolute(wire.open_claw.state_dir)?,
         port: port(wire.open_claw.port)?,
     };
-    if matcha.port == open_claw.port
-        || [
-            compatibility_transport_port,
-            session_transport_port,
-            task_manager_transport_port,
-            session_send_transport_port,
-            session_abort_transport_port,
-            session_approval_transport_port,
-            security_emergency_transport_port,
-            channel_status_transport_port,
-            channel_catalog_transport_port,
-            channel_control_transport_port,
-            channel_pairing_transport_port,
-            session_model_selection_transport_port,
-            matcha_history_transport_port,
-            usage_transport_port,
-            diagnostics_transport_port,
-            workspace_text_transport_port,
-            workspace_binary_transport_port,
-            workspace_directory_transport_port,
-            workspace_write_transport_port,
-            workspace_media_transport_port,
-            cron_transport_port,
-            cron_broker_transport_port,
-            agents_transport_port,
-            team_public_transport_port,
-            team_task_board_transport_port,
-            fleet_transport_port,
-            team_role_sessions_transport_port,
-            team_approvals_transport_port,
-            team_decision_transport_port,
-            team_role_chat_transport_port,
-            team_graph_transport_port,
-            provider_models_transport_port,
-            provider_accounts_transport_port,
-            team_skill_transport_port,
-            team_trigger_transport_port,
-            team_lifecycle_transport_port,
-            manual_team_transport_port,
-            settings_desired_transport_port,
-            security_policy_transport_port,
-            matcha.port,
-            open_claw.port,
-        ]
+    if [runtime_host_transport_port, matcha.port, open_claw.port]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
         .len()
-            != 41
+        != 3
     {
         return Err(BootstrapError);
     }
@@ -414,49 +174,10 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         parent_callback_dispatch_token,
         provider_credential_resolver,
         runtime_observation,
-        compatibility_transport_port,
+        runtime_host_transport_port,
         matcha,
         open_claw,
         delivery_verification_key,
-        cron_broker_verification_key,
-        session_transport_port,
-        task_manager_transport_port,
-        session_send_transport_port,
-        session_abort_transport_port,
-        session_approval_transport_port,
-        security_emergency_transport_port,
-        channel_status_transport_port,
-        channel_catalog_transport_port,
-        channel_control_transport_port,
-        channel_pairing_transport_port,
-        session_model_selection_transport_port,
-        matcha_history_transport_port,
-        usage_transport_port,
-        diagnostics_transport_port,
-        workspace_text_transport_port,
-        workspace_binary_transport_port,
-        workspace_directory_transport_port,
-        workspace_write_transport_port,
-        workspace_media_transport_port,
-        cron_transport_port,
-        cron_broker_transport_port,
-        agents_transport_port,
-        team_public_transport_port,
-        team_task_board_transport_port,
-        fleet_transport_port,
-        team_role_sessions_transport_port,
-        team_approvals_transport_port,
-        team_decision_transport_port,
-        team_role_chat_transport_port,
-        team_graph_transport_port,
-        provider_models_transport_port,
-        provider_accounts_transport_port,
-        team_skill_transport_port,
-        team_trigger_transport_port,
-        team_lifecycle_transport_port,
-        manual_team_transport_port,
-        settings_desired_transport_port,
-        security_policy_transport_port,
         #[cfg(unix)]
         guardian_executable: absolute(wire.guardian_executable)?,
     })
@@ -499,45 +220,7 @@ struct Wire {
     #[serde(default)]
     runtime_observation: RuntimeObservationWire,
     delivery_verification_key: String,
-    cron_broker_verification_key: String,
-    session_transport_port: u16,
-    task_manager_transport_port: u16,
-    session_send_transport_port: u16,
-    session_abort_transport_port: u16,
-    session_approval_transport_port: u16,
-    security_emergency_transport_port: u16,
-    channel_status_transport_port: u16,
-    channel_catalog_transport_port: u16,
-    channel_control_transport_port: u16,
-    channel_pairing_transport_port: u16,
-    session_model_selection_transport_port: u16,
-    matcha_history_transport_port: u16,
-    usage_transport_port: u16,
-    diagnostics_transport_port: u16,
-    workspace_text_transport_port: u16,
-    workspace_binary_transport_port: u16,
-    workspace_directory_transport_port: u16,
-    workspace_write_transport_port: u16,
-    workspace_media_transport_port: u16,
-    cron_transport_port: u16,
-    cron_broker_transport_port: u16,
-    agents_transport_port: u16,
-    team_public_transport_port: u16,
-    team_task_board_transport_port: u16,
-    fleet_transport_port: u16,
-    team_role_sessions_transport_port: u16,
-    team_approvals_transport_port: u16,
-    team_decision_transport_port: u16,
-    team_role_chat_transport_port: u16,
-    team_graph_transport_port: u16,
-    provider_models_transport_port: u16,
-    provider_accounts_transport_port: u16,
-    team_skill_transport_port: u16,
-    team_trigger_transport_port: u16,
-    team_lifecycle_transport_port: u16,
-    manual_team_transport_port: u16,
-    settings_desired_transport_port: u16,
-    security_policy_transport_port: u16,
+    runtime_host_transport_port: u16,
     matcha: MatchaWire,
     open_claw: OpenClawWire,
     #[cfg(unix)]
@@ -594,7 +277,6 @@ struct MatchaWire {
     working_directory: String,
     storage_root: String,
     port: u16,
-    private_secret_root: String,
     #[cfg(windows)]
     git_bash: String,
 }
@@ -634,14 +316,6 @@ fn runtime_observation(
 
 fn port(value: u16) -> Result<u16, BootstrapError> {
     (value != 0).then_some(value).ok_or(BootstrapError)
-}
-
-fn compatibility_port() -> u16 {
-    std::env::var("MATCHACLAW_RUNTIME_HOST_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|port| *port != 0)
-        .unwrap_or(3211)
 }
 
 fn provision_runtime_host_state_dir(path: &Path) -> Result<PathBuf, BootstrapError> {

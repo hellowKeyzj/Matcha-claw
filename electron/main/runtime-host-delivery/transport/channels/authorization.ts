@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ChannelCatalogTransport } from './catalog';
-import { beginChannelTrace, channelTraceError } from './catalog';
+import { beginChannelTrace, channelTraceError } from './trace';
 
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 300_000;

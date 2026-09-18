@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE = '/api/sessions/rename';
 const UNAVAILABLE = {
   success: false,
   error: 'Session rename is unavailable',
@@ -50,38 +51,30 @@ export interface SessionRenameTransport {
 
 export function createSessionRenameTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionRenameTransport {
-  const url = `http://127.0.0.1:${sessionTransportPort}/api/sessions/rename`;
   return {
     async rename(request: unknown): Promise<SessionRenameTransportResponse> {
       if (!isSessionRenameRequest(request)) {
         return { status: 503, body: UNAVAILABLE };
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/sessions/rename',
-              scope: 'sessions:write',
-              capability: 'sessions.rename',
-              subject: 'session-rename',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSessionRenameResponse(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // The public contract deliberately suppresses transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE,
+        issuer,
+        decision: {
+          endpoint: ROUTE,
+          scope: 'sessions:write',
+          capability: 'sessions.rename',
+          subject: 'session-rename',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSessionRenameResponse(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -154,13 +147,4 @@ function isEndpoint(value: unknown): value is Endpoint {
     && value.kind === 'native-runtime'
     && value.runtimeAdapterId === 'openclaw'
     && value.runtimeInstanceId === 'local';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

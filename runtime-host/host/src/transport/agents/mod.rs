@@ -6,7 +6,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const SUBAGENT_MANAGEMENT_CAPABILITY_ID: &str = "subagent.management";
 const SUBAGENT_SKILLS_CAPABILITY_ID: &str = "subagent.skills";

@@ -97,8 +97,7 @@ pub(super) struct RuntimeOwnerInput {
     pub(super) open_claw: Arc<crate::runtime::adapters::openclaw::OpenClawInstance>,
     pub(super) matcha_driver: Arc<dyn RuntimeDriver>,
     pub(super) admission: Arc<super::super::admission::HostAdmission>,
-    pub(super) session_delta:
-        Option<tokio::sync::mpsc::Sender<crate::sessions::state::SessionDelta>>,
+    pub(super) session_delta: Option<crate::sessions::events::SessionDeltaSource>,
     pub(super) open_claw_runtime: Option<tokio::sync::mpsc::Sender<()>>,
 }
 

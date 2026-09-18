@@ -1,13 +1,14 @@
 use std::{fmt, future::Future, pin::Pin};
 
 use organization::{
-    DeliveryReceiptReference, DeliveryRejection, GraphRunId, MaterializationOperationOutcome,
-    MaterializationRejection, NativeDeletionEvidence, NativeDeletionProof, NativeEffectFailure,
-    PromptDeliveryOutcome as DomainDeliveryOutcome, PromptDeliveryRequest, RoleAbortOutcome,
-    RoleSessionAbortOutcome, RoleSessionAbortReceipt, RoleSessionDeleteOutcome,
-    RoleSessionDeleteReceipt, RoleSessionDeletionConfirmation, RoleSessionReadbackOutcome,
-    RoleSessionReadbackReceipt, RoleSessionReceipt, SessionWindowReference,
-    TeamMaterializationRemoval, TeamMaterializationRequest, TeamNativeEffectsPort,
+    DeliveryReceiptReference, DeliveryRejection, EndpointSessionId, GraphRunId,
+    MaterializationOperationOutcome, MaterializationRejection, NativeDeletionEvidence,
+    NativeDeletionProof, NativeEffectFailure, PromptDeliveryOutcome as DomainDeliveryOutcome,
+    PromptDeliveryRequest, RoleAbortOutcome, RoleSessionAbortOutcome, RoleSessionAbortReceipt,
+    RoleSessionDeleteOutcome, RoleSessionDeleteReceipt, RoleSessionDeletionConfirmation,
+    RoleSessionReadbackOutcome, RoleSessionReadbackReceipt, RoleSessionReceipt,
+    SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
+    TeamNativeEffectsPort,
 };
 use platform::exchange::InvocationOutcome;
 
@@ -16,6 +17,7 @@ use crate::{
     session::{
         client::AppServerClientError,
         hydration::HydrationWindowRequest,
+        receipt::NativeRunSettled,
         request::SessionCancelParams,
         role::{RolePrompt, RoleRunId, RoleSessionId},
     },
@@ -153,6 +155,13 @@ pub enum MatchaMaterializationOutcome {
     OutcomeUnknown,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MatchaTerminalWatchOutcome {
+    Settled { settled: NativeRunSettled },
+    Failed { failure: MatchaEffectFailure },
+    OutcomeUnknown,
+}
+
 /// Matcha's native Team effect producer.
 ///
 /// Matcha app-server currently has no Team materialization producer. The
@@ -184,6 +193,15 @@ impl<'peer> MatchaTeamNativeEffects<'peer> {
     pub async fn deliver(&self, request: MatchaDeliveryRequest) -> MatchaDeliveryOutcome {
         let prompt = self.peer.role_session_prompt_handle();
         deliver_matcha_prompt(&prompt, request).await
+    }
+
+    pub async fn watch_terminal_settled(
+        &self,
+        session: RoleSessionId,
+        native_run_id: RoleRunId,
+    ) -> MatchaTerminalWatchOutcome {
+        let native = self.peer.role_session_native_handle();
+        watch_terminal_settled_with_handle(native, session, native_run_id).await
     }
 
     pub async fn abort(&self, session: RoleSessionId) -> MatchaSessionMutationOutcome {
@@ -283,7 +301,7 @@ pub async fn deliver_prompt_with_handle(
     request: PromptDeliveryRequest,
 ) -> DomainDeliveryOutcome {
     let session =
-        match RoleSessionId::try_new(request.binding().external_session().as_str().to_owned()) {
+        match RoleSessionId::try_new(request.binding().endpoint_session_id().as_str().to_owned()) {
             Ok(session) => session,
             Err(_) => {
                 return DomainDeliveryOutcome::Rejected {
@@ -326,10 +344,11 @@ async fn abort_role_sessions_with_handle(
     bindings: Vec<RoleSessionReceipt>,
 ) -> RoleAbortOutcome {
     for binding in bindings {
-        let session = match RoleSessionId::try_new(binding.external_session().as_str().to_owned()) {
-            Ok(session) => session,
-            Err(_) => return RoleAbortOutcome::OutcomeUnknown,
-        };
+        let session =
+            match RoleSessionId::try_new(binding.endpoint_session_id().as_str().to_owned()) {
+                Ok(session) => session,
+                Err(_) => return RoleAbortOutcome::OutcomeUnknown,
+            };
         match native.cancel_role_session(session).await {
             InvocationOutcome::Succeeded(()) => {}
             InvocationOutcome::TargetRejected(_)
@@ -359,13 +378,14 @@ pub fn delete_role_sessions(
         let mut confirmations = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let session =
-                match RoleSessionId::try_new(binding.external_session().as_str().to_owned()) {
+                match RoleSessionId::try_new(binding.endpoint_session_id().as_str().to_owned()) {
                     Ok(session) => session,
                     Err(_) => return NativeDeletionEvidence::Rejected,
                 };
             match native.close_role_session(session).await {
                 InvocationOutcome::Succeeded(()) => {
-                    let receipt = RoleSessionDeleteReceipt::new(binding.external_session().clone());
+                    let receipt =
+                        RoleSessionDeleteReceipt::new(binding.endpoint_session_id().clone());
                     let Ok(confirmation) =
                         RoleSessionDeletionConfirmation::try_new(binding, receipt)
                     else {
@@ -388,10 +408,30 @@ pub fn delete_role_sessions(
     }
 }
 
+async fn watch_terminal_settled_with_handle(
+    native: RoleSessionNativeHandle,
+    session: RoleSessionId,
+    native_run_id: RoleRunId,
+) -> MatchaTerminalWatchOutcome {
+    match native
+        .watch_role_terminal_settled(session, native_run_id.clone())
+        .await
+    {
+        Some(settled) if settled.native_run_id().as_str() == native_run_id.as_str() => {
+            MatchaTerminalWatchOutcome::Settled { settled }
+        }
+        Some(_) => MatchaTerminalWatchOutcome::Failed {
+            failure: MatchaEffectFailure::Rejected,
+        },
+        None => MatchaTerminalWatchOutcome::OutcomeUnknown,
+    }
+}
+
 async fn deliver_matcha_prompt(
     prompt: &RoleSessionPromptHandle,
     request: MatchaDeliveryRequest,
 ) -> MatchaDeliveryOutcome {
+    let requested_run_id = request.delivery_id.clone();
     match prompt
         .prompt_role_session_with_run_id(
             &request.session,
@@ -400,8 +440,13 @@ async fn deliver_matcha_prompt(
         )
         .await
     {
-        InvocationOutcome::Succeeded(run_id) => MatchaDeliveryOutcome::Delivered {
-            receipt: MatchaDeliveryReceipt(run_id),
+        InvocationOutcome::Succeeded(run_id) if run_id == requested_run_id => {
+            MatchaDeliveryOutcome::Delivered {
+                receipt: MatchaDeliveryReceipt(run_id),
+            }
+        }
+        InvocationOutcome::Succeeded(_) => MatchaDeliveryOutcome::Rejected {
+            failure: MatchaEffectFailure::Rejected,
         },
         InvocationOutcome::TargetRejected(error) => MatchaDeliveryOutcome::Rejected {
             failure: map_role_error(error),
@@ -450,7 +495,7 @@ impl TeamNativeEffectsPort for MatchaTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionAbortOutcome> + Send + '_>> {
-        let external_session = receipt.external_session().clone();
+        let external_session = receipt.endpoint_session_id().clone();
         let session = match RoleSessionId::try_new(external_session.as_str().to_owned()) {
             Ok(session) => session,
             Err(_) => {
@@ -474,7 +519,7 @@ impl TeamNativeEffectsPort for MatchaTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionDeleteOutcome> + Send + '_>> {
-        let external_session = receipt.external_session().clone();
+        let external_session = receipt.endpoint_session_id().clone();
         let session = match RoleSessionId::try_new(external_session.as_str().to_owned()) {
             Ok(session) => session,
             Err(_) => {
@@ -498,7 +543,7 @@ impl TeamNativeEffectsPort for MatchaTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionReadbackOutcome> + Send + '_>> {
-        let external_session = receipt.external_session().clone();
+        let external_session = receipt.endpoint_session_id().clone();
         let session = match RoleSessionId::try_new(external_session.as_str().to_owned()) {
             Ok(session) => session,
             Err(_) => {
@@ -522,7 +567,7 @@ impl TeamNativeEffectsPort for MatchaTeamNativeEffects<'_> {
 fn map_matcha_delivery(outcome: MatchaDeliveryOutcome) -> DomainDeliveryOutcome {
     match outcome {
         MatchaDeliveryOutcome::Delivered { receipt } => DomainDeliveryOutcome::Delivered {
-            receipt: DeliveryReceiptReference::try_new(format!("matcha-run:{}", receipt.as_str()))
+            receipt: DeliveryReceiptReference::try_new(receipt.as_str().to_owned())
                 .expect("native Matcha run receipt must be a valid opaque reference"),
         },
         MatchaDeliveryOutcome::Rejected { failure } => DomainDeliveryOutcome::Rejected {
@@ -539,7 +584,7 @@ fn map_matcha_delivery(outcome: MatchaDeliveryOutcome) -> DomainDeliveryOutcome 
 
 fn map_matcha_abort(
     outcome: MatchaSessionMutationOutcome,
-    session: organization::ExternalSessionReference,
+    session: EndpointSessionId,
 ) -> RoleSessionAbortOutcome {
     match outcome {
         MatchaSessionMutationOutcome::Confirmed { .. } => RoleSessionAbortOutcome::Confirmed {
@@ -554,7 +599,7 @@ fn map_matcha_abort(
 
 fn map_matcha_delete(
     outcome: MatchaSessionMutationOutcome,
-    session: organization::ExternalSessionReference,
+    session: EndpointSessionId,
 ) -> RoleSessionDeleteOutcome {
     match outcome {
         MatchaSessionMutationOutcome::Confirmed { .. } => RoleSessionDeleteOutcome::Confirmed {
@@ -569,7 +614,7 @@ fn map_matcha_delete(
 
 fn map_matcha_readback(
     outcome: MatchaReadbackOutcome,
-    session: organization::ExternalSessionReference,
+    session: EndpointSessionId,
 ) -> RoleSessionReadbackOutcome {
     match outcome {
         MatchaReadbackOutcome::Confirmed { window, .. } => {

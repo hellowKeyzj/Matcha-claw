@@ -11,7 +11,7 @@ use crate::provider::{
     native::{ProviderNativeConfigurationDiagnosticView, ProviderNativeConfigurationView},
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "provider.accounts";
 const AUTHORIZATION_ENDPOINT: &str = "/api/provider-accounts";

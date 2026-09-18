@@ -637,6 +637,7 @@ pub struct SessionEventProjector {
     run_id: RunId,
     cursor: Sequence,
     terminal: bool,
+    final_assistant_text: Option<String>,
     message_text: HashMap<MessageId, String>,
     message_thinking: HashMap<MessageId, String>,
     current_sdk_assistant_message_id: Option<MessageId>,
@@ -660,6 +661,7 @@ impl SessionEventProjector {
             run_id,
             cursor,
             terminal: false,
+            final_assistant_text: None,
             message_text: HashMap::new(),
             message_thinking: HashMap::new(),
             current_sdk_assistant_message_id: None,
@@ -675,6 +677,10 @@ impl SessionEventProjector {
 
     pub fn is_terminal(&self) -> bool {
         self.terminal
+    }
+
+    pub fn final_assistant_text(&self) -> Option<&str> {
+        self.final_assistant_text.as_deref()
     }
 
     pub fn project(&mut self, envelope: EventEnvelope) -> EventProjectionResult {
@@ -810,6 +816,9 @@ impl SessionEventProjector {
                     };
                     message.message_text = message_text;
                     message.thinking_text = thinking_text;
+                    if let Some(text) = message.message_text().filter(|text| !text.is_empty()) {
+                        self.final_assistant_text = Some(text.to_owned());
+                    }
                     if is_sdk_message {
                         self.sdk_text_state.observe_projected_message(message);
                     }
@@ -1950,6 +1959,36 @@ mod tests {
                     if message.text_delta().is_none()
                         && message.message_text() == Some("hello world"))
         ));
+    }
+
+    #[test]
+    fn final_assistant_text_is_scoped_to_the_bound_run() {
+        let mut projector = projector(0);
+        assert_eq!(projector.final_assistant_text(), None);
+        assert!(matches!(
+            projector.project(message_event(
+                1,
+                "session-1",
+                Some("run-1"),
+                "message.delta",
+                "message-1",
+                Some("run-a final"),
+            )),
+            EventProjectionResult::Projected(_)
+        ));
+        assert_eq!(projector.final_assistant_text(), Some("run-a final"));
+        assert!(matches!(
+            projector.project(message_event(
+                2,
+                "session-1",
+                Some("run-2"),
+                "message.delta",
+                "message-2",
+                Some("run-b final"),
+            )),
+            EventProjectionResult::OutOfRun { .. }
+        ));
+        assert_eq!(projector.final_assistant_text(), Some("run-a final"));
     }
 
     #[test]

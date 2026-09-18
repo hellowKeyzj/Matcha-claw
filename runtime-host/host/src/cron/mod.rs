@@ -4,7 +4,6 @@ const MAX_NAME_BYTES: usize = 4 * 1024;
 const MAX_AGENT_ID_BYTES: usize = 4 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_MODEL_BYTES: usize = 4 * 1024;
-const MAX_CONFIG_REVISION_BYTES: usize = 128;
 const MAX_SCHEDULE_BYTES: usize = 4 * 1024;
 const MAX_DELIVERY_BYTES: usize = 4 * 1024;
 const MAX_DATE_TIMESTAMP_MS: u64 = 8_640_000_000_000_000;
@@ -114,17 +113,6 @@ impl CronUpdateCommand {
             delivery,
             enabled,
         })
-    }
-
-    pub(crate) fn with_expected_config_revision(
-        mut self,
-        expected_config_revision: String,
-    ) -> Result<Self, InvalidCronCommand> {
-        if !valid_text(&expected_config_revision, MAX_CONFIG_REVISION_BYTES) {
-            return Err(InvalidCronCommand);
-        }
-        self.expected_config_revision = Some(expected_config_revision);
-        Ok(self)
     }
 }
 
@@ -475,116 +463,6 @@ pub(crate) enum CronExecutionTerminalStatus {
     Skipped,
     Cancelled,
     OutcomeUnknown,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CronBrokerContext {
-    pub(crate) session_id: String,
-    pub(crate) cwd: String,
-    pub(crate) owner: String,
-    pub(crate) target: serde_json::Value,
-    pub(crate) input: serde_json::Value,
-    pub(crate) expected_revision: Option<String>,
-}
-
-#[derive(Debug)]
-pub(crate) struct CronBrokerRequest {
-    pub(crate) request_id: String,
-    pub(crate) operation_id: String,
-    pub(crate) context: CronBrokerContext,
-    pub(crate) payload_hash: String,
-    pub(crate) operation: CronBrokerOperation,
-}
-
-#[derive(Debug)]
-pub(crate) enum CronBrokerOperation {
-    List,
-    History {
-        command: CronHistoryCommand,
-    },
-    Create {
-        command: CronCreateCommand,
-    },
-    Update {
-        command: CronUpdateCommand,
-        expected_config_revision: String,
-    },
-    Delete,
-}
-
-#[derive(Debug)]
-pub(crate) enum CronBrokerResult {
-    List(CronListOutcome),
-    History(CronHistoryOutcome),
-    Job(CronJobMutationOutcome),
-}
-
-#[derive(Debug)]
-pub(crate) enum CronBrokerOutcome {
-    Applied(CronBrokerResult),
-    Rejected {
-        code: &'static str,
-        message: &'static str,
-    },
-    Conflict {
-        code: &'static str,
-        message: &'static str,
-    },
-}
-
-pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
-    platform::exchange::canonical::encode(value)
-}
-
-impl CronBrokerOutcome {
-    pub(crate) fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Applied(CronBrokerResult::List(CronListOutcome::Unavailable))
-                | Self::Applied(CronBrokerResult::History(
-                    CronHistoryOutcome::Unavailable | CronHistoryOutcome::Deadline
-                ))
-                | Self::Applied(CronBrokerResult::Job(CronJobMutationOutcome::Unavailable))
-        )
-    }
-}
-
-impl CronBrokerRequest {
-    pub(crate) fn scope(&self) -> &'static str {
-        match self.operation {
-            CronBrokerOperation::List | CronBrokerOperation::History { .. } => "cron:read",
-            CronBrokerOperation::Create { .. }
-            | CronBrokerOperation::Update { .. }
-            | CronBrokerOperation::Delete { .. } => "cron:write",
-        }
-    }
-
-    pub(crate) fn context_hash(&self) -> String {
-        let value = serde_json::json!({
-            "version": 1,
-            "requestId": self.request_id,
-            "operationId": self.operation_id,
-            "operation": match &self.operation {
-                CronBrokerOperation::List => "list",
-                CronBrokerOperation::History { .. } => "history",
-                CronBrokerOperation::Create { .. } => "create",
-                CronBrokerOperation::Update { .. } => "update",
-                CronBrokerOperation::Delete { .. } => "delete",
-            },
-            "sessionId": self.context.session_id,
-            "cwd": self.context.cwd,
-            "owner": self.context.owner,
-            "target": self.context.target,
-            "input": self.context.input,
-            "expectedRevision": self.context.expected_revision,
-            "payloadHash": self.payload_hash,
-        });
-        use sha2::{Digest, Sha256};
-        Sha256::digest(canonical_json(&value).as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    }
 }
 
 fn parse_history_target(value: &str) -> Option<(String, Option<String>)> {

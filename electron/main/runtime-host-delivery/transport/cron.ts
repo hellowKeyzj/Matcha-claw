@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { hasExactKeys, isNonEmptyBoundedText as isNonEmptyString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson, type LoopbackDecision, type LoopbackJsonResponse } from './client';
 const REQUEST_TIMEOUT_MS = 30_000;
 const UNAVAILABLE = {
   success: false,
@@ -13,6 +12,7 @@ type Operation =
   | 'cron.update'
   | 'cron.delete'
   | 'cron.toggle'
+  | 'cron.trigger'
   | 'cron.session-history';
 type CronCrudOperation = Exclude<Operation, 'cron.session-history'>;
 type Endpoint = Readonly<{
@@ -58,6 +58,7 @@ export interface CronTransport {
   update(request: unknown): Promise<CronTransportResponse>;
   remove(request: unknown): Promise<CronTransportResponse>;
   toggle(request: unknown): Promise<CronTransportResponse>;
+  trigger(request: unknown): Promise<CronTransportResponse>;
   history(sessionKey: string, limit: number): Promise<CronTransportResponse>;
 }
 
@@ -78,7 +79,7 @@ type CronTransportOptions = Readonly<{
 
 export function createCronTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
   options: CronTransportOptions = {},
 ): CronTransport {
@@ -88,14 +89,18 @@ export function createCronTransport(
     update: (request) => send('cron.update', '/api/cron/jobs/update', request),
     remove: (request) => send('cron.delete', '/api/cron/jobs/delete', request),
     toggle: (request) => send('cron.toggle', '/api/cron/jobs/toggle', request),
+    trigger: (request) => send('cron.trigger', '/api/cron/jobs/trigger', request),
     history: (sessionKey, limit) => sendHistory({ sessionKey, limit }),
   };
 
-  async function sendHistory(request: CronSessionHistoryRequest): Promise<CronTransportResponse> {
-    if (!isCronSessionHistoryRequest(request)) {
-      return { status: 503, body: UNAVAILABLE };
-    }
-    await options.reportE2ETrace?.('transport_entered');
+  async function sendCronLoopbackJson(request: Readonly<{
+    path: string;
+    decision: LoopbackDecision;
+    method: 'GET' | 'POST';
+    body?: unknown;
+    query?: URLSearchParams;
+    emptyContentLength?: boolean;
+  }>): Promise<LoopbackJsonResponse | null> {
     const controller = new AbortController();
     let timedOut = false;
     const requestTimeout = setTimeout(() => {
@@ -103,42 +108,49 @@ export function createCronTransport(
       controller.abort();
     }, REQUEST_TIMEOUT_MS);
     try {
-      const query = new URLSearchParams({
-        sessionKey: request.sessionKey,
-        limit: String(request.limit),
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        issuer,
+        fetcher,
+        signal: controller.signal,
+        ...request,
       });
-      const response = await fetcher(
-        `http://127.0.0.1:${port}/api/cron/session-history?${query}`,
-        {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/cron/session-history',
-              scope: 'cron:history:read',
-              capability: 'scheduler.cron.history',
-              subject: 'cron-session-history',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Length': '0',
-          },
-          signal: controller.signal,
-        },
-      );
-      const body: unknown = await response.json();
-      await options.reportE2ETrace?.(loopbackTraceStage(response.status));
-      if (response.status === 200 && isCronSessionHistoryResponse(body)) {
-        return { status: 200, body };
-      }
-      if ([400, 401, 404, 409, 422, 502, 503, 504].includes(response.status)
-        && isPublicFailure(body)) {
-        return { status: response.status as CronTransportResponse['status'], body };
-      }
-    } catch {
-      await options.reportE2ETrace?.(timedOut ? 'loopback_timed_out' : 'loopback_failed');
+      if (!response) await options.reportE2ETrace?.(timedOut ? 'loopback_timed_out' : 'loopback_failed');
+      return response;
     } finally {
       clearTimeout(requestTimeout);
+    }
+  }
+
+  async function sendHistory(request: CronSessionHistoryRequest): Promise<CronTransportResponse> {
+    if (!isCronSessionHistoryRequest(request)) {
+      return { status: 503, body: UNAVAILABLE };
+    }
+    await options.reportE2ETrace?.('transport_entered');
+    const response = await sendCronLoopbackJson({
+      path: '/api/cron/session-history',
+      decision: {
+        endpoint: '/api/cron/session-history',
+        scope: 'cron:history:read',
+        capability: 'scheduler.cron.history',
+        subject: 'cron-session-history',
+      },
+      method: 'GET',
+      query: new URLSearchParams({
+        sessionKey: request.sessionKey,
+        limit: String(request.limit),
+      }),
+      emptyContentLength: true,
+    });
+    if (response) {
+      await options.reportE2ETrace?.(loopbackTraceStage(response.status));
+      if (response.status === 200 && isCronSessionHistoryResponse(response.body)) {
+        return { status: 200, body: response.body };
+      }
+      if ([400, 401, 404, 409, 422, 502, 503, 504].includes(response.status)
+        && isPublicFailure(response.body)) {
+        return { status: response.status as CronTransportResponse['status'], body: response.body };
+      }
     }
     return { status: 503, body: UNAVAILABLE };
   }
@@ -153,44 +165,26 @@ export function createCronTransport(
       return { status: 503, body: UNAVAILABLE };
     }
     await options.reportE2ETrace?.('transport_entered');
-    const controller = new AbortController();
-    let timedOut = false;
-    const requestTimeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetcher(`http://127.0.0.1:${port}${path}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${issuer.signDecision({
-            principal: 'electron-main-local',
-            endpoint: path,
-            scope: 'cron:write',
-            capability: 'scheduler.cron',
-            subject: 'cron-crud',
-            expiresAt: Date.now() + DECISION_TTL_MS,
-            revision: '1',
-          })}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
-      const body: unknown = await response.json();
+    const response = await sendCronLoopbackJson({
+      path,
+      decision: {
+        endpoint: path,
+        scope: 'cron:write',
+        capability: 'scheduler.cron',
+        subject: 'cron-crud',
+      },
+      method: 'POST',
+      body: request,
+    });
+    if (response) {
       await options.reportE2ETrace?.(loopbackTraceStage(response.status));
-      if (response.status === 200 && isSuccessResponse(body, operation)) {
-        return { status: 200, body };
+      if (response.status === 200 && isSuccessResponse(response.body, operation)) {
+        return { status: 200, body: response.body };
       }
       if ((response.status === 409 || response.status === 422 || response.status === 502 || response.status === 503)
-        && isPublicFailure(body)) {
-        return { status: response.status, body };
+        && isPublicFailure(response.body)) {
+        return { status: response.status, body: response.body };
       }
-    } catch {
-      await options.reportE2ETrace?.(timedOut ? 'loopback_timed_out' : 'loopback_failed');
-      // The public contract deliberately suppresses loopback transport details.
-    } finally {
-      clearTimeout(requestTimeout);
     }
     return { status: 503, body: UNAVAILABLE };
   }
@@ -307,7 +301,27 @@ function isSuccessResponse(value: unknown, operation: CronCrudOperation): boolea
   if (operation === 'cron.delete') {
     return isRecord(value) && hasExactKeys(value, ['removed']) && typeof value.removed === 'boolean';
   }
+  if (operation === 'cron.trigger') {
+    return isCronTriggerResponse(value);
+  }
   return isCronJob(value);
+}
+
+function isCronTriggerResponse(value: unknown): boolean {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['success', 'result'])
+    || value.success !== true
+    || !isRecord(value.result)
+    || !hasAllowedKeys(value.result, ['outcome', 'reason'], ['outcome'])) {
+    return false;
+  }
+  if (value.result.outcome !== 'accepted' && value.result.outcome !== 'skipped') return false;
+  return value.result.reason === undefined
+    || value.result.reason === 'already-running'
+    || value.result.reason === 'not-due'
+    || value.result.reason === 'invalid-spec'
+    || value.result.reason === 'disabled'
+    || value.result.reason === 'stopped';
 }
 
 function isCronJob(value: unknown): boolean {
@@ -380,10 +394,6 @@ function isPublicFailure(value: unknown): boolean {
     && typeof value.error === 'string';
 }
 
-function isTimestamp(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
 function isOptionalTimestamp(value: unknown): boolean {
   return value === null || value === undefined || isTimestamp(value);
 }
@@ -404,17 +414,4 @@ function hasAllowedKeys(
 ): boolean {
   const keys = Object.keys(value);
   return keys.every((key) => allowed.includes(key)) && required.every((key) => Object.hasOwn(value, key));
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

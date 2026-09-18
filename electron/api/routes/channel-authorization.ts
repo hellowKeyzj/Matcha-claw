@@ -4,7 +4,7 @@ import type {
   ChannelAuthorizationTransport,
 } from '../../main/runtime-host-delivery/transport/channels/authorization';
 import { parseJsonBody, sendJson } from '../route-utils';
-import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown', channel: 'qqbot' } as const;

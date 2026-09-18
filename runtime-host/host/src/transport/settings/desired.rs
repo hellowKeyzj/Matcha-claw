@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::transport::common::authorization::CapabilityDecisionVerifier;
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 pub(crate) const ENDPOINT: &str = "/api/settings/desired";
 pub(crate) const READ_ENDPOINT: &str = "/api/settings/current";

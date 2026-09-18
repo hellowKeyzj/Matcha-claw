@@ -11,7 +11,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "workspace.media";
 const PREPARE_OPERATION_ID: &str = "media.prepare";

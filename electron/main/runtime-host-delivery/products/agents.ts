@@ -1,4 +1,4 @@
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
 
 const DECISION_TTL_MS = 30_000;

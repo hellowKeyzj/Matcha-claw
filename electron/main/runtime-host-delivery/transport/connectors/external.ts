@@ -1,7 +1,6 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { validateSessionIdentity } from '../../../../desktop-contract/runtime-address';
-
-const DECISION_TTL_MS = 30_000;
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
 const UNAVAILABLE = {
   success: false,
@@ -48,42 +47,34 @@ type ExternalConnectorOperation =
 
 export function createExternalConnectorsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  providerModelsTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ExternalConnectorsTransport {
-  const url = `http://127.0.0.1:${providerModelsTransportPort}/api/external-connectors`;
   return {
     async execute(request: unknown): Promise<ExternalConnectorsTransportResponse> {
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/external-connectors',
-              scope: 'environment:external-connectors',
-              capability: request.operationId,
-              subject: 'external-connectors',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isSuccessResponse(request.operationId, body)) {
-          return { status: 200, body: projectPublicResponse(request.operationId, body) };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 401) return { status: 401, body: { success: false, error: 'External connector authorization failed' } };
-        if (response.status === 404) return { status: 404, body: { success: false, error: 'External connector is unknown' } };
-        if (response.status === 409) return { status: 409, body: { success: false, error: 'External connector mutation outcome is unknown; reopen before retrying' } };
-        if (response.status === 422) return { status: 422, body: REJECTED };
-      } catch {
-        // Public delivery deliberately redacts loopback and host failures.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/external-connectors',
+        issuer,
+        decision: {
+          endpoint: '/api/external-connectors',
+          scope: 'environment:external-connectors',
+          capability: request.operationId,
+          subject: 'external-connectors',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isSuccessResponse(request.operationId, response.body)) {
+        return { status: 200, body: projectPublicResponse(request.operationId, response.body) };
       }
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 401) return { status: 401, body: { success: false, error: 'External connector authorization failed' } };
+      if (response?.status === 404) return { status: 404, body: { success: false, error: 'External connector is unknown' } };
+      if (response?.status === 409) return { status: 409, body: { success: false, error: 'External connector mutation outcome is unknown; reopen before retrying' } };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -438,15 +429,6 @@ function optionalStringMap(value: unknown): boolean {
 
 function optionalRecord(value: unknown): boolean {
   return value === undefined || isRecord(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {

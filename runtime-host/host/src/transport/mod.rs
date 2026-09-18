@@ -6,6 +6,7 @@ pub(crate) mod connectors;
 pub(crate) mod cron;
 pub(crate) mod diagnostics;
 pub(crate) mod fleet;
+pub(crate) mod localhost;
 pub mod mcp;
 pub mod providers;
 pub(crate) mod runtime;

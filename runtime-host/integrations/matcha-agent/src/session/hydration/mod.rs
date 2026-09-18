@@ -341,7 +341,9 @@ mod tests {
     #[test]
     fn close_failure_does_not_replace_a_provisional_complete_snapshot() {
         let snapshot = hydrate_lines(
-            &[String::from(r#"{"message":{"role":"user","content":"visible"}}"#)],
+            &[String::from(
+                r#"{"message":{"role":"user","content":"visible"}}"#,
+            )],
             HydrationWindowRequest::latest(),
         )
         .unwrap();

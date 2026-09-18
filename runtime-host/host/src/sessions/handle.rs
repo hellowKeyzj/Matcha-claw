@@ -127,6 +127,21 @@ impl SessionHandle {
         .await
     }
 
+    pub(crate) async fn wait_session_native_run(
+        &self,
+        endpoint: crate::sessions::send::NativeEndpoint,
+        endpoint_session_id: Option<String>,
+        native_run_id: String,
+    ) -> Option<crate::runtime::driver::NativeRunSettled> {
+        let driver = self
+            .runtime_directory
+            .lookup(&endpoint.runtime_endpoint()?)?;
+        driver
+            .session_ops()?
+            .wait_session_native_run(endpoint_session_id, native_run_id)
+            .await
+    }
+
     pub(crate) async fn abort_session(
         &self,
         command: SessionAbortCommand,

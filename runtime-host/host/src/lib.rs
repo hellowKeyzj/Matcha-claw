@@ -6,6 +6,7 @@ mod composition;
 mod connectors;
 mod control;
 mod cron;
+pub mod delivery;
 mod diagnostics;
 mod facade;
 mod fleet;
@@ -34,9 +35,8 @@ pub use composition::{
     ShutdownFailures, ShutdownReport, WorkspaceBinaryError, WorkspaceListError,
     WorkspaceMediaError, WorkspaceReadError, WorkspaceStatError, WorkspaceWriteError,
 };
-pub use control::{
-    ControlError, DeliveryTransportInput, run as run_control, run_delivery_transports,
-};
+pub use control::ControlError;
+pub use delivery::{DeliveryTransportInput, run_delivery_transports};
 pub use diagnostics::{
     HostLifecycle, HostState, RuntimeFailure, RuntimeLifecycle, RuntimeObservationConfig,
     RuntimeObservationMode, RuntimeState,

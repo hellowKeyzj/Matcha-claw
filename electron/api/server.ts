@@ -83,91 +83,91 @@ type RouteHandler = (
 const routeHandlers: readonly RouteHandler[] = [
   handleAppRoutes,
   (req, res, url, deps) => handleAccountRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.agentsTransport),
+  (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.runtimeHostTransports.agentsTransport),
   (req, res, url, deps) => handleBillingRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.channelAuthorizationTransport),
-  (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.channelCatalogTransport),
-  (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.channelCatalogTransport),
-  (req, res, url, deps) => handleChannelCredentialsRoutes(req, res, url, deps.channelCredentialsTransport),
-  (req, res, url, deps) => handleChannelDeleteConfigRoutes(req, res, url, deps.channelDeleteConfigTransport),
-  (req, res, url, deps) => handleChannelLoginRoutes(req, res, url, deps.channelLoginTransport),
-  (req, res, url, deps) => handleChannelConfigReadRoutes(req, res, url, deps.channelConfigReadTransport),
-  (req, res, url, deps) => handleChannelControlRoutes(req, res, url, deps.channelControlTransport),
-  (req, res, url, deps) => handleChannelPairingRoutes(req, res, url, deps.channelPairingTransport),
-  (req, res, url, deps) => handleChannelStatusRoutes(req, res, url, deps.channelStatusTransport),
+  (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.runtimeHostTransports.channelAuthorizationTransport),
+  (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.runtimeHostTransports.channelCatalogTransport),
+  (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.runtimeHostTransports.channelCatalogTransport),
+  (req, res, url, deps) => handleChannelCredentialsRoutes(req, res, url, deps.runtimeHostTransports.channelCredentialsTransport),
+  (req, res, url, deps) => handleChannelDeleteConfigRoutes(req, res, url, deps.runtimeHostTransports.channelDeleteConfigTransport),
+  (req, res, url, deps) => handleChannelLoginRoutes(req, res, url, deps.runtimeHostTransports.channelLoginTransport),
+  (req, res, url, deps) => handleChannelConfigReadRoutes(req, res, url, deps.runtimeHostTransports.channelConfigReadTransport),
+  (req, res, url, deps) => handleChannelControlRoutes(req, res, url, deps.runtimeHostTransports.channelControlTransport),
+  (req, res, url, deps) => handleChannelPairingRoutes(req, res, url, deps.runtimeHostTransports.channelPairingTransport),
+  (req, res, url, deps) => handleChannelStatusRoutes(req, res, url, deps.runtimeHostTransports.channelStatusTransport),
   (req, res, url, deps) => handleChatHistoryRoutes(req, res, url, deps),
   (req, res, url, deps) => handleClawHubSkillRoutes(
     req,
     res,
     url,
-    deps.clawHubSkillInstallTransport,
-    deps.clawHubSkillSearchTransport,
+    deps.runtimeHostTransports.clawHubSkillInstallTransport,
+    deps.runtimeHostTransports.clawHubSkillSearchTransport,
   ),
-  (req, res, url, deps) => handleCronRoutes(req, res, url, deps.cronTransport),
+  (req, res, url, deps) => handleCronRoutes(req, res, url, deps.runtimeHostTransports.cronTransport),
   (req, res, url, deps) => handleFileRoutes(req, res, url, deps),
   (req, res, url, deps) => handleDiagnosticsRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleExternalConnectorsRoutes(req, res, url, deps.externalConnectorsTransport),
+  (req, res, url, deps) => handleExternalConnectorsRoutes(req, res, url, deps.runtimeHostTransports.externalConnectorsTransport),
   (req, res, url, deps) => handleFleetRoutes(
     req,
     res,
     url,
-    deps.fleetTransport,
+    deps.runtimeHostTransports.fleetTransport,
     deps.credentialWriteAdapter ?? createFleetCredentialWriteAdapter(deps.runtimeHost),
   ),
   (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
   (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.manualTeamTransport),
+  (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.runtimeHostTransports.manualTeamTransport),
   (req, res, url, deps) => handleMatchaAgentAppServerRoutes(req, res, url, deps),
   (req, res, url, deps) => handleOpenClawRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleOpenClawMcpServersRoutes(req, res, url, deps.openClawMcpServersTransport),
+  (req, res, url, deps) => handleOpenClawMcpServersRoutes(req, res, url, deps.runtimeHostTransports.openClawMcpServersTransport),
   (req, res, url, deps) => handlePackageRoutes(req, res, url, deps),
-  (req, res, url, deps) => handlePluginsRoutes(req, res, url, deps.pluginsTransport),
+  (req, res, url, deps) => handlePluginsRoutes(req, res, url, deps.runtimeHostTransports.pluginsTransport),
   (req, res, url, deps) => handleProviderAccountsRoutes(
     req,
     res,
     url,
-    deps.providerAccountsTransport,
+    deps.runtimeHostTransports.providerAccountsTransport,
     deps.providerCredentialStatusTransport,
   ),
-  (req, res, url, deps) => handleProviderModelsRoutes(req, res, url, deps.providerModelsTransport),
-  (req, res, url, deps) => handleProviderRoutingRoutes(req, res, url, deps.providerRoutingTransport),
+  (req, res, url, deps) => handleProviderModelsRoutes(req, res, url, deps.runtimeHostTransports.providerModelsTransport),
+  (req, res, url, deps) => handleProviderRoutingRoutes(req, res, url, deps.runtimeHostTransports.providerRoutingTransport),
   (req, res, url, deps) => handleRuntimeHostProcessRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleRuntimeHostUsageRoutes(req, res, url, deps.usageTransport),
-  (req, res, url, deps) => handleRuntimeDirectoryRoutes(req, res, url, deps.runtimeDirectoryTransport),
-  (req, res, url, deps) => handleSecurityEmergencyRoutes(req, res, url, deps.securityEmergencyTransport),
-  (req, res, url, deps) => handleSecurityPolicyRoutes(req, res, url, deps.securityPolicyTransport),
+  (req, res, url, deps) => handleRuntimeHostUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
+  (req, res, url, deps) => handleRuntimeDirectoryRoutes(req, res, url, deps.runtimeHostTransports.runtimeDirectoryTransport),
+  (req, res, url, deps) => handleSecurityEmergencyRoutes(req, res, url, deps.runtimeHostTransports.securityEmergencyTransport),
+  (req, res, url, deps) => handleSecurityPolicyRoutes(req, res, url, deps.runtimeHostTransports.securityPolicyTransport),
   (req, res, url, deps) => handleSecurityRoutes(
     req,
     res,
     url,
-    deps.securityPolicyTransport,
-    deps.securityRuleCatalogTransport,
+    deps.runtimeHostTransports.securityPolicyTransport,
+    deps.runtimeHostTransports.securityRuleCatalogTransport,
   ),
-  (req, res, url, deps) => handleSettingsDesiredRoutes(req, res, url, deps.settingsDesiredTransport),
-  (req, res, url, deps) => handleSettingsRoutes(req, res, url, deps.settingsDesiredTransport),
-  (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.skillBundleTransport),
-  (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.skillsManagementTransport),
-  (req, res, url, deps) => handleSealedSkillsRoutes(req, res, url, deps.sealedSkillsTransport),
+  (req, res, url, deps) => handleSettingsDesiredRoutes(req, res, url, deps.runtimeHostTransports.settingsDesiredTransport),
+  (req, res, url, deps) => handleSettingsRoutes(req, res, url, deps.runtimeHostTransports.settingsDesiredTransport),
+  (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.runtimeHostTransports.skillBundleTransport),
+  (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.runtimeHostTransports.skillsManagementTransport),
+  (req, res, url, deps) => handleSealedSkillsRoutes(req, res, url, deps.runtimeHostTransports.sealedSkillsTransport),
   (req, res, url, deps) => handleSubscriptionRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.teamApprovalsTransport),
-  (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.teamHumanDecisionTransport),
-  (req, res, url, deps) => handleTeamGraphRoutes(req, res, url, deps.teamGraphTransport),
-  (req, res, url, deps) => handleTeamLifecycleRoutes(req, res, url, deps.teamLifecycleTransport),
-  (req, res, url, deps) => handleTeamPublicRoutes(req, res, url, deps.teamPublicTransport),
-  (req, res, url, deps) => handleTeamTaskBoardRoutes(req, res, url, deps.teamTaskBoardTransport),
-  (req, res, url, deps) => handleTeamRoleChatRoutes(req, res, url, deps.teamRoleChatTransport),
-  (req, res, url, deps) => handleTeamRoleSessionsRoutes(req, res, url, deps.teamRoleSessionsTransport),
-  (req, res, url, deps) => handleTeamSkillRoutes(req, res, url, deps.teamSkillTransport),
-  (req, res, url, deps) => handleTeamTriggerRoutes(req, res, url, deps.teamTriggerTransport),
+  (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.runtimeHostTransports.teamApprovalsTransport),
+  (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.runtimeHostTransports.teamHumanDecisionTransport),
+  (req, res, url, deps) => handleTeamGraphRoutes(req, res, url, deps.runtimeHostTransports.teamGraphTransport),
+  (req, res, url, deps) => handleTeamLifecycleRoutes(req, res, url, deps.runtimeHostTransports.teamLifecycleTransport),
+  (req, res, url, deps) => handleTeamPublicRoutes(req, res, url, deps.runtimeHostTransports.teamPublicTransport),
+  (req, res, url, deps) => handleTeamTaskBoardRoutes(req, res, url, deps.runtimeHostTransports.teamTaskBoardTransport),
+  (req, res, url, deps) => handleTeamRoleChatRoutes(req, res, url, deps.runtimeHostTransports.teamRoleChatTransport),
+  (req, res, url, deps) => handleTeamRoleSessionsRoutes(req, res, url, deps.runtimeHostTransports.teamRoleSessionsTransport),
+  (req, res, url, deps) => handleTeamSkillRoutes(req, res, url, deps.runtimeHostTransports.teamSkillTransport),
+  (req, res, url, deps) => handleTeamTriggerRoutes(req, res, url, deps.runtimeHostTransports.teamTriggerTransport),
   (req, res, url, deps) => handleTeamWebhookAuthRoutes(
     req,
     res,
     url,
-    deps.teamWebhookAuthTransport,
+    deps.runtimeHostTransports.teamWebhookAuthTransport,
   ),
   (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.usageTransport),
+  (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
 ];
 
 export type HostApiConnection = Readonly<{
@@ -225,7 +225,7 @@ export async function readHostApiConnection(): Promise<HostApiConnection> {
   return { baseUrl: hostApiBaseUrl, token: hostApiToken };
 }
 
-export function createHostApiRequestHandler(deps: HostApiContext, port: number, fleetTransportPort?: number) {
+export function createHostApiRequestHandler(deps: HostApiContext, port: number, runtimeHostTransportPort?: number) {
   return async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
@@ -239,8 +239,8 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
 
       if (requestUrl.pathname === '/api/remote-fleet/runtime-agent/ingress') {
-        if (Number.isFinite(fleetTransportPort)) {
-          proxyFleetRuntimeAgentIngress(Number(fleetTransportPort), req, res);
+        if (Number.isFinite(runtimeHostTransportPort)) {
+          proxyFleetRuntimeAgentIngress(Number(runtimeHostTransportPort), req, res);
         } else {
           sendJson(res, 503, { success: false, error: 'Fleet data is unavailable' });
         }
@@ -304,7 +304,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
 export function startHostApiServer(
   ctx: HostApiContext,
   port?: number,
-  fleetTransportPort?: number,
+  runtimeHostTransportPort?: number,
 ): Server {
   const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
     ? Number(port)
@@ -313,15 +313,15 @@ export function startHostApiServer(
   hostApiToken = randomBytes(32).toString('hex');
   hostApiBaseUrl = '';
 
-  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort, fleetTransportPort));
+  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort, runtimeHostTransportPort));
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
-    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(fleetTransportPort)) {
+    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(runtimeHostTransportPort)) {
       socket.destroy();
       return;
     }
-    proxyFleetTerminalStreamUpgrade(Number(fleetTransportPort), req, socket, head);
+    proxyFleetTerminalStreamUpgrade(Number(runtimeHostTransportPort), req, socket, head);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {

@@ -1,7 +1,9 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-import { SESSION_TRACE_HEADER } from '../sessions/trace';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isRecord, sendLoopbackJson } from '../client';
+import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './trace';
 
-const DECISION_TTL_MS = 30_000;
+const CATALOG_ENDPOINT = '/api/channels/catalog';
+const CONFIGURE_ENDPOINT = '/api/channels/configure';
 const UNAVAILABLE = { outcome: 'unknown' } as const;
 type Rejected = Readonly<{ outcome: 'rejected' }>;
 const REJECTED: Rejected = { outcome: 'rejected' };
@@ -54,36 +56,27 @@ export interface ChannelCatalogTransport {
 
 export function createChannelCatalogTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelCatalogTransport {
-  const catalogUrl = `http://127.0.0.1:${port}/api/channels/catalog`;
-  const configureUrl = `http://127.0.0.1:${port}/api/channels/configure`;
   return {
     async read(): Promise<ChannelCatalogTransportResponse> {
-      try {
-        const response = await fetcher(catalogUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/channels/catalog',
-              scope: 'channels:read',
-              capability: 'channels.catalog.read',
-              subject: 'channel-catalog',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: '{}',
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isChannelCatalog(body)) {
-          return { status: 200, body };
-        }
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: CATALOG_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: CATALOG_ENDPOINT,
+          scope: 'channels:read',
+          capability: 'channels.catalog.read',
+          subject: 'channel-catalog',
+        },
+        method: 'POST',
+        fetcher,
+        body: {},
+      });
+      if (response?.status === 200 && isChannelCatalog(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -91,7 +84,7 @@ export function createChannelCatalogTransport(
       if (!isIdentity(channel)) return { status: 503, body: UNAVAILABLE };
       return await requestConfigure(
         issuer,
-        configureUrl,
+        runtimeHostTransportPort,
         fetcher,
         { action: 'form', channel },
         isChannelConfigureForm,
@@ -108,7 +101,7 @@ export function createChannelCatalogTransport(
       }
       return await requestConfigure(
         issuer,
-        configureUrl,
+        runtimeHostTransportPort,
         fetcher,
         { action: 'apply', ...input },
         isChannelConfigureOutcome,
@@ -121,7 +114,7 @@ export function createChannelCatalogTransport(
 
 async function requestConfigure<T extends ChannelConfigureForm | ChannelConfigureOutcome>(
   issuer: RuntimeHostDeliveryIssuer,
-  url: string,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   body: unknown,
   isExpectedBody: (value: unknown) => value is T,
@@ -133,37 +126,34 @@ async function requestConfigure<T extends ChannelConfigureForm | ChannelConfigur
   let outcome: unknown;
   let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
   try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: '/api/channels/configure',
-          scope: 'channels:write',
-          capability: 'channels.configure',
-          subject: 'channel-configure',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-        ...channelTraceHeaders(traceId),
+    const response = await sendLoopbackJson({
+      port: runtimeHostTransportPort,
+      path: CONFIGURE_ENDPOINT,
+      issuer,
+      decision: {
+        endpoint: CONFIGURE_ENDPOINT,
+        scope: 'channels:write',
+        capability: 'channels.configure',
+        subject: 'channel-configure',
       },
-      body: JSON.stringify(body),
+      method: 'POST',
+      fetcher,
+      body,
+      headers: channelTraceHeaders(traceId),
     });
-    status = response.status;
-    const responseBody: unknown = await response.json();
-    outcome = responseBody;
-    if (response.status === 400 && isRejected(responseBody)) {
-      return { status: 400, body: responseBody };
+    status = response?.status ?? 503;
+    outcome = response?.body ?? UNAVAILABLE;
+    if (response?.status === 400 && isRejected(response.body)) {
+      return { status: 400, body: response.body };
     }
-    if (response.status === 200 && isExpectedBody(responseBody)) {
-      return { status: 200, body: responseBody };
+    if (response?.status === 200 && isExpectedBody(response.body)) {
+      return { status: 200, body: response.body };
     }
-    if (response.status === 503 && isUnknown(responseBody)) {
-      return { status: 503, body: responseBody };
+    if (response?.status === 503 && isUnknown(response.body)) {
+      return { status: 503, body: response.body };
     }
     outcome = UNAVAILABLE;
-    errorCode = 'INVALID_RESPONSE';
+    errorCode = response === null ? 'UNAVAILABLE' : 'INVALID_RESPONSE';
   } catch (error) {
     outcome = UNAVAILABLE;
     errorCode = channelTraceError(error);
@@ -248,47 +238,9 @@ function isUnknown(value: unknown): value is typeof UNAVAILABLE {
   return isRecord(value) && Object.keys(value).length === 1 && value.outcome === 'unknown';
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function isChannelConfigureOutcome(value: unknown): value is ChannelConfigureOutcome {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const body = value as Record<string, unknown>;
   return Object.keys(body).length === 1
     && (body.outcome === 'confirmed' || body.outcome === 'target_rejected' || body.outcome === 'unknown');
-}
-
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function readChannelTrace(headers: Record<string, string | string[] | undefined>): string | undefined {
-  const value = headers[SESSION_TRACE_HEADER.toLowerCase()] ?? headers[SESSION_TRACE_HEADER];
-  return typeof value === 'string' && UUID.test(value) ? value : undefined;
-}
-
-export function channelTraceHeaders(traceId: string | undefined): Record<string, string> {
-  return traceId && UUID.test(traceId) ? { [SESSION_TRACE_HEADER]: traceId } : {};
-}
-
-export function beginChannelTrace(phase: string, traceId: string | undefined) {
-  const startedAt = performance.now();
-  const write = (suffix: 'start' | 'end', detail: object) => {
-    if (!traceId || !UUID.test(traceId)) return;
-    console.info(`[startup-trace] ${JSON.stringify({ source: 'electron-main', traceId, phase: `${phase}.${suffix}`, at: Date.now(), ...detail })}`);
-  };
-  write('start', {});
-  return (status: number, body: unknown, errorCode?: 'UNAVAILABLE' | 'ABORTED' | 'TIMEOUT' | 'INVALID_RESPONSE') => {
-    const value = body !== null && typeof body === 'object' && 'outcome' in body ? body.outcome : undefined;
-    const valid = body !== null && typeof body === 'object' && 'valid' in body ? body.valid : undefined;
-    const outcome = typeof value === 'string' && ['confirmed', 'connected', 'progress', 'target_rejected', 'unknown', 'rejected', 'cancelled'].includes(value)
-      ? value : typeof valid === 'boolean' ? valid ? 'valid' : 'invalid' : status === 200 ? 'delivered' : 'unknown';
-    write('end', { durationMs: Math.round(performance.now() - startedAt), status, outcome, ...(errorCode ? { errorCode } : {}) });
-  };
-}
-
-export function channelTraceError(error: unknown): 'UNAVAILABLE' | 'ABORTED' | 'TIMEOUT' {
-  if (error instanceof Error && error.name === 'AbortError') return 'ABORTED';
-  if (error instanceof Error && error.name === 'TimeoutError') return 'TIMEOUT';
-  return 'UNAVAILABLE';
 }

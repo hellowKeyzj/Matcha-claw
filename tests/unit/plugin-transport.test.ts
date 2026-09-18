@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 import { createPluginsTransport } from '../../electron/main/runtime-host-delivery/transport/plugins';
 
 const catalog = {

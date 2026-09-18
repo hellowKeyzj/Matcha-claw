@@ -212,6 +212,8 @@ pub struct ChatSendParams {
     idempotency_key: RunId,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<ChatAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_provenance_receipt: Option<String>,
 }
 impl fmt::Debug for ChatSendParams {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,6 +221,10 @@ impl fmt::Debug for ChatSendParams {
             .debug_struct("ChatSendParams")
             .field("has_message", &!self.message.is_empty())
             .field("has_delivery", &self.deliver.is_some())
+            .field(
+                "has_system_provenance_receipt",
+                &self.system_provenance_receipt.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -237,6 +243,7 @@ impl ChatSendParams {
             deliver: None,
             idempotency_key,
             attachments: Vec::new(),
+            system_provenance_receipt: None,
         })
     }
     pub fn session_key(&self) -> &SessionKey {
@@ -251,6 +258,12 @@ impl ChatSendParams {
         self.deliver = Some(deliver);
         self
     }
+
+    pub fn with_system_provenance_receipt(mut self, receipt: impl Into<String>) -> Self {
+        self.system_provenance_receipt = Some(receipt.into());
+        self
+    }
+
     pub fn try_with_attachment(
         mut self,
         attachment: ChatAttachment,
@@ -1653,22 +1666,66 @@ pub enum ChatState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatStatusPhase {
-    Other,
+    PreparingWorkspace,
+    NamingWorktree,
+    CreatingWorktree,
+    RunningSetup,
+    ProvisioningEnvironment,
+    PreparingContext,
+    StartingModel,
 }
 
 impl ChatStatusPhase {
     fn parse(value: Option<&Value>) -> Option<Self> {
         match value.and_then(Value::as_str)? {
-            "preparing_workspace"
-            | "naming_worktree"
-            | "creating_worktree"
-            | "running_setup"
-            | "provisioning_environment"
-            | "preparing_context"
-            | "starting_model" => Some(Self::Other),
+            "preparing_workspace" => Some(Self::PreparingWorkspace),
+            "naming_worktree" => Some(Self::NamingWorktree),
+            "creating_worktree" => Some(Self::CreatingWorktree),
+            "running_setup" => Some(Self::RunningSetup),
+            "provisioning_environment" => Some(Self::ProvisioningEnvironment),
+            "preparing_context" => Some(Self::PreparingContext),
+            "starting_model" => Some(Self::StartingModel),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChatStatusRetry {
+    pub attempt: u8,
+    pub max_attempts: u8,
+}
+
+impl ChatStatusRetry {
+    fn parse(value: &Value) -> Result<Self, ProtocolError> {
+        let object = value
+            .as_object()
+            .ok_or(ProtocolError::InvalidSessionEvent)?;
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "attempt" | "maxAttempts" | "reason"))
+            || object.get("reason").and_then(Value::as_str) != Some("rate_limit")
+        {
+            return Err(ProtocolError::InvalidSessionEvent);
+        }
+        let attempt = status_retry_attempt(object.get("attempt"))?;
+        let max_attempts = status_retry_attempt(object.get("maxAttempts"))?;
+        Ok(Self {
+            attempt,
+            max_attempts,
+        })
+    }
+}
+
+fn status_retry_attempt(value: Option<&Value>) -> Result<u8, ProtocolError> {
+    let attempt = value
+        .and_then(Value::as_u64)
+        .and_then(|attempt| u8::try_from(attempt).ok())
+        .ok_or(ProtocolError::InvalidSessionEvent)?;
+    (1..=10)
+        .contains(&attempt)
+        .then_some(attempt)
+        .ok_or(ProtocolError::InvalidSessionEvent)
 }
 
 #[derive(Clone, PartialEq)]
@@ -1678,6 +1735,7 @@ pub struct ChatEvent {
     pub sequence: u64,
     pub state: ChatState,
     pub status_phase: Option<ChatStatusPhase>,
+    pub status_retry: Option<ChatStatusRetry>,
     pub delta_text: Option<String>,
     pub replace: bool,
     pub message_text: Option<String>,
@@ -1694,6 +1752,7 @@ impl fmt::Debug for ChatEvent {
             .field("sequence", &self.sequence)
             .field("state", &self.state)
             .field("status_phase", &self.status_phase)
+            .field("has_status_retry", &self.status_retry.is_some())
             .field("has_delta_text", &self.delta_text.is_some())
             .field("replace", &self.replace)
             .field("has_message_text", &self.message_text.is_some())
@@ -1752,6 +1811,14 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
     } else {
         None
     };
+    let status_retry = if state == ChatState::Status {
+        object
+            .get("retry")
+            .map(ChatStatusRetry::parse)
+            .transpose()?
+    } else {
+        None
+    };
     if object.keys().any(|key| !allowed_chat_field(state, key))
         || (state == ChatState::Delta
             && object.get("message").is_none()
@@ -1804,6 +1871,7 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
         sequence,
         state,
         status_phase,
+        status_retry,
         delta_text,
         replace: object
             .get("replace")
@@ -2647,7 +2715,7 @@ fn allowed_chat_field(state: ChatState, field: &str) -> bool {
     matches!(
         field,
         "runId" | "sessionKey" | "agentId" | "spawnedBy" | "seq" | "state"
-    ) || (state == ChatState::Status && field == "phase")
+    ) || (state == ChatState::Status && matches!(field, "phase" | "retry"))
         || (state == ChatState::Delta
             && matches!(field, "message" | "deltaText" | "replace" | "usage"))
         || (state == ChatState::Final
@@ -3245,6 +3313,15 @@ mod tests {
             serde_json::to_value(send).unwrap(),
             json(
                 r#"{"sessionKey":"agent:main:session-1","message":"","deliver":false,"idempotencyKey":"run-7"}"#
+            )
+        );
+        let with_receipt = ChatSendParams::try_new(key(), "hello", run())
+            .unwrap()
+            .with_system_provenance_receipt("system note");
+        assert_eq!(
+            serde_json::to_value(with_receipt).unwrap(),
+            json(
+                r#"{"sessionKey":"agent:main:session-1","message":"hello","idempotencyKey":"run-7","systemProvenanceReceipt":"system note"}"#
             )
         );
         let with_attachments = ChatSendParams::try_new(key(), "review this", run())

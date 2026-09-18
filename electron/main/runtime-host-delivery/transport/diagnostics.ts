@@ -1,6 +1,11 @@
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import {
+  hasExactKeys,
+  isRecord,
+  isSafeNonNegativeInteger,
+  sendLoopbackJson,
+} from './client';
 
-const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = {
   success: false,
   error: 'Diagnostics archive is unavailable',
@@ -37,69 +42,53 @@ export interface DiagnosticsArchiveTransport {
 
 export function createDiagnosticsArchiveTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): DiagnosticsArchiveTransport {
-  const url = `http://127.0.0.1:${port}/api/diagnostics/archive`;
-  const downloadUrl = `${url}/download`;
   return {
     async archive(signal?: AbortSignal): Promise<DiagnosticsArchiveTransportResponse> {
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/diagnostics/archive',
-              scope: 'diagnostics:write',
-              capability: 'diagnostics.archive',
-              subject: 'host-diagnostics',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: '{}',
-          signal,
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200) {
-          const receipt = decodeReceipt(body);
-          if (receipt?.terminal === 'completed') return { status: 200, body: receipt };
-        }
-      } catch {
-        // The public contract deliberately suppresses cancellation and transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/diagnostics/archive',
+        issuer,
+        decision: {
+          endpoint: '/api/diagnostics/archive',
+          scope: 'diagnostics:write',
+          capability: 'diagnostics.archive',
+          subject: 'host-diagnostics',
+        },
+        method: 'POST',
+        fetcher,
+        body: {},
+        signal,
+      });
+      if (response?.status === 200) {
+        const receipt = decodeReceipt(response.body);
+        if (receipt?.terminal === 'completed') return { status: 200, body: receipt };
       }
       return { status: 503, body: UNAVAILABLE };
     },
     async download(archiveId: string, signal?: AbortSignal): Promise<DiagnosticsArchiveDownloadResponse> {
       if (!isArchiveId(archiveId)) return { status: 404, body: NOT_FOUND };
-      try {
-        const response = await fetcher(downloadUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/diagnostics/archive/download',
-              scope: 'diagnostics:read',
-              capability: 'diagnostics.archive.download',
-              subject: 'host-diagnostics',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ archiveId }),
-          signal,
-        });
-        if (response.status === 404) return { status: 404, body: NOT_FOUND };
-        const body: unknown = await response.json();
-        if (response.status === 200) {
-          const data = decodeDownload(body, archiveId);
-          if (data) return { status: 200, body: data };
-        }
-      } catch {
-        // The public contract deliberately suppresses cancellation and transport details.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/diagnostics/archive/download',
+        issuer,
+        decision: {
+          endpoint: '/api/diagnostics/archive/download',
+          scope: 'diagnostics:read',
+          capability: 'diagnostics.archive.download',
+          subject: 'host-diagnostics',
+        },
+        method: 'POST',
+        fetcher,
+        body: { archiveId },
+        signal,
+      });
+      if (response?.status === 404) return { status: 404, body: NOT_FOUND };
+      if (response?.status === 200) {
+        const data = decodeDownload(response.body, archiveId);
+        if (data) return { status: 200, body: data };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -153,17 +142,4 @@ function base64Value(codePoint: number): number {
 
 function isArchiveId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
-}
-
-function isSafeNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

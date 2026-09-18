@@ -95,6 +95,22 @@ impl SessionOps for MatchaRuntimeDriver {
         Box::pin(async move { send_session_with_handle(session, command, renderer_events).await })
     }
 
+    fn wait_session_native_run<'a>(
+        &'a self,
+        endpoint_session_id: Option<String>,
+        native_run_id: String,
+    ) -> crate::runtime::driver::SessionFuture<'a, Option<crate::runtime::driver::NativeRunSettled>>
+    {
+        let Some(endpoint_session_id) = endpoint_session_id else {
+            return Box::pin(async { None });
+        };
+        super::team_terminal::watch_session_native_run_with_handle(
+            self.native.clone(),
+            endpoint_session_id,
+            native_run_id,
+        )
+    }
+
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,

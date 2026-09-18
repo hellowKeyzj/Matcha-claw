@@ -1,10 +1,10 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import {
   logSessionTrace,
   traceHeader,
 } from '../sessions/trace';
 
-const DECISION_TTL_MS = 30_000;
 const POLICY_READ_ENDPOINT = '/api/security/policy/current';
 const AUDIT_READ_ENDPOINT = '/api/security/audit/current';
 const OPERATION_ENDPOINT = '/api/security/operation';
@@ -161,52 +161,44 @@ export interface SecurityPolicyTransport {
 
 export function createSecurityPolicyTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SecurityPolicyTransport {
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const url = `${baseUrl}/api/security/policy`;
   return {
     async operate(request: SecurityOperationRequest): Promise<SecurityOperationResponse> {
       if (!isSecurityOperationRequest(request)) {
         return { status: 400, body: OPERATION_INVALID };
       }
-      try {
-        const response = await fetcher(`${baseUrl}${OPERATION_ENDPOINT}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: OPERATION_ENDPOINT,
-              scope: 'security:operate',
-              capability: request.operationId,
-              subject: 'security-operation',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (
-          response.status === 200
-          && isBoundedOperationResponse(body, request.operationId)
-          && Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_OPERATION_RESPONSE_BYTES
-        ) {
-          return { status: 200, body };
-        }
-        if (response.status === 400 && isExact(body, OPERATION_INVALID)) {
-          return { status: 400, body: OPERATION_INVALID };
-        }
-        if (response.status === 401 && isExact(body, OPERATION_UNAUTHORIZED)) {
-          return { status: 401, body: OPERATION_UNAUTHORIZED };
-        }
-        if (response.status === 422 && isExact(body, OPERATION_REJECTED)) {
-          return { status: 422, body: OPERATION_REJECTED };
-        }
-      } catch {
-        // Native errors and delivery decisions never cross the Main boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: OPERATION_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: OPERATION_ENDPOINT,
+          scope: 'security:operate',
+          capability: request.operationId,
+          subject: 'security-operation',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      const body = response?.body;
+      if (
+        response?.status === 200
+        && isBoundedOperationResponse(body, request.operationId)
+        && Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_OPERATION_RESPONSE_BYTES
+      ) {
+        return { status: 200, body };
+      }
+      if (response?.status === 400 && isExact(body, OPERATION_INVALID)) {
+        return { status: 400, body: OPERATION_INVALID };
+      }
+      if (response?.status === 401 && isExact(body, OPERATION_UNAUTHORIZED)) {
+        return { status: 401, body: OPERATION_UNAUTHORIZED };
+      }
+      if (response?.status === 422 && isExact(body, OPERATION_REJECTED)) {
+        return { status: 422, body: OPERATION_REJECTED };
       }
       return { status: 503, body: OPERATION_UNAVAILABLE };
     },
@@ -215,84 +207,71 @@ export function createSecurityPolicyTransport(
       logSessionTrace('electron.security.policy.transport.request', traceId, {
         endpoint: POLICY_READ_ENDPOINT,
       });
-      try {
-        const response = await fetcher(`${baseUrl}${POLICY_READ_ENDPOINT}`, {
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: POLICY_READ_ENDPOINT,
-              scope: 'security:read',
-              capability: 'security.read',
-              subject: 'policy-read',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            ...traceHeader(traceId),
-          },
-        });
-        const body: unknown = await response.json();
-        const contract = response.status === 200 ? policyContract(body) : 'http-status';
-        const valid = contract === 'policy';
-        logSessionTrace('electron.security.policy.transport.response', traceId, {
-          status: response.status,
-          contract,
-          elapsedMs: Date.now() - startedAt,
-        });
-        return valid ? body : null;
-      } catch {
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: POLICY_READ_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: POLICY_READ_ENDPOINT,
+          scope: 'security:read',
+          capability: 'security.read',
+          subject: 'policy-read',
+        },
+        method: 'GET',
+        fetcher,
+        headers: traceHeader(traceId),
+      });
+      if (response === null) {
         logSessionTrace('electron.security.policy.transport.failure', traceId, {
           elapsedMs: Date.now() - startedAt,
         });
         return null;
       }
+      const contract = response.status === 200 ? policyContract(response.body) : 'http-status';
+      const valid = contract === 'policy';
+      logSessionTrace('electron.security.policy.transport.response', traceId, {
+        status: response.status,
+        contract,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return valid ? response.body as Record<string, unknown> : null;
     },
     async readAudit(page: number, pageSize: number): Promise<SecurityAuditResponse | null> {
       if (!isPositiveInteger(page) || !isPositiveInteger(pageSize) || page > 10_000 || pageSize > 200) return null;
-      try {
-        const endpoint = `${AUDIT_READ_ENDPOINT}?page=${page}&pageSize=${pageSize}`;
-        const response = await fetcher(`${baseUrl}${endpoint}`, {
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: AUDIT_READ_ENDPOINT,
-              scope: 'security:read',
-              capability: 'security.read',
-              subject: 'audit-read',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-          },
-        });
-        const body: unknown = await response.json();
-        return response.status === 200 && isAuditResponse(body, page, pageSize) ? body : null;
-      } catch {
-        return null;
-      }
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: AUDIT_READ_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: AUDIT_READ_ENDPOINT,
+          scope: 'security:read',
+          capability: 'security.read',
+          subject: 'audit-read',
+        },
+        method: 'GET',
+        fetcher,
+        query,
+      });
+      return response?.status === 200 && isAuditResponse(response.body, page, pageSize) ? response.body : null;
     },
     async submit(request): Promise<SecurityPolicyTransportResponse> {
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/security/policy',
-              scope: 'security:write',
-              capability: 'security.replace',
-              subject: 'security-policy',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isReceipt(body)) return { status: 200, body };
-        if (response.status === 422 && isExact(body, REJECTED)) return { status: 422, body: REJECTED };
-      } catch {
-        // Native errors and delivery decisions never cross the Main boundary.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/security/policy',
+        issuer,
+        decision: {
+          endpoint: '/api/security/policy',
+          scope: 'security:write',
+          capability: 'security.replace',
+          subject: 'security-policy',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isReceipt(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 422 && isExact(response.body, REJECTED)) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -636,15 +615,6 @@ function isExact(value: unknown, expected: Record<string, unknown>): boolean {
     && Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   return isRecord(value) && hasExactKeys(value, keys);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }

@@ -286,6 +286,13 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
+    "proposalPending": {
+      "title": "提案の確認待ち",
+      "emptySummary": "Leader が提案を準備しました。",
+      "confirm": "確認して開始",
+      "discuss": "続けて相談",
+      "cancel": "キャンセル"
+    },
     "dependencyMissing": {
       "title": "実行を続行する前に依存関係の対応が必要です",
       "description": "必須依存関係はバイパスできません。不足している Skill をインストールするか Tool を設定してから依存関係チェックを再試行してください。",

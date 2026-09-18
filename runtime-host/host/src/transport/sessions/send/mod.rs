@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "session.prompt";
 const OPERATION_ID: &str = "sessions.send";
@@ -173,7 +173,7 @@ impl SessionSendRequest {
         SessionSendCommand::try_new(
             endpoint,
             self.input.session_key,
-            None,
+            self.input.endpoint_session_id,
             self.scope.route_key,
             self.input.message,
             self.input.run_id,
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_public_endpoint_session_binding_on_active_send() {
+    fn preserves_public_endpoint_session_binding_on_active_send() {
         let mut value = request("openclaw");
         value["input"]["endpointSessionId"] = json!("endpoint-session-1");
 
@@ -300,7 +300,10 @@ mod tests {
             .unwrap()
             .into_command(None)
             .unwrap();
-        assert_eq!(command.endpoint_session_id, None);
+        assert_eq!(
+            command.endpoint_session_id.as_deref(),
+            Some("endpoint-session-1")
+        );
         assert_eq!(command.session_key, "agent:main:demo");
         assert_eq!(command.run_id.as_deref(), Some("run-1"));
     }

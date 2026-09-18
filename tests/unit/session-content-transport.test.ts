@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 import { createSessionContentTransport } from '../../electron/main/runtime-host-delivery/transport/sessions/content';
 
 const identity = {
@@ -53,21 +53,23 @@ function decodeDecision(authorization: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8'));
 }
 
+const runtimeHostTransportPort = 32_111;
+
 describe('SessionContentTransport', () => {
   it('binds content loads to the fixed endpoint and sealed decision', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(sealedUnavailableResponse());
-    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request())).resolves.toEqual(unavailableResponse());
 
-    expect(fetcher.mock.calls[0]![0]).toBe('http://127.0.0.1:19420/api/sessions/content');
+    expect(fetcher.mock.calls[0]![0]).toBe('http://127.0.0.1:32111/api/sessions/content');
     expect(decodeDecision(fetcher.mock.calls[0]![1].headers.Authorization).endpoint).toBe('/api/sessions/content');
     expect(decodeDecision(fetcher.mock.calls[0]![1].headers.Authorization).capability).toBe('session.management');
   });
 
   it('rejects identity and sessionKey mismatches before delivery', async () => {
     const fetcher = vi.fn();
-    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
     const scopeMismatch = {
       ...request(),
       scope: {
@@ -96,7 +98,7 @@ describe('SessionContentTransport', () => {
   it('accepts valid content chunks and forwards endpointSessionId', async () => {
     const body = successBody();
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(body), { status: 200 }));
-    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request({ endpointSessionId: 'main' }))).resolves.toEqual({ status: 200, body });
 
@@ -112,7 +114,7 @@ describe('SessionContentTransport', () => {
 
   it('rejects malformed requests and private response payloads with sealed unavailable', async () => {
     const fetcher = vi.fn();
-    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load({
       ...request(),
@@ -128,7 +130,7 @@ describe('SessionContentTransport', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ...successBody(), contentRef: 'content-ref-2' }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ...successBody(), offset: 8 }), { status: 200 }));
-    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), 19420, fetcher);
+    const transport = createSessionContentTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
 
     await expect(transport.load(request())).resolves.toEqual(unavailableResponse());
     await expect(transport.load(request())).resolves.toEqual(unavailableResponse());

@@ -1,7 +1,6 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { handleCapabilityRoutes } from '../../electron/api/routes/capabilities';
-import { RuntimeHostControlError } from '../../electron/main/runtime-host-delivery/control';
 
 function incoming(body?: unknown, method = 'POST', headers: Record<string, string> = {}) {
   return Object.assign(Readable.from(body === undefined ? [] : [JSON.stringify(body)]), {
@@ -296,7 +295,7 @@ describe('capability route sealed projection', () => {
       incoming(workspaceMediaRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { workspaceMediaTransport } as never,
+      { runtimeHostTransports: { workspaceMediaTransport } } as never,
     );
 
     expect(workspaceMediaTransport.execute).toHaveBeenCalledWith(workspaceMediaRequest);
@@ -313,7 +312,7 @@ describe('capability route sealed projection', () => {
       incoming(workspaceMediaRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { workspaceMediaTransport } as never,
+      { runtimeHostTransports: { workspaceMediaTransport } } as never,
     );
 
     expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Workspace media is unavailable' } });
@@ -474,21 +473,18 @@ describe('capability route sealed projection', () => {
     });
   });
 
-  it('projects Cron trigger outcomes through the native control command', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ result: { outcome: 'accepted' } }));
+  it('projects Cron trigger outcomes through the cron transport', async () => {
+    const trigger = vi.fn().mockResolvedValue({ status: 200, body: { success: true, result: { outcome: 'accepted' } } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(cronTriggerRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { cronTransport: { trigger } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.cron.manual-trigger',
-      input: { jobId: 'cron-job-1' },
-    });
+    expect(trigger).toHaveBeenCalledWith(cronTriggerRequest);
     expect(result.state).toEqual({
       statusCode: 200,
       body: { success: true, result: { outcome: 'accepted' } },
@@ -502,7 +498,7 @@ describe('capability route sealed projection', () => {
         incoming(cronTriggerRequest) as never,
         result.raw as never,
         new URL('http://localhost/api/capabilities/execute'),
-        { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ result: { outcome } })) } } as never,
+        { runtimeHostTransports: { cronTransport: { trigger: vi.fn().mockResolvedValue({ status: 200, body: { success: true, result: { outcome } } }) } } } as never,
       );
       expect(result.state).toEqual({ statusCode: 200, body: { success: true, result: { outcome } } });
     },
@@ -515,21 +511,20 @@ describe('capability route sealed projection', () => {
         incoming(cronTriggerRequest) as never,
         result.raw as never,
         new URL('http://localhost/api/capabilities/execute'),
-        { runtimeHost: { command: vi.fn().mockResolvedValue(succeeded({ result: { outcome: 'skipped', reason } })) } } as never,
+        { runtimeHostTransports: { cronTransport: { trigger: vi.fn().mockResolvedValue({ status: 200, body: { success: true, result: { outcome: 'skipped', reason } } }) } } } as never,
       );
       expect(result.state).toEqual({ statusCode: 200, body: { success: true, result: { outcome: 'skipped', reason } } });
     },
   );
 
-  it('projects unknown-delivery Cron commands as outcome-unknown success', async () => {
+  it('projects Cron transport outcome-unknown as a safe trigger result', async () => {
     const result = response();
-    const command = vi.fn().mockRejectedValue(new RuntimeHostControlError('timeout-exceeded', 'unknown-delivery'));
 
     await handleCapabilityRoutes(
       incoming(cronTriggerRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { cronTransport: { trigger: vi.fn().mockResolvedValue({ status: 409, body: { success: false, error: 'Cron operation outcome is unknown' } }) } } } as never,
     );
 
     expect(result.state).toEqual({
@@ -544,17 +539,17 @@ describe('capability route sealed projection', () => {
     { ...cronTriggerRequest, input: { id: cronTriggerRequest.input.id, extra: true } },
     { ...cronTriggerRequest, scope: { ...schedulerScope, endpoint: { ...schedulerScope.endpoint, runtimeInstanceId: 'other' } } },
   ])('rejects malformed Cron trigger envelopes before dispatch: %p', async (body) => {
-    const command = vi.fn();
+    const trigger = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { cronTransport: { trigger } } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
     expect(result.state).toEqual({
       statusCode: 400,
       body: { success: false, error: 'Cron trigger request is invalid' },
@@ -562,17 +557,17 @@ describe('capability route sealed projection', () => {
   });
 
   it.each([
-    rejected('UNAVAILABLE', 'private native detail'),
-    rejected('FAILED', 'private native detail'),
-    { kind: 'timed-out' as const },
-  ])('hides unavailable Cron control outcomes: %p', async (outcome) => {
+    { status: 503, body: { success: false, error: 'private native detail' } },
+    { status: 502, body: { success: false, error: 'private native detail' } },
+    { status: 200, body: { success: false, error: 'private native detail' } },
+  ])('hides unavailable Cron transport outcomes: %p', async (transportResponse) => {
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(cronTriggerRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command: vi.fn().mockResolvedValue(outcome) } } as never,
+      { runtimeHostTransports: { cronTransport: { trigger: vi.fn().mockResolvedValue(transportResponse) } } } as never,
     );
 
     expect(result.state).toEqual({
@@ -922,7 +917,7 @@ describe('capability route sealed projection', () => {
       }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send } } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } } } as never,
     );
 
     expect(send).not.toHaveBeenCalled();
@@ -947,7 +942,7 @@ describe('capability route sealed projection', () => {
       } as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { providerRoutingTransport: { execute } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute } } } as never,
     );
 
     expect(nextBody).toHaveBeenCalledOnce();
@@ -991,13 +986,13 @@ describe('capability route sealed projection', () => {
       incoming(loadBody) as never,
       loadResult.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionTimelineTransport: { load, window } } as never,
+      { runtimeHostTransports: { sessionTimelineTransport: { load, window } } } as never,
     );
     await handleCapabilityRoutes(
       incoming(windowBody) as never,
       windowResult.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionTimelineTransport: { load, window } } as never,
+      { runtimeHostTransports: { sessionTimelineTransport: { load, window } } } as never,
     );
 
     expect(load).toHaveBeenCalledWith({
@@ -1039,13 +1034,13 @@ describe('capability route sealed projection', () => {
       incoming(providerRequest) as never,
       provider.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { providerRoutingTransport: { execute: vi.fn().mockResolvedValue({ status: 200, body: { privateCanary } }) } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute: vi.fn().mockResolvedValue({ status: 200, body: { privateCanary } }) } } } as never,
     );
     await handleCapabilityRoutes(
       incoming(taskRequest) as never,
       task.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { taskManagerTransport: { list: vi.fn().mockResolvedValue({ status: 200, body: { privateCanary } }) } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { list: vi.fn().mockResolvedValue({ status: 200, body: { privateCanary } }) } } } as never,
     );
 
     expect(provider.state).toEqual({
@@ -1224,7 +1219,7 @@ describe('capability route sealed projection', () => {
       }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { taskManagerTransport: { list } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { list } } } as never,
     );
 
     expect(list).not.toHaveBeenCalled();

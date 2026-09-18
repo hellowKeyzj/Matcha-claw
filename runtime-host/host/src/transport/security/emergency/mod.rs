@@ -5,7 +5,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "security.emergency";
 const OPERATION_ID: &str = CAPABILITY_ID;

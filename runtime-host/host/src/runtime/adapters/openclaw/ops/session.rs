@@ -43,6 +43,13 @@ impl OpenClawInstance {
         self.session_gateway.abort_chat(params).await
     }
 
+    pub(crate) async fn wait_session_native_run(
+        &self,
+        native_run_id: String,
+    ) -> Option<crate::runtime::driver::NativeRunSettled> {
+        super::team::wait_openclaw_native_run(&self.gateway, native_run_id).await
+    }
+
     pub(crate) async fn patch_session_label(
         &self,
         params: openclaw::session::protocol::SessionLabelPatchParams,
@@ -203,6 +210,9 @@ impl OpenClawInstance {
             Ok(params) => params,
             Err(_) => return SessionSendOutcome::Rejected,
         };
+        if let Some(receipt) = command.system_provenance_receipt {
+            params = params.with_system_provenance_receipt(receipt);
+        }
         for attachment in command.attachments {
             let attachment = match map_attachment(attachment) {
                 Ok(attachment) => attachment,
@@ -477,6 +487,15 @@ impl SessionOps for OpenClawInstance {
         command: SessionSendCommand,
     ) -> crate::runtime::driver::SessionFuture<'a, SessionSendOutcome> {
         Box::pin(self.send_session(command))
+    }
+
+    fn wait_session_native_run<'a>(
+        &'a self,
+        _endpoint_session_id: Option<String>,
+        native_run_id: String,
+    ) -> crate::runtime::driver::SessionFuture<'a, Option<crate::runtime::driver::NativeRunSettled>>
+    {
+        Box::pin(self.wait_session_native_run(native_run_id))
     }
 
     fn abort_open_claw_chat<'a>(

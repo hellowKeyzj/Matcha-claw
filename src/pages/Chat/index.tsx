@@ -9,7 +9,6 @@ import { AlertCircle } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
 import { selectCurrentChatSendGate } from '@/stores/chat/selectors';
-import { useTeamsStore } from '@/stores/teams';
 import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
@@ -48,6 +47,7 @@ import { ChatSidePanel } from './components/ChatSidePanel';
 import { ChatOffline } from './components/ChatOffline';
 import { ChatInput } from './ChatInput';
 import { Button } from '@/components/ui/button';
+import { AssistantPendingLabelProvider } from './components/AssistantPendingIndicator';
 import { ChatList, type ChatListHandle } from './components/ChatList';
 import { ChatHeaderBar } from './components/ChatHeaderBar';
 import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from './components/ChatRuntimeDock';
@@ -429,12 +429,29 @@ function resolveModelTriggerLabel(modelId: string): string {
   return modelId.slice(separatorIndex + 1);
 }
 
+function buildRunProgressPendingLabel(
+  runProgress: ChatSessionRuntimeState['runProgress'],
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (!runProgress) {
+    return null;
+  }
+  if (runProgress.kind === 'retrying') {
+    return t('pending.retrying', {
+      attempt: runProgress.attempt,
+      maxAttempts: runProgress.maxAttempts,
+    });
+  }
+  return t(`pending.startup.${runProgress.phase}`);
+}
+
 function buildRuntimeAssistantPlaceholder(input: {
   sessionKey: string;
   runtime: ChatSessionRuntimeState;
   items: ReadonlyArray<SessionRenderItem>;
   imageGenerationActive: boolean;
   imageGenerationLabel: string;
+  pendingLabel: string | null;
 }): SessionRenderItem | null {
   const activeRunId = input.runtime.activeRunId;
   const placeholderRunId = activeRunId || (input.imageGenerationActive ? 'image-generation' : '');
@@ -465,6 +482,7 @@ function buildRuntimeAssistantPlaceholder(input: {
     }] : [],
     thinking: null,
     tools: [],
+    pendingLabel: input.pendingLabel,
     text: input.imageGenerationActive ? input.imageGenerationLabel : '',
     images: [],
     attachedFiles: [],
@@ -607,24 +625,8 @@ export function Chat({ isActive = true }: ChatProps) {
     ? currentSessionRecordKey
     : (currentConversation?.kind === 'draft' ? `${currentConversation.runtimeScopeKey}:agent:${currentConversation.agentId}:draft` : '');
   const currentAgentId = currentConversation?.agentId ?? currentSession.meta.agentId ?? '';
-  const submitTeamRoleMessageFromChat = useTeamsStore((state) => state.submitTeamRoleMessageFromChat);
-  const resolveTeamRoleChatTargetBySession = useTeamsStore((state) => state.resolveTeamRoleChatTargetBySession);
-  const resolveTeamLeaderChatTargetBySession = useTeamsStore((state) => state.resolveTeamLeaderChatTargetBySession);
-  const isTeamRoleSession = useTeamsStore((state) => state.isTeamRoleSession);
-  const currentTeamRoleSessionProbe = {
-    sessionIdentity: currentSessionConversation?.sessionIdentity ?? currentSession.meta.sessionIdentity,
-    sessionKey: currentSessionRecordKey,
-    endpointSessionId: currentSessionConversation?.endpointSessionId ?? currentSession.meta.endpointSessionId,
-  };
-  const currentTeamChatTarget = resolveTeamRoleChatTargetBySession(currentTeamRoleSessionProbe);
-  const currentTeamLeaderChatTarget = resolveTeamLeaderChatTargetBySession(currentTeamRoleSessionProbe);
-  const isCurrentTeamRoleSession = isTeamRoleSession(currentTeamRoleSessionProbe);
-  const connectorSessionIdentity = isCurrentTeamRoleSession
-    ? currentTeamLeaderChatTarget?.sessionIdentity ?? null
-    : currentSession.meta.sessionIdentity;
-  const connectorEndpointSessionId = isCurrentTeamRoleSession
-    ? currentTeamLeaderChatTarget?.endpointSessionId ?? null
-    : currentSession.meta.endpointSessionId;
+  const connectorSessionIdentity = currentSession.meta.sessionIdentity;
+  const connectorEndpointSessionId = currentSession.meta.endpointSessionId;
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
@@ -860,6 +862,7 @@ export function Chat({ isActive = true }: ChatProps) {
   );
   const imageGenerationActive = isImageGenerationActive(currentSession.runtime);
   const imageGenerationLabel = t('input.imageGenerationActive');
+  const pendingRunProgressLabel = buildRunProgressPendingLabel(currentSession.runtime.runProgress, t);
   const renderItems = useMemo(() => {
     const runtimePlaceholder = buildRuntimeAssistantPlaceholder({
       sessionKey: currentSessionRecordKey,
@@ -867,6 +870,7 @@ export function Chat({ isActive = true }: ChatProps) {
       items: viewportItems,
       imageGenerationActive,
       imageGenerationLabel,
+      pendingLabel: pendingRunProgressLabel,
     });
     const protocolItems = runtimePlaceholder ? [...viewportItems, runtimePlaceholder] : viewportItems;
     const nextItems = applyAssistantPresentationToItems({
@@ -882,7 +886,7 @@ export function Chat({ isActive = true }: ChatProps) {
     });
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionRecordKey, imageGenerationActive, imageGenerationLabel, viewportItems]);
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionRecordKey, imageGenerationActive, imageGenerationLabel, pendingRunProgressLabel, viewportItems]);
   const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
   const artifactFiles = useMemo(
     () => artifactGroups.flatMap((group) => group.files),
@@ -1228,19 +1232,8 @@ export function Chat({ isActive = true }: ChatProps) {
     attachments?: Parameters<typeof sendMessage>[1],
   ) => {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
-    if (isCurrentTeamRoleSession) {
-      if (!currentTeamChatTarget) {
-        return { accepted: false, reason: 'error', error: 'Team role session is not ready yet.' } as const;
-      }
-      if (attachments && attachments.length > 0) {
-        return { accepted: false, reason: 'error', error: 'Team role chat does not support attachments yet.' } as const;
-      }
-      void submitTeamRoleMessageFromChat(currentTeamChatTarget.teamId, currentTeamChatTarget.roleId, text, currentTeamChatTarget.runId)
-        .catch(() => undefined);
-      return { accepted: true } as const;
-    }
     return sendMessage(text, attachments);
-  }, [currentTeamChatTarget, isCurrentTeamRoleSession, sendMessage, submitTeamRoleMessageFromChat]);
+  }, [sendMessage]);
   const handleExportMarkdown = useCallback(() => {
     if (exportingMarkdown || !currentSessionRecordKey || !currentSessionConversation) {
       return;
@@ -1509,7 +1502,7 @@ export function Chat({ isActive = true }: ChatProps) {
   }
 
   return (
-    <>
+    <AssistantPendingLabelProvider label={pendingRunProgressLabel}>
       <ChatShell
         chatLayoutRef={chatLayoutRef}
         sidePanelPhase={chatWindowDock.phase}
@@ -1635,7 +1628,7 @@ export function Chat({ isActive = true }: ChatProps) {
         todoPanel={<SessionTodoPanel sessionKey={currentSessionRecordKey} />}
         input={inputNode}
       />
-    </>
+    </AssistantPendingLabelProvider>
   );
 }
 

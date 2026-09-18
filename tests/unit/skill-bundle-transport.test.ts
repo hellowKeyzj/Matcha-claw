@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/bootstrap';
+import { createRuntimeHostDeliveryIssuer } from '../../electron/main/runtime-host-delivery/issuer';
 import { createSkillBundleTransport } from '../../electron/main/runtime-host-delivery/transport/skills/bundle';
 
 const exportRequest = { skillKeys: ['web-search'] } as const;

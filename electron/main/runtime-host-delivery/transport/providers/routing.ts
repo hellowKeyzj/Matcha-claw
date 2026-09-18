@@ -1,14 +1,13 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import {
   decodeProviderMutationCommittedResponse,
   decodeProviderMutationCommitUnknownResponse,
-  ProviderMutationReceiptUnavailableError,
   type ProviderMutationCommittedResponse,
   type ProviderMutationCommitUnknownResponse,
 } from './mutation-receipt';
 
-const DECISION_TTL_MS = 30_000;
-const ENDPOINT = '/api/provider-routing';
+const PROVIDER_ROUTING_PATH = '/api/provider-routing';
 const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
 const UNAVAILABLE = {
@@ -73,16 +72,17 @@ export interface ProviderRoutingTransport {
 type ListResponse = Readonly<{ routing: Routing | null }>;
 type ReplaceResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
 
+const ROUTE_KEYS: readonly string[] = ['capability', 'primary', 'fallbacks', 'timeoutMs'];
+
 export function createProviderRoutingTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  providerModelsTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ProviderRoutingTransport {
-  const url = `http://127.0.0.1:${providerModelsTransportPort}${ENDPOINT}`;
   return {
     async execute(request: unknown): Promise<ProviderRoutingTransportResponse> {
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
-      return executeRequest(request, issuer, url, fetcher);
+      return executeRequest(request, issuer, runtimeHostTransportPort, fetcher);
     },
   };
 }
@@ -90,63 +90,48 @@ export function createProviderRoutingTransport(
 async function executeRequest(
   request: Request,
   issuer: RuntimeHostDeliveryIssuer,
-  url: string,
+  port: number,
   fetcher: typeof fetch,
 ): Promise<ProviderRoutingTransportResponse> {
-  try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: ENDPOINT,
-          scope: 'providers:routing',
-          capability: request.operationId,
-          subject: 'provider-routing',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      if (request.operationId === 'providerRouting.replace' && response.status === 200) {
-        throw new ProviderMutationReceiptUnavailableError();
-      }
-      return { status: 503, body: UNAVAILABLE };
+  const response = await sendLoopbackJson({
+    port,
+    path: PROVIDER_ROUTING_PATH,
+    issuer,
+    decision: {
+      endpoint: PROVIDER_ROUTING_PATH,
+      scope: 'providers:routing',
+      capability: request.operationId,
+      subject: 'provider-routing',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  if (request.operationId === 'providerRouting.replace') {
+    if (response?.status === 200) {
+      const decoded = decodeProviderMutationCommittedResponse(response.body, {
+        desiredStatus: 'stored',
+        desiredRevision: 'required',
+        unknownError: MUTATION_UNKNOWN_ERROR,
+      });
+      return decoded
+        ? { status: 200, body: decoded }
+        : { status: 503, body: UNAVAILABLE };
     }
-    if (request.operationId === 'providerRouting.replace') {
-      if (response.status === 200) {
-        return {
-          status: 200,
-          body: decodeProviderMutationCommittedResponse(body, {
-            desiredStatus: 'stored',
-            desiredRevision: 'required',
-            unknownError: MUTATION_UNKNOWN_ERROR,
-          }),
-        };
-      }
-      if (response.status === 409) {
-        const unknown = decodeProviderMutationCommitUnknownResponse(body, {
-          desiredRevision: 'required',
-          unknownError: MUTATION_UNKNOWN_ERROR,
-        });
-        return unknown
-          ? { status: 409, body: unknown }
-          : { status: 503, body: UNAVAILABLE };
-      }
-    } else if (response.status === 200 && isListResponse(body)) {
-      return { status: 200, body };
+    if (response?.status === 409) {
+      const unknown = decodeProviderMutationCommitUnknownResponse(response.body, {
+        desiredRevision: 'required',
+        unknownError: MUTATION_UNKNOWN_ERROR,
+      });
+      return unknown
+        ? { status: 409, body: unknown }
+        : { status: 503, body: UNAVAILABLE };
     }
-    if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-    if (response.status === 422) return { status: 422, body: REJECTED };
-  } catch {
-    // Public delivery deliberately redacts malformed loopback and host failures.
+  } else if (response?.status === 200 && isListResponse(response.body)) {
+    return { status: 200, body: response.body };
   }
+  if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+  if (response?.status === 422) return { status: 422, body: REJECTED };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -186,7 +171,7 @@ function isRouting(value: unknown): value is Routing {
 
 function isRoute(value: unknown): value is Route {
   return isRecord(value)
-    && hasOnlyKeys(value, ['capability', 'primary', 'fallbacks', 'timeoutMs'])
+    && Object.keys(value).every((key) => ROUTE_KEYS.includes(key))
     && isCapability(value.capability)
     && isModelReference(value.primary)
     && Array.isArray(value.fallbacks)
@@ -211,22 +196,9 @@ function isRevision(value: unknown): value is number {
 }
 
 function isPositiveInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  return isSafeNonNegativeInteger(value) && value > 0;
 }
 
 function isNonEmptyText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

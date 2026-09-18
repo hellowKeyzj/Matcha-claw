@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 
 export const SEALED_SKILLS_ENDPOINTS = Object.freeze({
   status: '/api/sealed-skills/status',
@@ -66,20 +65,20 @@ export interface SealedSkillsTransport {
 
 export function createSealedSkillsTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SealedSkillsTransport {
   return {
-    readStatus: () => get(issuer, port, fetcher, SEALED_SKILLS_ENDPOINTS.status, 'sealed-skills:read', 'sealedSkills.status', 'sealed-skills-status', isSealedSkillsStatusResult),
-    export: (request) => post(issuer, port, fetcher, SEALED_SKILLS_ENDPOINTS.export, request, 'sealed-skills:package', 'sealedSkills.export', 'sealed-skills-export', isSealedSkillExportRequest, isSealedSkillPackageMutationResult),
-    install: (request) => post(issuer, port, fetcher, SEALED_SKILLS_ENDPOINTS.install, request, 'sealed-skills:package', 'sealedSkills.install', 'sealed-skills-install', isSealedSkillInstallRequest, isSealedSkillPackageMutationResult),
-    uninstall: (request) => post(issuer, port, fetcher, SEALED_SKILLS_ENDPOINTS.uninstall, request, 'sealed-skills:package', 'sealedSkills.uninstall', 'sealed-skills-uninstall', isSealedSkillUninstallRequest, isSealedSkillUninstallResult),
+    readStatus: () => get(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.status, 'sealed-skills:read', 'sealedSkills.status', 'sealed-skills-status', isSealedSkillsStatusResult),
+    export: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.export, request, 'sealed-skills:package', 'sealedSkills.export', 'sealed-skills-export', isSealedSkillExportRequest, isSealedSkillPackageMutationResult),
+    install: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.install, request, 'sealed-skills:package', 'sealedSkills.install', 'sealed-skills-install', isSealedSkillInstallRequest, isSealedSkillPackageMutationResult),
+    uninstall: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.uninstall, request, 'sealed-skills:package', 'sealedSkills.uninstall', 'sealed-skills-uninstall', isSealedSkillUninstallRequest, isSealedSkillUninstallResult),
   };
 }
 
 async function get<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SealedSkillsEndpoint,
   scope: string,
@@ -87,12 +86,12 @@ async function get<T>(
   subject: string,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SealedSkillsTransportResponse<T>> {
-  return send(issuer, port, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
 }
 
 async function post<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SealedSkillsEndpoint,
   request: unknown,
@@ -103,12 +102,12 @@ async function post<T>(
   isSuccess: (value: unknown) => value is T,
 ): Promise<SealedSkillsTransportResponse<T>> {
   if (!isRequest(request)) return rejectedResponse();
-  return send(issuer, port, fetcher, endpoint, 'POST', request, scope, capability, subject, isSuccess);
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'POST', request, scope, capability, subject, isSuccess);
 }
 
 async function send<T>(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   endpoint: SealedSkillsEndpoint,
   method: 'GET' | 'POST',
@@ -118,31 +117,21 @@ async function send<T>(
   subject: string,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SealedSkillsTransportResponse<T>> {
-  try {
-    const response = await fetcher(`http://127.0.0.1:${port}${endpoint}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint,
-          scope,
-          capability,
-          subject,
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(method === 'POST' ? { body: JSON.stringify(request) } : {}),
-    });
-    const body: unknown = await response.json();
-    if (response.status === 200 && isSuccess(body)) return { status: 200, body };
-    if (response.status === 404 && isSealedSkillsNotFoundEndpoint(endpoint) && isNotFoundResult(body)) {
-      return { status: 404, body };
-    }
-    if (isRejectedStatus(response.status) && isRejectedResult(body)) return { status: response.status, body };
-  } catch {
-    // Public Delivery never exposes loopback errors, native errors, plaintext, secrets, or paths.
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: endpoint,
+    issuer,
+    decision: { endpoint, scope, capability, subject },
+    method,
+    fetcher,
+    ...(method === 'POST' ? { body: request } : {}),
+  });
+  if (response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
+  if (response?.status === 404 && isSealedSkillsNotFoundEndpoint(endpoint) && isNotFoundResult(response.body)) {
+    return { status: 404, body: response.body };
+  }
+  if (response !== null && isRejectedStatus(response.status) && isRejectedResult(response.body)) {
+    return { status: response.status, body: response.body };
   }
   return unknownResponse();
 }
@@ -174,15 +163,15 @@ function isSealedSkillPackageEntry(value: unknown): value is SealedSkillPackageE
 }
 
 function isSealedSkillExportRequest(value: unknown): value is SealedSkillExportRequest {
-  return hasExactKeys(value, ['skillKey']) && isOpenClawSkillKey(value.skillKey);
+  return isRecord(value) && hasExactKeys(value, ['skillKey']) && isOpenClawSkillKey(value.skillKey);
 }
 
 function isSealedSkillInstallRequest(value: unknown): value is SealedSkillInstallRequest {
-  return hasExactKeys(value, ['packagePath']) && isPackagePath(value.packagePath);
+  return isRecord(value) && hasExactKeys(value, ['packagePath']) && isPackagePath(value.packagePath);
 }
 
 function isSealedSkillUninstallRequest(value: unknown): value is SealedSkillUninstallRequest {
-  return hasExactKeys(value, ['skillKey']) && isOpenClawSkillKey(value.skillKey);
+  return isRecord(value) && hasExactKeys(value, ['skillKey']) && isOpenClawSkillKey(value.skillKey);
 }
 
 function isSealedSkillPackageMutationResult(value: unknown): value is SealedSkillPackageMutationResult {
@@ -201,11 +190,11 @@ function isSealedSkillUninstallResult(value: unknown): value is SealedSkillUnins
 }
 
 function isRejectedResult(value: unknown): value is SealedSkillsTransportFailure {
-  return hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'rejected';
 }
 
 function isNotFoundResult(value: unknown): value is Readonly<{ outcome: 'notFound' }> {
-  return hasExactKeys(value, ['outcome']) && value.outcome === 'notFound';
+  return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'notFound';
 }
 
 function isSealedSkillsNotFoundEndpoint(endpoint: SealedSkillsEndpoint): boolean {
@@ -242,14 +231,6 @@ function isText(value: unknown, maxLength: number): value is string {
   return isBoundedText(value, maxLength) && value.length > 0;
 }
 
-function isBoundedText(value: unknown, maxLength: number): value is string {
-  return typeof value === 'string' && value.length <= maxLength && !value.includes('\0');
-}
-
-function isTimestamp(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
 function rejectedResponse<T>(): SealedSkillsTransportResponse<T> {
   return { status: 400, body: { outcome: 'rejected' } };
 }
@@ -258,20 +239,10 @@ function unknownResponse<T>(): SealedSkillsTransportResponse<T> {
   return { status: 503, body: { outcome: 'unknown' } };
 }
 
-function hasExactKeys(value: unknown, expected: readonly string[]): value is Record<string, unknown> {
-  return isRecord(value)
-    && Object.keys(value).length === expected.length
-    && expected.every((key) => Object.hasOwn(value, key));
-}
-
 function hasOnlyKeys(value: unknown, allowed: readonly string[]): value is Record<string, unknown> {
   return isRecord(value) && Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function hasRequiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
   return required.every((key) => Object.hasOwn(value, key));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

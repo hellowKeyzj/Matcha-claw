@@ -1,5 +1,6 @@
 import { logger } from '../../../../utils/logger';
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import {
   isSessionTraceEnabled,
   logSessionTrace,
@@ -7,7 +8,7 @@ import {
   traceHeader,
 } from './trace';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/sessions/model';
 const REJECTION_REASON_HEADER = 'x-runtime-host-session-model-rejection';
 const OPENCLAW_PEER_CODE_HEADER = 'x-runtime-host-session-model-openclaw-code';
 const OPENCLAW_PEER_MESSAGE_HEADER = 'x-runtime-host-session-model-openclaw-message';
@@ -69,10 +70,9 @@ export interface SessionModelSelectionTransport {
 
 export function createSessionModelSelectionTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionModelSelectionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionModelSelectionTransport {
-  const url = `http://127.0.0.1:${sessionModelSelectionTransportPort}/api/sessions/model`;
   return {
     async select(request: unknown, traceId?: string | null): Promise<SessionModelSelectionTransportResponse> {
       const startedAt = Date.now();
@@ -89,62 +89,64 @@ export function createSessionModelSelectionTransport(
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         modelSelectionId: summarizeIdentifier(request.input.modelSelectionId),
       });
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/sessions/model',
-              scope: 'sessions:write',
-              capability: 'sessions.patchModel',
-              subject: 'session-model-selection',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-            ...traceHeader(traceId),
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
-        logSessionTrace('electron.model-selection.response', traceId, {
-          status: response.status,
-          contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
-          elapsedMs: Date.now() - startedAt,
-        });
-        if (
-          response.status === 200
-          && isSessionModelSelectionResponse(body)
-          && body.outcome === 'target_rejected'
-          && isSessionTraceEnabled()
-        ) {
-          logger.warn('[SessionModelSelection] target rejected', {
-            adapter: request.input.endpoint.runtimeAdapterId,
-            reason: response.headers?.get(REJECTION_REASON_HEADER) ?? 'unclassified',
-            openclawCode: response.headers?.get(OPENCLAW_PEER_CODE_HEADER) ?? undefined,
-            openclawMessage: response.headers?.get(OPENCLAW_PEER_MESSAGE_HEADER) ?? undefined,
-            accountId: response.headers?.get(DIAGNOSTIC_ACCOUNT_HEADER) ?? undefined,
-            modelId: response.headers?.get(DIAGNOSTIC_MODEL_HEADER) ?? undefined,
-            protocol: response.headers?.get(DIAGNOSTIC_PROTOCOL_HEADER) ?? undefined,
-            authMode: response.headers?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? undefined,
-            modelSelectionId: request.input.modelSelectionId,
-            sessionKeyLength: request.input.sessionKey.length,
-            endpointSessionIdLength: request.input.endpointSessionId?.length,
-          });
-        }
-        if (response.status === 200 && isSessionModelSelectionResponse(body)) {
-          return { status: 200, body };
-        }
-        if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-        if (response.status === 422) return { status: 422, body: UNSUPPORTED };
-      } catch {
+      let diagnosticHeaders: Headers | null = null;
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'sessions:write',
+          capability: 'sessions.patchModel',
+          subject: 'session-model-selection',
+        },
+        method: 'POST',
+        fetcher: async (input, init) => {
+          const fetched = await fetcher(input, init);
+          diagnosticHeaders = fetched.headers;
+          return fetched;
+        },
+        body: request,
+        headers: traceHeader(traceId),
+      });
+      if (response === null) {
         logSessionTrace('electron.model-selection.failure', traceId, {
           elapsedMs: Date.now() - startedAt,
         });
-        // The public contract deliberately suppresses transport details.
+        return { status: 503, body: UNAVAILABLE };
       }
+      const body = response.body;
+      const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
+      logSessionTrace('electron.model-selection.response', traceId, {
+        status: response.status,
+        contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
+        elapsedMs: Date.now() - startedAt,
+      });
+      if (
+        response.status === 200
+        && isSessionModelSelectionResponse(body)
+        && body.outcome === 'target_rejected'
+        && isSessionTraceEnabled()
+      ) {
+        logger.warn('[SessionModelSelection] target rejected', {
+          adapter: request.input.endpoint.runtimeAdapterId,
+          reason: diagnosticHeaders?.get(REJECTION_REASON_HEADER) ?? 'unclassified',
+          openclawCode: diagnosticHeaders?.get(OPENCLAW_PEER_CODE_HEADER) ?? undefined,
+          openclawMessage: diagnosticHeaders?.get(OPENCLAW_PEER_MESSAGE_HEADER) ?? undefined,
+          accountId: diagnosticHeaders?.get(DIAGNOSTIC_ACCOUNT_HEADER) ?? undefined,
+          modelId: diagnosticHeaders?.get(DIAGNOSTIC_MODEL_HEADER) ?? undefined,
+          protocol: diagnosticHeaders?.get(DIAGNOSTIC_PROTOCOL_HEADER) ?? undefined,
+          authMode: diagnosticHeaders?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? undefined,
+          modelSelectionId: request.input.modelSelectionId,
+          sessionKeyLength: request.input.sessionKey.length,
+          endpointSessionIdLength: request.input.endpointSessionId?.length,
+        });
+      }
+      if (response.status === 200 && isSessionModelSelectionResponse(body)) {
+        return { status: 200, body };
+      }
+      if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response.status === 422) return { status: 422, body: UNSUPPORTED };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -218,10 +220,6 @@ function isEndpoint(value: unknown): value is Endpoint {
     && value.runtimeInstanceId === 'local';
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0
@@ -231,11 +229,6 @@ function isIdentifier(value: unknown): value is string {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint < 32 || (codePoint >= 127 && codePoint <= 159);
     });
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasAllowedKeys(

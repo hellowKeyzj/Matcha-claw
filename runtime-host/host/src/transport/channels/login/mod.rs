@@ -5,7 +5,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const OPERATION_ID: &str = "channels.login";
 const AUTHORIZATION_ENDPOINT: &str = "/api/channels/login";

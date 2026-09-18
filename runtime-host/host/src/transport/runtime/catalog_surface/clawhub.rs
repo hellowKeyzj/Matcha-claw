@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-use super::server::{Request, Response, now_millis};
+use super::handler::{Request, Response, now_millis};
 
 pub(super) async fn handle_search(
     request: Request,

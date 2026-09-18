@@ -10,7 +10,7 @@ use std::{
 use arc_swap::ArcSwap;
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use platform::endpoint::runtime_address::RuntimeEndpoint;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 use super::{
     abort::SessionAbortOutcome,
@@ -22,6 +22,7 @@ use super::{
     },
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::SessionDeleteOutcome,
+    events::SessionDeltaSource,
     model_selection::{
         MatchaSessionModelRuntimeCommand, SessionModelSelectionOutcome,
         SessionModelSelectionRejection,
@@ -63,7 +64,7 @@ pub(crate) struct SessionShared {
     provider_handle: ProviderHandle,
     snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
-    session_delta: Option<mpsc::Sender<SessionDelta>>,
+    session_delta: Option<SessionDeltaSource>,
     epoch: u64,
 }
 
@@ -76,7 +77,7 @@ impl SessionOwner {
     pub(crate) fn new(
         runtime_directory: Arc<RuntimeDriverDirectory>,
         provider_handle: ProviderHandle,
-        session_delta: Option<mpsc::Sender<SessionDelta>>,
+        session_delta: Option<SessionDeltaSource>,
     ) -> (Self, Arc<ArcSwap<SessionSnapshot>>) {
         let snapshot = Arc::new(ArcSwap::new(Arc::new(SessionSnapshot {
             states: HashMap::new(),
@@ -141,8 +142,8 @@ impl SessionShared {
     }
 
     fn publish_session_delta(&self, delta: SessionDelta) {
-        if let Some(sink) = &self.session_delta {
-            let _ = sink.try_send(delta);
+        if let Some(source) = &self.session_delta {
+            source.publish(delta);
         }
     }
 
@@ -579,7 +580,7 @@ impl SessionLane {
                     *reason,
                 )
                 .await;
-            return Self::map_apply_result(result);
+            return Self::map_apply_result(shared, result);
         }
 
         if let Some(state) = &self.state {
@@ -600,7 +601,7 @@ impl SessionLane {
                     super::state::SessionApplyResult::Applied(delta) => {
                         shared.publish_session_delta(delta);
                     }
-                    result => return Self::map_apply_result(result),
+                    result => return Self::map_apply_result(shared, result),
                 }
             }
         }
@@ -617,7 +618,7 @@ impl SessionLane {
                 event.changes,
             )
             .await;
-        Self::map_apply_result(result)
+        Self::map_apply_result(shared, result)
     }
 
     async fn apply_changes_to_state(
@@ -701,9 +702,13 @@ impl SessionLane {
         }
     }
 
-    fn map_apply_result(result: super::state::SessionApplyResult) -> SessionIngestOutcome {
+    fn map_apply_result(
+        shared: &SessionShared,
+        result: super::state::SessionApplyResult,
+    ) -> SessionIngestOutcome {
         match result {
             super::state::SessionApplyResult::Applied(delta) => {
+                shared.publish_session_delta(delta.clone());
                 SessionIngestOutcome::Applied(delta)
             }
             super::state::SessionApplyResult::Duplicate { cursor } => {
@@ -1402,6 +1407,7 @@ fn send_outcome_runtime(
             phase,
             active_run_id,
             issue,
+            run_progress: None,
             runtime_activity: None,
             error_detail: None,
         },

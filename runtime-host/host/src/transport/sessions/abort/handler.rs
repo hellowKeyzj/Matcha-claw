@@ -1,0 +1,153 @@
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::Value;
+use tokio::sync::Mutex;
+
+use crate::transport::common::authorization::CapabilityDecisionVerifier;
+
+use super::{SessionAbortDelivery, SessionAbortRequest};
+
+const AUTHORIZATION_HEADER: &str = "authorization";
+const BEARER_PREFIX: &str = "Bearer ";
+
+pub(crate) async fn handle(
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    session: crate::sessions::SessionHandle,
+) -> Response {
+    handle_request(
+        Request {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            headers: headers.to_vec(),
+            body: body.to_vec(),
+        },
+        verifier,
+        session,
+    )
+    .await
+}
+
+async fn handle_request(
+    request: Request,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    session: crate::sessions::SessionHandle,
+) -> Response {
+    if request.method != "POST" || request.path != "/api/sessions/abort" {
+        return Response::not_found();
+    }
+    let Some(authorization) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+    else {
+        return Response::unauthorized();
+    };
+    let value = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => return Response::bad_request(),
+    };
+    let mut verifier = verifier.lock().await;
+    let request =
+        match SessionAbortRequest::decode(value, authorization, &mut verifier, now_millis()) {
+            Ok(request) => request,
+            Err(super::DecodeError::Unauthorized) => return Response::unauthorized(),
+            Err(super::DecodeError::Invalid) => return Response::bad_request(),
+        };
+    let command = match request.into_command() {
+        Ok(command) => command,
+        Err(_) => return Response::bad_request(),
+    };
+    if matches!(
+        command.endpoint,
+        crate::sessions::abort::NativeEndpoint::Unsupported
+    ) {
+        return Response::from_delivery(SessionAbortDelivery::Unsupported);
+    }
+    drop(verifier);
+    let outcome = match session.abort_session(command).await {
+        Ok(outcome) => outcome,
+        Err(_) => return Response::unavailable(),
+    };
+    Response::from_delivery(outcome.into())
+}
+
+struct Request {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) body: Value,
+}
+
+impl Response {
+    fn bad_request() -> Self {
+        Self::fixed(400, "Session abort request is invalid")
+    }
+
+    fn unauthorized() -> Self {
+        Self::fixed(401, "Session abort authorization is invalid")
+    }
+
+    fn not_found() -> Self {
+        Self::fixed(404, "Session abort route is not available")
+    }
+
+    fn unavailable() -> Self {
+        Self::from_delivery(SessionAbortDelivery::Unavailable)
+    }
+
+    pub(crate) fn deadline() -> Self {
+        Self::from_delivery(SessionAbortDelivery::Outcome(
+            crate::sessions::abort::SessionAbortOutcome::Unknown,
+        ))
+    }
+
+    fn fixed(status: u16, error: &'static str) -> Self {
+        Self {
+            status,
+            body: serde_json::json!({ "success": false, "error": error }),
+        }
+    }
+
+    fn from_delivery(delivery: SessionAbortDelivery) -> Self {
+        Self {
+            status: delivery.status_code(),
+            body: delivery.body(),
+        }
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use serde_json::json;
+
+    use super::Response;
+
+    #[test]
+    fn deadline_projects_unknown_without_reporting_success_or_invalid_request() {
+        assert_eq!(Response::deadline().status, 200);
+        assert_eq!(Response::deadline().body, json!({ "outcome": "unknown" }));
+        assert_ne!(Response::deadline().status, 400);
+    }
+}

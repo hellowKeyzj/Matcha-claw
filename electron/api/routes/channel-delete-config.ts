@@ -4,7 +4,7 @@ import type {
   ChannelDeleteConfigTransport,
 } from '../../main/runtime-host-delivery/transport/channels/delete-config';
 import { parseJsonBody, sendJson } from '../route-utils';
-import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/catalog';
+import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;

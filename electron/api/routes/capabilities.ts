@@ -6,7 +6,6 @@ import {
   type RuntimeScope,
 } from '../../desktop-contract/runtime-address';
 import {
-  RuntimeHostControlError,
   type RuntimeHostControlCommand,
   type RuntimeHostControlOutcome,
   type RuntimeHostJsonObject,
@@ -16,7 +15,7 @@ import {
   decodeSkillsStatus,
   projectSkillsStatus,
 } from '../../main/runtime-host-delivery/transport/skills/management';
-import type { HostApiContext } from '../context';
+import type { HostApiContext, RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
 import {
   logSessionTrace,
@@ -91,10 +90,11 @@ const OPENCLAW_MCP_APP_UNAVAILABLE = {
   success: false,
   error: 'OpenClaw MCP app request is unavailable',
 } as const;
-type CapabilityRouteContext = SessionCapabilityRouteDeps & Pick<
-  HostApiContext,
-  'providerRoutingTransport' | 'taskManagerTransport' | 'runtimeHost' | 'workspaceMediaTransport' | 'agentsTransport'
->;
+type CapabilityRouteContext = SessionCapabilityRouteDeps
+  & Pick<HostApiContext, 'runtimeHost'>
+  & RuntimeHostTransportContext<
+    'providerRoutingTransport' | 'taskManagerTransport' | 'workspaceMediaTransport' | 'agentsTransport' | 'cronTransport'
+  >;
 
 type TaskOperation =
   | 'tasks.list'
@@ -178,7 +178,7 @@ export async function handleCapabilityRoutes(
 
   if (isRecord(body) && body.id === 'workspace.media') {
     try {
-      const response = await deps.workspaceMediaTransport.execute(body);
+      const response = await deps.runtimeHostTransports.workspaceMediaTransport.execute(body);
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, { success: false, error: 'Workspace media is unavailable' });
@@ -190,7 +190,7 @@ export async function handleCapabilityRoutes(
     const traceId = readTraceHeader(req.headers);
     logSessionTrace('capability.subagent.configuration.dispatch', traceId, summarizeSubagentConfigurationRequest(body));
     try {
-      const response = await deps.agentsTransport.execute(body, traceId);
+      const response = await deps.runtimeHostTransports.agentsTransport.execute(body, traceId);
       logSessionTrace('capability.subagent.configuration.response', traceId, {
         status: response.status,
         contract: summarizeSubagentConfigurationResponse(response.body),
@@ -222,18 +222,17 @@ export async function handleCapabilityRoutes(
     }
 
     try {
-      const outcome = await deps.runtimeHost.command({
-        name: 'openclaw.cron.manual-trigger',
-        input: { jobId },
-      });
-      const result = decodeCronTriggerResult(outcome);
-      sendJson(res, result ? 200 : 503, result ?? CRON_SERVICE_UNAVAILABLE);
-    } catch (error) {
-      if (error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery') {
+      const response = await deps.runtimeHostTransports.cronTransport.trigger(body);
+      const result = decodeCronTriggerResult(response.body);
+      if (result) {
+        sendJson(res, 200, result);
+      } else if (response.status === 409) {
         sendJson(res, 200, { success: true, result: { outcome: 'outcome-unknown' } });
       } else {
         sendJson(res, 503, CRON_SERVICE_UNAVAILABLE);
       }
+    } catch {
+      sendJson(res, 503, CRON_SERVICE_UNAVAILABLE);
     }
     return true;
   }
@@ -300,12 +299,12 @@ export async function handleCapabilityRoutes(
       sendJson(res, 400, PROVIDER_ROUTING_INVALID);
       return true;
     }
-    if (!deps.providerRoutingTransport) {
+    if (!deps.runtimeHostTransports.providerRoutingTransport) {
       sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
       return true;
     }
     try {
-      const response = await deps.providerRoutingTransport.execute(body);
+      const response = await deps.runtimeHostTransports.providerRoutingTransport.execute(body);
       if (!isProviderRoutingResponse(response.body)) {
         sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
       } else {
@@ -325,7 +324,7 @@ export async function handleCapabilityRoutes(
       return true;
     }
     try {
-      const response = await deps.taskManagerTransport[taskDispatch[operation]](body);
+      const response = await deps.runtimeHostTransports.taskManagerTransport[taskDispatch[operation]](body);
       if (!isTaskManagerResponse(response.body, operation)) {
         sendJson(res, 503, TASK_MANAGER_UNAVAILABLE);
       } else {
@@ -823,33 +822,31 @@ function decodeCronTriggerJobId(value: unknown): string | null {
 }
 
 function decodeCronTriggerResult(
-  outcome: RuntimeHostControlOutcome,
+  value: unknown,
 ): { success: true; result: {
   outcome: 'accepted' | 'skipped';
   reason?: 'already-running' | 'not-due' | 'invalid-spec' | 'disabled' | 'stopped';
 } } | null {
-  if (!isRecord(outcome)
-    || !hasExactKeys(outcome, ['kind', 'result'])
-    || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result)
-    || !hasExactKeys(outcome.result, ['result'])
-    || !isRecord(outcome.result.result)
-    || !hasOnlyKeys(outcome.result.result, ['outcome', 'reason'])
-    || !Object.hasOwn(outcome.result.result, 'outcome')
-    || (outcome.result.result.outcome !== 'accepted'
-      && outcome.result.result.outcome !== 'skipped')
-    || (outcome.result.result.reason !== undefined
-      && !isCronTriggerSkipReason(outcome.result.result.reason))) {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['success', 'result'])
+    || value.success !== true
+    || !isRecord(value.result)
+    || !hasOnlyKeys(value.result, ['outcome', 'reason'])
+    || !Object.hasOwn(value.result, 'outcome')
+    || (value.result.outcome !== 'accepted'
+      && value.result.outcome !== 'skipped')
+    || (value.result.reason !== undefined
+      && !isCronTriggerSkipReason(value.result.reason))) {
     return null;
   }
-  if (outcome.result.result.outcome !== 'skipped' && outcome.result.result.reason !== undefined) {
+  if (value.result.outcome !== 'skipped' && value.result.reason !== undefined) {
     return null;
   }
   return {
     success: true,
     result: {
-      outcome: outcome.result.result.outcome,
-      ...(outcome.result.result.reason === undefined ? {} : { reason: outcome.result.result.reason }),
+      outcome: value.result.outcome,
+      ...(value.result.reason === undefined ? {} : { reason: value.result.reason }),
     },
   };
 }

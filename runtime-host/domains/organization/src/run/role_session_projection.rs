@@ -5,9 +5,9 @@ use crate::{
     run::query::{TeamRunQuery, TeamRunQueryOutcome, query_team_run},
 };
 
-/// Fixed renderer-safe Team role-session index. The opaque reference identifies only the local
-/// session record; provider session IDs, endpoints, agents, workspaces, receipts, and payloads
-/// never cross this boundary.
+/// Fixed renderer-safe Team role-session index. The session_ref identifies only the role session
+/// slot; provider session IDs, endpoints, agents, workspaces, receipts, and payloads never cross
+/// this boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamRoleSessionProjection {
@@ -94,7 +94,7 @@ pub fn query_team_role_sessions(
                         team.as_str().to_owned(),
                         binding.team_run().as_str().to_owned(),
                         binding.role().as_str().to_owned(),
-                        binding.local_session().as_str().to_owned(),
+                        binding.session_ref().as_str().to_owned(),
                     )
                 }));
             }

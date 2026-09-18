@@ -9,7 +9,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "session.management";
 const OPERATION_GET: &str = "sessions.permission.get";

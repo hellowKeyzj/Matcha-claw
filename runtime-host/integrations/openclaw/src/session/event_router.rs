@@ -97,6 +97,7 @@ mod tests {
                 sequence,
                 state: ChatState::Delta,
                 status_phase: None,
+                status_retry: None,
                 delta_text: Some(text.to_owned()),
                 replace: false,
                 message_text: None,

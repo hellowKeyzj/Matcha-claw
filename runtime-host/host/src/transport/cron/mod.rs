@@ -12,8 +12,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod broker;
-pub(crate) mod server;
+pub(crate) mod handler;
 
 pub(crate) const LIST_PATH: &str = "/api/cron/jobs";
 pub(crate) const CREATE_PATH: &str = "/api/cron/jobs/create";

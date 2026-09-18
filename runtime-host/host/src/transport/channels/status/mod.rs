@@ -5,7 +5,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const ACCOUNTS_OPERATION_ID: &str = "channels.status.read";
 const SNAPSHOT_OPERATION_ID: &str = "channels.snapshot.read";

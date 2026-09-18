@@ -6,7 +6,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "session.abort";
 const OPERATION_ID: &str = "sessions.abort";

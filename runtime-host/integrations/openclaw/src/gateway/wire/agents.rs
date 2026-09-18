@@ -438,11 +438,51 @@ pub enum AgentWaitStatus {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentWaitTimeoutPhase {
+    Queue,
+    Preflight,
+    Provider,
+    PostTurn,
+    GatewayDraining,
+}
+
+impl AgentWaitTimeoutPhase {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queue" => Some(Self::Queue),
+            "preflight" => Some(Self::Preflight),
+            "provider" => Some(Self::Provider),
+            "post_turn" => Some(Self::PostTurn),
+            "gateway_draining" => Some(Self::GatewayDraining),
+            _ => None,
+        }
+    }
+
+    pub const fn is_hard_timeout(self) -> bool {
+        matches!(self, Self::Preflight | Self::Provider | Self::PostTurn)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentWaitResult {
     pub status: AgentWaitStatus,
     pub started_at: Option<u64>,
     pub ended_at: Option<u64>,
+    pub timeout_phase: Option<AgentWaitTimeoutPhase>,
+    pub provider_started: Option<bool>,
+    pub pending_error: bool,
+    pub final_assistant_text: Option<String>,
+}
+
+impl AgentWaitResult {
+    pub fn is_hard_timeout(&self) -> bool {
+        !self.pending_error
+            && (self
+                .timeout_phase
+                .is_some_and(AgentWaitTimeoutPhase::is_hard_timeout)
+                || (self.status == AgentWaitStatus::Timeout && self.provider_started == Some(true)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -656,6 +696,34 @@ struct AgentWaitWire {
     status: String,
     started_at: Option<WaitTimestampWire>,
     ended_at: Option<WaitTimestampWire>,
+    timeout_phase: Option<String>,
+    provider_started: Option<bool>,
+    #[serde(default)]
+    pending_error: bool,
+    terminal_reply: Option<AgentTerminalReplyWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "disposition", rename_all = "camelCase")]
+enum AgentTerminalReplyWire {
+    #[serde(rename = "visible")]
+    Visible { text: String },
+    #[serde(rename = "silent")]
+    Silent,
+    #[serde(rename = "empty")]
+    Empty {
+        #[serde(rename = "code")]
+        _code: Option<String>,
+    },
+}
+
+impl AgentTerminalReplyWire {
+    fn visible_text(self) -> Option<String> {
+        match self {
+            Self::Visible { text } if valid_string(&text) => Some(text),
+            Self::Visible { .. } | Self::Silent | Self::Empty { .. } => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -697,10 +765,20 @@ impl AgentWaitWire {
             "pending" => AgentWaitStatus::Pending,
             _ => return Err(WireError::InvalidAgentsWait),
         };
+        let timeout_phase = self
+            .timeout_phase
+            .as_deref()
+            .and_then(AgentWaitTimeoutPhase::parse);
         Ok(AgentWaitResult {
             status,
             started_at,
             ended_at,
+            timeout_phase,
+            provider_started: self.provider_started,
+            pending_error: self.pending_error,
+            final_assistant_text: self
+                .terminal_reply
+                .and_then(AgentTerminalReplyWire::visible_text),
         })
     }
 }
@@ -1242,6 +1320,10 @@ mod tests {
                 status: AgentWaitStatus::Pending,
                 started_at: Some(1),
                 ended_at: None,
+                timeout_phase: None,
+                provider_started: None,
+                pending_error: false,
+                final_assistant_text: None,
             },
         );
         assert_eq!(
@@ -1257,6 +1339,10 @@ mod tests {
                 status: AgentWaitStatus::Timeout,
                 started_at: None,
                 ended_at: None,
+                timeout_phase: None,
+                provider_started: None,
+                pending_error: false,
+                final_assistant_text: None,
             },
         );
         assert_eq!(
@@ -1273,6 +1359,10 @@ mod tests {
                 status: AgentWaitStatus::Completed,
                 started_at: None,
                 ended_at: Some(2),
+                timeout_phase: None,
+                provider_started: None,
+                pending_error: false,
+                final_assistant_text: None,
             },
         );
 
@@ -1286,6 +1376,90 @@ mod tests {
                 decode_wait(response(payload), "run-1"),
                 Err(WireError::InvalidAgentsWait),
             );
+        }
+    }
+
+    #[test]
+    fn wait_decode_classifies_hard_timeout_metadata() {
+        let ordinary_timeout = decode_wait(
+            response(json!({
+                "runId": "run-1",
+                "status": "timeout",
+            })),
+            "run-1",
+        )
+        .unwrap();
+        assert!(!ordinary_timeout.is_hard_timeout());
+
+        let provider_timeout = decode_wait(
+            response(json!({
+                "runId": "run-1",
+                "status": "timeout",
+                "timeoutPhase": "provider",
+                "providerStarted": true,
+            })),
+            "run-1",
+        )
+        .unwrap();
+        assert_eq!(
+            provider_timeout.timeout_phase,
+            Some(AgentWaitTimeoutPhase::Provider)
+        );
+        assert!(provider_timeout.is_hard_timeout());
+
+        let pending_error = decode_wait(
+            response(json!({
+                "runId": "run-1",
+                "status": "timeout",
+                "providerStarted": true,
+                "pendingError": true,
+            })),
+            "run-1",
+        )
+        .unwrap();
+        assert!(!pending_error.is_hard_timeout());
+    }
+
+    #[test]
+    fn wait_decode_projects_visible_terminal_reply_as_final_assistant_text() {
+        let result = decode_wait(
+            response(json!({
+                "runId": "run-1",
+                "status": "completed",
+                "startedAt": 1,
+                "endedAt": 2,
+                "terminalReply": { "disposition": "visible", "text": "canonical reply" },
+                "terminalReceipt": { "private": true },
+            })),
+            "run-1",
+        )
+        .unwrap();
+        assert_eq!(result.status, AgentWaitStatus::Completed);
+        assert_eq!(result.started_at, Some(1));
+        assert_eq!(result.ended_at, Some(2));
+        assert_eq!(
+            result.final_assistant_text.as_deref(),
+            Some("canonical reply")
+        );
+    }
+
+    #[test]
+    fn wait_decode_keeps_non_visible_terminal_reply_silent() {
+        for terminal_reply in [
+            json!({ "disposition": "silent" }),
+            json!({ "disposition": "empty", "code": "message-tool-not-called" }),
+            json!({ "disposition": "visible", "text": "" }),
+        ] {
+            let result = decode_wait(
+                response(json!({
+                    "runId": "run-1",
+                    "status": "completed",
+                    "terminalReply": terminal_reply,
+                })),
+                "run-1",
+            )
+            .unwrap();
+            assert_eq!(result.final_assistant_text, None);
         }
     }
 
@@ -1307,6 +1481,10 @@ mod tests {
                 status: AgentWaitStatus::Timeout,
                 started_at: None,
                 ended_at: None,
+                timeout_phase: None,
+                provider_started: None,
+                pending_error: false,
+                final_assistant_text: None,
             },
         );
     }

@@ -1,8 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import { decodeSessionView } from './session-contract';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
-
-const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = { success: false, error: 'Session timeline is unavailable' } as const;
 
 type Endpoint = Readonly<{
@@ -39,7 +38,7 @@ export interface SessionTimelineTransport {
 
 export function createSessionTimelineTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionTimelineTransport {
   const execute = async (request: unknown, operation: TimelineRequest['operationId'], traceId?: string | null): Promise<SessionTimelineTransportResponse> => {
@@ -57,43 +56,40 @@ export function createSessionTimelineTransport(
       limit: request.input.limit ?? null,
       mode: request.input.mode ?? null,
     });
-    try {
-      const response = await fetcher(`http://127.0.0.1:${sessionTransportPort}${endpoint}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${issuer.signDecision({
-            principal: 'electron-main-local',
-            endpoint,
-            scope: 'sessions:read',
-            capability: 'session.management',
-            subject: 'session-timeline',
-            expiresAt: Date.now() + DECISION_TTL_MS,
-            revision: '1',
-          })}`,
-          'Content-Type': 'application/json',
-          ...traceHeader(traceId),
-        },
-        body: JSON.stringify(request),
-      });
-      const body: unknown = await response.json();
-      const view = response.status === 200 ? decodeSessionView(body) : null;
-      logSessionTrace('electron.timeline.response', traceId, {
-        operation,
-        status: response.status,
-        contract: view ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
-        elapsedMs: Date.now() - startedAt,
-      });
-      if (response.status === 200 && view && view.sessionKey === request.input.sessionKey) {
-        return { status: 200, body: view };
-      }
-      if (response.status === 503 && isUnavailable(body)) return { status: 503, body: UNAVAILABLE };
-    } catch {
+    const response = await sendLoopbackJson({
+      port: runtimeHostTransportPort,
+      path: endpoint,
+      issuer,
+      decision: {
+        endpoint,
+        scope: 'sessions:read',
+        capability: 'session.management',
+        subject: 'session-timeline',
+      },
+      method: 'POST',
+      fetcher,
+      body: request,
+      headers: traceHeader(traceId),
+    });
+    if (response === null) {
       logSessionTrace('electron.timeline.failure', traceId, {
         operation,
         elapsedMs: Date.now() - startedAt,
       });
-      // The sealed boundary never projects peer or transport details.
+      return { status: 503, body: UNAVAILABLE };
     }
+    const body = response.body;
+    const view = response.status === 200 ? decodeSessionView(body) : null;
+    logSessionTrace('electron.timeline.response', traceId, {
+      operation,
+      status: response.status,
+      contract: view ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
+      elapsedMs: Date.now() - startedAt,
+    });
+    if (response.status === 200 && view && view.sessionKey === request.input.sessionKey) {
+      return { status: 200, body: view };
+    }
+    if (response.status === 503 && isUnavailable(body)) return { status: 503, body: UNAVAILABLE };
     return { status: 503, body: UNAVAILABLE };
   };
   return {
@@ -127,8 +123,7 @@ function isInput(value: unknown, operation: TimelineRequest['operationId']): val
     ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit']
     : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical'];
   if (!Object.keys(value).every((key) => allowed.includes(key))) return false;
-  if (value.limit !== undefined
-    && (typeof value.limit !== 'number' || !Number.isSafeInteger(value.limit) || value.limit < 0 || value.limit > 200)) return false;
+  if (value.limit !== undefined && (!isSafeNonNegativeInteger(value.limit) || value.limit > 200)) return false;
   if (value.endpointSessionId !== undefined && !isBoundedId(value.endpointSessionId)) return false;
   if (operation === 'sessions.load') {
     return value.mode === undefined && value.offset === undefined && value.includeCanonical === undefined;
@@ -138,7 +133,7 @@ function isInput(value: unknown, operation: TimelineRequest['operationId']): val
     && (value.mode === 'latest'
       ? value.offset === undefined
       : value.offset === undefined
-        || (typeof value.offset === 'number' && Number.isSafeInteger(value.offset) && value.offset >= 0));
+        || isSafeNonNegativeInteger(value.offset));
 }
 
 function isIdentity(value: unknown): value is Identity {
@@ -171,13 +166,4 @@ function isBoundedId(value: unknown): value is string {
 function isUnavailable(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['success', 'error'])
     && value.success === false && value.error === UNAVAILABLE.error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

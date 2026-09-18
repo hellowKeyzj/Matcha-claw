@@ -466,6 +466,18 @@ async fn execute_team_runtime(
                 .await
                 .ok()?,
         ),
+        TeamRuntimeCommand::RunStartConfirm {
+            run_id,
+            proposal_id,
+        } => TeamRuntimeCommandOutcome::RunStartConfirm(
+            owner.run_start_confirm(run_id, proposal_id).await.ok()?,
+        ),
+        TeamRuntimeCommand::RunStartContinue {
+            run_id,
+            proposal_id,
+        } => TeamRuntimeCommandOutcome::RunStartContinue(
+            owner.run_start_continue(run_id, proposal_id).await.ok()?,
+        ),
         TeamRuntimeCommand::NodePromptRetryDue { run_id } => {
             TeamRuntimeCommandOutcome::NodePromptRetryDue(
                 owner.node_prompt_retry_due(run_id).await.ok()?,
@@ -849,6 +861,13 @@ pub(super) fn team_runtime_command(
         "team.graphImportYaml" => decode_team_graph_import(input, target),
         "team.runDiagnostics" => decode_team_run_diagnostics(input, target),
         "team.roleMessageSubmit" => decode_team_role_message(input, target),
+        "team.proposalConfirm" | "team.runStartConfirm" => {
+            decode_team_run_start_confirm(input, target)
+        }
+        "team.proposalContinue"
+        | "team.proposalCancel"
+        | "team.runStartContinue"
+        | "team.runStartReject" => decode_team_run_start_continue(input, target),
         "team.triggerFire" => decode_team_trigger(input, target),
         "team.approvalResolve" => decode_team_approval(input, target),
         "team.runCancel" => decode_team_run_cancel(input, target),
@@ -975,6 +994,36 @@ fn team_runtime_outcome_with_context(
             Ok(organization::RoleChatAdmissionOutcome::OutcomeUnknown) | Err(_) => {
                 CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "outcome-unknown" })))
             }
+        },
+        TeamRuntimeCommandOutcome::RunStartConfirm(result) => match result {
+            Ok(organization::ConfirmRunStartOutcome::Started)
+            | Ok(organization::ConfirmRunStartOutcome::Replayed) => {
+                CommandOutcome::succeeded(CommandResult::private(json!({
+                    "success": true,
+                    "outcome": "started",
+                })))
+            }
+            Ok(organization::ConfirmRunStartOutcome::Intake)
+            | Ok(organization::ConfirmRunStartOutcome::ProposalMismatch) => CommandOutcome::rejected(
+                RejectionCode::Failed,
+                "Team run start proposal was rejected.",
+            ),
+            Err(_) => CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "outcome-unknown" }))),
+        },
+        TeamRuntimeCommandOutcome::RunStartContinue(result) => match result {
+            Ok(organization::ContinueRunDiscussionOutcome::Intake)
+            | Ok(organization::ContinueRunDiscussionOutcome::Replayed) => {
+                CommandOutcome::succeeded(CommandResult::private(json!({
+                    "success": true,
+                    "outcome": "intake",
+                })))
+            }
+            Ok(organization::ContinueRunDiscussionOutcome::AlreadyStarted)
+            | Ok(organization::ContinueRunDiscussionOutcome::ProposalMismatch) => CommandOutcome::rejected(
+                RejectionCode::Failed,
+                "Team run start proposal was rejected.",
+            ),
+            Err(_) => CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "outcome-unknown" }))),
         },
         TeamRuntimeCommandOutcome::RunSnapshotInvalidInput => invalid_input(),
         TeamRuntimeCommandOutcome::RunSnapshot {
@@ -1514,6 +1563,49 @@ fn team_run_diagnostics_unavailable_section_name(
         organization::TeamRunDiagnosticsUnavailableSection::Transcripts => "transcripts",
         organization::TeamRunDiagnosticsUnavailableSection::RawPayloads => "raw_payloads",
     }
+}
+
+fn decode_team_run_start_confirm(
+    input: &serde_json::Map<String, Value>,
+    target: &Value,
+) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    let (_, run_id) = decode_team_target(target, input, false)?;
+    let proposal_id = decode_start_proposal_id(input)?;
+    Ok(TeamRuntimeCommand::RunStartConfirm {
+        run_id,
+        proposal_id,
+    })
+}
+
+fn decode_team_run_start_continue(
+    input: &serde_json::Map<String, Value>,
+    target: &Value,
+) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
+    let (_, run_id) = decode_team_target(target, input, false)?;
+    let proposal_id = decode_start_proposal_id(input)?;
+    Ok(TeamRuntimeCommand::RunStartContinue {
+        run_id,
+        proposal_id,
+    })
+}
+
+fn decode_start_proposal_id(
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, TeamRuntimeDecodeError> {
+    if !input.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "runId" | "teamId" | "proposalId" | "idempotencyKey"
+        )
+    }) {
+        return Err(TeamRuntimeDecodeError::InvalidInput);
+    }
+    input
+        .get("proposalId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)
 }
 
 fn decode_team_run_cancel(
@@ -3165,6 +3257,7 @@ fn team_run_public_snapshot_legacy_json(
         "unavailableSections": team_public_unavailable_sections_legacy_json(snapshot, roles.is_some()),
         "diagnostics": team_public_diagnostics_legacy_json(snapshot.diagnostics()),
         "events": snapshot.events().iter().map(team_public_event_legacy_json).collect::<Vec<_>>(),
+        "startGate": team_run_start_gate_legacy_json(snapshot.run()),
         "nextEventCursor": snapshot.next_event_cursor(),
     })
 }
@@ -3207,7 +3300,7 @@ pub(super) fn team_role_binding_legacy_json(
         "teamId": binding.team().as_str(),
         "runId": binding.team_run().as_str(),
         "roleId": binding.role().as_str(),
-        "sessionRef": binding.local_session().as_str(),
+        "sessionRef": binding.session_ref().as_str(),
         "status": "available",
     }))
 }
@@ -3398,6 +3491,36 @@ fn team_public_diagnostics_legacy_json(
             "events": counts.events(),
         },
     })
+}
+
+fn team_run_start_gate_legacy_json(
+    run: &organization::run::public_projection::TeamRunPublicRun,
+) -> Value {
+    let proposal = match run.start_gate() {
+        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending => {
+            Some(json!({
+                "proposalId": run.proposal_id(),
+                "taskSummary": run.proposal_summary().unwrap_or_default(),
+            }))
+        }
+        _ => None,
+    };
+    json!({
+        "status": team_run_start_gate_status_name(run.start_gate()),
+        "proposal": proposal,
+    })
+}
+
+fn team_run_start_gate_status_name(
+    status: organization::run::public_projection::TeamRunPublicStartGate,
+) -> &'static str {
+    match status {
+        organization::run::public_projection::TeamRunPublicStartGate::Intake => "intake",
+        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending => {
+            "proposal_pending"
+        }
+        organization::run::public_projection::TeamRunPublicStartGate::Started => "started",
+    }
 }
 
 fn team_run_status_from_public_snapshot(

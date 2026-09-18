@@ -7,7 +7,7 @@
 - `LEGACY-REJECTED`：path 仍注册，返回明确 bad request；它是当前可观察行为。
 - `main-owned`：Electron 在 child 前处理，见 [scope.md](scope.md)。
 
-Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/capabilities.ts)、[sessions.ts](../../electron/api/routes/sessions.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[channels.ts](../../electron/api/routes/channels.ts)、[providers.ts](../../electron/api/routes/providers.ts)、[runtime-topology.ts](../../electron/api/routes/runtime-topology.ts) 等 route 维持；Rust child 的 fixed loopback/control transports 在 [runtime-host/host/src/transport/](../../runtime-host/host/src/transport/) 与 [runtime-host/host/src/control/](../../runtime-host/host/src/control/) 中实现。旧 `runtime-host/composition/*.ts` route composition 已是历史来源，不是当前 active owner。
+Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/capabilities.ts)、[sessions.ts](../../electron/api/routes/sessions.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[channels.ts](../../electron/api/routes/channels.ts)、[providers.ts](../../electron/api/routes/providers.ts)、[runtime-topology.ts](../../electron/api/routes/runtime-topology.ts) 等 route 维持；Rust child 的 Host-owned loopback 入口已收敛为 [localhost server](../../runtime-host/host/src/transport/localhost/server.rs)，业务 handler/adapter 仍在 [runtime-host/host/src/transport/](../../runtime-host/host/src/transport/)，private control 在 [runtime-host/host/src/control/](../../runtime-host/host/src/control/) 中实现。旧 `runtime-host/composition/*.ts` route composition 已是历史来源，不是当前 active owner。
 
 ## A. transport and child operational surface
 
@@ -153,7 +153,7 @@ Evidence: [external-connectors.ts](../../electron/api/routes/external-connectors
 | --- | --- | --- |
 | `GET` | `/api/remote-fleet/snapshot`, `/metrics`, `/terminal/sessions`, `/list-commands`, `/list-audit-events` | Renderer allowlisted |
 | `POST` | register-connection/delete-connection/register-environment/delete-environment; write credential; remove node; probe/probe-connection; install/revoke agent; deploy/delete environment; drain/retire endpoint; start/stop runtime; sync capabilities; terminal open/reconnect/close | Renderer allowlisted; legacy node registration `/api/remote-fleet/register` 已关闭，不是 public active route；node dispatch receipts (`accepted/completed/rejected/outcomeUnknown`) 与 owner-local begin/terminal receipts 已投影为现有 renderer `command` payload |
-| `WS` | Electron public `/api/remote-fleet/terminal/stream` → Rust Fleet terminal prefix | Renderer allowlisted WebSocket |
+| `WS` | Electron public `/api/remote-fleet/terminal/stream` → unified Rust localhost server Fleet terminal route | Renderer allowlisted WebSocket；route upgrade outcome, not an independent Host-owned listener |
 | `POST` | `/api/remote-fleet/runtime-agent/ingress` | external RemoteAgent ingress, not Renderer IPC；Electron API server ingress proxy → Rust Fleet transport → Rust handler → FleetHandle core path 已接入 |
 
 Current route/transport evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[Electron API server](../../electron/api/server.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)。

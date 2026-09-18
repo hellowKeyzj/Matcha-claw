@@ -322,6 +322,7 @@ pub struct RuntimeView {
     pub phase: RunPhase,
     pub active_run_id: Option<String>,
     pub issue: Option<RuntimeIssue>,
+    pub run_progress: Option<RunProgress>,
     pub runtime_activity: Option<RuntimeActivity>,
     pub error_detail: Option<RuntimeErrorDetail>,
 }
@@ -336,14 +337,45 @@ pub enum RuntimeIssue {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RunProgress {
+    Startup { phase: RunStartupPhase },
+    Retrying { attempt: u8, max_attempts: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStartupPhase {
+    PreparingWorkspace,
+    NamingWorktree,
+    CreatingWorktree,
+    RunningSetup,
+    ProvisioningEnvironment,
+    PreparingContext,
+    StartingModel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeActivity {
     Compacting,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeErrorKind {
+    Fallback,
+    Error,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeErrorDetail {
+    pub kind: RuntimeErrorKind,
     pub failover_reason: Option<String>,
     pub provider_runtime_failure_kind: Option<String>,
     pub provider_error_type: Option<String>,
@@ -883,6 +915,7 @@ fn public_delta_runtime(runtime: &RuntimeView) -> RuntimeView {
         phase: runtime.phase,
         active_run_id: runtime.active_run_id.clone(),
         issue: runtime.issue,
+        run_progress: runtime.run_progress,
         runtime_activity: runtime.runtime_activity,
         error_detail: runtime.error_detail.clone(),
     }
@@ -1570,7 +1603,7 @@ impl SessionState {
                 {
                     return false;
                 }
-                update_message_delta(
+                let updated = update_message_delta(
                     &mut self.items,
                     item_id,
                     run_id.as_deref(),
@@ -1578,7 +1611,11 @@ impl SessionState {
                     text,
                     *replace,
                     *status,
-                )
+                );
+                if updated {
+                    clear_runtime_run_progress(&mut self.runtime, run_id.as_deref());
+                }
+                updated
             }
             SessionChange::MessageUpdated { item } => {
                 if item
@@ -1732,6 +1769,16 @@ fn item_status_for_terminal_run_phase(phase: RunPhase) -> ItemStatus {
     }
 }
 
+fn clear_runtime_run_progress(fact: &mut SessionFact<RuntimeView>, run_id: Option<&str>) {
+    let runtime = match fact {
+        SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } => runtime,
+        SessionFact::Unavailable | SessionFact::Unknown => return,
+    };
+    if run_id.is_none_or(|run_id| runtime.active_run_id.as_deref() == Some(run_id)) {
+        runtime.run_progress = None;
+    }
+}
+
 fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase: RunPhase) {
     let current = mem::replace(fact, SessionFact::Unknown);
     let (mut runtime, mut gaps) = match current {
@@ -1742,6 +1789,7 @@ fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase
                 phase,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             },
@@ -1754,6 +1802,7 @@ fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase
     } else {
         Some(run_id.to_owned())
     };
+    runtime.run_progress = None;
     runtime.runtime_activity = None;
     runtime.error_detail = None;
     gaps = with_gap(gaps, MissingFact::EventOnly);
@@ -2668,10 +2717,21 @@ fn valid_approval(approval: &ApprovalView) -> bool {
 
 fn valid_runtime(runtime: &RuntimeView) -> bool {
     runtime.active_run_id.as_deref().is_none_or(valid_id)
+        && runtime.run_progress.is_none_or(valid_run_progress)
         && runtime
             .error_detail
             .as_ref()
             .is_none_or(valid_runtime_error_detail)
+}
+
+fn valid_run_progress(progress: RunProgress) -> bool {
+    match progress {
+        RunProgress::Startup { .. } => true,
+        RunProgress::Retrying {
+            attempt,
+            max_attempts,
+        } => (1..=10).contains(&attempt) && attempt <= max_attempts && max_attempts <= 10,
+    }
 }
 
 fn valid_runtime_notice(notice: &RuntimeNotice) -> bool {
@@ -3092,6 +3152,7 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             }),
@@ -3168,8 +3229,10 @@ mod tests {
                         phase: RunPhase::Failed,
                         active_run_id: Some("run-1".to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: Some(RuntimeErrorDetail {
+                            kind: RuntimeErrorKind::Fallback,
                             failover_reason: Some("private failover".to_owned()),
                             provider_runtime_failure_kind: None,
                             provider_error_type: None,
@@ -3213,6 +3276,10 @@ mod tests {
         assert_eq!(encoded["changes"][2]["tool"]["summary"], "read complete");
         assert_eq!(encoded["changes"][2]["tool"]["output"]["secret"], true);
         assert_eq!(encoded["changes"][2]["tool"]["details"]["raw"], "native");
+        assert_eq!(
+            encoded["changes"][3]["runtime"]["errorDetail"]["kind"],
+            "fallback"
+        );
         assert_eq!(
             encoded["changes"][3]["runtime"]["errorDetail"]["failoverReason"],
             "private failover"
@@ -3274,6 +3341,7 @@ mod tests {
                         phase: RunPhase::Failed,
                         active_run_id: Some("ack-run-1".to_owned()),
                         issue: Some(RuntimeIssue::Rejected),
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: None,
                     },
@@ -3323,8 +3391,10 @@ mod tests {
                     phase: RunPhase::Failed,
                     active_run_id: Some("run-1".to_owned()),
                     issue: None,
+                    run_progress: None,
                     runtime_activity: None,
                     error_detail: Some(RuntimeErrorDetail {
+                        kind: RuntimeErrorKind::Error,
                         failover_reason: Some("auth_error".to_owned()),
                         provider_runtime_failure_kind: None,
                         provider_error_type: Some("authentication".to_owned()),
@@ -3469,6 +3539,7 @@ mod tests {
                 phase: RunPhase::Queued,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             }),
@@ -3646,6 +3717,7 @@ mod tests {
                         phase: RunPhase::Started,
                         active_run_id: Some("run-1".to_owned()),
                         issue: None,
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: None,
                     },
@@ -3665,6 +3737,7 @@ mod tests {
                         phase: RunPhase::Completed,
                         active_run_id: None,
                         issue: None,
+                        run_progress: None,
                         runtime_activity: None,
                         error_detail: None,
                     },
@@ -4550,6 +4623,7 @@ mod tests {
                 phase: RunPhase::Completed,
                 active_run_id: None,
                 issue: None,
+                run_progress: None,
                 runtime_activity: None,
                 error_detail: None,
             }),

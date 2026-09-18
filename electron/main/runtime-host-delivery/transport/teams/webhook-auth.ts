@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ROUTE_PATH = '/api/team/webhook-auth';
 const UNAVAILABLE = { success: false, error: 'Team webhook auth is unavailable' } as const;
 
 export type TeamWebhookAuthProjection = Readonly<{
@@ -24,35 +25,27 @@ export interface TeamWebhookAuthTransport {
 
 export function createTeamWebhookAuthTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamWebhookAuthTransport {
-  const url = `http://127.0.0.1:${port}/api/team/webhook-auth`;
   return {
     read: async () => {
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/team/webhook-auth',
-              scope: 'team:read',
-              capability: 'team.webhook-auth',
-              subject: 'team-webhook-auth',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: '{}',
-        });
-        const result: unknown = await response.json();
-        if (response.status === 200 && isProjection(result)) {
-          return { status: 200, body: result };
-        }
-      } catch {
-        // Native transport details do not cross the Electron delivery boundary.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: ROUTE_PATH,
+        issuer,
+        decision: {
+          endpoint: ROUTE_PATH,
+          scope: 'team:read',
+          capability: 'team.webhook-auth',
+          subject: 'team-webhook-auth',
+        },
+        method: 'POST',
+        fetcher,
+        body: {},
+      });
+      if (response?.status === 200 && isProjection(response.body)) {
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -76,13 +69,4 @@ function isProjection(value: unknown): value is TeamWebhookAuthProjection {
 function isMaskedToken(value: unknown): value is string {
   return typeof value === 'string'
     && /^mctwh_…[0-9a-f]{4}$/.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

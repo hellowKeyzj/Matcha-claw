@@ -1,8 +1,9 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
-import { Download, Minus, Plus, Upload } from 'lucide-react';
+import { Download, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
@@ -60,9 +61,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const cancelRun = useTeamsStore((state) => state.cancelRun);
+  const confirmProposal = useTeamsStore((state) => state.confirmProposal);
+  const cancelProposal = useTeamsStore((state) => state.cancelProposal);
   const submitGraphPatch = useTeamsStore((state) => state.submitGraphPatch);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
   const importGraphYaml = useTeamsStore((state) => state.importGraphYaml);
+  const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
 
   const yamlFileInputRef = useRef<HTMLInputElement | null>(null);
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
@@ -71,6 +75,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const runList = useTeamsStore((state) => (resolvedTeamId ? (state.runListByTeamId[resolvedTeamId] ?? []) : []));
   const graph = useTeamsStore((state) => (resolvedTeamId ? state.graphByTeamId[resolvedTeamId] : undefined));
   const roles = useTeamsStore((state) => (resolvedTeamId ? (state.rolesByTeamId[resolvedTeamId] ?? EMPTY_ROLES) : EMPTY_ROLES));
+  const startGate = useTeamsStore((state) => (resolvedTeamId ? state.startGateByTeamId[resolvedTeamId] : undefined));
   const loading = useTeamsStore((state) => (resolvedTeamId ? Boolean(state.loadingByTeamId[resolvedTeamId]) : false));
   const error = useTeamsStore((state) => (resolvedTeamId ? state.errorByTeamId[resolvedTeamId] : undefined));
 
@@ -143,6 +148,37 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     });
   };
 
+  const openLeaderDiscussion = (): void => {
+    const leader = roles.find((role) => role.roleId === 'leader');
+    if (!leader || !team) {
+      return;
+    }
+    setActiveRun(team.id, leader.runId);
+    openSessionIdentity({ sessionIdentity: leader.sessionIdentity, endpointSessionId: leader.endpointSessionId });
+  };
+
+  const continuePendingProposal = async (): Promise<void> => {
+    if (!team) {
+      return;
+    }
+    await runUiAction(`proposal-cancel:${team.id}:${run?.runId ?? 'none'}`, () => cancelProposal(team.id));
+    openLeaderDiscussion();
+  };
+
+  const cancelPendingProposal = async (): Promise<void> => {
+    if (!team) {
+      return;
+    }
+    await runUiAction(`proposal-cancel:${team.id}:${run?.runId ?? 'none'}`, () => cancelProposal(team.id));
+  };
+
+  const confirmPendingProposal = async (): Promise<void> => {
+    if (!team) {
+      return;
+    }
+    await runUiAction(`proposal-confirm:${team.id}:${run?.runId ?? 'none'}`, () => confirmProposal(team.id));
+  };
+
   const runs = [...runList];
 
   if (!team || !resolvedTeamId) {
@@ -166,6 +202,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const hasGraphToExport = hasExportableGraph(graph);
   const canExportGraphYaml = canAct && hasGraphToExport;
   const exportGraphYamlTitle = hasGraphToExport ? t('run.exportYaml') : t('run.exportYamlNoGraph');
+  const proposal = startGate?.status === 'proposal_pending' ? startGate.proposal : null;
+  const proposalSummary = proposal?.taskSummary?.trim() ?? '';
+  const canConfirmProposal = Boolean(proposal && run) && !loading && !pendingActionId;
 
   return (
     <section className="space-y-4">
@@ -211,6 +250,55 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         <div className="rounded-md border border-border bg-muted/25 p-3 text-sm text-muted-foreground">
           {t('run.createFirstRunHint')}
         </div>
+      ) : null}
+
+      {proposal ? (
+        <Card className="border-primary/25 bg-primary/5">
+          <CardContent className="space-y-3 py-4">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary">
+                <MessageCircle className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-foreground">{t('run.proposalPending.title')}</div>
+                <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+                  {proposalSummary || t('run.proposalPending.emptySummary')}
+                </p>
+                {proposal.detail ? (
+                  <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground/80">{proposal.detail}</p>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => { void continuePendingProposal(); }}
+                disabled={!roles.some((role) => role.roleId === 'leader')}
+              >
+                {t('run.proposalPending.discuss')}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => { void cancelPendingProposal(); }}
+                disabled={!roles.some((role) => role.roleId === 'leader')}
+              >
+                {t('run.proposalPending.cancel')}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => { void confirmPendingProposal(); }}
+                disabled={!canConfirmProposal}
+              >
+                {t('run.proposalPending.confirm')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       ) : null}
 
       <Card className="min-w-0">

@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys as exact, isNonEmptyBoundedText as isNonEmptyString, isRecord, sendLoopbackJson } from '../client';
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 const MAX_PATHS = 256;
 const UNAVAILABLE = { success: false, error: 'Workspace media is unavailable' } as const;
@@ -19,37 +18,30 @@ export interface WorkspaceMediaTransport {
 
 export function createWorkspaceMediaTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): WorkspaceMediaTransport {
   return {
     async execute(request: unknown) {
       if (!isRequest(request)) return { status: 503, body: UNAVAILABLE };
-      try {
-        const response = await fetcher(`http://127.0.0.1:${port}/api/workspace/media`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${issuer.signDecision({
-              principal: 'electron-main-local',
-              endpoint: '/api/workspace/media',
-              scope: 'workspace-media:read',
-              capability: request.operationId,
-              subject: 'workspace-media',
-              expiresAt: Date.now() + DECISION_TTL_MS,
-              revision: '1',
-            })}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(request),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isResponse(body, request.operationId)) {
-          return { status: 200, body };
-        }
-        if (response.status === 422 && isFailure(body)) return { status: 422, body };
-      } catch {
-        // Keep loopback transport details private.
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: '/api/workspace/media',
+        issuer,
+        decision: {
+          endpoint: '/api/workspace/media',
+          scope: 'workspace-media:read',
+          capability: request.operationId,
+          subject: 'workspace-media',
+        },
+        method: 'POST',
+        fetcher,
+        body: request,
+      });
+      if (response?.status === 200 && isResponse(response.body, request.operationId)) {
+        return { status: 200, body: response.body };
       }
+      if (response?.status === 422 && isFailure(response.body)) return { status: 422, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -302,17 +294,4 @@ function isCanonicalBase64(value: unknown): value is string {
 function estimateBase64Bytes(value: string): number {
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
   return Math.max(0, (value.length * 3) / 4 - padding);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }

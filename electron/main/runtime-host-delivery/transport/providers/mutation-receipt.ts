@@ -1,3 +1,5 @@
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger } from '../client';
+
 export type ProviderMutationDesiredStatus = 'stored' | 'deleted';
 export type ProviderMutationPersistedStatus = 'confirmed' | 'unknown';
 export type ProviderMutationAppliedStatus = 'confirmed' | 'unknown';
@@ -80,28 +82,35 @@ export class ProviderMutationReceiptUnavailableError extends Error {
   }
 }
 
+const PROVIDER_MUTATION_ACCOUNT_KEYS: readonly string[] = [
+  'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
+];
+const DESIRED_WITH_REVISION_KEYS: readonly string[] = ['status', 'revision'];
+const DESIRED_WITHOUT_REVISION_KEYS: readonly string[] = ['status'];
+const NATIVE_KEYS: readonly string[] = ['changed', 'applied', 'observed', 'diagnostic'];
+const NATIVE_DIAGNOSTIC_KEYS: readonly string[] = ['phase', 'reason', 'configPath', 'method', 'expectedPath', 'detail'];
+
 export function decodeProviderMutationCommittedAccountResponse(
   value: unknown,
   options: ProviderMutationAccountDecodeOptions,
-): ProviderMutationCommittedAccountResponse {
+): ProviderMutationCommittedAccountResponse | null {
   if (!isRecord(value)
     || !hasExactKeys(value, ['success', 'account', 'desired', 'persisted', 'native', 'commit'])
-    || value.success !== true
-    || !decodeProviderMutationAccount(value.account)) {
-    throw new ProviderMutationReceiptUnavailableError();
+    || value.success !== true) {
+    return null;
   }
+  const account = decodeProviderMutationAccount(value.account);
+  if (!account) return null;
   const receipt = decodeReceipt({
     desired: value.desired,
     persisted: value.persisted,
     native: value.native,
     commit: value.commit,
   }, options, 'committed');
-  if (!receipt || receipt.persisted.status !== 'confirmed') {
-    throw new ProviderMutationReceiptUnavailableError();
-  }
+  if (!receipt || receipt.persisted.status !== 'confirmed') return null;
   return {
     success: true,
-    account: decodeProviderMutationAccount(value.account)!,
+    account,
     desired: receipt.desired,
     persisted: { status: 'confirmed' },
     native: receipt.native,
@@ -112,11 +121,11 @@ export function decodeProviderMutationCommittedAccountResponse(
 export function decodeProviderMutationCommittedResponse(
   value: unknown,
   options: ProviderMutationReceiptDecodeOptions,
-): ProviderMutationCommittedResponse {
+): ProviderMutationCommittedResponse | null {
   if (!isRecord(value)
     || !hasExactKeys(value, ['success', 'desired', 'persisted', 'native', 'commit'])
     || value.success !== true) {
-    throw new ProviderMutationReceiptUnavailableError();
+    return null;
   }
   const receipt = decodeReceipt({
     desired: value.desired,
@@ -124,9 +133,7 @@ export function decodeProviderMutationCommittedResponse(
     native: value.native,
     commit: value.commit,
   }, options, 'committed');
-  if (!receipt || receipt.persisted.status !== 'confirmed') {
-    throw new ProviderMutationReceiptUnavailableError();
-  }
+  if (!receipt || receipt.persisted.status !== 'confirmed') return null;
   return {
     success: true,
     desired: receipt.desired,
@@ -190,7 +197,7 @@ function decodeDesired(
   const hasRevision = Object.hasOwn(value, 'revision');
   if ((!hasRevision && options.desiredRevision === 'required')
     || (hasRevision && options.desiredRevision === 'forbidden')
-    || !hasOnlyKeys(value, hasRevision ? ['status', 'revision'] : ['status'])
+    || !Object.keys(value).every((key) => (hasRevision ? DESIRED_WITH_REVISION_KEYS : DESIRED_WITHOUT_REVISION_KEYS).includes(key))
     || (options.desiredStatus !== undefined && value.status !== options.desiredStatus)
     || (value.status !== 'stored' && value.status !== 'deleted')
     || (hasRevision && !isPositiveInteger(value.revision))) {
@@ -203,9 +210,7 @@ function decodeDesired(
 
 function decodeProviderMutationAccount(value: unknown): ProviderMutationAccount | null {
   if (!isRecord(value)
-    || !hasOnlyKeys(value, [
-      'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
-    ])
+    || !Object.keys(value).every((key) => PROVIDER_MUTATION_ACCOUNT_KEYS.includes(key))
     || !isIdentifier(value.id)
     || !isIdentifier(value.provider)
     || !isBoundedText(value.label, 256)
@@ -249,7 +254,7 @@ function decodePersisted(
 function decodeNative(
   value: Record<string, unknown>,
 ): ProviderMutationReceipt['native'] | null {
-  if (!hasOnlyKeys(value, ['changed', 'applied', 'observed', 'diagnostic'])
+  if (!Object.keys(value).every((key) => NATIVE_KEYS.includes(key))
     || !Object.hasOwn(value, 'changed')
     || !Object.hasOwn(value, 'applied')
     || !Object.hasOwn(value, 'observed')
@@ -277,7 +282,7 @@ function decodeNative(
 function decodeNativeDiagnostic(value: unknown): ProviderMutationNativeDiagnostic | null {
   if (value === undefined) return null;
   if (!isRecord(value)
-    || !hasOnlyKeys(value, ['phase', 'reason', 'configPath', 'method', 'expectedPath', 'detail'])
+    || !Object.keys(value).every((key) => NATIVE_DIAGNOSTIC_KEYS.includes(key))
     || !isBoundedText(value.phase, 128)
     || !isBoundedText(value.reason, 128)
     || !isBoundedText(value.configPath, 2048)
@@ -297,7 +302,7 @@ function decodeNativeDiagnostic(value: unknown): ProviderMutationNativeDiagnosti
 }
 
 function isPositiveInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  return isSafeNonNegativeInteger(value) && value > 0;
 }
 
 function isIdentifier(value: unknown): value is string {
@@ -309,17 +314,4 @@ function isBoundedText(value: unknown, maxLength: number): value is string {
     && value.trim().length > 0
     && value.length <= maxLength
     && !/[\0\r\n]/.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

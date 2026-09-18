@@ -10,7 +10,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 const AUTHORIZATION_ENDPOINT: &str = "/api/diagnostics/archive";
 pub(crate) const DOWNLOAD_ENDPOINT: &str = "/api/diagnostics/archive/download";

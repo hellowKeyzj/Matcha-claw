@@ -659,6 +659,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
+    runProgress: null,
     runtimeActivity: null,
     errorDetail: null,
     runtimeNotice: null,
@@ -742,13 +743,25 @@ function areTransportIssuesEquivalent(
       && left.details === right.details);
 }
 
+function areRunProgressEquivalent(
+  left: ChatSessionRuntimeState['runProgress'],
+  right: ChatSessionRuntimeState['runProgress'],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.kind !== right.kind) return false;
+  return left.kind === 'startup'
+    ? right.kind === 'startup' && left.phase === right.phase
+    : right.kind === 'retrying' && left.attempt === right.attempt && left.maxAttempts === right.maxAttempts;
+}
+
 function areRuntimeErrorDetailsEquivalent(
   left: ChatSessionRuntimeState['errorDetail'],
   right: ChatSessionRuntimeState['errorDetail'],
 ): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
-  return left.failoverReason === right.failoverReason
+  return left.kind === right.kind
+    && left.failoverReason === right.failoverReason
     && left.providerRuntimeFailureKind === right.providerRuntimeFailureKind
     && left.providerErrorType === right.providerErrorType
     && left.providerErrorMessagePreview === right.providerErrorMessagePreview
@@ -790,6 +803,7 @@ function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatS
     && left.activeTurnItemKey === right.activeTurnItemKey
     && left.pendingTurnKey === right.pendingTurnKey
     && left.pendingTurnLaneKey === right.pendingTurnLaneKey
+    && areRunProgressEquivalent(left.runProgress, right.runProgress)
     && left.runtimeActivity === right.runtimeActivity
     && areRuntimeErrorDetailsEquivalent(left.errorDetail, right.errorDetail)
     && areRuntimeNoticesEquivalent(left.runtimeNotice, right.runtimeNotice)
@@ -1116,6 +1130,7 @@ export function patchSessionSnapshot(
     pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
     imageGeneration: nextImageGenerationRuntime.active ? nextImageGenerationRuntime : undefined,
     lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
+    runProgress: snapshot.runtime.runProgress,
     runtimeActivity: snapshot.runtime.runtimeActivity,
     errorDetail: snapshot.runtime.errorDetail,
     runtimeNotice: snapshot.runtime.runtimeNotice ?? null,
@@ -1430,6 +1445,7 @@ function projectionRuntime(
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
+    runProgress: runtime.runProgress,
     runtimeActivity: runtime.runtimeActivity,
     errorDetail: runtime.errorDetail,
     runtimeNotice,
@@ -1672,7 +1688,7 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
     case 'runtimeChanged':
       return {
         ...view,
-        runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null, runtimeActivity: null, errorDetail: null }), () => change.runtime),
+        runtime: updateProjectionFact(view.runtime, () => ({ phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null }), () => change.runtime),
         runtimeNotice: runtimeNoticeAfterRuntimeChange(view.runtimeNotice ?? null, change.runtime),
       };
     case 'runtimeNoticeUpdated':
@@ -1682,10 +1698,11 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
     case 'runPhaseChanged':
       return {
         ...view,
-        runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null, runtimeActivity: null, errorDetail: null }), (runtime) => ({
+        runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null }), (runtime) => ({
           ...runtime,
           phase: change.phase,
           activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
+          runProgress: null,
           runtimeActivity: null,
           errorDetail: null,
         })),

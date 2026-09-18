@@ -84,7 +84,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionAbortOutcome> + Send + '_>> {
-        let session = receipt.external_session().clone();
+        let session = receipt.endpoint_session_id().clone();
         let key = match scoped_session_key(receipt) {
             Ok(key) => key,
             Err(failure) => {
@@ -106,7 +106,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionDeleteOutcome> + Send + '_>> {
-        let session = receipt.external_session().clone();
+        let session = receipt.endpoint_session_id().clone();
         let key = match agent_scoped_session_key(receipt) {
             Ok(key) => key,
             Err(failure) => {
@@ -128,7 +128,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionReadbackOutcome> + Send + '_>> {
-        let session = receipt.external_session().clone();
+        let session = receipt.endpoint_session_id().clone();
         let key = match scoped_session_key(receipt) {
             Ok(key) => key,
             Err(failure) => {
@@ -137,7 +137,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         };
         let window = SessionWindowReference::try_new(format!(
             "openclaw-window:{}",
-            receipt.external_session().as_str()
+            receipt.endpoint_session_id().as_str()
         ));
         let Ok(window) = window else {
             return Box::pin(async {
@@ -176,7 +176,7 @@ fn native_delivery(request: PromptDeliveryRequest) -> Result<PromptDelivery, Nat
     let agent = AgentId::try_new(request.binding().agent().as_str().to_owned())
         .map_err(|_| NativeEffectFailure::InvalidInput)?;
     let session =
-        EndpointSessionId::try_new(request.binding().external_session().as_str().to_owned())
+        EndpointSessionId::try_new(request.binding().endpoint_session_id().as_str().to_owned())
             .map_err(|_| NativeEffectFailure::InvalidInput)?;
     let idempotency = RunId::try_new(request.idempotency_key().as_str().to_owned())
         .map_err(|_| NativeEffectFailure::InvalidInput)?;
@@ -192,11 +192,8 @@ fn native_delivery(request: PromptDeliveryRequest) -> Result<PromptDelivery, Nat
 fn map_delivery(native: NativeDeliveryOutcome) -> DomainDeliveryOutcome {
     match native {
         NativeDeliveryOutcome::Accepted { receipt } => DomainDeliveryOutcome::Delivered {
-            receipt: organization::DeliveryReceiptReference::try_new(format!(
-                "openclaw-run:{}",
-                receipt.as_str()
-            ))
-            .expect("native OpenClaw run receipt must be a valid opaque reference"),
+            receipt: organization::DeliveryReceiptReference::try_new(receipt.as_str().to_owned())
+                .expect("native OpenClaw run receipt must be a valid opaque reference"),
         },
         NativeDeliveryOutcome::Rejected { failure } => DomainDeliveryOutcome::Rejected {
             rejection: match failure {
@@ -218,7 +215,7 @@ fn agent_scoped_session_key(
 ) -> Result<AgentScopedSessionKey, NativeEffectFailure> {
     let agent = AgentId::try_new(receipt.agent().as_str().to_owned())
         .map_err(|_| NativeEffectFailure::InvalidInput)?;
-    let session = EndpointSessionId::try_new(receipt.external_session().as_str().to_owned())
+    let session = EndpointSessionId::try_new(receipt.endpoint_session_id().as_str().to_owned())
         .map_err(|_| NativeEffectFailure::InvalidInput)?;
     AgentScopedSessionKey::try_new(agent, session).map_err(|_| NativeEffectFailure::InvalidInput)
 }
@@ -228,7 +225,7 @@ fn map_abort(
         InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
         OpenClawSessionError,
     >,
-    session: organization::ExternalSessionReference,
+    session: organization::EndpointSessionId,
 ) -> RoleSessionAbortOutcome {
     match result {
         Ok(InvocationOutcome::Succeeded(result)) if result.ok => {
@@ -265,7 +262,7 @@ fn map_delete(
         InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
         OpenClawSessionError,
     >,
-    session: organization::ExternalSessionReference,
+    session: organization::EndpointSessionId,
 ) -> RoleSessionDeleteOutcome {
     match result {
         Ok(InvocationOutcome::Succeeded(_)) => RoleSessionDeleteOutcome::Confirmed {
@@ -307,7 +304,7 @@ mod tests {
 
     #[test]
     fn role_session_delete_confirms_absent_session_as_idempotent_cleanup() {
-        let session = organization::ExternalSessionReference::try_new("session:gone").unwrap();
+        let session = organization::EndpointSessionId::try_new("session:gone").unwrap();
 
         assert!(matches!(
             map_delete(
@@ -331,7 +328,7 @@ mod tests {
 
     #[test]
     fn role_session_abort_confirms_native_noop_as_idempotent_cleanup() {
-        let session = organization::ExternalSessionReference::try_new("session:gone").unwrap();
+        let session = organization::EndpointSessionId::try_new("session:gone").unwrap();
 
         assert!(matches!(
             map_abort(
@@ -358,7 +355,7 @@ mod tests {
     #[test]
     fn native_receipts_redact_private_payloads() {
         let receipt = RoleSessionAbortReceipt::new(
-            organization::ExternalSessionReference::try_new("session-canary").unwrap(),
+            organization::EndpointSessionId::try_new("session-canary").unwrap(),
         );
         assert_eq!(
             format!("{receipt:?}"),

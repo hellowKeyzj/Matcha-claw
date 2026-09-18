@@ -176,6 +176,7 @@ export function runtimeView(options: Partial<SessionWireRuntime> = {}): SessionW
     phase: 'completed',
     activeRunId: null,
     issue: null,
+    runProgress: null,
     runtimeActivity: null,
     errorDetail: null,
     ...options,

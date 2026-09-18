@@ -77,9 +77,11 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list },
-        sessionCreateTransport: { create },
-        sessionDeleteTransport: { delete: remove },
+        runtimeHostTransports: {
+          sessionListTransport: { list },
+          sessionCreateTransport: { create },
+          sessionDeleteTransport: { delete: remove },
+        },
       } as never,
     )).resolves.toBe(true);
 
@@ -106,9 +108,11 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list },
-        sessionCreateTransport: { create: vi.fn() },
-        sessionDeleteTransport: { delete: remove },
+        runtimeHostTransports: {
+          sessionListTransport: { list },
+          sessionCreateTransport: { create: vi.fn() },
+          sessionDeleteTransport: { delete: remove },
+        },
       },
     )).resolves.toBe(true);
 
@@ -135,10 +139,12 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list },
-        sessionCreateTransport: { create: vi.fn() },
-        sessionDeleteTransport: { delete: remove },
-        sessionRenameTransport: { rename },
+        runtimeHostTransports: {
+          sessionListTransport: { list },
+          sessionCreateTransport: { create: vi.fn() },
+          sessionDeleteTransport: { delete: remove },
+          sessionRenameTransport: { rename },
+        },
       } as never,
     )).resolves.toBe(true);
 
@@ -170,9 +176,11 @@ describe('session Host API routes', () => {
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list },
-        sessionCreateTransport: { create: vi.fn() },
-        sessionDeleteTransport: { delete: remove },
+        runtimeHostTransports: {
+          sessionListTransport: { list },
+          sessionCreateTransport: { create: vi.fn() },
+          sessionDeleteTransport: { delete: remove },
+        },
       },
     );
 

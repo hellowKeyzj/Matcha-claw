@@ -48,7 +48,7 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-pub(crate) mod server {
+pub(crate) mod handler {
     use super::{AUTHORIZATION_HEADER, BEARER_PREFIX, Delivery};
     use crate::{
         facade::PlatformToolsHandle, transport::common::authorization::CapabilityDecisionVerifier,

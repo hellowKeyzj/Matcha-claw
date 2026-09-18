@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
+use crate::runtime::driver::NativeRunSettled;
 use foundation::execution::OwnerRuntimeHandle;
-use matcha_agent::session::receipt::TerminalRunStatus;
+
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
-    GraphDefinition, GraphRunId, IdempotencyKey, MatchaTerminalReceiptTarget, ResumeOutcome,
+    GraphDefinition, GraphRunId, IdempotencyKey, NativeTerminalReceiptTarget, ResumeOutcome,
     RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault, TeamDecisionCommand,
     TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
     TeamNodeEventOutcome, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
@@ -26,12 +27,12 @@ use crate::{HostPhase, RequestAdmissionClosed};
 
 use super::{
     OrganizationCommand, OrganizationQuery,
+    start_gate_control::{StartGateBinding, StartGateSessionLookup},
     team_run::{
-        ArmedTrigger, ManualTeamCreateOutcome, MatchaTerminalObservationError,
-        MatchaTerminalObservationOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
-        TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
-        TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart, TeamRunActivityTarget,
-        TeamRunCommandOutcome, TeamRunTriggerOutcome,
+        ArmedTrigger, ManualTeamCreateOutcome, TeamDeleteOutcome,
+        TeamMaterializationCommandOutcome, TeamNodePromptSettledResult, TeamNodeTerminalResolution,
+        TeamNodeTerminalResult, TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart,
+        TeamRunActivityTarget, TeamRunCommandOutcome, TeamRunTriggerOutcome,
     },
     team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
 };
@@ -338,6 +339,78 @@ impl OrganizationHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::RoleSessions { team_id, reply })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn start_gate_session_binding(
+        &self,
+        lookup: StartGateSessionLookup,
+    ) -> Result<Option<StartGateBinding>, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::StartGateSessionBinding { lookup, reply })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn run_start_proposal_set(
+        &self,
+        run_id: GraphRunId,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    ) -> Result<Result<organization::SetRunStartProposalOutcome, StoreFault>, RequestAdmissionClosed>
+    {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::RunStartProposalSet {
+                run_id,
+                proposal_id,
+                summary,
+                source_delivery_id,
+                reply,
+            })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn run_start_confirm(
+        &self,
+        run_id: GraphRunId,
+        proposal_id: String,
+    ) -> Result<Result<organization::ConfirmRunStartOutcome, StoreFault>, RequestAdmissionClosed>
+    {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::RunStartConfirm {
+                run_id,
+                proposal_id,
+                reply,
+            })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn run_start_continue(
+        &self,
+        run_id: GraphRunId,
+        proposal_id: String,
+    ) -> Result<
+        Result<organization::ContinueRunDiscussionOutcome, StoreFault>,
+        RequestAdmissionClosed,
+    > {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::RunStartContinue {
+                run_id,
+                proposal_id,
+                reply,
+            })
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())
@@ -823,23 +896,20 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn observe_matcha_terminal(
+    pub async fn native_run_settled(
         &self,
         run_id: GraphRunId,
         delivery_id: DeliveryId,
-        status: TerminalRunStatus,
-        observed_at: u64,
-    ) -> Result<
-        Result<MatchaTerminalObservationOutcome, MatchaTerminalObservationError>,
-        RequestAdmissionClosed,
-    > {
+        settled: NativeRunSettled,
+        settled_at: u64,
+    ) -> Result<Result<TeamNodeTerminalResult, StoreFault>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
-            .send_command(OrganizationCommand::ObserveMatchaTerminal {
+            .send_command(OrganizationCommand::NativeRunSettled {
                 run_id,
                 delivery_id,
-                status,
-                observed_at,
+                settled,
+                settled_at,
                 reply,
             })
             .await
@@ -865,10 +935,10 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn matcha_terminal_target(
+    pub async fn native_terminal_target(
         &self,
         delivery_id: DeliveryId,
-    ) -> Result<Option<MatchaTerminalReceiptTarget>, RequestAdmissionClosed> {
+    ) -> Result<Option<NativeTerminalReceiptTarget>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::MatchaTerminalTarget { delivery_id, reply })

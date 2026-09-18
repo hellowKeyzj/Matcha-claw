@@ -40,7 +40,7 @@ describe('provider routing capability route', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { providerRoutingTransport: { execute } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute } } } as never,
     )).resolves.toBe(true);
 
     expect(execute).toHaveBeenCalledWith(request);
@@ -53,7 +53,7 @@ describe('provider routing capability route', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { providerRoutingTransport: { execute: vi.fn().mockRejectedValue(new Error('private loopback failure')) } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute: vi.fn().mockRejectedValue(new Error('private loopback failure')) } } } as never,
     );
     expect(result.state).toEqual({
       statusCode: 503,
@@ -68,7 +68,7 @@ describe('provider routing capability route', () => {
       incoming({ ...request, operationId: 'providerModels.list' }) as never,
       invalid.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { providerRoutingTransport: { execute } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute } } } as never,
     );
     expect(invalid.state).toEqual({
       statusCode: 400,
@@ -80,7 +80,7 @@ describe('provider routing capability route', () => {
       incoming({ ...request, id: 'provider.models', operationId: 'providerModels.list' }) as never,
       models.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { providerRoutingTransport: { execute } } as never,
+      { runtimeHostTransports: { providerRoutingTransport: { execute } } } as never,
     );
     expect(execute).not.toHaveBeenCalled();
     expect(models.state).toEqual({

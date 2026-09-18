@@ -1,5 +1,5 @@
+pub(crate) mod handler;
 pub(crate) mod runtime_agent_ingress;
-pub(crate) mod server;
 pub(crate) mod terminal_stream;
 
 mod authorization;
@@ -559,11 +559,11 @@ mod tests {
 
     #[test]
     fn terminal_session_projection_uses_public_websocket_path() {
-        assert!(server::is_terminal_route(
+        assert!(handler::is_terminal_route(
             "GET",
             crate::transport::fleet::terminal_stream::TERMINAL_WEBSOCKET_PATH
         ));
-        assert!(server::is_terminal_route(
+        assert!(handler::is_terminal_route(
             "GET",
             crate::transport::fleet::terminal_stream::PRIVATE_TERMINAL_WEBSOCKET_PATH
         ));

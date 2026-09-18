@@ -68,8 +68,10 @@ describe('Matcha session catalog Host API route', () => {
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list: openClawList },
-        matchaSessionListTransport: { list: matchaList },
+        runtimeHostTransports: {
+          sessionListTransport: { list: openClawList },
+          matchaSessionListTransport: { list: matchaList },
+        },
       } as never,
     )).resolves.toBe(true);
 
@@ -109,8 +111,10 @@ describe('Matcha session catalog Host API route', () => {
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list: openClawList },
-        matchaSessionListTransport: { list: matchaList },
+        runtimeHostTransports: {
+          sessionListTransport: { list: openClawList },
+          matchaSessionListTransport: { list: matchaList },
+        },
       } as never,
     );
 

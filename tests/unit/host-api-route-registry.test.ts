@@ -36,11 +36,13 @@ function hostApiContext(overrides: {
   mutate?: ReturnType<typeof vi.fn>;
 } = {}) {
   return {
-    clawHubSkillInstallTransport: { install: vi.fn() },
-    clawHubSkillSearchTransport: { search: overrides.search ?? vi.fn() },
-    fleetTransport: {
-      read: overrides.read ?? vi.fn(),
-      mutate: overrides.mutate ?? vi.fn(),
+    runtimeHostTransports: {
+      clawHubSkillInstallTransport: { install: vi.fn() },
+      clawHubSkillSearchTransport: { search: overrides.search ?? vi.fn() },
+      fleetTransport: {
+        read: overrides.read ?? vi.fn(),
+        mutate: overrides.mutate ?? vi.fn(),
+      },
     },
   } as never;
 }

@@ -8,8 +8,8 @@ use super::{
     events::TerminalOutcome,
     projection::{
         AssistantTurnChunkKind, AssistantTurnSegment, AssistantTurnStatus, CanonicalIngressResult,
-        CanonicalRecoveryReason, CanonicalRuntimeActivity, CanonicalSessionChange,
-        CanonicalSessionDeltaProducer,
+        CanonicalRecoveryReason, CanonicalRunProgress, CanonicalRuntimeActivity,
+        CanonicalSessionChange, CanonicalSessionDeltaProducer,
     },
     protocol::{
         ChatState, MessageActivityLifecycle, MessageId, RunId, RuntimeActivityPhase,
@@ -177,6 +177,7 @@ struct CanonicalChangeDebugSummary {
     terminal_aborted_count: usize,
     terminal_error_count: usize,
     runtime_activity_count: usize,
+    run_progress_count: usize,
     approval_requested_count: usize,
     approval_resolved_count: usize,
     recovery_required_count: usize,
@@ -239,6 +240,9 @@ impl CanonicalChangeDebugSummary {
             | CanonicalSessionChange::RuntimeFallbackCleared { .. }
             | CanonicalSessionChange::GuardianNotice { .. } => {
                 self.runtime_activity_count += 1;
+            }
+            CanonicalSessionChange::RunProgress { .. } => {
+                self.run_progress_count += 1;
             }
             CanonicalSessionChange::ApprovalRequested { .. } => {
                 self.approval_requested_count += 1;
@@ -316,6 +320,7 @@ fn trace_canonical_changes(stage: &'static str, changes: &[CanonicalSessionChang
             "terminalAbortedCount": summary.terminal_aborted_count,
             "terminalErrorCount": summary.terminal_error_count,
             "runtimeActivityCount": summary.runtime_activity_count,
+            "runProgressCount": summary.run_progress_count,
             "approvalRequestedCount": summary.approval_requested_count,
             "approvalResolvedCount": summary.approval_resolved_count,
             "recoveryRequiredCount": summary.recovery_required_count,
@@ -414,7 +419,7 @@ impl SessionReducerActor {
         }
 
         match chat.state {
-            ChatState::Status => None,
+            ChatState::Status => self.reduce_chat_status(event, source_epoch, route_key),
             ChatState::Delta => self.reduce_chat_delta(event, source_epoch, route_key),
             state => {
                 let run_id = chat.run_id.clone();
@@ -466,6 +471,33 @@ impl SessionReducerActor {
         }
     }
 
+    fn reduce_chat_status(
+        &mut self,
+        event: SessionEventEnvelope,
+        source_epoch: Option<GatewayEpoch>,
+        route_key: Option<String>,
+    ) -> Option<CanonicalIngressResult> {
+        let chat = event.chat.as_ref()?;
+        let run_id = chat.run_id.clone();
+        let progress = if let Some(retry) = chat.status_retry {
+            CanonicalRunProgress::Retrying {
+                attempt: retry.attempt,
+                max_attempts: retry.max_attempts,
+            }
+        } else {
+            CanonicalRunProgress::Startup {
+                phase: chat.status_phase?,
+            }
+        };
+        produce_changes_debugged(
+            "chat_status",
+            event,
+            source_epoch,
+            route_key,
+            vec![CanonicalSessionChange::RunProgress { run_id, progress }],
+        )
+    }
+
     fn reduce_chat_delta(
         &mut self,
         event: SessionEventEnvelope,
@@ -484,7 +516,7 @@ impl SessionReducerActor {
                     chat.message_text.as_deref(),
                     chat.message_thinking.as_deref(),
                 );
-            let changes = self.assistant_snapshot_changes(run_id, message_id, snapshot);
+            let changes = self.assistant_snapshot_changes(run_id.clone(), message_id, snapshot);
             if changes.is_empty() {
                 return None;
             }
@@ -503,7 +535,7 @@ impl SessionReducerActor {
                 delta_text,
                 chat.replace,
             );
-            let change = self.assistant_text_delta_change(run_id, message_id, delta)?;
+            let change = self.assistant_text_delta_change(run_id.clone(), message_id, delta)?;
             return produce_changes_debugged(
                 "chat_delta_text",
                 event,

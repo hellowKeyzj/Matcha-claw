@@ -1,6 +1,7 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const PAIRING_PATH = '/api/channels/pairing';
 const UNAVAILABLE = {
   success: false,
   error: 'Channel pairing is unavailable',
@@ -31,27 +32,30 @@ export interface ChannelPairingTransport {
 
 export function createChannelPairingTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): ChannelPairingTransport {
-  const url = `http://127.0.0.1:${port}/api/channels/pairing`;
   return {
     async list(channel: string, accountId?: string): Promise<ChannelPairingTransportResponse> {
       if (!isIdentity(channel) || (accountId !== undefined && !isIdentity(accountId))) return { status: 400, body: UNAVAILABLE };
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: signedHeaders(issuer, 'channels:read', 'channels.pairing.list'),
-          body: JSON.stringify({
-            channel,
-            ...(accountId ? { accountId } : {}),
-          }),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isPairingList(body)) return { status: 200, body };
-      } catch {
-        // Native transport details and raw pairing records stay private.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PAIRING_PATH,
+        issuer,
+        decision: {
+          endpoint: PAIRING_PATH,
+          scope: 'channels:read',
+          capability: 'channels.pairing.list',
+          subject: 'channel-pairing',
+        },
+        method: 'POST',
+        fetcher,
+        body: {
+          channel,
+          ...(accountId ? { accountId } : {}),
+        },
+      });
+      if (response?.status === 200 && isPairingList(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
     async approve(input): Promise<ChannelPairingApprovalResponse> {
@@ -60,43 +64,28 @@ export function createChannelPairingTransport(
         || (input.accountId !== undefined && !isIdentity(input.accountId))) {
         return { status: 400, body: UNAVAILABLE };
       }
-      try {
-        const response = await fetcher(url, {
-          method: 'POST',
-          headers: signedHeaders(issuer, 'channels:write', 'channels.pairing.approve'),
-          body: JSON.stringify({
-            action: 'approve',
-            channel: input.channel,
-            ...(input.accountId ? { accountId: input.accountId } : {}),
-            code: input.code,
-          }),
-        });
-        const body: unknown = await response.json();
-        if (response.status === 200 && isApprovalResponse(body)) return { status: 200, body };
-      } catch {
-        // Native transport details and raw pairing records stay private.
-      }
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: PAIRING_PATH,
+        issuer,
+        decision: {
+          endpoint: PAIRING_PATH,
+          scope: 'channels:write',
+          capability: 'channels.pairing.approve',
+          subject: 'channel-pairing',
+        },
+        method: 'POST',
+        fetcher,
+        body: {
+          action: 'approve',
+          channel: input.channel,
+          ...(input.accountId ? { accountId: input.accountId } : {}),
+          code: input.code,
+        },
+      });
+      if (response?.status === 200 && isApprovalResponse(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: UNAVAILABLE };
     },
-  };
-}
-
-function signedHeaders(
-  issuer: RuntimeHostDeliveryIssuer,
-  scope: 'channels:read' | 'channels:write',
-  capability: 'channels.pairing.list' | 'channels.pairing.approve',
-): Record<string, string> {
-  return {
-    Authorization: `Bearer ${issuer.signDecision({
-      principal: 'electron-main-local',
-      endpoint: '/api/channels/pairing',
-      scope,
-      capability,
-      subject: 'channel-pairing',
-      expiresAt: Date.now() + DECISION_TTL_MS,
-      revision: '1',
-    })}`,
-    'Content-Type': 'application/json',
   };
 }
 
@@ -114,36 +103,32 @@ function isApprovalCode(value: string): boolean {
 }
 
 function isPairingList(value: unknown): value is Readonly<{ requests: readonly PairingRequest[] }> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const body = value as Record<string, unknown>;
-  return Object.keys(body).length === 1
-    && Array.isArray(body.requests)
-    && body.requests.every(isPairingRequest);
+  return isRecord(value)
+    && hasExactKeys(value, ['requests'])
+    && Array.isArray(value.requests)
+    && value.requests.every(isPairingRequest);
 }
 
 function isPairingRequest(value: unknown): value is PairingRequest {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const request = value as Record<string, unknown>;
-  return Object.keys(request).every((key) => key === 'id' || key === 'createdAt' || key === 'lastSeenAt' || key === 'meta' || key === 'status')
-    && typeof request.id === 'string'
-    && request.id.length > 0
-    && (request.createdAt === undefined || typeof request.createdAt === 'string')
-    && (request.lastSeenAt === undefined || typeof request.lastSeenAt === 'string')
-    && (request.meta === undefined || isPairingRequestMeta(request.meta))
-    && (request.status === 'pending' || request.status === 'unknown');
+  if (!isRecord(value)) return false;
+  return Object.keys(value).every((key) => key === 'id' || key === 'createdAt' || key === 'lastSeenAt' || key === 'meta' || key === 'status')
+    && typeof value.id === 'string'
+    && value.id.length > 0
+    && (value.createdAt === undefined || typeof value.createdAt === 'string')
+    && (value.lastSeenAt === undefined || typeof value.lastSeenAt === 'string')
+    && (value.meta === undefined || isPairingRequestMeta(value.meta))
+    && (value.status === 'pending' || value.status === 'unknown');
 }
 
 function isPairingRequestMeta(value: unknown): value is Readonly<{ accountId: string }> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const meta = value as Record<string, unknown>;
-  return Object.keys(meta).length === 1
-    && typeof meta.accountId === 'string'
-    && meta.accountId.length > 0;
+  return isRecord(value)
+    && hasExactKeys(value, ['accountId'])
+    && typeof value.accountId === 'string'
+    && value.accountId.length > 0;
 }
 
 function isApprovalResponse(value: unknown): value is Readonly<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const body = value as Record<string, unknown>;
-  return Object.keys(body).length === 1
-    && (body.outcome === 'confirmed' || body.outcome === 'target_rejected' || body.outcome === 'unknown');
+  return isRecord(value)
+    && hasExactKeys(value, ['outcome'])
+    && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }

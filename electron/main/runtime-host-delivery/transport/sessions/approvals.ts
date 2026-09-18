@@ -1,6 +1,5 @@
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
-
-const DECISION_TTL_MS = 30_000;
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 const UNAVAILABLE = {
   success: false,
   error: 'Session approval is unavailable',
@@ -85,17 +84,17 @@ export interface SessionApprovalTransport {
 
 export function createSessionApprovalTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  sessionApprovalTransportPort: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): SessionApprovalTransport {
-  const baseUrl = `http://127.0.0.1:${sessionApprovalTransportPort}/api/sessions/approvals`;
   return {
     async list(request: unknown): Promise<SessionApprovalListTransportResponse> {
       if (!isListRequest(request)) return { status: 503, body: UNAVAILABLE };
       return await requestApproval<ApprovalListResponse>(
+        runtimeHostTransportPort,
         fetcher,
         issuer,
-        `${baseUrl}/list`,
+        '/api/sessions/approvals/list',
         'sessions.approvals.list',
         request,
         isListResponse,
@@ -104,9 +103,10 @@ export function createSessionApprovalTransport(
     async respond(request: unknown): Promise<SessionApprovalRespondTransportResponse> {
       if (!isRespondRequest(request)) return { status: 503, body: UNAVAILABLE };
       return await requestApproval<ApprovalRespondResponse>(
+        runtimeHostTransportPort,
         fetcher,
         issuer,
-        `${baseUrl}/respond`,
+        '/api/sessions/approvals/respond',
         'sessions.approvals.respond',
         request,
         isRespondResponse,
@@ -116,9 +116,10 @@ export function createSessionApprovalTransport(
 }
 
 async function requestApproval<T>(
+  port: number,
   fetcher: typeof fetch,
   issuer: RuntimeHostDeliveryIssuer,
-  url: string,
+  path: string,
   capability: 'sessions.approvals.list' | 'sessions.approvals.respond',
   request: SessionApprovalListRequest | SessionApprovalRespondRequest,
   isResponse: (value: unknown) => value is T,
@@ -126,30 +127,23 @@ async function requestApproval<T>(
   status: 200 | 400 | 422 | 503;
   body: T | InvalidRequest | typeof UNSUPPORTED | typeof UNAVAILABLE;
 }>> {
-  try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: new URL(url).pathname,
-          scope: 'sessions:write',
-          capability,
-          subject: 'session-approval',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-    const body: unknown = await response.json();
-    if (response.status === 200 && isResponse(body)) return { status: 200, body };
-    if (response.status === 400) return { status: 400, body: INVALID_REQUEST };
-    if (response.status === 422 && isUnsupported(body)) return { status: 422, body: UNSUPPORTED };
-  } catch {
-    // The delivery contract deliberately suppresses native transport details.
-  }
+  const response = await sendLoopbackJson({
+    port,
+    path,
+    issuer,
+    decision: {
+      endpoint: path,
+      scope: 'sessions:write',
+      capability,
+      subject: 'session-approval',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  if (response?.status === 200 && isResponse(response.body)) return { status: 200, body: response.body };
+  if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+  if (response?.status === 422 && isUnsupported(response.body)) return { status: 422, body: UNSUPPORTED };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -244,13 +238,4 @@ function sameEndpoint(left: NativeEndpoint, right: NativeEndpoint): boolean {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

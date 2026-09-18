@@ -6,21 +6,21 @@ use super::{
     DeliveryClaimSnapshot, DeliveryDispatch, DeliveryFailure, DeliveryId, DeliveryIdError,
     DeliveryLedger, DeliveryLedgerSnapshot, DeliveryPhase, DeliveryPhaseSnapshot, DeliveryReceipt,
     DeliveryReceiptError, DeliveryRecovery, DeliveryRequest, DeliveryRequestError,
-    DeliveryResolution, DeliverySnapshot, DeliveryStart, MatchaDeliveryCorrelation,
+    DeliveryResolution, DeliverySnapshot, DeliveryStart, NativeDeliveryCorrelation,
     NativeRunReceiptReference, NativeTerminalStatus, RegisterDeliveryError, RegisterOutcome,
     RestoreDeliveryError, RestoreLedgerError, TerminalObservationError, TerminalObservationOutcome,
     TerminalObservationResolution, TerminalObservationSnapshot, TerminalObservationSnapshotInput,
-    begin_delivery, dispatch_delivery, observe_matcha_terminal, recover_interrupted_delivery,
+    begin_delivery, dispatch_delivery, observe_native_terminal, recover_interrupted_delivery,
     register_delivery, resolve_authorized_graph_outcome, settle_delivery,
 };
 use crate::ports::{
-    DeliveryReceiptReference, DeliveryReference, DeliveryRejection, ExternalSessionReference,
+    DeliveryReceiptReference, DeliveryReference, DeliveryRejection, EndpointSessionId,
     IdempotencyKey, ManagedAgentReference, PromptDeliveryOutcome, PromptDeliveryPort,
     PromptDeliveryRequest, PromptDispatchPayload, RoleSessionReceipt, RuntimeEndpointReference,
 };
 use crate::{
     AttemptStatus, EdgeAction, EdgeDefinition, GraphDefinition, GraphEvent, GraphRunId, GraphState,
-    GraphStatus, LocalSessionReference, NodeDefinition, NodeId, RoleId, TeamId, project, reduce,
+    GraphStatus, NodeDefinition, NodeId, RoleId, TeamId, project, reduce,
 };
 
 fn request(delivery_id: &str, max_attempts: u32) -> DeliveryRequest {
@@ -32,6 +32,7 @@ fn request(delivery_id: &str, max_attempts: u32) -> DeliveryRequest {
         node_execution_id: "node-review:attempt:1".to_owned(),
         task_id: "task-release".to_owned(),
         role_id: "role-lead".to_owned(),
+        session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
         idempotency_key: "team-run:run-01:node-review:attempt:1".to_owned(),
         message: "private prompt".to_owned(),
         requested_at: 1_000,
@@ -51,8 +52,7 @@ fn binding() -> RoleSessionReceipt {
         TeamId::try_new("team-release").unwrap(),
         GraphRunId::new("run-01"),
         RoleId::try_new("role-lead").unwrap(),
-        LocalSessionReference::try_new("session-local-opaque").unwrap(),
-        ExternalSessionReference::try_new("session-native-opaque").unwrap(),
+        crate::RoleSessionRef::initial(),
         ManagedAgentReference::try_new("agent-lead").unwrap(),
         RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
     )
@@ -132,8 +132,8 @@ fn graph_with_edge() -> GraphState {
     .unwrap()
 }
 
-fn matcha_delivery_correlation() -> MatchaDeliveryCorrelation {
-    MatchaDeliveryCorrelation::new(matcha_session(), matcha_native_run())
+fn matcha_delivery_correlation() -> NativeDeliveryCorrelation {
+    NativeDeliveryCorrelation::new(matcha_session(), matcha_native_run())
 }
 
 fn delivered_delivery() -> Delivery {
@@ -144,7 +144,7 @@ fn delivered_delivery() -> Delivery {
         &active_claim,
         DeliveryReceipt::Accepted {
             receipt: DeliveryReceiptReference::try_new("delivery-receipt-01").unwrap(),
-            matcha_correlation: Some(matcha_delivery_correlation()),
+            native_correlation: Some(matcha_delivery_correlation()),
             accepted_at: 1_002,
         },
         2_000,
@@ -153,8 +153,8 @@ fn delivered_delivery() -> Delivery {
     delivery
 }
 
-fn matcha_session() -> ExternalSessionReference {
-    ExternalSessionReference::try_new("matcha-session-correlation-canary").unwrap()
+fn matcha_session() -> EndpointSessionId {
+    EndpointSessionId::try_new("matcha-session-correlation-canary").unwrap()
 }
 
 fn matcha_native_run() -> NativeRunReceiptReference {
@@ -588,7 +588,7 @@ fn interrupted_claim_becomes_outcome_unknown_without_an_automatic_replay() {
             &active_claim,
             DeliveryReceipt::Accepted {
                 receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-                matcha_correlation: None,
+                native_correlation: None,
                 accepted_at: 2_001
             },
             3_000,
@@ -625,7 +625,7 @@ fn stale_receipt_cannot_resolve_a_later_retry_claim() {
             &first,
             DeliveryReceipt::Accepted {
                 receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-                matcha_correlation: None,
+                native_correlation: None,
                 accepted_at: 2_001
             },
             3_000,
@@ -670,7 +670,7 @@ fn dispatch_preserves_the_claim_identity_and_records_an_external_receipt() {
         delivery.phase(),
         &DeliveryPhase::Delivered {
             receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 1_001,
         },
     );
@@ -828,7 +828,7 @@ fn generic_delivered_receipt_cannot_record_a_matcha_terminal_observation() {
         &active_claim,
         DeliveryReceipt::Accepted {
             receipt: DeliveryReceiptReference::try_new("generic-delivery-receipt").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 1_002,
         },
         2_000,
@@ -839,7 +839,7 @@ fn generic_delivered_receipt_cannot_record_a_matcha_terminal_observation() {
     let original_graph = graph.clone();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -859,7 +859,7 @@ fn terminal_observation_uses_correlation_even_when_delivery_and_native_receipts_
     let mut graph = running_graph();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -886,10 +886,10 @@ fn terminal_observation_rejects_session_mismatch_without_mutating_delivery_or_gr
     let original_graph = graph.clone();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
-            ExternalSessionReference::try_new("other-native-session").unwrap(),
+            EndpointSessionId::try_new("other-native-session").unwrap(),
             matcha_native_run(),
             NativeTerminalStatus::Completed,
             1_010,
@@ -909,7 +909,7 @@ fn terminal_observation_rejects_stale_fence_without_mutating_delivery_or_graph()
     let original_graph = graph.clone();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -924,7 +924,7 @@ fn terminal_observation_rejects_stale_fence_without_mutating_delivery_or_graph()
 }
 
 #[test]
-fn terminal_observation_rejects_a_native_receipt_other_than_its_matcha_correlation_without_mutation()
+fn terminal_observation_rejects_a_native_receipt_other_than_its_native_correlation_without_mutation()
  {
     let mut delivery = delivered_delivery();
     let original_delivery = delivery.clone();
@@ -932,7 +932,7 @@ fn terminal_observation_rejects_a_native_receipt_other_than_its_matcha_correlati
     let original_graph = graph.clone();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -952,7 +952,7 @@ fn terminal_observation_replays_identical_record_and_rejects_conflict_without_mu
     let mut graph = running_graph();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -965,7 +965,7 @@ fn terminal_observation_replays_identical_record_and_rejects_conflict_without_mu
     let observed_delivery = delivery.clone();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -978,7 +978,7 @@ fn terminal_observation_replays_identical_record_and_rejects_conflict_without_mu
     assert_eq!(delivery, observed_delivery);
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -1002,7 +1002,7 @@ fn completed_failed_and_interrupted_observations_wait_for_authorized_graph_resol
         let mut graph = running_graph();
 
         assert_eq!(
-            observe_matcha_terminal(
+            observe_native_terminal(
                 &mut delivery,
                 &mut graph,
                 matcha_session(),
@@ -1032,7 +1032,7 @@ fn completed_failed_and_interrupted_observations_wait_for_authorized_graph_resol
 fn authorized_graph_resolution_routes_only_an_explicit_fenced_output_receipt() {
     let mut delivery = delivered_delivery();
     let mut graph = graph_with_edge();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1078,7 +1078,7 @@ fn authorized_graph_resolution_routes_only_an_explicit_fenced_output_receipt() {
 fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receipts() {
     let mut cancelled_delivery = delivered_delivery();
     let mut cancelled_graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut cancelled_delivery,
         &mut cancelled_graph,
         matcha_session(),
@@ -1113,7 +1113,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
 
     let mut mismatched_delivery = delivered_delivery();
     let mut mismatched_graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut mismatched_delivery,
         &mut mismatched_graph,
         matcha_session(),
@@ -1152,7 +1152,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
 
     let mut unmatched_delivery = delivered_delivery();
     let mut unmatched_graph = graph_with_edge();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut unmatched_delivery,
         &mut unmatched_graph,
         matcha_session(),
@@ -1187,7 +1187,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
 
     let mut delivery = delivered_delivery();
     let mut graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1227,7 +1227,7 @@ fn cancelled_observation_records_atomically_without_output_or_edge_routing() {
     let mut graph = graph_with_edge();
 
     assert_eq!(
-        observe_matcha_terminal(
+        observe_native_terminal(
             &mut delivery,
             &mut graph,
             matcha_session(),
@@ -1262,7 +1262,7 @@ fn cancelled_observation_records_atomically_without_output_or_edge_routing() {
 fn terminal_observation_is_not_rewritten_by_interrupted_delivery_recovery() {
     let mut delivery = delivered_delivery();
     let mut graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1286,7 +1286,7 @@ fn terminal_observation_is_not_rewritten_by_interrupted_delivery_recovery() {
 fn terminal_observation_snapshot_round_trips_distinct_delivery_and_native_receipts() {
     let mut delivery = delivered_delivery();
     let mut graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1311,7 +1311,7 @@ fn terminal_observation_snapshot_round_trips_distinct_delivery_and_native_receip
 fn restore_rejects_a_terminal_observation_that_contradicts_its_delivery_facts() {
     let mut delivery = delivered_delivery();
     let mut graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1338,6 +1338,7 @@ fn restore_rejects_a_terminal_observation_that_contradicts_its_delivery_facts() 
                     delivered_receipt: observation.delivered_receipt().clone(),
                     native_terminal,
                     observed_at: observation.observed_at(),
+                    output: observation.output().cloned(),
                     resolution: observation.resolution().clone(),
                 }),
             },
@@ -1360,7 +1361,7 @@ fn restore_rejects_a_terminal_observation_that_contradicts_its_delivery_facts() 
 fn terminal_observation_debug_redacts_sensitive_correlation_fields() {
     let mut delivery = delivered_delivery();
     let mut graph = running_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
         matcha_session(),
@@ -1416,7 +1417,7 @@ fn terminal_delivery_rejects_later_receipts_without_rewriting_its_receipt_fact()
         &active_claim,
         DeliveryReceipt::Accepted {
             receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 1_001,
         },
         2_000,
@@ -1433,7 +1434,7 @@ fn terminal_delivery_rejects_later_receipts_without_rewriting_its_receipt_fact()
         Err(DeliveryReceiptError::NotDelivering {
             phase: DeliveryPhase::Delivered {
                 receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-                matcha_correlation: None,
+                native_correlation: None,
                 accepted_at: 1_001,
             },
         }),
@@ -1442,7 +1443,7 @@ fn terminal_delivery_rejects_later_receipts_without_rewriting_its_receipt_fact()
         delivery.phase(),
         &DeliveryPhase::Delivered {
             receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 1_001,
         },
     );

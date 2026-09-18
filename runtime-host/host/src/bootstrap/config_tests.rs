@@ -21,47 +21,13 @@ fn wire() -> serde_json::Value {
         "parentCallbackBaseUrl": "http://127.0.0.1:34100",
         "parentCallbackDispatchToken": "test-parent-dispatch-token",
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",
-        "cronBrokerVerificationKey": "MCowBQYDK2VwAyEAIcPTPZ95XS_AEiM3zFVx8tkcbB2_7d62G7PkQm6DPhY",
-        "sessionTransportPort": 34101,
-        "taskManagerTransportPort": 34138,
-        "sessionSendTransportPort": 34106,
-        "sessionAbortTransportPort": 34113,
-        "sessionApprovalTransportPort": 34107,
-        "securityEmergencyTransportPort": 34112,
-        "channelStatusTransportPort": 34115,
-        "channelCatalogTransportPort": 34142,
-        "channelControlTransportPort": 34132,
-        "channelPairingTransportPort": 34126,
-        "sessionModelSelectionTransportPort": 34108,
-        "matchaHistoryTransportPort": 34141,
-        "usageTransportPort": 34136,
-        "diagnosticsTransportPort": 34104,
-        "cronTransportPort": 34116,
-        "cronBrokerTransportPort": 34137,
-        "agentsTransportPort": 34117,
-        "teamPublicTransportPort": 34118,
-        "fleetTransportPort": 34143,
-        "teamRoleSessionsTransportPort": 34131,
-        "teamGraphTransportPort": 34120,
-        "providerModelsTransportPort": 34119,
-        "teamSkillTransportPort": 34121,
-        "teamTriggerTransportPort": 34122,
-        "teamLifecycleTransportPort": 34123,
-        "manualTeamTransportPort": 34125,
-        "settingsDesiredTransportPort": 34127,
-        "securityPolicyTransportPort": 34128,
-        "workspaceTextTransportPort": 34105,
-        "workspaceBinaryTransportPort": 34130,
-        "workspaceDirectoryTransportPort": 34110,
-        "workspaceWriteTransportPort": 34111,
-        "workspaceMediaTransportPort": 34135,
+        "runtimeHostTransportPort": 34101,
         "matcha": {
             "bunExecutable": format!("{ROOT}/bun"),
             "entry": format!("{ROOT}/app-server.mjs"),
             "workingDirectory": ROOT,
             "storageRoot": format!("{ROOT}/storage"),
             "port": 34102,
-            "privateSecretRoot": format!("{ROOT}/private"),
         },
         "openClaw": {
             "electronImage": format!("{ROOT}/MatchaClaw"),
@@ -75,23 +41,6 @@ fn wire() -> serde_json::Value {
             "port": 34103,
         },
     });
-    let root = value
-        .as_object_mut()
-        .expect("bootstrap fixture is an object");
-    root.insert(
-        "teamTaskBoardTransportPort".into(),
-        serde_json::json!(34124),
-    );
-    root.insert(
-        "teamApprovalsTransportPort".into(),
-        serde_json::json!(34133),
-    );
-    root.insert("teamDecisionTransportPort".into(), serde_json::json!(34139));
-    root.insert("teamRoleChatTransportPort".into(), serde_json::json!(34140));
-    root.insert(
-        "providerAccountsTransportPort".into(),
-        serde_json::json!(34134),
-    );
     with_platform_fields(value)
 }
 
@@ -152,7 +101,6 @@ fn materializable_wire(root: &TestRoot) -> serde_json::Value {
     value["matcha"]["entry"] = serde_json::Value::String(root.path("app-server.mjs"));
     value["matcha"]["workingDirectory"] = serde_json::Value::String(root.path("work"));
     value["matcha"]["storageRoot"] = serde_json::Value::String(root.path("storage"));
-    value["matcha"]["privateSecretRoot"] = serde_json::Value::String(root.path("private"));
     value["openClaw"]["electronImage"] = serde_json::Value::String(root.path("MatchaClaw"));
     value["openClaw"]["workingDirectory"] = serde_json::Value::String(root.path("work"));
     value["openClaw"]["openclawDir"] = serde_json::Value::String(root.path("openclaw"));
@@ -306,79 +254,7 @@ fn materializes_host_and_organization_runtime_input() {
     let parts = bootstrap.into_parts().unwrap();
     let input = parts.host;
     let webhook_token = parts.webhook_token;
-    let session_transport_port = parts.session_transport_port;
-    let task_manager_transport_port = parts.task_manager_transport_port;
-    let session_send_transport_port = parts.session_send_transport_port;
-    let session_abort_transport_port = parts.session_abort_transport_port;
-    let session_approval_transport_port = parts.session_approval_transport_port;
-    let security_emergency_transport_port = parts.security_emergency_transport_port;
-    let channel_status_transport_port = parts.channel_status_transport_port;
-    let channel_catalog_transport_port = parts.channel_catalog_transport_port;
-    let channel_control_transport_port = parts.channel_control_transport_port;
-    let channel_pairing_transport_port = parts.channel_pairing_transport_port;
-    let session_model_selection_transport_port = parts.session_model_selection_transport_port;
-    let matcha_history_transport_port = parts.matcha_history_transport_port;
-    let usage_transport_port = parts.usage_transport_port;
-    let diagnostics_transport_port = parts.diagnostics_transport_port;
-    let workspace_text_transport_port = parts.workspace_text_transport_port;
-    let workspace_binary_transport_port = parts.workspace_binary_transport_port;
-    let workspace_directory_transport_port = parts.workspace_directory_transport_port;
-    let workspace_write_transport_port = parts.workspace_write_transport_port;
-    let workspace_media_transport_port = parts.workspace_media_transport_port;
-    let cron_transport_port = parts.cron_transport_port;
-    let agents_transport_port = parts.agents_transport_port;
-    let team_public_transport_port = parts.team_public_transport_port;
-    let fleet_transport_port = parts.fleet_transport_port;
-    let team_role_sessions_transport_port = parts.team_role_sessions_transport_port;
-    let team_approvals_transport_port = parts.team_approvals_transport_port;
-    let team_decision_transport_port = parts.team_decision_transport_port;
-    let team_role_chat_transport_port = parts.team_role_chat_transport_port;
-    let team_graph_transport_port = parts.team_graph_transport_port;
-    let provider_models_transport_port = parts.provider_models_transport_port;
-    let provider_accounts_transport_port = parts.provider_accounts_transport_port;
-    let team_skill_transport_port = parts.team_skill_transport_port;
-    let team_trigger_transport_port = parts.team_trigger_transport_port;
-    let team_lifecycle_transport_port = parts.team_lifecycle_transport_port;
-    let manual_team_transport_port = parts.manual_team_transport_port;
-    let settings_desired_transport_port = parts.settings_desired_transport_port;
-    let security_policy_transport_port = parts.security_policy_transport_port;
-    assert_eq!(session_transport_port, 34101);
-    assert_eq!(task_manager_transport_port, 34138);
-    assert_eq!(session_send_transport_port, 34106);
-    assert_eq!(session_abort_transport_port, 34113);
-    assert_eq!(session_approval_transport_port, 34107);
-    assert_eq!(security_emergency_transport_port, 34112);
-    assert_eq!(channel_status_transport_port, 34115);
-    assert_eq!(channel_catalog_transport_port, 34142);
-    assert_eq!(channel_control_transport_port, 34132);
-    assert_eq!(channel_pairing_transport_port, 34126);
-    assert_eq!(session_model_selection_transport_port, 34108);
-    assert_eq!(matcha_history_transport_port, 34141);
-    assert_eq!(usage_transport_port, 34136);
-    assert_eq!(diagnostics_transport_port, 34104);
-    assert_eq!(workspace_text_transport_port, 34105);
-    assert_eq!(workspace_binary_transport_port, 34130);
-    assert_eq!(workspace_directory_transport_port, 34110);
-    assert_eq!(workspace_write_transport_port, 34111);
-    assert_eq!(workspace_media_transport_port, 34135);
-    assert_eq!(cron_transport_port, 34116);
-    assert_eq!(task_manager_transport_port, 34138);
-    assert_eq!(agents_transport_port, 34117);
-    assert_eq!(team_public_transport_port, 34118);
-    assert_eq!(fleet_transport_port, 34143);
-    assert_eq!(team_role_sessions_transport_port, 34131);
-    assert_eq!(team_approvals_transport_port, 34133);
-    assert_eq!(team_decision_transport_port, 34139);
-    assert_eq!(team_role_chat_transport_port, 34140);
-    assert_eq!(team_graph_transport_port, 34120);
-    assert_eq!(provider_models_transport_port, 34119);
-    assert_eq!(provider_accounts_transport_port, 34134);
-    assert_eq!(team_skill_transport_port, 34121);
-    assert_eq!(team_trigger_transport_port, 34122);
-    assert_eq!(team_lifecycle_transport_port, 34123);
-    assert_eq!(manual_team_transport_port, 34125);
-    assert_eq!(settings_desired_transport_port, 34127);
-    assert_eq!(security_policy_transport_port, 34128);
+    assert_eq!(parts.runtime_host_transport_port, 34101);
 
     assert_eq!(input.matcha.bun_executable, Path::new(&root.path("bun")));
     assert_eq!(input.matcha.entry, Path::new(&root.path("app-server.mjs")));
@@ -605,8 +481,8 @@ fn rejects_invalid_version_strings_ports_and_paths() {
     assert!(decode(serde_json::to_vec(&relative_path).unwrap()).is_err());
 
     let mut nul_path = wire();
-    nul_path["matcha"]["privateSecretRoot"] =
-        serde_json::Value::String(format!("{ROOT}/private\0injected"));
+    nul_path["matcha"]["storageRoot"] =
+        serde_json::Value::String(format!("{ROOT}/storage\0injected"));
     assert!(decode(serde_json::to_vec(&nul_path).unwrap()).is_err());
 
     let mut relative_app_log_dir = wire();
@@ -618,8 +494,8 @@ fn rejects_invalid_version_strings_ports_and_paths() {
 fn rejects_raw_payloads_without_disclosing_them() {
     let raw_payload = "native-bootstrap-payload-must-not-leak";
     let mut invalid = wire();
-    invalid["matcha"]["privateSecretRoot"] =
-        serde_json::Value::String(format!("{ROOT}/private\0{raw_payload}"));
+    invalid["matcha"]["storageRoot"] =
+        serde_json::Value::String(format!("{ROOT}/storage\0{raw_payload}"));
 
     let error = decode(serde_json::to_vec(&invalid).unwrap())
         .err()
@@ -634,7 +510,7 @@ fn rejects_raw_payloads_without_disclosing_them() {
 
 #[test]
 fn rejects_transport_port_collisions() {
-    let mut task_manager_collision = wire();
-    task_manager_collision["taskManagerTransportPort"] = serde_json::Value::from(34101);
-    assert!(decode(serde_json::to_vec(&task_manager_collision).unwrap()).is_err());
+    let mut matcha_collision = wire();
+    matcha_collision["matcha"]["port"] = serde_json::Value::from(34101);
+    assert!(decode(serde_json::to_vec(&matcha_collision).unwrap()).is_err());
 }

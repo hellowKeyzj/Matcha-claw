@@ -730,7 +730,7 @@ fn matcha_terminal_readback_stays_in_teamrun_receipt_router_native_watches() {
 
     assert!(!host.contains("read_matcha_terminal_receipt"));
     assert!(receipt_router.contains("struct TerminalWatches"));
-    assert!(receipt_router.contains("fn watch_matcha_terminal("));
+    assert!(receipt_router.contains("fn watch_native_terminal("));
     assert!(matcha.contains("impl TeamTerminalOps for MatchaRuntimeDriver"));
     assert!(matcha.contains("watch_role_terminal"));
     assert!(!crate_root.contains("read_matcha_terminal_receipt"));
@@ -1018,7 +1018,6 @@ fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
             "cancel_parent_event_operations",
             "trigger_open_claw_cron(",
             "list_cron_jobs(",
-            "execute_cron_broker(",
             "load_cron_history(",
             "add_cron_job(",
             "update_cron_job(",

@@ -7,6 +7,9 @@ const hostProviderDeleteAccountMock = vi.fn();
 const hostProviderUpdateAccountMock = vi.fn();
 const trackUiEventMock = vi.hoisted(() => vi.fn());
 const startUiTimingMock = vi.hoisted(() => vi.fn(() => () => 1));
+const providerModelCatalogRefreshMock = vi.hoisted(() => vi.fn());
+const capabilityRoutingRefreshMock = vi.hoisted(() => vi.fn());
+const subagentsLoadAvailableModelsMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/provider-accounts', () => ({
   fetchProviderSnapshot: (...args: unknown[]) => fetchProviderSnapshotMock(...args),
@@ -36,6 +39,30 @@ vi.mock('@/lib/telemetry', () => ({
   startUiTiming: (...args: unknown[]) => startUiTimingMock(...args),
 }));
 
+vi.mock('@/stores/provider-model-catalog', () => ({
+  useProviderModelCatalogStore: {
+    getState: () => ({
+      refresh: providerModelCatalogRefreshMock,
+    }),
+  },
+}));
+
+vi.mock('@/stores/capability-routing', () => ({
+  useCapabilityRoutingStore: {
+    getState: () => ({
+      refresh: capabilityRoutingRefreshMock,
+    }),
+  },
+}));
+
+vi.mock('@/stores/subagents', () => ({
+  useSubagentsStore: {
+    getState: () => ({
+      loadAvailableModels: subagentsLoadAvailableModelsMock,
+    }),
+  },
+}));
+
 import { useProviderStore } from '@/stores/providers';
 
 function sleep(ms: number): Promise<void> {
@@ -50,6 +77,9 @@ describe('useProviderStore mutation states', () => {
     hostProviderUpdateAccountMock.mockReset();
     trackUiEventMock.mockReset();
     startUiTimingMock.mockClear();
+    providerModelCatalogRefreshMock.mockReset();
+    capabilityRoutingRefreshMock.mockReset();
+    subagentsLoadAvailableModelsMock.mockReset();
     localStorage.clear();
 
     useProviderStore.setState({
@@ -128,6 +158,9 @@ describe('useProviderStore mutation states', () => {
     expect(useProviderStore.getState().providerSnapshot.credentials[0]?.label).toBe('OpenAI primary');
     expect(useProviderStore.getState().refreshing).toBe(false);
     expect(useProviderStore.getState().error).toBeNull();
+    expect(providerModelCatalogRefreshMock).toHaveBeenCalledTimes(1);
+    expect(capabilityRoutingRefreshMock).toHaveBeenCalledTimes(1);
+    expect(subagentsLoadAvailableModelsMock).toHaveBeenCalledWith({ force: true });
   });
 
   it('createAccount 只使用 mutation 后的 owner readback', async () => {
@@ -162,6 +195,9 @@ describe('useProviderStore mutation states', () => {
     expect(useProviderStore.getState().providerSnapshot.credentials).toContainEqual(
       expect.objectContaining({ id: 'ollama-local', vendorId: 'ollama' }),
     );
+    expect(providerModelCatalogRefreshMock).toHaveBeenCalledTimes(1);
+    expect(capabilityRoutingRefreshMock).toHaveBeenCalledTimes(1);
+    expect(subagentsLoadAvailableModelsMock).toHaveBeenCalledWith({ force: true });
 
     resolveInitialSnapshot?.({ statuses: [], credentials: [], vendors: [], revisions: {} });
     await refreshTask;

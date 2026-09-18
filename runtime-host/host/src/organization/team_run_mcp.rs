@@ -10,9 +10,7 @@ use organization::{
 };
 
 use crate::organization::{
-    TeamGraphPatchDraft, TeamNodePromptSettledResult,
-    TeamNodeTerminalResolution as OwnerNodeTerminalResolution, TeamNodeTerminalResult,
-    team_run::TeamRunOwner,
+    TeamGraphPatchDraft, TeamNodePromptSettledResult, team_run::TeamRunOwner,
 };
 
 /// The fixed semantic boundary for the independent local TeamRun MCP artifact.
@@ -89,42 +87,17 @@ impl TeamRunMcpFacade {
             let terminal = request
                 .terminal_resolution
                 .ok_or(TeamRunMcpError::Invalid)?;
-            let owner_terminal = OwnerNodeTerminalResolution {
-                delivery_id: terminal.delivery_id.clone(),
-                receipt: terminal.receipt.clone(),
-                node_id: terminal.node_id.clone(),
-                attempt_number: terminal.attempt_number,
-                summary: terminal.summary.clone(),
-                output_port: terminal.output_port.clone(),
-            };
-            let event = match request.event.value {
-                TeamNodeEventCommandKindValue::Complete => "complete",
-                TeamNodeEventCommandKindValue::Reject => "reject",
-                TeamNodeEventCommandKindValue::Progress
-                | TeamNodeEventCommandKindValue::RequestInput
-                | TeamNodeEventCommandKindValue::RequestApproval(_) => unreachable!(),
-            };
-            let outcome = self
-                .team_run
-                .resolve_node_terminal(
-                    &mut self.store,
-                    &request.run_id,
-                    &request.node_execution_id,
-                    event,
-                    Some(&owner_terminal),
-                    terminal.summary.as_str(),
-                    Some(terminal.output_port.as_str()),
-                    request.idempotency_key.as_str(),
-                    request.occurred_at,
-                )
-                .map_err(|error| match error {
-                    StoreFault::InvalidFacts => TeamRunMcpError::Invalid,
-                    _ => TeamRunMcpError::Unavailable,
-                })?;
-            return Ok(TeamNodeEventOutcome::terminal_resolved(
-                terminal_outcome(outcome),
-                terminal.summary,
-                terminal.output_port,
+            let TeamNodeTerminalResolution {
+                delivery_id: _,
+                receipt: _,
+                node_id: _,
+                attempt_number: _,
+                summary,
+                output_port,
+            } = terminal;
+            return Ok(TeamNodeEventOutcome::legacy_terminal_evidence(
+                summary,
+                output_port,
             ));
         }
         let event = match request.event.value {
@@ -540,8 +513,7 @@ pub(crate) enum TeamNodeEventOutcomeKind {
     Progressed,
     WaitingForInput,
     ApprovalRequested,
-    TerminalResolved {
-        outcome: &'static str,
+    LegacyTerminalEvidence {
         summary: String,
         output_port: String,
     },
@@ -562,10 +534,9 @@ impl TeamNodeEventOutcome {
         Self { kind }
     }
 
-    fn terminal_resolved(outcome: &'static str, summary: String, output_port: String) -> Self {
+    fn legacy_terminal_evidence(summary: String, output_port: String) -> Self {
         Self {
-            kind: TeamNodeEventOutcomeKind::TerminalResolved {
-                outcome,
+            kind: TeamNodeEventOutcomeKind::LegacyTerminalEvidence {
                 summary,
                 output_port,
             },
@@ -735,11 +706,4 @@ pub enum TeamRunMcpError {
 
 fn opaque(value: impl Into<String>) -> Result<OpaqueId, TeamRunMcpError> {
     OpaqueId::try_new(value).map_err(|_| TeamRunMcpError::Invalid)
-}
-
-const fn terminal_outcome(outcome: TeamNodeTerminalResult) -> &'static str {
-    match outcome {
-        TeamNodeTerminalResult::Recorded => "recorded",
-        TeamNodeTerminalResult::Replayed => "replayed",
-    }
 }

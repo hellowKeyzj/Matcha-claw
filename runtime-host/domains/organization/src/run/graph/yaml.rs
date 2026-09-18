@@ -91,6 +91,9 @@ pub fn export(definition: &GraphDefinition) -> String {
             yaml.push_str("    roleId: ");
             yaml.push_str(&quoted(assignment.role_id()));
             yaml.push('\n');
+            yaml.push_str("    sessionRef: ");
+            yaml.push_str(&quoted(assignment.session_ref().as_str()));
+            yaml.push('\n');
             if let Some(kind) = assignment.output_artifact_kind() {
                 yaml.push_str("    outputArtifactKind: ");
                 yaml.push_str(&quoted(kind));
@@ -105,6 +108,9 @@ pub fn export(definition: &GraphDefinition) -> String {
         if let Some(assignment) = node.review_assignment() {
             yaml.push_str("    roleId: ");
             yaml.push_str(&quoted(assignment.role_id()));
+            yaml.push('\n');
+            yaml.push_str("    sessionRef: ");
+            yaml.push_str(&quoted(assignment.session_ref().as_str()));
             yaml.push('\n');
             yaml.push_str("    prompt: ");
             yaml.push_str(&quoted(assignment.prompt()));
@@ -354,6 +360,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
     let task_id = fields.remove("taskId");
     let prompt = fields.remove("prompt");
     let role_id = fields.remove("roleId");
+    let session_ref = fields.remove("sessionRef");
     let output_artifact_kind = fields.remove("outputArtifactKind");
     let group_id = fields.remove("groupId");
     let require_completed = fields.remove("requireCompleted");
@@ -373,6 +380,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             if task_id.is_some()
                 || prompt.is_some()
                 || role_id.is_some()
+                || session_ref.is_some()
                 || output_artifact_kind.is_some()
                 || group_id.is_some()
                 || require_completed.is_some()
@@ -392,6 +400,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             task_id,
             prompt,
             role_id,
+            session_ref,
             webhook_path,
             cron_expression,
             group_id,
@@ -403,6 +412,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 Some(task_id),
                 Some(prompt),
                 Some(role_id),
+                session_ref,
                 None,
                 None,
                 group_id,
@@ -416,7 +426,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 WorkAssignment::typed(
                     task_id,
                     prompt,
-                    ExecutorPolicy::team_role(role_id),
+                    ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
                     output_artifact_kind,
                     group_id.map(GroupId::new),
                 ),
@@ -425,6 +435,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
         },
         (NodeKind::Review, false) => match (
             role_id,
+            session_ref,
             prompt,
             webhook_path,
             cron_expression,
@@ -435,14 +446,27 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             allow_failed,
             retry_limit,
         ) {
-            (Some(role_id), Some(prompt), None, None, None, None, None, None, None, None) => {
-                Ok(NodeDefinition::review(
-                    NodeId::new(id),
-                    title,
-                    max_attempts,
-                    super::ReviewAssignment::new(role_id, prompt),
-                ))
-            }
+            (
+                Some(role_id),
+                session_ref,
+                Some(prompt),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ) => Ok(NodeDefinition::review(
+                NodeId::new(id),
+                title,
+                max_attempts,
+                super::ReviewAssignment::with_executor(
+                    ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
+                    prompt,
+                ),
+            )),
             _ => Err(GraphYamlError::InvalidNode),
         },
         (NodeKind::Join, false) => match (
@@ -455,6 +479,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             task_id,
             prompt,
             role_id,
+            session_ref,
             output_artifact_kind,
         ) {
             (
@@ -462,6 +487,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 Some(require_completed),
                 Some(allow_failed),
                 Some(retry_limit),
+                None,
                 None,
                 None,
                 None,
@@ -503,6 +529,7 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 && task_id.is_none()
                 && prompt.is_none()
                 && role_id.is_none()
+                && session_ref.is_none()
                 && output_artifact_kind.is_none()
                 && group_id.is_none()
                 && require_completed.is_none()
@@ -517,6 +544,15 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             ))
         }
         _ => Err(GraphYamlError::InvalidNode),
+    }
+}
+
+fn role_session_ref(value: Option<String>) -> Result<crate::RoleSessionRef, GraphYamlError> {
+    match value {
+        Some(value) => {
+            crate::RoleSessionRef::try_new(value).map_err(|_| GraphYamlError::InvalidNode)
+        }
+        None => Ok(crate::RoleSessionRef::initial()),
     }
 }
 
@@ -610,6 +646,7 @@ fn scalar(field: &str, value: &str) -> Result<String, GraphYamlError> {
                 | "isControl"
                 | "action"
                 | "includeUpstreamResult"
+                | "sessionRef"
                 | "requireCompleted"
                 | "allowFailed"
                 | "retryLimit"

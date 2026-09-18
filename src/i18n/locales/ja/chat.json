@@ -67,10 +67,21 @@
     "pending": {
         "typing": "思考中",
         "activity": "ツールを実行中",
-        "compacting": "コンテキストを圧縮中です。完了後に返信を続けます"
+        "compacting": "コンテキストを圧縮中です。完了後に返信を続けます",
+        "startup": {
+            "preparing_workspace": "ワークスペースを準備中",
+            "naming_worktree": "ワークスペースに名前を付けています",
+            "creating_worktree": "ワークスペースを作成中",
+            "running_setup": "初期化を実行中",
+            "provisioning_environment": "実行環境を準備中",
+            "preparing_context": "コンテキストを準備中",
+            "starting_model": "モデルを起動中"
+        },
+        "retrying": "モデルがレート制限中です。再試行しています {{attempt}}/{{maxAttempts}}"
     },
     "runtimeStatus": {
         "providerFallback": "代替 Provider に切り替えました",
+        "runtimeError": "ランタイムエラー",
         "guardian": {
             "reviewing": "Guardian が操作を確認中です",
             "approved": "Guardian が操作を許可しました",

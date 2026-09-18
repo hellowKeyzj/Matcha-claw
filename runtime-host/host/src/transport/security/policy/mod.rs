@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::transport::common::authorization::CapabilityDecisionVerifier;
 
 pub(crate) mod catalog;
-pub(crate) mod server;
+pub(crate) mod handler;
 pub(crate) mod wire;
 
 pub(crate) const ENDPOINT: &str = "/api/security/policy";

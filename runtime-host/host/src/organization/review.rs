@@ -117,6 +117,7 @@ pub(crate) fn prepare_review_dispatch(
         node_execution_id: input.fence.node_execution_id().as_str().to_owned(),
         task_id: node_id.to_owned(),
         role_id: role_id.to_owned(),
+        session_ref: input.binding.session_ref().as_str().to_owned(),
         idempotency_key: delivery_key.clone(),
         message: prompt.clone(),
         requested_at: input.requested_at,
@@ -138,7 +139,7 @@ pub(crate) fn prepare_review_dispatch(
         node_id: node_id.to_owned(),
         fence: input.fence.clone(),
         role_id: role_id.to_owned(),
-        session_id: input.binding.external_session().as_str().to_owned(),
+        session_id: input.binding.endpoint_session_id().as_str().to_owned(),
         prompt,
         idempotency_key: delivery_key,
         requested_at: input.requested_at,
@@ -195,7 +196,7 @@ pub(crate) fn map_review_verdict(
 ///
 /// This is deliberately only a consumer. The current native terminal wire produces status, not
 /// the summary or authorization receipt required here; callers must obtain both from the trusted
-/// native/event producer after `observe_matcha_terminal` has recorded terminal observation.
+/// native/event producer after `observe_native_terminal` has recorded terminal observation.
 /// `OrganizationStore::apply_agent_node_event_resolution` remains the final observation gate.
 pub(crate) fn resolve_review_after_terminal_observation(
     preparation: &ReviewDispatchPreparation,
@@ -258,7 +259,12 @@ fn validate_dispatch_input(input: &ReviewDispatchInput<'_>) -> Result<(), Review
     if input.binding.team() != input.team_id
         || input.binding.team_run() != input.run_id
         || input.binding.role().as_str().trim().is_empty()
-        || input.binding.external_session().as_str().trim().is_empty()
+        || input
+            .binding
+            .endpoint_session_id()
+            .as_str()
+            .trim()
+            .is_empty()
     {
         return Err(ReviewDispatchError::SessionBindingMismatch);
     }
@@ -348,12 +354,12 @@ mod tests {
         );
         let fence = graph.current_attempt(&node_id).unwrap().fence().clone();
         let team = TeamId::try_new("team:review").unwrap();
-        let binding = RoleSessionReceipt::new(
+        let binding = RoleSessionReceipt::with_endpoint_session_id(
             team.clone(),
             run_id.clone(),
             organization::RoleId::try_new("reviewer").unwrap(),
-            organization::LocalSessionReference::try_new("local:review").unwrap(),
-            organization::ExternalSessionReference::try_new("session:review").unwrap(),
+            organization::RoleSessionRef::try_new("rs0").unwrap(),
+            organization::EndpointSessionId::try_new("session:review").unwrap(),
             organization::ManagedAgentReference::try_new("agent:review").unwrap(),
             organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         );

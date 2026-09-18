@@ -152,6 +152,7 @@ fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<Activity
             Some(ActivityKind::AgentTask {
                 task_id: work.task_id().to_owned(),
                 role_id: work.role_id().to_owned(),
+                session_ref: work.session_ref().as_str().to_owned(),
                 prompt: work.prompt().to_owned(),
             })
         }
@@ -163,6 +164,7 @@ fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<Activity
             Some(ActivityKind::AgentTask {
                 task_id: node.id().as_str().to_owned(),
                 role_id: review.role_id().to_owned(),
+                session_ref: review.session_ref().as_str().to_owned(),
                 prompt: review.prompt().to_owned(),
             })
         }
@@ -347,8 +349,8 @@ mod tests {
         assert_eq!(selected[0].group_id().map(GroupId::as_str), Some("group-a"));
         assert!(matches!(
             selected[0].activity_kind(),
-            ActivityKind::AgentTask { task_id, role_id, prompt }
-                if task_id == "task-a" && role_id == "role-a" && prompt == "prompt"
+            ActivityKind::AgentTask { task_id, role_id, session_ref, prompt }
+                if task_id == "task-a" && role_id == "role-a" && session_ref == "rs0" && prompt == "prompt"
         ));
         let request = selected[0]
             .bind_activity_target(ActivityTarget::new("session-a").unwrap(), 3, 1)

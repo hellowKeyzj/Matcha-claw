@@ -12,7 +12,7 @@ use std::{
 use crate::run::delivery::{
     AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
     NativeRunReceiptReference, NativeTerminalStatus, TerminalObservationResolution,
-    observe_matcha_terminal, resolve_authorized_graph_outcome,
+    observe_native_terminal, resolve_authorized_graph_outcome,
 };
 use crate::{
     AgentNodeEventResolution, Approval, ApprovalDecision, ApprovalRequest, ApprovalStatus,
@@ -20,18 +20,18 @@ use crate::{
     ControlNodeResolutionError, ControlNodeResolutionOutcome, Delivery, DeliveryId, DeliveryLedger,
     DeliveryLedgerSnapshot, DeliveryPhase, DeliveryPhaseSnapshot, DeliveryReceipt,
     DeliveryReceiptError, DeliveryRequest, DeliveryResolution, DeliverySnapshot, DeliveryStart,
-    DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EvidenceId,
-    EvidenceRecord, EvidenceReference, ExecutorPolicy, ExternalSessionReference, GraphDefinition,
-    GraphEvent, GraphPatch, GraphPatchOperation, GraphRunId, GraphRunLifecycle,
-    GraphRunLifecycleState, GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy,
-    LocalSessionReference, ManagedAgentReference, MatchaDeliveryCorrelation,
+    DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EndpointSessionId,
+    EvidenceId, EvidenceRecord, EvidenceReference, ExecutorPolicy, GraphDefinition, GraphEvent,
+    GraphPatch, GraphPatchOperation, GraphRunId, GraphRunLifecycle, GraphRunLifecycleState,
+    GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy, ManagedAgentReference,
     MaterializationOperationOutcome, MaterializationReceipt, MaterializationRecordOutcome,
-    MaterializationRejection, MaterializationSource, MemberId, NodeDefinition, NodeId, NodeKind,
-    RegisterOutcome, ReviewAssignment, RoleAssignment, RoleChatAdmission, RoleChatAdmissionOutcome,
-    RoleChatRejection, RoleId, RoleKind, RoleMaterializationAgent, RoleMaterializationReceipt,
-    RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference, ScriptReviewRule,
-    StartTrigger, TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember,
-    TeamNodeEvent, TeamNodeEventOutcome, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
+    MaterializationRejection, MaterializationSource, MemberId, NativeDeliveryCorrelation,
+    NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment, RoleAssignment,
+    RoleChatAdmission, RoleChatAdmissionOutcome, RoleChatRejection, RoleId, RoleKind,
+    RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
+    RuntimeEndpointReference, ScriptReviewRule, StartTrigger, TeamDecisionCommand,
+    TeamDecisionType, TeamDefinition, TeamId, TeamMember, TeamNodeEvent, TeamNodeEventOutcome,
+    TeamNodeOutput, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
     TerminalObservationOutcome, TriggerFireError, TriggerFireRequest, TriggerRegistration,
     TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
     ports::materialization::NativeWorkspaceReceipt,
@@ -1307,15 +1307,15 @@ fn facts_restore_rejects_duplicate_and_mismatched_indexes() {
 
 #[test]
 fn durable_restore_rejects_duplicate_matcha_terminal_correlation() {
-    let correlation = MatchaDeliveryCorrelation::new(
-        ExternalSessionReference::try_new("matcha-session-correlation-canary").unwrap(),
+    let correlation = NativeDeliveryCorrelation::new(
+        EndpointSessionId::try_new("matcha-session-correlation-canary").unwrap(),
         NativeRunReceiptReference::try_new("matcha-native-run-correlation-canary").unwrap(),
     );
     let first = DeliverySnapshot::new(
         delivery_request(),
         DeliveryPhaseSnapshot::Delivered {
             receipt: crate::DeliveryReceiptReference::try_new("delivery-receipt:one").unwrap(),
-            matcha_correlation: Some(correlation.clone()),
+            native_correlation: Some(correlation.clone()),
             accepted_at: 3,
         },
         0,
@@ -1328,7 +1328,7 @@ fn durable_restore_rejects_duplicate_matcha_terminal_correlation() {
         second_request,
         DeliveryPhaseSnapshot::Delivered {
             receipt: crate::DeliveryReceiptReference::try_new("delivery-receipt:two").unwrap(),
-            matcha_correlation: Some(correlation),
+            native_correlation: Some(correlation),
             accepted_at: 3,
         },
         0,
@@ -2568,15 +2568,15 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
 }
 
 #[test]
-fn observe_matcha_terminal_commits_once_replays_without_appending_and_survives_reopen() {
+fn observe_native_terminal_commits_once_replays_without_appending_and_survives_reopen() {
     let path = test_path("terminal-observation-transaction");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(delivered_terminal_facts()).unwrap();
     let before_observation = fs::metadata(&path).unwrap().len();
 
     assert_eq!(
-        store.observe_matcha_terminal(
-            matcha_terminal_target(&store),
+        store.observe_native_terminal(
+            native_terminal_target(&store),
             NativeTerminalStatus::Completed,
             4,
         ),
@@ -2587,8 +2587,8 @@ fn observe_matcha_terminal_commits_once_replays_without_appending_and_survives_r
     assert_terminal_observation_projection(store.facts(), NativeTerminalStatus::Completed);
 
     assert_eq!(
-        store.observe_matcha_terminal(
-            matcha_terminal_target(&store),
+        store.observe_native_terminal(
+            native_terminal_target(&store),
             NativeTerminalStatus::Completed,
             4,
         ),
@@ -2600,8 +2600,8 @@ fn observe_matcha_terminal_commits_once_replays_without_appending_and_survives_r
     let mut reopened = OrganizationStore::open(&path).unwrap();
     assert_terminal_observation_projection(reopened.facts(), NativeTerminalStatus::Completed);
     assert_eq!(
-        reopened.observe_matcha_terminal(
-            matcha_terminal_target(&reopened),
+        reopened.observe_native_terminal(
+            native_terminal_target(&reopened),
             NativeTerminalStatus::Completed,
             4,
         ),
@@ -2613,7 +2613,7 @@ fn observe_matcha_terminal_commits_once_replays_without_appending_and_survives_r
 }
 
 #[test]
-fn observe_matcha_terminal_persists_each_native_terminal_status_projection() {
+fn observe_native_terminal_persists_each_native_terminal_status_projection() {
     for (native_terminal, expected_outcome, expected_status, expected_resolution) in [
         (
             NativeTerminalStatus::Completed,
@@ -2645,7 +2645,7 @@ fn observe_matcha_terminal_persists_each_native_terminal_status_projection() {
         store.replace_facts(delivered_terminal_facts()).unwrap();
 
         assert_eq!(
-            store.observe_matcha_terminal(matcha_terminal_target(&store), native_terminal, 4,),
+            store.observe_native_terminal(native_terminal_target(&store), native_terminal, 4,),
             Ok(expected_outcome)
         );
         assert_native_terminal_projection(
@@ -2669,27 +2669,27 @@ fn observe_matcha_terminal_persists_each_native_terminal_status_projection() {
 }
 
 #[test]
-fn observe_matcha_terminal_uses_persisted_correlation_after_runtime_binding_drift() {
+fn observe_native_terminal_uses_persisted_correlation_after_runtime_binding_drift() {
     let path = test_path("terminal-observation-runtime-binding-drift");
     let mut store = OrganizationStore::open(&path).unwrap();
     let (delivery, graph, binding) = delivered_delivery_and_graph();
     let initial = facts_with_delivery(delivery.clone(), graph.clone(), binding, Vec::new());
     store.replace_facts(initial).unwrap();
 
-    let drifted_binding = RoleSessionReceipt::new(
+    let drifted_binding = RoleSessionReceipt::with_endpoint_session_id(
         team_id(),
         GraphRunId::new("run:one"),
         RoleId::try_new("leader").unwrap(),
-        LocalSessionReference::try_new("local:one").unwrap(),
-        ExternalSessionReference::try_new("native-session:two").unwrap(),
+        crate::RoleSessionRef::initial(),
+        EndpointSessionId::try_new("native-session:two").unwrap(),
         ManagedAgentReference::try_new("agent:one").unwrap(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
     );
     let drifted = facts_with_delivery(delivery, graph, drifted_binding, Vec::new());
     store.replace_facts(drifted).unwrap();
     assert_eq!(
-        store.observe_matcha_terminal(
-            matcha_terminal_target(&store),
+        store.observe_native_terminal(
+            native_terminal_target(&store),
             NativeTerminalStatus::Completed,
             4,
         ),
@@ -2701,14 +2701,14 @@ fn observe_matcha_terminal_uses_persisted_correlation_after_runtime_binding_drif
 }
 
 #[test]
-fn matcha_terminal_target_redacts_and_limits_public_projections() {
+fn native_terminal_target_redacts_and_limits_public_projections() {
     let path = test_path("terminal-observation-target-projection");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(delivered_terminal_facts()).unwrap();
-    let target = matcha_terminal_target(&store);
+    let target = native_terminal_target(&store);
 
     assert_eq!(
-        target.correlation().external_session().as_str(),
+        target.correlation().endpoint_session_id().as_str(),
         "matcha-session-correlation-canary"
     );
     assert_eq!(
@@ -3109,6 +3109,116 @@ fn authorized_graph_resolution_advances_the_durable_team_run_query() {
 }
 
 #[test]
+fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
+    let path = test_path("native-run-output-resolution");
+    let mut store = OrganizationStore::open(&path).unwrap();
+    let (delivery, graph, binding) = observed_work_delivery_and_graph();
+    store
+        .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
+        .unwrap();
+    let target = native_terminal_target(&store);
+    let final_text = r#"noise <team_message>{"summary":"completed safely","output_port":"completed","payload":{"ok":true},"status":"passed"}</team_message>"#.to_owned();
+
+    assert_eq!(
+        store.resolve_native_run_output(
+            target.clone(),
+            AuthorizedGraphResolutionReceipt::try_new("native-output:one").unwrap(),
+            final_text.clone(),
+            5,
+        ),
+        Ok(crate::AuthorizedGraphResolutionOutcome::Recorded)
+    );
+    let committed_len = fs::metadata(&path).unwrap().len();
+    let delivery = store
+        .facts()
+        .deliveries()
+        .delivery(&DeliveryId::new("delivery:one").unwrap())
+        .unwrap();
+    let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
+        panic!("native output should keep the terminal observation fact");
+    };
+    let output = observation
+        .output()
+        .expect("native output should be durable");
+    assert_eq!(output.final_assistant_text(), final_text);
+    assert_eq!(output.summary(), "completed safely");
+    assert_eq!(output.output_port(), "completed");
+    assert_eq!(output.status(), Some("passed"));
+    assert!(matches!(
+        observation.resolution(),
+        TerminalObservationResolution::GraphResolved(resolution)
+            if resolution.receipt().as_str() == "native-output:one"
+                && resolution.output_port() == "completed"
+    ));
+    assert_eq!(
+        store
+            .facts()
+            .run(&GraphRunId::new("run:one"))
+            .unwrap()
+            .graph()
+            .current_attempt(&NodeId::new("work"))
+            .unwrap()
+            .output_port(),
+        Some("completed")
+    );
+
+    assert_eq!(
+        store.resolve_native_run_output(
+            target,
+            AuthorizedGraphResolutionReceipt::try_new("native-output:one").unwrap(),
+            final_text.clone(),
+            5,
+        ),
+        Ok(crate::AuthorizedGraphResolutionOutcome::Replayed)
+    );
+    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    drop(store);
+
+    let reopened = OrganizationStore::open(&path).unwrap();
+    let delivery = reopened
+        .facts()
+        .deliveries()
+        .delivery(&DeliveryId::new("delivery:one").unwrap())
+        .unwrap();
+    let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
+        panic!("native output should survive reopen");
+    };
+    assert_eq!(
+        observation.output().map(TeamNodeOutput::output_port),
+        Some("completed")
+    );
+    drop(reopened);
+    remove_test_path(&path);
+}
+
+#[test]
+fn native_run_output_rejects_invalid_team_message_without_appending() {
+    let path = test_path("native-run-output-invalid");
+    let mut store = OrganizationStore::open(&path).unwrap();
+    let (delivery, graph, binding) = observed_work_delivery_and_graph();
+    store
+        .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
+        .unwrap();
+    let target = native_terminal_target(&store);
+    let before = fs::metadata(&path).unwrap().len();
+
+    assert_eq!(
+        store.resolve_native_run_output(
+            target,
+            AuthorizedGraphResolutionReceipt::try_new("native-output:bad").unwrap(),
+            "final text without envelope".to_owned(),
+            5,
+        ),
+        Err(StoreFault::NativeRunOutputResolution(
+            crate::NativeRunOutputResolutionError::InvalidOutput,
+        ))
+    );
+    assert_eq!(fs::metadata(&path).unwrap().len(), before);
+    drop(store);
+    remove_test_path(&path);
+}
+
+#[test]
 fn resolved_terminal_observation_round_trips_with_its_fenced_output_receipt() {
     let (mut delivery, mut graph, binding) = observed_delivery_and_graph();
     let fence = graph
@@ -3188,6 +3298,7 @@ fn legacy_delivered_snapshot_restores_without_a_terminal_observation() {
         node_execution_id: "start:attempt:1".to_owned(),
         task_id: "task:one".to_owned(),
         role_id: "leader".to_owned(),
+        session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
         idempotency_key: "delivery:one".to_owned(),
         message: "private prompt".to_owned(),
         requested_at: 1,
@@ -3197,7 +3308,7 @@ fn legacy_delivered_snapshot_restores_without_a_terminal_observation() {
         facts,
         DeliveryPhaseSnapshot::Delivered {
             receipt: crate::DeliveryReceiptReference::try_new("receipt:one").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 2,
         },
         0,
@@ -3225,13 +3336,13 @@ fn legacy_delivered_snapshot_restores_without_a_terminal_observation() {
 }
 
 #[test]
-fn matcha_terminal_target_requires_persisted_matcha_correlation() {
+fn native_terminal_target_requires_persisted_native_correlation() {
     let path = test_path("terminal-observation-no-correlation");
     let delivered = DeliverySnapshot::new(
         delivery_request(),
         DeliveryPhaseSnapshot::Delivered {
             receipt: crate::DeliveryReceiptReference::try_new("delivery-receipt:generic").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 3,
         },
         0,
@@ -3255,7 +3366,7 @@ fn matcha_terminal_target_requires_persisted_matcha_correlation() {
 
     assert!(
         store
-            .matcha_terminal_target(&DeliveryId::new("delivery:one").unwrap())
+            .native_terminal_target(&DeliveryId::new("delivery:one").unwrap())
             .is_none()
     );
     drop(store);
@@ -3265,12 +3376,12 @@ fn matcha_terminal_target_requires_persisted_matcha_correlation() {
 #[test]
 fn terminal_observation_restore_accepts_runtime_session_binding_drift() {
     let (delivery, graph, _) = observed_delivery_and_graph();
-    let drifted_binding = RoleSessionReceipt::new(
+    let drifted_binding = RoleSessionReceipt::with_endpoint_session_id(
         team_id(),
         GraphRunId::new("run:one"),
         RoleId::try_new("leader").unwrap(),
-        LocalSessionReference::try_new("local:one").unwrap(),
-        ExternalSessionReference::try_new("different-native-session").unwrap(),
+        crate::RoleSessionRef::initial(),
+        EndpointSessionId::try_new("different-native-session").unwrap(),
         ManagedAgentReference::try_new("agent:one").unwrap(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
     );
@@ -3571,7 +3682,7 @@ fn durable_delivery_settlement_appends_once_and_survives_reopen() {
             "accepted",
             DeliveryReceipt::Accepted {
                 receipt: crate::DeliveryReceiptReference::try_new("receipt:one").unwrap(),
-                matcha_correlation: None,
+                native_correlation: None,
                 accepted_at: 3,
             },
             DeliveryResolution::Delivered,
@@ -4542,12 +4653,12 @@ fn tombstoned_provisionable_facts() -> OrganizationFacts {
 }
 
 fn provisionable_runtime(agent: &str) -> RunRuntimeReceipt {
-    runtime(RoleSessionReceipt::new(
+    runtime(RoleSessionReceipt::with_endpoint_session_id(
         team_id(),
         GraphRunId::new("run:one"),
         RoleId::try_new("leader").unwrap(),
-        LocalSessionReference::try_new("local:one").unwrap(),
-        ExternalSessionReference::try_new("native-session:one").unwrap(),
+        crate::RoleSessionRef::initial(),
+        EndpointSessionId::try_new("native-session:one").unwrap(),
         ManagedAgentReference::try_new(agent).unwrap(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
     ))
@@ -4647,6 +4758,7 @@ fn delivery_request() -> DeliveryRequest {
         node_execution_id: "start:attempt:1".to_owned(),
         task_id: "task:one".to_owned(),
         role_id: "leader".to_owned(),
+        session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
         idempotency_key: "delivery:one".to_owned(),
         message: "private prompt".to_owned(),
         requested_at: 1,
@@ -4668,7 +4780,7 @@ fn settled_phase(resolution: DeliveryResolution) -> DeliveryPhase {
     match resolution {
         DeliveryResolution::Delivered => DeliveryPhase::Delivered {
             receipt: crate::DeliveryReceiptReference::try_new("receipt:one").unwrap(),
-            matcha_correlation: None,
+            native_correlation: None,
             accepted_at: 3,
         },
         DeliveryResolution::Failed => DeliveryPhase::Failed {
@@ -4725,9 +4837,9 @@ fn terminal_materialization() -> MaterializationReceipt {
     .unwrap()
 }
 
-fn matcha_terminal_target(store: &OrganizationStore) -> super::MatchaTerminalReceiptTarget {
+fn native_terminal_target(store: &OrganizationStore) -> super::NativeTerminalReceiptTarget {
     store
-        .matcha_terminal_target(&DeliveryId::new("delivery:one").unwrap())
+        .native_terminal_target(&DeliveryId::new("delivery:one").unwrap())
         .expect("delivered terminal fixture must provide a receipt target")
 }
 
@@ -4842,10 +4954,10 @@ fn observed_routed_work_delivery_and_graph() -> (Delivery, GraphState, RoleSessi
 fn observe_agent_delivery(
     (mut delivery, mut graph, binding): (Delivery, GraphState, RoleSessionReceipt),
 ) -> (Delivery, GraphState, RoleSessionReceipt) {
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
-        ExternalSessionReference::try_new("matcha-session-correlation-canary").unwrap(),
+        EndpointSessionId::try_new("matcha-session-correlation-canary").unwrap(),
         NativeRunReceiptReference::try_new("matcha-native-run-correlation-canary").unwrap(),
         NativeTerminalStatus::Completed,
         4,
@@ -4856,10 +4968,10 @@ fn observe_agent_delivery(
 
 fn observed_delivery_and_graph() -> (Delivery, GraphState, RoleSessionReceipt) {
     let (mut delivery, mut graph, binding) = delivered_delivery_and_graph();
-    observe_matcha_terminal(
+    observe_native_terminal(
         &mut delivery,
         &mut graph,
-        ExternalSessionReference::try_new("matcha-session-correlation-canary").unwrap(),
+        EndpointSessionId::try_new("matcha-session-correlation-canary").unwrap(),
         NativeRunReceiptReference::try_new("matcha-native-run-correlation-canary").unwrap(),
         NativeTerminalStatus::Completed,
         4,
@@ -4950,12 +5062,12 @@ fn delivery_and_graph_for_node(
     node_id: &str,
     graph: GraphState,
 ) -> (Delivery, GraphState, RoleSessionReceipt) {
-    let binding = RoleSessionReceipt::new(
+    let binding = RoleSessionReceipt::with_endpoint_session_id(
         team_id(),
         GraphRunId::new("run:one"),
         RoleId::try_new("leader").unwrap(),
-        LocalSessionReference::try_new("local:one").unwrap(),
-        ExternalSessionReference::try_new("native-session:one").unwrap(),
+        crate::RoleSessionRef::initial(),
+        EndpointSessionId::try_new("native-session:one").unwrap(),
         ManagedAgentReference::try_new("agent:one").unwrap(),
         RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
     );
@@ -4967,6 +5079,7 @@ fn delivery_and_graph_for_node(
         node_execution_id: format!("{node_id}:attempt:1"),
         task_id: "task:one".to_owned(),
         role_id: "leader".to_owned(),
+        session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
         idempotency_key: "delivery:one".to_owned(),
         message: "private prompt".to_owned(),
         requested_at: 1,
@@ -4982,8 +5095,8 @@ fn delivery_and_graph_for_node(
         &claim,
         DeliveryReceipt::Accepted {
             receipt: crate::DeliveryReceiptReference::try_new("delivery-receipt:one").unwrap(),
-            matcha_correlation: Some(MatchaDeliveryCorrelation::new(
-                ExternalSessionReference::try_new("matcha-session-correlation-canary").unwrap(),
+            native_correlation: Some(NativeDeliveryCorrelation::new(
+                EndpointSessionId::try_new("matcha-session-correlation-canary").unwrap(),
                 NativeRunReceiptReference::try_new("matcha-native-run-correlation-canary").unwrap(),
             )),
             accepted_at: 3,
@@ -5128,12 +5241,12 @@ fn role_chat_runtime(materialization: &MaterializationReceipt) -> RunRuntimeRece
     let role = materialization.roles().first().unwrap();
     RunRuntimeReceipt::try_new(
         GraphRunId::new("run:one"),
-        vec![RoleSessionReceipt::new(
+        vec![RoleSessionReceipt::with_endpoint_session_id(
             team_id(),
             GraphRunId::new("run:one"),
             role.role().clone(),
-            LocalSessionReference::try_new("local-role-chat").unwrap(),
-            ExternalSessionReference::try_new("native-session-role-chat").unwrap(),
+            crate::RoleSessionRef::initial(),
+            EndpointSessionId::try_new("native-session-role-chat").unwrap(),
             role.agent().clone(),
             RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
         )],
@@ -5184,6 +5297,7 @@ fn facts_with_run(display_text: &str, interrupted_delivery: bool) -> Organizatio
             node_execution_id: "start:attempt:1".to_owned(),
             task_id: "task:one".to_owned(),
             role_id: "leader".to_owned(),
+            session_ref: crate::ROLE_SESSION_REF_INITIAL.to_owned(),
             idempotency_key: "delivery:one".to_owned(),
             message: "private prompt".to_owned(),
             requested_at: 1,

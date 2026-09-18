@@ -14,8 +14,8 @@ pub use model::{
     DeliveryId, DeliveryIdError, DeliveryPhase, DeliveryReceipt, DeliveryRequest,
     DeliveryRequestError, InvalidAuthorizedGraphResolution,
     InvalidAuthorizedGraphResolutionReceipt, InvalidNativeRunReceiptReference,
-    MatchaDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus,
-    TerminalObservation, TerminalObservationResolution, delivery_retry_at,
+    NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
+    TeamNodeOutputError, TerminalObservation, TerminalObservationResolution, delivery_retry_at,
 };
 pub use restore::{
     DeliveryClaimSnapshot, DeliveryPhaseSnapshot, DeliverySnapshot, RestoreDeliveryError,
@@ -24,12 +24,15 @@ pub use restore::{
 pub use transition::{
     AuthorizedGraphResolutionError, AuthorizedGraphResolutionOutcome, DeliveryDispatch,
     DeliveryReceiptError, DeliveryRecovery, DeliveryResolution, DeliveryStart,
-    RegisterDeliveryError, TerminalObservationError, TerminalObservationOutcome, begin_delivery,
-    dispatch_delivery, recover_interrupted_delivery, register_delivery, settle_delivery,
+    NativeRunOutputResolutionError, RegisterDeliveryError, TerminalObservationError,
+    TerminalObservationOutcome, begin_delivery, dispatch_delivery, recover_interrupted_delivery,
+    register_delivery, settle_delivery,
 };
 
 pub(crate) use admission::admit_role_chat;
-pub(crate) use transition::{observe_matcha_terminal, resolve_authorized_graph_outcome};
+pub(crate) use transition::{
+    observe_native_terminal, resolve_authorized_graph_outcome, resolve_native_run_output,
+};
 
 #[cfg(test)]
 mod tests;

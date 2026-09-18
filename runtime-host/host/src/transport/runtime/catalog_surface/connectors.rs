@@ -8,7 +8,7 @@ use crate::transport::{
     runtime::openclaw_mcp_servers,
 };
 
-use super::server::{AUTHORIZATION_HEADER, BEARER_PREFIX, Request, Response, now_millis};
+use super::handler::{AUTHORIZATION_HEADER, BEARER_PREFIX, Request, Response, now_millis};
 
 pub(super) async fn handle_external_connectors(
     request: Request,

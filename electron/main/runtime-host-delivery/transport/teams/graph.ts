@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { RuntimeHostDeliveryIssuer } from '../../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
-const DECISION_TTL_MS = 30_000;
+const ENDPOINT = '/api/team/graph';
 const UNAVAILABLE = {
   success: false,
   error: 'Team graph is unavailable',
@@ -91,20 +92,19 @@ export interface TeamGraphTransport {
 
 export function createTeamGraphTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): TeamGraphTransport {
-  const url = `http://127.0.0.1:${port}/api/team/graph`;
   return {
-    export: (request) => send(url, issuer, fetcher, { action: 'export', ...request }),
-    replace: (request) => send(url, issuer, fetcher, {
+    export: (request) => send(runtimeHostTransportPort, issuer, fetcher, { action: 'export', ...request }),
+    replace: (request) => send(runtimeHostTransportPort, issuer, fetcher, {
       action: 'replace',
       teamId: request.teamId,
       commandId: request.commandId ?? `graph:${randomUUID()}`,
       idempotencyKey: request.idempotencyKey,
       graph: request.graph,
     }),
-    import: (request) => send(url, issuer, fetcher, {
+    import: (request) => send(runtimeHostTransportPort, issuer, fetcher, {
       action: 'import',
       teamId: request.teamId,
       commandId: request.commandId ?? `graph:${randomUUID()}`,
@@ -115,36 +115,30 @@ export function createTeamGraphTransport(
 }
 
 async function send(
-  url: string,
+  runtimeHostTransportPort: number,
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
   body: Record<string, unknown>,
 ): Promise<TeamGraphTransportResponse> {
   if (!isRequest(body)) return { status: 409, body: REJECTED };
-  try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: '/api/team/graph',
-          scope: 'team:write',
-          capability: 'team.graph.yaml',
-          subject: 'team-graph-yaml',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    const result: unknown = await response.json();
-    if (response.status === 200 && isSuccess(result)) return { status: 200, body: result };
-    if (response.status === 404 && isUnavailable(result)) return { status: 404, body: result };
-    if (response.status === 409 && isRejected(result)) return { status: 409, body: result };
-  } catch {
-    // Native transport details do not cross the Electron delivery boundary.
-  }
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: ENDPOINT,
+    issuer,
+    decision: {
+      endpoint: ENDPOINT,
+      scope: 'team:write',
+      capability: 'team.graph.yaml',
+      subject: 'team-graph-yaml',
+    },
+    method: 'POST',
+    fetcher,
+    body,
+  });
+  if (response === null) return { status: 503, body: UNAVAILABLE };
+  if (response.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
+  if (response.status === 404 && isUnavailable(response.body)) return { status: 404, body: response.body };
+  if (response.status === 409 && isRejected(response.body)) return { status: 409, body: response.body };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -230,7 +224,7 @@ function isGroup(value: unknown): boolean {
     && hasExactKeys(value.join, ['requireCompleted', 'allowFailed', 'retryLimit'])
     && typeof value.join.requireCompleted === 'boolean'
     && typeof value.join.allowFailed === 'boolean'
-    && isUint(value.join.retryLimit);
+    && isSafeNonNegativeInteger(value.join.retryLimit);
 }
 
 function isGraphEdge(value: unknown): boolean {
@@ -266,11 +260,7 @@ function isOpaqueId(value: unknown): value is string {
 }
 
 function isPositiveUint(value: unknown): value is number {
-  return isUint(value) && value > 0;
-}
-
-function isUint(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  return isSafeNonNegativeInteger(value) && value > 0;
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -296,13 +286,4 @@ function isRejected(value: unknown): value is typeof REJECTED {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\0\p{Cc}]/u.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

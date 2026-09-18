@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntimeHostDeliveryIssuer,
-} from '../../electron/main/runtime-host-delivery/bootstrap';
+} from '../../electron/main/runtime-host-delivery/issuer';
 import {
   createSessionPermissionTransport,
   decodeSessionPermissionRequest,
@@ -39,6 +39,8 @@ function permissionRequest(operationId: 'sessions.permission.get' | 'sessions.pe
   };
 }
 
+const runtimeHostTransportPort = 32_111;
+
 describe('session permission delivery transport', () => {
   it('binds permission get/set decisions to the fixed session permission endpoint', async () => {
     const projection = {
@@ -55,7 +57,7 @@ describe('session permission delivery transport', () => {
     });
     const transport = createSessionPermissionTransport(
       createRuntimeHostDeliveryIssuer(),
-      3220,
+      runtimeHostTransportPort,
       fetcher,
     );
     const request = permissionRequest('sessions.permission.set', { permissionMode: 'guarded' });
@@ -64,7 +66,7 @@ describe('session permission delivery transport', () => {
       status: 200,
       body: projection,
     });
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3220/api/sessions/permission', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:32111/api/sessions/permission', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(request),
     }));
@@ -105,7 +107,7 @@ describe('session permission delivery transport', () => {
       reason: 'Session permission is unsupported',
     };
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => projection });
-    const transport = createSessionPermissionTransport(createRuntimeHostDeliveryIssuer(), 3220, fetcher);
+    const transport = createSessionPermissionTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
     const matchaIdentity = { endpoint: matchaEndpoint, agentId: 'default', sessionKey: 'matcha-session-1' };
     const request = {
       id: 'session.management' as const,
@@ -116,7 +118,7 @@ describe('session permission delivery transport', () => {
     };
 
     await expect(transport.get(request)).resolves.toEqual({ status: 200, body: projection });
-    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3220/api/sessions/permission', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:32111/api/sessions/permission', expect.objectContaining({
       body: JSON.stringify(request),
     }));
   });
@@ -124,7 +126,7 @@ describe('session permission delivery transport', () => {
   it('redacts malformed native responses as unavailable', async () => {
     const transport = createSessionPermissionTransport(
       createRuntimeHostDeliveryIssuer(),
-      3220,
+      runtimeHostTransportPort,
       vi.fn().mockResolvedValue({ status: 200, json: async () => ({
         supported: false,
         mode: 'full',

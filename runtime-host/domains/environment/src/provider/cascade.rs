@@ -4,11 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::routing_rules::prune_provider_routing_to_admissible;
+
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderAccountRevision, ProviderAccountStore,
     ProviderAccountStoreFault, ProviderModel, ProviderModelCatalog, ProviderModelStore,
-    ProviderModelStoreFault, ProviderRoute, ProviderRouting, ProviderRoutingRevision,
-    ProviderRoutingStore, ProviderRoutingStoreFault,
+    ProviderModelStoreFault, ProviderRouting, ProviderRoutingStore, ProviderRoutingStoreFault,
 };
 
 /// Coordinates the durable desired facts affected by an account removal.
@@ -40,7 +41,7 @@ impl ProviderCascade {
                 .map_err(|_| ProviderCascadeFault::Open)?,
             journal: ProviderCascadeJournal::open(journal_path.into())?,
         };
-        cascade.recover()?;
+        cascade.recover_and_prune_inadmissible_routing()?;
         Ok(cascade)
     }
 
@@ -70,16 +71,21 @@ impl ProviderCascade {
         self.routing
             .reload()
             .map_err(|_| ProviderCascadeFault::Open)?;
-        self.recover()
+        self.recover_and_prune_inadmissible_routing()
     }
 
     pub fn persist_account(
         &mut self,
         account: ProviderAccount,
     ) -> Result<&ProviderAccount, ProviderCascadeFault> {
+        let account_id = account.id().clone();
         self.accounts
             .persist(account)
-            .map_err(ProviderCascadeFault::Accounts)
+            .map_err(ProviderCascadeFault::Accounts)?;
+        self.prune_inadmissible_routing()?;
+        self.accounts
+            .account(&account_id)
+            .ok_or(ProviderCascadeFault::Apply)
     }
 
     pub fn replace_models(
@@ -89,7 +95,32 @@ impl ProviderCascade {
     ) -> Result<&ProviderModelCatalog, ProviderCascadeFault> {
         self.models
             .replace(account_id, models)
-            .map_err(ProviderCascadeFault::Models)
+            .map_err(ProviderCascadeFault::Models)?;
+        self.prune_inadmissible_routing()?;
+        Ok(self.models.catalog())
+    }
+
+    pub fn prune_routing_to_current_catalog(&mut self) -> Result<(), ProviderCascadeFault> {
+        self.prune_inadmissible_routing()
+    }
+
+    fn prune_inadmissible_routing(&mut self) -> Result<(), ProviderCascadeFault> {
+        let Some(current) = self.routing.routing().cloned() else {
+            return Ok(());
+        };
+        let Some(next) = prune_provider_routing_to_admissible(
+            &current,
+            self.accounts.accounts(),
+            self.models.catalog(),
+        )
+        .map_err(|_| ProviderCascadeFault::Apply)?
+        else {
+            return Ok(());
+        };
+        self.routing
+            .replace(next)
+            .map_err(ProviderCascadeFault::Routing)?;
+        Ok(())
     }
 
     pub fn replace_routing(
@@ -132,6 +163,11 @@ impl ProviderCascade {
         self.apply(&transaction)?;
         self.journal.clear()?;
         Ok(())
+    }
+
+    fn recover_and_prune_inadmissible_routing(&mut self) -> Result<(), ProviderCascadeFault> {
+        self.recover()?;
+        self.prune_inadmissible_routing()
     }
 
     fn recover(&mut self) -> Result<(), ProviderCascadeFault> {
@@ -183,7 +219,13 @@ impl ProviderCascade {
         };
         let current_revision = current.revision().get();
         if current_revision == expected_revision {
-            let next = prune_routing(&current, account_id).ok_or(ProviderCascadeFault::Recovery)?;
+            let next = prune_provider_routing_to_admissible(
+                &current,
+                self.accounts.accounts(),
+                self.models.catalog(),
+            )
+            .map_err(|_| ProviderCascadeFault::Recovery)?
+            .ok_or(ProviderCascadeFault::Recovery)?;
             self.routing
                 .replace(next)
                 .map_err(|_| ProviderCascadeFault::Apply)?;
@@ -355,39 +397,6 @@ fn routing_references(routing: &ProviderRouting, account_id: &ProviderAccountId)
                 .iter()
                 .any(|reference| reference.account_id() == account_id)
     })
-}
-
-fn prune_routing(
-    current: &ProviderRouting,
-    account_id: &ProviderAccountId,
-) -> Option<ProviderRouting> {
-    let routes = current
-        .routes()
-        .iter()
-        .filter_map(|(capability, route)| {
-            prune_route(route, account_id).map(|route| (*capability, route))
-        })
-        .collect();
-    ProviderRouting::try_new(
-        ProviderRoutingRevision::try_new(current.revision().get().checked_add(1)?).ok()?,
-        routes,
-    )
-    .ok()
-}
-
-fn prune_route(route: &ProviderRoute, account_id: &ProviderAccountId) -> Option<ProviderRoute> {
-    let mut fallbacks = route
-        .fallbacks()
-        .iter()
-        .filter(|reference| reference.account_id() != account_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    if route.primary().account_id() != account_id {
-        return ProviderRoute::try_new(route.primary().clone(), fallbacks, route.timeout_ms()).ok();
-    }
-    let primary = fallbacks.first().cloned()?;
-    fallbacks.remove(0);
-    ProviderRoute::try_new(primary, fallbacks, route.timeout_ms()).ok()
 }
 
 #[cfg(test)]

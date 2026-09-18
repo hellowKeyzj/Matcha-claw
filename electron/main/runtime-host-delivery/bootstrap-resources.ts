@@ -46,44 +46,6 @@ export interface RuntimeHostBootstrapResolverDependencies {
   readonly getPort?: (
     name:
       | 'MATCHACLAW_RUNTIME_HOST'
-      | 'MATCHACLAW_SESSION_TRANSPORT'
-      | 'MATCHACLAW_FLEET_TRANSPORT'
-      | 'MATCHACLAW_DIAGNOSTICS_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_TEXT_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_BINARY_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_DIRECTORY_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_WRITE_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT'
-      | 'MATCHACLAW_SESSION_SEND_TRANSPORT'
-      | 'MATCHACLAW_SESSION_ABORT_TRANSPORT'
-      | 'MATCHACLAW_SECURITY_EMERGENCY_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_STATUS_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_CATALOG_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_CONTROL_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_PAIRING_TRANSPORT'
-      | 'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'
-      | 'MATCHACLAW_SECURITY_POLICY_TRANSPORT'
-      | 'MATCHACLAW_SESSION_APPROVAL_TRANSPORT'
-      | 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT'
-      | 'MATCHACLAW_USAGE_TRANSPORT'
-      | 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
-      | 'MATCHACLAW_CRON_TRANSPORT'
-      | 'MATCHACLAW_CRON_BROKER_TRANSPORT'
-      | 'MATCHACLAW_TASK_MANAGER_TRANSPORT'
-      | 'MATCHACLAW_AGENTS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_PUBLIC_TRANSPORT'
-      | 'MATCHACLAW_TEAM_TASK_BOARD_TRANSPORT'
-      | 'MATCHACLAW_TEAM_ROLE_SESSIONS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_APPROVALS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_DECISION_TRANSPORT'
-      | 'MATCHACLAW_TEAM_ROLE_CHAT_TRANSPORT'
-      | 'MATCHACLAW_TEAM_GRAPH_TRANSPORT'
-      | 'MATCHACLAW_PROVIDER_MODELS_TRANSPORT'
-      | 'MATCHACLAW_PROVIDER_ACCOUNTS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_SKILL_TRANSPORT'
-      | 'MATCHACLAW_TEAM_TRIGGER_TRANSPORT'
-      | 'MATCHACLAW_TEAM_LIFECYCLE_TRANSPORT'
-      | 'MATCHACLAW_MANUAL_TEAM_TRANSPORT'
       | 'MATCHA_AGENT_APP_SERVER'
       | 'OPENCLAW_GATEWAY'
   ) => number;
@@ -95,6 +57,11 @@ export interface RuntimeHostBootstrapResolverDependencies {
 }
 
 const runtimeHostProcess = process as RuntimeHostProcess;
+type RuntimeHostPortName = Parameters<NonNullable<RuntimeHostBootstrapResolverDependencies['getPort']>>[0];
+
+function getRuntimeHostBootstrapPort(name: RuntimeHostPortName): number {
+  return getPort(name as Parameters<typeof getPort>[0]);
+}
 
 export function resolveRuntimeHostBootstrap(
   dependencies: RuntimeHostBootstrapResolverDependencies = {}
@@ -124,7 +91,7 @@ export function resolveRuntimeHostBootstrap(
     target,
     getOpenClawConfigDir: dependencies.getOpenClawConfigDir ?? getOpenClawConfigDir,
     getRuntimeHostStateDir: dependencies.getRuntimeHostStateDir ?? getRuntimeHostStateDir,
-    getPort: dependencies.getPort ?? getPort,
+    getPort: dependencies.getPort ?? getRuntimeHostBootstrapPort,
     isFile,
     runtimeHostBinary,
   });
@@ -146,44 +113,7 @@ export function resolveRuntimeHostBootstrap(
       appLogDir: layout.appLogDir,
       runtimeHostStateDir: layout.runtimeHostStateDir,
       runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
-      sessionTransportPort: layout.sessionTransportPort,
-      fleetTransportPort: layout.fleetTransportPort,
-      diagnosticsTransportPort: layout.diagnosticsTransportPort,
-      workspaceTextTransportPort: layout.workspaceTextTransportPort,
-      workspaceBinaryTransportPort: layout.workspaceBinaryTransportPort,
-      workspaceDirectoryTransportPort: layout.workspaceDirectoryTransportPort,
-      workspaceWriteTransportPort: layout.workspaceWriteTransportPort,
-      workspaceMediaTransportPort: layout.workspaceMediaTransportPort,
-      sessionSendTransportPort: layout.sessionSendTransportPort,
-      sessionAbortTransportPort: layout.sessionAbortTransportPort,
-      securityEmergencyTransportPort: layout.securityEmergencyTransportPort,
-      channelStatusTransportPort: layout.channelStatusTransportPort,
-      channelCatalogTransportPort: layout.channelCatalogTransportPort,
-      channelControlTransportPort: layout.channelControlTransportPort,
-      channelPairingTransportPort: layout.channelPairingTransportPort,
-      settingsDesiredTransportPort: layout.settingsDesiredTransportPort,
-      securityPolicyTransportPort: layout.securityPolicyTransportPort,
-      sessionApprovalTransportPort: layout.sessionApprovalTransportPort,
-      matchaHistoryTransportPort: layout.matchaHistoryTransportPort,
-      usageTransportPort: layout.usageTransportPort,
-      sessionModelSelectionTransportPort: layout.sessionModelSelectionTransportPort,
-      cronTransportPort: layout.cronTransportPort,
-      cronBrokerTransportPort: layout.cronBrokerTransportPort,
-      taskManagerTransportPort: layout.taskManagerTransportPort,
-      agentsTransportPort: layout.agentsTransportPort,
-      teamPublicTransportPort: layout.teamPublicTransportPort,
-      teamTaskBoardTransportPort: layout.teamTaskBoardTransportPort,
-      teamRoleSessionsTransportPort: layout.teamRoleSessionsTransportPort,
-      teamApprovalsTransportPort: layout.teamApprovalsTransportPort,
-      teamDecisionTransportPort: layout.teamDecisionTransportPort,
-      teamRoleChatTransportPort: layout.teamRoleChatTransportPort,
-      teamGraphTransportPort: layout.teamGraphTransportPort,
-      providerModelsTransportPort: layout.providerModelsTransportPort,
-      providerAccountsTransportPort: layout.providerAccountsTransportPort,
-      teamSkillTransportPort: layout.teamSkillTransportPort,
-      teamTriggerTransportPort: layout.teamTriggerTransportPort,
-      teamLifecycleTransportPort: layout.teamLifecycleTransportPort,
-      manualTeamTransportPort: layout.manualTeamTransportPort,
+      runtimeHostTransportPort: layout.runtimeHostTransportPort,
       matcha: layout.matcha,
       openClaw: layout.openClaw,
       guardianExecutable: layout.guardianExecutable,
@@ -196,44 +126,7 @@ export function resolveRuntimeHostBootstrap(
     appLogDir: layout.appLogDir,
     runtimeHostStateDir: layout.runtimeHostStateDir,
     runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
-    sessionTransportPort: layout.sessionTransportPort,
-    fleetTransportPort: layout.fleetTransportPort,
-    diagnosticsTransportPort: layout.diagnosticsTransportPort,
-    workspaceTextTransportPort: layout.workspaceTextTransportPort,
-    workspaceBinaryTransportPort: layout.workspaceBinaryTransportPort,
-    workspaceDirectoryTransportPort: layout.workspaceDirectoryTransportPort,
-    workspaceWriteTransportPort: layout.workspaceWriteTransportPort,
-    workspaceMediaTransportPort: layout.workspaceMediaTransportPort,
-    sessionSendTransportPort: layout.sessionSendTransportPort,
-    sessionAbortTransportPort: layout.sessionAbortTransportPort,
-    securityEmergencyTransportPort: layout.securityEmergencyTransportPort,
-    channelStatusTransportPort: layout.channelStatusTransportPort,
-    channelCatalogTransportPort: layout.channelCatalogTransportPort,
-    channelControlTransportPort: layout.channelControlTransportPort,
-    channelPairingTransportPort: layout.channelPairingTransportPort,
-    settingsDesiredTransportPort: layout.settingsDesiredTransportPort,
-    securityPolicyTransportPort: layout.securityPolicyTransportPort,
-    sessionApprovalTransportPort: layout.sessionApprovalTransportPort,
-    matchaHistoryTransportPort: layout.matchaHistoryTransportPort,
-    usageTransportPort: layout.usageTransportPort,
-    sessionModelSelectionTransportPort: layout.sessionModelSelectionTransportPort,
-    cronTransportPort: layout.cronTransportPort,
-    cronBrokerTransportPort: layout.cronBrokerTransportPort,
-    taskManagerTransportPort: layout.taskManagerTransportPort,
-    agentsTransportPort: layout.agentsTransportPort,
-    teamPublicTransportPort: layout.teamPublicTransportPort,
-    teamTaskBoardTransportPort: layout.teamTaskBoardTransportPort,
-    teamRoleSessionsTransportPort: layout.teamRoleSessionsTransportPort,
-    teamApprovalsTransportPort: layout.teamApprovalsTransportPort,
-    teamDecisionTransportPort: layout.teamDecisionTransportPort,
-    teamRoleChatTransportPort: layout.teamRoleChatTransportPort,
-    teamGraphTransportPort: layout.teamGraphTransportPort,
-    providerModelsTransportPort: layout.providerModelsTransportPort,
-    providerAccountsTransportPort: layout.providerAccountsTransportPort,
-    teamSkillTransportPort: layout.teamSkillTransportPort,
-    teamTriggerTransportPort: layout.teamTriggerTransportPort,
-    teamLifecycleTransportPort: layout.teamLifecycleTransportPort,
-    manualTeamTransportPort: layout.manualTeamTransportPort,
+    runtimeHostTransportPort: layout.runtimeHostTransportPort,
     matcha: { ...layout.matcha, gitBash: layout.gitBash },
     openClaw: layout.openClaw,
   };
@@ -255,44 +148,6 @@ type RuntimeLayoutInput = {
   readonly getPort: (
     name:
       | 'MATCHACLAW_RUNTIME_HOST'
-      | 'MATCHACLAW_SESSION_TRANSPORT'
-      | 'MATCHACLAW_FLEET_TRANSPORT'
-      | 'MATCHACLAW_DIAGNOSTICS_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_TEXT_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_BINARY_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_DIRECTORY_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_WRITE_TRANSPORT'
-      | 'MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT'
-      | 'MATCHACLAW_SESSION_SEND_TRANSPORT'
-      | 'MATCHACLAW_SESSION_ABORT_TRANSPORT'
-      | 'MATCHACLAW_SECURITY_EMERGENCY_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_STATUS_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_CATALOG_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_CONTROL_TRANSPORT'
-      | 'MATCHACLAW_CHANNEL_PAIRING_TRANSPORT'
-      | 'MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'
-      | 'MATCHACLAW_SECURITY_POLICY_TRANSPORT'
-      | 'MATCHACLAW_SESSION_APPROVAL_TRANSPORT'
-      | 'MATCHACLAW_MATCHA_HISTORY_TRANSPORT'
-      | 'MATCHACLAW_USAGE_TRANSPORT'
-      | 'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
-      | 'MATCHACLAW_CRON_TRANSPORT'
-      | 'MATCHACLAW_CRON_BROKER_TRANSPORT'
-      | 'MATCHACLAW_TASK_MANAGER_TRANSPORT'
-      | 'MATCHACLAW_AGENTS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_PUBLIC_TRANSPORT'
-      | 'MATCHACLAW_TEAM_TASK_BOARD_TRANSPORT'
-      | 'MATCHACLAW_TEAM_ROLE_SESSIONS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_APPROVALS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_DECISION_TRANSPORT'
-      | 'MATCHACLAW_TEAM_ROLE_CHAT_TRANSPORT'
-      | 'MATCHACLAW_TEAM_GRAPH_TRANSPORT'
-      | 'MATCHACLAW_PROVIDER_MODELS_TRANSPORT'
-      | 'MATCHACLAW_PROVIDER_ACCOUNTS_TRANSPORT'
-      | 'MATCHACLAW_TEAM_SKILL_TRANSPORT'
-      | 'MATCHACLAW_TEAM_TRIGGER_TRANSPORT'
-      | 'MATCHACLAW_TEAM_LIFECYCLE_TRANSPORT'
-      | 'MATCHACLAW_MANUAL_TEAM_TRANSPORT'
       | 'MATCHA_AGENT_APP_SERVER'
       | 'OPENCLAW_GATEWAY'
   ) => number;
@@ -302,44 +157,7 @@ type RuntimeLayout = {
   readonly appLogDir: string;
   readonly runtimeHostStateDir: string;
   readonly runtimeHostMcpExecutable: string;
-  readonly sessionTransportPort: number;
-  readonly fleetTransportPort: number;
-  readonly diagnosticsTransportPort: number;
-  readonly workspaceTextTransportPort: number;
-  readonly workspaceBinaryTransportPort: number;
-  readonly workspaceDirectoryTransportPort: number;
-  readonly workspaceWriteTransportPort: number;
-  readonly workspaceMediaTransportPort: number;
-  readonly sessionSendTransportPort: number;
-  readonly sessionAbortTransportPort: number;
-  readonly securityEmergencyTransportPort: number;
-  readonly channelStatusTransportPort: number;
-  readonly channelCatalogTransportPort: number;
-  readonly channelControlTransportPort: number;
-  readonly channelPairingTransportPort: number;
-  readonly settingsDesiredTransportPort: number;
-  readonly securityPolicyTransportPort: number;
-  readonly sessionApprovalTransportPort: number;
-  readonly matchaHistoryTransportPort: number;
-  readonly usageTransportPort: number;
-  readonly sessionModelSelectionTransportPort: number;
-  readonly cronTransportPort: number;
-  readonly cronBrokerTransportPort: number;
-  readonly taskManagerTransportPort: number;
-  readonly agentsTransportPort: number;
-  readonly teamPublicTransportPort: number;
-  readonly teamTaskBoardTransportPort: number;
-  readonly teamRoleSessionsTransportPort: number;
-  readonly teamApprovalsTransportPort: number;
-  readonly teamDecisionTransportPort: number;
-  readonly teamRoleChatTransportPort: number;
-  readonly teamGraphTransportPort: number;
-  readonly providerModelsTransportPort: number;
-  readonly providerAccountsTransportPort: number;
-  readonly teamSkillTransportPort: number;
-  readonly teamTriggerTransportPort: number;
-  readonly teamLifecycleTransportPort: number;
-  readonly manualTeamTransportPort: number;
+  readonly runtimeHostTransportPort: number;
   readonly matcha: RuntimeHostBootstrapInput['matcha'];
   readonly openClaw: RuntimeHostBootstrapInput['openClaw'];
   readonly guardianExecutable: string;
@@ -394,53 +212,13 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
     appLogDir: input.path.join(userData, 'logs'),
     runtimeHostStateDir: input.getRuntimeHostStateDir(),
     runtimeHostMcpExecutable,
-    sessionTransportPort: input.getPort('MATCHACLAW_SESSION_TRANSPORT'),
-    fleetTransportPort: input.getPort('MATCHACLAW_FLEET_TRANSPORT'),
-    diagnosticsTransportPort: input.getPort('MATCHACLAW_DIAGNOSTICS_TRANSPORT'),
-    workspaceTextTransportPort: input.getPort('MATCHACLAW_WORKSPACE_TEXT_TRANSPORT'),
-    workspaceBinaryTransportPort: input.getPort('MATCHACLAW_WORKSPACE_BINARY_TRANSPORT'),
-    workspaceDirectoryTransportPort: input.getPort('MATCHACLAW_WORKSPACE_DIRECTORY_TRANSPORT'),
-    workspaceWriteTransportPort: input.getPort('MATCHACLAW_WORKSPACE_WRITE_TRANSPORT'),
-    workspaceMediaTransportPort: input.getPort('MATCHACLAW_WORKSPACE_MEDIA_TRANSPORT'),
-    sessionSendTransportPort: input.getPort('MATCHACLAW_SESSION_SEND_TRANSPORT'),
-    sessionAbortTransportPort: input.getPort('MATCHACLAW_SESSION_ABORT_TRANSPORT'),
-    securityEmergencyTransportPort: input.getPort('MATCHACLAW_SECURITY_EMERGENCY_TRANSPORT'),
-    channelStatusTransportPort: input.getPort('MATCHACLAW_CHANNEL_STATUS_TRANSPORT'),
-    channelCatalogTransportPort: input.getPort('MATCHACLAW_CHANNEL_CATALOG_TRANSPORT'),
-    channelControlTransportPort: input.getPort('MATCHACLAW_CHANNEL_CONTROL_TRANSPORT'),
-    channelPairingTransportPort: input.getPort('MATCHACLAW_CHANNEL_PAIRING_TRANSPORT'),
-    settingsDesiredTransportPort: input.getPort('MATCHACLAW_SETTINGS_DESIRED_TRANSPORT'),
-    securityPolicyTransportPort: input.getPort('MATCHACLAW_SECURITY_POLICY_TRANSPORT'),
-    sessionApprovalTransportPort: input.getPort('MATCHACLAW_SESSION_APPROVAL_TRANSPORT'),
-    matchaHistoryTransportPort: input.getPort('MATCHACLAW_MATCHA_HISTORY_TRANSPORT'),
-    usageTransportPort: input.getPort('MATCHACLAW_USAGE_TRANSPORT'),
-    sessionModelSelectionTransportPort: input.getPort(
-      'MATCHACLAW_SESSION_MODEL_SELECTION_TRANSPORT'
-    ),
-    cronTransportPort: input.getPort('MATCHACLAW_CRON_TRANSPORT'),
-    cronBrokerTransportPort: input.getPort('MATCHACLAW_CRON_BROKER_TRANSPORT'),
-    taskManagerTransportPort: input.getPort('MATCHACLAW_TASK_MANAGER_TRANSPORT'),
-    agentsTransportPort: input.getPort('MATCHACLAW_AGENTS_TRANSPORT'),
-    teamPublicTransportPort: input.getPort('MATCHACLAW_TEAM_PUBLIC_TRANSPORT'),
-    teamTaskBoardTransportPort: input.getPort('MATCHACLAW_TEAM_TASK_BOARD_TRANSPORT'),
-    teamRoleSessionsTransportPort: input.getPort('MATCHACLAW_TEAM_ROLE_SESSIONS_TRANSPORT'),
-    teamApprovalsTransportPort: input.getPort('MATCHACLAW_TEAM_APPROVALS_TRANSPORT'),
-    teamDecisionTransportPort: input.getPort('MATCHACLAW_TEAM_DECISION_TRANSPORT'),
-    teamRoleChatTransportPort: input.getPort('MATCHACLAW_TEAM_ROLE_CHAT_TRANSPORT'),
-    teamGraphTransportPort: input.getPort('MATCHACLAW_TEAM_GRAPH_TRANSPORT'),
-    providerModelsTransportPort: input.getPort('MATCHACLAW_PROVIDER_MODELS_TRANSPORT'),
-    providerAccountsTransportPort: input.getPort('MATCHACLAW_PROVIDER_ACCOUNTS_TRANSPORT'),
-    teamSkillTransportPort: input.getPort('MATCHACLAW_TEAM_SKILL_TRANSPORT'),
-    teamTriggerTransportPort: input.getPort('MATCHACLAW_TEAM_TRIGGER_TRANSPORT'),
-    teamLifecycleTransportPort: input.getPort('MATCHACLAW_TEAM_LIFECYCLE_TRANSPORT'),
-    manualTeamTransportPort: input.getPort('MATCHACLAW_MANUAL_TEAM_TRANSPORT'),
+    runtimeHostTransportPort: input.getPort('MATCHACLAW_RUNTIME_HOST'),
     matcha: {
       bunExecutable,
       entry,
       workingDirectory,
       storageRoot,
       port: input.getPort('MATCHA_AGENT_APP_SERVER'),
-      privateSecretRoot: input.path.join(storageRoot, 'private'),
     },
     openClaw: {
       electronImage: input.currentProcess.execPath,

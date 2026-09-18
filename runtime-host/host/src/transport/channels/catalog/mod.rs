@@ -8,7 +8,7 @@ use crate::{
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 pub(crate) fn channel_trace_id(headers: &[(String, String)]) -> Option<String> {
     crate::transport::sessions::trace::trace_id(headers)

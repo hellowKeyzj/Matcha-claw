@@ -5,6 +5,7 @@ pub(crate) mod approval;
 pub(crate) mod command;
 pub(crate) mod create;
 pub(crate) mod delete;
+pub(crate) mod events;
 #[allow(dead_code)]
 pub(crate) mod handle;
 pub(crate) mod matcha;
@@ -22,6 +23,7 @@ pub(crate) mod rename;
 pub(crate) mod runtime_error;
 #[allow(dead_code)]
 pub(crate) mod send;
+pub(crate) mod send_hook;
 #[allow(dead_code)]
 pub(crate) mod session_permission;
 #[allow(dead_code)]

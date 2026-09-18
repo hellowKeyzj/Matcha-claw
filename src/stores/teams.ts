@@ -8,6 +8,8 @@ import type { SessionRenderItem } from '../types/session/render-item';
 import { buildSessionIdentityKey, type SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 import {
   cancelTeamRun,
+  cancelTeamRunProposal,
+  confirmTeamRunProposal,
   createTeamRun,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
@@ -42,6 +44,7 @@ import {
   type TeamRoleBindingRecord,
   type TeamRunListItem,
   type TeamRunRecord,
+  type TeamRunStartGateProjection,
   type TeamRunSummary,
   type TeamRunWorkflowPlan,
   type TeamSourceType,
@@ -160,6 +163,7 @@ interface TeamsState {
   decisionsByTeamId: Record<string, TeamDecisionRecord[]>;
   eventsByTeamId: Record<string, TeamEventRecord[]>;
   eventsByRunId: Record<string, TeamEventRecord[]>;
+  startGateByTeamId: Record<string, TeamRunStartGateProjection | null | undefined>;
   eventCursorByTeamId: Record<string, number | undefined>;
   eventCursorByRunId: Record<string, number | undefined>;
   loadingByTeamId: Record<string, boolean>;
@@ -181,6 +185,8 @@ interface TeamsState {
   importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
   resumeRun: (teamId: string) => Promise<void>;
   cancelRun: (teamId: string, reason?: string) => Promise<void>;
+  confirmProposal: (teamId: string) => Promise<void>;
+  cancelProposal: (teamId: string) => Promise<void>;
   resolveApproval: (
     teamId: string,
     approvalId: string,
@@ -682,6 +688,7 @@ function appendOptimisticTeamRoleUserMessage(input: {
             activeTurnItemKey: assistantItemKey,
             pendingTurnKey: assistantItemKey,
             pendingTurnLaneKey: 'main',
+            runProgress: null,
             lastUserMessageAt: now,
             lastError: null,
             lastIssue: null,
@@ -733,6 +740,7 @@ function removeOptimisticTeamRoleUserMessage(optimistic: { sessionRecordKey: str
                 activeTurnItemKey: null,
                 pendingTurnKey: null,
                 pendingTurnLaneKey: null,
+                runProgress: null,
                 lastError: null,
                 updatedAt: Date.now(),
               },
@@ -945,6 +953,7 @@ function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSn
     kickbacksByTeamId: isSnapshotSectionAvailable(snapshot, 'kickbacks') ? { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks } : state.kickbacksByTeamId,
     decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: snapshot.decisions },
     eventsByTeamId: { ...state.eventsByTeamId, [teamId]: eventsForRun },
+    startGateByTeamId: { ...state.startGateByTeamId, [teamId]: snapshot.startGate },
     eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: snapshot.nextEventCursor },
   };
 }
@@ -969,6 +978,7 @@ function emptyTeamRunProjection(teamId: string, state: TeamsState) {
     kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: [] },
     decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: [] },
     eventsByTeamId: { ...state.eventsByTeamId, [teamId]: [] },
+    startGateByTeamId: { ...state.startGateByTeamId, [teamId]: undefined },
     eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: undefined },
   };
 }
@@ -1000,6 +1010,7 @@ export const useTeamsStore = create<TeamsState>()(
       decisionsByTeamId: {},
       eventsByTeamId: {},
       eventsByRunId: {},
+      startGateByTeamId: {},
       eventCursorByTeamId: {},
       eventCursorByRunId: {},
       loadingByTeamId: {},
@@ -1040,6 +1051,7 @@ export const useTeamsStore = create<TeamsState>()(
           kickbacksByTeamId: { ...state.kickbacksByTeamId, [id]: [] },
           decisionsByTeamId: { ...state.decisionsByTeamId, [id]: [] },
           eventsByTeamId: { ...state.eventsByTeamId, [id]: [] },
+          startGateByTeamId: { ...state.startGateByTeamId, [id]: undefined },
         }));
         return id;
       },
@@ -1069,6 +1081,7 @@ export const useTeamsStore = create<TeamsState>()(
           kickbacksByTeamId: { ...state.kickbacksByTeamId, [id]: [] },
           decisionsByTeamId: { ...state.decisionsByTeamId, [id]: [] },
           eventsByTeamId: { ...state.eventsByTeamId, [id]: [] },
+          startGateByTeamId: { ...state.startGateByTeamId, [id]: undefined },
         }));
         return id;
       },
@@ -1126,6 +1139,7 @@ export const useTeamsStore = create<TeamsState>()(
             runByTeamId: { ...state.runByTeamId, [teamId]: selectedRun ?? (runId ? state.runsById[runId] : undefined) },
             rolesByTeamId: { ...state.rolesByTeamId, [teamId]: selectedRun?.sessions ?? [] },
             eventsByTeamId: { ...state.eventsByTeamId, [teamId]: runId ? state.eventsByRunId[runId] ?? [] : [] },
+            startGateByTeamId: { ...state.startGateByTeamId, [teamId]: undefined },
             eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: runId ? state.eventCursorByRunId[runId] : undefined },
           };
         });
@@ -1175,6 +1189,7 @@ export const useTeamsStore = create<TeamsState>()(
             kickbacksByTeamId: withoutKey(state.kickbacksByTeamId, teamId),
             decisionsByTeamId: withoutKey(state.decisionsByTeamId, teamId),
             eventsByTeamId: withoutKey(state.eventsByTeamId, teamId),
+            startGateByTeamId: withoutKey(state.startGateByTeamId, teamId),
             eventsByRunId: runIdsToDelete.reduce((eventsByRunId, runId) => withoutKey(eventsByRunId, runId), state.eventsByRunId),
             eventCursorByTeamId: withoutKey(state.eventCursorByTeamId, teamId),
             eventCursorByRunId: runIdsToDelete.reduce((eventCursorByRunId, runId) => withoutKey(eventCursorByRunId, runId), state.eventCursorByRunId),
@@ -1489,6 +1504,38 @@ export const useTeamsStore = create<TeamsState>()(
           idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
         });
         await get().refreshSnapshot(teamId, { force: true });
+      },
+      confirmProposal: async (teamId) => {
+        const state = get();
+        const runId = resolveActiveRunId(state, teamId);
+        const proposal = state.startGateByTeamId[teamId]?.proposal;
+        const actionKey = idempotencyKey(teamId, `proposal-confirm:${runId}:${proposal?.proposalId ?? state.runsById[runId]?.revision ?? 'current'}`);
+        const result = await confirmTeamRunProposal({
+          runId,
+          ...(proposal?.proposalId ? { proposalId: proposal.proposalId } : {}),
+          idempotencyKey: actionKey,
+        });
+        if (result.snapshot) {
+          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
+        } else {
+          await get().refreshSnapshot(teamId, { force: true });
+        }
+      },
+      cancelProposal: async (teamId) => {
+        const state = get();
+        const runId = resolveActiveRunId(state, teamId);
+        const proposal = state.startGateByTeamId[teamId]?.proposal;
+        const actionKey = idempotencyKey(teamId, `proposal-cancel:${runId}:${proposal?.proposalId ?? state.runsById[runId]?.revision ?? 'current'}`);
+        const result = await cancelTeamRunProposal({
+          runId,
+          ...(proposal?.proposalId ? { proposalId: proposal.proposalId } : {}),
+          idempotencyKey: actionKey,
+        });
+        if (result.snapshot) {
+          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
+        } else {
+          await get().refreshSnapshot(teamId, { force: true });
+        }
       },
       resolveApproval: async (teamId, approvalId, decision, note) => {
         const state = get();

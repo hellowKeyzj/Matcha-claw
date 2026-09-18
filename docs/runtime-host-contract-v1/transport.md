@@ -1,5 +1,9 @@
 # Electron ↔ child transport
 
+## 0. localhost server shape
+
+当前 Rust child 只绑定一个 Host-owned loopback HTTP port/listener；`GET /health`、legacy `/dispatch`、产品 fixed DTO route、SSE 和 WebSocket upgrade 都是这个 server 的 route outcome。业务模块仍保留各自 handler/adapter；统一的是 listener/server，不是把业务语义并入一个 Host-wide owner。OpenClaw gateway、Matcha app-server、MCP stdio 不属于此 server。[VERIFY: electron/main/runtime-host-delivery/bootstrap.ts:48] [VERIFY: runtime-host/host/src/delivery/mod.rs:19] [VERIFY: runtime-host/host/src/transport/localhost/server.rs:13] [VERIFY: runtime-host/host/src/transport/localhost/http.rs:148]
+
 ## 1. child root endpoints
 
 | Method | Path | 状态 | 用途 |
@@ -9,7 +13,7 @@
 | `POST` | `/lifecycle/restart` | `CONFIRMED` | 重启 child 内部 lifecycle/background service；不重新 fork child。 |
 | `POST` | `/lifecycle/stop` | `CONFIRMED` | 返回后异步 shutdown child。 |
 
-来源：[runtime-host-server.ts](../../runtime-host/composition/runtime-host-server.ts#L95-L152)。Team webhook、remote-agent ingress 和 terminal WebSocket 另见 [scope.md](scope.md)。
+来源：[runtime-host/host/src/transport/localhost/router.rs](../../runtime-host/host/src/transport/localhost/router.rs)、[runtime-host/host/src/transport/localhost/server.rs](../../runtime-host/host/src/transport/localhost/server.rs)。Team webhook、remote-agent ingress 和 terminal WebSocket 另见 [scope.md](scope.md)。
 
 ## 2. `/dispatch` request envelope
 

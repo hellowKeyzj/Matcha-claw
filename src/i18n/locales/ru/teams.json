@@ -286,6 +286,13 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
+    "proposalPending": {
+      "title": "Proposal awaiting confirmation",
+      "emptySummary": "Leader has prepared a proposal.",
+      "confirm": "Confirm and start",
+      "discuss": "Continue discussion",
+      "cancel": "Cancel"
+    },
     "dependencyMissing": {
       "title": "Перед продолжением запуска нужно обработать зависимости",
       "description": "Обязательные зависимости нельзя обойти. Установите отсутствующие Skill или настройте Tool, затем повторите проверку зависимостей.",

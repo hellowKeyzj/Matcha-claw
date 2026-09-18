@@ -62,7 +62,7 @@ describe('Task Manager capability route', () => {
       incoming(listRequest) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { taskManagerTransport: { list } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { list } } } as never,
     );
 
     expect(list).toHaveBeenCalledWith(listRequest);
@@ -77,7 +77,7 @@ describe('Task Manager capability route', () => {
       incoming({ ...listRequest, operationId: 'tools.invoke' }) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { taskManagerTransport: { list } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { list } } } as never,
     );
 
     expect(list).not.toHaveBeenCalled();
@@ -112,7 +112,7 @@ describe('Task Manager capability route', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { taskManagerTransport: { create } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { create } } } as never,
     );
 
     expect(create).toHaveBeenCalledWith(request);
@@ -136,7 +136,7 @@ describe('Task Manager capability route', () => {
       }) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/capabilities/execute'),
-      { taskManagerTransport: { list } } as never,
+      { runtimeHostTransports: { taskManagerTransport: { list } } } as never,
     );
 
     expect(list).not.toHaveBeenCalled();

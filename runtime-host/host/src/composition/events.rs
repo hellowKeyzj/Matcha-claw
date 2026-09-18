@@ -6,8 +6,6 @@ use openclaw::{
 };
 use tokio::sync::mpsc;
 
-use crate::sessions::state::SessionDelta;
-
 const EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug)]
@@ -20,7 +18,6 @@ pub enum HostEvent {
         status: CronExecutionStatus,
     },
     OpenClawRuntime,
-    SessionDelta(SessionDelta),
     Matcha(SessionSubscriptionItem),
     MatchaLifecycle(SupervisorSnapshot),
 }
@@ -30,14 +27,12 @@ pub struct HostEvents {
     open_claw_canonical: mpsc::Receiver<CanonicalIngressResult>,
     open_claw_cron: mpsc::Receiver<(String, String, CronExecutionStatus)>,
     open_claw_runtime: mpsc::Receiver<()>,
-    session_delta: mpsc::Receiver<SessionDelta>,
     matcha: mpsc::Receiver<SessionSubscriptionItem>,
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     open_claw_open: bool,
     open_claw_canonical_open: bool,
     open_claw_cron_open: bool,
     open_claw_runtime_open: bool,
-    session_delta_open: bool,
     matcha_open: bool,
     matcha_lifecycle_open: bool,
 }
@@ -49,7 +44,6 @@ impl HostEvents {
                 && !self.open_claw_canonical_open
                 && !self.open_claw_cron_open
                 && !self.open_claw_runtime_open
-                && !self.session_delta_open
                 && !self.matcha_open
                 && !self.matcha_lifecycle_open
             {
@@ -76,10 +70,6 @@ impl HostEvents {
                     Some(()) => return Some(HostEvent::OpenClawRuntime),
                     None => self.open_claw_runtime_open = false,
                 },
-                delta = self.session_delta.recv(), if self.session_delta_open => match delta {
-                    Some(delta) => return Some(HostEvent::SessionDelta(delta)),
-                    None => self.session_delta_open = false,
-                },
                 event = self.matcha.recv(), if self.matcha_open => match event {
                     Some(event) => return Some(HostEvent::Matcha(event)),
                     None => self.matcha_open = false,
@@ -98,7 +88,6 @@ pub(super) struct EventSinks {
     open_claw_canonical: Option<mpsc::Sender<CanonicalIngressResult>>,
     open_claw_cron: Option<mpsc::Sender<(String, String, CronExecutionStatus)>>,
     open_claw_runtime: Option<mpsc::Sender<()>>,
-    session_delta: Option<mpsc::Sender<SessionDelta>>,
     matcha: Option<mpsc::Sender<SessionSubscriptionItem>>,
     matcha_lifecycle: Option<mpsc::Sender<SupervisorSnapshot>>,
 }
@@ -122,10 +111,6 @@ impl EventSinks {
         self.open_claw_runtime.clone()
     }
 
-    pub(super) fn session_delta(&self) -> Option<mpsc::Sender<SessionDelta>> {
-        self.session_delta.clone()
-    }
-
     pub(super) fn matcha(&self) -> Option<mpsc::Sender<SessionSubscriptionItem>> {
         self.matcha.clone()
     }
@@ -141,10 +126,6 @@ impl EventSinks {
         self.open_claw_runtime = None;
     }
 
-    pub(super) fn close_session_delta(&mut self) {
-        self.session_delta = None;
-    }
-
     pub(super) fn close_matcha(&mut self) {
         self.matcha = None;
         self.matcha_lifecycle = None;
@@ -156,7 +137,6 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
     let (open_claw_canonical, open_claw_canonical_events) = mpsc::channel(EVENT_CAPACITY);
     let (open_claw_cron, open_claw_cron_events) = mpsc::channel(EVENT_CAPACITY);
     let (open_claw_runtime, open_claw_runtime_events) = mpsc::channel(1);
-    let (session_delta, session_delta_events) = mpsc::channel(EVENT_CAPACITY);
     let (matcha, matcha_events) = mpsc::channel(EVENT_CAPACITY);
     let (matcha_lifecycle, matcha_lifecycle_events) = mpsc::channel(1);
     (
@@ -165,7 +145,6 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_canonical: Some(open_claw_canonical),
             open_claw_cron: Some(open_claw_cron),
             open_claw_runtime: Some(open_claw_runtime),
-            session_delta: Some(session_delta),
             matcha: Some(matcha),
             matcha_lifecycle: Some(matcha_lifecycle),
         },
@@ -174,14 +153,12 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_canonical: open_claw_canonical_events,
             open_claw_cron: open_claw_cron_events,
             open_claw_runtime: open_claw_runtime_events,
-            session_delta: session_delta_events,
             matcha: matcha_events,
             matcha_lifecycle: matcha_lifecycle_events,
             open_claw_open: true,
             open_claw_canonical_open: true,
             open_claw_cron_open: true,
             open_claw_runtime_open: true,
-            session_delta_open: true,
             matcha_open: true,
             matcha_lifecycle_open: true,
         },

@@ -51,8 +51,8 @@ impl TeamRunSupervisor {
         self.receipt_router.next_terminal_watch().await
     }
 
-    async fn cancel_matcha_terminal_watches(&mut self) {
-        self.receipt_router.cancel_matcha_terminal_watches().await;
+    async fn cancel_native_terminal_watches(&mut self) {
+        self.receipt_router.cancel_native_terminal_watches().await;
     }
 
     async fn cancel(&mut self) {
@@ -90,7 +90,7 @@ pub(super) async fn run(
             Next::Request(Some(TeamRunCoordinatorRequest::CancelMatchaTerminalWatches {
                 reply,
             })) => {
-                supervisor.cancel_matcha_terminal_watches().await;
+                supervisor.cancel_native_terminal_watches().await;
                 let _ = reply.send(());
             }
             Next::Request(Some(TeamRunCoordinatorRequest::RecoverMaterializationReceipts)) => {
@@ -101,13 +101,14 @@ pub(super) async fn run(
             Next::Request(None) => requests_open = false,
             Next::TerminalWatch(Some(observation)) => {
                 if input.admission.admit_request().is_ok() {
+                    let settled_at = now_seconds();
                     let _ = input
                         .organization
-                        .observe_matcha_terminal(
+                        .native_run_settled(
                             observation.run_id,
                             observation.delivery_id,
-                            observation.status,
-                            now_seconds(),
+                            observation.settled,
+                            settled_at,
                         )
                         .await;
                 }

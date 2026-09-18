@@ -28,8 +28,9 @@ use crate::{
             AuthorizedGraphResolution, AuthorizedGraphResolutionError,
             AuthorizedGraphResolutionOutcome, NativeTerminalStatus, TerminalObservation,
             TerminalObservationError, TerminalObservationOutcome, TerminalObservationResolution,
-            observe_matcha_terminal as apply_terminal_observation,
+            observe_native_terminal as apply_terminal_observation,
             resolve_authorized_graph_outcome as apply_authorized_graph_resolution,
+            resolve_native_run_output as apply_native_run_output,
         },
         event::{EventLedger, EventLedgerSnapshot},
         evidence::{EvidenceLedger, EvidenceRecord, RecordOutcome},
@@ -194,6 +195,151 @@ pub enum WorkflowPlanAdmissionOutcome {
 pub enum WorkflowPlanSubmitOutcome {
     Submitted(GraphRunId),
     Replayed(GraphRunId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunStartGate {
+    Intake,
+    ProposalPending {
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    },
+    Started,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetRunStartProposalOutcome {
+    Recorded,
+    Replayed,
+    AlreadyStarted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfirmRunStartOutcome {
+    Started,
+    Replayed,
+    Intake,
+    ProposalMismatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContinueRunDiscussionOutcome {
+    Intake,
+    Replayed,
+    AlreadyStarted,
+    ProposalMismatch,
+}
+
+impl RunStartGate {
+    pub fn proposal_id(&self) -> Option<&str> {
+        match self {
+            Self::ProposalPending { proposal_id, .. } => Some(proposal_id),
+            Self::Intake | Self::Started => None,
+        }
+    }
+
+    pub fn summary(&self) -> Option<&str> {
+        match self {
+            Self::ProposalPending { summary, .. } => Some(summary),
+            Self::Intake | Self::Started => None,
+        }
+    }
+
+    pub fn source_delivery_id(&self) -> Option<&str> {
+        match self {
+            Self::ProposalPending {
+                source_delivery_id, ..
+            } => Some(source_delivery_id),
+            Self::Intake | Self::Started => None,
+        }
+    }
+
+    pub(crate) fn proposal_pending(
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    ) -> Result<Self, ()> {
+        if proposal_id.trim().is_empty()
+            || summary.trim().is_empty()
+            || source_delivery_id.trim().is_empty()
+        {
+            return Err(());
+        }
+        Ok(Self::ProposalPending {
+            proposal_id,
+            summary,
+            source_delivery_id,
+        })
+    }
+
+    fn set_proposal(
+        &mut self,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    ) -> Result<SetRunStartProposalOutcome, ()> {
+        let next = Self::proposal_pending(proposal_id, summary, source_delivery_id)?;
+        match self {
+            Self::Started => Ok(SetRunStartProposalOutcome::AlreadyStarted),
+            current if *current == next => Ok(SetRunStartProposalOutcome::Replayed),
+            current => {
+                *current = next;
+                Ok(SetRunStartProposalOutcome::Recorded)
+            }
+        }
+    }
+
+    fn confirm_start(&mut self, proposal_id: &str) -> Result<ConfirmRunStartOutcome, ()> {
+        if proposal_id.trim().is_empty() {
+            return Err(());
+        }
+        match self {
+            Self::ProposalPending {
+                proposal_id: existing,
+                ..
+            } if existing == proposal_id => {
+                *self = Self::Started;
+                Ok(ConfirmRunStartOutcome::Started)
+            }
+            Self::ProposalPending { .. } => Ok(ConfirmRunStartOutcome::ProposalMismatch),
+            Self::Intake => Ok(ConfirmRunStartOutcome::Intake),
+            Self::Started => Ok(ConfirmRunStartOutcome::Replayed),
+        }
+    }
+
+    fn continue_discussion(
+        &mut self,
+        proposal_id: &str,
+    ) -> Result<ContinueRunDiscussionOutcome, ()> {
+        if proposal_id.trim().is_empty() {
+            return Err(());
+        }
+        match self {
+            Self::ProposalPending {
+                proposal_id: existing,
+                ..
+            } if existing == proposal_id => {
+                *self = Self::Intake;
+                Ok(ContinueRunDiscussionOutcome::Intake)
+            }
+            Self::ProposalPending { .. } => Ok(ContinueRunDiscussionOutcome::ProposalMismatch),
+            Self::Intake => Ok(ContinueRunDiscussionOutcome::Replayed),
+            Self::Started => Ok(ContinueRunDiscussionOutcome::AlreadyStarted),
+        }
+    }
+
+    fn can_transition_from(&self, previous: &Self) -> bool {
+        matches!(
+            (previous, self),
+            (Self::Intake, Self::Intake | Self::ProposalPending { .. })
+                | (
+                    Self::ProposalPending { .. },
+                    Self::Intake | Self::ProposalPending { .. } | Self::Started,
+                )
+                | (Self::Started, Self::Started)
+        )
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -370,6 +516,7 @@ pub struct GraphRunFacts {
     graph: GraphState,
     runtime: Option<RunRuntimeReceipt>,
     lifecycle: GraphRunLifecycle,
+    start_gate: RunStartGate,
 }
 
 impl GraphRunFacts {
@@ -379,12 +526,13 @@ impl GraphRunFacts {
         graph: GraphState,
         runtime: Option<RunRuntimeReceipt>,
     ) -> Result<Self, OrganizationFactsError> {
-        Self::with_lifecycle(
+        Self::with_lifecycle_and_start_gate(
             team,
             frozen_team_revision,
             graph,
             runtime,
             GraphRunLifecycle::active(),
+            RunStartGate::Intake,
         )
     }
 
@@ -394,6 +542,24 @@ impl GraphRunFacts {
         graph: GraphState,
         runtime: Option<RunRuntimeReceipt>,
         lifecycle: GraphRunLifecycle,
+    ) -> Result<Self, OrganizationFactsError> {
+        Self::with_lifecycle_and_start_gate(
+            team,
+            frozen_team_revision,
+            graph,
+            runtime,
+            lifecycle,
+            RunStartGate::Intake,
+        )
+    }
+
+    pub(crate) fn with_lifecycle_and_start_gate(
+        team: TeamId,
+        frozen_team_revision: TeamRevision,
+        graph: GraphState,
+        runtime: Option<RunRuntimeReceipt>,
+        lifecycle: GraphRunLifecycle,
+        start_gate: RunStartGate,
     ) -> Result<Self, OrganizationFactsError> {
         if graph.definition().run_id().as_str().trim().is_empty() {
             return Err(OrganizationFactsError::InvalidGraphRun);
@@ -410,6 +576,7 @@ impl GraphRunFacts {
             graph,
             runtime,
             lifecycle,
+            start_gate,
         })
     }
 
@@ -431,6 +598,10 @@ impl GraphRunFacts {
 
     pub fn lifecycle(&self) -> &GraphRunLifecycle {
         &self.lifecycle
+    }
+
+    pub fn start_gate(&self) -> &RunStartGate {
+        &self.start_gate
     }
 
     pub fn run_id(&self) -> &GraphRunId {
@@ -827,7 +998,7 @@ impl OrganizationFacts {
         for delivery in deliveries.deliveries() {
             let correlation = match delivery.phase() {
                 DeliveryPhase::Delivered {
-                    matcha_correlation: Some(correlation),
+                    native_correlation: Some(correlation),
                     ..
                 } => Some(correlation),
                 DeliveryPhase::TerminalObserved { observation } => Some(observation.correlation()),
@@ -1365,6 +1536,47 @@ impl OrganizationFacts {
         self.runs.get(run_id.as_str())
     }
 
+    pub(crate) fn set_run_start_proposal(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    ) -> Result<SetRunStartProposalOutcome, OrganizationFactsError> {
+        self.runs
+            .get_mut(run_id.as_str())
+            .ok_or(OrganizationFactsError::UnknownRun)?
+            .start_gate
+            .set_proposal(proposal_id, summary, source_delivery_id)
+            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
+    }
+
+    pub(crate) fn confirm_run_start(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: &str,
+    ) -> Result<ConfirmRunStartOutcome, OrganizationFactsError> {
+        self.runs
+            .get_mut(run_id.as_str())
+            .ok_or(OrganizationFactsError::UnknownRun)?
+            .start_gate
+            .confirm_start(proposal_id)
+            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
+    }
+
+    pub(crate) fn continue_run_discussion(
+        &mut self,
+        run_id: &GraphRunId,
+        proposal_id: &str,
+    ) -> Result<ContinueRunDiscussionOutcome, OrganizationFactsError> {
+        self.runs
+            .get_mut(run_id.as_str())
+            .ok_or(OrganizationFactsError::UnknownRun)?
+            .start_gate
+            .continue_discussion(proposal_id)
+            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
+    }
+
     pub(crate) fn purged_run_marker(&self, run_id: &GraphRunId) -> Option<&PurgedRunMarker> {
         self.purged_runs.get(run_id.as_str())
     }
@@ -1638,14 +1850,14 @@ impl OrganizationFacts {
         Ok(ApprovalResolutionOutcome::Recorded)
     }
 
-    pub(super) fn matcha_terminal_target(
+    pub(super) fn native_terminal_target(
         &self,
         delivery_id: &crate::DeliveryId,
-    ) -> Option<super::MatchaTerminalReceiptTarget> {
+    ) -> Option<super::NativeTerminalReceiptTarget> {
         let delivery = self.deliveries.delivery(delivery_id)?;
         let (correlation, existing_observation) = match delivery.phase() {
             DeliveryPhase::Delivered {
-                matcha_correlation: Some(correlation),
+                native_correlation: Some(correlation),
                 ..
             } => (correlation.clone(), None),
             DeliveryPhase::TerminalObserved { observation } => {
@@ -1667,12 +1879,21 @@ impl OrganizationFacts {
             return None;
         }
         let role_id = crate::RoleId::try_new(delivery.facts().role_id.clone()).ok()?;
-        Some(super::MatchaTerminalReceiptTarget::new(
+        let session_ref =
+            crate::RoleSessionRef::try_new(delivery.facts().session_ref.clone()).ok()?;
+        let endpoint = run
+            .runtime()?
+            .bindings()
+            .iter()
+            .find(|binding| binding.role() == &role_id && binding.session_ref() == &session_ref)
+            .map(|binding| binding.endpoint().clone())?;
+        Some(super::NativeTerminalReceiptTarget::new(
             delivery.facts().delivery_id.clone(),
             run.run_id().clone(),
             node_id,
             fence,
             role_id,
+            endpoint,
             correlation,
         ))
     }
@@ -1799,6 +2020,12 @@ impl OrganizationFacts {
                 .can_transition_from(previous_run.lifecycle())
             {
                 return Err(OrganizationFactsError::InvalidGraphRunLifecycle);
+            }
+            if !current
+                .start_gate()
+                .can_transition_from(previous_run.start_gate())
+            {
+                return Err(OrganizationFactsError::InvalidRunStartGate);
             }
         }
         for delivery in previous.deliveries.deliveries() {
@@ -2216,7 +2443,7 @@ impl OrganizationFacts {
         Ok(TriggerRegistration::Recorded(recorded))
     }
 
-    pub(crate) fn observe_matcha_terminal(
+    pub(crate) fn observe_native_terminal(
         &mut self,
         delivery_id: &crate::DeliveryId,
         native_terminal: NativeTerminalStatus,
@@ -2235,7 +2462,7 @@ impl OrganizationFacts {
             .ok_or(TerminalObservationError::RunMismatch)?;
         let correlation = match delivery.phase() {
             DeliveryPhase::Delivered {
-                matcha_correlation: Some(correlation),
+                native_correlation: Some(correlation),
                 ..
             } => correlation.clone(),
             DeliveryPhase::TerminalObserved { observation } => observation.correlation().clone(),
@@ -2244,7 +2471,7 @@ impl OrganizationFacts {
         let outcome = apply_terminal_observation(
             &mut delivery,
             &mut run.graph,
-            correlation.external_session().clone(),
+            correlation.endpoint_session_id().clone(),
             correlation.native_run_receipt().clone(),
             native_terminal,
             observed_at,
@@ -2606,21 +2833,8 @@ impl OrganizationFacts {
         let resolved_at = resolution.resolved_at();
         let outcome = apply_authorized_graph_resolution(&mut delivery, &mut run.graph, resolution)?;
         if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
-            let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
-                .map_err(|_| AuthorizedGraphResolutionError::DeliveryMismatch)?;
-            if let Some(activity) = self.activities.activity_mut(&activity_id) {
-                let settlement = match resolution_outcome {
-                    crate::AuthorizedGraphOutcome::Completed => ActivitySettlement::Completed {
-                        completed_at: resolved_at,
-                    },
-                    crate::AuthorizedGraphOutcome::Failed => ActivitySettlement::Failed {
-                        failed_at: resolved_at,
-                        failure: crate::ActivityFailure::Rejected,
-                    },
-                };
-                crate::run::activity::resolve_terminal_observed_activity(activity, settlement)
-                    .map_err(|_| AuthorizedGraphResolutionError::GraphStateMismatch)?;
-            }
+            self.settle_resolved_activity(&delivery_id, resolution_outcome, resolved_at)
+                .map_err(|_| AuthorizedGraphResolutionError::GraphStateMismatch)?;
         }
         self.runs.insert(run_id.as_str().to_owned(), run);
         *self
@@ -2628,6 +2842,78 @@ impl OrganizationFacts {
             .delivery_mut(&delivery_id)
             .expect("delivery ledger preserves its delivery identity index") = delivery;
         Ok(outcome)
+    }
+
+    pub(crate) fn resolve_native_run_output(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        receipt: crate::AuthorizedGraphResolutionReceipt,
+        final_assistant_text: String,
+        resolved_at: u64,
+    ) -> Result<AuthorizedGraphResolutionOutcome, crate::NativeRunOutputResolutionError> {
+        let mut delivery = self.deliveries.delivery(delivery_id).cloned().ok_or(
+            crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                AuthorizedGraphResolutionError::DeliveryMismatch,
+            ),
+        )?;
+        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
+        let mut run = self.runs.get(run_id.as_str()).cloned().ok_or(
+            crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                AuthorizedGraphResolutionError::RunMismatch,
+            ),
+        )?;
+        let outcome = apply_native_run_output(
+            &mut delivery,
+            &mut run.graph,
+            receipt,
+            final_assistant_text,
+            resolved_at,
+        )?;
+        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded)
+            && let crate::DeliveryPhase::TerminalObserved { observation } = delivery.phase()
+            && let TerminalObservationResolution::GraphResolved(resolution) =
+                observation.resolution()
+        {
+            self.settle_resolved_activity(
+                delivery_id,
+                resolution.outcome(),
+                resolution.resolved_at(),
+            )
+            .map_err(|_| {
+                crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                    AuthorizedGraphResolutionError::GraphStateMismatch,
+                )
+            })?;
+        }
+        self.runs.insert(run_id.as_str().to_owned(), run);
+        *self
+            .deliveries
+            .delivery_mut(delivery_id)
+            .expect("delivery ledger preserves its delivery identity index") = delivery;
+        Ok(outcome)
+    }
+
+    fn settle_resolved_activity(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        resolution_outcome: crate::AuthorizedGraphOutcome,
+        resolved_at: u64,
+    ) -> Result<(), crate::ActivityTransitionError> {
+        let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
+            .map_err(|_| crate::ActivityTransitionError::StaleClaim)?;
+        if let Some(activity) = self.activities.activity_mut(&activity_id) {
+            let settlement = match resolution_outcome {
+                crate::AuthorizedGraphOutcome::Completed => ActivitySettlement::Completed {
+                    completed_at: resolved_at,
+                },
+                crate::AuthorizedGraphOutcome::Failed => ActivitySettlement::Failed {
+                    failed_at: resolved_at,
+                    failure: crate::ActivityFailure::Rejected,
+                },
+            };
+            crate::run::activity::resolve_terminal_observed_activity(activity, settlement)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_control_node_resolution(
@@ -3223,17 +3509,6 @@ fn validate_runtime_receipt_alignment(
     if receipt.team_run() != run.run_id() {
         return Err(OrganizationFactsError::RuntimeRunMismatch);
     }
-    if receipt
-        .bindings()
-        .iter()
-        .any(|binding| binding.endpoint() != materialization.endpoint())
-    {
-        return Err(OrganizationFactsError::RuntimeMaterializationEndpointMismatch);
-    }
-    if receipt.bindings().len() != materialization.roles().len() {
-        return Err(OrganizationFactsError::RuntimeRoleBindingSetMismatch);
-    }
-
     for binding in receipt.bindings() {
         if binding.team() != run.team() {
             return Err(OrganizationFactsError::RuntimeBindingTeamMismatch);
@@ -3296,6 +3571,7 @@ pub enum OrganizationFactsError {
     UnknownEventRun,
     UnknownRun,
     InvalidGraphRunLifecycle,
+    InvalidRunStartGate,
     UnknownDeliveryRun,
     UnknownActivityRun,
     UnknownActivity,
@@ -3381,6 +3657,7 @@ fn validate_activity_request(
             ActivityKind::AgentTask {
                 task_id,
                 role_id,
+                session_ref,
                 prompt,
             },
             NodeKind::Work,
@@ -3388,24 +3665,34 @@ fn validate_activity_request(
             let work = node
                 .work_assignment()
                 .ok_or(OrganizationFactsError::InvalidActivity)?;
-            if work.task_id() != task_id || work.role_id() != role_id || work.prompt() != prompt {
+            if work.task_id() != task_id
+                || work.role_id() != role_id
+                || work.session_ref().as_str() != session_ref
+                || work.prompt() != prompt
+            {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
-            validate_activity_target(run, role_id, &request.target)
+            validate_activity_target(run, role_id, session_ref, &request.target)
         }
         (
             ActivityKind::AgentTask {
-                role_id, prompt, ..
+                role_id,
+                session_ref,
+                prompt,
+                ..
             },
             NodeKind::Review,
         ) => {
             let review = node
                 .review_assignment()
                 .ok_or(OrganizationFactsError::InvalidActivity)?;
-            if review.role_id() != role_id || prompt.trim().is_empty() {
+            if review.role_id() != role_id
+                || review.session_ref().as_str() != session_ref
+                || prompt.trim().is_empty()
+            {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
-            validate_activity_target(run, role_id, &request.target)
+            validate_activity_target(run, role_id, session_ref, &request.target)
         }
         (ActivityKind::Control { .. }, NodeKind::Start | NodeKind::Join | NodeKind::End) => Ok(()),
         _ => Err(OrganizationFactsError::InvalidActivity),
@@ -3415,20 +3702,22 @@ fn validate_activity_request(
 fn validate_activity_target(
     run: &GraphRunFacts,
     role_id: &str,
+    session_ref: &str,
     target: &ActivityTarget,
 ) -> Result<(), OrganizationFactsError> {
     let role = crate::RoleId::try_new(role_id.to_owned())
         .map_err(|_| OrganizationFactsError::InvalidActivity)?;
-    let binding = run
-        .runtime()
-        .and_then(|runtime| {
-            runtime
-                .bindings()
-                .iter()
-                .find(|binding| binding.role() == &role)
-        })
-        .ok_or(OrganizationFactsError::InvalidActivityTarget)?;
-    if binding.local_session().as_str() != target.as_str() {
+    let session_ref = crate::RoleSessionRef::try_new(session_ref.to_owned())
+        .map_err(|_| OrganizationFactsError::InvalidActivity)?;
+    let binding =
+        run.runtime()
+            .and_then(|runtime| {
+                runtime.bindings().iter().find(|binding| {
+                    binding.role() == &role && binding.session_ref() == &session_ref
+                })
+            })
+            .ok_or(OrganizationFactsError::InvalidActivityTarget)?;
+    if binding.endpoint_session_id().as_str() != target.as_str() {
         return Err(OrganizationFactsError::InvalidActivityTarget);
     }
     Ok(())
@@ -3583,7 +3872,10 @@ fn validate_terminal_observation(
                 && attempt.status() == crate::AttemptStatus::Waiting
                 && attempt.output_port().is_none() => {}
         TerminalObservationResolution::GraphResolved(resolution)
-            if resolution.delivery_id() == observation.delivery_id()
+            if observation
+                .output()
+                .is_none_or(|output| output.output_port() == resolution.output_port())
+                && resolution.delivery_id() == observation.delivery_id()
                 && resolution.graph_run_id() == observation.graph_run_id()
                 && resolution.fence() == observation.fence()
                 && resolution.resolved_at() >= observation.observed_at()

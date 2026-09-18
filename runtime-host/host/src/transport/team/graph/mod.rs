@@ -534,7 +534,7 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-pub(crate) mod server;
+pub(crate) mod handler;
 
 #[cfg(test)]
 mod tests {

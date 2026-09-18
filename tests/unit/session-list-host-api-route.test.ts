@@ -109,7 +109,7 @@ describe('session Host API public delivery route', () => {
       createRequest(request) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionListTransport: { list } } as never,
+      { runtimeHostTransports: { sessionListTransport: { list } } } as never,
     )).resolves.toBe(true);
 
     expect(list).toHaveBeenCalledWith(request);
@@ -142,8 +142,10 @@ describe('session Host API public delivery route', () => {
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
       {
-        sessionListTransport: { list: openClawList },
-        matchaSessionListTransport: { list: matchaList },
+        runtimeHostTransports: {
+          sessionListTransport: { list: openClawList },
+          matchaSessionListTransport: { list: matchaList },
+        },
       } as never,
     )).resolves.toBe(true);
 
@@ -171,7 +173,7 @@ describe('session Host API public delivery route', () => {
       createRequest(publicPromptRequest()) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send }, rendererEventRoutes } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
     )).resolves.toBe(true);
 
     expect(send).toHaveBeenCalledWith({
@@ -224,7 +226,7 @@ describe('session Host API public delivery route', () => {
       }, 'sessions.sendWithMedia')) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send }, rendererEventRoutes } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
     )).resolves.toBe(true);
 
     expect(consumeStagedAttachmentMock).toHaveBeenCalledWith('attachment-1');
@@ -273,7 +275,7 @@ describe('session Host API public delivery route', () => {
       }, 'sessions.sendWithMedia')) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send }, rendererEventRoutes } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
     );
 
     expect(send).not.toHaveBeenCalled();
@@ -301,7 +303,7 @@ describe('session Host API public delivery route', () => {
       createRequest(publicPromptRequest({ runId: 'run-invalid' })) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send }, rendererEventRoutes } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
     );
 
     expect(rendererEventRoutes.release).toHaveBeenCalledWith('renderer-route:invalid');
@@ -325,7 +327,7 @@ describe('session Host API public delivery route', () => {
       createRequest(publicPromptRequest({ runId: 'run-failed' })) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { sessionSendTransport: { send }, rendererEventRoutes } as never,
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
     );
 
     expect(rendererEventRoutes.release).toHaveBeenCalledWith('renderer-route:failed');

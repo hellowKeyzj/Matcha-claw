@@ -20,7 +20,7 @@ The old TS child wrapper and IPC shutdown message are legacy evidence, not the a
 
 ## Required child environment
 
-Current Rust delivery passes owner-specific ports, parent callback material, state roots, provider private resolver and peer inputs in the private bootstrap frame rather than reconstructing them from legacy child env. The exact fields are bootstrap-internal and must not become Renderer API.
+Current Rust delivery passes the Host-owned localhost server port, parent callback material, state roots, provider private resolver and peer inputs in the private bootstrap frame rather than reconstructing them from legacy child env. The exact fields are bootstrap-internal and must not become Renderer API.
 
 Legacy TS env variables remain migration evidence only:
 
@@ -41,11 +41,11 @@ Legacy TS env variables remain migration evidence only:
 | endpoint | default / source |
 | --- | --- |
 | Electron Host API | `13210` / `MATCHACLAW_PORT_MATCHACLAW_HOST_API` |
-| Rust product loopback transports | concrete ports allocated by Electron bootstrap per transport family |
+| Rust Host-owned loopback server | `MATCHACLAW_RUNTIME_HOST` / `runtimeHostTransportPort`; one listener routes fixed product DTOs, SSE and WS outcomes |
 | matcha-agent app server | `3212` / `MATCHACLAW_MATCHA_AGENT_APP_SERVER_PORT` |
 | OpenClaw gateway | `18789` / project config default/override path |
 
-Source: [config.ts](../../electron/utils/config.ts#L9-L89)、[main.rs](../../runtime-host/host/src/main.rs)。All Host API and Rust product transport listeners bind loopback (`127.0.0.1`) under current implementation.
+Source: [config.ts](../../electron/utils/config.ts#L9-L89)、[bootstrap.ts](../../electron/main/runtime-host-delivery/bootstrap.ts)、[localhost server](../../runtime-host/host/src/transport/localhost/server.rs)、[main.rs](../../runtime-host/host/src/main.rs)。Host API 与 Rust Host-owned localhost server bind loopback (`127.0.0.1`) under current implementation；OpenClaw gateway、Matcha app-server、MCP stdio 是 peer/native 边界，不纳入该统一 server。
 
 ## Lifecycle states are layer-specific
 
@@ -61,7 +61,7 @@ Do not collapse them into one Rust enum. Child root health is the Rust compatibi
 
 1. Electron spawns the Rust executable with stdio pipes.
 2. Electron writes exactly one length-prefixed bootstrap frame to stdin.
-3. Rust decodes bootstrap, constructs `Host`, spawns the Owner actor and binds configured loopback product transports.
+3. Rust decodes bootstrap, constructs `Host`, spawns the Owner actor and binds the configured Host-owned localhost server.
 4. Rust opens private framed control over the same stdio pair and emits the `ready` control message.
 5. Electron treats control ready as process readiness; Host health/status remains a separate command/projection.
 
@@ -102,13 +102,13 @@ Renderer public exact path:
   /api/remote-fleet/terminal/stream
 
 Electron:
-  raw TCP proxy to child
+  raw TCP proxy to child localhost server
 
-child accepted prefix:
+child accepted prefix on the unified server:
   /api/remote-fleet/terminal/
 ```
 
-The WebSocket does not travel through `/dispatch`; it is an upgrade/raw stream boundary. Electron destroys disallowed upgrade paths. Rust Fleet server destroys unsupported/failed upgrades. Current evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)。
+The WebSocket does not travel through `/dispatch`; it is an upgrade/raw stream route outcome on the unified localhost server. Electron destroys disallowed upgrade paths. Rust Fleet server destroys unsupported/failed upgrades. Current evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)、[RouteOutcome](../../runtime-host/host/src/transport/localhost/http.rs)。
 
 Terminal provider open is still under FleetOwner owner-local keyed-lane implementation; this is not product E2E/fault/backpressure/package/Windows verification.
 
@@ -118,7 +118,7 @@ Rust may change its executor, internal lifecycle implementation, internal backgr
 
 - Electron-owned launch and bounded ready/exit behavior;
 - one-shot private bootstrap and private control readiness;
-- fixed loopback product transport boundaries;
+- single Host-owned localhost server boundary with fixed product route contracts;
 - process restart vs peer lifecycle restart distinction;
 - Remote Fleet terminal upgrade behavior where still exposed;
 - parent callback token behavior without exposing it to Renderer.

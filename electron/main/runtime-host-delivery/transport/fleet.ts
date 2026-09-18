@@ -1,9 +1,9 @@
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import type { Duplex } from 'node:stream';
-import type { RuntimeHostDeliveryIssuer } from '../bootstrap';
+import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { hasExactKeys, isRecord, isSafeNonNegativeInteger as isCounter, sendLoopbackJson } from './client';
 
-const DECISION_TTL_MS = 30_000;
 const PUBLIC_FLEET_RUNTIME_AGENT_INGRESS_PATH = '/api/remote-fleet/runtime-agent/ingress';
 export const PUBLIC_FLEET_TERMINAL_STREAM_PATH = '/api/remote-fleet/terminal/stream';
 const PRIVATE_FLEET_TERMINAL_STREAM_PATH = '/api/fleet/terminal';
@@ -517,20 +517,19 @@ export interface FleetTransport {
 
 export function createFleetTransport(
   issuer: RuntimeHostDeliveryIssuer,
-  port: number,
+  runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): FleetTransport {
-  const url = `http://127.0.0.1:${port}/api/fleet`;
   return {
     async read(request): Promise<FleetTransportResponse> {
       if (!isFleetReadRequest(request)) return { status: 503, body: UNAVAILABLE };
-      return requestFleet(url, issuer, fetcher, request, 'fleet:read', (body) =>
+      return requestFleet(runtimeHostTransportPort, issuer, fetcher, request, 'fleet:read', (body) =>
         isSuccessResponse(body, request.operation) ? body : null,
       );
     },
     async mutate(request): Promise<FleetMutationTransportResponse> {
       if (!isFleetMutationRequest(request)) return { status: 503, body: UNAVAILABLE };
-      return requestFleet(url, issuer, fetcher, request, 'fleet:write', (body) =>
+      return requestFleet(runtimeHostTransportPort, issuer, fetcher, request, 'fleet:write', (body) =>
         isFleetMutationResponse(body, request.operation) ? body : null,
       );
     },
@@ -538,36 +537,29 @@ export function createFleetTransport(
 }
 
 async function requestFleet<T extends FleetSuccessBody | FleetMutationResult | FleetTerminalCloseResult | FleetTerminalSessionResult>(
-  url: string,
+  port: number,
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
   request: Readonly<{ operation: FleetOperation; input: Readonly<Record<string, unknown>> }>,
   scope: 'fleet:read' | 'fleet:write',
   decode: (body: unknown) => T | null,
 ): Promise<Readonly<{ status: 200 | 503; body: T | typeof UNAVAILABLE }>> {
-  try {
-    const response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${issuer.signDecision({
-          principal: 'electron-main-local',
-          endpoint: '/api/fleet',
-          scope,
-          capability: request.operation,
-          subject: 'fleet',
-          expiresAt: Date.now() + DECISION_TTL_MS,
-          revision: '1',
-        })}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-    const body: unknown = await response.json();
-    const decoded = response.status === 200 ? decode(body) : null;
-    if (decoded) return { status: 200, body: decoded };
-  } catch {
-    // Native transport details do not cross the Electron delivery boundary.
-  }
+  const response = await sendLoopbackJson({
+    port,
+    path: '/api/fleet',
+    issuer,
+    decision: {
+      endpoint: '/api/fleet',
+      scope,
+      capability: request.operation,
+      subject: 'fleet',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  const decoded = response?.status === 200 ? decode(response.body) : null;
+  if (decoded) return { status: 200, body: decoded };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -1431,23 +1423,10 @@ function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && /^unix:[0-9]+$/.test(value);
 }
 
-function isCounter(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
 }
 
 function isOneOf<T extends string>(value: unknown, values: readonly T[]): value is T {
   return typeof value === 'string' && values.includes(value as T);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }

@@ -14,7 +14,7 @@ use crate::transport::{
     },
 };
 
-use super::server::{
+use super::handler::{
     AUTHORIZATION_HEADER, AUTHORIZATION_SCOPE, AUTHORIZATION_SUBJECT, BEARER_PREFIX, ENDPOINT,
     Request, Response, SELECTABLE_ENDPOINT, now_millis,
 };
