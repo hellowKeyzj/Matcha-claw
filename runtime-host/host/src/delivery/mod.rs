@@ -77,7 +77,10 @@ where
     );
     let send_hooks =
         crate::sessions::send_hook::SessionSendHookSet::new(vec![std::sync::Arc::new(
-            crate::organization::StartGateSendHook::new(handles.organization.clone()),
+            crate::organization::StartGateSendHook::new(
+                handles.organization.clone(),
+                handles.start_gate_registry.clone(),
+            ),
         )]);
     let router =
         crate::transport::localhost::Router::new(crate::transport::localhost::RouterInput {

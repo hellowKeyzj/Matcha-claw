@@ -4,7 +4,7 @@ mod tests {
     use super::super::openclaw_direct;
     use super::super::query::SessionQuery;
     use super::super::send::{NativeEndpoint, SessionSendCommand};
-    use super::super::state::{SessionIdentity, SessionProvider};
+    use super::super::state::{SessionIdentity, SessionProvider, SessionSourceBinding};
     use foundation::execution::{CommandRoute, QueryRoute};
     use tokio::sync::oneshot;
 
@@ -16,7 +16,11 @@ mod tests {
     async fn session_commands_route_to_keyed_lanes() {
         let identity = mock_session_identity(SessionProvider::OpenClaw, "abc");
         let (reply, _rx) = oneshot::channel();
-        let command = SessionCommand::Ensure { identity, reply };
+        let command = SessionCommand::Ensure {
+            identity,
+            source_binding: SessionSourceBinding::ordinary(),
+            reply,
+        };
 
         assert_eq!(
             command.route(),
@@ -131,7 +135,9 @@ mod integration_tests {
     use super::super::command::{
         SessionCommand, SessionEnsureOutcome, SessionEvent, SessionIngestOutcome,
     };
-    use super::super::state::{RunPhase, SessionChange, SessionIdentity, SessionProvider};
+    use super::super::state::{
+        RunPhase, SessionChange, SessionIdentity, SessionProvider, SessionSourceBinding,
+    };
     use crate::{
         provider::{
             ProviderAccountsOwner, ProviderModelOwner, ProviderRoutingOwner, actor::ProviderOwner,
@@ -176,7 +182,7 @@ mod integration_tests {
         SessionOwner,
         Arc<arc_swap::ArcSwap<super::super::actor::SessionSnapshot>>,
     ) {
-        SessionOwner::new(runtime_dir, runtime_provider_handle(), None)
+        SessionOwner::new(runtime_dir, runtime_provider_handle(), None, None)
     }
 
     fn mock_identity(provider: SessionProvider, session_key: &str) -> SessionIdentity {
@@ -206,14 +212,17 @@ mod integration_tests {
 
         let cmd1 = SessionCommand::Ensure {
             identity: id1,
+            source_binding: SessionSourceBinding::ordinary(),
             reply: tx1,
         };
         let cmd2 = SessionCommand::Ensure {
             identity: id2,
+            source_binding: SessionSourceBinding::ordinary(),
             reply: tx2,
         };
         let cmd3 = SessionCommand::Ensure {
             identity: id3,
+            source_binding: SessionSourceBinding::ordinary(),
             reply: tx3,
         };
 
@@ -250,10 +259,12 @@ mod integration_tests {
 
         let cmd1 = SessionCommand::Ensure {
             identity: id.clone(),
+            source_binding: SessionSourceBinding::ordinary(),
             reply: tx1,
         };
         let cmd2 = SessionCommand::Ensure {
             identity: id,
+            source_binding: SessionSourceBinding::ordinary(),
             reply: tx2,
         };
 
@@ -293,6 +304,7 @@ mod integration_tests {
         handle
             .send_command(SessionCommand::Ensure {
                 identity: openclaw_abc.clone(),
+                source_binding: SessionSourceBinding::ordinary(),
                 reply: tx1,
             })
             .await
@@ -300,6 +312,7 @@ mod integration_tests {
         handle
             .send_command(SessionCommand::Ensure {
                 identity: matcha_abc.clone(),
+                source_binding: SessionSourceBinding::ordinary(),
                 reply: tx2,
             })
             .await
@@ -349,7 +362,7 @@ mod integration_tests {
         );
 
         let identity = mock_identity(SessionProvider::OpenClaw, "session-abc");
-        let binding = super::super::state::SessionSourceBinding::new("session-abc", None, Some(1))
+        let binding = super::super::state::SessionEventBinding::new("session-abc", None, Some(1))
             .expect("valid binding");
         let event = SessionEvent {
             binding,
@@ -404,7 +417,7 @@ mod integration_tests {
         }];
 
         // First ingest
-        let binding1 = super::super::state::SessionSourceBinding::new("session-def", None, Some(1))
+        let binding1 = super::super::state::SessionEventBinding::new("session-def", None, Some(1))
             .expect("valid binding");
         let event1 = SessionEvent {
             binding: binding1,
@@ -425,7 +438,7 @@ mod integration_tests {
         assert!(matches!(outcome1, SessionIngestOutcome::Applied(_)));
 
         // Duplicate ingest (same cursor)
-        let binding2 = super::super::state::SessionSourceBinding::new("session-def", None, Some(1))
+        let binding2 = super::super::state::SessionEventBinding::new("session-def", None, Some(1))
             .expect("valid binding");
         let event2 = SessionEvent {
             binding: binding2,
@@ -469,7 +482,7 @@ mod integration_tests {
         // OpenClaw session
         let openclaw_identity = mock_identity(SessionProvider::OpenClaw, "shared-key");
         let openclaw_binding =
-            super::super::state::SessionSourceBinding::new("shared-key", None, Some(1))
+            super::super::state::SessionEventBinding::new("shared-key", None, Some(1))
                 .expect("valid binding");
         let openclaw_event = SessionEvent {
             binding: openclaw_binding,
@@ -484,7 +497,7 @@ mod integration_tests {
         // Matcha session (same session_key, different provider)
         let matcha_identity = mock_identity(SessionProvider::MatchaAgent, "shared-key");
         let matcha_binding =
-            super::super::state::SessionSourceBinding::new("shared-key", None, Some(1))
+            super::super::state::SessionEventBinding::new("shared-key", None, Some(1))
                 .expect("valid binding");
         let matcha_event = SessionEvent {
             binding: matcha_binding,

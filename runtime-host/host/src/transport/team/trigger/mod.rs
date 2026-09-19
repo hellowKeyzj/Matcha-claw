@@ -288,16 +288,14 @@ async fn fire(
 }
 
 fn trigger_json(trigger: &ArmedTrigger) -> Value {
-    match &trigger.trigger {
-        TeamTrigger::Webhook { .. } => json!({
-            "teamId": trigger.team_id.as_str(), "runId": trigger.run_id.as_str(),
-            "startNodeId": trigger.start_node_id, "trigger": { "kind": "webhook" },
-        }),
-        TeamTrigger::Cron { .. } => json!({
-            "teamId": trigger.team_id.as_str(), "runId": trigger.run_id.as_str(),
-            "startNodeId": trigger.start_node_id, "trigger": { "kind": "cron" },
-        }),
-    }
+    let armed = match &trigger.trigger {
+        TeamTrigger::Webhook { path } => json!({ "kind": "webhook", "path": path }),
+        TeamTrigger::Cron { expression } => json!({ "kind": "cron", "expression": expression }),
+    };
+    json!({
+        "teamId": trigger.team_id.as_str(), "runId": trigger.run_id.as_str(),
+        "startNodeId": trigger.start_node_id, "trigger": armed,
+    })
 }
 
 fn has_keys(body: &serde_json::Map<String, Value>, keys: &[&str]) -> bool {

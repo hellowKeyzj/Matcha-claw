@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 
 use crate::{
-    organization::OrganizationHandle, transport::common::authorization::CapabilityDecisionVerifier,
+    organization::OrganizationHandle, runtime::driver::RuntimeDriverIdentity,
+    transport::common::authorization::CapabilityDecisionVerifier,
 };
 
 const OPERATION_ID: &str = "team.role-sessions.list";
@@ -54,7 +55,7 @@ pub(crate) fn decode(
 }
 
 pub(crate) enum Delivery {
-    Available(Vec<organization::TeamRoleSessionProjection>),
+    Available(Vec<Value>),
     Unavailable,
 }
 
@@ -68,7 +69,7 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Available(sessions) => role_sessions_body(sessions),
+            Self::Available(sessions) => json!({ "success": true, "sessions": sessions }),
             Self::Unavailable => json!({
                 "success": false,
                 "error": "Team role sessions are unavailable",
@@ -77,33 +78,38 @@ impl Delivery {
     }
 }
 
-pub(crate) fn role_sessions_body(sessions: &[organization::TeamRoleSessionProjection]) -> Value {
-    json!({
-        "success": true,
-        "sessions": sessions.iter().map(role_session_json).collect::<Vec<_>>(),
-    })
-}
-
-pub(crate) fn role_session_json(session: &organization::TeamRoleSessionProjection) -> Value {
-    json!({
-        "teamId": session.team_id(),
-        "runId": session.run_id(),
-        "roleId": session.role_id(),
-        "sessionRef": session.session_ref(),
-        "status": format_role_session_status(session.status()),
-    })
-}
-
-fn format_role_session_status(status: organization::TeamRoleSessionStatus) -> &'static str {
-    match status {
-        organization::TeamRoleSessionStatus::Available => "available",
-    }
+/// Projects one role-session receipt into the renderer's session identity contract.
+///
+/// `None` when the receipt names an endpoint this Host does not own, so the renderer could never
+/// address that session.
+pub(crate) fn role_session_json(session: &organization::RoleSessionReceipt) -> Option<Value> {
+    let identity = RuntimeDriverIdentity::from_reference(session.endpoint().as_str())?;
+    let agent_id = session.agent().as_str();
+    let endpoint_session_id = session.endpoint_session_id().as_str();
+    let session_key = identity.rendered_session_key(agent_id, endpoint_session_id)?;
+    let endpoint = serde_json::to_value(identity.endpoint()).ok()?;
+    Some(json!({
+        "teamId": session.team().as_str(),
+        "runId": session.team_run().as_str(),
+        "roleId": session.role().as_str(),
+        "sessionRef": session.session_ref().as_str(),
+        "status": "available",
+        "agentId": agent_id,
+        "endpointRef": &endpoint,
+        "localSessionId": session_key,
+        "endpointSessionId": endpoint_session_id,
+        "sessionIdentity": {
+            "endpoint": &endpoint,
+            "agentId": agent_id,
+            "sessionKey": session_key,
+        },
+    }))
 }
 
 pub(crate) async fn list(owner: &OrganizationHandle, request: Request) -> Delivery {
     match owner.role_sessions(request.team_id).await {
         Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => {
-            Delivery::Available(sessions)
+            Delivery::Available(sessions.iter().filter_map(role_session_json).collect())
         }
         Ok(organization::TeamRoleSessionQueryOutcome::Unavailable)
         | Ok(organization::TeamRoleSessionQueryOutcome::OutcomeUnknown)

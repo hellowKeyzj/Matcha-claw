@@ -23,6 +23,7 @@ type SessionSummary = Readonly<{
   sessionIdentity: SessionIdentity;
   kind: 'main' | 'session' | 'automation';
   endpointSessionId?: string;
+  model?: string;
   updatedAt?: number;
 }>;
 
@@ -108,7 +109,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || !Object.hasOwn(value, 'agentId')
     || !Object.hasOwn(value, 'sessionIdentity')
     || !Object.hasOwn(value, 'kind')
-    || !Object.keys(value).every((key) => ['key', 'agentId', 'sessionIdentity', 'kind', 'endpointSessionId', 'updatedAt'].includes(key))
+    || !Object.keys(value).every((key) => ['key', 'agentId', 'sessionIdentity', 'kind', 'endpointSessionId', 'model', 'updatedAt'].includes(key))
     || typeof value.key !== 'string'
     || typeof value.agentId !== 'string'
     || !isSessionIdentity(value.sessionIdentity)
@@ -117,6 +118,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     return false;
   }
   return (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')
+    && (value.model === undefined || typeof value.model === 'string')
     && (value.updatedAt === undefined || typeof value.updatedAt === 'number')
     && value.sessionIdentity.agentId === value.agentId
     && value.sessionIdentity.sessionKey === value.key;

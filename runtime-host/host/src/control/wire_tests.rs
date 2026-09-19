@@ -276,19 +276,6 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": { "name": "team.role-chat", "input": {
-                "teamId": "team:1",
-                "runId": "run:1",
-                "roleId": "leader",
-                "message": "private prompt canary",
-                "idempotencyKey": "role-chat:1"
-            } },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
             "command": { "name": "matcha.lifecycle.status", "input": {} },
         }),
         json!({
@@ -530,7 +517,7 @@ fn output_round_trips_with_semantic_outcomes_and_typed_events() {
             has_message: true,
             has_session_activity: true,
         })),
-        Output::Event(Event::new(SafeEvent::OpenClawRuntime)),
+        Output::Event(Event::new(SafeEvent::OpenClawRuntime {})),
         Output::Event(Event::new(SafeEvent::OpenClawCronExecution {
             job_id: CronExecutionId::try_new("cron-job-1".to_owned()).unwrap(),
             run_id: CronExecutionId::try_new("cron-run-1".to_owned()).unwrap(),
@@ -709,6 +696,11 @@ fn rejects_unknown_fields_and_safe_event_secret_channels() {
                 "hasMessage": false,
                 "hasSessionActivity": false,
             },
+        }),
+        json!({
+            "version": 1,
+            "type": "event",
+            "event": { "type": "openclaw.runtime", "unexpected": true },
         }),
         json!({
             "version": 1,

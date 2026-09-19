@@ -30,12 +30,15 @@ pub(super) struct OwnerRuntimeTasks {
 pub(super) struct OrganizationRuntime {
     pub(super) owner: OwnedTask<()>,
     pub(super) coordinator: crate::organization::TeamRunCoordinator,
+    pub(super) session_terminal:
+        Arc<crate::organization::session_terminal::OrganizationSessionTerminal>,
 }
 
 impl OrganizationRuntime {
-    async fn cancel_and_join(&mut self) {
+    async fn cancel_and_join_after_session(&mut self) {
         self.coordinator.cancel();
         let _ = self.coordinator.join().await;
+        let _ = self.session_terminal.close_and_join().await;
         self.owner.cancel();
         let _ = self.owner.join().await;
     }
@@ -60,7 +63,7 @@ impl OwnerRuntimeTasks {
         let _ = self.settings.join().await;
         let _ = self.provider.join().await;
         let _ = self.session.join().await;
-        self.organization.cancel_and_join().await;
+        self.organization.cancel_and_join_after_session().await;
         let _ = self.system.cancel_and_join().await;
     }
 }
@@ -79,6 +82,7 @@ pub(super) struct RuntimeOwners {
     pub(super) fleet_handle: FleetHandle,
     pub(super) fleet_startup_dispatches: Vec<crate::fleet::owner::PendingDispatch>,
     pub(super) organization_handle: crate::organization::OrganizationHandle,
+    pub(super) start_gate_registry: std::sync::Arc<crate::organization::StartGateRegistry>,
     pub(super) channel_endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
 }
 
@@ -222,20 +226,6 @@ pub(super) fn spawn_runtime_owners(
     );
     let provider_handle = ProviderHandle::new(provider_owner_handle);
 
-    let (session_owner, _session_snapshot) = crate::sessions::actor::SessionOwner::new(
-        Arc::clone(&runtime_directory),
-        provider_handle.clone(),
-        session_delta,
-    );
-    let (session_owner_handle, session_task) = owner_runtime_system.spawn_owner(
-        session_owner,
-        foundation::execution::OwnerRuntimeConfig::new(
-            64,
-            crate::sessions::actor::SessionOwner::lane_retention(),
-        ),
-    );
-    let session_handle = SessionHandle::new(session_owner_handle, Arc::clone(&runtime_directory));
-
     let organization_owner =
         crate::organization::OrganizationOwner::new(crate::organization::OrganizationOwnerInput {
             store: organization_store,
@@ -251,11 +241,37 @@ pub(super) fn spawn_runtime_owners(
     );
     let organization_handle =
         crate::organization::OrganizationHandle::new(organization_owner_handle);
+
+    let session_terminal = Arc::new(
+        crate::organization::session_terminal::OrganizationSessionTerminal::start(
+            organization_handle.clone(),
+            runtime_observation.sink(),
+        ),
+    );
+    let start_gate_registry = session_terminal.start_gate_registry();
+
+    let (session_owner, _session_snapshot) = crate::sessions::actor::SessionOwner::new(
+        Arc::clone(&runtime_directory),
+        provider_handle.clone(),
+        session_delta,
+        Some(Arc::clone(&session_terminal) as Arc<dyn crate::sessions::SessionTerminalHook>),
+    );
+    let (session_owner_handle, session_task) = owner_runtime_system.spawn_owner(
+        session_owner,
+        foundation::execution::OwnerRuntimeConfig::new(
+            64,
+            crate::sessions::actor::SessionOwner::lane_retention(),
+        ),
+    );
+    let session_handle = SessionHandle::new(session_owner_handle, Arc::clone(&runtime_directory));
+    session_terminal.bind_session(session_handle.clone());
+
     let (team_run_coordinator, team_run_coordinator_handle) =
         crate::organization::TeamRunCoordinator::spawn(
             crate::organization::TeamRunCoordinatorInput {
                 admission: Arc::clone(&admission),
                 organization: organization_handle.clone(),
+                session: session_handle.clone(),
                 runtime_directory: Arc::clone(&runtime_directory),
                 admission_changes: admission.subscribe(),
                 observation: runtime_observation.sink(),
@@ -299,6 +315,7 @@ pub(super) fn spawn_runtime_owners(
             organization: OrganizationRuntime {
                 owner: organization_task,
                 coordinator: team_run_coordinator,
+                session_terminal,
             },
         },
         runtime_directory,
@@ -313,6 +330,7 @@ pub(super) fn spawn_runtime_owners(
         fleet_handle,
         fleet_startup_dispatches,
         organization_handle,
+        start_gate_registry,
         channel_endpoint,
     })
 }

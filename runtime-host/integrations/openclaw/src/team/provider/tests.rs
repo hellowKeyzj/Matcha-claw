@@ -2664,7 +2664,7 @@ async fn serve_hello(socket: &mut TestSocket, required_scope: &str) {
         "operator.admin",
         "operator.approvals",
     ];
-    const CONTROL_METHODS: [&str; 9] = [
+    const CONTROL_METHODS: [&str; 10] = [
         "status",
         "config.get",
         "config.patch",
@@ -2673,6 +2673,7 @@ async fn serve_hello(socket: &mut TestSocket, required_scope: &str) {
         "agents.list",
         "skills.status",
         "channels.pairing.list",
+        "sessions.describe",
         wire::SYSTEM_PRESENCE_METHOD,
     ];
 

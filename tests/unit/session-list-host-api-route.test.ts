@@ -201,6 +201,30 @@ describe('session Host API public delivery route', () => {
     });
   });
 
+  it('rejects public prompt modelSelectionId without calling the lower send transport', async () => {
+    const response = createResponse();
+    const send = vi.fn();
+    const rendererEventRoutes = {
+      issue: vi.fn(() => 'renderer-route:should-not-issue'),
+      isMatchaRoute: vi.fn(() => false),
+      release: vi.fn(),
+    };
+
+    await handleCapabilityRoutes(
+      createRequest(publicPromptRequest({ modelSelectionId: 'openai/gpt-5.4' })) as never,
+      response.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHostTransports: { sessionSendTransport: { send } }, rendererEventRoutes } as never,
+    );
+
+    expect(send).not.toHaveBeenCalled();
+    expect(rendererEventRoutes.issue).not.toHaveBeenCalled();
+    expect(response.state).toEqual({
+      statusCode: 500,
+      body: { success: false, error: 'Capability request failed' },
+    });
+  });
+
   it('projects staged media into lower base64 attachments', async () => {
     const response = createResponse();
     const send = vi.fn().mockResolvedValue({

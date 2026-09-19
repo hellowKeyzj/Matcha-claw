@@ -31,10 +31,9 @@ export type TeamRuntimeOperationId =
   | 'team.graphImportYaml'
   | 'team.triggerFire'
   | 'team.proposalConfirm'
+  | 'team.proposalContinue'
   | 'team.proposalCancel'
-  | 'team.roleMessageSubmit'
   | 'team.nodePromptRetryDue'
-  | 'team.nodePromptSettled'
   | 'team.nodeEvent'
   | 'team.runCancel'
   | 'team.runDelete';
@@ -653,14 +652,6 @@ export interface TeamTriggerFireResult extends TeamRuntimeOperationReceipt {
   snapshot?: TeamRunSnapshot;
 }
 
-export interface TeamRoleMessageSubmitResult extends TeamRuntimeOperationReceipt {
-  success?: true;
-  submitted?: boolean;
-  deliveryId?: string;
-  outcome?: 'accepted';
-  snapshot?: TeamRunSnapshot;
-}
-
 export interface TeamGraphSaveResult extends TeamRuntimeOperationReceipt {
   success?: true;
   runId?: string;
@@ -728,14 +719,6 @@ export interface TeamNodePromptRetryDueResult {
   processedDeliveryRecordIds: string[];
   nextRetryAt?: number | null;
   items: TeamNodePromptRetryDueItemResult[];
-}
-
-export type TeamNodePromptSettledPhase = 'final' | 'error' | 'aborted';
-
-export interface TeamNodePromptSettledResult {
-  settled: boolean;
-  runId: string | null;
-  snapshot: TeamRunSnapshot | null;
 }
 
 export interface TeamGraphYamlExportResult {
@@ -1143,24 +1126,6 @@ export async function fireTeamRunTrigger(payload: {
   }, decodeTeamTriggerFire);
 }
 
-export async function submitTeamRunRoleMessage(payload: {
-  runId: string;
-  roleId: string;
-  text: string;
-  idempotencyKey: string;
-}): Promise<TeamRoleMessageSubmitResult> {
-  return await teamRuntimeApi({
-    operationId: 'team.roleMessageSubmit',
-    target: { kind: 'team-run', runId: payload.runId },
-    input: {
-      runId: payload.runId,
-      roleId: payload.roleId,
-      text: payload.text,
-      idempotencyKey: payload.idempotencyKey,
-    },
-  }, decodeTeamRoleMessageSubmit);
-}
-
 export async function wakeDueTeamRunNodePromptRetries(payload: {
   runId: string;
 }): Promise<TeamNodePromptRetryDueResult> {
@@ -1169,22 +1134,6 @@ export async function wakeDueTeamRunNodePromptRetries(payload: {
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
   }, decodeTeamNodePromptRetryDue);
-}
-
-export async function settleTeamRunNodePrompt(payload: {
-  sessionKey: string;
-  promptRunId: string;
-  phase: TeamNodePromptSettledPhase;
-}): Promise<TeamNodePromptSettledResult> {
-  return await teamRuntimeApi({
-    operationId: 'team.nodePromptSettled',
-    target: null,
-    input: {
-      sessionKey: payload.sessionKey,
-      promptRunId: payload.promptRunId,
-      phase: payload.phase,
-    },
-  }, decodeTeamNodePromptSettled);
 }
 
 export async function submitTeamRunNodeEvent(payload: {
@@ -1231,7 +1180,7 @@ export async function submitTeamRunNodeEvent(payload: {
 
 export async function confirmTeamRunProposal(payload: {
   runId: string;
-  proposalId?: string;
+  proposalId: string;
   idempotencyKey: string;
 }): Promise<TeamProposalConfirmResult> {
   return await teamRuntimeApi({
@@ -1239,7 +1188,23 @@ export async function confirmTeamRunProposal(payload: {
     target: { kind: 'team-run', runId: payload.runId },
     input: {
       runId: payload.runId,
-      ...(payload.proposalId ? { proposalId: payload.proposalId } : {}),
+      proposalId: payload.proposalId,
+      idempotencyKey: payload.idempotencyKey,
+    },
+  }, decodeTeamProposalConfirm);
+}
+
+export async function continueTeamRunProposal(payload: {
+  runId: string;
+  proposalId: string;
+  idempotencyKey: string;
+}): Promise<TeamProposalConfirmResult> {
+  return await teamRuntimeApi({
+    operationId: 'team.proposalContinue',
+    target: { kind: 'team-run', runId: payload.runId },
+    input: {
+      runId: payload.runId,
+      proposalId: payload.proposalId,
       idempotencyKey: payload.idempotencyKey,
     },
   }, decodeTeamProposalConfirm);
@@ -1247,7 +1212,7 @@ export async function confirmTeamRunProposal(payload: {
 
 export async function cancelTeamRunProposal(payload: {
   runId: string;
-  proposalId?: string;
+  proposalId: string;
   idempotencyKey: string;
 }): Promise<TeamProposalConfirmResult> {
   return await teamRuntimeApi({
@@ -1255,7 +1220,7 @@ export async function cancelTeamRunProposal(payload: {
     target: { kind: 'team-run', runId: payload.runId },
     input: {
       runId: payload.runId,
-      ...(payload.proposalId ? { proposalId: payload.proposalId } : {}),
+      proposalId: payload.proposalId,
       idempotencyKey: payload.idempotencyKey,
     },
   }, decodeTeamProposalConfirm);
@@ -1425,17 +1390,6 @@ function decodeTeamTriggerFire(payload: unknown): TeamTriggerFireResult {
   return teamRuntimeDecodeFailure();
 }
 
-function decodeTeamRoleMessageSubmit(payload: unknown): TeamRoleMessageSubmitResult {
-  if (isRecord(payload)
-    && hasExactKeys(payload, ['success', 'outcome', 'deliveryId'])
-    && payload.success === true
-    && payload.outcome === 'accepted'
-    && isText(payload.deliveryId)) {
-    return payload as TeamRoleMessageSubmitResult;
-  }
-  return teamRuntimeDecodeFailure();
-}
-
 function decodeTeamNodePromptRetryDue(payload: unknown): TeamNodePromptRetryDueResult {
   if (isRecord(payload)
     && hasOnlyKeys(payload, ['runId', 'processedDeliveryRecordIds', 'nextRetryAt', 'items'])
@@ -1445,17 +1399,6 @@ function decodeTeamNodePromptRetryDue(payload: unknown): TeamNodePromptRetryDueR
     && Array.isArray(payload.items)
     && payload.items.every(isTeamNodePromptRetryDueItem)) {
     return payload as unknown as TeamNodePromptRetryDueResult;
-  }
-  return teamRuntimeDecodeFailure();
-}
-
-function decodeTeamNodePromptSettled(payload: unknown): TeamNodePromptSettledResult {
-  if (isRecord(payload)
-    && hasExactKeys(payload, ['settled', 'runId', 'snapshot'])
-    && typeof payload.settled === 'boolean'
-    && (payload.runId === null || isText(payload.runId))
-    && (payload.snapshot === null || isRecord(payload.snapshot))) {
-    return payload as unknown as TeamNodePromptSettledResult;
   }
   return teamRuntimeDecodeFailure();
 }

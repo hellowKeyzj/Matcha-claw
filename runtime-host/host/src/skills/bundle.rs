@@ -10,7 +10,6 @@ const MAX_FILE_BYTES: usize = 48 * 1024;
 const MAX_BUNDLE_BYTES: usize = 48 * 1024;
 const MAX_TOTAL_BYTES: usize = 48 * 1024;
 const MAX_PATH_BYTES: usize = 240;
-const MAX_SKILL_KEY_BYTES: usize = 96;
 const SKILL_MANIFEST: &str = "SKILL.md";
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
 
@@ -139,18 +138,7 @@ fn validate_files(files: &[BundleFile]) -> Result<(), ()> {
 }
 
 fn normalize_skill_key(value: String) -> Result<String, ()> {
-    let value = value.trim().to_ascii_lowercase();
-    if value.is_empty()
-        || value.len() > MAX_SKILL_KEY_BYTES
-        || value.ends_with('-')
-        || !value
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| byte.is_ascii_alphanumeric() || (index > 0 && byte == b'-'))
-    {
-        return Err(());
-    }
-    Ok(value)
+    openclaw::skill::bundle::normalize_skill_key(&value).ok_or(())
 }
 
 fn validate_file_path(value: &str) -> Result<(), ()> {

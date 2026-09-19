@@ -14,7 +14,6 @@ vi.mock('@/services/openclaw/team-runtime-client', () => ({
   resumeTeam: vi.fn(),
   submitTeamRunDecision: vi.fn(),
   submitTeamRunGraphPatch: vi.fn(),
-  submitTeamRunRoleMessage: vi.fn(),
 }));
 
 import { useChatStore } from '@/stores/chat';
@@ -46,7 +45,6 @@ import {
   resumeTeam as resumeTeamRunLifecycle,
   submitTeamRunGraphPatch as submitTeamGraphPatch,
   type TeamGraphPatchOperation,
-  submitTeamRunRoleMessage as submitTeamRoleChat,
 } from '@/services/openclaw/team-runtime-client';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
@@ -272,7 +270,6 @@ describe('teams store', () => {
     vi.mocked(beginTeamRunCancellation).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', status: 'cancelled', revision: 1 });
     vi.mocked(exportTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', fileName: 'team-1-run-1.0.0-1000.team-graph.yaml', yaml: 'nodes: []\n' });
     vi.mocked(importTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', imported: true });
-    vi.mocked(submitTeamRoleChat).mockResolvedValue({ success: true, submitted: true });
     vi.mocked(resumeTeamRunLifecycle).mockResolvedValue({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [], runs: [] });
     vi.mocked(submitTeamGraphPatch).mockResolvedValue({ success: true, runId: 'team-1-run-1.0.0-1000', saved: true, outcome: 'available' });
     vi.mocked(readTeamRunSnapshot).mockImplementation(async ({ runId }) => buildSnapshot('running', [{ eventId: `event:${runId}`, runId, revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]));
@@ -915,94 +912,6 @@ describe('teams store', () => {
     expect(result).toEqual({ runId: 'team-1-run-1.0.0-1000' });
   });
 
-
-  it('shows TeamRun role chat user messages optimistically before runtime-host returns', async () => {
-    const leaderBinding = teamRoleSessionBinding({ runId: 'team-1-run-1.0.0-1000', roleId: 'leader', agentId: 'leader-agent' });
-    const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'idle', leaderBinding.sessionIdentity);
-    const loadedSessions = { [leader.recordKey]: leader.record };
-    useChatStore.setState({
-      currentSessionKey: leader.recordKey,
-      loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-    } as never);
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-      rolesByTeamId: {
-        'team-1': [{
-          runId: 'team-1-run-1.0.0-1000',
-          roleId: 'leader',
-          agentId: 'leader-agent',
-          endpointRef: leaderBinding.endpointRef,
-          localSessionId: leaderBinding.localSessionId,
-          endpointSessionId: leaderBinding.endpointSessionId,
-          sessionIdentity: leaderBinding.sessionIdentity,
-        }],
-      },
-    });
-    let releaseSubmit!: () => void;
-    vi.mocked(submitTeamRoleChat).mockReturnValueOnce(new Promise((resolve) => {
-      releaseSubmit = () => resolve({ success: true, outcome: 'accepted' });
-    }));
-
-    const submit = useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '立刻显示这句');
-
-    const optimisticRecord = useChatStore.getState().loadedSessions[leader.recordKey];
-    const optimisticItems = optimisticRecord?.items ?? [];
-    expect(optimisticItems).toEqual([
-      expect.objectContaining({
-        kind: 'user-message',
-        role: 'user',
-        text: '立刻显示这句',
-        status: 'sending',
-        messageId: expect.stringMatching(/^team-1:role-message:team-1-run-1\.0\.0-1000:leader:message:/),
-      }),
-      expect.objectContaining({
-        kind: 'assistant-turn',
-        role: 'assistant',
-        status: 'streaming',
-        pendingState: 'typing',
-      }),
-    ]);
-    expect(optimisticRecord?.runtime.runPhase).toBe('submitted');
-    expect(optimisticRecord?.runtime.activeRunId).toBe(optimisticItems[0]?.messageId);
-    expect(optimisticRecord?.runtime.activeTurnItemKey).toBe(optimisticItems[1]?.key);
-    expect(submitTeamRoleChat).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'team-1-run-1.0.0-1000',
-      roleId: 'leader',
-      text: '立刻显示这句',
-      idempotencyKey: optimisticItems[0]?.messageId,
-    }));
-
-    releaseSubmit();
-    await submit;
-  });
-
-  it('submits a Team role chat message to the requested run instead of the active run', async () => {
-    useTeamsStore.setState({
-      teams: [teamMeta({ activeRunId: 'team-1-run-active' })],
-      runIdsByTeamId: { 'team-1': ['team-1-run-active', 'team-1-run-requested'] },
-      runsById: {
-        'team-1-run-active': buildSnapshot('running', [{ eventId: 'active-event', runId: 'team-1-run-active', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
-        'team-1-run-requested': buildSnapshot('running', [{ eventId: 'requested-event', runId: 'team-1-run-requested', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
-      },
-      runByTeamId: { 'team-1': buildSnapshot('running', [{ eventId: 'active-event', runId: 'team-1-run-active', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined },
-    });
-    vi.mocked(submitTeamRoleChat).mockResolvedValueOnce({ success: true, outcome: 'accepted' });
-
-    await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '  Analyze Anthropic Series B  ', 'team-1-run-requested');
-
-    expect(submitTeamRoleChat).toHaveBeenCalledWith({
-      runId: 'team-1-run-requested',
-      roleId: 'leader',
-      text: '  Analyze Anthropic Series B  ',
-      idempotencyKey: expect.stringMatching(/^team-1:role-message:team-1-run-requested:leader:message:/),
-    });
-    expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(false);
-  });
-
   it('resolves Team role chat targets only from its binding owner', () => {
     const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
     const targetsByIdentityKey = buildTeamRoleChatTargetByIdentityKey({
@@ -1021,24 +930,6 @@ describe('teams store', () => {
       sessionIdentity: bindingAnalyst.sessionIdentity,
     });
     expect(resolveTeamRoleChatTarget(targetsByIdentityKey, createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent'))).toBeNull();
-  });
-
-  it('exposes Team role chat target resolution through its binding store contract', () => {
-    const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
-    useTeamsStore.setState({
-      teams: [teamMeta({ activeRunId: 'different-active-run' })],
-      runListByTeamId: {},
-      rolesByTeamId: { 'team-1': [bindingAnalyst] },
-    } as never);
-
-    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toMatchObject({
-      teamId: 'team-1',
-      runId: 'run-from-bindings',
-      roleId: 'analyst',
-      endpointSessionId: bindingAnalyst.endpointSessionId,
-    });
-    expect(useTeamsStore.getState().isTeamRoleSession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toBe(true);
-    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent') })).toBeNull();
   });
 
   it('resolves Team role targets from run-list session bindings', () => {
@@ -1113,50 +1004,6 @@ describe('teams store', () => {
       sessionIdentity: createOpenClawTestSessionIdentity('agent:leader-agent:main', 'leader-agent'),
       sessionKey: 'agent:leader-agent:main',
     })).toBe(false);
-  });
-
-  it('stores team role message submit errors from runtime-host', async () => {
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-    });
-    vi.mocked(submitTeamRoleChat).mockRejectedValueOnce(new Error('Team role session runtime is unavailable'));
-
-    const leaderBinding = teamRoleSessionBinding({ runId: 'team-1-run-1.0.0-1000', roleId: 'leader', agentId: 'leader-agent' });
-    const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'idle', leaderBinding.sessionIdentity);
-    const loadedSessions = { [leader.recordKey]: leader.record };
-    useChatStore.setState({
-      currentSessionKey: leader.recordKey,
-      loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-    } as never);
-
-    await expect(useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', 'hello')).rejects.toThrow('Team role session runtime is unavailable');
-
-    expect(useChatStore.getState().loadedSessions[leader.recordKey]?.items).toEqual([]);
-    expect(useChatStore.getState().loadedSessions[leader.recordKey]?.runtime.runPhase).toBe('idle');
-    expect(useTeamsStore.getState().errorByTeamId['team-1']).toBe('Team role session runtime is unavailable');
-    expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(false);
-  });
-
-  it('refreshes the active snapshot after role message submit', async () => {
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-    });
-    vi.mocked(submitTeamRoleChat).mockResolvedValueOnce({ success: true, outcome: 'accepted' });
-
-    await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', 'hello');
-
-    expect(readTeamRunSnapshot).toHaveBeenCalledWith({
-      runId: 'team-1-run-1.0.0-1000',
-      eventCursor: undefined,
-      eventLimit: 200,
-    });
   });
 
   it('guards duplicate in-flight resume actions while sending the sealed request only once', async () => {

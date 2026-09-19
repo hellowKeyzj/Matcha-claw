@@ -1,8 +1,9 @@
 use serde_json::{Value, json, to_value};
 
 use super::*;
-use crate::organization::{
-    TeamNodePromptSettledResult, TeamRuntimeCommand, TeamRuntimeCommandOutcome,
+use crate::{
+    organization::{TeamRuntimeCommand, TeamRuntimeCommandOutcome},
+    transport::team::role_sessions as team_role_sessions,
 };
 
 const TEST_UNKNOWN_CAPABILITY_MESSAGE: &str = "Capability descriptor is not available.";
@@ -256,93 +257,6 @@ fn team_run_snapshot_unavailable_sections_use_legacy_camel_case_names() {
             "gates",
             "kickbacks",
         ]
-    );
-}
-
-#[test]
-fn node_prompt_settled_decode_requires_null_target_and_preserves_prompt_identity() {
-    for phase in ["final", "error", "aborted"] {
-        let command = team_runtime_command(
-            "team.nodePromptSettled",
-            &Value::Null,
-            &json!({
-                "sessionKey": "session:one",
-                "promptRunId": "prompt:one",
-                "phase": phase,
-            }),
-            test_runtime_endpoint(),
-        )
-        .unwrap();
-        assert!(matches!(
-            command,
-            TeamRuntimeCommand::NodePromptSettled {
-                session_key,
-                prompt_run_id,
-                ..
-            } if session_key.as_str() == "session:one"
-                && prompt_run_id.as_str() == "prompt:one"
-        ));
-    }
-
-    for (target, input) in [
-        (
-            json!({ "kind": "team-run", "runId": "run:one" }),
-            json!({
-                "sessionKey": "session:one",
-                "promptRunId": "prompt:one",
-                "phase": "final",
-            }),
-        ),
-        (
-            json!({ "kind": "none" }),
-            json!({
-                "sessionKey": "session:one",
-                "promptRunId": "prompt:one",
-                "phase": "final",
-            }),
-        ),
-        (
-            Value::Null,
-            json!({
-                "runId": "run:one",
-                "sessionKey": "session:one",
-                "promptRunId": "prompt:one",
-                "phase": "final",
-            }),
-        ),
-    ] {
-        assert!(
-            team_runtime_command(
-                "team.nodePromptSettled",
-                &target,
-                &input,
-                test_runtime_endpoint()
-            )
-            .is_err()
-        );
-    }
-}
-
-#[test]
-fn node_prompt_settled_outcome_advances_without_node_event_completion() {
-    let outcome = team_runtime_outcome(
-        TeamRuntimeCommandOutcome::NodePromptSettled(Ok(TeamNodePromptSettledResult::Recorded(
-            organization::GraphRunId::new("run:one"),
-        ))),
-        None,
-        Some("run:one"),
-    );
-
-    assert_eq!(
-        to_value(outcome).unwrap(),
-        json!({
-            "kind": "succeeded",
-            "result": {
-                "settled": true,
-                "runId": "run:one",
-                "snapshot": null,
-            },
-        })
     );
 }
 
@@ -854,46 +768,48 @@ fn team_legacy_placeholder_paths_are_fixed_empty_values() {
 }
 
 #[test]
-fn team_role_binding_projection_redacts_session_identity() {
+fn team_role_binding_projection_carries_the_renderer_session_identity() {
     let binding = organization::RoleSessionReceipt::with_endpoint_session_id(
         organization::TeamId::try_new("team:one").unwrap(),
         organization::GraphRunId::new("run:one"),
         organization::RoleId::try_new("leader").unwrap(),
         organization::RoleSessionRef::try_new("rs0").unwrap(),
-        organization::EndpointSessionId::try_new("native-session:secret").unwrap(),
-        organization::ManagedAgentReference::try_new("agent:leader").unwrap(),
+        organization::EndpointSessionId::try_new("tr-one-leader-rs0").unwrap(),
+        organization::ManagedAgentReference::try_new("leader-agent").unwrap(),
         organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
     );
 
-    let value = team::team_role_binding_legacy_json(&binding).unwrap();
     assert_eq!(
-        value,
+        team_role_sessions::role_session_json(&binding).unwrap(),
         json!({
             "teamId": "team:one",
             "runId": "run:one",
             "roleId": "leader",
             "sessionRef": "rs0",
             "status": "available",
+            "agentId": "leader-agent",
+            "endpointRef": {
+                "kind": "native-runtime",
+                "runtimeAdapterId": "openclaw",
+                "runtimeInstanceId": "local",
+            },
+            "localSessionId": "agent:leader-agent:tr-one-leader-rs0",
+            "endpointSessionId": "tr-one-leader-rs0",
+            "sessionIdentity": {
+                "endpoint": {
+                    "kind": "native-runtime",
+                    "runtimeAdapterId": "openclaw",
+                    "runtimeInstanceId": "local",
+                },
+                "agentId": "leader-agent",
+                "sessionKey": "agent:leader-agent:tr-one-leader-rs0",
+            },
         })
     );
-    let serialized = value.to_string();
-    for private in [
-        "endpointRef",
-        "localSessionId",
-        "endpointSessionId",
-        "sessionIdentity",
-        "sessionKey",
-        "agentId",
-        "agent:leader",
-        "native",
-        "endpoint:openclaw",
-    ] {
-        assert!(!serialized.contains(private));
-    }
 }
 
 #[test]
-fn team_run_snapshot_roles_use_safe_session_projection() {
+fn team_run_snapshot_roles_carry_the_renderer_session_identity() {
     let facts = team_snapshot_facts();
     let snapshot = match organization::run::public_projection::query_team_run_public_snapshot(
         &facts,
@@ -907,7 +823,7 @@ fn team_run_snapshot_roles_use_safe_session_projection() {
             panic!("expected team run public snapshot")
         }
     };
-    let sessions = match organization::query_team_role_sessions(
+    let sessions = match organization::run::query_team_role_sessions(
         &facts,
         &organization::TeamId::try_new("team:one").unwrap(),
     ) {
@@ -930,33 +846,22 @@ fn team_run_snapshot_roles_use_safe_session_projection() {
         Some("run:one"),
     );
     let value = to_value(outcome).unwrap();
+    let roles = value["result"]["roles"].as_array().expect("roles array");
 
     assert_eq!(value["kind"], "succeeded");
     assert_eq!(
-        value["result"]["roles"],
-        json!([{
-            "teamId": "team:one",
-            "runId": "run:one",
-            "roleId": "writer",
-            "sessionRef": "rs0",
-            "status": "available",
-        }])
+        roles
+            .iter()
+            .map(|role| role["sessionRef"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["rs0"]
     );
-    let serialized = value.to_string();
-    for private in [
-        "endpointRef",
-        "localSessionId",
-        "endpointSessionId",
-        "sessionIdentity",
-        "sessionKey",
-        "agentId",
-        "private-agent-secret",
-        "external-session-secret",
-        "private-runtime-endpoint",
-        "native",
-    ] {
-        assert!(!serialized.contains(private));
-    }
+    assert!(
+        roles
+            .iter()
+            .all(|role| role["sessionIdentity"]["sessionKey"].is_string()),
+        "the renderer opens a role session from its identity, so every role row carries one"
+    );
 }
 
 fn team_snapshot_facts() -> organization::OrganizationFacts {
@@ -1074,8 +979,7 @@ fn team_snapshot_materialization() -> organization::MaterializationReceipt {
 }
 
 fn team_snapshot_runtime() -> organization::RunRuntimeReceipt {
-    let endpoint =
-        organization::RuntimeEndpointReference::try_new("private-runtime-endpoint").unwrap();
+    let endpoint = organization::RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap();
     organization::RunRuntimeReceipt::try_new(
         organization::GraphRunId::new("run:one"),
         vec![organization::RoleSessionReceipt::with_endpoint_session_id(
@@ -1083,8 +987,8 @@ fn team_snapshot_runtime() -> organization::RunRuntimeReceipt {
             organization::GraphRunId::new("run:one"),
             organization::RoleId::try_new("writer").unwrap(),
             organization::RoleSessionRef::try_new("rs0").unwrap(),
-            organization::EndpointSessionId::try_new("external-session-secret").unwrap(),
-            organization::ManagedAgentReference::try_new("private-agent-secret").unwrap(),
+            organization::EndpointSessionId::try_new("tr-one-writer-rs0").unwrap(),
+            organization::ManagedAgentReference::try_new("writer-agent").unwrap(),
             endpoint,
         )],
     )

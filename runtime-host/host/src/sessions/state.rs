@@ -5,6 +5,7 @@ use std::{
     mem,
 };
 
+use organization::{GraphRunId, RoleId, RoleSessionRef, TeamId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 
@@ -509,6 +510,7 @@ impl SessionFacts {
 pub struct SessionView {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
+    pub model: Option<String>,
     pub identity: SessionIdentity,
     pub epoch: u64,
     pub seq: u64,
@@ -531,6 +533,7 @@ impl Serialize for SessionView {
         struct Wire<'a> {
             session_key: &'a str,
             endpoint_session_id: Option<&'a str>,
+            model: Option<&'a str>,
             identity: &'a SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -546,6 +549,7 @@ impl Serialize for SessionView {
         Wire {
             session_key: &self.session_key,
             endpoint_session_id: self.endpoint_session_id.as_deref(),
+            model: self.model.as_deref(),
             identity: &self.identity,
             epoch: self.epoch,
             seq: self.seq,
@@ -571,6 +575,7 @@ impl<'de> Deserialize<'de> for SessionView {
         struct Wire {
             session_key: String,
             endpoint_session_id: Option<String>,
+            model: Option<String>,
             identity: SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -587,6 +592,7 @@ impl<'de> Deserialize<'de> for SessionView {
         let view = Self {
             session_key: wire.session_key,
             endpoint_session_id: wire.endpoint_session_id,
+            model: wire.model,
             identity: wire.identity,
             epoch: wire.epoch,
             seq: wire.seq,
@@ -1016,14 +1022,14 @@ fn canonical_change_fingerprint(changes: &[SessionChange]) -> u64 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SessionSourceBinding {
+pub(crate) struct SessionEventBinding {
     session_key: String,
     route_key: Option<String>,
     source_epoch: Option<u64>,
     source_cursor_contiguous: bool,
 }
 
-impl SessionSourceBinding {
+impl SessionEventBinding {
     pub(crate) fn new(
         session_key: impl Into<String>,
         route_key: Option<String>,
@@ -1078,9 +1084,43 @@ impl SessionSourceBinding {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionSourceBinding {
+    Ordinary,
+    Team(SessionTeamSourceBinding),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionTeamSourceBinding {
+    team_id: TeamId,
+    team_run_id: GraphRunId,
+    role_id: RoleId,
+    session_ref: RoleSessionRef,
+}
+
+impl SessionSourceBinding {
+    pub(crate) const fn ordinary() -> Self {
+        Self::Ordinary
+    }
+
+    pub(crate) fn team_from_receipt(receipt: &organization::RoleSessionReceipt) -> Self {
+        Self::Team(SessionTeamSourceBinding {
+            team_id: receipt.team().clone(),
+            team_run_id: receipt.team_run().clone(),
+            role_id: receipt.role().clone(),
+            session_ref: receipt.session_ref().clone(),
+        })
+    }
+
+    pub(crate) const fn is_team(&self) -> bool {
+        matches!(self, Self::Team(_))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionState {
     identity: SessionIdentity,
+    source_binding: SessionSourceBinding,
     endpoint_session_id: Option<String>,
     epoch: u64,
     seq: u64,
@@ -1138,6 +1178,7 @@ impl SessionState {
         let terminal_run_ids = terminal_run_ids_from_facts(&facts);
         Ok(Self {
             identity,
+            source_binding: SessionSourceBinding::ordinary(),
             endpoint_session_id: None,
             epoch,
             seq,
@@ -1162,8 +1203,59 @@ impl SessionState {
         &self.identity
     }
 
+    pub(crate) fn source_binding(&self) -> &SessionSourceBinding {
+        &self.source_binding
+    }
+
+    pub(crate) fn is_team_source(&self) -> bool {
+        self.source_binding.is_team()
+    }
+
     pub(crate) fn native_session_id(&self) -> Option<&str> {
         self.endpoint_session_id.as_deref()
+    }
+
+    pub(crate) fn assistant_text_for_run_id(&self, run_id: &str) -> Option<String> {
+        match assistant_turn_for_run_id(&self.items, run_id)? {
+            SessionItem::AssistantTurn {
+                status: ItemStatus::Final,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn final_assistant_texts_by_run(&self) -> Vec<(String, String)> {
+        items_fact_slice(&self.items)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| match item {
+                SessionItem::AssistantTurn {
+                    run_id: Some(run_id),
+                    status: ItemStatus::Final,
+                    text,
+                    ..
+                } => Some((run_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn with_source_binding(mut self, binding: SessionSourceBinding) -> Self {
+        self.source_binding = binding;
+        self
+    }
+
+    pub(crate) fn bind_source(&mut self, binding: SessionSourceBinding) -> bool {
+        if binding == SessionSourceBinding::Ordinary || self.source_binding == binding {
+            return true;
+        }
+        if self.source_binding == SessionSourceBinding::Ordinary {
+            self.source_binding = binding;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn with_endpoint_session_id(
@@ -1196,6 +1288,7 @@ impl SessionState {
         SessionView {
             session_key: self.identity.session_key.clone(),
             endpoint_session_id: self.endpoint_session_id.clone(),
+            model: None,
             identity: self.identity.clone(),
             epoch: self.epoch,
             seq: self.seq,
@@ -1217,7 +1310,7 @@ impl SessionState {
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
         let Some(binding) =
-            SessionSourceBinding::new(self.identity.session_key.clone(), route_key, None)
+            SessionEventBinding::new(self.identity.session_key.clone(), route_key, None)
         else {
             return SessionApplyResult::Rejected {
                 reason: SessionApplyRejection::InvalidInput,
@@ -1228,7 +1321,7 @@ impl SessionState {
 
     pub(crate) fn apply_bound(
         &mut self,
-        binding: SessionSourceBinding,
+        binding: SessionEventBinding,
         run_id: Option<String>,
         cursor: u64,
         changes: Vec<SessionChange>,
@@ -1345,14 +1438,14 @@ impl SessionState {
         SessionApplyResult::Applied(delta)
     }
 
-    pub(crate) fn native_source_epoch_changed(&self, binding: &SessionSourceBinding) -> bool {
+    pub(crate) fn native_source_epoch_changed(&self, binding: &SessionEventBinding) -> bool {
         (self.native_cursor.is_some() || self.native_source_epoch.is_some())
             && binding.source_epoch() != self.native_source_epoch
     }
 
     pub(crate) fn apply_native_bound(
         &mut self,
-        binding: SessionSourceBinding,
+        binding: SessionEventBinding,
         run_id: Option<String>,
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
@@ -1500,7 +1593,7 @@ impl SessionState {
 
     pub(crate) fn apply_native_recovery_bound(
         &mut self,
-        binding: SessionSourceBinding,
+        binding: SessionEventBinding,
         run_id: Option<String>,
         native_cursor: Option<u64>,
         reason: RecoveryReason,
@@ -3019,7 +3112,7 @@ mod tests {
     fn native_bound_derives_outer_run_id_from_single_run_changes() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let binding =
-            SessionSourceBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(1))
+            SessionEventBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(1))
                 .expect("binding");
         let result = state.apply_native_bound(
             binding,
@@ -3103,6 +3196,7 @@ mod tests {
         let view = SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: Some("endpoint-session-1".to_owned()),
+            model: None,
             identity: identity(),
             epoch: 1,
             seq: 1,
@@ -4447,7 +4541,7 @@ mod tests {
     fn native_cursor_is_separate_from_host_cursor_and_seq() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let binding =
-            SessionSourceBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(7))
+            SessionEventBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(7))
                 .expect("binding");
         let first = state.apply_native_bound(
             binding.clone(),
@@ -4485,7 +4579,7 @@ mod tests {
     fn native_gap_is_checked_only_for_explicitly_contiguous_binding() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let first_binding =
-            SessionSourceBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
+            SessionEventBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -4496,7 +4590,7 @@ mod tests {
             SessionApplyResult::Applied(_)
         ));
         let gap_binding =
-            SessionSourceBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
+            SessionEventBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 gap_binding,
@@ -4518,7 +4612,7 @@ mod tests {
     #[test]
     fn native_epoch_change_is_rejected_without_fabricating_an_epoch() {
         let mut state = SessionState::new(identity(), 1).expect("state");
-        let first_binding = SessionSourceBinding::new("session-1", None, None).expect("binding");
+        let first_binding = SessionEventBinding::new("session-1", None, None).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -4531,7 +4625,7 @@ mod tests {
         assert_eq!(state.native_source_epoch, None);
 
         let changed_binding =
-            SessionSourceBinding::new("session-1", None, Some(9)).expect("binding");
+            SessionEventBinding::new("session-1", None, Some(9)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 changed_binding,
@@ -4554,7 +4648,7 @@ mod tests {
     #[test]
     fn native_recovery_cursor_does_not_conflict_with_recovered_event() {
         let mut state = SessionState::new(identity(), 1).expect("state");
-        let first_binding = SessionSourceBinding::new("session-1", None, None).expect("binding");
+        let first_binding = SessionEventBinding::new("session-1", None, None).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -4566,7 +4660,7 @@ mod tests {
         ));
 
         let changed_binding =
-            SessionSourceBinding::new("session-1", None, Some(9)).expect("binding");
+            SessionEventBinding::new("session-1", None, Some(9)).expect("binding");
         assert!(matches!(
             state.apply_native_recovery_bound(
                 changed_binding.clone(),

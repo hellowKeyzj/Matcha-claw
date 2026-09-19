@@ -4,7 +4,7 @@ use serde_json::Value;
 
 const TEAM_MESSAGE_OPEN: &str = "<team_message>";
 const TEAM_MESSAGE_CLOSE: &str = "</team_message>";
-const MAX_REPAIR_ATTEMPTS: usize = 3;
+pub(crate) const MAX_REPAIR_ATTEMPTS: usize = 3;
 
 type TeamMessageRepairFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
 
@@ -122,6 +122,27 @@ pub(crate) fn parse_team_message(text: &str) -> Result<TeamMessage, TeamMessageE
     let value = serde_json::from_str::<Value>(json.trim())
         .map_err(|error| TeamMessageError::Json(error.to_string()))?;
     validate_team_message(&value)
+}
+
+pub(crate) fn parse_or_normalize_team_message_text(text: &str) -> Result<String, TeamMessageError> {
+    match parse_team_message(text) {
+        Ok(_) => return Ok(text.to_owned()),
+        Err(TeamMessageError::MissingEnvelope) => {}
+        Err(error) => return Err(error),
+    }
+    let Some(json) = text
+        .get(text.find('{').ok_or(TeamMessageError::MissingEnvelope)?..)
+        .and_then(|suffix| suffix.get(..suffix.rfind('}')? + 1))
+    else {
+        return Err(TeamMessageError::MissingEnvelope);
+    };
+    let value = serde_json::from_str::<Value>(json.trim())
+        .map_err(|error| TeamMessageError::Json(error.to_string()))?;
+    validate_team_message(&value)?;
+    Ok(format!(
+        "{TEAM_MESSAGE_OPEN}{}{TEAM_MESSAGE_CLOSE}",
+        json.trim()
+    ))
 }
 
 pub(crate) fn validate_team_message(value: &Value) -> Result<TeamMessage, TeamMessageError> {
@@ -274,7 +295,7 @@ pub(crate) async fn parse_or_repair_team_message(
         Err(error) => error,
     };
     for attempt in 1..=MAX_REPAIR_ATTEMPTS {
-        let prompt = build_repair_prompt(attempt, original_output, &error);
+        let prompt = build_team_message_repair_prompt(attempt, original_output, &error);
         let Some(repaired) = repairer.repair_team_message(prompt).await else {
             return TeamMessageRepairOutcome::Failed(error);
         };
@@ -287,7 +308,7 @@ pub(crate) async fn parse_or_repair_team_message(
     TeamMessageRepairOutcome::Failed(error)
 }
 
-fn build_repair_prompt<'a>(
+pub(crate) fn build_team_message_repair_prompt<'a>(
     attempt: usize,
     original_output: &'a str,
     error: &TeamMessageError,

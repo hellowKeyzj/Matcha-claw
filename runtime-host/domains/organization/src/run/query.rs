@@ -117,6 +117,63 @@ impl fmt::Debug for TeamRunQueryOutcome {
     }
 }
 
+/// Lists the role sessions of every proven, available TeamRun of one team. Tombstoned,
+/// cancelling, and recovery-unknown runs deliberately contribute nothing so stale session
+/// selections cannot survive a durable lifecycle transition.
+pub fn query_team_role_sessions(
+    facts: &OrganizationFacts,
+    team: &TeamId,
+) -> TeamRoleSessionQueryOutcome {
+    let Some(team_facts) = facts.team(team) else {
+        return TeamRoleSessionQueryOutcome::Unavailable;
+    };
+    if team_facts.tombstoned() || facts.materialization(team).is_none() {
+        return TeamRoleSessionQueryOutcome::Unavailable;
+    }
+
+    let mut sessions = Vec::new();
+    let mut unknown = false;
+    for run in facts.runs().filter(|run| run.team() == team) {
+        match query_team_run(
+            facts,
+            &TeamRunQuery::get(team.clone(), run.run_id().clone()),
+        ) {
+            TeamRunQueryOutcome::Available(projection) => {
+                sessions.extend(projection.role_sessions().iter().cloned());
+            }
+            TeamRunQueryOutcome::OutcomeUnknown => unknown = true,
+            TeamRunQueryOutcome::Unavailable => {}
+        }
+    }
+    sessions.sort_by(|left, right| {
+        (
+            left.team_run().as_str(),
+            left.role().as_str(),
+            left.session_ref().as_str(),
+            left.endpoint_session_id().as_str(),
+        )
+            .cmp(&(
+                right.team_run().as_str(),
+                right.role().as_str(),
+                right.session_ref().as_str(),
+                right.endpoint_session_id().as_str(),
+            ))
+    });
+
+    if sessions.is_empty() && unknown {
+        TeamRoleSessionQueryOutcome::OutcomeUnknown
+    } else {
+        TeamRoleSessionQueryOutcome::Available(sessions)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeamRoleSessionQueryOutcome {
+    Available(Vec<RoleSessionReceipt>),
+    Unavailable,
+    OutcomeUnknown,
+}
+
 /// Resolves a TeamRun only from validated Organization durable facts.
 ///
 /// A TeamRun is unavailable without an extant, non-tombstoned team and its confirmed

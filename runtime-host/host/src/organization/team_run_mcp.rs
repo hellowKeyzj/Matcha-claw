@@ -1,4 +1,3 @@
-use organization::run::delivery::NativeTerminalStatus;
 use organization::run::event::{
     ApprovalAction, ApprovalCommand, CommandPayload, NodeProgressCommand, OpaqueId, RunCommand,
 };
@@ -9,9 +8,7 @@ use organization::{
     TeamNodeEvent, TeamNodeEventKind,
 };
 
-use crate::organization::{
-    TeamGraphPatchDraft, TeamNodePromptSettledResult, team_run::TeamRunOwner,
-};
+use crate::organization::{TeamGraphPatchDraft, team_run::TeamRunOwner};
 
 /// The fixed semantic boundary for the independent local TeamRun MCP artifact.
 ///
@@ -198,32 +195,6 @@ impl TeamRunMcpFacade {
         })
     }
 
-    pub(crate) fn prompt_settled(
-        &mut self,
-        request: TeamNodePromptSettledCommand,
-    ) -> Result<TeamNodePromptSettledOutcome, TeamRunMcpError> {
-        let outcome = self
-            .team_run
-            .settle_node_prompt(
-                &mut self.store,
-                request.session_key.as_str(),
-                request.prompt_run_id.as_str(),
-                request.phase.native_terminal(),
-                request.settled_at,
-            )
-            .map_err(|error| match error {
-                StoreFault::InvalidFacts | StoreFault::TerminalObservation(_) => {
-                    TeamRunMcpError::Invalid
-                }
-                _ => TeamRunMcpError::Unavailable,
-            })?;
-        Ok(match outcome {
-            TeamNodePromptSettledResult::Recorded(_) => TeamNodePromptSettledOutcome::Recorded,
-            TeamNodePromptSettledResult::Replayed(_) => TeamNodePromptSettledOutcome::Replayed,
-            TeamNodePromptSettledResult::NotFound => TeamNodePromptSettledOutcome::NotFound,
-        })
-    }
-
     pub(crate) fn resolve_approval(
         &mut self,
         request: TeamApprovalResolutionCommand,
@@ -376,53 +347,6 @@ impl TeamNodeEventCommand {
             occurred_at,
         })
     }
-}
-
-pub(crate) struct TeamNodePromptSettledCommand {
-    session_key: OpaqueId,
-    prompt_run_id: OpaqueId,
-    phase: TeamNodePromptSettledPhase,
-    settled_at: u64,
-}
-
-impl TeamNodePromptSettledCommand {
-    pub(crate) fn try_new(
-        session_key: String,
-        prompt_run_id: String,
-        phase: TeamNodePromptSettledPhase,
-        settled_at: u64,
-    ) -> Result<Self, TeamRunMcpError> {
-        Ok(Self {
-            session_key: opaque(session_key)?,
-            prompt_run_id: opaque(prompt_run_id)?,
-            phase,
-            settled_at,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TeamNodePromptSettledPhase {
-    Final,
-    Error,
-    Aborted,
-}
-
-impl TeamNodePromptSettledPhase {
-    const fn native_terminal(self) -> NativeTerminalStatus {
-        match self {
-            Self::Final => NativeTerminalStatus::Completed,
-            Self::Error => NativeTerminalStatus::Failed,
-            Self::Aborted => NativeTerminalStatus::Cancelled,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TeamNodePromptSettledOutcome {
-    Recorded,
-    Replayed,
-    NotFound,
 }
 
 pub(crate) struct TeamNodeTerminalResolution {

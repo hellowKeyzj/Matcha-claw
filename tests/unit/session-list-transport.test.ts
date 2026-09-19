@@ -91,6 +91,20 @@ describe('Electron Main session-list transport', () => {
     });
   });
 
+  it('accepts session catalog rows that carry a model', async () => {
+    const modeledSession = { ...session, model: 'provider/selected-model' } as const;
+    const transport = createSessionListTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_101,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ sessions: [modeledSession] }) }),
+    );
+
+    await expect(transport.list(request)).resolves.toEqual({
+      status: 200,
+      body: { sessions: [modeledSession] },
+    });
+  });
+
   it.each([
     {
       name: 'identity agent binding mismatch',
@@ -110,7 +124,6 @@ describe('Electron Main session-list transport', () => {
           derivedTitle: 'native title',
           status: 'active',
           hasActiveRun: true,
-          model: 'provider/private-default-model',
         }],
       },
     },

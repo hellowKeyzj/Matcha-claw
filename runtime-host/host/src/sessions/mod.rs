@@ -5,6 +5,7 @@ pub(crate) mod approval;
 pub(crate) mod command;
 pub(crate) mod create;
 pub(crate) mod delete;
+pub(crate) mod endpoint;
 pub(crate) mod events;
 #[allow(dead_code)]
 pub(crate) mod handle;
@@ -28,11 +29,13 @@ pub(crate) mod send_hook;
 pub(crate) mod session_permission;
 #[allow(dead_code)]
 pub(crate) mod state;
+pub(crate) mod terminal_hook;
 #[allow(dead_code)]
 pub(crate) mod timeline;
 
 pub(crate) use handle::SessionHandle;
 pub use runtime_error::RuntimeSessionError;
+pub(crate) use terminal_hook::{SessionRunTerminalSnapshot, SessionTerminalHook};
 
 #[cfg(test)]
 mod actor_tests;

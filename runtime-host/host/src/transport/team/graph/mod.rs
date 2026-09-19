@@ -185,7 +185,7 @@ fn decode_export(body: &serde_json::Map<String, Value>) -> Result<Request, Decod
 }
 
 fn decode_replace(body: &serde_json::Map<String, Value>) -> Result<Request, DecodeError> {
-    if body.len() != 6 {
+    if body.len() != 5 {
         return Err(DecodeError::Invalid);
     }
     let team_id = team_id(body)?;

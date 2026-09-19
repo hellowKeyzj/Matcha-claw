@@ -1545,6 +1545,7 @@ function applyDecodedSessionView(
       protocolId: null,
       runtimeEndpointId: nextIdentity.endpoint.runtimeInstanceId,
       endpointSessionId: view.endpointSessionId,
+      model: view.model ?? current.meta.model,
       sessionIdentity: nextIdentity,
     } : current.meta;
     const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));

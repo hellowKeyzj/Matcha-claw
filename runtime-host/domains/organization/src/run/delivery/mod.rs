@@ -1,12 +1,8 @@
-mod admission;
 mod ledger;
 mod model;
 mod restore;
 mod transition;
 
-pub use admission::{
-    RoleChatAdmission, RoleChatAdmissionError, RoleChatAdmissionOutcome, RoleChatRejection,
-};
 pub use ledger::{DeliveryLedger, DeliveryLedgerSnapshot, RegisterOutcome, RestoreLedgerError};
 pub use model::{
     AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
@@ -29,7 +25,6 @@ pub use transition::{
     register_delivery, settle_delivery,
 };
 
-pub(crate) use admission::admit_role_chat;
 pub(crate) use transition::{
     observe_native_terminal, resolve_authorized_graph_outcome, resolve_native_run_output,
 };

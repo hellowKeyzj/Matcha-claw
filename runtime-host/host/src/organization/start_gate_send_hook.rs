@@ -1,3 +1,8 @@
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
 use crate::{
     runtime::driver::RuntimeDriverIdentity,
     sessions::{
@@ -14,11 +19,63 @@ use super::{OrganizationHandle, start_gate_control};
 #[derive(Clone)]
 pub(crate) struct StartGateSendHook {
     organization: OrganizationHandle,
+    start_gate: Arc<StartGateRegistry>,
 }
 
 impl StartGateSendHook {
-    pub(crate) fn new(organization: OrganizationHandle) -> Self {
-        Self { organization }
+    pub(crate) fn new(
+        organization: OrganizationHandle,
+        start_gate: Arc<StartGateRegistry>,
+    ) -> Self {
+        Self {
+            organization,
+            start_gate,
+        }
+    }
+}
+
+/// Shared `native_run_id -> (run_id, proposal_id)` registry for start-gate proposals. The send hook
+/// registers a sent start-gate prompt; the organization session terminal consumes it when the
+/// native run reaches a terminal phase.
+#[derive(Default)]
+pub(crate) struct StartGateRegistry {
+    proposals: Mutex<BTreeMap<String, StartGateProposal>>,
+}
+
+struct StartGateProposal {
+    run_id: organization::GraphRunId,
+    proposal_id: String,
+}
+
+impl StartGateRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn register(
+        &self,
+        native_run_id: String,
+        run_id: organization::GraphRunId,
+        proposal_id: String,
+    ) {
+        self.proposals
+            .lock()
+            .expect("start gate registry lock is never poisoned")
+            .insert(
+                native_run_id,
+                StartGateProposal {
+                    run_id,
+                    proposal_id,
+                },
+            );
+    }
+
+    pub(super) fn take(&self, native_run_id: &str) -> Option<(organization::GraphRunId, String)> {
+        self.proposals
+            .lock()
+            .expect("start gate registry lock is never poisoned")
+            .remove(native_run_id)
+            .map(|proposal| (proposal.run_id, proposal.proposal_id))
     }
 }
 
@@ -28,38 +85,25 @@ impl SessionSendHook for StartGateSendHook {
         command: SessionSendCommand,
         now_millis: u64,
     ) -> SessionSendHookFuture<'a> {
+        let start_gate = Arc::clone(&self.start_gate);
         Box::pin(async move {
-            prepare_start_gate_send(self.organization.clone(), command, now_millis).await
+            prepare_start_gate_send(self.organization.clone(), start_gate, command, now_millis)
+                .await
         })
     }
 }
 
 async fn prepare_start_gate_send(
     organization: OrganizationHandle,
+    start_gate: Arc<StartGateRegistry>,
     command: SessionSendCommand,
     now_millis: u64,
 ) -> Result<SessionSendHookPrepared, ()> {
-    let Some(endpoint) = endpoint_reference(command.endpoint) else {
-        return Ok(SessionSendHookPrepared::unchanged(command));
-    };
-    let Some(endpoint_session_id) = command.endpoint_session_id.clone() else {
-        return Ok(SessionSendHookPrepared::unchanged(command));
-    };
-    let lookup = start_gate_control::StartGateSessionLookup {
-        endpoint,
-        session_key: command.session_key.clone(),
-        endpoint_session_id,
-    };
-    let Some(binding) = organization
-        .start_gate_session_binding(lookup)
-        .await
-        .map_err(|_| ())?
+    let TeamSessionPurpose::Intake(binding) =
+        derive_team_session_purpose(organization, &command).await?
     else {
         return Ok(SessionSendHookPrepared::unchanged(command));
     };
-    if !binding.is_leader_intake() {
-        return Ok(SessionSendHookPrepared::unchanged(command));
-    }
     let proposal_id = start_gate_control::proposal_id(
         &binding,
         command
@@ -69,9 +113,7 @@ async fn prepare_start_gate_send(
         now_millis,
     );
     let state = StartGateSendState {
-        organization,
-        endpoint: command.endpoint,
-        endpoint_session_id: command.endpoint_session_id.clone(),
+        start_gate,
         run_id: binding.run_id.clone(),
         proposal_id,
     };
@@ -84,51 +126,58 @@ async fn prepare_start_gate_send(
     ))
 }
 
-struct StartGateSendState {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TeamSessionPurpose {
+    Intake(start_gate_control::StartGateBinding),
+    Role,
+}
+
+async fn derive_team_session_purpose(
     organization: OrganizationHandle,
-    endpoint: NativeEndpoint,
-    endpoint_session_id: Option<String>,
+    command: &SessionSendCommand,
+) -> Result<TeamSessionPurpose, ()> {
+    if command.delivery_context.is_some() {
+        return Ok(TeamSessionPurpose::Role);
+    }
+    let Some(endpoint) = endpoint_reference(command.endpoint) else {
+        return Ok(TeamSessionPurpose::Role);
+    };
+    let Some(endpoint_session_id) = command.endpoint_session_id.clone() else {
+        return Ok(TeamSessionPurpose::Role);
+    };
+    let lookup = start_gate_control::StartGateSessionLookup {
+        endpoint,
+        session_key: command.session_key.clone(),
+        endpoint_session_id,
+    };
+    let Some(binding) = organization
+        .start_gate_session_binding(lookup)
+        .await
+        .map_err(|_| ())?
+    else {
+        return Ok(TeamSessionPurpose::Role);
+    };
+    if binding.is_leader_intake() {
+        Ok(TeamSessionPurpose::Intake(binding))
+    } else {
+        Ok(TeamSessionPurpose::Role)
+    }
+}
+
+struct StartGateSendState {
+    start_gate: Arc<StartGateRegistry>,
     run_id: organization::GraphRunId,
     proposal_id: String,
 }
 
 impl SessionSendHookState for StartGateSendState {
-    fn after_queued(self: Box<Self>, session: SessionHandle, native_run_id: String) {
-        tokio::spawn(watch_start_gate_control(session, *self, native_run_id));
-    }
-}
-
-async fn watch_start_gate_control(
-    session: SessionHandle,
-    state: StartGateSendState,
-    native_run_id: String,
-) {
-    let Some(settled) = session
-        .wait_session_native_run(
-            state.endpoint,
-            state.endpoint_session_id,
-            native_run_id.clone(),
-        )
-        .await
-    else {
-        return;
-    };
-    let Some(text) = settled.final_assistant_text else {
-        return;
-    };
-    if !matches!(
-        settled.status,
-        organization::NativeTerminalStatus::Completed
-    ) {
-        return;
-    }
-    if let start_gate_control::TeamControl::ProposeRun(summary) =
-        start_gate_control::parse_control(&text)
-    {
-        let _ = state
-            .organization
-            .run_start_proposal_set(state.run_id, state.proposal_id, summary, native_run_id)
-            .await;
+    fn after_queued(self: Box<Self>, _session: SessionHandle, native_run_id: String) {
+        let StartGateSendState {
+            start_gate,
+            run_id,
+            proposal_id,
+        } = *self;
+        start_gate.register(native_run_id, run_id, proposal_id);
     }
 }
 

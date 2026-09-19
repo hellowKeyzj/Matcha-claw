@@ -1112,7 +1112,7 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 9] = [
+const CONTROL_METHODS: [&str; 10] = [
     "status",
     "config.get",
     "config.patch",
@@ -1121,6 +1121,7 @@ const CONTROL_METHODS: [&str; 9] = [
     "agents.list",
     "skills.status",
     "channels.pairing.list",
+    "sessions.describe",
     wire::SYSTEM_PRESENCE_METHOD,
 ];
 
@@ -1647,6 +1648,7 @@ mod tests {
                 "agents.list",
                 "skills.status",
                 "channels.pairing.list",
+                "sessions.describe",
             ]);
             hello["payload"]["auth"]["scopes"] = json!(CONTROL_SCOPES);
             hello["payload"]["features"]["events"] = json!(CONTROL_EVENTS);

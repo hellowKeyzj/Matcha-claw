@@ -54,7 +54,7 @@ struct Target {
     deny_unknown_fields
 )]
 enum Input {
-    List,
+    List {},
     Get { account_id: String },
     Replace { account: ProviderAccountWireDraft },
     Delete { account_id: String, revision: u64 },
@@ -141,7 +141,7 @@ impl ProviderAccountsRequest {
 
     fn validate(&self) -> Result<(), RequestError> {
         let valid_operation = match (&self.operation_id, &self.input) {
-            (operation, Input::List) => operation == "providerAccounts.list",
+            (operation, Input::List {}) => operation == "providerAccounts.list",
             (operation, Input::Get { .. }) => operation == "providerAccounts.get",
             (operation, Input::Replace { .. }) => operation == "providerAccounts.replace",
             (operation, Input::Delete { .. }) => operation == "providerAccounts.delete",
@@ -156,7 +156,7 @@ impl ProviderAccountsRequest {
 
     pub(crate) fn into_command(self) -> Result<ProviderAccountsCommand, RequestError> {
         match self.input {
-            Input::List => Ok(ProviderAccountsCommand::List),
+            Input::List {} => Ok(ProviderAccountsCommand::List),
             Input::Get { account_id } => ProviderAccountId::try_new(account_id)
                 .map(ProviderAccountsCommand::Get)
                 .map_err(|_| RequestError::Invalid),
@@ -407,6 +407,27 @@ mod tests {
 
     use super::*;
     use crate::provider::accounts::ProviderAccountsDelivery;
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        let list = json!({
+            "id": "provider.accounts",
+            "operationId": "providerAccounts.list",
+            "scope": { "kind": "provider-account-catalog" },
+            "target": { "kind": "provider-accounts" },
+            "input": { "kind": "list" },
+        });
+        assert!(serde_json::from_value::<ProviderAccountsRequest>(list).is_ok());
+
+        let invalid = json!({
+            "id": "provider.accounts",
+            "operationId": "providerAccounts.list",
+            "scope": { "kind": "provider-account-catalog" },
+            "target": { "kind": "provider-accounts" },
+            "input": { "kind": "list", "bogus": 1 },
+        });
+        assert!(serde_json::from_value::<ProviderAccountsRequest>(invalid).is_err());
+    }
 
     #[test]
     fn strict_request_decoding_rejects_secrets_and_unknown_fields() {

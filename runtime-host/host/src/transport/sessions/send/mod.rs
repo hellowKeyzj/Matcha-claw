@@ -344,6 +344,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_model_selection_on_prompt_send() {
+        let mut value = request("openclaw");
+        value["input"]["modelSelectionId"] = json!("account-1/model-1");
+
+        assert_eq!(
+            SessionSendRequest::decode_semantics(value)
+                .and_then(|request| SessionSendRequest::into_command(request, None)),
+            Err(RequestError::Invalid)
+        );
+    }
+
+    #[test]
     fn accepts_text_requests_without_attachments() {
         let mut value = request("openclaw");
         value["input"]["attachments"] = json!([]);

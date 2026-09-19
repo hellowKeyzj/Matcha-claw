@@ -239,7 +239,6 @@ function createRuntimeHostTransportBundleFixture() {
     },
     manualTeamTransport: { materializeAndCreate: vi.fn() },
     teamHumanDecisionTransport: { resolve: vi.fn() },
-    teamRoleChatTransport: { submit: vi.fn() },
     providerAccountsTransport: { execute: vi.fn() },
     providerModelsTransport: { execute: vi.fn() },
     externalConnectorsTransport: { execute: vi.fn() },

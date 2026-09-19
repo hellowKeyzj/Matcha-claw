@@ -23,7 +23,7 @@ const SHARED_CONTROL_SCOPES: [&str; 4] = [
 ];
 const SHARED_CONTROL_CAPS: [&str; 2] = ["agent-kind", "tool-events"];
 const SHARED_CONTROL_EVENTS: [&str; 1] = ["tick"];
-const SHARED_CONTROL_METHODS: [&str; 9] = [
+const SHARED_CONTROL_METHODS: [&str; 10] = [
     "status",
     "config.get",
     "config.patch",
@@ -32,6 +32,7 @@ const SHARED_CONTROL_METHODS: [&str; 9] = [
     "agents.list",
     SKILLS_STATUS_METHOD,
     "channels.pairing.list",
+    "sessions.describe",
     wire::SYSTEM_PRESENCE_METHOD,
 ];
 const SKILL_OPERATION_METHODS: [&str; 14] = [

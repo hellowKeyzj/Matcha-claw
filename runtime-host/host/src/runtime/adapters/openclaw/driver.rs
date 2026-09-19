@@ -25,10 +25,6 @@ impl RuntimeDriver for OpenClawInstance {
         Some(self)
     }
 
-    fn team_terminal_ops(&self) -> Option<&dyn TeamTerminalOps> {
-        Some(self)
-    }
-
     fn cron_ops(&self) -> Option<&dyn CronOps> {
         Some(self)
     }

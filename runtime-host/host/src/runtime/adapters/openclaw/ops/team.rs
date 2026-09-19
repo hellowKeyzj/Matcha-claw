@@ -3,7 +3,7 @@ use std::sync::Arc;
 use openclaw::{
     port::{OpenClawGateway, OpenClawSessionError},
     session::protocol::{
-        AgentId, AgentScopedSessionKey, EndpointSessionId, RunId, SessionCreateParams,
+        AgentId, AgentScopedSessionKey, EndpointSessionId, ModelRef, SessionCreateParams,
         SessionsListParams,
     },
 };
@@ -16,11 +16,8 @@ use platform::exchange::InvocationOutcome;
 use super::super::OpenClawInstance;
 use crate::{
     organization::RuntimeReceiptOutcome,
-    runtime::driver::{NativeRunSettled, OwnedRuntimeFuture, TeamOps, TeamTerminalOps},
+    runtime::driver::{OwnedRuntimeFuture, TeamOps},
 };
-
-pub(super) const TEAM_TERMINAL_WAIT_SLICE_MS: u64 = 30_000;
-pub(super) const TEAM_TERMINAL_RPC_TIMEOUT_BUFFER_MS: u64 = 10_000;
 
 async fn confirm_runtime_receipt_native(
     gateway: &tokio::sync::Mutex<OpenClawGateway>,
@@ -48,10 +45,24 @@ async fn confirm_runtime_receipt_native(
             Err(outcome) => return outcome,
         };
         if !exists {
-            let params = match SessionCreateParams::try_new(agent.clone(), endpoint_session_id) {
-                Ok(params) => params,
-                Err(_) => return RuntimeReceiptOutcome::Rejected,
+            let model = match gateway.list_agents().await.ok().and_then(|agents| {
+                agents
+                    .agents
+                    .into_iter()
+                    .find(|candidate| candidate.id == agent.as_str())
+                    .and_then(|candidate| candidate.model)
+            }) {
+                Some(model) => match ModelRef::try_new(model) {
+                    Ok(model) => model,
+                    Err(_) => return RuntimeReceiptOutcome::Rejected,
+                },
+                None => return RuntimeReceiptOutcome::Unavailable,
             };
+            let params =
+                match SessionCreateParams::try_new(agent.clone(), endpoint_session_id, model) {
+                    Ok(params) => params,
+                    Err(_) => return RuntimeReceiptOutcome::Rejected,
+                };
             match gateway.create_session(params).await {
                 Ok(InvocationOutcome::Succeeded(_)) => {}
                 Ok(InvocationOutcome::TargetRejected(_)) => return RuntimeReceiptOutcome::Rejected,
@@ -134,16 +145,6 @@ fn map_runtime_receipt_error(error: OpenClawSessionError) -> RuntimeReceiptOutco
 }
 
 #[cfg(test)]
-fn agent_scoped_session_key(
-    binding: &organization::RoleSessionReceipt,
-) -> Option<AgentScopedSessionKey> {
-    let agent = AgentId::try_new(binding.agent().as_str().to_owned()).ok()?;
-    let session =
-        EndpointSessionId::try_new(binding.endpoint_session_id().as_str().to_owned()).ok()?;
-    AgentScopedSessionKey::try_new(agent, session).ok()
-}
-
-#[cfg(test)]
 mod native_receipt_tests {
     use organization::{
         EndpointSessionId, GraphRunId, ManagedAgentReference, RoleId, RoleSessionRef,
@@ -164,69 +165,17 @@ mod native_receipt_tests {
             RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
         );
 
+        let agent = AgentId::try_new(binding.agent().as_str().to_owned()).unwrap();
+        let session = openclaw::session::protocol::EndpointSessionId::try_new(
+            binding.endpoint_session_id().as_str().to_owned(),
+        )
+        .unwrap();
         assert_eq!(
-            agent_scoped_session_key(&binding).unwrap().as_str(),
+            AgentScopedSessionKey::try_new(agent, session)
+                .unwrap()
+                .as_str(),
             "agent:selected-agent:endpoint-session"
         );
-    }
-}
-
-impl TeamTerminalOps for OpenClawInstance {
-    fn watch_terminal(
-        &self,
-        target: organization::NativeTerminalReceiptTarget,
-    ) -> OwnedRuntimeFuture<Option<NativeRunSettled>> {
-        let gateway = Arc::clone(&self.gateway);
-        let native_run_id = target
-            .correlation()
-            .native_run_receipt()
-            .as_str()
-            .to_owned();
-        Box::pin(async move { wait_openclaw_native_run(&gateway, native_run_id).await })
-    }
-}
-
-pub(super) async fn wait_openclaw_native_run(
-    gateway: &tokio::sync::Mutex<OpenClawGateway>,
-    native_run_id: String,
-) -> Option<NativeRunSettled> {
-    let run_id = RunId::try_new(native_run_id).ok()?;
-    let waiter = gateway.lock().await.team_native_run_waiter();
-    loop {
-        let input = openclaw::agents::AgentWait::try_new(
-            run_id.as_str().to_owned(),
-            TEAM_TERMINAL_WAIT_SLICE_MS,
-            TEAM_TERMINAL_RPC_TIMEOUT_BUFFER_MS,
-        )
-        .ok()?;
-        match waiter.wait(input).await {
-            openclaw::team::NativeRunSettledOutcome::Observed(settled) => {
-                let Some(status) = match_openclaw_terminal_status(&settled) else {
-                    continue;
-                };
-                return Some(NativeRunSettled {
-                    status,
-                    final_assistant_text: settled.final_assistant_text().map(ToOwned::to_owned),
-                });
-            }
-            openclaw::team::NativeRunSettledOutcome::Rejected
-            | openclaw::team::NativeRunSettledOutcome::OutcomeUnknown => return None,
-        }
-    }
-}
-
-pub(super) fn match_openclaw_terminal_status(
-    settled: &openclaw::team::NativeRunSettled,
-) -> Option<organization::NativeTerminalStatus> {
-    match settled.status() {
-        openclaw::team::NativeRunStatus::Completed => {
-            Some(organization::NativeTerminalStatus::Completed)
-        }
-        openclaw::team::NativeRunStatus::Failed => Some(organization::NativeTerminalStatus::Failed),
-        openclaw::team::NativeRunStatus::Timeout if settled.is_hard_timeout() => {
-            Some(organization::NativeTerminalStatus::Interrupted)
-        }
-        openclaw::team::NativeRunStatus::Timeout | openclaw::team::NativeRunStatus::Pending => None,
     }
 }
 
@@ -276,19 +225,6 @@ impl TeamOps for OpenClawInstance {
     ) -> OwnedRuntimeFuture<crate::organization::RuntimeReceiptOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move { confirm_runtime_receipt_native(&gateway, receipt).await })
-    }
-
-    fn deliver_prompt(
-        &self,
-        request: organization::PromptDeliveryRequest,
-    ) -> OwnedRuntimeFuture<organization::PromptDeliveryOutcome> {
-        let gateway = Arc::clone(&self.gateway);
-        Box::pin(async move {
-            let mut gateway = gateway.lock().await;
-            openclaw::team::OpenClawTeamNativeEffects::new(&mut gateway)
-                .deliver(request)
-                .await
-        })
     }
 
     fn abort_role_sessions(

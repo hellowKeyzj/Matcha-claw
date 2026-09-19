@@ -12,7 +12,6 @@ import {
   type RuntimeHostControlOutput,
   type RuntimeHostSafeEvent,
 } from './control';
-
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const MAX_READY_TIMEOUT_MS = 2_147_483_647;
 const MAX_LAUNCH_STDERR_BYTES = 4_096;

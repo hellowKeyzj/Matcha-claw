@@ -17,10 +17,6 @@ impl RuntimeDriver for MatchaAgentInstance {
         Some(self)
     }
 
-    fn team_terminal_ops(&self) -> Option<&dyn TeamTerminalOps> {
-        Some(self)
-    }
-
     fn lifecycle_ops(&self) -> Option<&dyn LifecycleOps> {
         Some(self)
     }
@@ -40,10 +36,6 @@ impl RuntimeDriver for MatchaRuntimeDriver {
     }
 
     fn team_ops(&self) -> Option<&dyn TeamOps> {
-        Some(self)
-    }
-
-    fn team_terminal_ops(&self) -> Option<&dyn TeamTerminalOps> {
         Some(self)
     }
 

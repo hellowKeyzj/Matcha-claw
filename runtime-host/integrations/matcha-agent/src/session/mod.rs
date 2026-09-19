@@ -11,8 +11,6 @@ pub mod model;
 pub mod models;
 pub mod projection;
 pub mod protocol_event;
-pub mod receipt;
 pub mod recovery;
 pub mod request;
 pub mod role;
-pub(crate) mod watcher;

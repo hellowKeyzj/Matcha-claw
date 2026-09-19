@@ -35,7 +35,7 @@ pub(crate) fn project_observed(
         HostEvent::OpenClawRuntime => project_accepted(
             observation,
             OPENCLAW_RUNTIME_EVENT,
-            SafeEvent::OpenClawRuntime,
+            SafeEvent::OpenClawRuntime {},
         ),
         HostEvent::Matcha(_) => drop_unsupported(observation, MATCHA_SESSION_EVENT),
         HostEvent::MatchaLifecycle(snapshot) => {

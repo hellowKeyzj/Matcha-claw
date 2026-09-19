@@ -107,8 +107,9 @@ pub enum OrganizationQuery {
         now: u64,
         reply: oneshot::Sender<Vec<ActivityId>>,
     },
-    TerminalObservationDeliveries {
-        reply: oneshot::Sender<Vec<DeliveryId>>,
+    NativeDeliveryByRun {
+        native_run_id: String,
+        reply: oneshot::Sender<Option<DeliveryId>>,
     },
     ActiveRunIds {
         reply: oneshot::Sender<Vec<GraphRunId>>,

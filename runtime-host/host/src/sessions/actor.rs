@@ -24,18 +24,20 @@ use super::{
     delete::SessionDeleteOutcome,
     events::SessionDeltaSource,
     model_selection::{
-        MatchaSessionModelRuntimeCommand, SessionModelSelectionOutcome,
-        SessionModelSelectionRejection,
+        MatchaSessionModelRuntimeCommand, NativeEndpoint, SessionModelSelectionOutcome,
+        SessionModelSelectionRejection, SessionRuntimeModelCommand,
     },
+    openclaw_direct::{self, SessionCatalog},
     query::SessionQuery,
     rename::SessionRenameOutcome,
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::SessionPermissionOutcome,
     state::{
         MAX_SAFE_INTEGER, RunPhase, RuntimeIssue, RuntimeView, SessionChange, SessionDelta,
-        SessionFacts, SessionIdentity, SessionProvider, SessionSourceBinding, SessionState,
-        SessionView,
+        SessionEventBinding, SessionFacts, SessionIdentity, SessionProvider, SessionSourceBinding,
+        SessionState, SessionView,
     },
+    terminal_hook::{SessionRunTerminalSnapshot, SessionTerminalHook},
     timeline::{self, ContentCommand, ContentOutcome},
 };
 use crate::{
@@ -65,6 +67,7 @@ pub(crate) struct SessionShared {
     snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
     session_delta: Option<SessionDeltaSource>,
+    terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
     epoch: u64,
 }
 
@@ -78,6 +81,7 @@ impl SessionOwner {
         runtime_directory: Arc<RuntimeDriverDirectory>,
         provider_handle: ProviderHandle,
         session_delta: Option<SessionDeltaSource>,
+        terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
     ) -> (Self, Arc<ArcSwap<SessionSnapshot>>) {
         let snapshot = Arc::new(ArcSwap::new(Arc::new(SessionSnapshot {
             states: HashMap::new(),
@@ -88,6 +92,7 @@ impl SessionOwner {
             snapshot: Arc::clone(&snapshot),
             snapshot_writer: Arc::new(Mutex::new(())),
             session_delta,
+            terminal_hook,
             epoch: next_session_epoch(),
         };
 
@@ -141,9 +146,55 @@ impl SessionShared {
         self.snapshot.store(Arc::new(SessionSnapshot { states }));
     }
 
-    fn publish_session_delta(&self, delta: SessionDelta) {
+    fn emit_session_delta(&self, delta: &SessionDelta, state: &SessionState) {
         if let Some(source) = &self.session_delta {
-            source.publish(delta);
+            source.publish(delta.clone());
+        }
+        if !state.is_team_source() {
+            return;
+        }
+        let Some(hook) = &self.terminal_hook else {
+            return;
+        };
+        for change in &delta.changes {
+            let SessionChange::RunPhaseChanged { run_id, phase } = change else {
+                continue;
+            };
+            if !super::state::terminal_run_phase(*phase) {
+                continue;
+            }
+            let Some(final_assistant_text) = state.assistant_text_for_run_id(run_id) else {
+                continue;
+            };
+            hook.run_terminal(SessionRunTerminalSnapshot {
+                provider: state.identity().provider(),
+                session_key: delta.session_key.clone(),
+                route_key: delta.route_key.clone(),
+                source_binding: state.source_binding().clone(),
+                native_run_id: run_id.clone(),
+                phase: *phase,
+                final_assistant_text: Some(final_assistant_text),
+            });
+        }
+    }
+
+    fn emit_hydrated_terminals(&self, state: &SessionState) {
+        if !state.is_team_source() {
+            return;
+        }
+        let Some(hook) = &self.terminal_hook else {
+            return;
+        };
+        for (run_id, final_assistant_text) in state.final_assistant_texts_by_run() {
+            hook.run_terminal(SessionRunTerminalSnapshot {
+                provider: state.identity().provider(),
+                session_key: state.identity().session_key().to_owned(),
+                route_key: None,
+                source_binding: state.source_binding().clone(),
+                native_run_id: run_id,
+                phase: RunPhase::Completed,
+                final_assistant_text: Some(final_assistant_text),
+            });
         }
     }
 
@@ -239,7 +290,26 @@ impl SessionShared {
                 timeline::UnavailableReason::SessionOpsUnavailable,
             );
         };
-        ops.load_session_timeline(command, self.epoch).await
+        let outcome = ops.load_session_timeline(command.clone(), self.epoch).await;
+        if command.operation() != timeline::Operation::Load {
+            return outcome;
+        }
+        let Some(open_ops) = ops.open_session_ops() else {
+            return outcome;
+        };
+        match outcome {
+            timeline::Outcome::Unavailable(failure) => timeline::Outcome::Unavailable(failure),
+            timeline::Outcome::Complete(view) => timeline::Outcome::Complete(
+                open_ops
+                    .on_load_session_timeline(&command, view, self.provider_handle.clone())
+                    .await,
+            ),
+            timeline::Outcome::Incomplete(view) => timeline::Outcome::Incomplete(
+                open_ops
+                    .on_load_session_timeline(&command, view, self.provider_handle.clone())
+                    .await,
+            ),
+        }
     }
 
     async fn handle_content(&self, command: ContentCommand) -> ContentOutcome {
@@ -274,6 +344,73 @@ impl SessionShared {
             self.store_matcha_catalog_bindings(sessions).await;
         }
         outcome
+    }
+
+    /// Read-only list projection: corrects OpenClaw catalog model refs that our own provider
+    /// catalog no longer accepts. Never writes back to the runtime.
+    ///
+    /// Runs at most one provider judgement for the whole catalog, and at most one
+    /// `agents.list`-backed default lookup per distinct stale agent.
+    async fn reconcile_openclaw_catalog_models(&self, catalog: SessionCatalog) -> SessionCatalog {
+        let endpoint = NativeEndpoint::OpenClawLocal;
+        let session_count = catalog.sessions.len();
+        let driver = self.openclaw_session_driver();
+        let defaults_driver = driver.clone();
+        let judge_handle = self.provider_handle.clone();
+        let rebound_handle = self.provider_handle.clone();
+        let (catalog, corrected) = openclaw_direct::reconcile_catalog_models(
+            catalog,
+            async move |model_refs| match judge_handle
+                .accept_session_runtime_models(endpoint, model_refs)
+                .await
+            {
+                Ok(accepted) => openclaw_direct::CatalogModelJudgement::Accepted(accepted),
+                Err(_) => openclaw_direct::CatalogModelJudgement::Unavailable,
+            },
+            move |agent_id| {
+                let driver = defaults_driver.clone();
+                Box::pin(async move {
+                    match driver
+                        .as_ref()
+                        .and_then(|driver| driver.session_ops())
+                        .and_then(|ops| ops.open_session_ops())
+                    {
+                        Some(ops) => ops.agent_default_model(agent_id).await,
+                        None => None,
+                    }
+                })
+            },
+            move |entry, default_model| {
+                let Ok(command) = SessionRuntimeModelCommand::try_new(
+                    endpoint,
+                    entry.key.clone(),
+                    Some(entry.endpoint_session_id.clone()),
+                    entry.model.clone(),
+                    default_model,
+                ) else {
+                    return Box::pin(async { None });
+                };
+                let handle = rebound_handle.clone();
+                Box::pin(async move {
+                    handle
+                        .resolve_session_model_rebound(command)
+                        .await
+                        .ok()
+                        .and_then(|selection| selection.openclaw_model_ref().map(str::to_owned))
+                })
+            },
+        )
+        .await;
+        if corrected > 0 {
+            log_session_catalog_model_reconciled(session_count, corrected);
+        }
+        catalog
+    }
+
+    fn openclaw_session_driver(&self) -> Option<Arc<dyn RuntimeDriver>> {
+        self.running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+            .ok()
+            .filter(|driver| driver.session_ops().is_some())
     }
 
     async fn store_matcha_catalog_bindings(
@@ -406,7 +543,10 @@ impl SessionShared {
                 let _ = reply.send(self.get_session_view(&session_key));
             }
             SessionQuery::OpenClaw(query) => {
-                super::openclaw_direct::reply_query(&self.runtime_directory, query).await;
+                super::openclaw_direct::reply_query(&self.runtime_directory, query, |catalog| {
+                    self.reconcile_openclaw_catalog_models(catalog)
+                })
+                .await;
             }
             SessionQuery::ListMatcha { reply } => {
                 let outcome = self.handle_list_matcha().await;
@@ -430,8 +570,14 @@ impl SessionLane {
     ) {
         use SessionCommand::*;
         match command {
-            Ensure { identity, reply } => {
-                let outcome = self.handle_ensure(shared, &key, identity).await;
+            Ensure {
+                identity,
+                source_binding,
+                reply,
+            } => {
+                let outcome = self
+                    .handle_ensure(shared, &key, identity, source_binding)
+                    .await;
                 let _ = reply.send(outcome);
             }
             Ingest {
@@ -506,14 +652,20 @@ impl SessionLane {
         shared: &SessionShared,
         key: &str,
         identity: SessionIdentity,
+        source_binding: SessionSourceBinding,
     ) -> SessionEnsureOutcome {
         let expected_key = session_lane_key(identity.provider(), identity.session_key());
         if expected_key != key {
             return SessionEnsureOutcome::Failed;
         }
 
-        if let Some(existing) = &self.state {
-            return SessionEnsureOutcome::Existing(existing.clone());
+        if let Some(existing) = &mut self.state {
+            if !existing.bind_source(source_binding) {
+                return SessionEnsureOutcome::Failed;
+            }
+            let existing = existing.clone();
+            shared.store_snapshot_state(existing.clone()).await;
+            return SessionEnsureOutcome::Existing(existing);
         }
 
         let endpoint = RuntimeEndpoint::try_new(
@@ -534,7 +686,7 @@ impl SessionLane {
         };
 
         let state = match SessionState::new(identity, shared.epoch) {
-            Ok(state) => state,
+            Ok(state) => state.with_source_binding(source_binding),
             Err(_) => return SessionEnsureOutcome::Failed,
         };
 
@@ -574,13 +726,14 @@ impl SessionLane {
                     &session_key,
                     provider,
                     &identity,
+                    &SessionSourceBinding::ordinary(),
                     event.binding,
                     event.run_id,
                     event.cursor,
                     *reason,
                 )
                 .await;
-            return Self::map_apply_result(shared, result);
+            return Self::map_apply_result(result);
         }
 
         if let Some(state) = &self.state {
@@ -591,17 +744,18 @@ impl SessionLane {
                         &session_key,
                         provider,
                         &identity,
+                        &SessionSourceBinding::ordinary(),
                         event.binding.clone(),
                         event.run_id.clone(),
                         event.cursor,
                         super::state::RecoveryReason::EpochChanged,
                     )
                     .await;
-                match recovery_result {
-                    super::state::SessionApplyResult::Applied(delta) => {
-                        shared.publish_session_delta(delta);
-                    }
-                    result => return Self::map_apply_result(shared, result),
+                if !matches!(
+                    recovery_result,
+                    super::state::SessionApplyResult::Applied(_)
+                ) {
+                    return Self::map_apply_result(recovery_result);
                 }
             }
         }
@@ -612,13 +766,14 @@ impl SessionLane {
                 &session_key,
                 provider,
                 &identity,
+                &SessionSourceBinding::ordinary(),
                 event.binding,
                 event.run_id,
                 event.cursor,
                 event.changes,
             )
             .await;
-        Self::map_apply_result(shared, result)
+        Self::map_apply_result(result)
     }
 
     async fn apply_changes_to_state(
@@ -627,12 +782,14 @@ impl SessionLane {
         session_key: &str,
         provider: SessionProvider,
         identity: &SessionIdentity,
-        binding: SessionSourceBinding,
+        source_binding: &SessionSourceBinding,
+        binding: SessionEventBinding,
         run_id: Option<String>,
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
     ) -> super::state::SessionApplyResult {
-        let state = match self.event_state(shared, session_key, provider, identity) {
+        let state = match self.event_state(shared, session_key, provider, identity, source_binding)
+        {
             Ok(state) => state,
             Err(result) => return result,
         };
@@ -640,9 +797,10 @@ impl SessionLane {
         let mut next = state;
         let result = next.apply_native_bound(binding, run_id, native_cursor, changes);
 
-        if matches!(result, super::state::SessionApplyResult::Applied(_)) {
+        if let super::state::SessionApplyResult::Applied(delta) = &result {
             self.state = Some(next.clone());
-            shared.store_snapshot_state(next).await;
+            shared.store_snapshot_state(next.clone()).await;
+            shared.emit_session_delta(delta, &next);
         }
 
         result
@@ -654,12 +812,14 @@ impl SessionLane {
         session_key: &str,
         provider: SessionProvider,
         identity: &SessionIdentity,
-        binding: SessionSourceBinding,
+        source_binding: &SessionSourceBinding,
+        binding: SessionEventBinding,
         run_id: Option<String>,
         native_cursor: Option<u64>,
         reason: super::state::RecoveryReason,
     ) -> super::state::SessionApplyResult {
-        let state = match self.event_state(shared, session_key, provider, identity) {
+        let state = match self.event_state(shared, session_key, provider, identity, source_binding)
+        {
             Ok(state) => state,
             Err(result) => return result,
         };
@@ -667,9 +827,10 @@ impl SessionLane {
         let mut next = state;
         let result = next.apply_native_recovery_bound(binding, run_id, native_cursor, reason);
 
-        if matches!(result, super::state::SessionApplyResult::Applied(_)) {
+        if let super::state::SessionApplyResult::Applied(delta) = &result {
             self.state = Some(next.clone());
-            shared.store_snapshot_state(next).await;
+            shared.store_snapshot_state(next.clone()).await;
+            shared.emit_session_delta(delta, &next);
         }
 
         result
@@ -681,9 +842,19 @@ impl SessionLane {
         session_key: &str,
         provider: SessionProvider,
         identity: &SessionIdentity,
+        source_binding: &SessionSourceBinding,
     ) -> Result<SessionState, super::state::SessionApplyResult> {
         match &self.state {
-            Some(state) if state.identity().provider() == provider => Ok(state.clone()),
+            Some(state) if state.identity().provider() == provider => {
+                let mut state = state.clone();
+                if state.bind_source(source_binding.clone()) {
+                    Ok(state)
+                } else {
+                    Err(super::state::SessionApplyResult::Rejected {
+                        reason: super::state::SessionApplyRejection::InvalidInput,
+                    })
+                }
+            }
             Some(_) => Err(super::state::SessionApplyResult::Rejected {
                 reason: super::state::SessionApplyRejection::InvalidInput,
             }),
@@ -693,22 +864,18 @@ impl SessionLane {
                         reason: super::state::SessionApplyRejection::InvalidInput,
                     });
                 }
-                SessionState::new(identity.clone(), shared.epoch).map_err(|_| {
-                    super::state::SessionApplyResult::Rejected {
+                SessionState::new(identity.clone(), shared.epoch)
+                    .map(|state| state.with_source_binding(source_binding.clone()))
+                    .map_err(|_| super::state::SessionApplyResult::Rejected {
                         reason: super::state::SessionApplyRejection::InvalidInput,
-                    }
-                })
+                    })
             }
         }
     }
 
-    fn map_apply_result(
-        shared: &SessionShared,
-        result: super::state::SessionApplyResult,
-    ) -> SessionIngestOutcome {
+    fn map_apply_result(result: super::state::SessionApplyResult) -> SessionIngestOutcome {
         match result {
             super::state::SessionApplyResult::Applied(delta) => {
-                shared.publish_session_delta(delta.clone());
                 SessionIngestOutcome::Applied(delta)
             }
             super::state::SessionApplyResult::Duplicate { cursor } => {
@@ -888,7 +1055,8 @@ impl SessionLane {
             return;
         };
         self.state = Some(state.clone());
-        shared.store_snapshot_state(state).await;
+        shared.store_snapshot_state(state.clone()).await;
+        shared.emit_hydrated_terminals(&state);
     }
 
     async fn handle_create(
@@ -934,6 +1102,7 @@ impl SessionLane {
         let provider = command.endpoint.provider();
         let session_key = command.session_key.clone();
         let route_key = command.route_key.clone();
+        let source_binding = command.source_binding.clone();
         let failure_run_id = match command.endpoint {
             super::send::NativeEndpoint::OpenClawLocal => None,
             super::send::NativeEndpoint::MatchaAgentLocal => {
@@ -942,7 +1111,7 @@ impl SessionLane {
             super::send::NativeEndpoint::Unsupported => None,
         };
         let identity = self.session_identity(provider, &session_key);
-        let binding = SessionSourceBinding::new(session_key.clone(), Some(route_key), None);
+        let binding = SessionEventBinding::new(session_key.clone(), Some(route_key), None);
         let command = match self.bind_matcha_send_command(shared, command) {
             Ok(command) => command,
             Err(outcome) => {
@@ -951,6 +1120,7 @@ impl SessionLane {
                     &session_key,
                     provider,
                     identity,
+                    &source_binding,
                     binding,
                     &outcome,
                     failure_run_id,
@@ -978,6 +1148,7 @@ impl SessionLane {
             &session_key,
             provider,
             identity,
+            &source_binding,
             binding,
             &outcome,
             failure_run_id,
@@ -992,7 +1163,8 @@ impl SessionLane {
         session_key: &str,
         provider: SessionProvider,
         identity: Option<SessionIdentity>,
-        binding: Option<SessionSourceBinding>,
+        source_binding: &SessionSourceBinding,
+        binding: Option<SessionEventBinding>,
         outcome: &SessionSendOutcome,
         failure_run_id: Option<String>,
     ) {
@@ -1003,21 +1175,19 @@ impl SessionLane {
             Some(projection) => projection,
             None => return,
         };
-        let result = self
+        let _ = self
             .apply_changes_to_state(
                 shared,
                 session_key,
                 provider,
                 &identity,
+                source_binding,
                 binding,
                 run_id,
                 None,
                 vec![SessionChange::RuntimeChanged { runtime }],
             )
             .await;
-        if let super::state::SessionApplyResult::Applied(delta) = result {
-            shared.publish_session_delta(delta);
-        }
     }
 
     async fn handle_abort(
@@ -1221,7 +1391,10 @@ impl SessionLane {
                 let _ = reply.send(outcome);
             }
             SessionQuery::OpenClaw(query) => {
-                super::openclaw_direct::reply_query(&shared.runtime_directory, query).await;
+                super::openclaw_direct::reply_query(&shared.runtime_directory, query, |catalog| {
+                    shared.reconcile_openclaw_catalog_models(catalog)
+                })
+                .await;
             }
             SessionQuery::MatchaHistory { command, reply } => {
                 let outcome = shared.handle_matcha_history(command).await;
@@ -1323,6 +1496,22 @@ impl OwnerSpec for SessionOwner {
             }
         }
     }
+}
+
+fn log_session_catalog_model_reconciled(session_count: usize, corrected_count: usize) {
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-catalog.model-reconciled",
+            "sessionCount": session_count,
+            "correctedCount": corrected_count,
+        })
+    );
 }
 
 fn send_driver_failure(failure: RuntimeOperationFailure) -> SessionSendOutcome {
@@ -1451,26 +1640,28 @@ fn state_from_view_seeded(
         }
         _ => (view.seq, view.cursor),
     };
+    let source_binding = previous
+        .map(|state| state.source_binding().clone())
+        .unwrap_or_else(SessionSourceBinding::ordinary);
     SessionState::from_view_parts(view.identity.clone(), view.epoch, seq, cursor, facts)
         .ok()?
+        .with_source_binding(source_binding)
         .with_endpoint_session_id(view.endpoint_session_id.clone())
         .ok()
 }
 
 fn matcha_catalog_state(endpoint_session_id: &str, epoch: u64) -> Option<SessionState> {
+    let identity = RuntimeDriverIdentity::matcha_agent();
+    let agent_id = identity.default_agent_id();
     let identity = SessionIdentity::new(
-        matcha_catalog_session_key(endpoint_session_id),
+        identity.rendered_session_key(agent_id, endpoint_session_id)?,
         SessionProvider::MatchaAgent,
-        Some("matcha".to_owned()),
+        Some(agent_id.to_owned()),
     )?;
     SessionState::new(identity, epoch)
         .ok()?
         .with_endpoint_session_id(Some(endpoint_session_id.to_owned()))
         .ok()
-}
-
-fn matcha_catalog_session_key(endpoint_session_id: &str) -> String {
-    format!("matcha-agent:matcha:{endpoint_session_id}")
 }
 
 fn matcha_session_id(session_id: Option<&str>) -> Result<MatchaSessionId, ()> {

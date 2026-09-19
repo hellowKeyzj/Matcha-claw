@@ -9,7 +9,6 @@ pub(crate) struct MatchaAgentInstance {
 pub(crate) struct MatchaRuntimeDriver {
     pub(super) lifecycle: MatchaPeerLifecycleHandle,
     pub(super) session: MatchaPeerSessionHandle,
-    pub(super) prompt: RoleSessionPromptHandle,
     pub(super) native: RoleSessionNativeHandle,
     pub(super) renderer_events: Option<mpsc::Sender<SessionSubscriptionItem>>,
 }
@@ -19,7 +18,6 @@ impl MatchaRuntimeDriver {
         Self {
             lifecycle: peer.lifecycle_handle(),
             session: peer.session_handle(),
-            prompt: peer.role_session_prompt_handle(),
             native: peer.role_session_native_handle(),
             renderer_events: None,
         }

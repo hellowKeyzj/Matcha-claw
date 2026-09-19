@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{
     sessions::state::{SessionCompleteness, SessionView},
-    sessions::timeline::{Command, Direction, Outcome, Provider, WindowRequest},
+    sessions::timeline::{Command, Direction, Operation, Outcome, Provider, WindowRequest},
     transport::common::authorization::CapabilityDecisionVerifier,
 };
 
@@ -78,7 +78,10 @@ impl Request {
 
         match self.operation_id.as_str() {
             LOAD_OPERATION => {
-                if self.input.mode.is_some() || self.input.offset.is_some() {
+                if self.input.mode.is_some()
+                    || self.input.offset.is_some()
+                    || self.input.include_canonical.is_some()
+                {
                     return Err(DecodeError::Invalid);
                 }
             }
@@ -105,6 +108,11 @@ impl Request {
             self.input.offset,
         )?;
         Command::new(
+            match self.operation_id.as_str() {
+                LOAD_OPERATION => Operation::Load,
+                WINDOW_OPERATION => Operation::Window,
+                _ => return None,
+            },
             self.scope.identity.endpoint.provider()?,
             self.input.session_key,
             Some(self.scope.identity.agent_id.clone()),
@@ -310,8 +318,26 @@ mod tests {
         });
         let request = serde_json::from_value::<Request>(value).unwrap();
         let command = request.into_command().unwrap();
+        assert_eq!(command.operation(), Operation::Window);
         assert!(command.include_canonical());
         assert_eq!(command.endpoint_session_id(), Some("endpoint-session-1"));
+    }
+
+    #[test]
+    fn marks_load_requests_as_load_operations() {
+        let value = serde_json::json!({
+            "id": CAPABILITY_ID,
+            "operationId": LOAD_OPERATION,
+            "scope": { "kind": "session", "identity": identity_json() },
+            "target": { "kind": "session", "identity": identity_json() },
+            "input": {
+                "sessionKey": "session-1",
+                "sessionIdentity": identity_json()
+            }
+        });
+        let request = serde_json::from_value::<Request>(value).unwrap();
+        let command = request.into_command().unwrap();
+        assert_eq!(command.operation(), Operation::Load);
     }
 
     #[test]
@@ -335,6 +361,7 @@ mod tests {
         SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: None,
+            model: None,
             identity: SessionIdentity::new(
                 "session-1",
                 SessionProvider::OpenClaw,

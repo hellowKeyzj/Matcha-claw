@@ -24,7 +24,7 @@ use super::{
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
-    state::{SessionIdentity, SessionView},
+    state::{SessionIdentity, SessionSourceBinding, SessionView},
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
         ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
@@ -71,8 +71,21 @@ impl SessionHandle {
         &self,
         identity: SessionIdentity,
     ) -> Result<SessionEnsureOutcome, ()> {
-        self.request_command(|reply| SessionCommand::Ensure { identity, reply })
+        self.ensure_bound_session(identity, SessionSourceBinding::ordinary())
             .await
+    }
+
+    pub(crate) async fn ensure_bound_session(
+        &self,
+        identity: SessionIdentity,
+        source_binding: SessionSourceBinding,
+    ) -> Result<SessionEnsureOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Ensure {
+            identity,
+            source_binding,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn ingest_event(
@@ -125,21 +138,6 @@ impl SessionHandle {
             request: SessionSendRequest::Session { command, reply },
         })
         .await
-    }
-
-    pub(crate) async fn wait_session_native_run(
-        &self,
-        endpoint: crate::sessions::send::NativeEndpoint,
-        endpoint_session_id: Option<String>,
-        native_run_id: String,
-    ) -> Option<crate::runtime::driver::NativeRunSettled> {
-        let driver = self
-            .runtime_directory
-            .lookup(&endpoint.runtime_endpoint()?)?;
-        driver
-            .session_ops()?
-            .wait_session_native_run(endpoint_session_id, native_run_id)
-            .await
     }
 
     pub(crate) async fn abort_session(

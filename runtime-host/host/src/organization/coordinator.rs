@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use foundation::execution::{ObservationSink, ServiceHandle};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::{composition::HostAdmission, runtime::directory::RuntimeDriverDirectory};
 
@@ -13,6 +13,7 @@ const TEAM_RUN_MAINTENANCE_CAPACITY: usize = 8;
 pub(crate) struct TeamRunCoordinatorInput {
     pub(crate) admission: Arc<HostAdmission>,
     pub(crate) organization: OrganizationHandle,
+    pub(crate) session: crate::sessions::SessionHandle,
     pub(crate) runtime_directory: Arc<RuntimeDriverDirectory>,
     pub(crate) admission_changes: tokio::sync::watch::Receiver<crate::composition::AdmissionState>,
     pub(crate) observation: ObservationSink,
@@ -28,23 +29,10 @@ pub(crate) struct TeamRunCoordinator {
 }
 
 pub(super) enum TeamRunCoordinatorRequest {
-    CancelMatchaTerminalWatches { reply: oneshot::Sender<()> },
     RecoverMaterializationReceipts,
 }
 
 impl TeamRunCoordinatorHandle {
-    pub(crate) async fn cancel_native_terminal_watches(&self) {
-        let (reply, reply_rx) = oneshot::channel();
-        if self
-            .requests
-            .send(TeamRunCoordinatorRequest::CancelMatchaTerminalWatches { reply })
-            .await
-            .is_ok()
-        {
-            let _ = reply_rx.await;
-        }
-    }
-
     pub(crate) async fn recover_materialization_receipts(&self) {
         let _ = self
             .requests

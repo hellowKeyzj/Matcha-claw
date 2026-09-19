@@ -29,7 +29,7 @@ use crate::{
     sessions::model_selection::{
         MatchaSessionModelRuntimeCommand, NativeEndpoint, ResolvedSessionModelSelection,
         SessionModelSelectionBinding, SessionModelSelectionCommand, SessionModelSelectionOutcome,
-        SessionModelSelectionRejection,
+        SessionModelSelectionRejection, SessionRuntimeModelCommand,
     },
     transport::sessions::trace as session_trace,
 };
@@ -243,6 +243,18 @@ impl ProviderOwner {
                 let outcome = self.resolve_matcha_session_model_runtime(command);
                 let _ = reply.send(outcome);
             }
+            AcceptSessionRuntimeModels {
+                endpoint,
+                model_refs,
+                reply,
+            } => {
+                let outcome = self.accept_session_runtime_models(endpoint, &model_refs);
+                let _ = reply.send(outcome);
+            }
+            ResolveSessionModelRebound { command, reply } => {
+                let outcome = self.resolve_session_model_rebound(command);
+                let _ = reply.send(outcome);
+            }
         }
     }
 
@@ -366,6 +378,101 @@ impl ProviderOwner {
             native: ProviderNativeConfigurationView::from_effect(&native),
             commit,
         }
+    }
+
+    fn accept_session_runtime_models(
+        &self,
+        endpoint: NativeEndpoint,
+        model_refs: &[String],
+    ) -> Result<Vec<bool>, SessionModelSelectionOutcome> {
+        if endpoint != NativeEndpoint::OpenClawLocal {
+            return Err(SessionModelSelectionOutcome::Unsupported);
+        }
+        let Some(capability) = session_model_capability(endpoint) else {
+            return Err(SessionModelSelectionOutcome::Unsupported);
+        };
+        self.models
+            .accept_runtime_model_refs(&self.cascade, capability, model_refs)
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)
+    }
+
+    fn resolve_session_model_rebound(
+        &self,
+        command: SessionRuntimeModelCommand,
+    ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        if command.endpoint != NativeEndpoint::OpenClawLocal {
+            return Err(SessionModelSelectionOutcome::Unsupported);
+        }
+        let Some(capability) = session_model_capability(command.endpoint) else {
+            return Err(SessionModelSelectionOutcome::Unsupported);
+        };
+        let default = command
+            .default_model
+            .as_deref()
+            .map(|default_model| {
+                self.models
+                    .resolve_runtime_model_ref(&self.cascade, capability, default_model)
+            })
+            .transpose()
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?
+            .flatten();
+        let selection = match default {
+            Some(selection) => selection,
+            None => match self.models.resolve_routing_default(
+                &self.cascade,
+                environment::ProviderRoutingCapability::Chat,
+            ) {
+                Ok(Some(selection)) => selection,
+                Ok(None) => {
+                    return Err(SessionModelSelectionOutcome::target_rejected(
+                        SessionModelSelectionRejection::ModelSelectionNotFound,
+                    ));
+                }
+                Err(()) => return Err(SessionModelSelectionOutcome::Unavailable),
+            },
+        };
+        let diagnostic = Some(selection.diagnostic());
+        let model = self
+            .models
+            .openclaw_model_ref(&self.cascade, &selection)
+            .map_err(|_| {
+                SessionModelSelectionOutcome::target_rejected_with_diagnostic(
+                    SessionModelSelectionRejection::OpenClawModelRefInvalid,
+                    diagnostic.clone(),
+                )
+            })?;
+        let model = openclaw::session::protocol::ModelRef::try_new(model).map_err(|_| {
+            SessionModelSelectionOutcome::target_rejected_with_diagnostic(
+                SessionModelSelectionRejection::OpenClawModelRefInvalid,
+                diagnostic.clone(),
+            )
+        })?;
+        if let Some(diagnostic) = diagnostic.as_ref() {
+            session_trace::log(
+                "runtime.model-selection.rebound",
+                command.trace_id.as_deref(),
+                serde_json::json!({
+                    "endpoint": format!("{:?}", command.endpoint),
+                    "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+                    "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
+                    "currentModel": session_trace::id_shape(command.current_model.as_deref()),
+                    "defaultModel": session_trace::id_shape(command.default_model.as_deref()),
+                    "accountId": diagnostic.account_id(),
+                    "modelId": diagnostic.model_id(),
+                    "protocol": diagnostic.protocol(),
+                    "authMode": diagnostic.auth_mode(),
+                }),
+            );
+        }
+        Ok(ResolvedSessionModelSelection {
+            endpoint: command.endpoint,
+            session_key: command.session_key,
+            endpoint_session_id: command.endpoint_session_id,
+            model_selection_id: selection.selection_id,
+            binding: SessionModelSelectionBinding::OpenClaw(model),
+            diagnostic,
+            trace_id: command.trace_id,
+        })
     }
 
     fn resolve_matcha_session_model_runtime(
@@ -615,6 +722,12 @@ async fn handle_provider_snapshot_query(
         }
         ProviderQuery::ResolveSessionModelSelection { reply, .. }
         | ProviderQuery::ResolveMatchaSessionModelRuntime { reply, .. } => {
+            let _ = reply.send(Err(SessionModelSelectionOutcome::Unavailable));
+        }
+        ProviderQuery::AcceptSessionRuntimeModels { reply, .. } => {
+            let _ = reply.send(Err(SessionModelSelectionOutcome::Unavailable));
+        }
+        ProviderQuery::ResolveSessionModelRebound { reply, .. } => {
             let _ = reply.send(Err(SessionModelSelectionOutcome::Unavailable));
         }
     }

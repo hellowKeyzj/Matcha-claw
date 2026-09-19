@@ -381,7 +381,7 @@ Host-owned localhost transport 已收敛为一个 loopback port/listener，但�
 |---|---|---|
 | Session | `SessionHandle` / `SessionOwner`，必要时经 RuntimeDriver `SessionOps` | `transport/sessions/**`, `transport/session_*.rs`, `host/src/sessions/**` |
 | Workspace | `facade::WorkspaceHandle`，经 RuntimeDriver `WorkspaceOps` 读取/写入 OpenClaw native workspace projection | `transport/workspace_*.rs`, `host/src/facade/workspace.rs` |
-| Organization / TeamRun | `OrganizationHandle` / `OrganizationOwner` / `TeamRunCoordinator`；TeamRun effect 经 RuntimeDriver `TeamOps` / `TeamTerminalOps`；standalone MCP artifact 只经 Organization TeamRun facade | `transport/team_*.rs`, `artifacts/team_run_mcp.rs`, `host/src/organization/**` |
+| Organization / TeamRun | `OrganizationHandle` / `OrganizationOwner` / `TeamRunCoordinator`；TeamRun effect 经 RuntimeDriver `TeamOps`；session terminal settlement 经 `SessionTerminalHook` / `OrganizationSessionTerminal`；standalone MCP artifact 只经 Organization TeamRun facade | `transport/team_*.rs`, `artifacts/team_run_mcp.rs`, `host/src/organization/**` |
 | Environment-facing products | `ProviderHandle`、`SettingsHandle`、`SecurityHandle`、`ChannelHandle`、`ConnectorHandle` | `transport/provider_accounts/**`, `transport/provider_models.rs`, `transport/settings_desired/**`, `transport/security_*.rs`, `transport/channel_*.rs` |
 | External ClawHub marketplace | `ClawHubRegistryClient`；search 直连 external registry，install 仍经 `SkillsHandle` runtime ops 执行 legacy CLI fallback | `transport/clawhub_search.rs`, `external/clawhub/**`, `transport/skills.rs` |
 | OpenClaw products | `CronHandle`、`AgentsHandle`、`TaskManagerHandle`、`PluginsHandle`、`SkillsHandle`、`UsageHandle`；session/task/team prompt effect 经 OpenClaw `GatewayClient` control exchange 投递 | `transport/cron.rs`, `transport/agents/**`, `transport/task_manager*`, `transport/usage/**`, `host/src/facade/**` |
@@ -451,7 +451,7 @@ flowchart LR
   Coordinator["TeamRunCoordinator\nscheduler · watch · reconciliation"]
   Directory["RuntimeDriverDirectory"]
   OpenClaw["openclaw Integration\nTeamOps materialization / prompt"]
-  Matcha["matcha-agent Integration\nTeamOps delivery / TeamTerminalOps watch"]
+  Matcha["matcha-agent Integration\nTeamOps delivery"]
 
   Delivery --> OrgHandle --> OrgOwner
   Coordinator --> OrgHandle
@@ -461,7 +461,7 @@ flowchart LR
   Directory --> Matcha
 ```
 
-`organization` owns graph reduction, attempt fences, approval, delivery ledger, evidence and trigger facts. `TeamRunCoordinator` 是 Organization-adjacent background Implementation Module：它订阅 admission changes，查询 active/pending TeamRun facts，调用 `OrganizationHandle` 做 schedule/claim/settle/observe，并通过 RuntimeDriver `TeamOps` / `TeamTerminalOps` 触达 OpenClaw 或 matcha-agent Adapter。`PeerOwner` 只通过 `TeamRunCoordinatorHandle` 通知 materialization receipt recovery 或 Matcha terminal watch cancellation；不得把 TeamRun scheduler/watch/reconciliation 写回 Root actor，也不引入 `PeerMaintenance` Module。`runtime-host-mcp` 是独立 Delivery shell；它打开 Organization store 并验证请求 contract，但不引入第二个 TeamRun owner。
+`organization` owns graph reduction, attempt fences, approval, delivery ledger, evidence and trigger facts. `TeamRunCoordinator` 是 Organization-adjacent background Implementation Module：它订阅 admission changes，查询 active/pending TeamRun facts，调用 `OrganizationHandle` 做 schedule/claim/settle/observe，并通过 RuntimeDriver `TeamOps` 触达 OpenClaw 或 matcha-agent Adapter。Session owner 在运行阶段通过 `SessionTerminalHook` 投递终端快照；`OrganizationSessionTerminal` 统一将 terminal status 与 run-bound final assistant text 交给 `native_run_settled_by_native_run_id`，由 Organization 记录 observation 并解析结果。`PeerOwner` 只通过 `TeamRunCoordinatorHandle` 通知 materialization receipt recovery；不得把 TeamRun scheduler/reconciliation 或终端结算写回 Root actor，也不引入 `PeerMaintenance` Module。`runtime-host-mcp` 是独立 Delivery shell；它打开 Organization store 并验证请求 contract，但不引入第二个 TeamRun owner。
 
 ### 9.3 Cron：immediate admission 与 native terminal fact 不混同
 

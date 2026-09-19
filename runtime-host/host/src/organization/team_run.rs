@@ -16,7 +16,7 @@ use organization::{
     TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome, TeamTriggerFireRequest,
     TeamTriggerFireRequestError, TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
     TriggerRegistration, TriggerSource, next_cron_slot_after, plan_due_cron_trigger,
-    plan_terminal_observations, query_team_run,
+    query_team_run,
     run::lifecycle::GraphRunLifecycleState,
     run::scheduler::{NodePromptRetryDueQuery, NodePromptRetryDueQueryOutcome},
 };
@@ -101,13 +101,6 @@ pub(crate) enum TeamRunActivityOutcome {
     AwaitingRetry(TeamRunCommandOutcome),
     Terminal(TeamRunCommandOutcome),
     OutcomeUnknown(TeamRunCommandOutcome),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TeamNodePromptSettledResult {
-    Recorded(GraphRunId),
-    Replayed(GraphRunId),
-    NotFound,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -514,7 +507,7 @@ impl TeamRunOwner {
         store: &OrganizationStore,
         team_id: &TeamId,
     ) -> organization::TeamRoleSessionQueryOutcome {
-        organization::query_team_role_sessions(store.facts(), team_id)
+        organization::run::query_team_role_sessions(store.facts(), team_id)
     }
 
     pub(crate) fn query_pending_approvals(
@@ -589,19 +582,6 @@ impl TeamRunOwner {
         command: organization::run::approval::HumanDecisionCommand,
     ) -> Result<organization::run::approval::HumanDecisionOutcome, StoreFault> {
         store.resolve_human_decision(command)
-    }
-
-    pub(crate) fn admit_role_chat(
-        &self,
-        store: &mut OrganizationStore,
-        admission: organization::RoleChatAdmission,
-    ) -> Result<organization::RoleChatAdmissionOutcome, StoreFault> {
-        if role_chat_conflicts_active_team_run(store, &admission) {
-            return Ok(organization::RoleChatAdmissionOutcome::Rejected(
-                organization::RoleChatRejection::StaleFence,
-            ));
-        }
-        store.admit_role_chat(admission)
     }
 
     pub(crate) fn register_delivery(
@@ -940,31 +920,11 @@ impl TeamRunOwner {
         })
     }
 
-    pub(crate) fn terminal_observation_deliveries(
+    pub(crate) fn native_delivery_by_run(
         &self,
         store: &OrganizationStore,
-    ) -> Vec<DeliveryId> {
-        plan_terminal_observations(&store.facts().deliveries().snapshot())
-            .delivery_ids()
-            .to_vec()
-    }
-
-    pub(crate) fn native_terminal_target(
-        &self,
-        store: &OrganizationStore,
-        delivery_id: &DeliveryId,
-    ) -> Option<NativeTerminalReceiptTarget> {
-        store.native_terminal_target(delivery_id)
-    }
-
-    pub(crate) fn settle_node_prompt(
-        &self,
-        store: &mut OrganizationStore,
-        session_key: &str,
-        prompt_run_id: &str,
-        phase: NativeTerminalStatus,
-        settled_at: u64,
-    ) -> Result<TeamNodePromptSettledResult, StoreFault> {
+        native_run_id: &str,
+    ) -> Result<Option<DeliveryId>, StoreFault> {
         let mut matches = store
             .facts()
             .deliveries()
@@ -978,43 +938,22 @@ impl TeamRunOwner {
                     DeliveryPhase::TerminalObserved { observation } => observation.correlation(),
                     _ => return None,
                 };
-                let run_id = GraphRunId::new(delivery.facts().run_id.clone());
-                let run = store.facts().run(&run_id)?;
-                let binding = run.runtime()?.bindings().iter().find(|binding| {
-                    binding.role().as_str() == delivery.facts().role_id
-                        && binding.session_ref().as_str() == delivery.facts().session_ref
-                })?;
-                (binding.session_ref().as_str() == session_key
-                    && correlation.native_run_receipt().as_str() == prompt_run_id)
-                    .then_some(delivery)
+                (correlation.native_run_receipt().as_str() == native_run_id)
+                    .then(|| delivery.facts().delivery_id.clone())
             })
             .collect::<Vec<_>>();
         if matches.len() > 1 {
             return Err(StoreFault::InvalidFacts);
         }
-        let Some(delivery) = matches.pop() else {
-            return Ok(TeamNodePromptSettledResult::NotFound);
-        };
-        let run_id = GraphRunId::new(delivery.facts().run_id.clone());
-        if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {
-            if observation.native_terminal() != phase {
-                return Err(StoreFault::InvalidFacts);
-            }
-            return Ok(TeamNodePromptSettledResult::Replayed(run_id));
-        }
-        let delivery_id = DeliveryId::new(delivery.facts().delivery_id.as_str().to_owned())
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        let target = store
-            .native_terminal_target(&delivery_id)
-            .ok_or(StoreFault::InvalidFacts)?;
-        let outcome = store.observe_native_terminal(target, phase, settled_at)?;
-        Ok(match outcome {
-            TerminalObservationOutcome::Replayed => TeamNodePromptSettledResult::Replayed(run_id),
-            TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution
-            | TerminalObservationOutcome::RecordedNodeCancelled => {
-                TeamNodePromptSettledResult::Recorded(run_id)
-            }
-        })
+        Ok(matches.pop())
+    }
+
+    pub(crate) fn native_terminal_target(
+        &self,
+        store: &OrganizationStore,
+        delivery_id: &DeliveryId,
+    ) -> Option<NativeTerminalReceiptTarget> {
+        store.native_terminal_target(delivery_id)
     }
 
     pub(crate) fn resolve_node_terminal(
@@ -1269,30 +1208,6 @@ impl TeamRunCommandOutcome {
             TeamRunQueryOutcome::OutcomeUnknown => Self::OutcomeUnknown,
         }
     }
-}
-
-fn role_chat_conflicts_active_team_run(
-    store: &OrganizationStore,
-    admission: &organization::RoleChatAdmission,
-) -> bool {
-    store
-        .facts()
-        .activities()
-        .activities()
-        .filter(|activity| activity.facts().run_id == *admission.run_id())
-        .filter(|activity| {
-            matches!(
-                activity.phase(),
-                ActivityPhase::Pending
-                    | ActivityPhase::RetryScheduled { .. }
-                    | ActivityPhase::Claimed(_)
-                    | ActivityPhase::Dispatched(_)
-            )
-        })
-        .any(|activity| match &activity.facts().activity_kind {
-            ActivityKind::AgentTask { role_id, .. } => role_id == admission.role_id().as_str(),
-            _ => false,
-        })
 }
 
 fn agent_task_execution_request(

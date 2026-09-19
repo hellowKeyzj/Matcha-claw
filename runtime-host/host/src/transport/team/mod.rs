@@ -4,7 +4,6 @@ pub(crate) mod graph;
 pub(crate) mod lifecycle;
 pub(crate) mod manual;
 pub(crate) mod public;
-pub(crate) mod role_chat;
 pub(crate) mod role_sessions;
 pub(crate) mod skill;
 pub(crate) mod task_board;

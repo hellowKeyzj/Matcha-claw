@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub(crate) const CONTROL_VERSION: u8 = 1;
 pub(crate) const MAX_REQUEST_ID_BYTES: usize = 128;
+#[cfg(test)]
 const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
 const MAX_CRON_EXECUTION_ID_BYTES: usize = 128;
 /// Bounds an untrusted parent's command wait and keeps a stuck child command recoverable.
@@ -27,6 +28,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn deserialize_sequence<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -40,6 +42,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn deserialize_safe_millis<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
@@ -48,21 +51,6 @@ where
     (value <= MAX_SAFE_SEQUENCE)
         .then_some(value)
         .ok_or_else(|| D::Error::custom("control event timestamp exceeds the safe integer range"))
-}
-
-fn deserialize_cron_execution_id<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    (!value.is_empty()
-        && value.len() <= MAX_CRON_EXECUTION_ID_BYTES
-        && value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-')))
-    .then_some(value)
-    .ok_or_else(|| D::Error::custom("invalid Cron execution identity"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -236,13 +224,15 @@ pub(crate) struct CommandRequest {
     pub(crate) command: Command,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "lowercase")]
 enum ReadyType {
     Ready,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ready {
     #[serde(deserialize_with = "deserialize_version")]
@@ -260,7 +250,8 @@ impl Ready {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum RejectionCode {
     InvalidInput,
@@ -269,7 +260,8 @@ pub(crate) enum RejectionCode {
     Failed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CommandRejection {
     code: RejectionCode,
@@ -418,14 +410,18 @@ impl Outcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 enum EventType {
     #[serde(rename = "event")]
     Event,
 }
 
 /// A deliberately small event projection. It cannot carry gateway payloads or credentials.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Projection is one-way: the runtime never decodes what it emits, so `Deserialize` is
+/// test-only and exists so tests can assert the emitted shape.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum SafeEvent {
     #[serde(rename = "openclaw.lifecycle", rename_all = "camelCase")]
@@ -436,8 +432,10 @@ pub(crate) enum SafeEvent {
         has_message: bool,
         has_session_activity: bool,
     },
+    // `deny_unknown_fields` is silently ineffective on a unit variant, so this stays an
+    // empty struct variant. `OpenClawRuntime {}` serializes byte-identically to `OpenClawRuntime`.
     #[serde(rename = "openclaw.runtime")]
-    OpenClawRuntime,
+    OpenClawRuntime {},
     #[serde(rename = "matcha.lifecycle", rename_all = "camelCase")]
     MatchaLifecycle {
         lifecycle: SafeRuntimeLifecycle,
@@ -453,7 +451,8 @@ pub(crate) enum SafeEvent {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SafeRuntimeLifecycle {
     Unavailable,
@@ -481,17 +480,19 @@ impl CronExecutionId {
     }
 }
 
+#[cfg(test)]
 impl<'de> Deserialize<'de> for CronExecutionId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value = deserialize_cron_execution_id(deserializer)?;
+        let value = String::deserialize(deserializer)?;
         Self::try_new(value).ok_or_else(|| D::Error::custom("invalid Cron execution identity"))
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SafeCronExecutionStatus {
     Succeeded,
@@ -502,6 +503,7 @@ pub(crate) enum SafeCronExecutionStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Event {
     #[serde(deserialize_with = "deserialize_version")]
@@ -509,30 +511,6 @@ pub(crate) struct Event {
     #[serde(rename = "type")]
     kind: EventType,
     event: SafeEvent,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EventWire {
-    #[serde(deserialize_with = "deserialize_version")]
-    version: u8,
-    #[serde(rename = "type")]
-    kind: EventType,
-    event: SafeEvent,
-}
-
-impl<'de> Deserialize<'de> for Event {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let event = EventWire::deserialize(deserializer)?;
-        Ok(Self {
-            version: event.version,
-            kind: event.kind,
-            event: event.event,
-        })
-    }
 }
 
 impl Event {

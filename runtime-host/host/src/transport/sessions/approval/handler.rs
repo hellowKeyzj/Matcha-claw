@@ -6,7 +6,10 @@ use std::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::transport::common::authorization::CapabilityDecisionVerifier;
+use crate::{
+    sessions::approval::endpoint_supports_approval,
+    transport::common::authorization::CapabilityDecisionVerifier,
+};
 
 use super::{
     PendingApprovalsDelivery, PendingApprovalsRequest, SessionApprovalDelivery,
@@ -71,10 +74,7 @@ async fn handle_request(
                 Ok(command) => command,
                 Err(_) => return Response::bad_request(),
             };
-            if matches!(
-                command.endpoint,
-                crate::sessions::approval::NativeEndpoint::Unsupported
-            ) {
+            if !endpoint_supports_approval(command.endpoint) {
                 return Response::from_pending(PendingApprovalsDelivery::Unsupported);
             }
             drop(verifier);
@@ -99,10 +99,7 @@ async fn handle_request(
                 Ok(command) => command,
                 Err(_) => return Response::bad_request(),
             };
-            if matches!(
-                command.endpoint,
-                crate::sessions::approval::NativeEndpoint::Unsupported
-            ) {
+            if !endpoint_supports_approval(command.endpoint) {
                 return Response::from_response(SessionApprovalDelivery::Unsupported);
             }
             drop(verifier);

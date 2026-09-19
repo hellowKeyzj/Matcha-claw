@@ -2610,6 +2610,7 @@ mod tests {
                             "agents.list",
                             "skills.status",
                             "channels.pairing.list",
+                            "sessions.describe",
                             crate::gateway::wire::SYSTEM_PRESENCE_METHOD
                         ],
                         "events": ["tick"]

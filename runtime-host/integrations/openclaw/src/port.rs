@@ -145,9 +145,10 @@ use crate::{
         protocol::{
             ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
             ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
-            SessionDeleteResult, SessionKey, SessionLabelPatchParams, SessionLabelPatchResult,
-            SessionModelPatchParams, SessionModelPatchResult, SessionPermissionPatchParams,
-            SessionPermissionProjection, SessionsListParams, SessionsListResult,
+            SessionDeleteResult, SessionDescribeParams, SessionDescribeRow, SessionKey,
+            SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
+            SessionModelPatchResult, SessionPermissionPatchParams, SessionPermissionProjection,
+            SessionsListParams, SessionsListResult,
         },
     },
     session_window::{self, HistoryError, PageRequest, SessionWindow},
@@ -1184,10 +1185,12 @@ impl OpenClawGateway {
                 };
             }
         };
-        match SessionOperation::new(Arc::clone(&self.client))
-            .send_chat(params)
-            .await
-        {
+        let session_key = params.session_key().clone();
+        let operation = SessionOperation::new(Arc::clone(&self.client));
+        if let Err(error) = operation.subscribe_session_messages(&session_key).await {
+            return crate::team::map_send_outcome(InvocationOutcome::TargetRejected(error));
+        }
+        match operation.send_chat(params).await {
             Ok(outcome) => crate::team::map_send_outcome(outcome),
             Err(error) => crate::team::map_send_outcome(InvocationOutcome::TargetRejected(error)),
         }
@@ -1409,6 +1412,16 @@ impl OpenClawSessionGateway {
     ) -> Result<SessionsListResult, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
             .list_sessions(params)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn describe_session(
+        &self,
+        params: SessionDescribeParams,
+    ) -> Result<Option<SessionDescribeRow>, OpenClawSessionError> {
+        SessionOperation::new(Arc::clone(&self.client))
+            .describe_session(params)
             .await
             .map_err(Into::into)
     }
@@ -2380,7 +2393,12 @@ mod tests {
     }
 
     fn session_create_params() -> SessionCreateParams {
-        SessionCreateParams::try_new(agent_id(), endpoint_session_id()).unwrap()
+        SessionCreateParams::try_new(
+            agent_id(),
+            endpoint_session_id(),
+            ModelRef::try_new("claude-sonnet").unwrap(),
+        )
+        .unwrap()
     }
 
     fn session_delete_params() -> SessionDeleteParams {

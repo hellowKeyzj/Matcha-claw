@@ -15,6 +15,7 @@ mod receipt_router;
 mod review;
 mod run_actor;
 mod run_scheduler;
+pub(crate) mod session_terminal;
 mod start_gate_control;
 mod start_gate_send_hook;
 mod supervisor;
@@ -38,11 +39,11 @@ pub use decision::{
 };
 pub(crate) use handle::OrganizationHandle;
 pub(crate) use query::OrganizationQuery;
-pub(crate) use start_gate_send_hook::StartGateSendHook;
+pub(crate) use start_gate_send_hook::{StartGateRegistry, StartGateSendHook};
 pub(crate) use team_run::{
     ArmedTrigger, ManualTeamCreateOutcome, RuntimeReceiptOutcome, TeamDeleteOutcome,
-    TeamMaterializationCommandOutcome, TeamNodePromptSettledResult, TeamNodeTerminalResolution,
-    TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunTriggerOutcome, TeamTrigger,
+    TeamMaterializationCommandOutcome, TeamNodeTerminalResolution, TeamNodeTerminalResult,
+    TeamRunCommandOutcome, TeamRunTriggerOutcome, TeamTrigger,
 };
 pub use team_run_mcp::{
     TeamGraphContextOutcome, TeamGraphContextRequest, TeamGraphContextRequestView,
@@ -51,7 +52,7 @@ pub use team_run_mcp::{
 };
 pub(crate) use team_runtime::{
     ManualTeamProvision, TeamGraphPatchDraft, TeamNodeEventCommandOutcome, TeamRuntimeCommand,
-    TeamRuntimeCommandOutcome, TeamRuntimeCreateSource, TeamRuntimePromptPhase, TeamRuntimeStatus,
+    TeamRuntimeCommandOutcome, TeamRuntimeCreateSource, TeamRuntimeStatus,
 };
 
 const ORGANIZATION_FACTS_FILE: &str = "organization-facts.log";

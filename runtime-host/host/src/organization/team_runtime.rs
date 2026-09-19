@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use organization::{
     BeginCancellationOutcome, CommandPayload, CreateGraphRunOutcome, EdgeAction, GraphDefinition,
     GraphPatch, GraphPatchOperation, GraphRunId, GraphRunPurgeOutcome, IdempotencyKey, NodeKind,
-    ResumeOutcome, RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault,
-    TeamDecisionReceipt, TeamDecisionType, TeamGraphContextResult, TeamGraphContextView, TeamId,
-    TeamNodeEventOutcome, TeamRunDiagnosticsQueryOutcome, TeamRunQueryOutcome,
-    TeamTriggerFireOutcome, TriggerFireRequest,
+    ResumeOutcome, RunCommand, StoreFault, TeamDecisionReceipt, TeamDecisionType,
+    TeamGraphContextResult, TeamGraphContextView, TeamId, TeamNodeEventOutcome,
+    TeamRunDiagnosticsQueryOutcome, TeamRunQueryOutcome, TeamTriggerFireOutcome,
+    TriggerFireRequest,
     package::{TeamSkillDependencyPlanResult, TeamSkillPackageValidation},
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
@@ -20,9 +20,8 @@ use organization::{
 };
 
 use super::team_run::{
-    ArmedTrigger, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
-    TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
-    TeamRunCommandOutcome, TeamRunTriggerOutcome,
+    ArmedTrigger, TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamNodeTerminalResolution,
+    TeamNodeTerminalResult, TeamRunCommandOutcome, TeamRunTriggerOutcome,
 };
 
 pub(crate) enum TeamRuntimeStatus {
@@ -248,16 +247,6 @@ pub(crate) enum TeamRuntimeCommand {
         request: TriggerFireRequest,
         fired_at: u64,
     },
-    RoleMessageSubmit {
-        admission: RoleChatAdmission,
-    },
-    RoleMessageSubmitForRun {
-        run_id: GraphRunId,
-        role_id: organization::RoleId,
-        message: String,
-        idempotency_key: String,
-        requested_at: u64,
-    },
     RunStartConfirm {
         run_id: GraphRunId,
         proposal_id: String,
@@ -268,11 +257,6 @@ pub(crate) enum TeamRuntimeCommand {
     },
     NodePromptRetryDue {
         run_id: GraphRunId,
-    },
-    NodePromptSettled {
-        session_key: OpaqueId,
-        prompt_run_id: OpaqueId,
-        phase: TeamRuntimePromptPhase,
     },
     NodeEvent {
         run_id: GraphRunId,
@@ -313,13 +297,6 @@ pub(crate) enum TeamRuntimeCommand {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TeamRuntimePromptPhase {
-    Final,
-    Error,
-    Aborted,
-}
-
 pub(crate) enum TeamRuntimeCommandOutcome {
     PackageValidate(TeamSkillPackageValidation),
     DependencyPlan(TeamSkillDependencyPlanResult),
@@ -331,7 +308,7 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     WebhookTriggerFire(Result<TeamTriggerFireOutcome, TeamRuntimeStatus>),
     RunSnapshot {
         snapshot: TeamRunPublicSnapshotQueryOutcome,
-        role_sessions: Option<Vec<organization::TeamRoleSessionProjection>>,
+        role_sessions: Option<Vec<organization::RoleSessionReceipt>>,
     },
     RunSnapshotInvalidInput,
     GraphSave(Result<TeamRunCommandOutcome, StoreFault>),
@@ -340,12 +317,9 @@ pub(crate) enum TeamRuntimeCommandOutcome {
     GraphExportYaml(Result<String, TeamRuntimeStatus>),
     GraphImportYaml(Result<TeamRunCommandOutcome, StoreFault>),
     TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
-    RoleMessageSubmit(Result<RoleChatAdmissionOutcome, StoreFault>),
-    RoleMessageSubmitForRun(Result<RoleChatAdmissionOutcome, StoreFault>),
     RunStartConfirm(Result<organization::ConfirmRunStartOutcome, StoreFault>),
     RunStartContinue(Result<organization::ContinueRunDiscussionOutcome, StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
-    NodePromptSettled(Result<TeamNodePromptSettledResult, TeamRuntimeStatus>),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
     RunDecisionSubmit(Result<TeamDecisionReceipt, TeamRuntimeStatus>),

@@ -336,7 +336,7 @@ function isInput(
     && isText(value.agentId, 4096)
     && isRootedFileName(value.name)
     && typeof value.content === 'string'
-    && value.content.length <= 1024 * 1024;
+    && Buffer.byteLength(value.content, 'utf8') <= 1024 * 1024;
 }
 
 function isEndpoint(value: unknown): value is Endpoint {

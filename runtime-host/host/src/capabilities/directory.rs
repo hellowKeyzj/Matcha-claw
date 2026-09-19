@@ -457,9 +457,7 @@ fn team_runtime_descriptor(scope: Value, identity: RuntimeDriverIdentity) -> Val
             operation("team.graphExportYaml", "Export TeamRun graph YAML", "team-run"),
             operation("team.graphImportYaml", "Import TeamRun graph YAML", "team-run"),
             operation("team.triggerFire", "Fire TeamRun StartNode trigger", "team-run"),
-            operation("team.roleMessageSubmit", "Submit Team role chat message", "team-run"),
             operation("team.nodePromptRetryDue", "Read due TeamRun node prompt retry plan", "team-run"),
-            operation("team.nodePromptSettled", "Wake TeamRun after a node prompt session turn settles", "none"),
             operation("team.nodeEvent", "Submit TeamRun node event command", "team-run"),
             operation("team.runDiagnostics", "Read TeamRun diagnostics", "team-run"),
             operation("team.runDecisionSubmit", "Submit TeamRun decision", "team-run"),
@@ -851,14 +849,6 @@ mod tests {
         let team = &outcome["result"]["capabilities"][10];
         assert_eq!(team["kind"], "team-runtime");
         assert_eq!(team["supportLevel"], "native");
-        let settled = team["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|operation| operation["id"] == "team.nodePromptSettled")
-            .unwrap();
-        assert_eq!(settled["targetKind"], "none");
-        assert_eq!(settled["targetRequired"], false);
         let retry_due = team["operations"]
             .as_array()
             .unwrap()

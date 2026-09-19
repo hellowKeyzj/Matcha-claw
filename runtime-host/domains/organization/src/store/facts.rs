@@ -3015,13 +3015,6 @@ impl OrganizationFacts {
         Ok(ControlNodeResolutionOutcome::Recorded)
     }
 
-    pub(crate) fn admit_role_chat(
-        &mut self,
-        admission: crate::RoleChatAdmission,
-    ) -> Result<crate::RoleChatAdmissionOutcome, crate::RoleChatAdmissionError> {
-        crate::run::delivery::admit_role_chat(self, admission)
-    }
-
     pub(crate) fn register_delivery(
         &mut self,
         request: crate::DeliveryRequest,

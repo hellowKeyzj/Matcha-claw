@@ -8,8 +8,16 @@ use foundation::execution::{OperationHandle, TraceContext};
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::driver::{
-    ActivityExecutionOutcome, ActivityExecutionRequest, OwnedRuntimeFuture, RuntimeDriverIdentity,
+use crate::{
+    runtime::driver::{
+        ActivityExecutionOutcome, ActivityExecutionRequest, OwnedRuntimeFuture,
+        RuntimeDriverIdentity,
+    },
+    sessions::{
+        command::{SessionEnsureOutcome, role_session_route_key},
+        send::{NativeEndpoint, SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
+        state::{SessionIdentity, SessionSourceBinding},
+    },
 };
 
 use super::{
@@ -458,22 +466,96 @@ fn execute_team_activity(
     input: &TeamRunCoordinatorInput,
     request: ActivityExecutionRequest,
 ) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
-    let Some(driver) = input.runtime_directory.all_drivers().find(|driver| {
-        driver.identity().runtime_endpoint_reference() == request.binding().endpoint().as_str()
-    }) else {
-        return Box::pin(async {
-            ActivityExecutionOutcome::Rejected {
-                rejection: organization::DeliveryRejection::Permanent,
+    let session = input.session.clone();
+    Box::pin(async move {
+        let delivery = request.delivery_request().clone();
+        let binding = request.binding().clone();
+        let Some(identity) = RuntimeDriverIdentity::from_reference(binding.endpoint().as_str())
+        else {
+            return ActivityExecutionOutcome::Unknown;
+        };
+        let Some(session_key) = identity.rendered_session_key(
+            binding.agent().as_str(),
+            binding.endpoint_session_id().as_str(),
+        ) else {
+            return ActivityExecutionOutcome::Unknown;
+        };
+        let Some(session_identity) = SessionIdentity::new(
+            session_key.clone(),
+            identity.session_provider(),
+            Some(binding.agent().as_str().to_owned()),
+        ) else {
+            return ActivityExecutionOutcome::Unknown;
+        };
+        let source_binding = SessionSourceBinding::team_from_receipt(&binding);
+        let ensure_outcome = session
+            .ensure_bound_session(session_identity, source_binding.clone())
+            .await;
+        match ensure_outcome {
+            Ok(SessionEnsureOutcome::Created(_)) | Ok(SessionEnsureOutcome::Existing(_)) => {}
+            Ok(SessionEnsureOutcome::RuntimeNotFound)
+            | Ok(SessionEnsureOutcome::RuntimeNoSessionSupport) => {
+                return ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Permanent,
+                };
             }
-        });
+            Ok(SessionEnsureOutcome::Failed) | Err(_) => return ActivityExecutionOutcome::Unknown,
+        }
+        let route_key = role_session_route_key(&session_key);
+        let command = match SessionSendCommand::try_new(
+            NativeEndpoint::from_runtime_endpoint(identity.endpoint()),
+            session_key,
+            Some(binding.endpoint_session_id().as_str().to_owned()),
+            route_key,
+            delivery.message,
+            None,
+            Some(delivery.idempotency_key),
+            Some(true),
+            Vec::new(),
+            None,
+        ) {
+            Ok(command) => command
+                .with_source_binding(source_binding)
+                .with_delivery_context(SessionDeliveryContext {
+                    delivery_id: delivery.delivery_id,
+                    endpoint_session_id: binding.endpoint_session_id().clone(),
+                }),
+            Err(_) => return ActivityExecutionOutcome::Unknown,
+        };
+        match session.send_session(command).await {
+            Ok(SessionSendOutcome::Queued { run_id })
+            | Ok(SessionSendOutcome::Succeeded { run_id, .. }) => {
+                accepted_activity_outcome(binding.endpoint_session_id().clone(), run_id)
+            }
+            Ok(SessionSendOutcome::Rejected) | Ok(SessionSendOutcome::Unsupported) => {
+                ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Permanent,
+                }
+            }
+            Ok(SessionSendOutcome::Unavailable) => ActivityExecutionOutcome::Rejected {
+                rejection: organization::DeliveryRejection::Retryable,
+            },
+            Ok(SessionSendOutcome::Unknown) | Err(_) => ActivityExecutionOutcome::Unknown,
+        }
+    })
+}
+
+fn accepted_activity_outcome(
+    endpoint_session_id: organization::EndpointSessionId,
+    run_id: String,
+) -> ActivityExecutionOutcome {
+    let Ok(receipt) = organization::DeliveryReceiptReference::try_new(run_id.clone()) else {
+        return ActivityExecutionOutcome::Unknown;
     };
-    match driver.team_ops() {
-        Some(ops) => ops.execute_activity(request),
-        None => Box::pin(async {
-            ActivityExecutionOutcome::Rejected {
-                rejection: organization::DeliveryRejection::Permanent,
-            }
-        }),
+    let Ok(native_run_receipt) = organization::NativeRunReceiptReference::try_new(run_id) else {
+        return ActivityExecutionOutcome::Unknown;
+    };
+    ActivityExecutionOutcome::Accepted {
+        receipt,
+        correlation: organization::NativeDeliveryCorrelation::new(
+            endpoint_session_id,
+            native_run_receipt,
+        ),
     }
 }
 

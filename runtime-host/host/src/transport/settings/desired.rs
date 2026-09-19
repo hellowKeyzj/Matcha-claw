@@ -69,17 +69,5 @@ fn valid(value: &Value) -> bool {
         && input.get("gatewayAutoStart").is_some_and(Value::is_boolean)
         && proxy.len() == 4
         && proxy.get("enabled").is_some_and(Value::is_boolean)
-        && safe_text(proxy.get("server"), 2048)
-        && safe_text(proxy.get("bypassRules"), 4096)
         && proxy.get("credentialReference") == Some(&Value::Null)
-        && proxy
-            .get("server")
-            .and_then(Value::as_str)
-            .is_none_or(|server| !server.contains('@'))
-}
-
-fn safe_text(value: Option<&Value>, maximum: usize) -> bool {
-    value.and_then(Value::as_str).is_some_and(|text| {
-        text.len() <= maximum && !text.contains('\0') && !text.contains(['\r', '\n'])
-    })
 }

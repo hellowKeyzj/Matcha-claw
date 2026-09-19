@@ -215,7 +215,7 @@ impl ScheduleInput {
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
 enum DeliveryInput {
-    None,
+    None {},
     Announce {
         channel: String,
         to: String,
@@ -226,7 +226,7 @@ enum DeliveryInput {
 impl DeliveryInput {
     fn into_command(self) -> CronDeliveryCommand {
         match self {
-            Self::None => CronDeliveryCommand::None,
+            Self::None {} => CronDeliveryCommand::None,
             Self::Announce {
                 channel,
                 to,
@@ -971,6 +971,21 @@ mod tests {
                 "enabled": true,
             },
         })
+    }
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        assert!(matches!(
+            decode_create(create_request()),
+            Ok(CronRequest::Create(_))
+        ));
+
+        let mut unknown_delivery_field = create_request();
+        unknown_delivery_field["input"]["delivery"]["bogus"] = json!(1);
+        assert!(matches!(
+            decode_create(unknown_delivery_field),
+            Err(DecodeError::Invalid)
+        ));
     }
 
     #[test]

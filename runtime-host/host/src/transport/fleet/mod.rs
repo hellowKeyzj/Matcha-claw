@@ -137,6 +137,36 @@ mod tests {
     }
 
     #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        for (operation, kind) in [
+            ("fleet.targets.list", "list"),
+            ("fleet.terminals.list", "terminalList"),
+        ] {
+            let mut accepted_verifier = verifier();
+            assert!(
+                Request::decode(
+                    json!({"operation":operation,"input":{"kind":kind}}),
+                    &decision(operation),
+                    &mut accepted_verifier,
+                    1
+                )
+                .is_ok()
+            );
+
+            let mut rejected_verifier = verifier();
+            assert!(matches!(
+                Request::decode(
+                    json!({"operation":operation,"input":{"kind":kind,"bogus":1}}),
+                    &decision(operation),
+                    &mut rejected_verifier,
+                    1
+                ),
+                Err(DecodeError::Invalid)
+            ));
+        }
+    }
+
+    #[test]
     fn snapshot_read_requires_exact_capability_and_read_scope() {
         let request = json!({"operation":"fleet.snapshot.get","input":{"kind":"snapshot"}});
         let mut valid_verifier = verifier();

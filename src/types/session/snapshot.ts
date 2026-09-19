@@ -266,6 +266,7 @@ export type SessionWireWindow = {
 export type SessionView = {
   sessionKey: string;
   endpointSessionId: string | null;
+  model: string | null;
   identity: SessionWireIdentity;
   epoch: number;
   seq: number;
@@ -784,7 +785,7 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
+  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'model', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
   const identity = decodeIdentity(value.identity);
   const items = decodeFact(value.items, (facts) => Array.isArray(facts) && facts.length <= MAX_ITEMS && facts.every((item) => decodeItem(item) !== null) ? facts.map((item) => decodeItem(item)!) : null);
   const tools = decodeFact(value.tools, (facts) => Array.isArray(facts) && facts.length <= MAX_TOOLS && facts.every((item) => decodeTool(item) !== null) ? facts.map((item) => decodeTool(item)!) : null);
@@ -794,12 +795,13 @@ function decodeView(value: unknown): SessionView | null {
   const completeness = decodeCompleteness(value.completeness);
   if (!identity || !isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
+    || (value.model !== null && !isNonEmptyIdentifier(value.model, MAX_SESSION_KEY_BYTES))
     || identity.sessionKey !== value.sessionKey
     || !isSafeInteger(value.epoch) || value.epoch < 1 || value.epoch > MAX_SAFE_INTEGER
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, model: value.model, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {

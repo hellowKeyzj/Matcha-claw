@@ -472,28 +472,6 @@ impl OrganizationStore {
         self.facts.resume_graph_runs(team_id)
     }
 
-    pub fn admit_role_chat(
-        &mut self,
-        admission: crate::RoleChatAdmission,
-    ) -> Result<crate::RoleChatAdmissionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .admit_role_chat(admission)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, crate::RoleChatAdmissionOutcome::Accepted { .. })
-            && candidate != self.facts
-        {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
-    }
-
     pub fn register_delivery(
         &mut self,
         request: crate::DeliveryRequest,

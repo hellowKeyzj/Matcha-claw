@@ -16,9 +16,10 @@ use crate::{
 use super::protocol::{
     self, ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
     ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
-    SessionDeleteResult, SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
-    SessionModelPatchResult, SessionPermissionMode, SessionPermissionPatchParams,
-    SessionPermissionProjection, SessionsListParams, SessionsListResult,
+    SessionDeleteResult, SessionDescribeParams, SessionDescribeRow, SessionLabelPatchParams,
+    SessionLabelPatchResult, SessionModelPatchParams, SessionModelPatchResult,
+    SessionPermissionMode, SessionPermissionPatchParams, SessionPermissionProjection,
+    SessionsListParams, SessionsListResult,
 };
 
 static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -44,6 +45,21 @@ impl SessionOperation {
             .await
             .map_err(OperationError::from)?;
         protocol::decode_sessions_list_result(&request_id, response).map_err(OperationError::from)
+    }
+
+    pub(crate) async fn describe_session(
+        &self,
+        params: SessionDescribeParams,
+    ) -> Result<Option<SessionDescribeRow>, OperationError> {
+        let request_id = next_request_id("sessions-describe")?;
+        let request = request(&request_id, protocol::SESSIONS_DESCRIBE_METHOD, params)?;
+        let response = self
+            .gateway
+            .rpc_query(request)
+            .await
+            .map_err(OperationError::from)?;
+        protocol::decode_session_describe_result(&request_id, response)
+            .map_err(OperationError::from)
     }
 
     pub(crate) async fn history(
@@ -580,6 +596,7 @@ mod tests {
         let create = protocol::SessionCreateParams::try_new(
             protocol::AgentId::try_new("mct-team").unwrap(),
             protocol::EndpointSessionId::try_new("team-endpoint-session-run-1-reviewer").unwrap(),
+            protocol::ModelRef::try_new("anthropic/claude-opus-4-7").unwrap(),
         )
         .unwrap();
         let delete = protocol::SessionDeleteParams::new(create.key().clone());
@@ -820,7 +837,8 @@ mod tests {
                             protocol::CHAT_ABORT_METHOD,
                             protocol::SESSIONS_PATCH_METHOD,
                             protocol::SESSIONS_CREATE_METHOD,
-                            protocol::SESSIONS_DELETE_METHOD
+                            protocol::SESSIONS_DELETE_METHOD,
+                            protocol::SESSIONS_DESCRIBE_METHOD
                         ],
                         "events": ["tick"]
                     },

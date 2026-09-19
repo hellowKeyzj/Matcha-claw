@@ -1,8 +1,10 @@
-use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Serialize;
 
-use super::state::SessionProvider;
-use crate::runtime::driver::RuntimeDriverIdentity;
+use organization::{DeliveryId, EndpointSessionId};
+
+use super::state::SessionSourceBinding;
+
+pub(crate) use super::endpoint::NativeEndpoint;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -12,54 +14,6 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 const MAX_ATTACHMENTS: usize = 16;
 const MAX_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeEndpoint {
-    OpenClawLocal,
-    MatchaAgentLocal,
-    Unsupported,
-}
-
-impl NativeEndpoint {
-    pub(crate) fn parse(
-        kind: &str,
-        runtime_adapter_id: &str,
-        runtime_instance_id: &str,
-    ) -> Option<Self> {
-        if kind != "native-runtime" {
-            return None;
-        }
-        RuntimeEndpoint::try_new(runtime_adapter_id, runtime_instance_id)
-            .ok()
-            .map(Self::from_runtime_endpoint)
-    }
-
-    pub(crate) fn from_runtime_endpoint(endpoint: RuntimeEndpoint) -> Self {
-        if endpoint == RuntimeDriverIdentity::open_claw().endpoint() {
-            Self::OpenClawLocal
-        } else if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
-            Self::MatchaAgentLocal
-        } else {
-            Self::Unsupported
-        }
-    }
-
-    pub(crate) const fn provider(self) -> SessionProvider {
-        match self {
-            Self::OpenClawLocal => SessionProvider::OpenClaw,
-            Self::MatchaAgentLocal => SessionProvider::MatchaAgent,
-            Self::Unsupported => SessionProvider::OpenClaw,
-        }
-    }
-
-    pub(crate) fn runtime_endpoint(self) -> Option<RuntimeEndpoint> {
-        match self {
-            Self::OpenClawLocal => Some(RuntimeDriverIdentity::open_claw().endpoint()),
-            Self::MatchaAgentLocal => Some(RuntimeDriverIdentity::matcha_agent().endpoint()),
-            Self::Unsupported => None,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Attachment {
@@ -87,6 +41,12 @@ impl Attachment {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionDeliveryContext {
+    pub(crate) delivery_id: DeliveryId,
+    pub(crate) endpoint_session_id: EndpointSessionId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionSendCommand {
     pub(crate) endpoint: NativeEndpoint,
     pub(crate) session_key: String,
@@ -103,6 +63,8 @@ pub(crate) struct SessionSendCommand {
     /// Host-private transport correlation; it is never serialized or projected to a peer.
     pub(crate) trace_id: Option<String>,
     pub(crate) system_provenance_receipt: Option<String>,
+    pub(crate) source_binding: SessionSourceBinding,
+    pub(crate) delivery_context: Option<SessionDeliveryContext>,
 }
 
 impl SessionSendCommand {
@@ -149,6 +111,8 @@ impl SessionSendCommand {
             attachments,
             trace_id,
             system_provenance_receipt: None,
+            source_binding: SessionSourceBinding::ordinary(),
+            delivery_context: None,
         })
     }
 
@@ -184,6 +148,16 @@ impl SessionSendCommand {
         }
         self.system_provenance_receipt = Some(receipt);
         Ok(self)
+    }
+
+    pub(crate) fn with_source_binding(mut self, binding: SessionSourceBinding) -> Self {
+        self.source_binding = binding;
+        self
+    }
+
+    pub(crate) fn with_delivery_context(mut self, context: SessionDeliveryContext) -> Self {
+        self.delivery_context = Some(context);
+        self
     }
 
     pub(crate) fn with_resolved_run_id(mut self, run_id: String) -> Result<Self, InvalidCommand> {

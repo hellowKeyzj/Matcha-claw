@@ -93,7 +93,7 @@ impl Delivery {
             Self::Snapshot(snapshot) => fleet_snapshot_json(snapshot),
             Self::SelectorPreview(preview) => selector_preview_json(preview.clone()),
             Self::Invalid => {
-                json!({"success":false,"error":"Fleet selector constraints are invalid"})
+                json!({"success":false,"error":"Fleet request is invalid"})
             }
             Self::Unavailable => json!({
                 "success": false,

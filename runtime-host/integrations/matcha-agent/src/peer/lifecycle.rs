@@ -37,14 +37,12 @@ use crate::{
         },
         history::{HistoryContentResult, HistoryListResult, HistoryLoadResult},
         hydration::HydrationWindowRequest,
-        model::{ApprovalId, OptionId, RunId, RunStatus, Sequence, SessionId},
-        receipt::{NativeRunSettled, TerminalRunReceipt, TerminalRunStatus},
+        model::{ApprovalId, OptionId, RunId, Sequence, SessionId},
         recovery::{ProjectionRecoveryReason, SessionRecovery},
         request::{
             SessionCancelParams, SessionLoadParams, SessionSetModelParams, SessionSnapshotParams,
         },
         role::{RolePrompt, RoleRunId, RoleSessionCwd, RoleSessionId},
-        watcher::{TerminalEventWatcher, TerminalWatchStep},
     },
 };
 
@@ -80,6 +78,7 @@ pub struct RoleSessionPromptHandle {
     handle: SupervisorHandle,
     endpoint: AppServerEndpoint,
     secret: Arc<Secret>,
+    source_epoch: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -312,42 +311,6 @@ pub enum RendererApprovalPhase {
     Resolved,
 }
 
-pub struct RoleTerminalWatch {
-    endpoint: AppServerEndpoint,
-    secret: Arc<Secret>,
-    session_id: SessionId,
-    run_id: RunId,
-}
-
-impl RoleTerminalWatch {
-    pub async fn wait(self) -> Option<TerminalRunStatus> {
-        self.wait_settled().await.map(|settled| settled.status())
-    }
-
-    pub async fn wait_settled(self) -> Option<NativeRunSettled> {
-        let Ok((client, _)) =
-            AppServerClient::connect_and_initialize_raw_only(self.endpoint, &self.secret).await
-        else {
-            return None;
-        };
-        let terminal = watch_terminal(
-            &client,
-            self.endpoint,
-            &self.secret,
-            self.session_id,
-            self.run_id,
-        )
-        .await;
-        client.finish_with_cleanup(terminal).await
-    }
-}
-
-impl fmt::Debug for RoleTerminalWatch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RoleTerminalWatch(<redacted>)")
-    }
-}
-
 impl RendererEvent {
     fn is_terminal(&self) -> bool {
         matches!(
@@ -415,147 +378,6 @@ async fn load_or_create_role_session(
             InvocationOutcome::Unknown
         }
         Err(error) => InvocationOutcome::TargetRejected(RoleSessionError::Client(error)),
-    }
-}
-
-async fn watch_terminal(
-    client: &AppServerClient,
-    endpoint: AppServerEndpoint,
-    secret: &Arc<Secret>,
-    session_id: SessionId,
-    run_id: RunId,
-) -> Option<NativeRunSettled> {
-    let mut events = client.raw_events();
-    let EventSubscriptionCursor::Subscribed(replay) = client
-        .subscribe_events_with_cursor(session_id.clone(), None)
-        .await
-        .ok()?
-    else {
-        return None;
-    };
-    let cursor = replay.cursor();
-    let (receipt, snapshot_cursor) =
-        read_terminal_receipt_with_cursor(client, session_id.clone(), run_id.clone())
-            .await
-            .ok()?;
-    match receipt {
-        TerminalRunReceipt::Found { status } => {
-            replay_terminal_settled(endpoint, secret, session_id, run_id.clone())
-                .await
-                .or_else(|| Some(NativeRunSettled::new(run_id, status, None)))
-        }
-        TerminalRunReceipt::Pending => {
-            let start_cursor = max_sequence(cursor, snapshot_cursor);
-            watch_terminal_events(
-                &mut events,
-                TerminalEventWatcher::resume_after(session_id, run_id, start_cursor),
-                start_cursor,
-            )
-            .await
-        }
-        TerminalRunReceipt::NotFound => None,
-    }
-}
-
-async fn replay_terminal_settled(
-    endpoint: AppServerEndpoint,
-    secret: &Arc<Secret>,
-    session_id: SessionId,
-    run_id: RunId,
-) -> Option<NativeRunSettled> {
-    let Ok((client, _)) = AppServerClient::connect_and_initialize_raw_only(endpoint, secret).await
-    else {
-        return None;
-    };
-    let terminal = replay_terminal_settled_with_client(&client, session_id, run_id).await;
-    client.finish_with_cleanup(terminal).await
-}
-
-async fn replay_terminal_settled_with_client(
-    client: &AppServerClient,
-    session_id: SessionId,
-    run_id: RunId,
-) -> Option<NativeRunSettled> {
-    let replay = client
-        .replay_event_payload(session_id.clone(), None, None)
-        .await
-        .ok()?;
-    let mut watcher =
-        TerminalEventWatcher::resume_after(session_id, run_id, Sequence::try_new(0).ok()?);
-    for event in replay.events() {
-        match watcher.observe(event.clone()) {
-            TerminalWatchStep::Pending => {}
-            TerminalWatchStep::Terminal(settled) => return Some(settled),
-            TerminalWatchStep::Stop => return None,
-        }
-    }
-    None
-}
-
-async fn read_terminal_receipt_with_cursor(
-    client: &AppServerClient,
-    session_id: SessionId,
-    run_id: RunId,
-) -> Result<(TerminalRunReceipt, Sequence), AppServerClientError> {
-    let snapshot = client
-        .snapshot_session(SessionSnapshotParams::new(session_id))
-        .await?;
-    let receipt = snapshot
-        .runs
-        .into_iter()
-        .find(|run| run.run_id == run_id)
-        .map(|run| terminal_receipt_from_status(run.status))
-        .unwrap_or(TerminalRunReceipt::NotFound);
-    Ok((receipt, snapshot.session.last_seq))
-}
-
-fn terminal_receipt_from_status(status: RunStatus) -> TerminalRunReceipt {
-    match status {
-        RunStatus::Queued { .. }
-        | RunStatus::Running { .. }
-        | RunStatus::WaitingForApproval { .. } => TerminalRunReceipt::Pending,
-        RunStatus::Completed { .. } => TerminalRunReceipt::Found {
-            status: TerminalRunStatus::Completed,
-        },
-        RunStatus::Cancelled { .. } => TerminalRunReceipt::Found {
-            status: TerminalRunStatus::Cancelled,
-        },
-        RunStatus::Failed { .. } => TerminalRunReceipt::Found {
-            status: TerminalRunStatus::Failed,
-        },
-        RunStatus::Interrupted { .. } => TerminalRunReceipt::Found {
-            status: TerminalRunStatus::Interrupted,
-        },
-    }
-}
-
-fn max_sequence(left: Sequence, right: Sequence) -> Sequence {
-    if right.get() > left.get() {
-        right
-    } else {
-        left
-    }
-}
-
-async fn watch_terminal_events(
-    events: &mut broadcast::Receiver<crate::session::client::RawEvent>,
-    mut watcher: TerminalEventWatcher,
-    cursor: Sequence,
-) -> Option<NativeRunSettled> {
-    loop {
-        match events.recv().await {
-            Ok(crate::session::client::RawEvent::Envelope(event))
-                if event.seq.get() <= cursor.get() => {}
-            Ok(crate::session::client::RawEvent::Envelope(event)) => match watcher.observe(event) {
-                TerminalWatchStep::Pending => {}
-                TerminalWatchStep::Terminal(settled) => return Some(settled),
-                TerminalWatchStep::Stop => return None,
-            },
-            Ok(crate::session::client::RawEvent::Overflow)
-            | Ok(crate::session::client::RawEvent::Closed)
-            | Err(broadcast::error::RecvError::Lagged(_))
-            | Err(broadcast::error::RecvError::Closed) => return None,
-        }
     }
 }
 
@@ -1056,6 +878,7 @@ impl MatchaPeer {
             handle: self.handle.clone(),
             endpoint: self.endpoint,
             secret: Arc::clone(&self.secret),
+            source_epoch: Arc::clone(&self.source_epoch),
         }
     }
 
@@ -1105,31 +928,6 @@ impl MatchaPeer {
             return crate::session::history::HistoryResult::Unavailable;
         }
         read_canonical_session(self.endpoint, &self.secret, session_id, request).await
-    }
-
-    /// Reads one terminal receipt through a new authenticated native-edge connection.
-    ///
-    /// The operation is admitted only while this peer supervisor is running. Pending,
-    /// not-found, connection, deadline, and protocol observations are returned without
-    /// synthesizing a terminal fact.
-    pub async fn read_terminal_receipt(
-        &self,
-        session_id: SessionId,
-        run_id: RunId,
-    ) -> Result<TerminalRunReceipt, TerminalReceiptReadError> {
-        if !receipt_reading_admitted(self.snapshot().phase()) {
-            return Err(TerminalReceiptReadError::RuntimeUnavailable);
-        }
-        let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
-        let (client, _) =
-            AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events)
-                .await
-                .map_err(TerminalReceiptReadError::Client)?;
-        let receipt = read_terminal_receipt_with_cursor(&client, session_id, run_id)
-            .await
-            .map(|(receipt, _)| receipt)
-            .map_err(TerminalReceiptReadError::Client);
-        client.finish_with_cleanup(receipt).await
     }
 
     pub async fn create_session(
@@ -1353,19 +1151,6 @@ impl MatchaPeer {
             InvocationOutcome::Unknown => InvocationOutcome::Unknown,
         };
         client.finish_with_cleanup(outcome).await
-    }
-
-    pub fn watch_role_terminal(
-        &self,
-        session_id: RoleSessionId,
-        run_id: RoleRunId,
-    ) -> Option<RoleTerminalWatch> {
-        receipt_reading_admitted(self.snapshot().phase()).then(|| RoleTerminalWatch {
-            endpoint: self.endpoint,
-            secret: Arc::clone(&self.secret),
-            session_id: session_id.native(),
-            run_id: run_id.native(),
-        })
     }
 
     async fn connect_role_session_client(&self) -> Result<AppServerClient, RoleSessionError> {
@@ -1993,32 +1778,6 @@ impl RoleSessionNativeHandle {
         };
         client.finish_with_cleanup(outcome).await
     }
-
-    pub async fn watch_role_terminal(
-        &self,
-        session_id: RoleSessionId,
-        run_id: RoleRunId,
-    ) -> Option<TerminalRunStatus> {
-        self.watch_role_terminal_settled(session_id, run_id)
-            .await
-            .map(|settled| settled.status())
-    }
-
-    pub async fn watch_role_terminal_settled(
-        &self,
-        session_id: RoleSessionId,
-        run_id: RoleRunId,
-    ) -> Option<NativeRunSettled> {
-        receipt_reading_admitted(self.handle.snapshot().phase())
-            .then_some(RoleTerminalWatch {
-                endpoint: self.endpoint,
-                secret: Arc::clone(&self.secret),
-                session_id: session_id.native(),
-                run_id: run_id.native(),
-            })?
-            .wait_settled()
-            .await
-    }
 }
 
 impl RoleSessionPromptHandle {
@@ -2026,38 +1785,67 @@ impl RoleSessionPromptHandle {
         &self,
         session_id: &RoleSessionId,
         prompt: RolePrompt,
-        run_id: Option<RoleRunId>,
+        run_id: RoleRunId,
+        renderer_session_key: String,
+        route_key: String,
+        events: mpsc::Sender<SessionSubscriptionItem>,
     ) -> InvocationOutcome<RoleRunId, RoleSessionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return InvocationOutcome::TargetRejected(RoleSessionError::RuntimeUnavailable);
         }
-        let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
-        let client = match AppServerClient::connect_and_initialize(
+        let (updates, _updates_rx) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
+        let client =
+            match AppServerClient::connect_and_initialize(self.endpoint, &self.secret, updates)
+                .await
+            {
+                Ok((client, _)) => client,
+                Err(error) => {
+                    return InvocationOutcome::TargetRejected(RoleSessionError::Client(error));
+                }
+            };
+        let params = prompt.into_params(session_id).with_run_id(run_id.native());
+        let subscription = match subscribe_renderer_events_raw(
             self.endpoint,
             &self.secret,
+            self.source_epoch.load(Ordering::Relaxed),
+            session_id.native(),
+            renderer_session_key,
+            run_id.native(),
+            route_key,
             events,
+            None,
         )
         .await
         {
-            Ok((client, _)) => client,
+            Ok(subscription) => subscription,
             Err(error) => {
-                return InvocationOutcome::TargetRejected(RoleSessionError::Client(error));
+                let error = match error {
+                    RendererSubscriptionError::RuntimeUnavailable => {
+                        RoleSessionError::RuntimeUnavailable
+                    }
+                    RendererSubscriptionError::Client(error) => RoleSessionError::Client(error),
+                };
+                return client
+                    .finish_with_cleanup(InvocationOutcome::TargetRejected(error))
+                    .await;
             }
-        };
-        let params = prompt.into_params(session_id);
-        let params = match run_id {
-            Some(run_id) => params.with_run_id(run_id.native()),
-            None => params,
         };
         let outcome = match client.prompt_session(params).await {
             InvocationOutcome::Succeeded(result) => {
                 InvocationOutcome::Succeeded(RoleRunId::from_native(result.run_id))
             }
             InvocationOutcome::TargetRejected(error) => {
+                subscription.abort();
                 InvocationOutcome::TargetRejected(RoleSessionError::Client(error))
             }
-            InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
-            InvocationOutcome::Unknown => InvocationOutcome::Unknown,
+            InvocationOutcome::Cancelled => {
+                subscription.abort();
+                InvocationOutcome::Cancelled
+            }
+            InvocationOutcome::Unknown => {
+                subscription.abort();
+                InvocationOutcome::Unknown
+            }
         };
         client.finish_with_cleanup(outcome).await
     }
@@ -2112,32 +1900,6 @@ impl fmt::Display for RoleSessionError {
 }
 
 impl std::error::Error for RoleSessionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::RuntimeUnavailable => None,
-            Self::Client(error) => Some(error),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TerminalReceiptReadError {
-    RuntimeUnavailable,
-    Client(AppServerClientError),
-}
-
-impl fmt::Display for TerminalReceiptReadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RuntimeUnavailable => {
-                formatter.write_str("matcha peer receipt reader is unavailable")
-            }
-            Self::Client(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for TerminalReceiptReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::RuntimeUnavailable => None,
@@ -2508,219 +2270,17 @@ mod role_session_tests {
 }
 
 #[cfg(test)]
-mod receipt_tests {
+mod renderer_tests {
     use foundation::process::supervision::SupervisorPhase;
-    use futures_util::{SinkExt, StreamExt};
     use serde_json::{Value, json};
-    use tokio::{
-        net::{TcpListener, TcpStream},
-        sync::mpsc,
-    };
-    use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
+    use tokio::sync::mpsc;
 
     use super::*;
-    use crate::{
-        lifecycle::secret::Secret,
-        session::{
-            approval::ApprovalRecord,
-            client::AppServerEndpoint,
-            model::EventId,
-            protocol_event::{Event, EventEnvelope},
-        },
+    use crate::session::{
+        approval::ApprovalRecord,
+        model::EventId,
+        protocol_event::{Event, EventEnvelope},
     };
-
-    fn watcher() -> TerminalEventWatcher {
-        TerminalEventWatcher::resume_after(
-            SessionId::try_new("watch-session").unwrap(),
-            RunId::try_new("watch-run").unwrap(),
-            Sequence::try_new(0).unwrap(),
-        )
-    }
-
-    async fn serve_app_server(
-        listener: TcpListener,
-        handler: impl AsyncFnOnce(&mut WebSocketStream<TcpStream>),
-    ) {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        let initialize = read_json(&mut socket).await;
-        assert_eq!(initialize["method"], "initialize");
-        send_json(
-            &mut socket,
-            json!({
-                "jsonrpc":"2.0",
-                "id":initialize["id"],
-                "result":{
-                    "protocolVersion":"matcha-agent-app-server-v1",
-                    "serverVersion":"2.2.1",
-                    "capabilities":{
-                        "eventReplay":true,
-                        "snapshots":true,
-                        "approvals":true,
-                        "sdkMessageEnvelope":true,
-                        "blobStore":true,
-                        "sessionTranscript":true
-                    }
-                }
-            }),
-        )
-        .await;
-        handler(&mut socket).await;
-    }
-
-    async fn connected_client(endpoint: AppServerEndpoint) -> AppServerClient {
-        let (updates, _receiver) = mpsc::channel(1);
-        AppServerClient::connect_and_initialize(
-            endpoint,
-            &Secret::new("terminal-replay-token".into()).unwrap(),
-            updates,
-        )
-        .await
-        .unwrap()
-        .0
-    }
-
-    async fn read_json(socket: &mut WebSocketStream<TcpStream>) -> Value {
-        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
-            panic!("expected text frame");
-        };
-        serde_json::from_str(text.as_str()).unwrap()
-    }
-
-    async fn send_json(socket: &mut WebSocketStream<TcpStream>, value: Value) {
-        socket
-            .send(Message::Text(value.to_string().into()))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminal_watcher_stops_on_closed_or_overflowed_raw_stream() {
-        let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
-        sender
-            .send(crate::session::client::RawEvent::Closed)
-            .unwrap();
-        assert_eq!(
-            watch_terminal_events(&mut receiver, watcher(), Sequence::try_new(0).unwrap()).await,
-            None
-        );
-
-        let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
-        sender
-            .send(crate::session::client::RawEvent::Overflow)
-            .unwrap();
-        assert_eq!(
-            watch_terminal_events(&mut receiver, watcher(), Sequence::try_new(0).unwrap()).await,
-            None
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminal_watcher_resumes_after_the_receipt_snapshot_cursor() {
-        let (sender, mut receiver) = tokio::sync::broadcast::channel(8);
-        sender
-            .send(crate::session::client::RawEvent::Envelope(
-                renderer_envelope(1, json!({"type":"run.completed","runId":"run-1"})),
-            ))
-            .unwrap();
-        sender
-            .send(crate::session::client::RawEvent::Envelope(
-                renderer_envelope(4, json!({"type":"run.completed","runId":"run-1"})),
-            ))
-            .unwrap();
-
-        let settled = watch_terminal_events(
-            &mut receiver,
-            TerminalEventWatcher::resume_after(
-                SessionId::try_new("session-1").unwrap(),
-                RunId::try_new("run-1").unwrap(),
-                Sequence::try_new(3).unwrap(),
-            ),
-            Sequence::try_new(3).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(settled.native_run_id().as_str(), "run-1");
-        assert_eq!(settled.status(), TerminalRunStatus::Completed);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminal_replay_binds_final_text_to_the_requested_run() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = AppServerEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
-        let server = tokio::spawn(serve_app_server(listener, async |socket| {
-            let request = read_json(socket).await;
-            assert_eq!(request["method"], "events.replay");
-            assert_eq!(request["params"], json!({"sessionId": "session-1"}));
-            send_json(
-                socket,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {
-                        "events": [
-                            replay_envelope(1, "run-1", json!({"type":"message.delta","messageId":"message-1","delta":"run-1 final"})),
-                            replay_envelope(2, "run-2", json!({"type":"message.delta","messageId":"message-2","delta":"run-2 final"})),
-                            replay_envelope(3, "run-2", json!({"type":"run.completed","runId":"run-2"})),
-                            replay_envelope(4, "run-1", json!({"type":"run.completed","runId":"run-1"}))
-                        ]
-                    }
-                }),
-            )
-            .await;
-        }));
-
-        let client = connected_client(endpoint).await;
-        let settled = replay_terminal_settled_with_client(
-            &client,
-            SessionId::try_new("session-1").unwrap(),
-            RunId::try_new("run-1").unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(settled.status(), TerminalRunStatus::Completed);
-        assert_eq!(settled.final_assistant_text(), Some("run-1 final"));
-        drop(client);
-        server.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn terminal_replay_preserves_missing_final_text_as_none() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = AppServerEndpoint::try_new(listener.local_addr().unwrap()).unwrap();
-        let server = tokio::spawn(serve_app_server(listener, async |socket| {
-            let request = read_json(socket).await;
-            assert_eq!(request["method"], "events.replay");
-            send_json(
-                socket,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {
-                        "events": [
-                            replay_envelope(1, "run-1", json!({"type":"run.completed","runId":"run-1"}))
-                        ]
-                    }
-                }),
-            )
-            .await;
-        }));
-
-        let client = connected_client(endpoint).await;
-        let settled = replay_terminal_settled_with_client(
-            &client,
-            SessionId::try_new("session-1").unwrap(),
-            RunId::try_new("run-1").unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(settled.status(), TerminalRunStatus::Completed);
-        assert_eq!(settled.final_assistant_text(), None);
-        drop(client);
-        server.await.unwrap();
-    }
 
     #[test]
     fn renderer_event_envelope_exposes_only_safe_provenance_and_projection() {
@@ -2850,17 +2410,6 @@ mod receipt_tests {
     }
 
     #[test]
-    fn cleanup_close_failure_preserves_an_observed_terminal_event() {
-        assert_eq!(
-            crate::session::client::outcome_after_cleanup(
-                Some(TerminalRunStatus::Completed),
-                Err(AppServerClientError::CloseFailed),
-            ),
-            Some(TerminalRunStatus::Completed)
-        );
-    }
-
-    #[test]
     fn cleanup_close_failure_preserves_pending_approval_snapshot() {
         let approvals = pending_approvals_from_snapshot(vec![approval_record()]);
         assert_eq!(
@@ -2884,29 +2433,6 @@ mod receipt_tests {
             ),
             InvocationOutcome::Succeeded(())
         );
-    }
-
-    #[test]
-    fn role_terminal_watch_debug_is_redacted() {
-        let output = format!(
-            "{:?}",
-            RoleTerminalWatch {
-                endpoint: AppServerEndpoint::try_new("127.0.0.1:19003".parse().unwrap()).unwrap(),
-                secret: Arc::new(Secret::new("secret-canary".into()).unwrap()),
-                session_id: SessionId::try_new("session-canary").unwrap(),
-                run_id: RunId::try_new("run-canary").unwrap(),
-            }
-        );
-
-        assert_eq!(output, "RoleTerminalWatch(<redacted>)");
-        for canary in [
-            "session-canary",
-            "run-canary",
-            "secret-canary",
-            "127.0.0.1:19003",
-        ] {
-            assert!(!output.contains(canary));
-        }
     }
 
     fn approval_record() -> ApprovalRecord {
@@ -3194,21 +2720,6 @@ mod receipt_tests {
             SupervisorPhase::ShutDown,
         ] {
             assert!(!receipt_reading_admitted(phase));
-        }
-    }
-
-    #[test]
-    fn receipt_read_errors_are_fixed_and_redacted() {
-        let error = TerminalReceiptReadError::Client(AppServerClientError::PeerRejected);
-        let rendered = format!("{error:?} {error}");
-        assert_eq!(error.to_string(), "app-server rejected request");
-        for canary in [
-            "receipt-session-canary",
-            "receipt-run-canary",
-            "receipt-secret-canary",
-            "127.0.0.1:19001",
-        ] {
-            assert!(!rendered.contains(canary));
         }
     }
 

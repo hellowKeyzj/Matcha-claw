@@ -5,7 +5,6 @@ import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useRuntimeHostStore } from '@/stores/gateway';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
@@ -155,20 +154,6 @@ describe('chat model picker', () => {
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
 
-    useCapabilityRoutingStore.setState({
-      routing: {
-        chat: {
-          primary: { accountId: 'openai', modelId: 'gpt-5.4' },
-          fallbacks: [],
-        },
-      },
-      revision: 1,
-      ready: true,
-      loading: false,
-      saving: false,
-      error: null,
-    } as never);
-
     useSubagentsStore.setState({
       agents: [
         {
@@ -207,6 +192,7 @@ describe('chat model picker', () => {
           providerLabel: 'openai',
           modelLabel: 'gpt-5.4',
           displayLabel: 'openai / gpt-5.4',
+          modelReferences: ['provider/private-default-model', 'custom-4ee8e78e/gpt-5.4'],
         },
         {
           id: 'anthropic/claude-opus-4-6',
@@ -323,11 +309,14 @@ describe('chat model picker', () => {
     } as never);
   });
 
-  it('switches the current session model via session patch', async () => {
+  it('switches the current session model via session patch and refreshes peer truth', async () => {
+    const loadSessions = vi.mocked(useChatStore.getState().loadSessions);
+
     renderChat();
 
     const picker = await screen.findByTestId('chat-model-picker');
     expect(picker).toHaveTextContent('gpt-5.4');
+    loadSessions.mockClear();
 
     fireEvent.click(picker);
     fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
@@ -344,9 +333,10 @@ describe('chat model picker', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('claude-opus-4-6');
+      expect(loadSessions).toHaveBeenCalledTimes(1);
     });
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
   });
 
   it.each(['target_rejected', 'outcome_unknown'] as const)(
@@ -394,7 +384,7 @@ describe('chat model picker', () => {
     expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
   });
 
-  it('shows the first available model for sessions without a session or agent default model without patching', async () => {
+  it('does not show a model picker for sessions without a runtime model', async () => {
     const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
@@ -407,45 +397,16 @@ describe('chat model picker', () => {
         },
       },
     } as never);
-    useSubagentsStore.setState({
-      agentsResource: {
-        status: 'ready',
-        data: [
-          {
-            id: 'test',
-            name: 'Test Agent',
-            workspace: '.',
-            skills: [],
-            isDefault: false,
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        ],
-        error: null,
-        loading: false,
-        hasLoadedOnce: true,
-        loadedAt: 1,
-      },
-      agents: [
-        {
-          id: 'test',
-          name: 'Test Agent',
-          workspace: '.',
-          skills: [],
-          isDefault: false,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
-    } as never);
 
     renderChat();
 
-    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
+    await waitFor(() => {
+      expect(screen.queryByTestId('chat-model-picker')).not.toBeInTheDocument();
+    });
     expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 
-  it('shows the current available model for stale session model metadata without patching', async () => {
+  it('maps a runtime model reference to the current catalog entry without patching', async () => {
     const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
@@ -458,38 +419,6 @@ describe('chat model picker', () => {
         },
       },
     } as never);
-    useSubagentsStore.setState({
-      agentsResource: {
-        status: 'ready',
-        data: [
-          {
-            id: 'test',
-            name: 'Test Agent',
-            workspace: '.',
-            skills: [],
-            isDefault: false,
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        ],
-        error: null,
-        loading: false,
-        hasLoadedOnce: true,
-        loadedAt: 1,
-      },
-      agents: [
-        {
-          id: 'test',
-          name: 'Test Agent',
-          workspace: '.',
-          skills: [],
-          isDefault: false,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
-    } as never);
-
     renderChat();
 
     expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');

@@ -179,6 +179,9 @@ pub(crate) fn pending_run_activity_ids(
     run_id: &GraphRunId,
     now: u64,
 ) -> Vec<ActivityId> {
+    if !run_allows_activity_execution(store, run_id) {
+        return Vec::new();
+    }
     store
         .facts()
         .activities()
@@ -192,6 +195,16 @@ pub(crate) fn pending_run_activity_ids(
             _ => None,
         })
         .collect()
+}
+
+pub(crate) fn run_allows_activity_execution(
+    store: &OrganizationStore,
+    run_id: &GraphRunId,
+) -> bool {
+    store.facts().run(run_id).is_some_and(|run| {
+        matches!(run.lifecycle().state(), GraphRunLifecycleState::Active)
+            && matches!(run.start_gate(), RunStartGate::Started)
+    })
 }
 
 pub(crate) fn activity_belongs_to(

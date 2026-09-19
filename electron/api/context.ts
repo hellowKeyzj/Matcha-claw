@@ -96,7 +96,6 @@ export type TeamApiContext = RuntimeHostTransportContext<
   | 'teamLifecycleTransport'
   | 'manualTeamTransport'
   | 'teamHumanDecisionTransport'
-  | 'teamRoleChatTransport'
 >;
 
 export type ChatHistoryApiContext = RuntimeHostTransportContext<'matchaAgentHistoryTransport'>;

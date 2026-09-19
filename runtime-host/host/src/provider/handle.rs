@@ -8,8 +8,8 @@ use tokio::sync::oneshot;
 use crate::{
     provider::{account_draft::ProviderAccountDraft, auth::Resolver},
     sessions::model_selection::{
-        MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
-        SessionModelSelectionCommand, SessionModelSelectionOutcome,
+        MatchaSessionModelRuntimeCommand, NativeEndpoint, ResolvedSessionModelSelection,
+        SessionModelSelectionCommand, SessionModelSelectionOutcome, SessionRuntimeModelCommand,
     },
 };
 
@@ -219,6 +219,37 @@ impl ProviderHandle {
         let (reply, rx) = oneshot::channel();
         self.owner
             .send_query(ProviderQuery::ResolveMatchaSessionModelRuntime { command, reply })
+            .await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
+        rx.await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?
+    }
+
+    pub(crate) async fn accept_session_runtime_models(
+        &self,
+        endpoint: NativeEndpoint,
+        model_refs: Vec<String>,
+    ) -> Result<Vec<bool>, SessionModelSelectionOutcome> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::AcceptSessionRuntimeModels {
+                endpoint,
+                model_refs,
+                reply,
+            })
+            .await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
+        rx.await
+            .map_err(|_| SessionModelSelectionOutcome::Unavailable)?
+    }
+
+    pub(crate) async fn resolve_session_model_rebound(
+        &self,
+        command: SessionRuntimeModelCommand,
+    ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::ResolveSessionModelRebound { command, reply })
             .await
             .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
         rx.await

@@ -56,7 +56,6 @@ import { handleTeamGraphRoutes } from './routes/team-graph';
 import { handleTeamLifecycleRoutes } from './routes/team-lifecycle';
 import { handleTeamPublicRoutes } from './routes/team-public';
 import { handleTeamTaskBoardRoutes } from './routes/team-task-board';
-import { handleTeamRoleChatRoutes } from './routes/team-role-chat';
 import { handleTeamRoleSessionsRoutes } from './routes/team-role-sessions';
 import { handleTeamSkillRoutes } from './routes/team-skill';
 import { handleTeamTriggerRoutes } from './routes/team-trigger';
@@ -156,7 +155,6 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleTeamLifecycleRoutes(req, res, url, deps.runtimeHostTransports.teamLifecycleTransport),
   (req, res, url, deps) => handleTeamPublicRoutes(req, res, url, deps.runtimeHostTransports.teamPublicTransport),
   (req, res, url, deps) => handleTeamTaskBoardRoutes(req, res, url, deps.runtimeHostTransports.teamTaskBoardTransport),
-  (req, res, url, deps) => handleTeamRoleChatRoutes(req, res, url, deps.runtimeHostTransports.teamRoleChatTransport),
   (req, res, url, deps) => handleTeamRoleSessionsRoutes(req, res, url, deps.runtimeHostTransports.teamRoleSessionsTransport),
   (req, res, url, deps) => handleTeamSkillRoutes(req, res, url, deps.runtimeHostTransports.teamSkillTransport),
   (req, res, url, deps) => handleTeamTriggerRoutes(req, res, url, deps.runtimeHostTransports.teamTriggerTransport),

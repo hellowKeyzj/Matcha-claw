@@ -13,7 +13,7 @@ use ::matcha_agent::{
     peer::{
         LifecycleError as MatchaLifecycleError, MatchaPeer, MatchaPeerFactory, MatchaPeerInput,
         MatchaPeerLifecycleHandle, MatchaPeerSessionHandle, RoleSessionNativeHandle,
-        RoleSessionPromptHandle, SessionSubscriptionItem,
+        SessionSubscriptionItem,
     },
     session::{
         client::AppServerClientError,
@@ -21,7 +21,7 @@ use ::matcha_agent::{
         hydration::{HydrationWindowMode, HydrationWindowRequest},
         model::{RunId, SessionId},
     },
-    team::{abort_role_sessions, delete_role_sessions, deliver_prompt, deliver_prompt_with_handle},
+    team::{abort_role_sessions, delete_role_sessions},
 };
 
 pub use ::matcha_agent::peer::ConstructionError;
@@ -29,7 +29,7 @@ pub use ::matcha_agent::peer::ConstructionError;
 use crate::{
     runtime::driver::{
         LifecycleOps, OwnedRuntimeFuture, RuntimeCapabilitySurface, RuntimeDriver,
-        RuntimeDriverIdentity, SessionOps, TeamOps, TeamTerminalOps,
+        RuntimeDriverIdentity, SessionOps, TeamOps,
     },
     sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
     sessions::approval::{

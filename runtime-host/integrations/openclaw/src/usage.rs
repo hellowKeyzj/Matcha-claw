@@ -490,6 +490,34 @@ fn safe_session_id(value: &str) -> bool {
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && !is_compaction_checkpoint_session_id(value)
+}
+
+/// OpenClaw's `validateSessionId` rejects `<id>.checkpoint.<uuid>` because that
+/// shape names a derived compaction snapshot, which would double-index usage.
+/// `COMPACTION_CHECKPOINT_TRANSCRIPT_RE` matches with `/i`, so the marker and
+/// the uuid hex are both case-insensitive.
+fn is_compaction_checkpoint_session_id(value: &str) -> bool {
+    const MARKER: &[u8] = b".checkpoint.";
+    let Some(index) = value
+        .as_bytes()
+        .windows(MARKER.len())
+        .rposition(|window| window.eq_ignore_ascii_case(MARKER))
+    else {
+        return false;
+    };
+    index > 0 && is_uuid(&value[index + MARKER.len()..])
+}
+
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            14 => matches!(byte, b'1'..=b'5'),
+            19 => matches!(byte, b'8' | b'9' | b'a' | b'b' | b'A' | b'B'),
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 fn safe_session_key(value: &str) -> bool {
@@ -665,6 +693,24 @@ mod tests {
                 Err(UsageReadError::Unavailable)
             );
         }
+    }
+
+    #[test]
+    fn rejects_compaction_checkpoint_session_ids_case_insensitively() {
+        assert!(!safe_session_id(
+            "A.CHECKPOINT.0f8e1a2b-3c4d-4e5f-8a9b-1c2d3e4f5a6b"
+        ));
+        assert!(!safe_session_id(
+            "s.checkpoint.0F8E1A2B-3C4D-4E5F-8A9B-1C2D3E4F5A6B"
+        ));
+        assert!(!safe_session_id(
+            "s.CHECKPOINT.0F8E1A2B-3C4D-4E5F-8A9B-1C2D3E4F5A6B"
+        ));
+        assert!(!safe_session_id(
+            "s.checkpoint.123e4567-e89b-42d3-a456-426614174000"
+        ));
+        assert!(safe_session_id("session-1"));
+        assert!(safe_session_id("s.checkpoint.not-a-uuid"));
     }
 
     #[test]

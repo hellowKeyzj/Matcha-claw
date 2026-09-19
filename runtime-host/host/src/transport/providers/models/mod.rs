@@ -54,7 +54,7 @@ struct Target {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Input {
-    List,
+    List {},
     Selectable {
         capability: String,
     },
@@ -129,7 +129,7 @@ impl ProviderModelsRequest {
 
     fn validate(&self) -> Result<(), RequestError> {
         let valid_operation = match (&self.operation_id, &self.input) {
-            (operation, Input::List) => operation == "providerModels.list",
+            (operation, Input::List {}) => operation == "providerModels.list",
             (operation, Input::Selectable { .. }) => operation == "providerModels.listSelectable",
             (operation, Input::Discover { .. }) => operation == "providerModels.discover",
             (operation, Input::Replace { .. }) => operation == "providerModels.replace",
@@ -144,7 +144,7 @@ impl ProviderModelsRequest {
 
     pub(crate) fn into_command(self) -> Result<ProviderModelsCommand, RequestError> {
         match self.input {
-            Input::List => Ok(ProviderModelsCommand::List),
+            Input::List {} => Ok(ProviderModelsCommand::List),
             Input::Selectable { capability } => capability_for(&capability)
                 .map(ProviderModelsCommand::Selectable)
                 .ok_or(RequestError::Invalid),
@@ -461,6 +461,30 @@ mod tests {
             "input": { "kind": "discover", "accountId": "account-main" },
         });
         assert!(ProviderModelsRequest::decode_semantics_for_test(request).is_ok());
+    }
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        let list = json!({
+            "id": "provider.models",
+            "operationId": "providerModels.list",
+            "scope": { "kind": "provider-model-catalog" },
+            "target": { "kind": "provider-models" },
+            "input": { "kind": "list" },
+        });
+        assert!(ProviderModelsRequest::decode_semantics_for_test(list).is_ok());
+
+        let invalid = json!({
+            "id": "provider.models",
+            "operationId": "providerModels.list",
+            "scope": { "kind": "provider-model-catalog" },
+            "target": { "kind": "provider-models" },
+            "input": { "kind": "list", "bogus": 1 },
+        });
+        assert!(matches!(
+            ProviderModelsRequest::decode_semantics_for_test(invalid),
+            Err(RequestError::Invalid)
+        ));
     }
 
     #[test]

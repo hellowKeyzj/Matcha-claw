@@ -1,4 +1,12 @@
 use super::*;
+use crate::sessions::{
+    model_selection::{
+        NativeEndpoint, SessionModelSelectionDiagnostic, SessionRuntimeModelCommand,
+        SessionRuntimeModelSource,
+    },
+    state::SessionView,
+    timeline,
+};
 
 impl OpenClawInstance {
     pub(crate) async fn list_sessions(
@@ -41,13 +49,6 @@ impl OpenClawInstance {
         openclaw::port::OpenClawSessionError,
     > {
         self.session_gateway.abort_chat(params).await
-    }
-
-    pub(crate) async fn wait_session_native_run(
-        &self,
-        native_run_id: String,
-    ) -> Option<crate::runtime::driver::NativeRunSettled> {
-        super::team::wait_openclaw_native_run(&self.gateway, native_run_id).await
     }
 
     pub(crate) async fn patch_session_label(
@@ -136,6 +137,61 @@ impl OpenClawInstance {
                 SessionPermissionOutcome::Unavailable
             }
         }
+    }
+
+    pub(crate) async fn session_runtime_model_facts(
+        &self,
+        session_key: String,
+    ) -> Result<
+        SessionRuntimeModelFacts,
+        crate::sessions::RuntimeSessionError<openclaw::port::OpenClawSessionError>,
+    > {
+        let session_key =
+            openclaw::session::protocol::SessionKey::try_new(session_key).map_err(|_| {
+                crate::sessions::RuntimeSessionError::Client(
+                    openclaw::port::OpenClawSessionError::TargetRejected,
+                )
+            })?;
+        let row = self
+            .session_gateway
+            .describe_session(openclaw::session::protocol::SessionDescribeParams::new(
+                session_key,
+                None,
+            ))
+            .await
+            .map_err(crate::sessions::RuntimeSessionError::Client)?;
+        Ok(match row {
+            Some(row) => SessionRuntimeModelFacts {
+                current_model: row.model_ref(),
+                agent_id: row.agent_id.map(|agent_id| agent_id.as_str().to_owned()),
+                model_override_source: row.model_override_source.map(|source| match source {
+                    openclaw::session::protocol::SessionModelOverrideSource::User => {
+                        SessionRuntimeModelSource::User
+                    }
+                    openclaw::session::protocol::SessionModelOverrideSource::Auto => {
+                        SessionRuntimeModelSource::Auto
+                    }
+                }),
+            },
+            None => SessionRuntimeModelFacts {
+                current_model: None,
+                agent_id: None,
+                model_override_source: None,
+            },
+        })
+    }
+
+    async fn configured_agent_model(&self, agent_id: &str) -> Option<String> {
+        self.gateway
+            .lock()
+            .await
+            .list_agents()
+            .await
+            .ok()?
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .and_then(|agent| agent.model)
     }
 
     pub(crate) async fn select_session_model(
@@ -256,17 +312,231 @@ fn project_openclaw_session_catalog_entry(
         key: entry.session_key.as_str().to_owned(),
         agent_id: entry.agent_id.as_str().to_owned(),
         endpoint_session_id: entry.endpoint_session_id,
+        model: session.model,
         updated_at: session.updated_at,
     })
 }
 
+impl SessionOpenOps for OpenClawInstance {
+    fn on_load_session_timeline<'a>(
+        &'a self,
+        command: &'a timeline::Command,
+        view: SessionView,
+        provider_handle: ProviderHandle,
+    ) -> crate::runtime::driver::SessionFuture<'a, SessionView> {
+        Box::pin(async move {
+            log_session_model_reconcile_entered(command.session_key());
+            let Ok(facts) = self
+                .session_runtime_model_facts(command.session_key().to_owned())
+                .await
+            else {
+                log_session_model_reconcile_skipped("describe", command, None, None);
+                return view;
+            };
+            let endpoint = NativeEndpoint::OpenClawLocal;
+            if matches!(
+                facts.model_override_source,
+                Some(SessionRuntimeModelSource::User | SessionRuntimeModelSource::Auto)
+            ) {
+                if let Some(model) = facts.current_model.as_deref() {
+                    let accepted = provider_handle
+                        .accept_session_runtime_models(endpoint, vec![model.to_owned()])
+                        .await;
+                    if matches!(accepted.as_ref(), Ok(accepted) if accepted.first() == Some(&true))
+                    {
+                        log_session_model_reconcile_kept(command.session_key(), model);
+                        return SessionView {
+                            model: Some(model.to_owned()),
+                            ..view
+                        };
+                    }
+                    if accepted.is_err() {
+                        log_session_model_reconcile_skipped(
+                            "judge_unavailable",
+                            command,
+                            facts.current_model.as_deref(),
+                            None,
+                        );
+                    }
+                }
+            }
+            let default_model = match facts.agent_id.as_deref() {
+                Some(agent_id) => self.configured_agent_model(agent_id).await,
+                None => None,
+            };
+            let Ok(rebound) = SessionRuntimeModelCommand::try_new(
+                endpoint,
+                command.session_key().to_owned(),
+                command.endpoint_session_id().map(str::to_owned),
+                facts.current_model.clone(),
+                default_model.clone(),
+            ) else {
+                log_session_model_reconcile_skipped(
+                    "command_invalid",
+                    command,
+                    facts.current_model.as_deref(),
+                    default_model.as_deref(),
+                );
+                return view;
+            };
+            let Ok(mut selection) = provider_handle.resolve_session_model_rebound(rebound).await
+            else {
+                log_session_model_reconcile_skipped(
+                    "rebound_unresolved",
+                    command,
+                    facts.current_model.as_deref(),
+                    default_model.as_deref(),
+                );
+                return view;
+            };
+            let resolved_model = selection.openclaw_model_ref().map(str::to_owned);
+            let diagnostic = selection.diagnostic.take();
+            let outcome = self.select_session_model(selection).await;
+            if outcome != SessionModelSelectionOutcome::Succeeded {
+                log_session_model_reconcile_skipped(
+                    "patch_rejected",
+                    command,
+                    facts.current_model.as_deref(),
+                    resolved_model.as_deref(),
+                );
+                log_session_model_patch_rejected(command.session_key(), &outcome);
+                return view;
+            }
+            log_session_model_reconciled(
+                command.session_key(),
+                facts.current_model.as_deref(),
+                resolved_model.as_deref(),
+                diagnostic.as_ref(),
+            );
+            SessionView {
+                model: resolved_model,
+                ..view
+            }
+        })
+    }
+
+    fn agent_default_model<'a>(
+        &'a self,
+        agent_id: String,
+    ) -> crate::runtime::driver::SessionFuture<'a, Option<String>> {
+        Box::pin(async move { self.configured_agent_model(&agent_id).await })
+    }
+}
+
+fn log_session_model_reconciled(
+    session_key: &str,
+    previous_model: Option<&str>,
+    resolved_model: Option<&str>,
+    diagnostic: Option<&SessionModelSelectionDiagnostic>,
+) {
+    use crate::transport::sessions::trace as session_trace;
+
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-model.reconciled",
+            "sessionKey": session_trace::id_shape(Some(session_key)),
+            "previousModel": session_trace::id_shape(previous_model),
+            "resolvedModel": session_trace::id_shape(resolved_model),
+            "accountId": diagnostic.map(SessionModelSelectionDiagnostic::account_id),
+            "modelId": diagnostic.map(SessionModelSelectionDiagnostic::model_id),
+        })
+    );
+}
+
+fn log_session_model_reconcile_entered(session_key: &str) {
+    use crate::transport::sessions::trace as session_trace;
+
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-model.reconcile-entered",
+            "sessionKey": session_trace::id_shape(Some(session_key)),
+        })
+    );
+}
+
+fn log_session_model_reconcile_kept(session_key: &str, model: &str) {
+    use crate::transport::sessions::trace as session_trace;
+
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-model.reconcile-kept",
+            "sessionKey": session_trace::id_shape(Some(session_key)),
+            "model": session_trace::id_shape(Some(model)),
+        })
+    );
+}
+
+fn log_session_model_reconcile_skipped(
+    reason: &'static str,
+    command: &timeline::Command,
+    current_model: Option<&str>,
+    candidate_model: Option<&str>,
+) {
+    use crate::transport::sessions::trace as session_trace;
+
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-model.reconcile-skipped",
+            "reason": reason,
+            "sessionKey": session_trace::id_shape(Some(command.session_key())),
+            "endpointSessionId": session_trace::id_shape(command.endpoint_session_id()),
+            "currentModel": session_trace::id_shape(current_model),
+            "candidateModel": session_trace::id_shape(candidate_model),
+        })
+    );
+}
+
+fn log_session_model_patch_rejected(session_key: &str, outcome: &SessionModelSelectionOutcome) {
+    use crate::transport::sessions::trace as session_trace;
+
+    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "prefix": "session-trace",
+            "source": "runtime-host",
+            "stage": "runtime.session-model.patch-rejected",
+            "sessionKey": session_trace::id_shape(Some(session_key)),
+            "rejection": outcome.rejection_reason(),
+            "peerCode": outcome
+                .openclaw_patch_rejection()
+                .map(|rejection| rejection.code().to_owned()),
+            "peerMessage": outcome
+                .openclaw_patch_rejection()
+                .map(|rejection| rejection.message().to_owned()),
+        })
+    );
+}
+
 impl SessionOps for OpenClawInstance {
     fn admission(&self) -> SessionAdmission {
-        SessionAdmission::agent_scoped(
-            RuntimeDriverIdentity::open_claw().endpoint(),
-            crate::sessions::state::SessionProvider::OpenClaw,
-            "agent",
-        )
+        SessionAdmission::new(RuntimeDriverIdentity::open_claw())
     }
 
     fn abort_session<'a>(
@@ -282,7 +552,15 @@ impl SessionOps for OpenClawInstance {
         epoch: u64,
     ) -> crate::runtime::driver::SessionFuture<'a, SessionCreateOutcome> {
         Box::pin(async move {
-            let params = match command.clone().into_openclaw_params() {
+            let default_model = match self.configured_agent_model(command.agent_id()).await {
+                Some(model) => model,
+                None => return SessionCreateOutcome::Unavailable,
+            };
+            let model = match openclaw::session::protocol::ModelRef::try_new(default_model) {
+                Ok(model) => model,
+                Err(_) => return SessionCreateOutcome::TargetRejected,
+            };
+            let params = match command.clone().into_openclaw_params(model) {
                 Ok(params) => params,
                 Err(_) => return SessionCreateOutcome::TargetRejected,
             };
@@ -309,6 +587,10 @@ impl SessionOps for OpenClawInstance {
                 .map_err(crate::sessions::RuntimeSessionError::Client)?;
             Ok(project_openclaw_session_catalog(result))
         })
+    }
+
+    fn open_session_ops(&self) -> Option<&dyn SessionOpenOps> {
+        Some(self)
     }
 
     fn history<'a>(
@@ -487,15 +769,6 @@ impl SessionOps for OpenClawInstance {
         command: SessionSendCommand,
     ) -> crate::runtime::driver::SessionFuture<'a, SessionSendOutcome> {
         Box::pin(self.send_session(command))
-    }
-
-    fn wait_session_native_run<'a>(
-        &'a self,
-        _endpoint_session_id: Option<String>,
-        native_run_id: String,
-    ) -> crate::runtime::driver::SessionFuture<'a, Option<crate::runtime::driver::NativeRunSettled>>
-    {
-        Box::pin(self.wait_session_native_run(native_run_id))
     }
 
     fn abort_open_claw_chat<'a>(

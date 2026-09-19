@@ -58,7 +58,7 @@ struct Target {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Input {
-    List,
+    List {},
     Replace { routing: RoutingDraft },
 }
 
@@ -128,7 +128,7 @@ impl ProviderRoutingRequest {
 
     fn validate(&self) -> Result<(), RequestError> {
         let valid_operation = match (&self.operation_id, &self.input) {
-            (operation, Input::List) => operation == "providerRouting.list",
+            (operation, Input::List {}) => operation == "providerRouting.list",
             (operation, Input::Replace { .. }) => operation == "providerRouting.replace",
         };
         (self.id == CAPABILITY_ID
@@ -141,7 +141,7 @@ impl ProviderRoutingRequest {
 
     pub(crate) fn into_command(self) -> Result<ProviderRoutingCommand, RequestError> {
         match self.input {
-            Input::List => Ok(ProviderRoutingCommand::List),
+            Input::List {} => Ok(ProviderRoutingCommand::List),
             Input::Replace { routing } => routing.try_into().map(ProviderRoutingCommand::Replace),
         }
     }
@@ -444,6 +444,25 @@ mod tests {
             "target": { "kind": "provider-routing" },
             "input": input,
         })
+    }
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        assert!(
+            ProviderRoutingRequest::decode_semantics(request(
+                "providerRouting.list",
+                json!({ "kind": "list" }),
+            ))
+            .is_ok()
+        );
+
+        assert!(matches!(
+            ProviderRoutingRequest::decode_semantics(request(
+                "providerRouting.list",
+                json!({ "kind": "list", "bogus": 1 }),
+            )),
+            Err(RequestError::Invalid)
+        ));
     }
 
     #[test]

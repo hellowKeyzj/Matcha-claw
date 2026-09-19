@@ -248,6 +248,49 @@ function peekSessionMcpRuntime() { return undefined; }
 export { peekSessionMcpRuntime as p };
 `;
 
+const SESSIONS_PATCH_FIXTURE = `
+function resolveSessionPatchModelSelection(params) {
+	return {
+		ok: true,
+		provider: params.defaultProvider,
+		model: params.defaultModel,
+		isDefault: true
+	};
+}
+function patchSessionModel(patch) {
+	if ("model" in patch) {
+		const raw = patch.model;
+		let selection;
+		if (raw === null) selection = {
+			...resolvedDefault,
+			isDefault: true
+		};
+		else if (raw !== void 0) {
+			const resolved = resolveSessionPatchModelSelection({
+				cfg,
+				agentId: sessionAgentId,
+				catalog,
+				raw: trimmed,
+				defaultProvider: resolvedDefault.provider,
+				defaultModel: resolvedDefault.model,
+				subagentModelHint
+			});
+			if (!resolved.ok) return invalid(resolved.error);
+			selection = resolved;
+		}
+		if (selection) {
+			applyModelOverrideWithAuthProfileCompatibility({
+				cfg,
+				entry: next,
+				selection,
+				markLiveSwitchPending: raw !== null
+			});
+			if (raw === null) delete next.liveModelSwitchPending;
+		}
+	}
+}
+`;
+
 function createTempOpenClawPackage(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'matcha-openclaw-patches-'));
   tempRoots.push(root);
@@ -518,6 +561,44 @@ describe('openclaw bundle patches', () => {
 
     expect(results).toEqual([expect.objectContaining({
       id: 'mcp-server-status-method',
+      status: 'clean',
+    })]);
+  });
+
+  it('keeps explicit session model patches as session overrides', () => {
+    const openclawDir = createTempOpenClawPackage();
+    const sessionsPatchFile = seedDistFile(openclawDir, 'sessions-patch-test.js', SESSIONS_PATCH_FIXTURE);
+
+    const results = applyOpenClawBundlePatches(openclawDir, {
+      log: () => undefined,
+      patchIds: ['explicit-session-model-patch'],
+    });
+    const source = fs.readFileSync(sessionsPatchFile, 'utf8');
+
+    expect(results).toEqual([expect.objectContaining({
+      id: 'explicit-session-model-patch',
+      status: 'applied',
+    })]);
+    expect(source).toContain('selection = { ...resolved, isDefault: false };');
+    expect(source).toContain('if (raw === null) selection = {');
+    expect(source).toContain('isDefault: true');
+  });
+
+  it('keeps explicit session model patch idempotent', () => {
+    const openclawDir = createTempOpenClawPackage();
+    seedDistFile(openclawDir, 'sessions-patch-test.js', SESSIONS_PATCH_FIXTURE);
+
+    applyOpenClawBundlePatches(openclawDir, {
+      log: () => undefined,
+      patchIds: ['explicit-session-model-patch'],
+    });
+    const results = applyOpenClawBundlePatches(openclawDir, {
+      log: () => undefined,
+      patchIds: ['explicit-session-model-patch'],
+    });
+
+    expect(results).toEqual([expect.objectContaining({
+      id: 'explicit-session-model-patch',
       status: 'clean',
     })]);
   });

@@ -62,6 +62,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const cancelRun = useTeamsStore((state) => state.cancelRun);
   const confirmProposal = useTeamsStore((state) => state.confirmProposal);
+  const continueProposal = useTeamsStore((state) => state.continueProposal);
   const cancelProposal = useTeamsStore((state) => state.cancelProposal);
   const submitGraphPatch = useTeamsStore((state) => state.submitGraphPatch);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
@@ -161,7 +162,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     if (!team) {
       return;
     }
-    await runUiAction(`proposal-cancel:${team.id}:${run?.runId ?? 'none'}`, () => cancelProposal(team.id));
+    await runUiAction(`proposal-continue:${team.id}:${run?.runId ?? 'none'}`, () => continueProposal(team.id));
     openLeaderDiscussion();
   };
 
@@ -204,7 +205,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const exportGraphYamlTitle = hasGraphToExport ? t('run.exportYaml') : t('run.exportYamlNoGraph');
   const proposal = startGate?.status === 'proposal_pending' ? startGate.proposal : null;
   const proposalSummary = proposal?.taskSummary?.trim() ?? '';
-  const canConfirmProposal = Boolean(proposal && run) && !loading && !pendingActionId;
+  const canActOnProposal = Boolean(proposal?.proposalId && run) && !loading && !pendingActionId;
 
   return (
     <section className="space-y-4">
@@ -275,7 +276,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 variant="outline"
                 size="sm"
                 onClick={() => { void continuePendingProposal(); }}
-                disabled={!roles.some((role) => role.roleId === 'leader')}
+                disabled={!canActOnProposal || !roles.some((role) => role.roleId === 'leader')}
               >
                 {t('run.proposalPending.discuss')}
               </Button>
@@ -284,7 +285,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 variant="outline"
                 size="sm"
                 onClick={() => { void cancelPendingProposal(); }}
-                disabled={!roles.some((role) => role.roleId === 'leader')}
+                disabled={!canActOnProposal || !roles.some((role) => role.roleId === 'leader')}
               >
                 {t('run.proposalPending.cancel')}
               </Button>
@@ -292,7 +293,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 type="button"
                 size="sm"
                 onClick={() => { void confirmPendingProposal(); }}
-                disabled={!canConfirmProposal}
+                disabled={!canActOnProposal}
               >
                 {t('run.proposalPending.confirm')}
               </Button>

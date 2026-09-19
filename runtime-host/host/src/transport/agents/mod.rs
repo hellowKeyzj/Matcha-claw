@@ -251,7 +251,7 @@ impl AgentsRequest {
                 agent_id,
                 revision,
                 selection: match selection {
-                    SkillSelectionInput::InheritDefaultSkills => {
+                    SkillSelectionInput::InheritDefaultSkills {} => {
                         agents::SkillSelection::InheritDefaultSkills
                     }
                     SkillSelectionInput::SetExplicitSkillAllowlist { skill_keys } => {
@@ -280,7 +280,7 @@ impl AgentsRequest {
                 agent_id,
                 revision,
                 selection: match selection {
-                    ToolSelectionInput::InheritDefaultTools => {
+                    ToolSelectionInput::InheritDefaultTools {} => {
                         agents::ToolSelection::InheritDefaultTools
                     }
                     ToolSelectionInput::SetAgentToolPolicy {
@@ -663,7 +663,7 @@ struct SetToolConfigurationInput {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "selectionType", rename_all = "camelCase", deny_unknown_fields)]
 enum SkillSelectionInput {
-    InheritDefaultSkills,
+    InheritDefaultSkills {},
     SetExplicitSkillAllowlist {
         #[serde(rename = "skillKeys")]
         skill_keys: Vec<String>,
@@ -673,7 +673,7 @@ enum SkillSelectionInput {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "selectionType", rename_all = "camelCase", deny_unknown_fields)]
 enum ToolSelectionInput {
-    InheritDefaultTools,
+    InheritDefaultTools {},
     SetAgentToolPolicy {
         profile: String,
         allow: Vec<String>,
@@ -883,7 +883,7 @@ impl Input {
                     && target_matches(agent_id)
                     && valid_id(revision)
                     && match selection {
-                        SkillSelectionInput::InheritDefaultSkills => true,
+                        SkillSelectionInput::InheritDefaultSkills {} => true,
                         SkillSelectionInput::SetExplicitSkillAllowlist { skill_keys } => {
                             skill_keys.iter().all(|key| valid_id(key))
                         }
@@ -902,7 +902,7 @@ impl Input {
                     && target_matches(agent_id)
                     && valid_id(revision)
                     && match selection {
-                        ToolSelectionInput::InheritDefaultTools => true,
+                        ToolSelectionInput::InheritDefaultTools {} => true,
                         ToolSelectionInput::SetAgentToolPolicy {
                             profile,
                             allow,
@@ -1459,6 +1459,47 @@ mod tests {
                 "content": "",
             },
         })
+    }
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        let skills_set = |selection: Value| {
+            json!({
+                "id": SUBAGENT_SKILLS_CAPABILITY_ID,
+                "operationId": "subagentSkills.set",
+                "scope": { "kind": "agent", "endpoint": endpoint("openclaw"), "agentId": "main" },
+                "target": { "kind": "subagent", "subagentId": "main" },
+                "input": {
+                    "agentId": "main",
+                    "revision": "rev-1",
+                    "selection": selection,
+                },
+            })
+        };
+
+        let mut accepted_verifier =
+            CapabilityDecisionVerifier::try_new(&verification_key()).unwrap();
+        assert!(
+            AgentsRequest::decode(
+                skills_set(json!({ "selectionType": "inheritDefaultSkills" })),
+                &decision_for(SUBAGENT_SKILLS_CAPABILITY_ID),
+                &mut accepted_verifier,
+                now_millis(),
+            )
+            .is_ok()
+        );
+
+        let mut rejected_verifier =
+            CapabilityDecisionVerifier::try_new(&verification_key()).unwrap();
+        assert!(
+            AgentsRequest::decode(
+                skills_set(json!({ "selectionType": "inheritDefaultSkills", "bogus": 1 })),
+                &decision_for(SUBAGENT_SKILLS_CAPABILITY_ID),
+                &mut rejected_verifier,
+                now_millis(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -36,18 +36,18 @@ describe('runtime session list', () => {
       kind: 'session',
       endpointSessionId: 'direct-session',
       preferred: false,
+      model: 'provider/private-default-model',
       updatedAt: 42,
     }]);
   });
 
-  it('does not synthesize catalog metadata from the native peer', async () => {
+  it('does not synthesize catalog metadata while preserving the native model', async () => {
     const { listSessions } = await import('@/services/runtime/session-runtime');
 
     const [session] = await listSessions({ endpoint: sessionIdentity.endpoint });
 
     expect(session).not.toHaveProperty('label');
     expect(session).not.toHaveProperty('displayName');
-    expect(session).not.toHaveProperty('model');
-    expect(JSON.stringify(session)).not.toContain('private-default-model');
+    expect(session.model).toBe('provider/private-default-model');
   });
 });

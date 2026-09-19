@@ -20,19 +20,22 @@ pub(crate) struct Request {
     pub(super) input: Input,
 }
 
+// deny_unknown_fields 对 internally-tagged 的 unit variant 不生效
+// （属性被 InternallyTaggedUnitVisitor 忽略），必须写成空 struct variant `Unit {}` 才真正拒绝未知键；
+// `Unit {}` 与 `Unit` 的序列化输出逐字节相同，因此这个写法不改变 JSON 形状。
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum Input {
-    List,
-    Topology,
-    Connections,
-    Capabilities,
-    Environments,
-    Resources,
-    Commands,
-    Audit,
-    Leases,
-    Metrics,
+    List {},
+    Topology {},
+    Connections {},
+    Capabilities {},
+    Environments {},
+    Resources {},
+    Commands {},
+    Audit {},
+    Leases {},
+    Metrics {},
     Snapshot {},
     SelectorPreview {
         payload: SelectorPreviewPayload,
@@ -178,7 +181,7 @@ pub(super) enum Input {
     TerminalClose {
         payload: TerminalSessionPayload,
     },
-    TerminalList,
+    TerminalList {},
 }
 
 #[derive(Deserialize)]
@@ -611,7 +614,7 @@ impl Request {
         let request = serde_json::from_value::<Self>(value).map_err(|_| DecodeError::Invalid)?;
         let valid = matches!(
             (&request.operation, &request.input),
-            (Operation::TargetsList, Input::List)
+            (Operation::TargetsList, Input::List { .. })
                 | (Operation::TargetPut, Input::TargetPut { .. })
                 | (Operation::TargetRemove, Input::TargetRemove { .. })
                 | (Operation::CommandSubmit, Input::CommandSubmit { .. })
@@ -731,16 +734,16 @@ impl Request {
                     Input::TerminalFinishClose { .. }
                 )
                 | (Operation::TerminalClose, Input::TerminalClose { .. })
-                | (Operation::TerminalList, Input::TerminalList)
-                | (Operation::TopologyGet, Input::Topology)
-                | (Operation::ConnectionsList, Input::Connections)
-                | (Operation::CapabilitiesList, Input::Capabilities)
-                | (Operation::EnvironmentsList, Input::Environments)
-                | (Operation::ResourcesList, Input::Resources)
-                | (Operation::CommandsList, Input::Commands)
-                | (Operation::AuditList, Input::Audit)
-                | (Operation::LeasesList, Input::Leases)
-                | (Operation::MetricsGet, Input::Metrics)
+                | (Operation::TerminalList, Input::TerminalList { .. })
+                | (Operation::TopologyGet, Input::Topology { .. })
+                | (Operation::ConnectionsList, Input::Connections { .. })
+                | (Operation::CapabilitiesList, Input::Capabilities { .. })
+                | (Operation::EnvironmentsList, Input::Environments { .. })
+                | (Operation::ResourcesList, Input::Resources { .. })
+                | (Operation::CommandsList, Input::Commands { .. })
+                | (Operation::AuditList, Input::Audit { .. })
+                | (Operation::LeasesList, Input::Leases { .. })
+                | (Operation::MetricsGet, Input::Metrics { .. })
                 | (Operation::SnapshotGet, Input::Snapshot { .. })
                 | (Operation::SelectorPreview, Input::SelectorPreview { .. })
         );

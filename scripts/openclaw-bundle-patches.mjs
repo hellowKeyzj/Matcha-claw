@@ -4,7 +4,7 @@ import path from 'node:path';
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'mcp-server-status-method', 'provider-config-debug-trace']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -183,6 +183,7 @@ function patchMatchaSealedSkills(openclawDir) {
   const patchId = 'matcha-sealed-skills';
   const distDir = path.join(openclawDir, 'dist');
   const readFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'agent-tools.read-',
     markers: [
       'function wrapReadToolWithSkillContent(tool, skills, options)',
       'Virtual skill file not found:',
@@ -198,6 +199,7 @@ function patchMatchaSealedSkills(openclawDir) {
     ],
   });
   const workspaceFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'workspace-',
     markers: [
       'async function loadWorkspaceBootstrapFiles(dir',
       'async function readWorkspaceFileWithGuards(params)',
@@ -939,6 +941,7 @@ function patchOpencodeGoSessionHeader(openclawDir) {
   const patchId = 'opencode-go-session-header';
   const distDir = path.join(openclawDir, 'dist');
   const streamFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'stream-',
     markers: ['function createOpencodeGoAttributionWrapper(baseStreamFn, sourceApi)'],
   });
   const extraParamsFile = locateSingleJavaScriptFile(distDir, patchId, {
@@ -946,6 +949,7 @@ function patchOpencodeGoSessionHeader(openclawDir) {
     markers: ['const providerStreamBase = agent.streamFn;'],
   });
   const attemptFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'builtin-openclaw-',
     markers: ['preparedExtraParams: effectiveExtraParams,', 'sessionId: attempt.sessionId,'],
   });
   const compactionFile = locateSingleJavaScriptFile(distDir, patchId, {
@@ -1012,6 +1016,7 @@ function patchMcpServerStatusMethod(openclawDir) {
     ],
   });
   const sessionAccessorFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'session-accessor.sqlite-entry-',
     markers: [
       'function patchSessionEntryCore(',
       'function loadSessionEntry(',
@@ -2050,6 +2055,36 @@ function patchProviderConfigSessionPathTrace(filePath, patchId) {
   return changed;
 }
 
+function patchExplicitSessionModelPatch(openclawDir) {
+  const patchId = 'explicit-session-model-patch';
+  const distDir = path.join(openclawDir, 'dist');
+  const sessionsPatchFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'sessions-patch-',
+    markers: [
+      'function resolveSessionPatchModelSelection(params)',
+      'if ("model" in patch) {',
+      'applyModelOverrideWithAuthProfileCompatibility({',
+      'markLiveSwitchPending: raw !== null',
+    ],
+  });
+  return patchExplicitSessionModelSelection(sessionsPatchFile, patchId)
+    ? { status: 'applied', detail: path.basename(sessionsPatchFile) }
+    : { status: 'clean', detail: 'already patched' };
+}
+
+function patchExplicitSessionModelSelection(filePath, patchId) {
+  let source = readText(filePath);
+  if (source.includes('selection = { ...resolved, isDefault: false };')) return false;
+  const pattern = /(\n[\t ]*if \(!resolved\.ok\) return invalid\(resolved\.error\);\n)([\t ]*)selection = resolved;/g;
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) {
+    throw new Error(`${patchId}: expected one session model patch selection target, found ${matches.length}`);
+  }
+  source = source.replace(pattern, '$1$2selection = { ...resolved, isDefault: false };');
+  writeText(filePath, source);
+  return true;
+}
+
 const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'strip-bundled-channel-plugins',
@@ -2070,6 +2105,10 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'provider-config-debug-trace',
     apply: patchProviderConfigDebugTrace,
+  },
+  {
+    id: 'explicit-session-model-patch',
+    apply: patchExplicitSessionModelPatch,
   },
 ]);
 

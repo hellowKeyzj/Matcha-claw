@@ -1,52 +1,16 @@
-use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Serialize;
 
-use super::state::SessionProvider;
-use crate::runtime::driver::RuntimeDriverIdentity;
+use super::endpoint::NativeEndpoint;
 
 const MAX_IDENTIFIER_BYTES: usize = 4096;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeEndpoint {
-    MatchaAgentLocal,
-    Unsupported,
-}
-
-impl NativeEndpoint {
-    pub(crate) fn parse(
-        kind: &str,
-        runtime_adapter_id: &str,
-        runtime_instance_id: &str,
-    ) -> Option<Self> {
-        if kind != "native-runtime" {
-            return None;
-        }
-        RuntimeEndpoint::try_new(runtime_adapter_id, runtime_instance_id)
-            .ok()
-            .map(Self::from_runtime_endpoint)
-    }
-
-    pub(crate) fn from_runtime_endpoint(endpoint: RuntimeEndpoint) -> Self {
-        if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
-            Self::MatchaAgentLocal
-        } else {
-            Self::Unsupported
-        }
-    }
-
-    pub(crate) const fn provider(self) -> SessionProvider {
-        match self {
-            Self::MatchaAgentLocal => SessionProvider::MatchaAgent,
-            Self::Unsupported => SessionProvider::MatchaAgent,
-        }
-    }
-
-    pub(crate) fn runtime_endpoint(self) -> Option<RuntimeEndpoint> {
-        match self {
-            Self::MatchaAgentLocal => Some(RuntimeDriverIdentity::matcha_agent().endpoint()),
-            Self::Unsupported => None,
-        }
-    }
+/// Session approval is a matcha-agent-only operation.
+///
+/// Any other native endpoint is reported to the renderer as unsupported rather than routed to a
+/// runtime that does not implement approvals, so the outcome does not depend on that runtime's
+/// lifecycle.
+pub(crate) const fn endpoint_supports_approval(endpoint: NativeEndpoint) -> bool {
+    matches!(endpoint, NativeEndpoint::MatchaAgentLocal)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

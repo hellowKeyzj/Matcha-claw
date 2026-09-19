@@ -83,6 +83,7 @@ pub(crate) struct HostHandles {
     pub(crate) observation: ObservationSink,
     pub channel_endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
     pub session_delta_source: crate::sessions::events::SessionDeltaSource,
+    pub start_gate_registry: std::sync::Arc<crate::organization::StartGateRegistry>,
 }
 
 pub struct Host {
@@ -226,6 +227,7 @@ impl Host {
                 clawhub_registry: provisioned.clawhub_registry,
                 runtime_observation: provisioned.runtime_observation.clone(),
                 session_delta_source: session_delta_source.clone(),
+                start_gate_registry: std::sync::Arc::clone(&owners.start_gate_registry),
             },
             &owners,
             &event_sinks,

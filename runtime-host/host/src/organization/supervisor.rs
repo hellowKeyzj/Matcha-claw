@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     coordinator::{TeamRunCoordinatorInput, TeamRunCoordinatorRequest},
-    receipt_router::{TeamRunReceiptRouter, TerminalWatchObservation},
+    receipt_router::TeamRunReceiptRouter,
     run_actor::TeamRunActors,
     team_run::{CronReconciliation, TeamTriggerCron},
 };
@@ -15,7 +15,6 @@ enum Next {
     Tick,
     AdmissionChanged,
     Request(Option<TeamRunCoordinatorRequest>),
-    TerminalWatch(Option<TerminalWatchObservation>),
 }
 
 struct TeamRunSupervisor {
@@ -31,10 +30,6 @@ impl TeamRunSupervisor {
         }
     }
 
-    async fn start_terminal_recovery(&mut self, input: &TeamRunCoordinatorInput) {
-        self.receipt_router.start_terminal_recovery(input).await;
-    }
-
     async fn wake_active_runs(&mut self, input: &TeamRunCoordinatorInput, now: u64) {
         if let Ok(run_ids) = input.organization.active_run_ids().await {
             self.run_actors
@@ -43,21 +38,8 @@ impl TeamRunSupervisor {
         }
     }
 
-    fn has_terminal_watches(&self) -> bool {
-        self.receipt_router.has_terminal_watches()
-    }
-
-    async fn next_terminal_watch(&mut self) -> Option<TerminalWatchObservation> {
-        self.receipt_router.next_terminal_watch().await
-    }
-
-    async fn cancel_native_terminal_watches(&mut self) {
-        self.receipt_router.cancel_native_terminal_watches().await;
-    }
-
-    async fn cancel(&mut self) {
+    fn cancel(&mut self) {
         self.run_actors.cancel();
-        self.receipt_router.cancel().await;
     }
 }
 
@@ -75,23 +57,16 @@ pub(super) async fn run(
             &mut requests,
             &mut requests_open,
             &mut input.admission_changes,
-            &mut supervisor,
             &cancellation,
         )
         .await
         {
             Next::Shutdown => {
-                supervisor.cancel().await;
+                supervisor.cancel();
                 return;
             }
             Next::Tick | Next::AdmissionChanged => {
                 reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
-            }
-            Next::Request(Some(TeamRunCoordinatorRequest::CancelMatchaTerminalWatches {
-                reply,
-            })) => {
-                supervisor.cancel_native_terminal_watches().await;
-                let _ = reply.send(());
             }
             Next::Request(Some(TeamRunCoordinatorRequest::RecoverMaterializationReceipts)) => {
                 if input.admission.admit_request().is_ok() {
@@ -99,21 +74,6 @@ pub(super) async fn run(
                 }
             }
             Next::Request(None) => requests_open = false,
-            Next::TerminalWatch(Some(observation)) => {
-                if input.admission.admit_request().is_ok() {
-                    let settled_at = now_seconds();
-                    let _ = input
-                        .organization
-                        .native_run_settled(
-                            observation.run_id,
-                            observation.delivery_id,
-                            observation.settled,
-                            settled_at,
-                        )
-                        .await;
-                }
-            }
-            Next::TerminalWatch(None) => {}
         }
     }
 }
@@ -122,7 +82,6 @@ async fn next(
     requests: &mut mpsc::Receiver<TeamRunCoordinatorRequest>,
     requests_open: &mut bool,
     admission_changes: &mut tokio::sync::watch::Receiver<crate::composition::AdmissionState>,
-    supervisor: &mut TeamRunSupervisor,
     cancellation: &CancellationToken,
 ) -> Next {
     tokio::select! {
@@ -133,7 +92,6 @@ async fn next(
             Ok(()) => Next::AdmissionChanged,
             Err(_) => Next::Shutdown,
         },
-        observation = supervisor.next_terminal_watch(), if supervisor.has_terminal_watches() => Next::TerminalWatch(observation),
         _ = tokio::time::sleep(Duration::from_secs(30)) => Next::Tick,
     }
 }
@@ -147,7 +105,6 @@ async fn reconcile(
         return;
     }
     let now = now_seconds();
-    supervisor.start_terminal_recovery(input).await;
     reconcile_team_trigger_cron(input, team_trigger_cron, now).await;
     supervisor.wake_active_runs(input, now).await;
 }

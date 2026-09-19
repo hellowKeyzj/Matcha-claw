@@ -106,11 +106,11 @@ pub(super) async fn terminal_open_delivery(
 ) -> Delivery {
     let (selector, dimensions) = match parse_terminal_open(payload) {
         Ok(value) => value,
-        Err(()) => return Delivery::Mutation(json!({"outcome":"error"})),
+        Err(()) => return Delivery::Invalid,
     };
     match owner.terminal_open_allocated(selector, dimensions).await {
         Err(_) => Delivery::Unavailable,
-        Ok(Err(_)) => Delivery::Mutation(json!({"outcome":"error"})),
+        Ok(Err(_)) => Delivery::Invalid,
         Ok(Ok(opened)) => Delivery::Mutation(terminal_session_json(
             "terminalOpened",
             &opened.opened,
@@ -125,11 +125,11 @@ pub(super) async fn terminal_reconnect_delivery(
 ) -> Delivery {
     let session = match fleet::terminal::SessionId::try_new(payload.session_id) {
         Ok(session) => session,
-        Err(_) => return Delivery::Mutation(json!({"outcome":"error"})),
+        Err(_) => return Delivery::Invalid,
     };
     let opened = match owner.terminal_reconnect(session).await {
         Err(_) => return Delivery::Unavailable,
-        Ok(Err(_)) => return Delivery::Mutation(json!({"outcome":"error"})),
+        Ok(Err(_)) => return Delivery::Invalid,
         Ok(Ok(opened)) => opened,
     };
     let context = match owner.terminal_context(opened.session.clone()).await {
@@ -143,7 +143,7 @@ pub(super) async fn terminal_reconnect_delivery(
             let _ = owner
                 .terminal_close_fenced(opened.session.id().clone(), opened.session.generation())
                 .await;
-            return Delivery::Mutation(json!({"outcome":"error"}));
+            return Delivery::Invalid;
         }
         Ok(Ok(Some(context))) => context,
     };
@@ -186,13 +186,13 @@ pub(super) async fn terminal_begin_close_delivery(
 ) -> Delivery {
     let session = match fleet::terminal::SessionId::try_new(payload.session_id) {
         Ok(session) => session,
-        Err(_) => return Delivery::Mutation(json!({"outcome":"error"})),
+        Err(_) => return Delivery::Invalid,
     };
     owner
         .terminal_begin_close(session)
         .await
         .map_or(Delivery::Unavailable, |result| {
-            result.map_or(Delivery::Mutation(json!({"outcome":"error"})), |_| {
+            result.map_or(Delivery::Invalid, |_| {
                 Delivery::Mutation(json!({"outcome":"terminalClosing"}))
             })
         })
@@ -204,13 +204,13 @@ pub(super) async fn terminal_finish_close_delivery(
 ) -> Delivery {
     let session = match fleet::terminal::SessionId::try_new(payload.session_id) {
         Ok(session) => session,
-        Err(_) => return Delivery::Mutation(json!({"outcome":"error"})),
+        Err(_) => return Delivery::Invalid,
     };
     owner
         .terminal_finish_close(session)
         .await
         .map_or(Delivery::Unavailable, |result| {
-            result.map_or(Delivery::Mutation(json!({"outcome":"error"})), |_| {
+            result.map_or(Delivery::Invalid, |_| {
                 Delivery::Mutation(json!({"outcome":"terminalClosed"}))
             })
         })

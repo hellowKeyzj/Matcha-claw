@@ -2,9 +2,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    sessions::approval::{
-        NativeEndpoint, PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
-        SessionApprovalOutcome,
+    sessions::{
+        approval::{
+            PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
+            SessionApprovalOutcome,
+        },
+        endpoint::NativeEndpoint,
     },
     transport::common::authorization::CapabilityDecisionVerifier,
 };
@@ -362,13 +365,17 @@ mod tests {
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(matcha.endpoint, NativeEndpoint::MatchaAgentLocal);
+        assert!(crate::sessions::approval::endpoint_supports_approval(
+            matcha.endpoint
+        ));
 
         let openclaw = SessionApprovalRequest::decode_semantics(respond_request("openclaw"))
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(openclaw.endpoint, NativeEndpoint::Unsupported);
+        assert!(!crate::sessions::approval::endpoint_supports_approval(
+            openclaw.endpoint
+        ));
     }
 
     #[test]

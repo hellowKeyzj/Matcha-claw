@@ -11,7 +11,7 @@ use crate::{
     organization::{
         ManualTeamProvision, OrganizationHandle, TeamGraphPatchDraft, TeamNodeEventCommandOutcome,
         TeamNodeTerminalResolution, TeamRuntimeCommand, TeamRuntimeCommandOutcome,
-        TeamRuntimeCreateSource, TeamRuntimePromptPhase, TeamRuntimeStatus,
+        TeamRuntimeCreateSource, TeamRuntimeStatus,
     },
     runtime::driver::RuntimeDriverIdentity,
     transport::{sessions::trace as session_trace, team::role_sessions as team_role_sessions},
@@ -374,7 +374,7 @@ async fn execute_team_runtime(
                                     Some(
                                         sessions
                                             .into_iter()
-                                            .filter(|session| session.run_id() == run_id.as_str())
+                                            .filter(|session| session.team_run() == &run_id)
                                             .collect(),
                                     )
                                 }
@@ -443,29 +443,6 @@ async fn execute_team_runtime(
                 owner.trigger_fire(request, fired_at).await.ok()?,
             )
         }
-        TeamRuntimeCommand::RoleMessageSubmit { admission } => {
-            TeamRuntimeCommandOutcome::RoleMessageSubmit(
-                owner.role_message_submit(admission).await.ok()?,
-            )
-        }
-        TeamRuntimeCommand::RoleMessageSubmitForRun {
-            run_id,
-            role_id,
-            message,
-            idempotency_key,
-            requested_at,
-        } => TeamRuntimeCommandOutcome::RoleMessageSubmitForRun(
-            owner
-                .role_message_submit_for_run(
-                    run_id,
-                    role_id,
-                    message,
-                    idempotency_key,
-                    requested_at,
-                )
-                .await
-                .ok()?,
-        ),
         TeamRuntimeCommand::RunStartConfirm {
             run_id,
             proposal_id,
@@ -483,21 +460,6 @@ async fn execute_team_runtime(
                 owner.node_prompt_retry_due(run_id).await.ok()?,
             )
         }
-        TeamRuntimeCommand::NodePromptSettled {
-            session_key,
-            prompt_run_id,
-            phase,
-        } => TeamRuntimeCommandOutcome::NodePromptSettled(
-            owner
-                .node_prompt_settled(
-                    session_key.as_str().to_owned(),
-                    prompt_run_id.as_str().to_owned(),
-                    phase,
-                    now_millis(),
-                )
-                .await
-                .ok()?,
-        ),
         TeamRuntimeCommand::NodeEvent {
             run_id,
             node_execution_id,
@@ -853,14 +815,12 @@ pub(super) fn team_runtime_command(
         "team.graphPatch" => decode_team_graph_patch(input, target),
         "team.graphContext" => decode_team_graph_context(input, target),
         "team.nodePromptRetryDue" => decode_team_node_prompt_retry_due(input, target),
-        "team.nodePromptSettled" => decode_team_node_prompt_settled(input, target),
         "team.nodeEvent" => decode_team_node_event(input, target),
         "team.runDecisionSubmit" => decode_team_run_decision(input, target),
         "team.runSnapshot" => decode_team_snapshot(input, target),
         "team.graphExportYaml" => decode_team_graph_export(input, target),
         "team.graphImportYaml" => decode_team_graph_import(input, target),
         "team.runDiagnostics" => decode_team_run_diagnostics(input, target),
-        "team.roleMessageSubmit" => decode_team_role_message(input, target),
         "team.proposalConfirm" | "team.runStartConfirm" => {
             decode_team_run_start_confirm(input, target)
         }
@@ -977,23 +937,6 @@ fn team_runtime_outcome_with_context(
         TeamRuntimeCommandOutcome::TriggerFire(result) => match result {
             Ok(result) => team_run_trigger_outcome(result),
             Err(_) => CommandOutcome::rejected(RejectionCode::Failed, "Team trigger was rejected."),
-        },
-        TeamRuntimeCommandOutcome::RoleMessageSubmit(result)
-        | TeamRuntimeCommandOutcome::RoleMessageSubmitForRun(result) => match result {
-            Ok(organization::RoleChatAdmissionOutcome::Accepted { delivery_id }) => {
-                CommandOutcome::succeeded(CommandResult::private(json!({
-                    "success": true,
-                    "outcome": "accepted",
-                    "deliveryId": delivery_id.as_str(),
-                })))
-            }
-            Ok(organization::RoleChatAdmissionOutcome::Rejected(_)) => CommandOutcome::rejected(
-                RejectionCode::Failed,
-                "Team role message was rejected.",
-            ),
-            Ok(organization::RoleChatAdmissionOutcome::OutcomeUnknown) | Err(_) => {
-                CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "outcome-unknown" })))
-            }
         },
         TeamRuntimeCommandOutcome::RunStartConfirm(result) => match result {
             Ok(organization::ConfirmRunStartOutcome::Started)
@@ -1173,24 +1116,6 @@ fn team_runtime_outcome_with_context(
             }
             Err(TeamRuntimeStatus::OutcomeUnknown) => {
                 CommandOutcome::unknown(CommandResult::private(json!({ "runId": run_id, "outcome": "outcome-unknown" })))
-            }
-            Err(TeamRuntimeStatus::Unavailable) => unavailable(),
-        },
-        TeamRuntimeCommandOutcome::NodePromptSettled(result) => match result {
-            Ok(crate::organization::TeamNodePromptSettledResult::Recorded(run_id)) => {
-                CommandOutcome::succeeded(CommandResult::private(json!({ "settled": true, "runId": run_id.as_str(), "snapshot": null })))
-            }
-            Ok(crate::organization::TeamNodePromptSettledResult::Replayed(run_id)) => {
-                CommandOutcome::succeeded(CommandResult::private(json!({ "settled": true, "runId": run_id.as_str(), "snapshot": null })))
-            }
-            Ok(crate::organization::TeamNodePromptSettledResult::NotFound) => {
-                CommandOutcome::succeeded(CommandResult::private(json!({ "settled": false, "runId": null, "snapshot": null })))
-            }
-            Err(TeamRuntimeStatus::Rejected) => {
-                CommandOutcome::rejected(RejectionCode::Failed, "Team node prompt settlement was rejected.")
-            }
-            Err(TeamRuntimeStatus::OutcomeUnknown) => {
-                CommandOutcome::unknown(CommandResult::private(json!({ "outcome": "outcome-unknown" })))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
@@ -2077,87 +2002,6 @@ fn decode_team_trigger(
     })
 }
 
-fn decode_team_role_message(
-    input: &serde_json::Map<String, Value>,
-    target: &Value,
-) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (team_id, run_id) = decode_team_target(target, input, false)?;
-    if !input.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "runId" | "teamId" | "roleId" | "text" | "idempotencyKey"
-        )
-    }) {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
-    }
-    if team_id.is_none() {
-        let role_id = organization::RoleId::try_new(
-            input
-                .get("roleId")
-                .and_then(Value::as_str)
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?
-                .to_owned(),
-        )
-        .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
-        let message = input
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?
-            .to_owned();
-        let idempotency_key = input
-            .get("idempotencyKey")
-            .and_then(Value::as_str)
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?
-            .to_owned();
-        return Ok(TeamRuntimeCommand::RoleMessageSubmitForRun {
-            run_id,
-            role_id,
-            message,
-            idempotency_key,
-            requested_at: now_millis(),
-        });
-    }
-    let Some(team_id) = team_id else {
-        return Err(TeamRuntimeDecodeError::Unavailable);
-    };
-    if !input.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "runId" | "teamId" | "roleId" | "text" | "idempotencyKey"
-        )
-    }) {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
-    }
-    let role_id = organization::RoleId::try_new(
-        input
-            .get("roleId")
-            .and_then(Value::as_str)
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?
-            .to_owned(),
-    )
-    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
-    let message = input
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let idempotency_key = input
-        .get("idempotencyKey")
-        .and_then(Value::as_str)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let admission = organization::RoleChatAdmission::new(
-        team_id,
-        run_id,
-        role_id,
-        message.to_owned(),
-        idempotency_key.to_owned(),
-        now_millis(),
-    )
-    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
-    Ok(TeamRuntimeCommand::RoleMessageSubmit { admission })
-}
-
 fn decode_team_approval(
     input: &serde_json::Map<String, Value>,
     target: &Value,
@@ -2445,26 +2289,6 @@ fn decode_team_graph_patch(
         idempotency_key,
     )?;
     Ok(TeamRuntimeCommand::GraphPatch { patch })
-}
-
-fn decode_team_node_prompt_settled(
-    input: &serde_json::Map<String, Value>,
-    target: &Value,
-) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    if !target.is_null() || input.len() != 3 {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
-    }
-    let phase = match input.get("phase").and_then(Value::as_str) {
-        Some("final") => TeamRuntimePromptPhase::Final,
-        Some("error") => TeamRuntimePromptPhase::Error,
-        Some("aborted") => TeamRuntimePromptPhase::Aborted,
-        _ => return Err(TeamRuntimeDecodeError::InvalidInput),
-    };
-    Ok(TeamRuntimeCommand::NodePromptSettled {
-        session_key: decode_opaque(input, "sessionKey")?,
-        prompt_run_id: decode_opaque(input, "promptRunId")?,
-        phase,
-    })
 }
 
 fn decode_team_node_event(
@@ -3211,7 +3035,7 @@ fn now_millis() -> u64 {
 fn team_run_list_item_legacy_json(outcome: &organization::TeamRunQueryOutcome) -> Option<Value> {
     match outcome {
         organization::TeamRunQueryOutcome::Available(run) => {
-            let sessions = team_role_bindings_legacy_json(run.role_sessions())?;
+            let sessions = team_role_session_receipts_legacy_json(run.role_sessions());
             Some(json!({
                 "runId": run.run().as_str(),
                 "status": team_run_status_from_graph_status(run.graph_status()),
@@ -3231,16 +3055,17 @@ fn team_run_list_item_legacy_json(outcome: &organization::TeamRunQueryOutcome) -
 
 fn team_run_public_snapshot_legacy_json(
     snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
-    role_sessions: Option<&[organization::TeamRoleSessionProjection]>,
+    role_sessions: Option<&[organization::RoleSessionReceipt]>,
 ) -> Value {
-    let roles = role_sessions.map(team_role_session_projections_legacy_json);
+    let roles_available = role_sessions.is_some();
+    let roles = role_sessions.map(team_role_session_receipts_legacy_json);
     json!({
         "run": team_public_run_legacy_json(snapshot),
         "graph": team_public_graph_legacy_json(snapshot.run().run_id(), snapshot.graph()),
         "nodeInputStates": [],
         "nodeExecutions": snapshot.attempts().iter().map(|attempt| team_public_attempt_legacy_json(snapshot.run().run_id(), attempt)).collect::<Vec<_>>(),
         "nodeDeliveries": [],
-        "roles": roles.clone().unwrap_or_default(),
+        "roles": roles.unwrap_or_default(),
         "stages": [],
         "workflowPlan": null,
         "dispatchGroups": [],
@@ -3254,7 +3079,7 @@ fn team_run_public_snapshot_legacy_json(
         "gates": [],
         "kickbacks": [],
         "decisions": snapshot.decisions().iter().map(team_public_decision_legacy_json).collect::<Vec<_>>(),
-        "unavailableSections": team_public_unavailable_sections_legacy_json(snapshot, roles.is_some()),
+        "unavailableSections": team_public_unavailable_sections_legacy_json(snapshot, roles_available),
         "diagnostics": team_public_diagnostics_legacy_json(snapshot.diagnostics()),
         "events": snapshot.events().iter().map(team_public_event_legacy_json).collect::<Vec<_>>(),
         "startGate": team_run_start_gate_legacy_json(snapshot.run()),
@@ -3278,31 +3103,13 @@ fn team_public_unavailable_sections_legacy_json(
         .collect()
 }
 
-fn team_role_bindings_legacy_json(
-    bindings: &[organization::RoleSessionReceipt],
-) -> Option<Vec<Value>> {
-    bindings.iter().map(team_role_binding_legacy_json).collect()
-}
-
-fn team_role_session_projections_legacy_json(
-    sessions: &[organization::TeamRoleSessionProjection],
+fn team_role_session_receipts_legacy_json(
+    sessions: &[organization::RoleSessionReceipt],
 ) -> Vec<Value> {
     sessions
         .iter()
-        .map(team_role_sessions::role_session_json)
+        .filter_map(team_role_sessions::role_session_json)
         .collect()
-}
-
-pub(super) fn team_role_binding_legacy_json(
-    binding: &organization::RoleSessionReceipt,
-) -> Option<Value> {
-    Some(json!({
-        "teamId": binding.team().as_str(),
-        "runId": binding.team_run().as_str(),
-        "roleId": binding.role().as_str(),
-        "sessionRef": binding.session_ref().as_str(),
-        "status": "available",
-    }))
 }
 
 pub(super) fn team_public_run_legacy_json(

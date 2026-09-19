@@ -3,10 +3,7 @@ use std::{
     io::Write,
     num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Barrier,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::run::delivery::{
@@ -26,14 +23,13 @@ use crate::{
     GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy, ManagedAgentReference,
     MaterializationOperationOutcome, MaterializationReceipt, MaterializationRecordOutcome,
     MaterializationRejection, MaterializationSource, MemberId, NativeDeliveryCorrelation,
-    NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment, RoleAssignment,
-    RoleChatAdmission, RoleChatAdmissionOutcome, RoleChatRejection, RoleId, RoleKind,
-    RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt,
-    RuntimeEndpointReference, ScriptReviewRule, StartTrigger, TeamDecisionCommand,
-    TeamDecisionType, TeamDefinition, TeamId, TeamMember, TeamNodeEvent, TeamNodeEventOutcome,
-    TeamNodeOutput, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
-    TerminalObservationOutcome, TriggerFireError, TriggerFireRequest, TriggerRegistration,
-    TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
+    NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment, RoleAssignment, RoleId,
+    RoleKind, RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt,
+    RunRuntimeReceipt, RuntimeEndpointReference, ScriptReviewRule, StartTrigger,
+    TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember, TeamNodeEvent,
+    TeamNodeEventOutcome, TeamNodeOutput, TeamRevision, TeamRole, TeamRunQuery,
+    TeamRunQueryOutcome, TerminalObservationOutcome, TriggerFireError, TriggerFireRequest,
+    TriggerRegistration, TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
     ports::materialization::NativeWorkspaceReceipt,
     query_team_run, reduce,
     run::event::NodeProgressCommand,
@@ -105,139 +101,6 @@ fn decision_ledger_commits_replays_conflicts_and_reopens() {
         TeamDecisionType::Retry
     );
     drop(reopened);
-    remove_test_path(&path);
-}
-
-#[test]
-fn role_chat_admission_is_durable_idempotent_and_private() {
-    let path = test_path("role-chat-admission");
-    let mut store = OrganizationStore::open(&path).unwrap();
-    store.replace_facts(role_chat_facts(1, true)).unwrap();
-
-    let first = store
-        .admit_role_chat(role_chat_admission("chat:one", "private canary"))
-        .unwrap();
-    let RoleChatAdmissionOutcome::Accepted { delivery_id } = first else {
-        panic!("ready role work must admit exactly one delivery");
-    };
-    let committed_len = fs::metadata(&path).unwrap().len();
-    let delivery = store.facts().deliveries().delivery(&delivery_id).unwrap();
-    assert_eq!(delivery.facts().message, "private canary");
-    assert_eq!(delivery.facts().max_attempts, 3);
-    assert_eq!(store.facts().deliveries().deliveries().count(), 1);
-
-    assert_eq!(
-        store
-            .admit_role_chat(role_chat_admission("chat:one", "private canary"))
-            .unwrap(),
-        RoleChatAdmissionOutcome::Accepted {
-            delivery_id: delivery_id.clone(),
-        },
-    );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
-    assert_eq!(store.facts().deliveries().deliveries().count(), 1);
-
-    assert_eq!(
-        store
-            .admit_role_chat(role_chat_admission("chat:one", "changed private canary"))
-            .unwrap(),
-        RoleChatAdmissionOutcome::Rejected(RoleChatRejection::IdempotencyConflict),
-    );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
-    assert_eq!(store.facts().deliveries().deliveries().count(), 1);
-    drop(store);
-
-    let reopened = OrganizationStore::open(&path).unwrap();
-    let restored = reopened
-        .facts()
-        .deliveries()
-        .delivery(&delivery_id)
-        .unwrap();
-    assert_eq!(restored.facts().message, "private canary");
-    assert_eq!(reopened.facts().deliveries().deliveries().count(), 1);
-    drop(reopened);
-    remove_test_path(&path);
-}
-
-#[test]
-fn concurrent_role_chat_admission_produces_at_most_one_delivery() {
-    let path = test_path("role-chat-concurrent");
-    let mut initial = OrganizationStore::open(&path).unwrap();
-    initial.replace_facts(role_chat_facts(1, true)).unwrap();
-    drop(initial);
-
-    let first_store = OrganizationStore::open(&path).unwrap();
-    let second_store = OrganizationStore::open(&path).unwrap();
-    let barrier = Arc::new(Barrier::new(2));
-    let first = std::thread::spawn({
-        let barrier = barrier.clone();
-        move || {
-            let mut store = first_store;
-            barrier.wait();
-            store
-                .admit_role_chat(role_chat_admission("chat:concurrent", "private canary"))
-                .unwrap_or(RoleChatAdmissionOutcome::OutcomeUnknown)
-        }
-    });
-    let second = std::thread::spawn({
-        let barrier = barrier.clone();
-        move || {
-            let mut store = second_store;
-            barrier.wait();
-            store
-                .admit_role_chat(role_chat_admission("chat:concurrent", "private canary"))
-                .unwrap_or(RoleChatAdmissionOutcome::OutcomeUnknown)
-        }
-    });
-
-    let outcomes = [first.join().unwrap(), second.join().unwrap()];
-    let delivery_ids = outcomes
-        .iter()
-        .map(|outcome| match outcome {
-            RoleChatAdmissionOutcome::Accepted { delivery_id } => delivery_id,
-            _ => panic!("concurrent replay must return the accepted delivery"),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(delivery_ids[0], delivery_ids[1]);
-    let reopened = OrganizationStore::open(&path).unwrap();
-    assert_eq!(reopened.facts().deliveries().deliveries().count(), 1);
-    drop(reopened);
-    remove_test_path(&path);
-}
-
-#[test]
-fn role_chat_admission_fails_closed_for_unbound_or_ambiguous_role_work() {
-    let path = test_path("role-chat-unavailable");
-    let mut store = OrganizationStore::open(&path).unwrap();
-    store.replace_facts(role_chat_facts(1, false)).unwrap();
-    let missing_role = RoleChatAdmission::new(
-        team_id(),
-        GraphRunId::new("run:one"),
-        RoleId::try_new("missing").unwrap(),
-        "private canary",
-        "chat:unbound",
-        3,
-    )
-    .unwrap();
-    assert_eq!(
-        store.admit_role_chat(missing_role).unwrap(),
-        RoleChatAdmissionOutcome::Rejected(RoleChatRejection::RoleUnavailable),
-    );
-    assert_eq!(store.facts().deliveries().deliveries().count(), 0);
-    drop(store);
-    remove_test_path(&path);
-
-    let path = test_path("role-chat-ambiguous");
-    let mut store = OrganizationStore::open(&path).unwrap();
-    store.replace_facts(role_chat_facts(2, true)).unwrap();
-    assert_eq!(
-        store
-            .admit_role_chat(role_chat_admission("chat:ambiguous", "private canary"))
-            .unwrap(),
-        RoleChatAdmissionOutcome::Rejected(RoleChatRejection::Ambiguous),
-    );
-    assert_eq!(store.facts().deliveries().deliveries().count(), 0);
-    drop(store);
     remove_test_path(&path);
 }
 
@@ -5169,87 +5032,6 @@ fn facts_with_armed_webhook_run() -> OrganizationFacts {
             .unwrap(),
         ],
         DeliveryLedgerSnapshot::new(Vec::new()),
-    )
-    .unwrap()
-}
-
-fn role_chat_admission(idempotency_key: &str, message: &str) -> RoleChatAdmission {
-    RoleChatAdmission::new(
-        team_id(),
-        GraphRunId::new("run:one"),
-        RoleId::try_new("leader").unwrap(),
-        message,
-        idempotency_key,
-        3,
-    )
-    .unwrap()
-}
-
-fn role_chat_facts(work_nodes: usize, bind_role: bool) -> OrganizationFacts {
-    assert!(bind_role || work_nodes == 1);
-    let nodes = (0..work_nodes)
-        .map(|index| {
-            NodeDefinition::work(
-                NodeId::new(format!("work:{index}")),
-                "role chat work",
-                NonZeroU32::new(7).unwrap(),
-                WorkAssignment::new(format!("task:{index}"), "leader"),
-            )
-        })
-        .collect();
-    let graph = GraphState::initialize(
-        GraphDefinition::new(
-            "graph:role-chat",
-            "plan:role-chat",
-            GraphRunId::new("run:one"),
-            "role chat",
-            nodes,
-            Vec::new(),
-        )
-        .unwrap(),
-        1,
-    );
-    let materialization = role_chat_materialization();
-    let runtime = bind_role.then(|| role_chat_runtime(&materialization));
-    OrganizationFacts::restore(
-        [TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )],
-        [materialization],
-        [GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, runtime).unwrap()],
-        DeliveryLedgerSnapshot::new(Vec::new()),
-    )
-    .unwrap()
-}
-
-fn role_chat_materialization() -> MaterializationReceipt {
-    MaterializationReceipt::try_new(
-        team_id(),
-        RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-        vec![RoleMaterializationReceipt::new(
-            RoleId::try_new("leader").unwrap(),
-            ManagedAgentReference::try_new("agent-role-chat").unwrap(),
-            RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-        )],
-    )
-    .unwrap()
-}
-
-fn role_chat_runtime(materialization: &MaterializationReceipt) -> RunRuntimeReceipt {
-    let role = materialization.roles().first().unwrap();
-    RunRuntimeReceipt::try_new(
-        GraphRunId::new("run:one"),
-        vec![RoleSessionReceipt::with_endpoint_session_id(
-            team_id(),
-            GraphRunId::new("run:one"),
-            role.role().clone(),
-            crate::RoleSessionRef::initial(),
-            EndpointSessionId::try_new("native-session-role-chat").unwrap(),
-            role.agent().clone(),
-            RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
-        )],
     )
     .unwrap()
 }

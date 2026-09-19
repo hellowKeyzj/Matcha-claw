@@ -10,11 +10,13 @@ use std::fmt;
 pub const CHAT_SEND_METHOD: &str = "chat.send";
 pub const CHAT_ABORT_METHOD: &str = "chat.abort";
 pub const SESSIONS_LIST_METHOD: &str = "sessions.list";
+pub const SESSIONS_DESCRIBE_METHOD: &str = "sessions.describe";
 pub const SESSIONS_PATCH_METHOD: &str = "sessions.patch";
 pub const SESSIONS_CREATE_METHOD: &str = "sessions.create";
 pub const SESSIONS_DELETE_METHOD: &str = "sessions.delete";
 pub const CHAT_HISTORY_METHOD: &str = "chat.history";
 const MAX_CHAT_SESSION_KEY_UTF16: usize = 512;
+const MAX_SESSION_LABEL_BYTES: usize = 512;
 const DEFAULT_CHAT_HISTORY_LIMIT: usize = 200;
 const MAX_CHAT_HISTORY_LIMIT: u64 = 1_000;
 const MAX_CHAT_HISTORY_MAX_CHARS: u64 = 500_000;
@@ -657,15 +659,21 @@ pub struct SessionCreateParams {
     key: AgentScopedSessionKey,
     #[serde(rename = "agentId")]
     agent_id: AgentId,
+    model: ModelRef,
 }
 
 impl SessionCreateParams {
     pub fn try_new(
         agent_id: AgentId,
         endpoint_session_id: EndpointSessionId,
+        model: ModelRef,
     ) -> Result<Self, ValidationError> {
         let key = AgentScopedSessionKey::try_new(agent_id.clone(), endpoint_session_id)?;
-        Ok(Self { key, agent_id })
+        Ok(Self {
+            key,
+            agent_id,
+            model,
+        })
     }
 
     pub fn key(&self) -> &AgentScopedSessionKey {
@@ -941,7 +949,7 @@ impl SessionLabelPatchParams {
     pub fn try_new(key: SessionKey, label: impl Into<String>) -> Result<Self, ValidationError> {
         Ok(Self {
             key,
-            label: non_empty(label, "session label must be a non-empty string")?,
+            label: parse_session_label(label.into())?,
         })
     }
 
@@ -1161,6 +1169,94 @@ impl SessionsListParams {
         )?);
         Ok(self)
     }
+}
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDescribeParams {
+    key: SessionKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
+}
+impl fmt::Debug for SessionDescribeParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionDescribeParams")
+            .field("has_agent_id", &self.agent_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl SessionDescribeParams {
+    pub fn new(key: SessionKey, agent_id: Option<&str>) -> Self {
+        Self {
+            key,
+            agent_id: agent_id.map(str::to_owned),
+        }
+    }
+
+    pub fn key(&self) -> &SessionKey {
+        &self.key
+    }
+}
+/// One `sessions.describe` row. The row carries the selected model as a bare model id next to
+/// its provider, so [`Self::model_ref`] is the only place that rejoins them into a runtime ref.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionDescribeRow {
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub agent_id: Option<AgentId>,
+    pub model_override_source: Option<SessionModelOverrideSource>,
+}
+impl<'de> Deserialize<'de> for SessionDescribeRow {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut payload = Value::deserialize(deserializer)?;
+        let object = payload
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("sessions.describe session must be an object"))?;
+        let session_info = object.get("sessionInfo").and_then(Value::as_object);
+        let metadata = object.get("metadata").and_then(Value::as_object);
+        let read = |name: &str| {
+            session_wire_field(object, session_info, metadata, &[name]).unwrap_or(Value::Null)
+        };
+        Ok(Self {
+            model: serde_json::from_value(read("model")).map_err(D::Error::custom)?,
+            model_provider: serde_json::from_value(read("modelProvider"))
+                .map_err(D::Error::custom)?,
+            agent_id: serde_json::from_value(read("agentId")).map_err(D::Error::custom)?,
+            model_override_source: serde_json::from_value(read("modelOverrideSource"))
+                .map_err(D::Error::custom)?,
+        })
+    }
+}
+impl SessionDescribeRow {
+    /// Rejoins the row's selected model into the canonical `provider/model` runtime ref shared
+    /// with [`crate::projection::ProviderModelRuntimeIdentity::runtime_model_ref`].
+    pub fn model_ref(&self) -> Option<String> {
+        let model = self.model.as_deref()?;
+        let Some(provider) = self.model_provider.as_deref() else {
+            return Some(model.to_owned());
+        };
+        if model.starts_with(provider) && model.as_bytes().get(provider.len()) == Some(&b'/') {
+            return Some(model.to_owned());
+        }
+        Some(format!("{provider}/{model}"))
+    }
+}
+impl fmt::Debug for SessionDescribeRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionDescribeRow")
+            .field("has_model", &self.model.is_some())
+            .field("has_model_provider", &self.model_provider.is_some())
+            .field("has_agent_id", &self.agent_id.is_some())
+            .field("model_override_source", &self.model_override_source)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionModelOverrideSource {
+    User,
+    Auto,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -1452,6 +1548,7 @@ pub enum ProtocolError {
     InvalidChatSendResult,
     InvalidChatAbortResult,
     InvalidSessionsListResult,
+    InvalidSessionDescribeResult,
     InvalidSessionModelPatchResult,
     InvalidSessionPermissionPatchResult,
     InvalidSessionLabelPatchResult,
@@ -1468,6 +1565,7 @@ impl fmt::Display for ProtocolError {
             Self::InvalidChatSendResult => "chat.send result is invalid",
             Self::InvalidChatAbortResult => "chat.abort result is invalid",
             Self::InvalidSessionsListResult => "sessions.list result is invalid",
+            Self::InvalidSessionDescribeResult => "sessions.describe result is invalid",
             Self::InvalidSessionModelPatchResult => "sessions.patch model result is invalid",
             Self::InvalidSessionPermissionPatchResult => {
                 "sessions.patch permission result is invalid"
@@ -1514,6 +1612,19 @@ pub fn decode_sessions_list_result(
         return Err(ProtocolError::InvalidSessionsListResult);
     }
     Ok(result)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionDescribeEnvelope {
+    session: Option<SessionDescribeRow>,
+}
+pub fn decode_session_describe_result(
+    id: &str,
+    response: GatewayResponse,
+) -> Result<Option<SessionDescribeRow>, ProtocolError> {
+    let result: SessionDescribeEnvelope =
+        decode_result(id, response, ProtocolError::InvalidSessionDescribeResult)?;
+    Ok(result.session)
 }
 pub fn decode_session_model_patch_result(
     id: &str,
@@ -3253,6 +3364,16 @@ fn non_empty(value: impl Into<String>, error: &'static str) -> Result<String, Va
         .then_some(value)
         .ok_or(ValidationError(error))
 }
+
+/// Mirrors OpenClaw's `parseSessionLabel`: the label is trimmed, must not be
+/// blank, and is stored trimmed.
+fn parse_session_label(value: String) -> Result<String, ValidationError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_SESSION_LABEL_BYTES {
+        return Err(ValidationError("session label is invalid"));
+    }
+    Ok(trimmed.to_owned())
+}
 fn positive(value: u64, error: &'static str) -> Result<u64, ValidationError> {
     (value > 0).then_some(value).ok_or(ValidationError(error))
 }
@@ -3486,6 +3607,7 @@ mod tests {
         let create = SessionCreateParams::try_new(
             AgentId::try_new("mct-team").unwrap(),
             EndpointSessionId::try_new("team-endpoint-session-run-1-reviewer").unwrap(),
+            ModelRef::try_new("provider/model").unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -3495,7 +3617,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&create).unwrap(),
             json(
-                r#"{"key":"agent:mct-team:team-endpoint-session-run-1-reviewer","agentId":"mct-team"}"#
+                r#"{"key":"agent:mct-team:team-endpoint-session-run-1-reviewer","agentId":"mct-team","model":"provider/model"}"#
             )
         );
         assert_eq!(
@@ -3516,6 +3638,7 @@ mod tests {
                 SessionCreateParams::try_new(
                     AgentId::try_new("mct-team").unwrap(),
                     EndpointSessionId::try_new(endpoint).unwrap(),
+                    ModelRef::try_new("provider/model").unwrap(),
                 )
                 .is_err()
             );
@@ -3591,6 +3714,7 @@ mod tests {
         let expected_key = SessionCreateParams::try_new(
             AgentId::try_new("mct-team").unwrap(),
             EndpointSessionId::try_new("team-session").unwrap(),
+            ModelRef::try_new("provider/model").unwrap(),
         )
         .unwrap()
         .key()
@@ -3682,6 +3806,7 @@ mod tests {
         let expected_key = SessionCreateParams::try_new(
             AgentId::try_new("mct-team").unwrap(),
             EndpointSessionId::try_new("team-session").unwrap(),
+            ModelRef::try_new("provider/model").unwrap(),
         )
         .unwrap()
         .key()
@@ -4416,10 +4541,11 @@ mod tests {
         let endpoint_session_id = EndpointSessionId::try_new(PAYLOAD).unwrap();
         let scoped_key =
             AgentScopedSessionKey::try_new(agent_id.clone(), endpoint_session_id.clone()).unwrap();
-        let session_create = SessionCreateParams::try_new(agent_id, endpoint_session_id).unwrap();
+        let model_ref = ModelRef::try_new(PAYLOAD).unwrap();
+        let session_create =
+            SessionCreateParams::try_new(agent_id, endpoint_session_id, model_ref.clone()).unwrap();
         let run_id = RunId::try_new(RUN).unwrap();
         let message_id = MessageId::try_new(MESSAGE).unwrap();
-        let model_ref = ModelRef::try_new(PAYLOAD).unwrap();
         assert_debug_redacts(&session_key, CANARIES);
         assert_debug_redacts(&scoped_key, CANARIES);
         assert_debug_redacts(&session_create, CANARIES);
@@ -4587,5 +4713,98 @@ mod tests {
                 "peer-payload-canary",
             ],
         );
+    }
+
+    #[test]
+    fn session_describe_reads_the_selected_model_pair_and_ignores_unknown_fields() {
+        let describe = SessionDescribeParams::new(key(), None);
+        assert_eq!(
+            serde_json::to_value(&describe).unwrap(),
+            serde_json::json!({"key": "agent:main:session-1"})
+        );
+        assert_eq!(
+            serde_json::to_value(SessionDescribeParams::new(key(), Some("worker"))).unwrap(),
+            serde_json::json!({"key": "agent:main:session-1", "agentId": "worker"})
+        );
+
+        let row = decode_session_describe_result(
+            "describe",
+            success(
+                "describe",
+                r#"{"session":{"key":"agent:main:session-1","model":"glm-5.2","modelProvider":"custom-cc367df7","agentId":"main","modelOverrideSource":"user","updatedAt":42,"future":true,"lastMessage":{"role":"user","content":"private"}}}"#,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.model.as_deref(), Some("glm-5.2"));
+        assert_eq!(row.model_provider.as_deref(), Some("custom-cc367df7"));
+        assert_eq!(row.agent_id.as_ref().map(AgentId::as_str), Some("main"));
+        assert_eq!(
+            row.model_override_source,
+            Some(SessionModelOverrideSource::User)
+        );
+        assert_eq!(row.model_ref().as_deref(), Some("custom-cc367df7/glm-5.2"));
+        assert_debug_redacts(&row, &["glm-5.2", "custom-cc367df7", "private"]);
+    }
+
+    #[test]
+    fn session_describe_treats_a_missing_session_as_absent() {
+        assert!(
+            decode_session_describe_result(
+                "describe",
+                success("describe", r#"{"session":null,"future":true}"#),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            decode_session_describe_result("missing", success("present", r#"{"session":null}"#),)
+                .unwrap_err(),
+            ProtocolError::MismatchedResponse,
+        );
+    }
+
+    #[test]
+    fn session_describe_normalizes_the_row_model_ref() {
+        let row = |raw: &str| {
+            decode_session_describe_result("describe", success("describe", raw))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            row(r#"{"session":{"model":"glm-5.2","modelProvider":"custom-cc367df7"}}"#)
+                .model_ref()
+                .as_deref(),
+            Some("custom-cc367df7/glm-5.2")
+        );
+        assert_eq!(
+            row(r#"{"session":{"model":"anthropic/claude-sonnet-4-6","modelProvider":"vercel-ai-gateway"}}"#)
+                .model_ref()
+                .as_deref(),
+            Some("vercel-ai-gateway/anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(
+            row(r#"{"session":{"model":"custom-cc367df7/glm-5.2","modelProvider":"custom-cc367df7"}}"#)
+                .model_ref()
+                .as_deref(),
+            Some("custom-cc367df7/glm-5.2")
+        );
+        assert_eq!(
+            row(r#"{"session":{"model":"custom-cc367df7/glm-5.2","modelProvider":"custom"}}"#)
+                .model_ref()
+                .as_deref(),
+            Some("custom/custom-cc367df7/glm-5.2")
+        );
+        assert_eq!(
+            row(r#"{"session":{"model":"glm-5.2"}}"#)
+                .model_ref()
+                .as_deref(),
+            Some("glm-5.2")
+        );
+        assert_eq!(
+            row(r#"{"session":{"modelProvider":"custom-cc367df7"}}"#).model_ref(),
+            None
+        );
+        assert_eq!(row(r#"{"session":{}}"#).model_ref(), None);
     }
 }

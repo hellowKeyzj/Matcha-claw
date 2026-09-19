@@ -1,5 +1,7 @@
 use std::{fmt, future::Future, pin::Pin};
 
+use tokio::sync::mpsc;
+
 use organization::{
     DeliveryReceiptReference, DeliveryRejection, EndpointSessionId, GraphRunId,
     MaterializationOperationOutcome, MaterializationRejection, NativeDeletionEvidence,
@@ -13,11 +15,13 @@ use organization::{
 use platform::exchange::InvocationOutcome;
 
 use crate::{
-    peer::{MatchaPeer, RoleSessionError, RoleSessionNativeHandle, RoleSessionPromptHandle},
+    peer::{
+        MatchaPeer, RoleSessionError, RoleSessionNativeHandle, RoleSessionPromptHandle,
+        SessionSubscriptionItem,
+    },
     session::{
         client::AppServerClientError,
         hydration::HydrationWindowRequest,
-        receipt::NativeRunSettled,
         request::SessionCancelParams,
         role::{RolePrompt, RoleRunId, RoleSessionId},
     },
@@ -155,13 +159,6 @@ pub enum MatchaMaterializationOutcome {
     OutcomeUnknown,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MatchaTerminalWatchOutcome {
-    Settled { settled: NativeRunSettled },
-    Failed { failure: MatchaEffectFailure },
-    OutcomeUnknown,
-}
-
 /// Matcha's native Team effect producer.
 ///
 /// Matcha app-server currently has no Team materialization producer. The
@@ -192,16 +189,7 @@ impl<'peer> MatchaTeamNativeEffects<'peer> {
 
     pub async fn deliver(&self, request: MatchaDeliveryRequest) -> MatchaDeliveryOutcome {
         let prompt = self.peer.role_session_prompt_handle();
-        deliver_matcha_prompt(&prompt, request).await
-    }
-
-    pub async fn watch_terminal_settled(
-        &self,
-        session: RoleSessionId,
-        native_run_id: RoleRunId,
-    ) -> MatchaTerminalWatchOutcome {
-        let native = self.peer.role_session_native_handle();
-        watch_terminal_settled_with_handle(native, session, native_run_id).await
+        deliver_matcha_prompt(&prompt, None, request).await
     }
 
     pub async fn abort(&self, session: RoleSessionId) -> MatchaSessionMutationOutcome {
@@ -288,16 +276,43 @@ impl<'peer> MatchaTeamNativeEffects<'peer> {
     }
 }
 
+/// Host-owned renderer binding for one role session.
+///
+/// The session key and route key are derived by the Host session layer; the
+/// integration only carries them into the native renderer subscription.
+#[derive(Clone)]
+pub struct RoleSessionRenderer {
+    session_key: String,
+    route_key: String,
+    events: mpsc::Sender<SessionSubscriptionItem>,
+}
+
+impl RoleSessionRenderer {
+    pub fn new(
+        session_key: String,
+        route_key: String,
+        events: mpsc::Sender<SessionSubscriptionItem>,
+    ) -> Self {
+        Self {
+            session_key,
+            route_key,
+            events,
+        }
+    }
+}
+
 pub fn deliver_prompt(
     peer: &MatchaPeer,
+    renderer: Option<RoleSessionRenderer>,
     request: PromptDeliveryRequest,
 ) -> impl Future<Output = DomainDeliveryOutcome> + Send + 'static {
     let prompt = peer.role_session_prompt_handle();
-    async move { deliver_prompt_with_handle(prompt, request).await }
+    async move { deliver_prompt_with_handle(prompt, renderer, request).await }
 }
 
 pub async fn deliver_prompt_with_handle(
     prompt: RoleSessionPromptHandle,
+    renderer: Option<RoleSessionRenderer>,
     request: PromptDeliveryRequest,
 ) -> DomainDeliveryOutcome {
     let session =
@@ -329,7 +344,7 @@ pub async fn deliver_prompt_with_handle(
             };
         }
     };
-    map_matcha_delivery(deliver_matcha_prompt(&prompt, delivery).await)
+    map_matcha_delivery(deliver_matcha_prompt(&prompt, renderer, delivery).await)
 }
 
 pub fn abort_role_sessions(
@@ -408,35 +423,25 @@ pub fn delete_role_sessions(
     }
 }
 
-async fn watch_terminal_settled_with_handle(
-    native: RoleSessionNativeHandle,
-    session: RoleSessionId,
-    native_run_id: RoleRunId,
-) -> MatchaTerminalWatchOutcome {
-    match native
-        .watch_role_terminal_settled(session, native_run_id.clone())
-        .await
-    {
-        Some(settled) if settled.native_run_id().as_str() == native_run_id.as_str() => {
-            MatchaTerminalWatchOutcome::Settled { settled }
-        }
-        Some(_) => MatchaTerminalWatchOutcome::Failed {
-            failure: MatchaEffectFailure::Rejected,
-        },
-        None => MatchaTerminalWatchOutcome::OutcomeUnknown,
-    }
-}
-
 async fn deliver_matcha_prompt(
     prompt: &RoleSessionPromptHandle,
+    renderer: Option<RoleSessionRenderer>,
     request: MatchaDeliveryRequest,
 ) -> MatchaDeliveryOutcome {
+    let Some(renderer) = renderer else {
+        return MatchaDeliveryOutcome::Rejected {
+            failure: MatchaEffectFailure::Unavailable,
+        };
+    };
     let requested_run_id = request.delivery_id.clone();
     match prompt
         .prompt_role_session_with_run_id(
             &request.session,
             request.prompt,
-            Some(request.delivery_id),
+            request.delivery_id,
+            renderer.session_key,
+            renderer.route_key,
+            renderer.events,
         )
         .await
     {
@@ -488,7 +493,7 @@ impl TeamNativeEffectsPort for MatchaTeamNativeEffects<'_> {
         request: PromptDeliveryRequest,
     ) -> Pin<Box<dyn Future<Output = DomainDeliveryOutcome> + Send + '_>> {
         let prompt = self.peer.role_session_prompt_handle();
-        Box::pin(async move { deliver_prompt_with_handle(prompt, request).await })
+        Box::pin(async move { deliver_prompt_with_handle(prompt, None, request).await })
     }
 
     fn abort(

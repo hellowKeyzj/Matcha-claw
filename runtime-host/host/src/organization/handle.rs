@@ -6,10 +6,9 @@ use foundation::execution::OwnerRuntimeHandle;
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
     GraphDefinition, GraphRunId, IdempotencyKey, NativeTerminalReceiptTarget, ResumeOutcome,
-    RoleChatAdmission, RoleChatAdmissionOutcome, RunCommand, StoreFault, TeamDecisionCommand,
-    TeamDecisionReceipt, TeamGraphContextQuery, TeamGraphContextResult, TeamId, TeamNodeEvent,
-    TeamNodeEventOutcome, TeamRunQuery, TeamRunQueryOutcome, TeamTriggerFireOutcome,
-    TombstoneOutcome, TriggerFireRequest,
+    RunCommand, StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamGraphContextQuery,
+    TeamGraphContextResult, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamRunQuery,
+    TeamRunQueryOutcome, TeamTriggerFireOutcome, TombstoneOutcome, TriggerFireRequest,
     package::{
         TeamSkillDependencyPlanResult, TeamSkillPackageValidation, TeamSkillSelectionError,
         TeamSkillSelectionId,
@@ -30,11 +29,11 @@ use super::{
     start_gate_control::{StartGateBinding, StartGateSessionLookup},
     team_run::{
         ArmedTrigger, ManualTeamCreateOutcome, TeamDeleteOutcome,
-        TeamMaterializationCommandOutcome, TeamNodePromptSettledResult, TeamNodeTerminalResolution,
-        TeamNodeTerminalResult, TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart,
-        TeamRunActivityTarget, TeamRunCommandOutcome, TeamRunTriggerOutcome,
+        TeamMaterializationCommandOutcome, TeamNodeTerminalResolution, TeamNodeTerminalResult,
+        TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart, TeamRunActivityTarget,
+        TeamRunCommandOutcome, TeamRunTriggerOutcome,
     },
-    team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
+    team_runtime::TeamRuntimeStatus,
 };
 
 #[derive(Clone)]
@@ -605,41 +604,6 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn role_message_submit(
-        &self,
-        admission: RoleChatAdmission,
-    ) -> Result<Result<RoleChatAdmissionOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::RoleMessageSubmit { admission, reply })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
-    pub async fn role_message_submit_for_run(
-        &self,
-        run_id: GraphRunId,
-        role_id: organization::RoleId,
-        message: String,
-        idempotency_key: String,
-        requested_at: u64,
-    ) -> Result<Result<RoleChatAdmissionOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::RoleMessageSubmitForRun {
-                run_id,
-                role_id,
-                message,
-                idempotency_key,
-                requested_at,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
     pub async fn node_event(
         &self,
         command: RunCommand,
@@ -664,28 +628,6 @@ impl OrganizationHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::NodePromptRetryDue { run_id, reply })
-            .await
-            .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
-    }
-
-    pub async fn node_prompt_settled(
-        &self,
-        session_key: String,
-        prompt_run_id: String,
-        phase: TeamRuntimePromptPhase,
-        settled_at: u64,
-    ) -> Result<Result<TeamNodePromptSettledResult, TeamRuntimeStatus>, RequestAdmissionClosed>
-    {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::NodePromptSettled {
-                session_key,
-                prompt_run_id,
-                phase,
-                settled_at,
-                reply,
-            })
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())
@@ -809,12 +751,16 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn terminal_observation_deliveries(
+    pub async fn native_delivery_by_run(
         &self,
-    ) -> Result<Vec<DeliveryId>, RequestAdmissionClosed> {
+        native_run_id: String,
+    ) -> Result<Option<DeliveryId>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
-            .send_query(OrganizationQuery::TerminalObservationDeliveries { reply })
+            .send_query(OrganizationQuery::NativeDeliveryByRun {
+                native_run_id,
+                reply,
+            })
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())
@@ -915,6 +861,31 @@ impl OrganizationHandle {
             .await
             .map_err(closed)?;
         reply_rx.await.map_err(|_| closed_error())
+    }
+
+    /// Settles a team node terminal by native run id alone, resolving the owning delivery first.
+    /// Native run ids without a team delivery are not team dispatches and settle nothing.
+    pub async fn native_run_settled_by_native_run_id(
+        &self,
+        native_run_id: String,
+        settled: NativeRunSettled,
+        settled_at: u64,
+    ) -> Result<(), RequestAdmissionClosed> {
+        let Some(delivery_id) = self.native_delivery_by_run(native_run_id).await? else {
+            return Ok(());
+        };
+        let Some(target) = self.native_terminal_target(delivery_id.clone()).await? else {
+            return Ok(());
+        };
+        let _ = self
+            .native_run_settled(
+                target.graph_run_id().clone(),
+                delivery_id,
+                settled,
+                settled_at,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn recover_materialization_receipts(&self) -> Result<(), RequestAdmissionClosed> {

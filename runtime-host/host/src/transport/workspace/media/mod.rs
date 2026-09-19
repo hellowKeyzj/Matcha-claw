@@ -212,12 +212,20 @@ fn valid_agent_id(value: &str) -> bool {
             .any(|byte| byte == 0 || byte.is_ascii_control())
 }
 
+/// The name is echoed back verbatim as the receipt name, so it must be a single
+/// path segment that cannot address a parent.
 fn valid_file_name(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 4096 && !value.as_bytes().contains(&0)
+    !value.is_empty()
+        && value.len() <= 4096
+        && value != "."
+        && value != ".."
+        && !value.contains(['/', '\\'])
+        && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn valid_base64(value: &str) -> bool {
-    value.len() <= MAX_BASE64_BYTES
+    !value.is_empty()
+        && value.len() <= MAX_BASE64_BYTES
         && value.len().is_multiple_of(4)
         && value
             .bytes()

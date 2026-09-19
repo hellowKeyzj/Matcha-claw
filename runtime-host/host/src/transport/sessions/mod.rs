@@ -184,6 +184,7 @@ struct Session {
     session_identity: SessionIdentity,
     kind: PublicSessionKind,
     endpoint_session_id: String,
+    model: Option<String>,
     updated_at: Option<u64>,
 }
 
@@ -195,6 +196,9 @@ fn session_value(session: &Session) -> Value {
         "kind": public_session_kind_value(session.kind),
         "endpointSessionId": &session.endpoint_session_id,
     });
+    if let Some(model) = &session.model {
+        value["model"] = serde_json::json!(model);
+    }
     if let Some(updated_at) = session.updated_at {
         value["updatedAt"] = serde_json::json!(updated_at);
     }
@@ -250,6 +254,7 @@ fn project_session(
         agent_id: session.agent_id,
         kind,
         endpoint_session_id: session.endpoint_session_id,
+        model: session.model,
         updated_at: session.updated_at,
     })
 }
@@ -374,6 +379,7 @@ mod tests {
             key,
             agent_id,
             endpoint_session_id,
+            model: None,
             updated_at,
         }
     }

@@ -41,7 +41,7 @@ struct Kind {
     deny_unknown_fields
 )]
 enum Input {
-    List,
+    List {},
 }
 
 pub(crate) enum Command {
@@ -75,14 +75,14 @@ impl Request {
             && self.scope.kind == "openclaw-mcp-servers"
             && self.target.kind == "openclaw-mcp-servers"
             && operation_name(&self.operation_id).is_some_and(|kind| match (&self.input, kind) {
-                (Input::List, "list") => true,
+                (Input::List {}, "list") => true,
                 _ => false,
             })
     }
 
     pub(crate) fn into_command(self) -> Command {
         match self.input {
-            Input::List => Command::List,
+            Input::List {} => Command::List,
         }
     }
 }
@@ -174,6 +174,22 @@ mod tests {
             json!({ "kind": "sessionStatus" }),
         ));
         assert!(unsupported.is_err());
+    }
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        let accepted = serde_json::from_value::<Request>(request(
+            "openClawMcpServers.list",
+            json!({ "kind": "list" }),
+        ))
+        .expect("list request decodes");
+        assert!(accepted.valid());
+
+        let rejected = serde_json::from_value::<Request>(request(
+            "openClawMcpServers.list",
+            json!({ "kind": "list", "bogus": 1 }),
+        ));
+        assert!(rejected.is_err());
     }
 
     fn request(operation_id: &str, input: Value) -> Value {

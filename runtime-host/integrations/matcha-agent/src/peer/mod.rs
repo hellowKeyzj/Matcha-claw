@@ -7,8 +7,8 @@ pub use lifecycle::{
     JoinError, LifecycleError, MatchaPeer, MatchaPeerLifecycleHandle, MatchaPeerSessionHandle,
     RendererApprovalPhase, RendererEvent, RendererEventEnvelope, RendererMessageLifecycle,
     RendererRunPhase, RendererSubscriptionError, RendererToolPhase, RoleSessionError,
-    RoleSessionNativeHandle, RoleSessionOwnership, RoleSessionPromptHandle, RoleTerminalWatch,
-    SessionSubscriptionItem, ShutdownError, TerminalReceiptReadError,
+    RoleSessionNativeHandle, RoleSessionOwnership, RoleSessionPromptHandle,
+    SessionSubscriptionItem, ShutdownError,
 };
 
 #[cfg(test)]

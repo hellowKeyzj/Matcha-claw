@@ -85,8 +85,6 @@ pub mod run {
     pub mod recovery;
     #[path = "review/mod.rs"]
     pub mod review;
-    #[path = "role_session_projection.rs"]
-    pub mod role_session_projection;
     #[path = "scheduler/mod.rs"]
     pub mod scheduler;
     #[path = "task_board/mod.rs"]
@@ -152,8 +150,7 @@ pub mod run {
         DeliveryRequest, DeliveryRequestError, DeliveryResolution, DeliverySnapshot, DeliveryStart,
         InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt,
         NativeDeliveryCorrelation, NativeRunOutputResolutionError, RegisterDeliveryError,
-        RegisterOutcome, RestoreDeliveryError, RestoreLedgerError, RoleChatAdmission,
-        RoleChatAdmissionError, RoleChatAdmissionOutcome, RoleChatRejection, TeamNodeOutput,
+        RegisterOutcome, RestoreDeliveryError, RestoreLedgerError, TeamNodeOutput,
         TeamNodeOutputError, TerminalObservationError, TerminalObservationOutcome, begin_delivery,
         dispatch_delivery, recover_interrupted_delivery, register_delivery, settle_delivery,
     };
@@ -216,7 +213,10 @@ pub mod run {
         NativeDeletionProof, NativeDeletionProofError, RoleSessionDeletionConfirmation,
         TeamRunPurgeRequest, purge_team_run,
     };
-    pub use query::{TeamRunProjection, TeamRunQuery, TeamRunQueryOutcome, query_team_run};
+    pub use query::{
+        TeamRoleSessionQueryOutcome, TeamRunProjection, TeamRunQuery, TeamRunQueryOutcome,
+        query_team_role_sessions, query_team_run,
+    };
     pub use recovery::{
         AttemptRecoveryItem, CancellationRecoveryAction, DeliveryRecoveryAction,
         DeliveryRecoveryItem, DeliveryRecoverySummary, LedgerRecoverySummary,
@@ -224,10 +224,6 @@ pub mod run {
         ReviewRecoveryStatus, ReviewRecoverySummary, RunRecoveryStatus, TeamRunRecoveryPlan,
         TeamRunRecoveryQuery, apply_organization_recovery, plan_organization_recovery,
         query_team_run_recovery,
-    };
-    pub use role_session_projection::{
-        TeamRoleSessionProjection, TeamRoleSessionQueryOutcome, TeamRoleSessionStatus,
-        query_team_role_sessions,
     };
     pub use scheduler::{
         ArmedCronTrigger, CronScheduleError, CronTriggerScheduleError, DueCronTriggerPlan,
@@ -317,8 +313,7 @@ pub use run::{
     RegisterDeliveryError, RegisterOutcome, ResolveApprovalError, RestoreActivityError,
     RestoreActivityLedgerError, RestoreDeliveryError, RestoreError, RestoreEvidenceLedgerError,
     RestoreLedgerError, RestoreTriggerLedgerError, ReviewAssignment, ReviewRecoveryStatus,
-    ReviewRecoverySummary, RoleChatAdmission, RoleChatAdmissionError, RoleChatAdmissionOutcome,
-    RoleChatRejection, RoleSessionDeletionConfirmation, RunCommand, RunRecoveryStatus,
+    ReviewRecoverySummary, RoleSessionDeletionConfirmation, RunCommand, RunRecoveryStatus,
     ScriptReviewRule, SettleOutcome, StartOutcome, StartTrigger, TeamDecision, TeamDecisionCommand,
     TeamDecisionCommandError, TeamDecisionLedger, TeamDecisionLedgerRestoreError,
     TeamDecisionLedgerSnapshot, TeamDecisionReceipt, TeamDecisionRecordError, TeamDecisionSnapshot,
@@ -328,9 +323,8 @@ pub use run::{
     TeamNodeNonTerminalEvent, TeamNodeOutput, TeamNodeOutputError, TeamNodeTerminalEvent,
     TeamPublicAttempt, TeamPublicAttemptStatus, TeamPublicEdge, TeamPublicEdgeAction,
     TeamPublicEdgeStatus, TeamPublicGraph, TeamPublicGraphStatus, TeamPublicNode,
-    TeamPublicNodeKind, TeamPublicProjection, TeamPublicQueryOutcome, TeamRoleSessionProjection,
-    TeamRoleSessionQueryOutcome, TeamRoleSessionStatus, TeamRunDiagnosticsApprovalSummary,
-    TeamRunDiagnosticsBudgets, TeamRunDiagnosticsConfidence,
+    TeamPublicNodeKind, TeamPublicProjection, TeamPublicQueryOutcome, TeamRoleSessionQueryOutcome,
+    TeamRunDiagnosticsApprovalSummary, TeamRunDiagnosticsBudgets, TeamRunDiagnosticsConfidence,
     TeamRunDiagnosticsDeliveryFailureSummary, TeamRunDiagnosticsDeliverySummary,
     TeamRunDiagnosticsFailureSummary, TeamRunDiagnosticsGraphStatus,
     TeamRunDiagnosticsLifecycleStatus, TeamRunDiagnosticsLimits, TeamRunDiagnosticsProjection,
@@ -348,7 +342,7 @@ pub use run::{
     dispatch_activity, dispatch_delivery, export_yaml, import_for_run, import_yaml,
     next_cron_slot_after, plan_due_cron_trigger, plan_organization_recovery,
     plan_terminal_observations, project, query_team_graph_context, query_team_public_projection,
-    query_team_role_sessions, query_team_run, query_team_run_diagnostics, query_team_run_recovery,
+    query_team_run, query_team_run_diagnostics, query_team_run_recovery,
     recover_interrupted_activity, recover_interrupted_delivery, recovery_oracle, reduce,
     register_delivery, resolve_approval, resolve_webhook_trigger, restore_oracle, settle_activity,
     settle_delivery,

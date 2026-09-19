@@ -209,8 +209,15 @@ impl ContentOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Operation {
+    Load,
+    Window,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Command {
+    operation: Operation,
     provider: Provider,
     session_key: String,
     agent_id: Option<String>,
@@ -221,6 +228,7 @@ pub(crate) struct Command {
 
 impl Command {
     pub(crate) fn new(
+        operation: Operation,
         provider: Provider,
         session_key: String,
         agent_id: Option<String>,
@@ -238,6 +246,7 @@ impl Command {
             return None;
         }
         Some(Self {
+            operation,
             provider,
             session_key,
             agent_id,
@@ -245,6 +254,10 @@ impl Command {
             endpoint_session_id,
             include_canonical,
         })
+    }
+
+    pub(crate) const fn operation(&self) -> Operation {
+        self.operation
     }
 
     pub(crate) const fn provider(&self) -> Provider {
@@ -894,6 +907,7 @@ fn project_matcha_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id,
+        model: None,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -1017,6 +1031,7 @@ fn project_openclaw_replay_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id: Some(endpoint_session_id),
+        model: None,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -2155,6 +2170,7 @@ fn project_matcha_hydration_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id,
+        model: None,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -2444,11 +2460,7 @@ mod tests {
 
     impl SessionOps for CapturingSessionOps {
         fn admission(&self) -> SessionAdmission {
-            SessionAdmission::agent_scoped(
-                RuntimeDriverIdentity::open_claw().endpoint(),
-                SessionProvider::OpenClaw,
-                "agent",
-            )
+            SessionAdmission::new(RuntimeDriverIdentity::open_claw())
         }
 
         fn abort_session<'a>(
@@ -2724,6 +2736,7 @@ mod tests {
     #[test]
     fn rejects_endpoint_session_id_that_cannot_be_bound() {
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "session-1".to_owned(),
             None,
@@ -2737,6 +2750,7 @@ mod tests {
     #[test]
     fn keeps_canonical_request_controls_on_the_command() {
         let command = Command::new(
+            Operation::Load,
             Provider::Matcha,
             "session-1".to_owned(),
             Some("agent-1".to_owned()),
@@ -2758,6 +2772,7 @@ mod tests {
     #[test]
     fn matcha_native_session_id_uses_endpoint_binding() {
         let command = Command::new(
+            Operation::Load,
             Provider::Matcha,
             "matcha-agent:matcha:native-session-1".to_owned(),
             Some("matcha".to_owned()),
@@ -2777,6 +2792,7 @@ mod tests {
     fn matcha_native_session_id_rejects_missing_endpoint_binding() {
         for session_key in ["session-1", "matcha-agent:matcha:session-1"] {
             let command = Command::new(
+                Operation::Load,
                 Provider::Matcha,
                 session_key.to_owned(),
                 Some("matcha".to_owned()),
@@ -2793,6 +2809,7 @@ mod tests {
     #[test]
     fn openclaw_history_key_uses_canonical_session_key_with_endpoint_binding() {
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "agent:agentic-identity-trust-architect:team-endpoint-session-a8b648cce33bcc074ffa958a5436e843".to_owned(),
             Some("agentic-identity-trust-architect".to_owned()),
@@ -2813,6 +2830,7 @@ mod tests {
     #[test]
     fn openclaw_history_key_keeps_agent_scoped_session_key() {
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "agent:main:direct-session".to_owned(),
             None,
@@ -2831,6 +2849,7 @@ mod tests {
     #[test]
     fn openclaw_history_key_rejects_malformed_agent_scoped_session_key() {
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "agent:main:".to_owned(),
             Some("main".to_owned()),
@@ -2846,6 +2865,7 @@ mod tests {
     #[test]
     fn openclaw_history_key_rejects_nested_agent_scoped_session_key() {
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "agent:main:agent:main:main".to_owned(),
             Some("main".to_owned()),
@@ -2897,6 +2917,7 @@ mod tests {
     async fn openclaw_older_window_passes_request_to_replay_loader_and_keeps_window_metadata() {
         let ops = CapturingSessionOps::default();
         let command = Command::new(
+            Operation::Load,
             Provider::OpenClaw,
             "agent:main:session-1".to_owned(),
             Some("main".to_owned()),

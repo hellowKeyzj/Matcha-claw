@@ -4,9 +4,9 @@ use crate::runtime::driver::NativeRunSettled;
 
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
-    GraphDefinition, GraphRunId, IdempotencyKey, RoleChatAdmission, RoleChatAdmissionOutcome,
-    RunCommand, StoreFault, TeamDecisionCommand, TeamDecisionReceipt, TeamId, TeamNodeEvent,
-    TeamNodeEventOutcome, TeamTriggerFireOutcome, TombstoneOutcome, TriggerFireRequest,
+    GraphDefinition, GraphRunId, IdempotencyKey, RunCommand, StoreFault, TeamDecisionCommand,
+    TeamDecisionReceipt, TeamId, TeamNodeEvent, TeamNodeEventOutcome, TeamTriggerFireOutcome,
+    TombstoneOutcome, TriggerFireRequest,
     package::{TeamSkillSelectionError, TeamSkillSelectionId},
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
@@ -18,11 +18,10 @@ use tokio::sync::oneshot;
 use super::{
     team_run::{
         ManualTeamCreateOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
-        TeamNodePromptSettledResult, TeamNodeTerminalResolution, TeamNodeTerminalResult,
-        TeamRunActivityError, TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome,
-        TeamRunTriggerOutcome,
+        TeamNodeTerminalResolution, TeamNodeTerminalResult, TeamRunActivityError,
+        TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome, TeamRunTriggerOutcome,
     },
-    team_runtime::{TeamRuntimePromptPhase, TeamRuntimeStatus},
+    team_runtime::TeamRuntimeStatus,
 };
 
 pub enum OrganizationCommand {
@@ -119,18 +118,6 @@ pub enum OrganizationCommand {
         patch: super::team_runtime::TeamGraphPatchDraft,
         reply: oneshot::Sender<Result<TeamRunCommandOutcome, StoreFault>>,
     },
-    RoleMessageSubmit {
-        admission: RoleChatAdmission,
-        reply: oneshot::Sender<Result<RoleChatAdmissionOutcome, StoreFault>>,
-    },
-    RoleMessageSubmitForRun {
-        run_id: GraphRunId,
-        role_id: organization::RoleId,
-        message: String,
-        idempotency_key: String,
-        requested_at: u64,
-        reply: oneshot::Sender<Result<RoleChatAdmissionOutcome, StoreFault>>,
-    },
     RunStartProposalSet {
         run_id: GraphRunId,
         proposal_id: String,
@@ -152,13 +139,6 @@ pub enum OrganizationCommand {
         command: RunCommand,
         event: TeamNodeEvent,
         reply: oneshot::Sender<Result<TeamNodeEventOutcome, StoreFault>>,
-    },
-    NodePromptSettled {
-        session_key: String,
-        prompt_run_id: String,
-        phase: TeamRuntimePromptPhase,
-        settled_at: u64,
-        reply: oneshot::Sender<Result<TeamNodePromptSettledResult, TeamRuntimeStatus>>,
     },
     NodeTerminalResolve {
         run_id: GraphRunId,

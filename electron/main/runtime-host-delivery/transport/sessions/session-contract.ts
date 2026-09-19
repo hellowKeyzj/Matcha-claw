@@ -13,6 +13,7 @@ const MAX_RENDERER_ROUTE_KEY_BYTES = 128;
 export type SessionView = Readonly<{
   sessionKey: string;
   endpointSessionId: string | null;
+  model: string | null;
   identity: Readonly<{
     sessionKey: string;
     endpoint: Readonly<{
@@ -173,12 +174,13 @@ export function decodeSessionContentLoadResponse(value: unknown): SessionContent
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasExactKeys(value, [
-      'sessionKey', 'endpointSessionId', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
+      'sessionKey', 'endpointSessionId', 'model', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
     ])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
     || !isNullableSessionKey(value.endpointSessionId)
+    || !isNullableSessionKey(value.model)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
     || !isEpoch(value.epoch)

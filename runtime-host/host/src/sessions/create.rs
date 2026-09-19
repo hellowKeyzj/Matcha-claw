@@ -1,13 +1,18 @@
 use openclaw::{
     port::OpenClawSessionError,
-    session::protocol::{AgentId, EndpointSessionId, SessionCreateParams, SessionCreateResult},
+    session::protocol::{
+        AgentId, EndpointSessionId, ModelRef, SessionCreateParams, SessionCreateResult,
+    },
 };
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 use platform::exchange::InvocationOutcome;
 use serde::{Serialize, Serializer};
 
-use crate::sessions::state::{
-    MAX_SESSION_KEY_BYTES, SessionIdentity, SessionProvider, SessionState, SessionView,
+use crate::{
+    runtime::driver::RuntimeDriverIdentity,
+    sessions::state::{
+        MAX_SESSION_KEY_BYTES, SessionIdentity, SessionProvider, SessionState, SessionView,
+    },
 };
 
 const MAX_AGENT_ID_BYTES: usize = 64;
@@ -50,22 +55,12 @@ impl SessionCreateAdmissionInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionAdmission {
-    endpoint: RuntimeEndpoint,
-    provider: SessionProvider,
-    generated_key_namespace: &'static str,
+    identity: RuntimeDriverIdentity,
 }
 
 impl SessionAdmission {
-    pub(crate) fn agent_scoped(
-        endpoint: RuntimeEndpoint,
-        provider: SessionProvider,
-        generated_key_namespace: &'static str,
-    ) -> Self {
-        Self {
-            endpoint,
-            provider,
-            generated_key_namespace,
-        }
+    pub(crate) const fn new(identity: RuntimeDriverIdentity) -> Self {
+        Self { identity }
     }
 
     pub(crate) fn prepare_create(
@@ -73,7 +68,7 @@ impl SessionAdmission {
         input: SessionCreateAdmissionInput,
         now_ms: u64,
     ) -> Result<SessionCreateCommand, InvalidSessionCreate> {
-        if input.endpoint != self.endpoint || !valid_identity(&input.agent_id, MAX_AGENT_ID_BYTES) {
+        if input.endpoint != self.identity.endpoint() {
             return Err(InvalidSessionCreate);
         }
         let endpoint_session_id = match input.endpoint_session_id {
@@ -85,14 +80,13 @@ impl SessionAdmission {
             }
             None => generated_endpoint_session_id(now_ms)?,
         };
-        let session_key = generated_local_session_key(
-            self.generated_key_namespace,
-            &input.agent_id,
-            &endpoint_session_id,
-        );
+        let session_key = self
+            .identity
+            .rendered_session_key(&input.agent_id, &endpoint_session_id)
+            .ok_or(InvalidSessionCreate)?;
         SessionCreateCommand::from_prepared(
-            self.endpoint.clone(),
-            self.provider,
+            self.identity.endpoint(),
+            self.identity.session_provider(),
             input.agent_id,
             endpoint_session_id,
             session_key,
@@ -148,14 +142,17 @@ impl SessionCreateCommand {
         &self.endpoint_session_id
     }
 
-    pub(crate) fn into_openclaw_params(self) -> Result<SessionCreateParams, InvalidSessionCreate> {
+    pub(crate) fn into_openclaw_params(
+        self,
+        model: ModelRef,
+    ) -> Result<SessionCreateParams, InvalidSessionCreate> {
         if self.provider != SessionProvider::OpenClaw {
             return Err(InvalidSessionCreate);
         }
         let agent_id = AgentId::try_new(self.agent_id).map_err(|_| InvalidSessionCreate)?;
         let endpoint_session_id = EndpointSessionId::try_new(self.endpoint_session_id)
             .map_err(|_| InvalidSessionCreate)?;
-        SessionCreateParams::try_new(agent_id, endpoint_session_id)
+        SessionCreateParams::try_new(agent_id, endpoint_session_id, model)
             .map_err(|_| InvalidSessionCreate)
     }
 
@@ -176,14 +173,6 @@ impl SessionCreateCommand {
     pub(crate) const fn provider(&self) -> SessionProvider {
         self.provider
     }
-}
-
-fn generated_local_session_key(
-    namespace: &str,
-    agent_id: &str,
-    endpoint_session_id: &str,
-) -> String {
-    format!("{namespace}:{agent_id}:{endpoint_session_id}")
 }
 
 fn generated_endpoint_session_id(now_ms: u64) -> Result<String, InvalidSessionCreate> {
@@ -334,19 +323,11 @@ mod tests {
     use crate::runtime::driver::RuntimeDriverIdentity;
 
     fn openclaw_admission() -> SessionAdmission {
-        SessionAdmission::agent_scoped(
-            RuntimeDriverIdentity::open_claw().endpoint(),
-            SessionProvider::OpenClaw,
-            "agent",
-        )
+        SessionAdmission::new(RuntimeDriverIdentity::open_claw())
     }
 
     fn matcha_admission() -> SessionAdmission {
-        SessionAdmission::agent_scoped(
-            RuntimeDriverIdentity::matcha_agent().endpoint(),
-            SessionProvider::MatchaAgent,
-            "matcha-agent",
-        )
+        SessionAdmission::new(RuntimeDriverIdentity::matcha_agent())
     }
 
     #[test]
@@ -389,7 +370,7 @@ mod tests {
         assert_eq!(
             command
                 .clone()
-                .into_openclaw_params()
+                .into_openclaw_params(ModelRef::try_new("anthropic/claude-sonnet-4-6").unwrap())
                 .unwrap()
                 .key()
                 .as_str(),

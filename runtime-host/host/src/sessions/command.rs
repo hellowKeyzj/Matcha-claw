@@ -1,4 +1,7 @@
+use std::fmt::Write;
+
 use foundation::execution::CommandRoute;
+use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use super::{
@@ -11,7 +14,10 @@ use super::{
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
-    state::{SessionDelta, SessionIdentity, SessionProvider, SessionSourceBinding, SessionState},
+    state::{
+        SessionDelta, SessionEventBinding, SessionIdentity, SessionProvider, SessionSourceBinding,
+        SessionState,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -42,7 +48,7 @@ pub(crate) enum SessionEvictOutcome {
 }
 
 pub(crate) struct SessionEvent {
-    pub(crate) binding: SessionSourceBinding,
+    pub(crate) binding: SessionEventBinding,
     pub(crate) run_id: Option<String>,
     pub(crate) cursor: Option<u64>,
     pub(crate) changes: Vec<super::state::SessionChange>,
@@ -67,6 +73,7 @@ pub(crate) enum SessionAbortRequest {
 pub(crate) enum SessionCommand {
     Ensure {
         identity: SessionIdentity,
+        source_binding: SessionSourceBinding,
         reply: oneshot::Sender<SessionEnsureOutcome>,
     },
     Ingest {
@@ -247,4 +254,18 @@ pub(crate) fn openclaw_agent_lane_key(agent_id: &str, session_key: &str) -> Stri
             &format!("agent:{agent_id}:{session_key}"),
         )
     }
+}
+
+/// Derives the deterministic renderer route key Host owns for a team role session.
+///
+/// The renderer contract only admits `renderer-route:` followed by `[A-Za-z0-9_-]`,
+/// so a session key carrying `:` separators is folded into a fixed-width digest.
+pub(crate) fn role_session_route_key(session_key: &str) -> String {
+    let digest = Sha256::digest(session_key.as_bytes());
+    let mut route_key = String::with_capacity("renderer-route:team-".len() + 24);
+    route_key.push_str("renderer-route:team-");
+    for byte in &digest[..12] {
+        let _ = write!(&mut route_key, "{byte:02x}");
+    }
+    route_key
 }

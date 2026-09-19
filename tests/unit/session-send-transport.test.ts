@@ -115,6 +115,7 @@ describe('Electron Main session-send transport', () => {
   });
 
   it.each([
+    { ...request, input: { ...request.input, modelSelectionId: 'openai/gpt-5.4' } },
     { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], filePath: 'C:/private/image.png' }] } },
     { ...request, input: { ...request.input, attachments: Array.from({ length: 17 }, () => request.input.attachments[0]) } },
     { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], filePath: 'C:/private/image.png' }] } },

@@ -30,7 +30,6 @@ pub(super) async fn stop(
     if shared.admission().admit_request().is_err() {
         return Err(StopMatchaError::AdmissionClosed);
     }
-    shared.team_run().cancel_native_terminal_watches().await;
     let result = lifecycle.stop().await;
     super::status::runtime_stop_result(result)
         .map(|()| super::status::matcha_state(shared))
@@ -44,7 +43,6 @@ pub(super) async fn restart(
     if shared.admission().admit_request().is_err() {
         return Err(RestartMatchaError::AdmissionClosed);
     }
-    shared.team_run().cancel_native_terminal_watches().await;
     let result = lifecycle.restart().await;
     super::status::runtime_restart_result(result)
         .map(|()| super::status::matcha_state(shared))

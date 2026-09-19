@@ -43,79 +43,79 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
         Operation::TargetPut => match input {
             Input::TargetPut { payload } => match parse_target_put(payload) {
                 Ok((id, config)) => owner.put_target(id, config).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|target| json!({"outcome":"targetUpdated","target":{"id":target.id().as_str(),"revision":target.revision(),"kind":target_kind_name(target.kind())}})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TargetRemove => match input {
             Input::TargetRemove { payload } => match TargetId::try_new(payload.id) {
                 Ok(id) => owner.remove_target(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"targetRemoved"})))),
-                Err(_) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(_) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::ConnectionUpsert => match input {
             Input::ConnectionUpsert { payload } => match parse_connection(payload) {
                 Ok(record) => owner.upsert_connection(record).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"connectionUpdated"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::ConnectionRemove => match input {
             Input::ConnectionRemove { payload } => match ConnectionId::try_new(payload.id) {
                 Ok(id) => owner.delete_connection(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"connectionRemoved"})))),
-                Err(_) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(_) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::EnvironmentRegister => match input {
             Input::EnvironmentRegister { payload } => match parse_environment(payload) {
                 Ok(record) => owner.register_environment(record).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"environmentRegistered"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::ResourceRegister => match input {
             Input::ResourceRegister { payload } => match parse_resource(payload) {
                 Ok(request) => owner.register_resource(request).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"resourceRegistered"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::NodeUpsert => match input {
             Input::NodeUpsert { payload } => match parse_node(payload) {
                 Ok(observation) => owner.upsert_node(observation).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"nodeUpdated"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::AgentUpsert => match input {
             Input::AgentUpsert { payload } => match parse_agent(payload) {
                 Ok(observation) => owner.upsert_agent(observation).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"agentUpdated"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::AgentRevoke => match input {
             Input::AgentRevoke { payload } => match NativeAgentId::try_new(payload.id) {
                 Ok(id) => owner.revoke_agent(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"agentRevoked"})))),
-                Err(_) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(_) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::RuntimeUpsert => match input {
             Input::RuntimeUpsert { payload } => match parse_runtime(payload) {
                 Ok(observation) => owner.upsert_runtime(observation).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"runtimeUpdated"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::EndpointUpsert => match input {
             Input::EndpointUpsert { payload } => match parse_endpoint(payload) {
                 Ok(observation) => owner.upsert_endpoint(observation).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"endpointUpdated"})))),
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::ConnectionProbeBegin => match input {
             Input::ConnectionProbeBegin { payload } => match (ConnectionId::try_new(payload.id), CommandId::try_new(payload.command_id)) {
@@ -130,26 +130,26 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                             crate::fleet::lifecycle::FleetConnectionLifecycleOutcome::Rejected(_) => json!({"outcome":"probeRejected","reason":"providerRejected"}),
                         }))
                     }),
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::ConnectionProbeComplete => match input {
             Input::ConnectionProbeComplete { payload } => {
-                let outcome = match payload.outcome.as_str() { "ready" => fleet::connection::ProbeOutcome::Ready, "unhealthy" => fleet::connection::ProbeOutcome::Unhealthy, _ => return Delivery::Mutation(json!({"outcome":"error"})) };
+                let outcome = match payload.outcome.as_str() { "ready" => fleet::connection::ProbeOutcome::Ready, "unhealthy" => fleet::connection::ProbeOutcome::Unhealthy, _ => return Delivery::Invalid };
                 match (ConnectionId::try_new(payload.id), CommandId::try_new(payload.command_id)) {
                     (Ok(id), Ok(command_id)) => owner.complete_connection_probe(id, command_id, outcome, payload.message).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"probeCompleted"})))),
-                    _ => Delivery::Mutation(json!({"outcome":"error"})),
+                    _ => Delivery::Invalid,
                 }
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::EnvironmentDeployBegin | Operation::EnvironmentDeployComplete | Operation::EnvironmentDeployFail => {
             match input {
                 Input::EnvironmentDeployBegin { payload } => lifecycle_environment_deploy(owner, payload, 0).await,
                 Input::EnvironmentDeployComplete { payload } => lifecycle_environment_deploy(owner, payload, 1).await,
                 Input::EnvironmentDeployFail { payload } => lifecycle_environment_deploy_fail(owner, payload).await,
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             }
         }
         Operation::EnvironmentDeleteBegin | Operation::EnvironmentDeleteComplete | Operation::EnvironmentDeleteFail => {
@@ -157,14 +157,14 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                 Input::EnvironmentDeleteBegin { payload } => lifecycle_environment_delete(owner, payload, 0).await,
                 Input::EnvironmentDeleteComplete { payload } => lifecycle_environment_delete(owner, payload, 1).await,
                 Input::EnvironmentDeleteFail { payload } => lifecycle_environment_delete_fail(owner, payload).await,
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             }
         }
         Operation::ResourceProvisionBegin | Operation::ResourceProvisionComplete => {
             match input {
                 Input::ResourceProvisionBegin { payload } => lifecycle_resource_provision(owner, payload, 0).await,
                 Input::ResourceProvisionComplete { payload } => lifecycle_resource_provision(owner, payload, 1).await,
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             }
         }
         Operation::ResourceDeleteBegin | Operation::ResourceDeleteComplete | Operation::ResourceDeleteFail => {
@@ -172,12 +172,12 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                 Input::ResourceDeleteBegin { payload } => lifecycle_resource_delete(owner, payload, 0).await,
                 Input::ResourceDeleteComplete { payload } => lifecycle_resource_delete(owner, payload, 1).await,
                 Input::ResourceDeleteFail { payload } => lifecycle_resource_delete_fail(owner, payload).await,
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             }
         }
         Operation::NodeRetire => match input {
-            Input::NodeRetire { payload } => match NodeId::try_new(payload.id) { Ok(id) => owner.retire_node(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"nodeRetired"})))), Err(_) => Delivery::Mutation(json!({"outcome":"error"})) },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            Input::NodeRetire { payload } => match NodeId::try_new(payload.id) { Ok(id) => owner.retire_node(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"nodeRetired"})))), Err(_) => Delivery::Invalid },
+            _ => Delivery::Invalid,
         },
         Operation::RuntimeStartBegin | Operation::RuntimeStartComplete | Operation::RuntimeStopBegin | Operation::RuntimeStopComplete => {
             match input {
@@ -185,77 +185,77 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                 Input::RuntimeStartComplete { payload } => lifecycle_runtime(owner, payload, 1).await,
                 Input::RuntimeStopBegin { payload } => lifecycle_runtime(owner, payload, 2).await,
                 Input::RuntimeStopComplete { payload } => lifecycle_runtime(owner, payload, 3).await,
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             }
         }
         Operation::RuntimeRetire => match input {
-            Input::RuntimeRetire { payload } => match RuntimeId::try_new(payload.id) { Ok(id) => owner.retire_runtime(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"runtimeRetired"})))), Err(_) => Delivery::Mutation(json!({"outcome":"error"})) },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            Input::RuntimeRetire { payload } => match RuntimeId::try_new(payload.id) { Ok(id) => owner.retire_runtime(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"runtimeRetired"})))), Err(_) => Delivery::Invalid },
+            _ => Delivery::Invalid,
         },
         Operation::EndpointDrain | Operation::EndpointRetire => match input {
-            Input::EndpointDrain { payload } => match EndpointId::try_new(payload.id) { Ok(id) => owner.drain_endpoint(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"endpointDrained"})))), Err(_) => Delivery::Mutation(json!({"outcome":"error"})) },
-            Input::EndpointRetire { payload } => match EndpointId::try_new(payload.id) { Ok(id) => owner.retire_endpoint(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"endpointRetired"})))), Err(_) => Delivery::Mutation(json!({"outcome":"error"})) },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            Input::EndpointDrain { payload } => match EndpointId::try_new(payload.id) { Ok(id) => owner.drain_endpoint(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"endpointDrained"})))), Err(_) => Delivery::Invalid },
+            Input::EndpointRetire { payload } => match EndpointId::try_new(payload.id) { Ok(id) => owner.retire_endpoint(id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"endpointRetired"})))), Err(_) => Delivery::Invalid },
+            _ => Delivery::Invalid,
         },
         Operation::EndpointProbeBegin => match input {
-            Input::EndpointProbeBegin { payload } => match (EndpointId::try_new(payload.id), CommandId::try_new(payload.command_id)) { (Ok(id), Ok(command_id)) => owner.begin_endpoint_probe(id, command_id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"probeStarted"})))), _ => Delivery::Mutation(json!({"outcome":"error"})) },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            Input::EndpointProbeBegin { payload } => match (EndpointId::try_new(payload.id), CommandId::try_new(payload.command_id)) { (Ok(id), Ok(command_id)) => owner.begin_endpoint_probe(id, command_id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"probeStarted"})))), _ => Delivery::Invalid },
+            _ => Delivery::Invalid,
         },
         Operation::CapabilitySyncBegin => match input {
             Input::CapabilitySyncBegin { payload } => match (EndpointId::try_new(payload.id), CommandId::try_new(payload.command_id)) {
                 (Ok(id), Ok(command_id)) => owner.begin_capability_sync(id, command_id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"capabilitySyncStarted"})))),
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::CapabilitySyncComplete => match input {
             Input::CapabilitySyncComplete { payload } => match (CommandId::try_new(payload.command_id.clone()), EndpointId::try_new(payload.id.clone()), parse_capability_sync(payload)) {
                 (Ok(command_id), Ok(id), Ok(sync)) => owner.complete_capability_sync(id, command_id, sync).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"capabilitySyncCompleted"})))),
-                _ => Delivery::Mutation(json!({"outcome":"error"})),
+                _ => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TerminalOpen => match input {
             Input::TerminalOpen { payload } => terminal::terminal_open_delivery(owner, payload).await,
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TerminalReconnect => match input {
             Input::TerminalReconnect { payload } => {
                 terminal::terminal_reconnect_delivery(owner, payload).await
             }
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TerminalBeginClose => match input {
             Input::TerminalBeginClose { payload } => {
                 terminal::terminal_begin_close_delivery(owner, payload).await
             }
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TerminalFinishClose => match input {
             Input::TerminalFinishClose { payload } => {
                 terminal::terminal_finish_close_delivery(owner, payload).await
             }
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::TerminalClose => match input {
             Input::TerminalClose { payload } => terminal::terminal_close_delivery(owner, payload).await,
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::CommandSubmit => match input {
             Input::CommandSubmit { payload } => {
-                let target_id = match TargetId::try_new(payload.selector.target_id.clone()) { Ok(id) => id, Err(_) => return Delivery::Mutation(json!({"outcome":"error"})) };
-                let kind = match payload.selector.expected_kind.as_str() { "docker" => TargetKind::Docker, "kubernetes" => TargetKind::Kubernetes, "ssh" => TargetKind::Ssh, "custom" => TargetKind::Custom, _ => return Delivery::Mutation(json!({"outcome":"error"})) };
+                let target_id = match TargetId::try_new(payload.selector.target_id.clone()) { Ok(id) => id, Err(_) => return Delivery::Invalid };
+                let kind = match payload.selector.expected_kind.as_str() { "docker" => TargetKind::Docker, "kubernetes" => TargetKind::Kubernetes, "ssh" => TargetKind::Ssh, "custom" => TargetKind::Custom, _ => return Delivery::Invalid };
                 let selector = match query_option(owner.target_selector(target_id, payload.selector.revision, kind).await) {
                     QueryOption::Some(selector) => selector,
-                    QueryOption::None => return Delivery::Mutation(json!({"outcome":"error"})),
+                    QueryOption::None => return Delivery::Invalid,
                     QueryOption::Unavailable => return Delivery::Unavailable,
                 };
                 match parse_submit(payload, selector) {
                     Ok(request) => owner.submit(request).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|outcome| json!({"outcome": match outcome { fleet::FleetSubmitOutcome::Submitted => "submitted", fleet::FleetSubmitOutcome::AlreadySubmitted => "alreadySubmitted" }})))),
-                    Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                    Err(()) => Delivery::Invalid,
                 }
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::NodeCommandSubmit => match input {
             Input::NodeCommandSubmit { payload } => match parse_node_command_submit(payload) {
@@ -266,36 +266,36 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                         match owner.submit(resolution.request).await {
                             Ok(Ok(fleet::FleetSubmitOutcome::Submitted)) => owner.begin_dispatch(dispatch_id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|dispatch| json!({"outcome": match dispatch.outcome { crate::fleet::executor::FleetExecutionOutcome::Completed => "completed", crate::fleet::executor::FleetExecutionOutcome::Rejected => "rejected", crate::fleet::executor::FleetExecutionOutcome::Unknown => "outcomeUnknown", crate::fleet::executor::FleetExecutionOutcome::Accepted => "accepted" }, "dispatchId": dispatch.dispatch_id.as_str(), "attempt": dispatch.attempt.sequence(), "target": target})))),
                             Ok(Ok(fleet::FleetSubmitOutcome::AlreadySubmitted)) => Delivery::Mutation(json!({"outcome":"alreadySubmitted","dispatchId":dispatch_id.as_str(),"target":target})),
-                            Ok(Err(_)) => Delivery::Mutation(json!({"outcome":"error"})),
+                            Ok(Err(_)) => Delivery::Invalid,
                             Err(_) => Delivery::Unavailable,
                         }
                     }
-                    Ok(Err(_)) => Delivery::Mutation(json!({"outcome":"error"})),
+                    Ok(Err(_)) => Delivery::Invalid,
                     Err(_) => Delivery::Unavailable,
                 },
-                Err(()) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(()) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::CommandBegin => match input {
             Input::CommandBegin { payload } => match DispatchId::try_new(payload.dispatch_id) {
                 Ok(dispatch) => owner.begin_dispatch(dispatch).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|dispatch| json!({"outcome": match dispatch.outcome { crate::fleet::executor::FleetExecutionOutcome::Completed => "completed", crate::fleet::executor::FleetExecutionOutcome::Rejected => "rejected", crate::fleet::executor::FleetExecutionOutcome::Unknown => "outcomeUnknown", crate::fleet::executor::FleetExecutionOutcome::Accepted => "accepted" },"dispatchId":dispatch.dispatch_id.as_str(),"attempt":dispatch.attempt.sequence()})))),
-                Err(_) => Delivery::Mutation(json!({"outcome":"error"})),
+                Err(_) => Delivery::Invalid,
             },
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            _ => Delivery::Invalid,
         },
         Operation::CommandAccept | Operation::CommandReject | Operation::CommandUnknown => {
-            let (payload, operation) = match input { Input::CommandAccept { payload } => (payload, 0), Input::CommandReject { payload } => (payload, 1), Input::CommandUnknown { payload } => (payload, 2), _ => return Delivery::Mutation(json!({"outcome":"error"})) };
-            let dispatch = match DispatchId::try_new(payload.dispatch_id) { Ok(v) => v, Err(_) => return Delivery::Mutation(json!({"outcome":"error"})) };
-            let attempt = match DispatchAttempt::try_new(payload.attempt) { Ok(v) => v, Err(_) => return Delivery::Mutation(json!({"outcome":"error"})) };
+            let (payload, operation) = match input { Input::CommandAccept { payload } => (payload, 0), Input::CommandReject { payload } => (payload, 1), Input::CommandUnknown { payload } => (payload, 2), _ => return Delivery::Invalid };
+            let dispatch = match DispatchId::try_new(payload.dispatch_id) { Ok(v) => v, Err(_) => return Delivery::Invalid };
+            let attempt = match DispatchAttempt::try_new(payload.attempt) { Ok(v) => v, Err(_) => return Delivery::Invalid };
             let result = match operation { 0 => owner.accept_dispatch(dispatch, attempt).await, 1 => owner.reject_dispatch(dispatch, attempt).await, _ => owner.mark_dispatch_unknown(dispatch, attempt).await };
             result.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|outcome| delivery_outcome_json(outcome, operation))))
         }
         Operation::CommandReplay => match input {
-            Input::CommandReplay { payload } => { let command = match CommandId::try_new(payload.command_id) { Ok(v) => v, Err(_) => return Delivery::Mutation(json!({"outcome":"error"})) }; let dispatch = match DispatchId::try_new(payload.dispatch_id) { Ok(v) => v, Err(_) => return Delivery::Mutation(json!({"outcome":"error"})) }; owner.authorize_replay(command, dispatch).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"replayAuthorized"})))) }
-            _ => Delivery::Mutation(json!({"outcome":"error"})),
+            Input::CommandReplay { payload } => { let command = match CommandId::try_new(payload.command_id) { Ok(v) => v, Err(_) => return Delivery::Invalid }; let dispatch = match DispatchId::try_new(payload.dispatch_id) { Ok(v) => v, Err(_) => return Delivery::Invalid }; owner.authorize_replay(command, dispatch).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"replayAuthorized"})))) }
+            _ => Delivery::Invalid,
         },
-        _ => Delivery::Mutation(json!({"outcome":"error"})),
+        _ => Delivery::Invalid,
     }
 }
 
@@ -326,16 +326,14 @@ async fn lifecycle_environment_deploy(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     let result = match step {
         0 => owner.run_environment_deployment(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::fleet::lifecycle::FleetLifecycleOutcome::Completed | crate::fleet::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "deploymentCompleted", crate::fleet::lifecycle::FleetLifecycleOutcome::Rejected(_) => "deploymentFailed", crate::fleet::lifecycle::FleetLifecycleOutcome::Unknown(_) => "deploymentUnknown" }}))),
         _ => owner.complete_environment_deployment(id, command_id, phase).await.map(|result| result.map(|_| json!({"outcome":"deploymentCompleted"}))),
     };
     result.map_or(Delivery::Unavailable, |result| {
-        result.map_or(Delivery::Mutation(json!({"outcome":"error"})), |value| {
-            Delivery::Mutation(value)
-        })
+        result.map_or(Delivery::Invalid, |value| Delivery::Mutation(value))
     })
 }
 
@@ -349,7 +347,7 @@ async fn lifecycle_environment_deploy_fail(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     owner
         .fail_environment_deployment(id, command_id, phase, payload.message)
@@ -370,7 +368,7 @@ async fn lifecycle_environment_delete(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     let result = match step {
         0 => owner
@@ -404,7 +402,7 @@ async fn lifecycle_environment_delete_fail(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     owner
         .fail_environment_deletion(id, command_id, phase, payload.message)
@@ -425,7 +423,7 @@ async fn lifecycle_resource_provision(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     let result = match step {
         0 => owner.run_resource_provisioning(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::fleet::lifecycle::FleetLifecycleOutcome::Completed | crate::fleet::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "provisioningCompleted", crate::fleet::lifecycle::FleetLifecycleOutcome::Rejected(_) => "provisioningFailed", crate::fleet::lifecycle::FleetLifecycleOutcome::Unknown(_) => "provisioningUnknown" }}))),
@@ -445,7 +443,7 @@ async fn lifecycle_resource_delete(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     let result = match step {
         0 => owner.run_resource_deletion(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::fleet::lifecycle::FleetLifecycleOutcome::Completed | crate::fleet::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "deletionCompleted", crate::fleet::lifecycle::FleetLifecycleOutcome::Rejected(_) => "deletionFailed", crate::fleet::lifecycle::FleetLifecycleOutcome::Unknown(_) => "deletionUnknown" }}))),
@@ -464,7 +462,7 @@ async fn lifecycle_resource_delete_fail(
         fleet::effect::PhaseKey::try_new(payload.phase),
     ) {
         (Ok(id), Ok(command_id), Ok(phase)) => (id, command_id, phase),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     owner
         .fail_resource_deletion(id, command_id, phase, payload.message)
@@ -480,7 +478,7 @@ async fn lifecycle_runtime(owner: &FleetHandle, payload: CommandIdPayload, step:
         CommandId::try_new(payload.command_id),
     ) {
         (Ok(id), Ok(command_id)) => (id, command_id),
-        _ => return Delivery::Mutation(json!({"outcome":"error"})),
+        _ => return Delivery::Invalid,
     };
     let result = match step {
         0 => owner.begin_runtime_start(id, command_id).await,
@@ -494,7 +492,7 @@ async fn lifecycle_runtime(owner: &FleetHandle, payload: CommandIdPayload, step:
 }
 
 fn mutation_result(result: Result<Value, fleet::FleetDeliveryError>) -> Delivery {
-    Delivery::Mutation(result.unwrap_or_else(|_| json!({"outcome":"error"})))
+    result.map_or(Delivery::Invalid, Delivery::Mutation)
 }
 
 fn parse_connection(payload: ConnectionUpsertPayload) -> Result<ConnectionRecord, ()> {

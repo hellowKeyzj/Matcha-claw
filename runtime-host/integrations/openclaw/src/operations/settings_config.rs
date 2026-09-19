@@ -437,6 +437,7 @@ mod tests {
                             "agents.list",
                             "skills.status",
                             "channels.pairing.list",
+                            "sessions.describe",
                             wire::SYSTEM_PRESENCE_METHOD
                         ],
                         "events": ["tick"]

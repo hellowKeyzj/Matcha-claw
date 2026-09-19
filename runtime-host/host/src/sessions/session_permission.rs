@@ -1,59 +1,9 @@
-use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Serialize;
 
-use super::state::SessionProvider;
-use crate::runtime::driver::RuntimeDriverIdentity;
+pub(crate) use super::endpoint::NativeEndpoint;
 
 const MAX_AGENT_ID_BYTES: usize = 256;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeEndpoint {
-    OpenClawLocal,
-    MatchaAgentLocal,
-    Unsupported,
-}
-
-impl NativeEndpoint {
-    pub(crate) fn parse(
-        kind: &str,
-        runtime_adapter_id: &str,
-        runtime_instance_id: &str,
-    ) -> Option<Self> {
-        if kind != "native-runtime" {
-            return None;
-        }
-        RuntimeEndpoint::try_new(runtime_adapter_id, runtime_instance_id)
-            .ok()
-            .map(Self::from_runtime_endpoint)
-    }
-
-    fn from_runtime_endpoint(endpoint: RuntimeEndpoint) -> Self {
-        if endpoint == RuntimeDriverIdentity::open_claw().endpoint() {
-            Self::OpenClawLocal
-        } else if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
-            Self::MatchaAgentLocal
-        } else {
-            Self::Unsupported
-        }
-    }
-
-    pub(crate) const fn provider(self) -> SessionProvider {
-        match self {
-            Self::OpenClawLocal => SessionProvider::OpenClaw,
-            Self::MatchaAgentLocal => SessionProvider::MatchaAgent,
-            Self::Unsupported => SessionProvider::OpenClaw,
-        }
-    }
-
-    pub(crate) fn runtime_endpoint(self) -> Option<RuntimeEndpoint> {
-        match self {
-            Self::OpenClawLocal => Some(RuntimeDriverIdentity::open_claw().endpoint()),
-            Self::MatchaAgentLocal => Some(RuntimeDriverIdentity::matcha_agent().endpoint()),
-            Self::Unsupported => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]

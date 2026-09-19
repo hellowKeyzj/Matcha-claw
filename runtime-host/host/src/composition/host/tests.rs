@@ -721,18 +721,15 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
 }
 
 #[test]
-fn matcha_terminal_readback_stays_in_teamrun_receipt_router_native_watches() {
+fn matcha_terminal_readback_stays_out_of_host_and_control_surfaces() {
     let host = include_str!("mod.rs");
     let receipt_router = include_str!("../../organization/receipt_router.rs");
-    let matcha = include_str!("../../runtime/adapters/matcha_agent/ops/team_terminal.rs");
     let crate_root = include_str!("../../lib.rs");
     let control_wire = include_str!("../../control/wire.rs");
 
     assert!(!host.contains("read_matcha_terminal_receipt"));
-    assert!(receipt_router.contains("struct TerminalWatches"));
-    assert!(receipt_router.contains("fn watch_native_terminal("));
-    assert!(matcha.contains("impl TeamTerminalOps for MatchaRuntimeDriver"));
-    assert!(matcha.contains("watch_role_terminal"));
+    assert!(!receipt_router.contains("TerminalWatches"));
+    assert!(!receipt_router.contains("watch_native_terminal"));
     assert!(!crate_root.contains("read_matcha_terminal_receipt"));
     assert!(!crate_root.contains("TerminalRunReceipt"));
     for matcha_terminal_receipt in [

@@ -48,12 +48,13 @@ use zeroize::Zeroizing;
 
 use self::owner::{SupervisorLifecycleHandle, SupervisorOwner};
 use crate::{
+    provider::handle::ProviderHandle,
     runtime::driver::{
         ChannelOps, ConnectorOps, CronOps, LifecycleOps, OwnedRuntimeFuture, ProviderConfigOps,
         ProviderNativeConfigurationCommand, RuntimeCapabilitySurface, RuntimeDriver,
         RuntimeDriverIdentity, RuntimeLifecycleFailure, RuntimeStartFailure, SecurityOps,
-        SessionFuture, SessionOps, SettingsOps, SettingsProjectionEffect, SkillOps, SubagentOps,
-        TaskOps, TeamOps, TeamTerminalOps, WorkspaceOps,
+        SessionFuture, SessionOpenOps, SessionOps, SettingsOps, SettingsProjectionEffect, SkillOps,
+        SubagentOps, TaskOps, TeamOps, WorkspaceOps,
     },
     sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
     sessions::create::{
@@ -66,7 +67,7 @@ use crate::{
     },
     sessions::model_selection::{
         OpenClawPatchRejection, ResolvedSessionModelSelection, SessionModelSelectionBinding,
-        SessionModelSelectionOutcome, SessionModelSelectionRejection,
+        SessionModelSelectionOutcome, SessionModelSelectionRejection, SessionRuntimeModelFacts,
     },
     sessions::rename::{
         SessionRenameCommand, SessionRenameOutcome,

@@ -36,6 +36,7 @@ use crate::{
 use super::{BodyPolicy, Request, RequestHead, Response, RouteOutcome};
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
+const SUBAGENTS_REQUEST_BYTES: usize = 1024 * 1024 + 64 * 1024;
 const SESSIONS_REQUEST_BYTES: usize =
     (20_usize * 1024 * 1024).div_ceil(3) * 4 + 64 * 1024 + 128 * 1024;
 const TEAM_SMALL_REQUEST_BYTES: usize = 8 * 1024;
@@ -198,7 +199,7 @@ impl Router {
                 max_bytes: team_body_limit(path),
             },
             ("POST", "/api/subagents/agents") => BodyPolicy::Required {
-                max_bytes: DEFAULT_REQUEST_BYTES,
+                max_bytes: SUBAGENTS_REQUEST_BYTES,
             },
             ("POST", path) if is_channel_route(path) => BodyPolicy::Required {
                 max_bytes: channel_body_limit(path),
@@ -628,17 +629,6 @@ impl Router {
                 )
                 .await
             }
-            "/api/team/role-chat" => {
-                crate::transport::team::role_chat::handler::handle_localhost(
-                    method,
-                    path,
-                    headers,
-                    body,
-                    Arc::clone(&self.verifier),
-                    self.organization.clone(),
-                )
-                .await
-            }
             "/api/team/lifecycle" => {
                 crate::transport::team::lifecycle::handler::handle_localhost(
                     method,
@@ -905,7 +895,6 @@ fn is_team_route(path: &str) -> bool {
             | "/api/team/approvals"
             | "/api/team/task-board"
             | "/api/team/decision"
-            | "/api/team/role-chat"
             | "/api/team/lifecycle"
             | "/api/team/graph"
             | "/api/team/skill"

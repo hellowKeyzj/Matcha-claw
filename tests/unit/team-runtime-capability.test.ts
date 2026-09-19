@@ -29,11 +29,9 @@ import {
   resolveTeamApproval,
   resumeTeam,
   saveTeamRunGraphProjection,
-  settleTeamRunNodePrompt,
   submitTeamRunDecision,
   submitTeamRunGraphPatch,
   submitTeamRunNodeEvent,
-  submitTeamRunRoleMessage,
   validateTeamSkillPackage,
   wakeDueTeamRunNodePromptRetries,
 } from '@/services/openclaw/team-runtime-client';
@@ -101,9 +99,7 @@ const LEGACY_OPERATION_IDS = [
   'team.graphExportYaml',
   'team.graphImportYaml',
   'team.triggerFire',
-  'team.roleMessageSubmit',
   'team.nodePromptRetryDue',
-  'team.nodePromptSettled',
   'team.nodeEvent',
   'team.runDiagnostics',
   'team.runDecisionSubmit',
@@ -232,25 +228,11 @@ const cases: ClientCase[] = [
     }),
   },
   {
-    name: 'role message',
-    operationId: 'team.roleMessageSubmit',
-    target: { kind: 'team-run', runId },
-    input: { runId, roleId: 'leader', text: 'hello', idempotencyKey: 'message:one' },
-    invoke: () => submitTeamRunRoleMessage({ runId, roleId: 'leader', text: 'hello', idempotencyKey: 'message:one' }),
-  },
-  {
     name: 'node prompt retry due',
     operationId: 'team.nodePromptRetryDue',
     target: { kind: 'team-run', runId },
     input: { runId },
     invoke: () => wakeDueTeamRunNodePromptRetries({ runId }),
-  },
-  {
-    name: 'node prompt settled',
-    operationId: 'team.nodePromptSettled',
-    target: null,
-    input: { sessionKey: 'session:one', promptRunId: 'prompt:one', phase: 'final' },
-    invoke: () => settleTeamRunNodePrompt({ sessionKey: 'session:one', promptRunId: 'prompt:one', phase: 'final' }),
   },
   {
     name: 'node event',
@@ -327,11 +309,11 @@ beforeEach(() => {
 });
 
 describe('Team runtime client compatibility verification', () => {
-  it('covers all 25 legacy operation ids through exported client wrappers', () => {
+  it('covers all 23 legacy operation ids through exported client wrappers', () => {
     const covered = new Set(cases.map(({ operationId }) => operationId));
-    expect(LEGACY_OPERATION_IDS).toHaveLength(25);
-    expect(cases).toHaveLength(25);
-    expect(covered.size).toBe(25);
+    expect(LEGACY_OPERATION_IDS).toHaveLength(23);
+    expect(cases).toHaveLength(23);
+    expect(covered.size).toBe(23);
     expect(covered).toEqual(new Set(LEGACY_OPERATION_IDS));
   });
 

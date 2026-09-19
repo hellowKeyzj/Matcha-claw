@@ -40,7 +40,6 @@ import { createTeamGraphTransport } from './teams/graph';
 import { createTeamLifecycleTransport } from './teams/lifecycle';
 import { createManualTeamTransport } from './teams/manual';
 import { createTeamPublicTransport } from './teams/public';
-import { createTeamRoleChatTransport } from './teams/role-chat';
 import { createTeamRoleSessionsTransport } from './teams/role-sessions';
 import { createTeamSkillTransport } from './teams/skill';
 import { createTeamTaskBoardTransport } from './teams/task-board';
@@ -139,7 +138,6 @@ export function createRuntimeHostTransportBundle(
     teamLifecycleTransport: createTeamLifecycleTransport(issuer, runtimeHostTransportPort),
     manualTeamTransport: createManualTeamTransport(issuer, runtimeHostTransportPort),
     teamHumanDecisionTransport: createTeamHumanDecisionTransport(issuer, runtimeHostTransportPort),
-    teamRoleChatTransport: createTeamRoleChatTransport(issuer, runtimeHostTransportPort),
     providerAccountsTransport: createProviderAccountsTransport(issuer, runtimeHostTransportPort),
     providerModelsTransport: createProviderModelsTransport(issuer, runtimeHostTransportPort),
     externalConnectorsTransport: createExternalConnectorsTransport(issuer, runtimeHostTransportPort),

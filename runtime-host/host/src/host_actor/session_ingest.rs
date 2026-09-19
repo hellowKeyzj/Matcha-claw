@@ -12,7 +12,7 @@ use crate::{
         matcha::matcha_event_changes,
         openclaw::openclaw_canonical_changes,
         state::{
-            RecoveryReason, SessionChange, SessionIdentity, SessionProvider, SessionSourceBinding,
+            RecoveryReason, SessionChange, SessionIdentity, SessionProvider, SessionEventBinding,
         },
     },
 };
@@ -47,7 +47,7 @@ async fn ingest_openclaw_canonical(
             let session_key = delta.session_key().as_str().to_owned();
             let route_key = delta.route_key().map(str::to_owned);
             let binding =
-                SessionSourceBinding::new(session_key.clone(), route_key, delta.source_epoch())
+                SessionEventBinding::new(session_key.clone(), route_key, delta.source_epoch())
                     .expect("OpenClaw canonical ingress must contain a valid session binding");
             let run_id = delta.run_id().map(|id| id.as_str().to_owned());
             let changes =
@@ -56,7 +56,7 @@ async fn ingest_openclaw_canonical(
         }
         CanonicalIngressResult::Unknown { provenance } => {
             let session_key = provenance.session_key().as_str().to_owned();
-            let binding = SessionSourceBinding::new(
+            let binding = SessionEventBinding::new(
                 session_key.clone(),
                 provenance.route_key().map(str::to_owned),
                 provenance.source_epoch(),
@@ -97,7 +97,7 @@ async fn ingest_matcha_event(host: &Host, event: &RendererEventEnvelope) -> Sess
         return SessionIngestAction::Continue;
     };
     let Some(binding) =
-        SessionSourceBinding::new(session_key.clone(), Some(route_key), source_epoch)
+        SessionEventBinding::new(session_key.clone(), Some(route_key), source_epoch)
     else {
         return SessionIngestAction::Continue;
     };
@@ -124,7 +124,7 @@ async fn ingest_matcha_recovery(
         return SessionIngestAction::Shutdown;
     };
     let source_cursor = cursor.sequence().get();
-    let Some(binding) = SessionSourceBinding::new(
+    let Some(binding) = SessionEventBinding::new(
         session_key.to_owned(),
         Some(route_key.to_owned()),
         recovery.source_epoch(),

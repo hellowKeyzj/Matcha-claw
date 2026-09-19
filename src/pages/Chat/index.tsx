@@ -15,7 +15,6 @@ import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRu
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 import { useSettingsStore } from '@/stores/settings';
 import { useComposerDraftStore, clampComposerDraftSelection, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { GatewayTransportIssue } from '../../types/session/runtime-state';
@@ -34,7 +33,6 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
-  patchSessionMeta,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
 import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
@@ -100,6 +98,7 @@ import {
   resolveArtifactWorkbenchSelection,
 } from './artifact-workbench';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
+import { resolveModelCatalogEntry } from '@/lib/provider-models';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import {
   buildArtifactPreviewTargetFromAttachedFile,
@@ -402,25 +401,6 @@ function selectChatPageState(state: ChatStoreState) {
   };
 }
 
-function resolveEffectiveChatModelId(
-  sessionModel: string | null | undefined,
-  agentDefaultModel: string | null | undefined,
-  fallbackModel: string | null | undefined,
-  availableModelIds: ReadonlySet<string>,
-): string {
-  const normalizedFallbackModel = typeof fallbackModel === 'string' ? fallbackModel.trim() : '';
-  const hasCatalog = availableModelIds.size > 0;
-  const normalizeAvailableModel = (model: string | null | undefined): string => {
-    const normalized = typeof model === 'string' ? model.trim() : '';
-    if (!normalized) return '';
-    return !hasCatalog || availableModelIds.has(normalized) ? normalized : '';
-  };
-
-  return normalizeAvailableModel(sessionModel)
-    || normalizeAvailableModel(agentDefaultModel)
-    || normalizedFallbackModel;
-}
-
 function resolveModelTriggerLabel(modelId: string): string {
   const separatorIndex = modelId.indexOf('/');
   if (separatorIndex < 0 || separatorIndex === modelId.length - 1) {
@@ -635,10 +615,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
-  const chatModelRoute = useCapabilityRoutingStore((state) => state.routing.chat);
-  const routingReady = useCapabilityRoutingStore((state) => state.ready);
-  const routingLoading = useCapabilityRoutingStore((state) => state.loading);
-  const refreshCapabilityRouting = useCapabilityRoutingStore((state) => state.refresh);
   const currentAgent = currentAgentId ? agents.find((agent) => agent.id === currentAgentId) : undefined;
   const loadedSessionsForDraftCleanup = useChatStore((state) => state.loadedSessions);
   const loadedSessionKeys = useMemo(() => Object.keys(loadedSessionsForDraftCleanup), [loadedSessionsForDraftCleanup]);
@@ -1102,36 +1078,16 @@ export function Chat({ isActive = true }: ChatProps) {
     }, TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [currentSession.runtime, gatewayStatus.lastIssue, localizedRuntimeError]);
-  useEffect(() => {
-    if (!chatSideEffectsActive || routingReady || routingLoading) {
-      return;
-    }
-    void refreshCapabilityRouting();
-  }, [refreshCapabilityRouting, routingLoading, routingReady, chatSideEffectsActive]);
-
-  const fallbackModelId = useMemo(() => {
-    if (!routingReady) {
-      return '';
-    }
-    const primary = chatModelRoute?.primary;
-    if (primary) {
-      const routed = availableModels.find((model) => (
-        model.accountId === primary.accountId
-        && model.modelLabel === primary.modelId
-      ));
-      if (routed) return routed.id;
-    }
-    return availableModels[0]?.id ?? '';
-  }, [availableModels, chatModelRoute?.primary, routingReady]);
-  const availableModelIds = useMemo(() => new Set(availableModels.map((model) => model.id)), [availableModels]);
-  const effectiveCurrentModelId = useMemo(() => {
-    return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model, fallbackModelId, availableModelIds);
-  }, [availableModelIds, currentAgent?.model, currentSession.meta.model, fallbackModelId]);
+  const currentSessionModelEntry = useMemo(() => {
+    return resolveModelCatalogEntry(availableModels, currentSession.meta.model);
+  }, [availableModels, currentSession.meta.model]);
+  const currentSessionModelReference = currentSession.meta.model?.trim() ?? '';
+  const currentSessionModelId = currentSessionModelEntry?.id ?? currentSessionModelReference;
   const contextUsage = useMemo(() => buildChatContextUsageViewModel({
     snapshot: currentSession.contextTokens,
-    currentModelId: effectiveCurrentModelId,
+    currentModelId: currentSessionModelId,
     availableModels,
-  }), [availableModels, currentSession.contextTokens, effectiveCurrentModelId]);
+  }), [availableModels, currentSession.contextTokens, currentSessionModelId]);
   const [workspaceRecoveryPending, setWorkspaceRecoveryPending] = useState(false);
   const handleChooseWorkspaceForCurrentAgent = useCallback(async () => {
     if (!canChooseWorkspaceForCurrentAgent || !currentAgent || workspaceRecoveryPending) {
@@ -1200,7 +1156,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const activeRun = isRunActive(currentSession.runtime)
     || currentSession.runtime.activeRunId != null;
   const modelPicker = useMemo(() => {
-    const currentModelId = effectiveCurrentModelId;
+    const currentModelId = currentSessionModelId;
     if (!currentModelId) {
       return null;
     }
@@ -1212,12 +1168,6 @@ export function Chat({ isActive = true }: ChatProps) {
       id: model.id,
       label: model.displayLabel,
     }));
-    if (!triggerLabels.has(currentModelId)) {
-      options.unshift({
-        id: currentModelId,
-        label: currentModelId,
-      });
-    }
     return {
       currentModelId,
       currentLabel: triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId),
@@ -1226,7 +1176,7 @@ export function Chat({ isActive = true }: ChatProps) {
       switching: false,
       disabled: activeRun || !currentSessionRecordKey,
     };
-  }, [activeRun, availableModels, currentSessionRecordKey, effectiveCurrentModelId, modelsLoading]);
+  }, [activeRun, availableModels, currentSessionModelId, currentSessionRecordKey, modelsLoading]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -1282,7 +1232,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const handleSelectModel = useCallback(async (modelSelectionId: string) => {
     const traceId = createSessionTraceId('model-selection');
     const normalizedModelSelectionId = modelSelectionId.trim();
-    const currentModelSelectionId = effectiveCurrentModelId;
+    const currentModelSelectionId = currentSessionModelId;
     logSessionTrace('model-selection.enter', traceId, {
       currentSessionKey: summarizeIdentifier(currentSessionRecordKey),
       requestedModelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
@@ -1320,18 +1270,13 @@ export function Chat({ isActive = true }: ChatProps) {
       if (result.outcome !== 'succeeded') {
         throw new Error(result.outcome);
       }
-      useChatStore.setState((state) => ({
-        loadedSessions: patchSessionMeta(state, currentSessionRecordKey, {
-          model: normalizedModelSelectionId,
-        }),
-      }));
       void loadSessions();
     } catch (error) {
       logSessionTrace('model-selection.error', traceId, summarizeError(error));
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
-  }, [activeRun, currentSessionConversation, currentSessionRecordKey, effectiveCurrentModelId, loadSessions, t]);
+  }, [activeRun, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, t]);
 
   const handleSelectSessionPermission = useCallback(async (selection: SessionPermissionSelection) => {
     if (!currentSessionPermissionIdentity

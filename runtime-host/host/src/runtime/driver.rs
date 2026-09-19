@@ -29,6 +29,7 @@ use crate::{
         CronJobMutationOutcome, CronListOutcome, CronRunHistoryFailure, CronRunHistoryReceipt,
         CronTriggerResult, CronUpdateCommand,
     },
+    provider::handle::ProviderHandle,
     sessions::abort::{SessionAbortCommand, SessionAbortOutcome},
     sessions::approval::{
         PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
@@ -41,6 +42,7 @@ use crate::{
     sessions::rename::{SessionRenameCommand, SessionRenameOutcome},
     sessions::send::{SessionSendCommand, SessionSendOutcome},
     sessions::session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
+    sessions::state::{SessionProvider, SessionView},
     sessions::timeline::{self, ContentCommand, ContentOutcome},
     skills::install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
     skills::management::{Command as SkillManagementCommand, Outcome as SkillManagementOutcome},
@@ -50,8 +52,8 @@ use crate::{
 use openclaw::{
     port::{OpenClawSessionError, ProviderNativeConfigurationEffect},
     session::protocol::{
-        ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-        ChatSendResult,
+        AgentId, AgentScopedSessionKey, ChatAbortParams, ChatAbortResult, ChatHistoryParams,
+        ChatHistoryResult, ChatSendParams, ChatSendResult, EndpointSessionId,
     },
 };
 use organization::{
@@ -89,10 +91,6 @@ pub(crate) trait RuntimeDriver: Send + Sync {
     }
 
     fn team_ops(&self) -> Option<&dyn TeamOps> {
-        None
-    }
-
-    fn team_terminal_ops(&self) -> Option<&dyn TeamTerminalOps> {
         None
     }
 
@@ -189,14 +187,6 @@ impl ActivityExecutionRequest {
             RuntimeActivity::AgentTask(activity) => activity.delivery_request(),
         }
     }
-
-    pub(crate) fn into_prompt_delivery(
-        self,
-    ) -> Result<organization::PromptDeliveryRequest, ActivityExecutionRequestError> {
-        match self.activity {
-            RuntimeActivity::AgentTask(activity) => activity.into_prompt_delivery(),
-        }
-    }
 }
 
 impl AgentTaskActivity {
@@ -249,56 +239,6 @@ impl AgentTaskActivity {
     pub(crate) fn delivery_request(&self) -> &organization::DeliveryRequest {
         &self.delivery
     }
-
-    pub(crate) fn into_prompt_delivery(
-        self,
-    ) -> Result<organization::PromptDeliveryRequest, ActivityExecutionRequestError> {
-        Ok(organization::PromptDeliveryRequest::new(
-            organization::DeliveryReference::try_new(self.delivery.delivery_id.as_str().to_owned())
-                .map_err(|_| ActivityExecutionRequestError::InvalidDeliveryReference)?,
-            self.binding,
-            organization::IdempotencyKey::try_new(self.delivery.idempotency_key)
-                .map_err(|_| ActivityExecutionRequestError::InvalidIdempotencyKey)?,
-            organization::PromptDispatchPayload::try_new(self.delivery.message)
-                .map_err(|_| ActivityExecutionRequestError::InvalidPromptPayload)?,
-        ))
-    }
-}
-
-fn activity_delivery_outcome(
-    binding: &organization::RoleSessionReceipt,
-    outcome: organization::PromptDeliveryOutcome,
-) -> ActivityExecutionOutcome {
-    match outcome {
-        organization::PromptDeliveryOutcome::Delivered { receipt } => {
-            let Ok(native_run_receipt) =
-                organization::NativeRunReceiptReference::try_new(receipt.as_str().to_owned())
-            else {
-                return ActivityExecutionOutcome::Unknown;
-            };
-            ActivityExecutionOutcome::Accepted {
-                receipt,
-                correlation: organization::NativeDeliveryCorrelation::new(
-                    binding.endpoint_session_id().clone(),
-                    native_run_receipt,
-                ),
-            }
-        }
-        organization::PromptDeliveryOutcome::Rejected { rejection } => {
-            ActivityExecutionOutcome::Rejected { rejection }
-        }
-        organization::PromptDeliveryOutcome::OutcomeUnknown => ActivityExecutionOutcome::Unknown,
-    }
-}
-
-impl From<ActivityExecutionOutcome> for organization::PromptDeliveryOutcome {
-    fn from(outcome: ActivityExecutionOutcome) -> Self {
-        match outcome {
-            ActivityExecutionOutcome::Accepted { receipt, .. } => Self::Delivered { receipt },
-            ActivityExecutionOutcome::Rejected { rejection } => Self::Rejected { rejection },
-            ActivityExecutionOutcome::Unknown => Self::OutcomeUnknown,
-        }
-    }
 }
 
 pub(crate) trait SessionOps: Send + Sync {
@@ -319,6 +259,10 @@ pub(crate) trait SessionOps: Send + Sync {
         &'a self,
     ) -> SessionFuture<'a, Result<SessionCatalog, RuntimeSessionError<OpenClawSessionError>>> {
         Box::pin(async { Err(RuntimeSessionError::RuntimeUnavailable) })
+    }
+
+    fn open_session_ops(&self) -> Option<&dyn SessionOpenOps> {
+        None
     }
 
     fn history<'a>(
@@ -424,14 +368,6 @@ pub(crate) trait SessionOps: Send + Sync {
         command: SessionSendCommand,
     ) -> SessionFuture<'a, SessionSendOutcome>;
 
-    fn wait_session_native_run<'a>(
-        &'a self,
-        _endpoint_session_id: Option<String>,
-        _native_run_id: String,
-    ) -> SessionFuture<'a, Option<NativeRunSettled>> {
-        Box::pin(async { None })
-    }
-
     fn abort_open_claw_chat<'a>(
         &'a self,
         _params: ChatAbortParams,
@@ -455,6 +391,19 @@ pub(crate) trait SessionOps: Send + Sync {
         _command: SessionPermissionCommand,
     ) -> SessionFuture<'a, SessionPermissionOutcome> {
         Box::pin(async { SessionPermissionOutcome::unsupported() })
+    }
+}
+
+pub(crate) trait SessionOpenOps: Send + Sync {
+    fn on_load_session_timeline<'a>(
+        &'a self,
+        command: &'a timeline::Command,
+        view: SessionView,
+        provider_handle: ProviderHandle,
+    ) -> SessionFuture<'a, SessionView>;
+
+    fn agent_default_model<'a>(&'a self, _agent_id: String) -> SessionFuture<'a, Option<String>> {
+        Box::pin(async { None })
     }
 }
 
@@ -491,29 +440,6 @@ pub(crate) trait TeamOps: Send + Sync {
         receipt: RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<crate::organization::RuntimeReceiptOutcome>;
 
-    fn execute_activity(
-        &self,
-        request: ActivityExecutionRequest,
-    ) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
-        let binding = request.binding().clone();
-        match request.into_prompt_delivery() {
-            Ok(delivery) => {
-                let delivery = self.deliver_prompt(delivery);
-                Box::pin(async move { activity_delivery_outcome(&binding, delivery.await) })
-            }
-            Err(_) => Box::pin(async {
-                ActivityExecutionOutcome::Rejected {
-                    rejection: organization::DeliveryRejection::Permanent,
-                }
-            }),
-        }
-    }
-
-    fn deliver_prompt(
-        &self,
-        request: organization::PromptDeliveryRequest,
-    ) -> OwnedRuntimeFuture<organization::PromptDeliveryOutcome>;
-
     fn abort_role_sessions(
         &self,
         bindings: Vec<organization::RoleSessionReceipt>,
@@ -532,12 +458,6 @@ pub(crate) struct NativeRunSettled {
     pub(crate) final_assistant_text: Option<String>,
 }
 
-pub(crate) trait TeamTerminalOps: Send + Sync {
-    fn watch_terminal(
-        &self,
-        target: organization::NativeTerminalReceiptTarget,
-    ) -> OwnedRuntimeFuture<Option<NativeRunSettled>>;
-}
 pub(crate) trait CronOps: Send + Sync {
     fn list_cron_jobs<'a>(&'a self) -> SessionFuture<'a, CronListOutcome>;
 
@@ -1403,6 +1323,7 @@ pub(crate) struct RuntimeDriverIdentity {
     runtime_adapter_id: &'static str,
     runtime_instance_id: &'static str,
     runtime_endpoint_reference: &'static str,
+    session_provider: SessionProvider,
     default_agent_id: &'static str,
     display_name: &'static str,
 }
@@ -1414,6 +1335,7 @@ impl RuntimeDriverIdentity {
             runtime_adapter_id: OPENCLAW_RUNTIME_ADAPTER_ID,
             runtime_instance_id: LOCAL_RUNTIME_INSTANCE_ID,
             runtime_endpoint_reference: "endpoint:openclaw",
+            session_provider: SessionProvider::OpenClaw,
             default_agent_id: OPENCLAW_AGENT_ID,
             display_name: "OpenClaw",
         }
@@ -1425,9 +1347,50 @@ impl RuntimeDriverIdentity {
             runtime_adapter_id: MATCHA_RUNTIME_ADAPTER_ID,
             runtime_instance_id: LOCAL_RUNTIME_INSTANCE_ID,
             runtime_endpoint_reference: "endpoint:matcha",
+            session_provider: SessionProvider::MatchaAgent,
             default_agent_id: MATCHA_AGENT_ID,
             display_name: "Matcha Agent",
         }
+    }
+
+    /// Reverses [`Self::runtime_endpoint_reference`].
+    pub(crate) fn from_reference(reference: &str) -> Option<Self> {
+        [Self::open_claw(), Self::matcha_agent()]
+            .into_iter()
+            .find(|identity| identity.runtime_endpoint_reference == reference)
+    }
+
+    /// The renderer-facing session key Host addresses one agent-scoped session by.
+    ///
+    /// OpenClaw reuses the peer's own agent-scoped grammar, so the key is built through that
+    /// grammar's authority and is absent when the peer would reject the identity. The Matcha
+    /// namespace is Host-owned because app-server session ids are opaque portable ids without an
+    /// agent dimension, so every identity has a key.
+    pub(crate) fn rendered_session_key(
+        self,
+        agent_id: &str,
+        endpoint_session_id: &str,
+    ) -> Option<String> {
+        match self.session_provider {
+            SessionProvider::OpenClaw => {
+                let agent_id = AgentId::try_new(agent_id.to_owned()).ok()?;
+                let endpoint_session_id =
+                    EndpointSessionId::try_new(endpoint_session_id.to_owned()).ok()?;
+                Some(
+                    AgentScopedSessionKey::try_new(agent_id, endpoint_session_id)
+                        .ok()?
+                        .as_str()
+                        .to_owned(),
+                )
+            }
+            SessionProvider::MatchaAgent => Some(format!(
+                "{MATCHA_RUNTIME_ADAPTER_ID}:{agent_id}:{endpoint_session_id}"
+            )),
+        }
+    }
+
+    pub(crate) const fn session_provider(self) -> SessionProvider {
+        self.session_provider
     }
 
     pub(crate) fn endpoint(self) -> RuntimeEndpoint {

@@ -1,10 +1,17 @@
-use std::{collections::BTreeSet, fmt::Write as _, io::Read as _, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    io::Read as _,
+    time::Duration,
+};
 
 use environment::{
     ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
     ConnectorSecretValue, InvalidConnectorSecretRef, InvalidProviderModel, ProviderAccount,
     ProviderAccountAuthMode, ProviderAccountId, ProviderApiProtocol, ProviderCascade,
-    ProviderCascadeFault, ProviderModel, ProviderModelCapability, ProviderModelStoreFault,
+    ProviderCascadeFault, ProviderModel, ProviderModelCapability, ProviderModelReference,
+    ProviderModelStoreFault, ProviderRoutingCapability, provider_model_matches_routing_reference,
+    provider_routing_model_capability,
 };
 use sha2::{Digest, Sha256};
 
@@ -14,7 +21,9 @@ use crate::{
         accounts::{ProviderCommitOutcome, ProviderPersistedOutcome},
         model_reference,
         native::ProviderNativeConfigurationView,
-        runtime_identity::{provider_runtime_identities, provider_runtime_identity},
+        runtime_identity::{
+            ProviderRuntimeIdentity, provider_runtime_identities, provider_runtime_identity,
+        },
     },
     sessions::model_selection::{
         MatchaProviderRuntimeConfig, MatchaProviderSecret, SessionModelSelectionDiagnostic,
@@ -210,7 +219,7 @@ impl ProviderModelOwner {
         capability: ProviderModelCapability,
         selection_id: &str,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(cascade, capability, |model, _account, _view| {
+        self.resolve_matching(cascade, capability, |model, _account| {
             model.selection_id() == selection_id
         })
     }
@@ -223,30 +232,99 @@ impl ProviderModelOwner {
         model_selection_id: Option<&str>,
         provider_fingerprint: Option<&str>,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(cascade, capability, |model, account, view| {
-            view.model_id == model_id
+        self.resolve_matching(cascade, capability, |model, account| {
+            model.model_id() == model_id
                 && model_selection_id.is_none_or(|id| model.selection_id() == id)
                 && provider_fingerprint
                     .is_none_or(|fingerprint| matcha_provider_fingerprint(account) == fingerprint)
         })
     }
 
+    pub(crate) fn resolve_runtime_model_ref(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderModelCapability,
+        runtime_model_ref: &str,
+    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
+        let identities = provider_runtime_identities(cascade.accounts()).map_err(|_| ())?;
+        self.resolve_matching(cascade, capability, |model, account| {
+            runtime_model_ref_for(&identities, account, model).as_deref() == Some(runtime_model_ref)
+        })
+    }
+
+    /// Answers every ref from one pass over the selectable catalog, so a session list costs one
+    /// catalog scan however many distinct models it holds.
+    pub(crate) fn accept_runtime_model_refs(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderModelCapability,
+        runtime_model_refs: &[String],
+    ) -> Result<Vec<bool>, ()> {
+        let identities = provider_runtime_identities(cascade.accounts()).map_err(|_| ())?;
+        let accepted = cascade
+            .catalog()
+            .selectable_for(capability)
+            .into_iter()
+            .filter_map(|model| {
+                runtime_model_ref_for(&identities, cascade.account(model.account_id())?, model)
+            })
+            .collect::<BTreeSet<_>>();
+        Ok(runtime_model_refs
+            .iter()
+            .map(|runtime_model_ref| accepted.contains(runtime_model_ref))
+            .collect())
+    }
+
+    pub(crate) fn resolve_routing_default(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderRoutingCapability,
+    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
+        let Some(route) = cascade
+            .routing()
+            .and_then(|routing| routing.route(capability))
+        else {
+            return Ok(None);
+        };
+        for reference in std::iter::once(route.primary()).chain(route.fallbacks()) {
+            let Some(selection) = self.resolve_routing_reference(cascade, capability, reference)?
+            else {
+                continue;
+            };
+            return Ok(Some(selection));
+        }
+        Ok(None)
+    }
+
+    fn resolve_routing_reference(
+        &self,
+        cascade: &ProviderCascade,
+        capability: ProviderRoutingCapability,
+        reference: &ProviderModelReference,
+    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
+        self.resolve_matching(
+            cascade,
+            provider_routing_model_capability(capability),
+            |model, _account| {
+                provider_model_matches_routing_reference(model, capability, reference)
+            },
+        )
+    }
+
     fn resolve_matching(
         &self,
         cascade: &ProviderCascade,
         capability: ProviderModelCapability,
-        mut matches_selection: impl FnMut(&ProviderModel, &ProviderAccount, &ProviderModelView) -> bool,
+        mut matches_selection: impl FnMut(&ProviderModel, &ProviderAccount) -> bool,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
         for model in cascade.catalog().selectable_for(capability) {
             let Some(account) = cascade.account(model.account_id()) else {
                 continue;
             };
-            let Some(view) = view_for(cascade, model) else {
-                continue;
-            };
-            if !matches_selection(model, account, &view) {
+            if !matches_selection(model, account) {
                 continue;
             }
+            let view = view_for(account, model);
             return Ok(Some(ResolvedProviderModelSelection {
                 view,
                 selection_id: model.selection_id(),
@@ -860,9 +938,18 @@ fn connector_secret_to_string(value: &ConnectorSecretValue) -> Result<String, ()
     secret.ok_or(())
 }
 
-fn view_for(cascade: &ProviderCascade, model: &ProviderModel) -> Option<ProviderModelView> {
-    let account = cascade.account(model.account_id())?;
-    Some(ProviderModelView {
+fn runtime_model_ref_for(
+    identities: &BTreeMap<String, ProviderRuntimeIdentity>,
+    account: &ProviderAccount,
+    model: &ProviderModel,
+) -> Option<String> {
+    identities.get(account.id().as_str()).map(|identity| {
+        identity.runtime_model_ref(account.configuration().kind(), model.model_id())
+    })
+}
+
+fn view_for(account: &ProviderAccount, model: &ProviderModel) -> ProviderModelView {
+    ProviderModelView {
         account_id: account.id().as_str().to_owned(),
         label: account.configuration().label().to_owned(),
         model_id: model.model_id().to_owned(),
@@ -878,7 +965,7 @@ fn view_for(cascade: &ProviderCascade, model: &ProviderModel) -> Option<Provider
         aspect_ratio: model.aspect_ratio().map(str::to_owned),
         resolution: model.resolution().map(str::to_owned),
         quality: model.quality().map(str::to_owned),
-    })
+    }
 }
 
 pub(crate) const fn provider_model_capability_name(
@@ -978,7 +1065,7 @@ fn replace_fault(fault: ProviderCascadeFault) -> ProviderModelReplaceOutcome {
 mod tests {
     use environment::{
         ProviderAccountConfiguration, ProviderAccountConfigurationInput, ProviderAccountKind,
-        ProviderAccountRevision, ProviderEndpoint, ProviderReference,
+        ProviderAccountRevision, ProviderAccountStore, ProviderEndpoint, ProviderReference,
     };
 
     use super::*;
@@ -1002,6 +1089,117 @@ mod tests {
             })
             .unwrap(),
         )
+    }
+
+    fn chat_draft(model_id: &str) -> ProviderModelDraft {
+        ProviderModelDraft {
+            model_id: model_id.to_owned(),
+            capabilities: vec![ProviderModelCapability::Chat],
+            context_window: None,
+            max_tokens: None,
+            timeout_ms: None,
+            aspect_ratio: None,
+            resolution: None,
+            quality: None,
+        }
+    }
+
+    /// A cascade holding one enabled account and whatever models the drafts produce. `root` stays
+    /// with the caller: the cascade re-reads these files on every mutation.
+    fn cascade_with_models(
+        root: &tempfile::TempDir,
+        model_ids: &[&str],
+    ) -> (ProviderCascade, ProviderModelOwner) {
+        let account = account(ProviderApiProtocol::OpenAiResponses);
+        let account_id = account.id().clone();
+        ProviderAccountStore::open(root.path().join("accounts.json"))
+            .expect("accounts store")
+            .persist(account)
+            .expect("persist account");
+        let mut models = ProviderModelOwner::new();
+        let mut cascade = ProviderCascade::open(
+            root.path().join("accounts.json"),
+            root.path().join("models.json"),
+            root.path().join("routing.json"),
+            root.path().join("cascade.json"),
+        )
+        .expect("provider cascade");
+        let outcome = models.replace(
+            &mut cascade,
+            account_id,
+            model_ids.iter().copied().map(chat_draft).collect(),
+        );
+        assert!(
+            matches!(outcome, ProviderModelReplaceOutcome::DesiredStored { .. }),
+            "unexpected replace outcome: {outcome:?}"
+        );
+        (cascade, models)
+    }
+
+    #[test]
+    fn runtime_model_refs_are_accepted_only_while_their_model_is_configured() {
+        let root = tempfile::tempdir().expect("provider tempdir");
+        let (cascade, models) = cascade_with_models(&root, &["glm-5.2", "llama-3.3"]);
+
+        assert_eq!(
+            models
+                .accept_runtime_model_refs(
+                    &cascade,
+                    ProviderModelCapability::Chat,
+                    &[
+                        "test/glm-5.2".to_owned(),
+                        "test/llama-3.3".to_owned(),
+                        "test/glm-4.5".to_owned(),
+                        "custom-cc367df7/glm-5.2".to_owned(),
+                    ],
+                )
+                .unwrap(),
+            vec![true, true, false, false]
+        );
+    }
+
+    /// Deleting a model is exactly what invalidates a session's stored ref; the ref must stop
+    /// being accepted, and the singular resolver must agree with the batch one.
+    #[test]
+    fn deleting_a_model_invalidates_its_runtime_ref_for_both_resolvers() {
+        let root = tempfile::tempdir().expect("provider tempdir");
+        let (mut cascade, mut models) = cascade_with_models(&root, &["glm-5.2", "llama-3.3"]);
+        let account_id = ProviderAccountId::try_new("account-1").unwrap();
+        let outcome = models.replace(&mut cascade, account_id, vec![chat_draft("llama-3.3")]);
+        assert!(
+            matches!(outcome, ProviderModelReplaceOutcome::DesiredStored { .. }),
+            "unexpected replace outcome: {outcome:?}"
+        );
+
+        assert_eq!(
+            models
+                .accept_runtime_model_refs(
+                    &cascade,
+                    ProviderModelCapability::Chat,
+                    &["test/glm-5.2".to_owned(), "test/llama-3.3".to_owned()],
+                )
+                .unwrap(),
+            vec![false, true]
+        );
+        assert!(
+            models
+                .resolve_runtime_model_ref(&cascade, ProviderModelCapability::Chat, "test/glm-5.2")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            models
+                .resolve_runtime_model_ref(
+                    &cascade,
+                    ProviderModelCapability::Chat,
+                    "test/llama-3.3"
+                )
+                .unwrap()
+                .unwrap()
+                .view
+                .model_id,
+            "llama-3.3"
+        );
     }
 
     #[test]

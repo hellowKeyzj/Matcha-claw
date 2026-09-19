@@ -46,9 +46,9 @@ struct Kind {
     deny_unknown_fields
 )]
 enum Input {
-    List,
-    Catalog,
-    Status,
+    List {},
+    Catalog {},
+    Status {},
     SessionStatus {
         session_identity: SessionIdentity,
     },
@@ -271,9 +271,9 @@ impl Request {
             && self.scope.kind == "external-connector-catalog"
             && self.target.kind == "external-connectors"
             && operation_name(&self.operation_id).is_some_and(|kind| match (&self.input, kind) {
-                (Input::List, "list") | (Input::Catalog, "catalog") | (Input::Status, "status") => {
-                    true
-                }
+                (Input::List {}, "list")
+                | (Input::Catalog {}, "catalog")
+                | (Input::Status {}, "status") => true,
                 (Input::SessionStatus { session_identity }, "sessionStatus") => {
                     SessionStatusTarget {
                         session_identity: session_identity.clone(),
@@ -305,9 +305,9 @@ impl Request {
 
     pub(crate) fn into_command(self) -> Command {
         match self.input {
-            Input::List => Command::List,
-            Input::Catalog => Command::Catalog,
-            Input::Status => Command::Status,
+            Input::List {} => Command::List,
+            Input::Catalog {} => Command::Catalog,
+            Input::Status {} => Command::Status,
             Input::SessionStatus { session_identity } => {
                 Command::SessionStatus(SessionStatusTarget { session_identity })
             }
@@ -504,6 +504,28 @@ fn error(message: &'static str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_variant_rejects_unknown_fields() {
+        let request = serde_json::from_value::<Request>(json!({
+            "id": "external.connectors",
+            "operationId": "externalConnectors.list",
+            "scope": { "kind": "external-connector-catalog" },
+            "target": { "kind": "external-connectors" },
+            "input": { "kind": "list" }
+        }))
+        .expect("public list request");
+        assert!(request.valid());
+
+        let invalid = serde_json::from_value::<Request>(json!({
+            "id": "external.connectors",
+            "operationId": "externalConnectors.list",
+            "scope": { "kind": "external-connector-catalog" },
+            "target": { "kind": "external-connectors" },
+            "input": { "kind": "list", "bogus": 1 }
+        }));
+        assert!(invalid.is_err());
+    }
 
     #[test]
     fn opaque_secret_references_are_accepted_but_resolved_values_are_not() {

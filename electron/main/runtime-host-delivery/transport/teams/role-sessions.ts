@@ -4,12 +4,29 @@ import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 const ROUTE_PATH = '/api/team/role-sessions';
 const UNAVAILABLE = { success: false, error: 'Team role sessions are unavailable' } as const;
 
+type TeamRoleSessionEndpoint = Readonly<{
+  kind: 'native-runtime';
+  runtimeAdapterId: string;
+  runtimeInstanceId: string;
+}>;
+
+type TeamRoleSessionIdentity = Readonly<{
+  endpoint: TeamRoleSessionEndpoint;
+  agentId: string;
+  sessionKey: string;
+}>;
+
 type TeamRoleSession = Readonly<{
   teamId: string;
   runId: string;
   roleId: string;
   sessionRef: string;
   status: 'available';
+  agentId: string;
+  endpointRef: TeamRoleSessionEndpoint;
+  localSessionId: string;
+  endpointSessionId: string;
+  sessionIdentity: TeamRoleSessionIdentity;
 }>;
 
 type Response = Readonly<{
@@ -62,13 +79,58 @@ function isSuccess(value: unknown): value is Extract<Response['body'], { success
 }
 
 function isTeamRoleSession(value: unknown): value is TeamRoleSession {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      'teamId',
+      'runId',
+      'roleId',
+      'sessionRef',
+      'status',
+      'agentId',
+      'endpointRef',
+      'localSessionId',
+      'endpointSessionId',
+      'sessionIdentity',
+    ])
+    || !isIdentifier(value.teamId)
+    || !isIdentifier(value.runId)
+    || !isIdentifier(value.roleId)
+    || !isIdentifier(value.sessionRef)
+    || value.status !== 'available'
+    || !isIdentifier(value.agentId)
+    || !isEndpoint(value.endpointRef)
+    || !isIdentifier(value.localSessionId)
+    || !isIdentifier(value.endpointSessionId)
+    || !isSessionIdentity(value.sessionIdentity)) {
+    return false;
+  }
+  // The renderer indexes a role session by both halves, so a mismatched pair would resolve to
+  // a session that cannot be opened.
+  return value.sessionIdentity.agentId === value.agentId
+    && value.sessionIdentity.sessionKey === value.localSessionId
+    && sameEndpoint(value.sessionIdentity.endpoint, value.endpointRef);
+}
+
+function sameEndpoint(left: TeamRoleSessionEndpoint, right: TeamRoleSessionEndpoint): boolean {
+  return left.kind === right.kind
+    && left.runtimeAdapterId === right.runtimeAdapterId
+    && left.runtimeInstanceId === right.runtimeInstanceId;
+}
+
+function isEndpoint(value: unknown): value is TeamRoleSessionEndpoint {
   return isRecord(value)
-    && hasExactKeys(value, ['teamId', 'runId', 'roleId', 'sessionRef', 'status'])
-    && isIdentifier(value.teamId)
-    && isIdentifier(value.runId)
-    && isIdentifier(value.roleId)
-    && isIdentifier(value.sessionRef)
-    && value.status === 'available';
+    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
+    && value.kind === 'native-runtime'
+    && isIdentifier(value.runtimeAdapterId)
+    && isIdentifier(value.runtimeInstanceId);
+}
+
+function isSessionIdentity(value: unknown): value is TeamRoleSessionIdentity {
+  return isRecord(value)
+    && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey'])
+    && isEndpoint(value.endpoint)
+    && isIdentifier(value.agentId)
+    && isIdentifier(value.sessionKey);
 }
 
 function isIdentifier(value: unknown): value is string {

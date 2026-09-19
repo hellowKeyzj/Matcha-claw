@@ -33,14 +33,6 @@ impl TeamOps for MatchaRuntimeDriver {
         Box::pin(async { crate::organization::RuntimeReceiptOutcome::OutcomeUnknown })
     }
 
-    fn deliver_prompt(
-        &self,
-        request: organization::PromptDeliveryRequest,
-    ) -> OwnedRuntimeFuture<organization::PromptDeliveryOutcome> {
-        let prompt = self.prompt.clone();
-        Box::pin(async move { deliver_prompt_with_handle(prompt, request).await })
-    }
-
     fn abort_role_sessions(
         &self,
         bindings: Vec<organization::RoleSessionReceipt>,
@@ -162,13 +154,6 @@ impl TeamOps for MatchaAgentInstance {
         _receipt: organization::RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<crate::organization::RuntimeReceiptOutcome> {
         Box::pin(async { crate::organization::RuntimeReceiptOutcome::OutcomeUnknown })
-    }
-
-    fn deliver_prompt(
-        &self,
-        request: organization::PromptDeliveryRequest,
-    ) -> OwnedRuntimeFuture<organization::PromptDeliveryOutcome> {
-        Box::pin(deliver_prompt(self.peer(), request))
     }
 
     fn abort_role_sessions(

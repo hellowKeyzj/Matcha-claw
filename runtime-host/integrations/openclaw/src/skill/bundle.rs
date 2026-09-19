@@ -379,9 +379,9 @@ impl SkillBundleStore {
         if self.state_dir.open().is_err() {
             return SkillRemoveOutcome::Unknown;
         }
-        let key = match normalize_skill_key(skill_key) {
-            Ok(key) => key,
-            Err(_) => return SkillRemoveOutcome::Rejected,
+        let key = match normalize_skill_key(&skill_key) {
+            Some(key) => key,
+            None => return SkillRemoveOutcome::Rejected,
         };
         let root = self.root();
         let target = root.join(&key);
@@ -462,7 +462,7 @@ fn normalize_requested_keys(keys: Vec<String>) -> Result<Vec<String>, BundleErro
     }
     let mut normalized = BTreeSet::new();
     for key in keys {
-        normalized.insert(normalize_skill_key(key)?);
+        normalized.insert(normalize_skill_key(&key).ok_or(BundleError::Rejected)?);
     }
     Ok(normalized.into_iter().collect())
 }
@@ -474,7 +474,7 @@ fn normalize_bundles(bundles: Vec<SkillBundle>) -> Result<Vec<SkillBundle>, Bund
     let mut normalized = BTreeMap::new();
     let mut total_bytes = 0usize;
     for bundle in bundles {
-        let skill_key = normalize_skill_key(bundle.skill_key)?;
+        let skill_key = normalize_skill_key(&bundle.skill_key).ok_or(BundleError::Rejected)?;
         if normalized.contains_key(&skill_key)
             || bundle.files.is_empty()
             || bundle.files.len() > MAX_FILES_PER_BUNDLE
@@ -708,7 +708,7 @@ fn manifest_name(content: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join("-")
         .to_ascii_lowercase();
-    normalize_skill_key(normalized).ok()
+    normalize_skill_key(&normalized)
 }
 
 fn stage_bundles(staging: &Path, bundles: Vec<SkillBundle>) -> Result<(), BundleError> {
@@ -877,7 +877,9 @@ fn collect_files_at(
     Ok(files)
 }
 
-fn normalize_skill_key(value: String) -> Result<String, BundleError> {
+/// The OpenClaw skill key normalization rule, shared by the Host wire DTO and
+/// the native DTO so both layers accept exactly the same keys.
+pub fn normalize_skill_key(value: &str) -> Option<String> {
     let value = value.trim().to_ascii_lowercase();
     if value.is_empty()
         || value.len() > MAX_SKILL_KEY_BYTES
@@ -887,9 +889,21 @@ fn normalize_skill_key(value: String) -> Result<String, BundleError> {
             .all(|(index, byte)| byte.is_ascii_alphanumeric() || (index > 0 && byte == b'-'))
         || value.ends_with('-')
     {
-        return Err(BundleError::Rejected);
+        return None;
     }
-    Ok(value)
+    Some(collapse_separators(value))
+}
+
+/// Mirrors OpenClaw's `normalizeSkillIndexName` folding, so `a--b` and `a-b`
+/// resolve to the single key the runtime also uses.
+fn collapse_separators(value: String) -> String {
+    let mut collapsed = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte != b'-' || !collapsed.ends_with('-') {
+            collapsed.push(char::from(byte));
+        }
+    }
+    collapsed
 }
 
 fn normalize_file_path(value: String) -> Result<String, BundleError> {

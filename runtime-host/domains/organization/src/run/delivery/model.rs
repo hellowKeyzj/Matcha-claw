@@ -55,7 +55,7 @@ pub struct DeliveryRequest {
     pub role_id: String,
     pub session_ref: String,
     pub idempotency_key: String,
-    /// Opaque role-chat content owned solely by the private delivery fact.
+    /// Opaque role-session message owned solely by the private delivery fact.
     pub message: String,
     pub requested_at: u64,
     pub max_attempts: u32,

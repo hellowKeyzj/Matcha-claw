@@ -8,8 +8,8 @@ use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use organization::{
     ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId, GraphRunId,
     GraphRunLifecycleState, IdempotencyKey, MaterializationRecordOutcome, NativeDeletionEvidence,
-    NativeTerminalReceiptTarget, NativeTerminalStatus, OrganizationStore, RoleAbortOutcome,
-    RuntimeEndpointReference, StoreFault, TeamId,
+    NativeTerminalReceiptTarget, OrganizationStore, RoleAbortOutcome, RuntimeEndpointReference,
+    StoreFault, TeamId,
     package::{
         TeamSkillDependencyCatalog, TeamSkillDependencyPlanResult, TeamSkillPackageValidation,
         TeamSkillSelectionError, TeamSkillSelectionId, TeamSkillSelectionResolver,
@@ -1016,12 +1016,6 @@ impl OwnerSpec for OrganizationOwner {
             OrganizationCommand::GraphPatch { patch, .. } => {
                 CommandRoute::Keyed(patch.run_id.clone())
             }
-            OrganizationCommand::RoleMessageSubmit { admission, .. } => {
-                CommandRoute::Keyed(admission.run_id().clone())
-            }
-            OrganizationCommand::RoleMessageSubmitForRun { run_id, .. } => {
-                CommandRoute::Keyed(run_id.clone())
-            }
             OrganizationCommand::ApprovalResolve { command, .. } => {
                 CommandRoute::Keyed(command.run_id().clone())
             }
@@ -1031,7 +1025,6 @@ impl OwnerSpec for OrganizationOwner {
             OrganizationCommand::TeamDelete { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunPurge { .. }
-            | OrganizationCommand::NodePromptSettled { .. }
             | OrganizationCommand::RecoverMaterializationReceipts { .. } => CommandRoute::Exclusive,
             OrganizationCommand::TeamSkillAuthorize { .. }
             | OrganizationCommand::TeamSkillMaterialize { .. }
@@ -1065,7 +1058,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
             | OrganizationQuery::PendingRunActivityIds { .. }
-            | OrganizationQuery::TerminalObservationDeliveries { .. }
+            | OrganizationQuery::NativeDeliveryByRun { .. }
             | OrganizationQuery::ActiveRunIds { .. }
             | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => QueryRoute::Global,
@@ -1298,40 +1291,6 @@ impl OwnerSpec for OrganizationOwner {
                     .and_then(|mut store| state.team_run.apply_graph_patch(&mut store, patch));
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::RoleMessageSubmit { admission, reply } => {
-                let outcome = state
-                    .open_store()
-                    .and_then(|mut store| state.team_run.admit_role_chat(&mut store, admission));
-                let _ = reply.send(outcome);
-            }
-            OrganizationCommand::RoleMessageSubmitForRun {
-                run_id,
-                role_id,
-                message,
-                idempotency_key,
-                requested_at,
-                reply,
-            } => {
-                let outcome = state.open_store().and_then(|mut store| {
-                    let Some(team) = store.facts().run(&run_id).map(|run| run.team().clone())
-                    else {
-                        return Ok(organization::RoleChatAdmissionOutcome::Rejected(
-                            organization::RoleChatRejection::RunUnavailable,
-                        ));
-                    };
-                    organization::RoleChatAdmission::new(
-                        team,
-                        run_id,
-                        role_id,
-                        message,
-                        idempotency_key,
-                        requested_at,
-                    )
-                    .map_err(|_| StoreFault::InvalidFacts)
-                    .and_then(|admission| state.team_run.admit_role_chat(&mut store, admission))
-                });
-                let _ = reply.send(outcome);
-            }
             OrganizationCommand::NodeEvent {
                 command,
                 event,
@@ -1486,7 +1445,6 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::WebhookTriggerFire { .. }
-            | OrganizationCommand::NodePromptSettled { .. }
             | OrganizationCommand::RecoverMaterializationReceipts { .. } => {
                 unreachable!("organization command routed to wrong run lane")
             }
@@ -1651,39 +1609,6 @@ impl OwnerSpec for OrganizationOwner {
                 }
                 let _ = reply.send(());
             }
-            OrganizationCommand::NodePromptSettled {
-                session_key,
-                prompt_run_id,
-                phase,
-                settled_at,
-                reply,
-            } => {
-                let native_phase = match phase {
-                    super::team_runtime::TeamRuntimePromptPhase::Final => {
-                        NativeTerminalStatus::Completed
-                    }
-                    super::team_runtime::TeamRuntimePromptPhase::Error => {
-                        NativeTerminalStatus::Failed
-                    }
-                    super::team_runtime::TeamRuntimePromptPhase::Aborted => {
-                        NativeTerminalStatus::Cancelled
-                    }
-                };
-                let outcome = match state.refresh() {
-                    Ok(()) => state
-                        .team_run
-                        .settle_node_prompt(
-                            &mut state.store,
-                            &session_key,
-                            &prompt_run_id,
-                            native_phase,
-                            settled_at,
-                        )
-                        .map_err(node_prompt_settled_status),
-                    Err(_) => Err(TeamRuntimeStatus::Unavailable),
-                };
-                let _ = reply.send(outcome);
-            }
             OrganizationCommand::RunCreate { .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { .. }
             | OrganizationCommand::RunCancel { .. }
@@ -1694,8 +1619,6 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TriggerFire { .. }
             | OrganizationCommand::GraphSave { .. }
             | OrganizationCommand::GraphPatch { .. }
-            | OrganizationCommand::RoleMessageSubmit { .. }
-            | OrganizationCommand::RoleMessageSubmitForRun { .. }
             | OrganizationCommand::NodeEvent { .. }
             | OrganizationCommand::NodeTerminalResolve { .. }
             | OrganizationCommand::ApprovalResolve { .. }
@@ -1859,7 +1782,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
             | OrganizationQuery::PendingRunActivityIds { .. }
-            | OrganizationQuery::TerminalObservationDeliveries { .. }
+            | OrganizationQuery::NativeDeliveryByRun { .. }
             | OrganizationQuery::ActiveRunIds { .. }
             | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => {
@@ -1947,10 +1870,17 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome);
             }
-            OrganizationQuery::TerminalObservationDeliveries { reply } => {
+            OrganizationQuery::NativeDeliveryByRun {
+                native_run_id,
+                reply,
+            } => {
                 let outcome = match state.refresh() {
-                    Ok(()) => state.team_run.terminal_observation_deliveries(&state.store),
-                    Err(_) => Vec::new(),
+                    Ok(()) => state
+                        .team_run
+                        .native_delivery_by_run(&state.store, &native_run_id)
+                        .ok()
+                        .flatten(),
+                    Err(_) => None,
                 };
                 let _ = reply.send(outcome);
             }
@@ -2021,16 +1951,6 @@ fn manual_runtime_receipt_outcome(outcome: RuntimeReceiptOutcome) -> ManualTeamC
         RuntimeReceiptOutcome::Rejected => ManualTeamCreateOutcome::Rejected,
         RuntimeReceiptOutcome::OutcomeUnknown => ManualTeamCreateOutcome::OutcomeUnknown,
         RuntimeReceiptOutcome::Unavailable => ManualTeamCreateOutcome::Unavailable,
-    }
-}
-
-fn node_prompt_settled_status(error: StoreFault) -> TeamRuntimeStatus {
-    match error {
-        StoreFault::InvalidFacts | StoreFault::TerminalObservation(_) => {
-            TeamRuntimeStatus::Rejected
-        }
-        StoreFault::CommitOutcomeUnknown(_) => TeamRuntimeStatus::OutcomeUnknown,
-        _ => TeamRuntimeStatus::Unavailable,
     }
 }
 
@@ -3144,13 +3064,6 @@ mod tests {
             _receipt: RunRuntimeReceipt,
         ) -> OwnedRuntimeFuture<RuntimeReceiptOutcome> {
             Box::pin(async { RuntimeReceiptOutcome::OutcomeUnknown })
-        }
-
-        fn deliver_prompt(
-            &self,
-            _request: organization::PromptDeliveryRequest,
-        ) -> OwnedRuntimeFuture<organization::PromptDeliveryOutcome> {
-            Box::pin(async { organization::PromptDeliveryOutcome::OutcomeUnknown })
         }
 
         fn abort_role_sessions(

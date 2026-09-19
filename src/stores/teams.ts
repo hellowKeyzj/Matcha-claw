@@ -1,15 +1,14 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useChatStore } from '@/stores/chat';
-import { buildSessionIdentityRecordIndex, findSessionRecordKey } from '@/stores/chat/session-identity';
-import { patchSessionItemsAndViewport, patchSessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
-import type { SessionRenderItem } from '../types/session/render-item';
 import { buildSessionIdentityKey, type SessionIdentity } from '../../electron/desktop-contract/runtime-address';
 import {
   cancelTeamRun,
   cancelTeamRunProposal,
   confirmTeamRunProposal,
+  continueTeamRunProposal,
   createTeamRun,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
@@ -22,7 +21,6 @@ import {
   resumeTeam,
   submitTeamRunDecision,
   submitTeamRunGraphPatch,
-  submitTeamRunRoleMessage,
   type TeamApprovalRecord,
   type TeamArtifactRecord,
   type TeamDecisionRecord,
@@ -186,6 +184,7 @@ interface TeamsState {
   resumeRun: (teamId: string) => Promise<void>;
   cancelRun: (teamId: string, reason?: string) => Promise<void>;
   confirmProposal: (teamId: string) => Promise<void>;
+  continueProposal: (teamId: string) => Promise<void>;
   cancelProposal: (teamId: string) => Promise<void>;
   resolveApproval: (
     teamId: string,
@@ -194,10 +193,6 @@ interface TeamsState {
     note?: string,
   ) => Promise<void>;
   submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
-  resolveTeamRoleChatTargetBySession: (probe: TeamRoleSessionProbe) => TeamRoleChatTarget | null;
-  resolveTeamLeaderChatTargetBySession: (probe: TeamRoleSessionProbe) => TeamRoleChatTarget | null;
-  isTeamRoleSession: (probe: TeamRoleSessionProbe) => boolean;
-  submitTeamRoleMessageFromChat: (teamId: string, roleId: string, message: string, runId?: string) => Promise<void>;
 }
 
 const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
@@ -347,26 +342,6 @@ export function resolveTeamRoleChatTargetFromProbe(index: TeamRoleChatTargetInde
     }
   }
   return null;
-}
-
-export function resolveTeamLeaderChatTargetFromProbe(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): TeamRoleChatTarget | null {
-  const target = resolveTeamRoleChatTargetFromProbe(index, probe);
-  if (!target) {
-    return null;
-  }
-  if (target.roleId === 'leader') {
-    return target;
-  }
-  return Array.from(index.byIdentityKey.values()).find((candidate) => (
-    candidate.teamId === target.teamId
-    && candidate.runId === target.runId
-    && candidate.roleId === 'leader'
-  )) ?? null;
-}
-
-export function isTeamRoleSessionLocalKey(index: TeamRoleChatTargetIndex, value: string | null | undefined): boolean {
-  const key = normalizeTeamRoleSessionKey(value);
-  return Boolean(key && index.localSessionKeys.has(key));
 }
 
 export function isTeamRoleReservedLocalSessionKey(value: string | null | undefined): boolean {
@@ -599,154 +574,6 @@ function removeTeamRunRoleSessions(bindings: readonly TeamRoleBindingRecord[]): 
       foregroundHistorySessionKey: state.foregroundHistorySessionKey && deleteSet.has(state.foregroundHistorySessionKey)
         ? null
         : state.foregroundHistorySessionKey,
-    };
-  });
-}
-
-function resolveTeamRoleChatSessionRecordKey(
-  state: ReturnType<typeof useChatStore.getState>,
-  binding: TeamRoleBindingRecord,
-): string | null {
-  return findSessionRecordKey(state, binding.sessionIdentity);
-}
-
-function appendOptimisticTeamRoleUserMessage(input: {
-  readonly binding: TeamRoleBindingRecord | undefined;
-  readonly runId: string;
-  readonly roleId: string;
-  readonly message: string;
-  readonly idempotencyKey: string;
-}): { sessionRecordKey: string; itemKey: string } | null {
-  const itemKey = `optimistic:user:${input.runId}:${input.roleId}:${input.idempotencyKey}`;
-  const assistantItemKey = `optimistic:assistant:${input.runId}:${input.roleId}:${input.idempotencyKey}`;
-  let appended: { sessionRecordKey: string; itemKey: string } | null = null;
-  useChatStore.setState((state) => {
-    const binding = input.binding;
-    const sessionRecordKey = binding ? resolveTeamRoleChatSessionRecordKey(state, binding) : null;
-    if (!sessionRecordKey) {
-      return state;
-    }
-    const record = state.loadedSessions[sessionRecordKey];
-    if (!record || record.items.some((item) => item.key === itemKey || (item.kind === 'user-message' && item.messageId === input.idempotencyKey))) {
-      return state;
-    }
-    const now = Date.now();
-    const optimisticUserItem = {
-      key: itemKey,
-      kind: 'user-message',
-      sessionKey: record.meta.sessionIdentity?.sessionKey ?? sessionRecordKey,
-      role: 'user',
-      text: input.message,
-      images: [],
-      attachedFiles: [],
-      messageId: input.idempotencyKey,
-      createdAt: now,
-      updatedAt: now,
-      status: 'sending',
-    } as SessionRenderItem;
-    const optimisticAssistantItem = {
-      key: assistantItemKey,
-      kind: 'assistant-turn',
-      sessionKey: record.meta.sessionIdentity?.sessionKey ?? sessionRecordKey,
-      role: 'assistant',
-      runId: input.idempotencyKey,
-      text: '',
-      createdAt: now,
-      updatedAt: now,
-      laneKey: 'main',
-      turnKey: `team-role:${input.runId}:${input.roleId}:${input.idempotencyKey}`,
-      agentId: binding?.agentId ?? input.roleId,
-      identitySource: 'client',
-      identityMode: 'client',
-      identityConfidence: 'strong',
-      status: 'streaming',
-      segments: [],
-      thinking: null,
-      tools: [],
-      images: [],
-      attachedFiles: [],
-      pendingState: 'typing',
-    } as SessionRenderItem;
-    appended = { sessionRecordKey, itemKey };
-    const loadedSessions = patchSessionItemsAndViewport(
-      state,
-      sessionRecordKey,
-      [...record.items, optimisticUserItem, optimisticAssistantItem],
-      { isAtLatest: true },
-    );
-    const patchedRecord = loadedSessions[sessionRecordKey] ?? record;
-    return {
-      ...state,
-      loadedSessions: patchSessionRecord(
-        { loadedSessions },
-        sessionRecordKey,
-        {
-          runtime: {
-            ...patchedRecord.runtime,
-            activeRunId: input.idempotencyKey,
-            runPhase: 'submitted',
-            activeTurnItemKey: assistantItemKey,
-            pendingTurnKey: assistantItemKey,
-            pendingTurnLaneKey: 'main',
-            runProgress: null,
-            lastUserMessageAt: now,
-            lastError: null,
-            lastIssue: null,
-            updatedAt: now,
-          },
-        },
-      ),
-    };
-  });
-  return appended;
-}
-
-function removeOptimisticTeamRoleUserMessage(optimistic: { sessionRecordKey: string; itemKey: string } | null): void {
-  if (!optimistic) {
-    return;
-  }
-  useChatStore.setState((state) => {
-    const record = state.loadedSessions[optimistic.sessionRecordKey];
-    if (!record || !record.items.some((item) => item.key === optimistic.itemKey)) {
-      return state;
-    }
-    const assistantItemKey = optimistic.itemKey.replace('optimistic:user:', 'optimistic:assistant:');
-    const items = record.items.filter((item) => item.key !== optimistic.itemKey && item.key !== assistantItemKey);
-    const loadedSessions = patchSessionItemsAndViewport(
-      state,
-      optimistic.sessionRecordKey,
-      items,
-      {
-        totalItemCount: items.length,
-        windowEndOffset: record.window.windowStartOffset + items.length,
-        isAtLatest: true,
-      },
-    );
-    const patchedRecord = loadedSessions[optimistic.sessionRecordKey] ?? record;
-    const shouldClearRuntime = record.runtime.activeTurnItemKey === assistantItemKey
-      || record.runtime.pendingTurnKey === assistantItemKey
-      || record.runtime.activeRunId === (record.items.find((item) => item.key === optimistic.itemKey && item.kind === 'user-message') as { messageId?: string } | undefined)?.messageId;
-    return {
-      ...state,
-      loadedSessions: shouldClearRuntime
-        ? patchSessionRecord(
-            { loadedSessions },
-            optimistic.sessionRecordKey,
-            {
-              runtime: {
-                ...patchedRecord.runtime,
-                activeRunId: null,
-                runPhase: 'idle',
-                activeTurnItemKey: null,
-                pendingTurnKey: null,
-                pendingTurnLaneKey: null,
-                runProgress: null,
-                lastError: null,
-                updatedAt: Date.now(),
-              },
-            },
-          )
-        : loadedSessions,
     };
   });
 }
@@ -1509,10 +1336,32 @@ export const useTeamsStore = create<TeamsState>()(
         const state = get();
         const runId = resolveActiveRunId(state, teamId);
         const proposal = state.startGateByTeamId[teamId]?.proposal;
-        const actionKey = idempotencyKey(teamId, `proposal-confirm:${runId}:${proposal?.proposalId ?? state.runsById[runId]?.revision ?? 'current'}`);
+        if (!proposal?.proposalId) {
+          throw new Error(`Team run proposal is required: ${teamId}`);
+        }
+        const actionKey = idempotencyKey(teamId, `proposal-confirm:${runId}:${proposal.proposalId}`);
         const result = await confirmTeamRunProposal({
           runId,
-          ...(proposal?.proposalId ? { proposalId: proposal.proposalId } : {}),
+          proposalId: proposal.proposalId,
+          idempotencyKey: actionKey,
+        });
+        if (result.snapshot) {
+          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
+        } else {
+          await get().refreshSnapshot(teamId, { force: true });
+        }
+      },
+      continueProposal: async (teamId) => {
+        const state = get();
+        const runId = resolveActiveRunId(state, teamId);
+        const proposal = state.startGateByTeamId[teamId]?.proposal;
+        if (!proposal?.proposalId) {
+          throw new Error(`Team run proposal is required: ${teamId}`);
+        }
+        const actionKey = idempotencyKey(teamId, `proposal-continue:${runId}:${proposal.proposalId}`);
+        const result = await continueTeamRunProposal({
+          runId,
+          proposalId: proposal.proposalId,
           idempotencyKey: actionKey,
         });
         if (result.snapshot) {
@@ -1525,10 +1374,13 @@ export const useTeamsStore = create<TeamsState>()(
         const state = get();
         const runId = resolveActiveRunId(state, teamId);
         const proposal = state.startGateByTeamId[teamId]?.proposal;
-        const actionKey = idempotencyKey(teamId, `proposal-cancel:${runId}:${proposal?.proposalId ?? state.runsById[runId]?.revision ?? 'current'}`);
+        if (!proposal?.proposalId) {
+          throw new Error(`Team run proposal is required: ${teamId}`);
+        }
+        const actionKey = idempotencyKey(teamId, `proposal-cancel:${runId}:${proposal.proposalId}`);
         const result = await cancelTeamRunProposal({
           runId,
-          ...(proposal?.proposalId ? { proposalId: proposal.proposalId } : {}),
+          proposalId: proposal.proposalId,
           idempotencyKey: actionKey,
         });
         if (result.snapshot) {
@@ -1572,56 +1424,6 @@ export const useTeamsStore = create<TeamsState>()(
           });
           await get().refreshSnapshot(teamId, { force: true });
         });
-      },
-      resolveTeamRoleChatTargetBySession: (probe) => (
-        resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(get()), probe)
-      ),
-      resolveTeamLeaderChatTargetBySession: (probe) => (
-        resolveTeamLeaderChatTargetFromProbe(selectTeamRoleChatTargetIndex(get()), probe)
-      ),
-      isTeamRoleSession: (probe) => isKnownTeamRoleSession(selectTeamRoleChatTargetIndex(get()), probe),
-      submitTeamRoleMessageFromChat: async (teamId, roleId, message, requestedRunId) => {
-        let optimistic: { sessionRecordKey: string; itemKey: string } | null = null;
-        set((state) => ({
-          loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
-          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
-        }));
-        try {
-          const state = get();
-          const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
-          const actionKey = idempotencyKey(teamId, `role-message:${runId}:${roleId}:${createRequestId('message')}`);
-          optimistic = appendOptimisticTeamRoleUserMessage({
-            binding: collectTeamRunRoleSessionBindings(state, teamId, [runId]).find((role) => role.runId === runId && role.roleId === roleId),
-            runId,
-            roleId,
-            message,
-            idempotencyKey: actionKey,
-          });
-          const result = await submitTeamRunRoleMessage({
-            runId,
-            roleId,
-            text: message,
-            idempotencyKey: actionKey,
-          });
-          if (result.snapshot) {
-            set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-          } else {
-            await get().refreshSnapshot(teamId, { force: true });
-          }
-        } catch (error) {
-          removeOptimisticTeamRoleUserMessage(optimistic);
-          set((state) => ({
-            errorByTeamId: {
-              ...state.errorByTeamId,
-              [teamId]: error instanceof Error ? error.message : String(error),
-            },
-          }));
-          throw error;
-        } finally {
-          set((state) => ({
-            loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
-          }));
-        }
       },
     }),
     {

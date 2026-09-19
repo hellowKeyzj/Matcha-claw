@@ -47,7 +47,6 @@ import type { TeamGraphTransport } from './teams/graph';
 import type { TeamLifecycleTransport } from './teams/lifecycle';
 import type { ManualTeamTransport } from './teams/manual';
 import type { TeamPublicTransport } from './teams/public';
-import type { TeamRoleChatTransport } from './teams/role-chat';
 import type { TeamRoleSessionsTransport } from './teams/role-sessions';
 import type { TeamSkillTransport } from './teams/skill';
 import type { TeamTaskBoardTransport } from './teams/task-board';
@@ -107,7 +106,6 @@ export interface RuntimeHostTransports {
   teamLifecycleTransport: TeamLifecycleTransport;
   manualTeamTransport: ManualTeamTransport;
   teamHumanDecisionTransport: TeamHumanDecisionTransport;
-  teamRoleChatTransport: TeamRoleChatTransport;
   providerAccountsTransport: ProviderAccountsTransport;
   providerModelsTransport: ProviderModelsTransport;
   externalConnectorsTransport: ExternalConnectorsTransport;

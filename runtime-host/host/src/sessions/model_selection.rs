@@ -1,62 +1,12 @@
-use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::{Serialize, Serializer};
 
-use super::state::SessionProvider;
-use crate::runtime::driver::RuntimeDriverIdentity;
+pub(crate) use super::endpoint::NativeEndpoint;
 
 const MAX_MODEL_SELECTION_ID_BYTES: usize = 4096;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_MATCHA_MODEL_BYTES: usize = 4096;
 const MAX_PROVIDER_FINGERPRINT_BYTES: usize = 4096;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeEndpoint {
-    OpenClawLocal,
-    MatchaAgentLocal,
-    Unsupported,
-}
-
-impl NativeEndpoint {
-    pub(crate) fn parse(
-        kind: &str,
-        runtime_adapter_id: &str,
-        runtime_instance_id: &str,
-    ) -> Option<Self> {
-        if kind != "native-runtime" {
-            return None;
-        }
-        RuntimeEndpoint::try_new(runtime_adapter_id, runtime_instance_id)
-            .ok()
-            .map(Self::from_runtime_endpoint)
-    }
-
-    pub(crate) fn from_runtime_endpoint(endpoint: RuntimeEndpoint) -> Self {
-        if endpoint == RuntimeDriverIdentity::open_claw().endpoint() {
-            Self::OpenClawLocal
-        } else if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
-            Self::MatchaAgentLocal
-        } else {
-            Self::Unsupported
-        }
-    }
-
-    pub(crate) const fn provider(self) -> SessionProvider {
-        match self {
-            Self::OpenClawLocal => SessionProvider::OpenClaw,
-            Self::MatchaAgentLocal => SessionProvider::MatchaAgent,
-            Self::Unsupported => SessionProvider::OpenClaw,
-        }
-    }
-
-    pub(crate) fn runtime_endpoint(self) -> Option<RuntimeEndpoint> {
-        match self {
-            Self::OpenClawLocal => Some(RuntimeDriverIdentity::open_claw().endpoint()),
-            Self::MatchaAgentLocal => Some(RuntimeDriverIdentity::matcha_agent().endpoint()),
-            Self::Unsupported => None,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionModelSelectionCommand {
@@ -78,6 +28,15 @@ pub(crate) struct ResolvedSessionModelSelection {
     pub(crate) trace_id: Option<String>,
 }
 
+impl ResolvedSessionModelSelection {
+    pub(crate) fn openclaw_model_ref(&self) -> Option<&str> {
+        match &self.binding {
+            SessionModelSelectionBinding::OpenClaw(ref_model) => Some(ref_model.as_str()),
+            SessionModelSelectionBinding::Matcha { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MatchaSessionModelRuntimeCommand {
     pub(crate) session_key: String,
@@ -85,6 +44,29 @@ pub(crate) struct MatchaSessionModelRuntimeCommand {
     pub(crate) model: String,
     pub(crate) model_selection_id: Option<String>,
     pub(crate) provider_fingerprint: Option<String>,
+    pub(crate) trace_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRuntimeModelFacts {
+    pub(crate) current_model: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) model_override_source: Option<SessionRuntimeModelSource>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRuntimeModelSource {
+    User,
+    Auto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRuntimeModelCommand {
+    pub(crate) endpoint: NativeEndpoint,
+    pub(crate) session_key: String,
+    pub(crate) endpoint_session_id: Option<String>,
+    pub(crate) current_model: Option<String>,
+    pub(crate) default_model: Option<String>,
     pub(crate) trace_id: Option<String>,
 }
 
@@ -221,6 +203,45 @@ impl MatchaSessionModelRuntimeCommand {
 
     pub(crate) fn trace_id(&self) -> Option<&str> {
         self.trace_id.as_deref()
+    }
+}
+
+impl SessionRuntimeModelCommand {
+    pub(crate) fn try_new(
+        endpoint: NativeEndpoint,
+        session_key: String,
+        endpoint_session_id: Option<String>,
+        current_model: Option<String>,
+        default_model: Option<String>,
+    ) -> Result<Self, InvalidCommand> {
+        if session_key.is_empty()
+            || session_key.len() > MAX_SESSION_KEY_BYTES
+            || session_key.as_bytes().contains(&0)
+            || endpoint_session_id
+                .as_deref()
+                .is_some_and(|endpoint_session_id| !valid_endpoint_session_id(endpoint_session_id))
+            || current_model
+                .as_deref()
+                .is_some_and(|value| !valid_model_value(value, MAX_MATCHA_MODEL_BYTES))
+            || default_model
+                .as_deref()
+                .is_some_and(|value| !valid_model_value(value, MAX_MATCHA_MODEL_BYTES))
+        {
+            return Err(InvalidCommand);
+        }
+        Ok(Self {
+            endpoint,
+            session_key,
+            endpoint_session_id,
+            current_model,
+            default_model,
+            trace_id: None,
+        })
+    }
+
+    pub(crate) fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
     }
 }
 

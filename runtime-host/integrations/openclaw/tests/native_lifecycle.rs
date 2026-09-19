@@ -34,8 +34,8 @@ use openclaw::{
         OpenClawGateway, SessionEvent,
     },
     session::protocol::{
-        AgentId, EndpointSessionId, SessionCreateParams, SessionKey, SessionModelPatchParams,
-        SessionsListParams,
+        AgentId, EndpointSessionId, ModelRef, SessionCreateParams, SessionKey,
+        SessionModelPatchParams, SessionsListParams,
     },
 };
 use platform::listener_identity::ListenerIdentity;
@@ -377,6 +377,8 @@ impl NativeOpenClawFixture {
                 SessionCreateParams::try_new(
                     AgentId::try_new("main").expect("fixed fixture agent identity is valid"),
                     endpoint_session_id,
+                    ModelRef::try_new("anthropic/claude-sonnet-4-6")
+                        .expect("fixed fixture model identity is valid"),
                 )
                 .expect("fixture session creation parameters are valid"),
             )
@@ -396,6 +398,8 @@ impl NativeOpenClawFixture {
         let created = SessionCreateParams::try_new(
             AgentId::try_new("main").expect("fixed fixture agent identity is valid"),
             endpoint_session_id,
+            ModelRef::try_new("anthropic/claude-sonnet-4-6")
+                .expect("fixed fixture model identity is valid"),
         )
         .expect("fixture session creation parameters are valid");
         let session_key = SessionKey::try_new(created.key().as_str().to_owned())

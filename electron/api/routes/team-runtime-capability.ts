@@ -32,10 +32,9 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.graphImportYaml', 'Import TeamRun graph YAML', 'team-run'],
   ['team.triggerFire', 'Fire TeamRun StartNode trigger', 'team-run'],
   ['team.proposalConfirm', 'Confirm TeamRun start proposal', 'team-run'],
+  ['team.proposalContinue', 'Continue TeamRun start discussion', 'team-run'],
   ['team.proposalCancel', 'Cancel TeamRun start proposal', 'team-run'],
-  ['team.roleMessageSubmit', 'Submit Team role chat message', 'team-run'],
   ['team.nodePromptRetryDue', 'Wake due TeamRun node prompt retries', 'team-run'],
-  ['team.nodePromptSettled', 'Wake TeamRun after a node prompt session turn settles', 'none'],
   ['team.nodeEvent', 'Submit TeamRun node event command', 'team-run'],
   ['team.runDiagnostics', 'Read TeamRun diagnostics', 'team-run'],
   ['team.runDecisionSubmit', 'Submit TeamRun decision', 'team-run'],
@@ -95,12 +94,6 @@ function validateOperation(
         && isWebhookTriggerTarget(target)
         && isText(input.webhookPath)
         && isOpaque(input.idempotencyKey);
-    case 'team.nodePromptSettled':
-      return hasExactKeys(input, ['sessionKey', 'promptRunId', 'phase'])
-        && target === null
-        && isOpaque(input.sessionKey)
-        && isOpaque(input.promptRunId)
-        && (input.phase === 'final' || input.phase === 'error' || input.phase === 'aborted');
     case 'team.approvalResolve':
       return hasOnlyKeys(input, ['runId', 'approvalId', 'decision', 'note', 'idempotencyKey'])
         && hasRequiredKeys(input, ['runId', 'approvalId', 'decision', 'idempotencyKey'])
@@ -143,18 +136,12 @@ function validateOperation(
         && (input.payloadSummary === undefined || typeof input.payloadSummary === 'string')
         && isOpaque(input.idempotencyKey);
     case 'team.proposalConfirm':
+    case 'team.proposalContinue':
     case 'team.proposalCancel':
       return hasOnlyKeys(input, ['runId', 'teamId', 'proposalId', 'idempotencyKey'])
-        && hasRequiredKeys(input, ['runId', 'idempotencyKey'])
+        && hasRequiredKeys(input, ['runId', 'proposalId', 'idempotencyKey'])
         && matchingRunTarget(target, input)
-        && (input.proposalId === undefined || isOpaque(input.proposalId))
-        && isOpaque(input.idempotencyKey);
-    case 'team.roleMessageSubmit':
-      return hasOnlyKeys(input, ['runId', 'teamId', 'roleId', 'text', 'idempotencyKey'])
-        && hasRequiredKeys(input, ['runId', 'roleId', 'text', 'idempotencyKey'])
-        && matchingRunTarget(target, input)
-        && isIdentifier(input.roleId)
-        && isText(input.text)
+        && isOpaque(input.proposalId)
         && isOpaque(input.idempotencyKey);
     case 'team.nodeEvent':
       return isNodeEventRequest(target, input);

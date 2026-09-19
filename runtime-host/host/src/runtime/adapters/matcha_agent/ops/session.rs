@@ -2,11 +2,7 @@ use super::*;
 
 impl SessionOps for MatchaRuntimeDriver {
     fn admission(&self) -> SessionAdmission {
-        SessionAdmission::agent_scoped(
-            RuntimeDriverIdentity::matcha_agent().endpoint(),
-            crate::sessions::state::SessionProvider::MatchaAgent,
-            "matcha-agent",
-        )
+        SessionAdmission::new(RuntimeDriverIdentity::matcha_agent())
     }
 
     fn abort_session<'a>(
@@ -93,22 +89,6 @@ impl SessionOps for MatchaRuntimeDriver {
         let session = self.session.clone();
         let renderer_events = self.renderer_events.clone();
         Box::pin(async move { send_session_with_handle(session, command, renderer_events).await })
-    }
-
-    fn wait_session_native_run<'a>(
-        &'a self,
-        endpoint_session_id: Option<String>,
-        native_run_id: String,
-    ) -> crate::runtime::driver::SessionFuture<'a, Option<crate::runtime::driver::NativeRunSettled>>
-    {
-        let Some(endpoint_session_id) = endpoint_session_id else {
-            return Box::pin(async { None });
-        };
-        super::team_terminal::watch_session_native_run_with_handle(
-            self.native.clone(),
-            endpoint_session_id,
-            native_run_id,
-        )
     }
 
     fn select_session_model<'a>(
